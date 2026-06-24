@@ -988,7 +988,17 @@ void NumberSpeculativeLowering::VisitStringCompare(GateRef gate)
 
     GateRef result;
     ASSERT(Op == TypedBinOp::TYPED_EQ);
+#ifdef CONTROLFLOW_OPTIMIZATION
+    if (GetOutputType(left) == TypeInfo::CHAR && GetOutputType(right) == TypeInfo::CHAR) {
+        result = builder_.Int32Equal(left, right);
+    } else if (GetOutputType(left) == TypeInfo::CHAR || GetOutputType(right) == TypeInfo::CHAR) {
+        result = builder_.Boolean(false);
+    } else {
+        result = builder_.StringEqual(left, right);
+    }
+#else
     result = builder_.StringEqual(left, right);
+#endif
 
     acc_.SetMachineType(gate, MachineType::I1);
     acc_.SetGateType(gate, GateType::NJSValue());

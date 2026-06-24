@@ -213,6 +213,10 @@ if (enable_branch_profile) {
   ]
 }
 
+if (enable_controlflow_optimization) {
+  libark_jsoptimizer_sources += [ "controlflow_optimization.cpp" ]
+}
+
 if (ets_runtime_enable_ark_steed) {
   # These trampolines are part of the generated stub ABI and must remain in
   # ark_stub_compiler.

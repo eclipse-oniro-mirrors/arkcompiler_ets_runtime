@@ -33,12 +33,76 @@ public:
     };
     NumberSpeculativeRetype(Circuit* circuit, Chunk* chunk, ChunkVector<TypeInfo>& typeInfos)
         : circuit_(circuit), acc_(circuit), builder_(circuit),
+#ifdef CONTROLFLOW_OPTIMIZATION
+          typeInfos_(typeInfos), convertCache_(chunk), chunk_(chunk), glue_(acc_.GetGlueFromArgList()) {}
+#else
           typeInfos_(typeInfos), chunk_(chunk), glue_(acc_.GetGlueFromArgList()) {}
+#endif
     GateRef VisitGate(GateRef gate);
     void setState(NumberSpeculativeRetype::State state);
     void ConvertMonoAccessorValueIn(GateRef gate);
 
 private:
+#ifdef CONTROLFLOW_OPTIMIZATION
+    enum class TaggedTypeInfo {
+        INT32,
+        FLOAT64,
+        BOOL,
+        TAGGED,
+        TAGGED_INT,
+        TAGGED_BOOL,
+        TAGGED_NUMBER,
+        TAGGED_DOUBLE,
+        TAGGED_STRING,
+        NONE,
+    };
+
+    class TypeCache {
+    public:
+        TypeCache(Chunk *chunk): cache_(chunk) {}
+
+        GateRef GetCachedGate(TaggedTypeInfo info)
+        {
+            if (cache_.count(info)) {
+                return cache_[info];
+            }
+            return Circuit::NullGate();
+        }
+
+        void SetCachedGate(TaggedTypeInfo info, GateRef gate)
+        {
+            cache_[info] = gate;
+        }
+
+    private:
+        ChunkUnorderedMap<TaggedTypeInfo, GateRef> cache_;
+    };
+
+    class ConvertCache {
+    public:
+        ConvertCache(Chunk *chunk): map_(chunk), chunk_(chunk) {}
+        GateRef GetCachedGate(GateRef gate, TaggedTypeInfo info)
+        {
+            if (map_.find(gate) != map_.end()) {
+                auto &cache = map_.at(gate);
+                return cache.GetCachedGate(info);
+            }
+            return Circuit::NullGate();
+        }
+
+        void SetCachedGate(GateRef gate, TaggedTypeInfo info, GateRef convert)
+        {
+            if (map_.find(gate) == map_.end()) {
+                map_.emplace(gate, chunk_);
+            }
+            map_.at(gate).SetCachedGate(info, convert);
+        }
+
+    private:
+        ChunkUnorderedMap<GateRef, TypeCache> map_;
+        Chunk *chunk_;
+    };
+#endif
 
     enum class OpType {
         NORMAL,
@@ -157,6 +221,12 @@ private:
     GateRef CheckBoundAndConvertToInt32(GateRef gate,
                                         ConvertSupport support = ConvertSupport::ENABLE,
                                         OpType type = OpType::NORMAL);
+#ifdef CONTROLFLOW_OPTIMIZATION
+    TaggedTypeInfo GetTaggedTypeOfTaggedConvertion(TypeInfo output,
+                                                   GateType gateType = GateType::Empty(),
+                                                   ConvertToNumber convert = ConvertToNumber::DISABLE);
+    GateRef CheckAndConvertFromBoolToTagged(GateRef gate, GateType gateType, ConvertToNumber convert);
+#endif
     GateRef CheckAndConvertToFloat64(GateRef gate, GateType gateType,
                                     ConvertToNumber convert = ConvertToNumber::BOOL_ONLY);
     GateRef CheckAndConvertToTagged(GateRef gate, GateType gateType, ConvertToNumber convert);
@@ -198,6 +268,9 @@ private:
     GateAccessor acc_;
     CircuitBuilder builder_;
     ChunkVector<TypeInfo>& typeInfos_;
+#ifdef CONTROLFLOW_OPTIMIZATION
+    ConvertCache convertCache_;
+#endif
     State state_ {0};
     [[maybe_unused]] Chunk *chunk_ {nullptr};
     GateRef glue_ {Circuit::NullGate()};

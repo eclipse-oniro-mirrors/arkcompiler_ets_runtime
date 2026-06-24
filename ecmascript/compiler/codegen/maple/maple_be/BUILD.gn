@@ -234,6 +234,9 @@ ohos_source_set("libcgaarch64") {
       defines += [ "JIT_FORT_DISABLE" ]
     }
   }
+  if (enable_controlflow_optimization) {
+    defines += [ "CONTROLFLOW_OPTIMIZATION" ]
+  }
   part_name = "ets_runtime"
   subsystem_name = "arkcompiler"
 }
@@ -255,6 +258,9 @@ ohos_source_set("libcgx8664") {
   external_deps = [ "bounds_checking_function:libsec_static" ]
   if (ets_runtime_enable_cmc_gc) {
     # defines += [ "ENABLE_CMC_IR_FIX_REGISTER" ]
+  }
+  if (enable_controlflow_optimization) {
+    defines += [ "CONTROLFLOW_OPTIMIZATION" ]
   }
   part_name = "ets_runtime"
   subsystem_name = "arkcompiler"
@@ -314,6 +320,9 @@ ohos_source_set("libcgphases") {
   if (ets_runtime_enable_cmc_gc) {
     # defines += [ "ENABLE_CMC_IR_FIX_REGISTER" ]
   }
+  if (enable_controlflow_optimization) {
+    defines += [ "CONTROLFLOW_OPTIMIZATION" ]
+  }
   part_name = "ets_runtime"
   subsystem_name = "arkcompiler"
 }
@@ -337,6 +346,9 @@ ohos_static_library("libcg") {
   external_deps = [ "bounds_checking_function:libsec_static" ]
   if (ets_runtime_enable_cmc_gc) {
     # defines += [ "ENABLE_CMC_IR_FIX_REGISTER" ]
+  }
+  if (enable_controlflow_optimization) {
+    defines += [ "CONTROLFLOW_OPTIMIZATION" ]
   }
   part_name = "ets_runtime"
   subsystem_name = "arkcompiler"

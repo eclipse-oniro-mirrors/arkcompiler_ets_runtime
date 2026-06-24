@@ -17,6 +17,15 @@
 
 #include "ecmascript/compiler/circuit_arg_indices.h"
 #include "ecmascript/compiler/circuit_builder-inl.h"
+#ifdef CONTROLFLOW_OPTIMIZATION
+#include "ecmascript/compiler/circuit.h"
+#include "ecmascript/compiler/gate.h"
+#include "ecmascript/compiler/lcr_gate_meta_data.h"
+#include "ecmascript/compiler/number_gate_info.h"
+#include "ecmascript/compiler/type.h"
+#include "ecmascript/log_wrapper.h"
+#include "macros.h"
+#endif
 
 namespace panda::ecmascript::kungfu {
 GateRef NumberSpeculativeRetype::SetOutputType(GateRef gate, GateType gateType)
@@ -1030,6 +1039,7 @@ GateRef NumberSpeculativeRetype::TryConvertConstantToBool(GateRef gate)
     return Circuit::NullGate();
 }
 
+#ifdef CONTROLFLOW_OPTIMIZATION
 GateRef NumberSpeculativeRetype::CheckAndConvertToBool(GateRef gate, GateType gateType)
 {
     auto input = TryConvertConstantToBool(gate);
@@ -1037,6 +1047,55 @@ GateRef NumberSpeculativeRetype::CheckAndConvertToBool(GateRef gate, GateType ga
         return input;
     }
 
+    TypeInfo output = GetOutputTypeInfo(gate);
+    GateRef cGate = convertCache_.GetCachedGate(gate, TaggedTypeInfo::BOOL);
+    if (cGate != Circuit::NullGate()) {
+        return cGate;
+    }
+    switch (output) {
+        case TypeInfo::INT1:
+            return gate;
+        case TypeInfo::INT32:
+            cGate = builder_.ConvertInt32ToBool(gate);
+            convertCache_.SetCachedGate(gate, TaggedTypeInfo::BOOL, cGate);
+            return cGate;
+        case TypeInfo::UINT32:
+            cGate = builder_.ConvertUInt32ToBool(gate);
+            convertCache_.SetCachedGate(gate, TaggedTypeInfo::BOOL, cGate);
+            return cGate;
+        case TypeInfo::FLOAT64:
+            cGate = builder_.ConvertFloat64ToBool(gate);
+            convertCache_.SetCachedGate(gate, TaggedTypeInfo::BOOL, cGate);
+            return cGate;
+        case TypeInfo::CHAR:
+            // CHAR refers to string of length 1, while only empty string converts to false in a boolean context.
+            return builder_.Boolean(true);
+        case TypeInfo::NONE:
+        case TypeInfo::TAGGED: {
+            if (gateType.IsBooleanType()) {
+                return builder_.CheckTaggedBooleanAndConvertToBool(gate);
+            } else if (gateType.IsUndefinedType()) {
+                return builder_.CheckUndefinedAndConvertToBool(gate);
+            } else if (gateType.IsNullType()) {
+                return builder_.CheckNullAndConvertToBool(gate);
+            } else {
+                ASSERT(gateType.IsNumberType());
+                return builder_.CheckTaggedNumberAndConvertToBool(gate);
+            }
+        }
+        default: {
+            UNREACHABLE();
+            return Circuit::NullGate();
+        }
+    }
+}
+#else
+GateRef NumberSpeculativeRetype::CheckAndConvertToBool(GateRef gate, GateType gateType)
+{
+    auto input = TryConvertConstantToBool(gate);
+    if (input != Circuit::NullGate()) {
+        return input;
+    }
     TypeInfo output = GetOutputTypeInfo(gate);
     switch (output) {
         case TypeInfo::INT1:
@@ -1069,6 +1128,7 @@ GateRef NumberSpeculativeRetype::CheckAndConvertToBool(GateRef gate, GateType ga
         }
     }
 }
+#endif
 
 void NumberSpeculativeRetype::ConvertForNumberBinaryOp(GateRef gate)
 {
@@ -1245,12 +1305,33 @@ GateRef NumberSpeculativeRetype::CheckAndConvertToInt32(GateRef gate, GateType g
         return result;
     }
     TypeInfo output = GetOutputTypeInfo(gate);
+#ifdef CONTROLFLOW_OPTIMIZATION
+    GateRef cGate = Circuit::NullGate();
+#endif
     switch (output) {
         case TypeInfo::INT1:
+#ifdef CONTROLFLOW_OPTIMIZATION
+            cGate = convertCache_.GetCachedGate(gate, TaggedTypeInfo::INT32);
+            if (cGate == Circuit::NullGate()) {
+                cGate = builder_.ConvertBoolToInt32(gate, support);
+                convertCache_.SetCachedGate(gate, TaggedTypeInfo::INT32, cGate);
+            }
+            result = cGate;
+#else
             result = builder_.ConvertBoolToInt32(gate, support);
+#endif
             break;
         case TypeInfo::CHAR: {
+#ifdef CONTROLFLOW_OPTIMIZATION
+            cGate = convertCache_.GetCachedGate(gate, TaggedTypeInfo::INT32);
+            if (cGate == Circuit::NullGate()) {
+                cGate = builder_.ConvertCharToInt32(gate);
+                convertCache_.SetCachedGate(gate, TaggedTypeInfo::INT32, cGate);
+            }
+            result = cGate;
+#else
             result = builder_.ConvertCharToInt32(gate);
+#endif
             break;
         }
         case TypeInfo::INT32:
@@ -1267,7 +1348,16 @@ GateRef NumberSpeculativeRetype::CheckAndConvertToInt32(GateRef gate, GateType g
             if (needCheckFloat64) {
                 result = builder_.CheckFloat64ConvertToInt32Legally(gate);
             } else {
+#ifdef CONTROLFLOW_OPTIMIZATION
+                cGate = convertCache_.GetCachedGate(gate, TaggedTypeInfo::INT32);
+                if (cGate == Circuit::NullGate()) {
+                    cGate = builder_.ConvertFloat64ToInt32(gate);
+                    convertCache_.SetCachedGate(gate, TaggedTypeInfo::INT32, cGate);
+                }
+                result = cGate;
+#else
                 result = builder_.ConvertFloat64ToInt32(gate);
+#endif
             }
             break;
         }
@@ -1302,14 +1392,26 @@ GateRef NumberSpeculativeRetype::CheckBoundAndConvertToInt32(GateRef gate, Conve
         return result;
     }
     TypeInfo output = GetOutputTypeInfo(gate);
+#ifdef CONTROLFLOW_OPTIMIZATION
+    result = convertCache_.GetCachedGate(gate, TaggedTypeInfo::INT32);
+    if (result != Circuit::NullGate()) {
+        ResizeAndSetTypeInfo(result, TypeInfo::INT32);
+        return result;
+    }
+#endif
     switch (output) {
         case TypeInfo::INT1:
             result = builder_.ConvertBoolToInt32(gate, support);
+#ifdef CONTROLFLOW_OPTIMIZATION
+            convertCache_.SetCachedGate(gate, TaggedTypeInfo::INT32, result);
+#endif
             break;
-        case TypeInfo::CHAR: {
+        case TypeInfo::CHAR:
             result = builder_.ConvertCharToInt32(gate);
+#ifdef CONTROLFLOW_OPTIMIZATION
+            convertCache_.SetCachedGate(gate, TaggedTypeInfo::INT32, result);
+#endif
             break;
-        }
         case TypeInfo::INT32:
             return gate;
         case TypeInfo::UINT32: {
@@ -1369,19 +1471,38 @@ GateRef NumberSpeculativeRetype::CheckAndConvertToFloat64(GateRef gate, GateType
         return result;
     }
     TypeInfo output = GetOutputTypeInfo(gate);
+#ifdef CONTROLFLOW_OPTIMIZATION
+    result = convertCache_.GetCachedGate(gate, TaggedTypeInfo::FLOAT64);
+    if (result != Circuit::NullGate()) {
+        ResizeAndSetTypeInfo(result, TypeInfo::FLOAT64);
+        return result;
+    }
+#endif
     switch (output) {
         case TypeInfo::INT1:
             result = builder_.ConvertBoolToFloat64(gate, ToConvertSupport(convert));
+#ifdef CONTROLFLOW_OPTIMIZATION
+            convertCache_.SetCachedGate(gate, TaggedTypeInfo::FLOAT64, result);
+#endif
             break;
         case TypeInfo::CHAR: {
             result = builder_.ConvertCharToDouble(gate);
+#ifdef CONTROLFLOW_OPTIMIZATION
+            convertCache_.SetCachedGate(gate, TaggedTypeInfo::FLOAT64, result);
+#endif
             break;
         }
         case TypeInfo::INT32:
             result = builder_.ConvertInt32ToFloat64(gate);
+#ifdef CONTROLFLOW_OPTIMIZATION
+            convertCache_.SetCachedGate(gate, TaggedTypeInfo::FLOAT64, result);
+#endif
             break;
         case TypeInfo::UINT32:
             result = builder_.ConvertUInt32ToFloat64(gate);
+#ifdef CONTROLFLOW_OPTIMIZATION
+            convertCache_.SetCachedGate(gate, TaggedTypeInfo::FLOAT64, result);
+#endif
             break;
         case TypeInfo::FLOAT64:
             return gate;
@@ -1424,6 +1545,74 @@ GateRef NumberSpeculativeRetype::CheckAndConvertToFloat64(GateRef gate, GateType
     return result;
 }
 
+#ifdef CONTROLFLOW_OPTIMIZATION
+GateRef NumberSpeculativeRetype::CheckAndConvertFromBoolToTagged(GateRef gate, GateType gateType,
+                                                                 ConvertToNumber convert)
+{
+    if (gateType.IsNumberType() && convert != ConvertToNumber::DISABLE) {
+        GateRef cGate = builder_.ConvertInt32ToTaggedInt(builder_.BooleanToInt32(gate));
+        convertCache_.SetCachedGate(gate, TaggedTypeInfo::TAGGED_INT, cGate);
+        return cGate;
+    }
+    GateRef cGate = builder_.ConvertBoolToTaggedBoolean(gate);
+    convertCache_.SetCachedGate(gate, TaggedTypeInfo::TAGGED_BOOL, cGate);
+    return cGate;
+}
+#endif
+
+#ifdef CONTROLFLOW_OPTIMIZATION
+GateRef NumberSpeculativeRetype::CheckAndConvertToTagged(GateRef gate, GateType gateType, ConvertToNumber convert)
+{
+    TypeInfo output = GetOutputTypeInfo(gate);
+    TaggedTypeInfo info = GetTaggedTypeOfTaggedConvertion(output);
+    GateRef cGate = convertCache_.GetCachedGate(gate, info);
+    if (cGate != Circuit::NullGate()) {
+        return cGate;
+    }
+    switch (output) {
+        case TypeInfo::INT1:
+            return CheckAndConvertFromBoolToTagged(gate, gateType, convert);
+        case TypeInfo::INT32:
+            cGate = builder_.ConvertInt32ToTaggedInt(gate);
+            convertCache_.SetCachedGate(gate, info, cGate);
+            return cGate;
+        case TypeInfo::UINT32:
+            cGate = builder_.ConvertUInt32ToTaggedNumber(gate);
+            convertCache_.SetCachedGate(gate, info, cGate);
+            return cGate;
+        case TypeInfo::FLOAT64:
+            cGate = builder_.ConvertFloat64ToTaggedDouble(gate);
+            convertCache_.SetCachedGate(gate, info, cGate);
+            return cGate;
+        case TypeInfo::CHAR:
+            cGate = builder_.ConvertCharToEcmaString(gate);
+            convertCache_.SetCachedGate(gate, info, cGate);
+            return cGate;
+        case TypeInfo::HOLE_INT:
+            return builder_.CheckHoleIntAndConvertToTaggedInt(gate);
+        case TypeInfo::HOLE_DOUBLE:
+            return builder_.CheckHoleDoubleAndConvertToTaggedDouble(gate);
+        case TypeInfo::NONE:
+        case TypeInfo::TAGGED: {
+            if (convert == ConvertToNumber::ALL) {
+                // Convert if not number
+                ASSERT(gateType.IsNumberType());
+                GateRef ret = builder_.ToNumber(glue_, gate, glue_);
+                ResizeAndSetTypeInfo(ret, TypeInfo::TAGGED);
+                return ret;
+            }
+            // Deoptimize if not number
+            ASSERT(gateType.IsNumberType() || gateType.IsBooleanType());
+            builder_.TryPrimitiveTypeCheck(gateType, gate);
+            return gate;
+        }
+        default:
+            LOG_ECMA(FATAL) << "this branch is unreachable";
+            UNREACHABLE();
+            return Circuit::NullGate();
+    }
+}
+#else
 GateRef NumberSpeculativeRetype::CheckAndConvertToTagged(GateRef gate, GateType gateType, ConvertToNumber convert)
 {
     TypeInfo output = GetOutputTypeInfo(gate);
@@ -1466,7 +1655,88 @@ GateRef NumberSpeculativeRetype::CheckAndConvertToTagged(GateRef gate, GateType 
             return Circuit::NullGate();
     }
 }
+#endif
 
+#ifdef CONTROLFLOW_OPTIMIZATION
+NumberSpeculativeRetype::TaggedTypeInfo NumberSpeculativeRetype::GetTaggedTypeOfTaggedConvertion(
+    TypeInfo output,
+    GateType gateType,
+    ConvertToNumber convert
+)
+{
+    switch (output) {
+        case TypeInfo::INT1:
+            if (gateType.IsNumberType() && convert != ConvertToNumber::DISABLE) {
+                return TaggedTypeInfo::TAGGED_INT;
+            }
+            return TaggedTypeInfo::TAGGED_BOOL;
+        case TypeInfo::INT32:
+            return TaggedTypeInfo::TAGGED_INT;
+        case TypeInfo::UINT32:
+            return TaggedTypeInfo::TAGGED_NUMBER;
+        case TypeInfo::FLOAT64:
+            return TaggedTypeInfo::TAGGED_DOUBLE;
+        case TypeInfo::CHAR:
+            return TaggedTypeInfo::TAGGED_STRING;
+        case TypeInfo::HOLE_INT:
+            return TaggedTypeInfo::TAGGED;
+        case TypeInfo::HOLE_DOUBLE:
+            return TaggedTypeInfo::TAGGED;
+        default:
+            return TaggedTypeInfo::NONE;
+    }
+}
+#endif
+
+#ifdef CONTROLFLOW_OPTIMIZATION
+GateRef NumberSpeculativeRetype::ConvertToTagged(GateRef gate)
+{
+    TypeInfo output = GetOutputTypeInfo(gate);
+    TaggedTypeInfo info = GetTaggedTypeOfTaggedConvertion(output);
+    GateRef cGate = convertCache_.GetCachedGate(gate, info);
+    if (cGate != Circuit::NullGate()) {
+        return cGate;
+    }
+    switch (output) {
+        case TypeInfo::INT1:
+            cGate = builder_.ConvertBoolToTaggedBoolean(gate);
+            convertCache_.SetCachedGate(gate, info, cGate);
+            return cGate;
+        case TypeInfo::INT32:
+            cGate = builder_.ConvertInt32ToTaggedInt(gate);
+            convertCache_.SetCachedGate(gate, info, cGate);
+            return cGate;
+        case TypeInfo::UINT32:
+            cGate = builder_.ConvertUInt32ToTaggedNumber(gate);
+            convertCache_.SetCachedGate(gate, info, cGate);
+            return cGate;
+        case TypeInfo::FLOAT64:
+            cGate = builder_.ConvertFloat64ToTaggedDouble(gate);
+            convertCache_.SetCachedGate(gate, info, cGate);
+            return cGate;
+        case TypeInfo::CHAR:
+            cGate = builder_.ConvertCharToEcmaString(gate);
+            convertCache_.SetCachedGate(gate, info, cGate);
+            return cGate;
+        case TypeInfo::HOLE_INT:
+            cGate = builder_.ConvertSpecialHoleIntToTagged(gate);
+            convertCache_.SetCachedGate(gate, info, cGate);
+            return cGate;
+        case TypeInfo::HOLE_DOUBLE:
+            cGate = builder_.ConvertSpecialHoleDoubleToTagged(gate);
+            convertCache_.SetCachedGate(gate, info, cGate);
+            return cGate;
+        case TypeInfo::NONE:
+        case TypeInfo::TAGGED: {
+            return gate;
+        }
+        default:
+            LOG_ECMA(FATAL) << "this branch is unreachable";
+            UNREACHABLE();
+            return Circuit::NullGate();
+    }
+}
+#else
 GateRef NumberSpeculativeRetype::ConvertToTagged(GateRef gate)
 {
     TypeInfo output = GetOutputTypeInfo(gate);
@@ -1495,6 +1765,7 @@ GateRef NumberSpeculativeRetype::ConvertToTagged(GateRef gate)
             return Circuit::NullGate();
     }
 }
+#endif
 
 GateRef NumberSpeculativeRetype::VisitRangeCheckPredicate(GateRef gate)
 {

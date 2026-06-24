@@ -302,6 +302,21 @@ host_unittest_action("FileGeneratorTest") {
   ]
 }
 
+host_unittest_action("ControlflowOptimizationTest") {
+  module_out_path = module_output_path
+
+  sources = [
+    # test file
+    "controlflow_optimization_test.cpp",
+  ]
+
+  deps = [
+    "$js_root:libark_jsruntime_test_set",
+    "$js_root/ecmascript/compiler:libark_jsoptimizer_set",
+  ]
+  external_deps = [ "runtime_core:libarkfile_static" ]
+}
+
 group("unittest") {
   testonly = true
 
@@ -331,6 +346,10 @@ group("host_unittest") {
 
   if (enable_branch_elimination) {
     deps += [ ":BranchEliminationTest" ]
+  }
+
+  if (enable_controlflow_optimization) {
+    deps += [ ":ControlflowOptimizationTestAction" ]
   }
 
   if (is_mac) {

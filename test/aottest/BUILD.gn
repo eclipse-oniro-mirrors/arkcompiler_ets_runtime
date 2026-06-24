@@ -40,6 +40,7 @@ group("ark_aot_js_test") {
     "fallback_type_conversion",
     "pgo_stobjbyvalue",
     "typedarray_to_reversed",
+    "controlflow_opt"
   ]
 
   deps = []

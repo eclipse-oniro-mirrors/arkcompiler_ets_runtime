@@ -26,8 +26,14 @@
 namespace panda::ecmascript::kungfu {
 class GateRegion : public ChunkObject {
 public:
+#ifdef CONTROLFLOW_OPTIMIZATION
+    GateRegion(Chunk* chunk) : gateList_(chunk), preds_(chunk),
+        succs_(chunk), dominatedRegions_(chunk), postDominatedRegions_(chunk),
+        dominanceFrontiers_(chunk) {}
+#else
     GateRegion(Chunk* chunk) : gateList_(chunk), preds_(chunk),
         succs_(chunk), dominatedRegions_(chunk) {}
+#endif
     ~GateRegion() = default;
 
     void AddGate(GateRef gate)
@@ -186,6 +192,18 @@ public:
         return iDominator_;
     }
 
+#ifdef CONTROLFLOW_OPTIMIZATION
+    GateRegion* GetPostDominator() const
+    {
+        return postIDominator_;
+    }
+
+    ChunkVector<GateRegion*>& GetDominanceFrontiers()
+    {
+        return dominanceFrontiers_;
+    }
+#endif
+
     ChunkVector<GateRegion*>& GetDominatedRegions()
     {
         return dominatedRegions_;
@@ -233,6 +251,11 @@ private:
     ChunkVector<GateRegion*> preds_;
     ChunkVector<GateRegion*> succs_;
     ChunkVector<GateRegion*> dominatedRegions_;
+#ifdef CONTROLFLOW_OPTIMIZATION
+    GateRegion *postIDominator_ {nullptr};
+    ChunkVector<GateRegion*> postDominatedRegions_;
+    ChunkVector<GateRegion*> dominanceFrontiers_;
+#endif
     GateRef state_ {Circuit::NullGate()};
     StateKind stateKind_ {StateKind::OTHER};
     int32_t loopNumber_ {INVALID_INDEX};
@@ -245,6 +268,9 @@ private:
     friend class LoopInfoBuilder;
     friend class GraphLinearizer;
     friend class StateDependBuilder;
+#ifdef CONTROLFLOW_OPTIMIZATION
+    friend class DominanceFrontiersGenerator;
+#endif
 };
 
 class GraphLinearizer {
@@ -278,6 +304,14 @@ public:
     {
         return enableLiteCG_;
     }
+
+#ifdef CONTROLFLOW_OPTIMIZATION
+    void BuildControlflowInfo();
+
+    void Schedule();
+
+    void BuildDominanceFrontier();
+#endif
 
 private:
     enum class ScheduleModel { LIR, JS_OPCODE };
@@ -347,6 +381,12 @@ private:
 
     GateRegion* GateToRegion(GateRef gate) const
     {
+#ifdef CONTROLFLOW_OPTIMIZATION
+        auto id = acc_.GetId(gate);
+        if (id >= gateIdToGateInfo_.size()) {
+            return nullptr;
+        }
+#endif
         const GateInfo& info = GetGateInfo(gate);
         return info.region;
     }
@@ -433,6 +473,13 @@ private:
         model_ = ScheduleModel::JS_OPCODE;
     }
 
+#ifdef CONTROLFLOW_OPTIMIZATION
+    void SetAddBytecode()
+    {
+        addBytecode_ = true;
+    }
+#endif
+
     bool IsSchedueLIR() const
     {
         return model_ == ScheduleModel::LIR;
@@ -468,6 +515,9 @@ private:
     ChunkVector<LoopInfo> loops_;
 
     bool onlyBB_ {false}; // dont schedule
+#ifdef CONTROLFLOW_OPTIMIZATION
+    bool addBytecode_ {false};
+#endif
     bool loopInvariantCodeMotion_ {false};
     bool enableLiteCG_ {false};
     friend class ArrayBoundsCheckElimination;
@@ -478,6 +528,10 @@ private:
     friend class LoopInfoBuilder;
     friend class StateSplitLinearizer;
     friend class InductionVariableAnalysis;
+#ifdef CONTROLFLOW_OPTIMIZATION
+    friend class ControlFlowOptimization;
+    friend class DominanceFrontiersGenerator;
+#endif
 };
 };  // namespace panda::ecmascript::kungfu
 

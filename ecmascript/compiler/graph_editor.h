@@ -32,13 +32,19 @@ public:
 
     static void RemoveDeadState(Circuit* circuit, GateRef gate);
     static void EliminateRedundantPhi(Circuit* circuit, bool enableLog, const std::string& methodName);
+#ifdef CONTROLFLOW_OPTIMIZATION
+    bool FrameValueUsedInCFGTailoring(GateRef gate);
+#endif
+
 private:
     void ReplaceGate(GateRef gate);
     void RemoveGate();
     void PropagateGate(const Edge& edge);
     void PropagateMerge(const Edge& edge);
     void EliminatePhi();
+#ifndef CONTROLFLOW_OPTIMIZATION
     bool FrameValueUsedInCFGTailoring(GateRef gate);
+#endif
 
     Circuit *circuit_ {nullptr};
     GateAccessor acc_;
