@@ -14,9 +14,11 @@
 import("//arkcompiler/ets_runtime/js_runtime_config.gni")
 import("//arkcompiler/ets_runtime/test/test_helper.gni")
 
+module_output_path = "ets_runtime/ets_runtime"
+
 if (ets_runtime_enable_ark_steed) {
   host_unittest_action("ArkSteedRegisterAllocatorTest") {
-    module_out_path = "ets_runtime/ets_runtime"
+    module_out_path = module_output_path
     sources = [ "input_result_alias_test.cpp" ]
     deps = [
       "$js_root:libark_jsruntime_test_set",
@@ -28,12 +30,38 @@ if (ets_runtime_enable_ark_steed) {
       "zlib:libz",
     ]
   }
+
+  host_unittest_action("ArkSteedPipelineStatisticsTest") {
+    module_out_path = module_output_path
+
+    sources = [
+      # test file
+      "pipeline_statistics_test.cpp",
+    ]
+
+    configs = [
+      "$js_root:ecma_test_config",
+    ]
+
+    deps = [ "$js_root:libark_jsruntime_test" ]
+  }
+}
+
+group("unittest") {
+  testonly = true
+
+  # deps file
+  deps = []
+  if (ets_runtime_enable_ark_steed) {
+    deps += [":ArkSteedPipelineStatisticsTest"]
+  }
 }
 
 group("arksteed_host_unittest") {
   testonly = true
+
   deps = []
   if (ets_runtime_enable_ark_steed) {
-    deps += [ ":ArkSteedRegisterAllocatorTestAction" ]
+    deps += [ ":ArkSteedRegisterAllocatorTestAction", ":ArkSteedPipelineStatisticsTestAction" ]
   }
 }

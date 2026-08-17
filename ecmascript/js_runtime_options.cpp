@@ -51,6 +51,9 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
          OPTION_COMPILER_ARKSTEED_REUSE_STACK_SLOTS},
         {"compiler-arksteed-deopt-on-insufficient-profile", required_argument, nullptr,
          OPTION_COMPILER_ARKSTEED_DEOPT_ON_INSUFFICIENT_PROFILE},
+        {"compiler-arksteed-pass-trace", required_argument, nullptr, OPTION_COMPILER_ARKSTEED_PASS_TRACE},
+        {"compiler-arksteed-pass-trace-methods", required_argument, nullptr,
+         OPTION_COMPILER_ARKSTEED_PASS_TRACE_METHODS},
         {"compiler-log-snapshot", required_argument, nullptr, OPTION_COMPILER_LOG_SNAPSHOT},
         {"compiler-log-time", required_argument, nullptr, OPTION_COMPILER_LOG_TIME},
         {"compiler-log-all-methods-time", required_argument, nullptr, OPTION_COMPILER_LOG_ALL_METHODS_TIME},
@@ -728,6 +731,17 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
                 } else {
                     return false;
                 }
+                break;
+            case OPTION_COMPILER_ARKSTEED_PASS_TRACE:
+                ret = ParseBoolParam(&argBool);
+                if (ret) {
+                    SetCompilerArkSteedPassTrace(argBool);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_ARKSTEED_PASS_TRACE_METHODS:
+                SetCompilerArkSteedPassTraceMethods(optarg);
                 break;
             case OPTION_ASM_OPT_LEVEL:
                 ret = ParseUint32Param("compiler-opt-level", &argUint32);

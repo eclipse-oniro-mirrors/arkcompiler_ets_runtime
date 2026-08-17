@@ -16,6 +16,7 @@
 #ifndef ECMASCRIPT_ARKSTEED_COMPILER_H
 #define ECMASCRIPT_ARKSTEED_COMPILER_H
 
+#include "ecmascript/arksteed/arksteed_pipeline_statistics.h"
 #include "ecmascript/arksteed/arksteed_task.h"
 #include "ecmascript/compiler/jit_compilation_env.h"
 #include "ecmascript/jit/jit_task.h"
@@ -63,7 +64,8 @@ public:
           jitCompilationEnv_(new JitCompilationEnv(arkSteedTask->GetCompilerVM(), arkSteedTask->GetHostVM(),
                                                    jsFunction_, arkSteedTask->GetDependencies())),
           profileTypeInfo_(arkSteedTask->GetProfileTypeInfo()),
-          compilerTier_(arkSteedTask->GetCompilerTier())
+          compilerTier_(arkSteedTask->GetCompilerTier()),
+          pipelineStatistics_(ShouldEnablePipelineStatistics(arkSteedTask, jitCompilationEnv_.get()))
     {
         jitCompilationEnv_->SetProfileTypeInfo(profileTypeInfo_);
     }
@@ -91,8 +93,11 @@ public:
     }
 
 private:
+    static bool ShouldEnablePipelineStatistics(ArkSteedTask *arkSteedTask, JitCompilationEnv *env);
+
     void DebugLogOnCompilationStart();
     void DebugLogOnCompilationDone();
+    CString GetCompiledMethodName() const;
 
     ArkSteedTask *arkSteedTask_;
     JSHandle<JSFunction> jsFunction_;
@@ -100,6 +105,7 @@ private:
     std::unique_ptr<JitCompilationEnv> jitCompilationEnv_;
     JSHandle<ProfileTypeInfo> profileTypeInfo_;
     CompilerTier compilerTier_;
+    PipelineStatisticsCollector pipelineStatistics_;
 
     // Compilation artifacts — created in Compile(), consumed in FillCodeDesc()
     std::unique_ptr<Chunk> chunk_;

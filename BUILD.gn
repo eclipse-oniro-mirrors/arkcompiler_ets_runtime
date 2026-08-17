@@ -238,7 +238,10 @@ group("ark_js_unittest_suit") {
   }
   if ((current_cpu == "arm64" || current_cpu == "amd64") &&
       !ets_runtime_test_enable_dfx) {
-    deps += [ "ecmascript/jit/tests:unittest" ]
+    deps += [
+      "ecmascript/arksteed/unittests:unittest",
+      "ecmascript/jit/tests:unittest",
+    ]
   }
 }
 

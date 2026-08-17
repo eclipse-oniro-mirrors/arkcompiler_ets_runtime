@@ -15,11 +15,13 @@
 
 #include "ecmascript/arksteed/arksteed_compiler.h"
 
+#include "ecmascript/ecma_macros.h"
 #include <limits>
 #include <utility>
 #include <vector>
 
 #include "ecmascript/arksteed/arksteed_assembler.h"
+#include "ecmascript/arksteed/arksteed_pipeline_statistics.h"
 #include "ecmascript/arksteed/arksteed_deopt_helper.h"
 #include "ecmascript/arksteed/arksteed_graph_builder.h"
 #include "ecmascript/arksteed/arksteed_codegen.h"
@@ -46,6 +48,16 @@
 #include <sstream>
 
 namespace panda::ecmascript::arksteed {
+
+namespace {
+
+CString ParseMethodNameFromEnv(JitCompilationEnv *env)
+{
+    MethodLiteral *method = env->GetMethodLiteral();
+    return MethodLiteral::ParseFunctionNameToCString(env->GetJSPandaFile(), method->GetMethodId());
+}
+
+}  // namespace
 
 static void VerifyGraph(Graph *graph)
 {
@@ -126,10 +138,8 @@ void ArkSteedCompilerTask::DebugLogOnCompilationStart()
     if (!common::Log::LogIsLoggable(Level::INFO, Component::COMPILER)) {
         return;
     }
-    JitCompilationEnv *env = jitCompilationEnv_.get();
-    MethodLiteral *method = env->GetMethodLiteral();
-    LOG_COMPILER(INFO) << "======== ArkSteedCompilerTask: Starts compiling: "
-                       << MethodLiteral::ParseFunctionName(env->GetJSPandaFile(), method->GetMethodId()) << " ========";
+    LOG_COMPILER(INFO) << "======== ArkSteedCompilerTask: Starts compiling: " << GetCompiledMethodName()
+                       << " ========";
 }
 
 void ArkSteedCompilerTask::DebugLogOnCompilationDone()
@@ -137,14 +147,34 @@ void ArkSteedCompilerTask::DebugLogOnCompilationDone()
     if (!common::Log::LogIsLoggable(Level::INFO, Component::COMPILER)) {
         return;
     }
-    JitCompilationEnv *env = jitCompilationEnv_.get();
-    MethodLiteral *method = env->GetMethodLiteral();
-    LOG_COMPILER(INFO) << "======== ArkSteedCompilerTask: Finished compiling: "
-                       << MethodLiteral::ParseFunctionName(env->GetJSPandaFile(), method->GetMethodId()) << " ========";
+    LOG_COMPILER(INFO) << "======== ArkSteedCompilerTask: Finished compiling: " << GetCompiledMethodName()
+                       << " ========";
+}
+
+CString ArkSteedCompilerTask::GetCompiledMethodName() const
+{
+    return ParseMethodNameFromEnv(jitCompilationEnv_.get());
+}
+
+bool ArkSteedCompilerTask::ShouldEnablePipelineStatistics(ArkSteedTask *arkSteedTask, JitCompilationEnv *env)
+{
+    const JSRuntimeOptions &options = arkSteedTask->GetHostVM()->GetJSOptions();
+    if (!options.GetCompilerArkSteedPassTrace()) {
+        return false;
+    }
+    const std::string filter = options.GetCompilerArkSteedPassTraceMethods();
+    if (filter.empty()) {
+        return true;
+    }
+    return MatchMethodName(filter, ParseMethodNameFromEnv(env));
 }
 
 bool ArkSteedCompilerTask::BuildGraph(JSThread *compilerThread, uintptr_t hostGlueAddr)
 {
+    (void)compilerThread;  // Unused
+
+    ArkSteedPipelineStatistics statsScope(pipelineStatistics_, "BuildGraph");
+
     JitCompilationEnv *env = jitCompilationEnv_.get();
     if (env->GetJSOptions().IsEnableJITPGO()) {
         auto jitProfiler = env->GetPGOProfiler()->GetJITProfile();
@@ -161,39 +191,64 @@ bool ArkSteedCompilerTask::BuildGraph(JSThread *compilerThread, uintptr_t hostGl
     }
 
     BytecodePreprocessor preproc(env, chunk_.get());
-    if (!preproc.Run()) {
-        LOG_COMPILER(WARN) << "JIT compilation halts due to bytecode preprocessing error.";
-        return false;
+    {
+        ArkSteedPipelineStatistics stats(pipelineStatistics_, "BytecodePreprocessor");
+        if (!preproc.Run()) {
+            LOG_COMPILER(WARN) << "JIT compilation halts due to bytecode preprocessing error.";
+            return false;
+        }
     }
     BytecodeAnalysis analysis(&preproc);
-    if (!analysis.Run()) {
-        LOG_COMPILER(WARN) << "JIT compilation halts due to bytecode analysis error.";
-        return false;
+    {
+        ArkSteedPipelineStatistics stats(pipelineStatistics_, "BytecodeAnalysis");
+        if (!analysis.Run()) {
+            LOG_COMPILER(WARN) << "JIT compilation halts due to bytecode analysis error.";
+            return false;
+        }
     }
-    GraphBuilder graphBuilder(compilerThread, graph_, hostGlueAddr, &preproc, &analysis);
-    if (!graphBuilder.Run()) {
-        LOG_COMPILER(WARN) << "JIT compilation halts due to graph building error.";
-        return false;
+
+    {
+        ArkSteedPipelineStatistics stats(pipelineStatistics_, "GraphBuilder");
+
+        GraphBuilder graphBuilder(compilerThread, graph_, hostGlueAddr, &preproc, &analysis);
+        if (!graphBuilder.Run()) {
+            LOG_COMPILER(WARN) << "JIT compilation halts due to graph building error.";
+            return false;
+        }
     }
     return true;
 }
 
 void ArkSteedCompilerTask::RunPreRegallocProcessors()
 {
+    ArkSteedPipelineStatistics statsScope(pipelineStatistics_, "RunPreRegallocProcessors");
+
     // VertexInfoAllocateProcessor - allocate regalloc info for all vertices
-    GraphProcessor<VertexInfoAllocateProcessor> processor;
-    processor.Run(graph_);
+    {
+        ArkSteedPipelineStatistics stats(pipelineStatistics_, "VertexInfoAllocate");
+        GraphProcessor<VertexInfoAllocateProcessor> processor;
+        processor.Run(graph_);
+    }
     // ValueLocationConstraintProcessor - set input/output location constraints
-    GraphProcessor<ValueLocationConstraintProcessor> constraintProcessor;
-    constraintProcessor.Run(graph_);
+    {
+        ArkSteedPipelineStatistics stats(pipelineStatistics_, "ValueLocationConstraint");
+        GraphProcessor<ValueLocationConstraintProcessor> constraintProcessor;
+        constraintProcessor.Run(graph_);
+    }
 
     // MaxCallDepthProcessor - compute max call stack args
-    GraphProcessor<MaxCallDepthProcessor> callDepthProcessor;
-    callDepthProcessor.Run(graph_);
+    {
+        ArkSteedPipelineStatistics stats(pipelineStatistics_, "MaxCallDepth");
+        GraphProcessor<MaxCallDepthProcessor> callDepthProcessor;
+        callDepthProcessor.Run(graph_);
+    }
 
     // LivenessProcessor - track live ranges and next use
-    GraphProcessor<LivenessProcessor> liveRangeProcessor;
-    liveRangeProcessor.Run(graph_);
+    {
+        ArkSteedPipelineStatistics stats(pipelineStatistics_, "Liveness");
+        GraphProcessor<LivenessProcessor> liveRangeProcessor;
+        liveRangeProcessor.Run(graph_);
+    }
 }
 
 bool ArkSteedCompilerTask::Compile()
@@ -201,8 +256,12 @@ bool ArkSteedCompilerTask::Compile()
     DebugLogOnCompilationStart();
 
     ArkSteedCompileTimeScope totalScope(arkSteedTask_);
+    ArkSteedPipelineStatisticsSummary statsSummary(
+        pipelineStatistics_, pipelineStatistics_.Enabled() ? GetCompiledMethodName() : "");
+    
     NativeAreaAllocator *allocator = arkSteedTask_->GetCompilerVM()->GetNativeAreaAllocator();
-    chunk_ = std::make_unique<Chunk>(allocator);
+    chunk_ = std::make_unique<Chunk>(allocator, pipelineStatistics_.Enabled());
+    pipelineStatistics_.AttachChunk(chunk_.get());
     graph_ = Graph::New(chunk_.get());
 
     // Allocate FuncEntryDes from chunk (persists until ArkSteedCompilerTask destroyed)
@@ -218,15 +277,22 @@ bool ArkSteedCompilerTask::Compile()
 
     ArkSteedPGOContext pgoContext(compilerThread, jitCompilationEnv_.get());
 
+
     if (!BuildGraph(compilerThread, hostGlueAddr)) {
         return false;
     }
 
-    WriteBarrierValueKindPass writeBarrierValueKindPass(graph_);
-    writeBarrierValueKindPass.Run();
+    {
+        ArkSteedPipelineStatistics stats(pipelineStatistics_, "WriteBarrierValueKindPass");
+        WriteBarrierValueKindPass writeBarrierValueKindPass(graph_);
+        writeBarrierValueKindPass.Run();
+    }
 
     // Verify graph integrity
-    VerifyGraph(graph_);
+    {
+        ArkSteedPipelineStatistics stats(pipelineStatistics_, "VerifyGraph");
+        VerifyGraph(graph_);
+    }
     RunPreRegallocProcessors();
 
     // Print graph with labeller if option is enabled
@@ -239,29 +305,37 @@ bool ArkSteedCompilerTask::Compile()
     }
 
     // Register allocation
-    graph_->SetReuseStackSlots(arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedReuseStackSlots());
-    ArkSteedRegisterAllocator registerAllocator(graph_);
+    {
+        ArkSteedPipelineStatistics stats(pipelineStatistics_, "RegisterAllocation");
+        graph_->SetReuseStackSlots(
+            arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedReuseStackSlots());
+        ArkSteedRegisterAllocator registerAllocator(graph_);
+    }
 
     // Code generation
-    assembler_ = new ArkSteedAssembler(chunk_.get(), compilerThread, hostThread);
-    if (arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedEnableCodeComment()) {
-        assembler_->EnableComments(true);
-    }
+    {
+        ArkSteedPipelineStatistics stats(pipelineStatistics_, "CodeGeneration");
+        assembler_ = new ArkSteedAssembler(chunk_.get(), compilerThread, hostThread);
+        if (arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedEnableCodeComment()) {
+            assembler_->EnableComments(true);
+        }
 #ifdef JIT_ENABLE_CODE_SIGN
-    EnableCodeSign();
+        EnableCodeSign();
 #endif
-    safepointTableBuilder_ = new ArkSteedSafepointTableBuilder(chunk_.get());
-    translationBuilder_ = new DeoptTranslationBuilder();
-    deoptLiteralTableBuilder_ = new DeoptLiteralTableBuilder();
-    bool withColors = arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedPrintWithColors();
-    ArkSteedCodeGenerator codegen(assembler_, graph_, safepointTableBuilder_, translationBuilder_,
-                                  deoptLiteralTableBuilder_, withColors);
-    codegen.Generate();
+        safepointTableBuilder_ = new ArkSteedSafepointTableBuilder(chunk_.get());
+        translationBuilder_ = new DeoptTranslationBuilder();
+        deoptLiteralTableBuilder_ = new DeoptLiteralTableBuilder();
+        bool withColors = arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedPrintWithColors();
+        ArkSteedCodeGenerator codegen(assembler_, graph_, safepointTableBuilder_, translationBuilder_,
+                                      deoptLiteralTableBuilder_, withColors);
+        codegen.Generate();
+    }
     if (arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedPrintCode()) {
         LogAsm(assembler_);
     }
 
     DebugLogOnCompilationDone();
+    statsSummary.MarkSuccess();
     return true;
 }
 

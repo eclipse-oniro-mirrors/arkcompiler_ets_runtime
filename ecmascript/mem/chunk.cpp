@@ -18,64 +18,64 @@
 #include "native_area_allocator.h"
 
 namespace panda::ecmascript {
-Chunk::Chunk(NativeAreaAllocator *allocator) : allocator_(allocator) {}
+Chunk::Chunk(NativeAreaAllocator *allocator, bool enableStatistics)
+    : allocator_(allocator), enableStatistics_(enableStatistics) {}
 
-Area *Chunk::NewArea(size_t size)
-{
-    auto area = allocator_->AllocateArea(size);
-    if (area == nullptr) { // LOCV_EXCL_BR_LINE
-        LOG_ECMA_MEM(FATAL) << "OOM Chunk : NewArea area is nullptr";
-        UNREACHABLE();
-    }
-    allocator_->IncreaseNativeSizeStats(size, NativeFlag::CHUNK_MEM);
-    areaList_.AddNode(area);
-    currentArea_ = area;
-    return area;
+Area *Chunk::NewArea(size_t size) {
+  auto area = allocator_->AllocateArea(size);
+  if (area == nullptr) { // LOCV_EXCL_BR_LINE
+    LOG_ECMA_MEM(FATAL) << "OOM Chunk : NewArea area is nullptr";
+    UNREACHABLE();
+  }
+  allocator_->IncreaseNativeSizeStats(size, NativeFlag::CHUNK_MEM);
+  areaList_.AddNode(area);
+  currentArea_ = area;
+  return area;
 }
 
-uintptr_t Chunk::Expand(size_t size)
-{
-    ASSERT(end_ - ptr_ < size);
+uintptr_t Chunk::Expand(size_t size) {
+  ASSERT(end_ - ptr_ < size);
 
-    Area *head = currentArea_;
-    size_t newSize;
-    if (head != nullptr) {
-        // NOLINTNEXTLINE(hicpp-signed-bitwise)
-        newSize = size + (head->GetSize() << 1);
-    } else {
-        newSize = sizeof(Area) + MEM_ALIGN + size;
-    }
+  Area *head = currentArea_;
+  size_t newSize;
+  if (head != nullptr) {
+    // NOLINTNEXTLINE(hicpp-signed-bitwise)
+    newSize = size + (head->GetSize() << 1);
+  } else {
+    newSize = sizeof(Area) + MEM_ALIGN + size;
+  }
 
-    if (newSize < MIN_CHUNK_AREA_SIZE) {
-        newSize = MIN_CHUNK_AREA_SIZE;
-    } else if (newSize > MAX_CHUNK_AREA_SIZE) {
-        size_t minNewSize = sizeof(Area) + MEM_ALIGN + size;
-        newSize = std::max(minNewSize, MAX_CHUNK_AREA_SIZE);
-    }
+  if (newSize < MIN_CHUNK_AREA_SIZE) {
+    newSize = MIN_CHUNK_AREA_SIZE;
+  } else if (newSize > MAX_CHUNK_AREA_SIZE) {
+    size_t minNewSize = sizeof(Area) + MEM_ALIGN + size;
+    newSize = std::max(minNewSize, MAX_CHUNK_AREA_SIZE);
+  }
 
-    if (newSize > static_cast<size_t>(std::numeric_limits<int>::max())) { // LOCV_EXCL_BR_LINE
-        LOG_ECMA_MEM(FATAL) << "OOM chunk : newSize is "<< newSize << ", size is " << size;
-        UNREACHABLE();
-    }
+  if (newSize > static_cast<size_t>(
+                    std::numeric_limits<int>::max())) { // LOCV_EXCL_BR_LINE
+    LOG_ECMA_MEM(FATAL) << "OOM chunk : newSize is " << newSize << ", size is "
+                        << size;
+    UNREACHABLE();
+  }
 
-    Area *area = NewArea(newSize);
-    if (area == nullptr) { // LOCV_EXCL_BR_LINE
-        LOG_ECMA_MEM(FATAL) << "OOM chunk : NewArea area is nullptr";
-        UNREACHABLE();
-    }
-    uintptr_t result = AlignUp(area->GetBegin(), MEM_ALIGN);
-    ptr_ = result + size;
-    end_ = area->GetEnd();
-    return result;
+  Area *area = NewArea(newSize);
+  if (area == nullptr) { // LOCV_EXCL_BR_LINE
+    LOG_ECMA_MEM(FATAL) << "OOM chunk : NewArea area is nullptr";
+    UNREACHABLE();
+  }
+  uintptr_t result = AlignUp(area->GetBegin(), MEM_ALIGN);
+  ptr_ = result + size;
+  end_ = area->GetEnd();
+  return result;
 }
 
-void Chunk::ReleaseMemory()
-{
-    while (!areaList_.IsEmpty()) {
-        Area *node = areaList_.PopBack();
-        allocator_->FreeArea(node);
-    }
-    ptr_ = 0;
-    end_ = 0;
+void Chunk::ReleaseMemory() {
+  while (!areaList_.IsEmpty()) {
+    Area *node = areaList_.PopBack();
+    allocator_->FreeArea(node);
+  }
+  ptr_ = 0;
+  end_ = 0;
 }
-}  // namespace panda::ecmascript
+} // namespace panda::ecmascript
