@@ -1364,16 +1364,20 @@ void BytecodeInfo::InitBytecodeInfo(BytecodeInfo &info, const uint8_t *pc,
             break;
         }
         case EcmaOpcode::NEWOBJRANGE_IMM8_IMM8_V8: {
+            uint16_t slotId = READ_INST_8_0();
             uint16_t numArgs = READ_INST_8_1();
             uint16_t firstArgRegIdx = READ_INST_8_2();
+            info.slotId = ICSlotId(slotId);
             for (uint16_t i = 0; i < numArgs; ++i) {
                 info.inputs.emplace_back(VirtualRegister(firstArgRegIdx + i));
             }
             break;
         }
         case EcmaOpcode::NEWOBJRANGE_IMM16_IMM8_V8: {
+            uint16_t slotId = READ_INST_16_0();
             uint16_t numArgs = READ_INST_8_2();
             uint16_t firstArgRegIdx = READ_INST_8_3();
+            info.slotId = ICSlotId(slotId);
             for (uint16_t i = 0; i < numArgs; ++i) {
                 info.inputs.emplace_back(VirtualRegister(firstArgRegIdx + i));
             }

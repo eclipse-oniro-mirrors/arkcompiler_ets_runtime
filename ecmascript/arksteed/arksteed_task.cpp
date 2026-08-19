@@ -267,7 +267,7 @@ bool ArkSteedTask::AsyncTask::Run(uint32_t threadIndex)
 
         MachineCodeDesc codeDesc = task_->GetMachineCodeDesc();
         size_t instrSize = codeDesc.codeSizeAlign;
-        CString sizeInfo = "text size : ";
+        CString sizeInfo = ", text size : ";
         sizeInfo.append(std::to_string(instrSize)).append("bytes");
         scope.appendMessage(sizeInfo);
 

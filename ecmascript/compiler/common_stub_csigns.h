@@ -168,6 +168,9 @@ namespace panda::ecmascript::kungfu {
     V(StLexVar)                                         \
     V(CMCSetValueWithBarrier)                           \
     V(EnsurePropertiesCapacity)                         \
+    V(ArkSteedStringToNumber)                           \
+    V(ArkSteedNewObjectFromPrimitive)                   \
+    V(ArkSteedCallConstructorBody)                      \
     V(CopyCOWElements)
 
 #define COMMON_STUB_ID_LIST(V)          \

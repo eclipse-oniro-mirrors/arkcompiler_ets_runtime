@@ -35,6 +35,31 @@ ArkSteedAssembler::~ArkSteedAssembler() = default;
 // Platform-independent implementations
 // =============================================================================
 
+void ArkSteedAssembler::JumpIfNotStrongHeapObject(ArkSteedRegister value, Label *target)
+{
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister bits = scope.Acquire();
+    Move(bits, static_cast<int64_t>(JSTaggedValue::TAG_WEAK_MASK));
+    And(bits, value);
+#if defined(PANDA_TARGET_ARM64)
+    Compare(bits, 0);
+#endif
+    JumpIf(Condition::NOT_EQUAL, target);
+}
+
+void ArkSteedAssembler::JumpIfNotECMAObject(ArkSteedRegister value, Label *target)
+{
+    JumpIfNotStrongHeapObject(value, target);
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister type = scope.Acquire();
+    LoadField(type, value, TaggedObject::HCLASS_OFFSET);
+    And(type, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    LoadUint8Field(type, type, JSHClass::BIT_FIELD_OFFSET);
+    Sub(type, static_cast<int32_t>(JSType::ECMA_OBJECT_FIRST));
+    Compare(type, static_cast<int32_t>(JSType::ECMA_OBJECT_LAST) - static_cast<int32_t>(JSType::ECMA_OBJECT_FIRST));
+    JumpIf(Condition::ABOVE, target);
+}
+
 void ArkSteedAssembler::LoadTaggedValue(ArkSteedRegister dst, uint64_t taggedValue)
 {
     Move(dst, taggedValue);

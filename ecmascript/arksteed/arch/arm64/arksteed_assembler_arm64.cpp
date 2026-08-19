@@ -197,6 +197,11 @@ void ArkSteedAssembler::LoadField(ArkSteedRegister dst, ArkSteedRegister base, i
     LoadRegisterWithOperand(dst, operand);
 }
 
+void ArkSteedAssembler::LoadUint8Field(ArkSteedRegister dst, ArkSteedRegister base, int32_t offset)
+{
+    assembler_.Ldrb(dst.W(), aarch64::MemoryOperand(base, offset));
+}
+
 void ArkSteedAssembler::LoadInt32Field(ArkSteedRegister dst, ArkSteedRegister base, int32_t offset)
 {
     aarch64::MemoryOperand operand(base, offset, aarch64::AddrMode::OFFSET);
@@ -544,14 +549,56 @@ void ArkSteedAssembler::Int32Add(ArkSteedRegister dst, ArkSteedRegister left, Ar
     assembler_.Adds(dst.W(), left.W(), aarch64::Operand(right.W()));
 }
 
+void ArkSteedAssembler::Int32Add(ArkSteedRegister dst, ArkSteedRegister left, int32_t immediate)
+{
+    int64_t value = immediate;
+    if (value >= 0 && FitsAddSubImmediate(static_cast<uint64_t>(value))) {
+        EmitAddSubImmediate(dst.W(), left.W(), static_cast<uint64_t>(value), AddSubImmediateOp::ADD);
+        return;
+    }
+    if (value < 0 && FitsAddSubImmediate(static_cast<uint64_t>(-value))) {
+        EmitAddSubImmediate(dst.W(), left.W(), static_cast<uint64_t>(-value), AddSubImmediateOp::SUB);
+        return;
+    }
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister scratch = scope.AcquireScratch();
+    Move(scratch, value);
+    Int32Add(dst, left, scratch);
+}
+
 void ArkSteedAssembler::Int32Sub(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right)
 {
     assembler_.Subs(dst.W(), left.W(), aarch64::Operand(right.W()));
 }
 
+void ArkSteedAssembler::Int32Sub(ArkSteedRegister dst, ArkSteedRegister left, int32_t immediate)
+{
+    int64_t value = immediate;
+    if (value >= 0 && FitsAddSubImmediate(static_cast<uint64_t>(value))) {
+        EmitAddSubImmediate(dst.W(), left.W(), static_cast<uint64_t>(value), AddSubImmediateOp::SUB);
+        return;
+    }
+    if (value < 0 && FitsAddSubImmediate(static_cast<uint64_t>(-value))) {
+        EmitAddSubImmediate(dst.W(), left.W(), static_cast<uint64_t>(-value), AddSubImmediateOp::ADD);
+        return;
+    }
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister scratch = scope.AcquireScratch();
+    Move(scratch, value);
+    Int32Sub(dst, left, scratch);
+}
+
 void ArkSteedAssembler::Int32Mul(ArkSteedRegister dst, ArkSteedRegister src)
 {
     assembler_.Mul(dst.W(), dst.W(), src.W());
+}
+
+void ArkSteedAssembler::Int32Mul(ArkSteedRegister dst, int32_t immediate)
+{
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister scratch = scope.AcquireScratch();
+    Move(scratch, immediate);
+    Int32Mul(dst, scratch);
 }
 
 void ArkSteedAssembler::Int32MulWide(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right)
@@ -1390,16 +1437,13 @@ void ArkSteedAssembler::JumpIfFunctionNotCompiled(ArkSteedRegister jsFunc, Label
     TestAndBranchIfZero(bitfield, JSFunctionBase::IsCompiledCodeBit::START_BIT, target);
 }
 
-void ArkSteedAssembler::BranchIfNoPendingException(Label* target)
+void ArkSteedAssembler::BranchIfNoPendingException(Label *target)
 {
     TemporaryRegisterScope scope(this);
     ArkSteedRegister scratch = scope.AcquireScratch();
-    PushPair(aarch64::xzr, aarch64::x0);
-    Move(aarch64::x0, static_cast<uint64_t>(entryThread_->GetGlueAddr()));
-    LoadField(scratch, aarch64::x0, static_cast<int32_t>(JSThread::GlueData::GetExceptionOffset(false)));
-    Move(aarch64::x0, JSTaggedValue::Hole().GetRawData());
-    Compare(scratch, aarch64::x0);
-    PopPair(aarch64::xzr, aarch64::x0);
+    Move(scratch, static_cast<uint64_t>(entryThread_->GetGlueAddr()));
+    LoadField(scratch, scratch, static_cast<int32_t>(JSThread::GlueData::GetExceptionOffset(false)));
+    Compare(scratch, static_cast<int32_t>(JSTaggedValue::VALUE_HOLE));
     JumpIf(Condition::EQUAL, target);
 }
 
@@ -1569,6 +1613,11 @@ void ArkSteedAssembler::ReserveCallArgSlots(int32_t slotCount)
     if (slotCount > 0) {
         Sub(aarch64::sp, slotCount * FRAME_SLOT_SIZE);
     }
+}
+
+void ArkSteedAssembler::LoadCallArgv(ArkSteedRegister dst)
+{
+    assembler_.Mov(dst, aarch64::sp);
 }
 
 void ArkSteedAssembler::FreeCallArgSlots(int32_t slotCount)

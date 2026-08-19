@@ -126,6 +126,11 @@ void ArkSteedAssembler::LoadField(ArkSteedRegister dst, ArkSteedRegister base, i
     assembler_.Movq(operand, dst);
 }
 
+void ArkSteedAssembler::LoadUint8Field(ArkSteedRegister dst, ArkSteedRegister base, int32_t offset)
+{
+    assembler_.Movzbl(x64::Operand(base, offset), dst);
+}
+
 void ArkSteedAssembler::LoadInt32Field(ArkSteedRegister dst, ArkSteedRegister base, int32_t offset)
 {
     x64::Operand operand(base, offset);
@@ -406,15 +411,35 @@ void ArkSteedAssembler::Int32Add(ArkSteedRegister dst, ArkSteedRegister left, Ar
     assembler_.Addl(right, dst);
 }
 
+void ArkSteedAssembler::Int32Add(ArkSteedRegister dst, ArkSteedRegister left, int32_t immediate)
+{
+    ASSERT(dst == left);
+    assembler_.Addl(x64::Immediate(immediate), dst);
+}
+
 void ArkSteedAssembler::Int32Sub(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right)
 {
     ASSERT(dst == left);
     assembler_.Subl(right, dst);
 }
 
+void ArkSteedAssembler::Int32Sub(ArkSteedRegister dst, ArkSteedRegister left, int32_t immediate)
+{
+    ASSERT(dst == left);
+    assembler_.Subl(x64::Immediate(immediate), dst);
+}
+
 void ArkSteedAssembler::Int32Mul(ArkSteedRegister dst, ArkSteedRegister src)
 {
     assembler_.Imull(src, dst);
+}
+
+void ArkSteedAssembler::Int32Mul(ArkSteedRegister dst, int32_t immediate)
+{
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister scratch = scope.AcquireScratch();
+    Move(scratch, immediate);
+    Int32Mul(dst, scratch);
 }
 
 void ArkSteedAssembler::Int32MulWide([[maybe_unused]] ArkSteedRegister dst,
@@ -917,13 +942,10 @@ void ArkSteedAssembler::BranchIfNoPendingException(Label *target)
 {
     TemporaryRegisterScope scope(this);
     ArkSteedRegister scratch = scope.AcquireScratch();
-    assembler_.Push(x64::rax);
-    assembler_.Movabs(static_cast<uint64_t>(entryThread_->GetGlueAddr()), x64::rax);
-    LoadField(scratch, x64::rax, static_cast<int32_t>(JSThread::GlueData::GetExceptionOffset(false)));
-    assembler_.Movabs(JSTaggedValue::Hole().GetRawData(), x64::rax);
-    assembler_.Cmpq(scratch, x64::rax);
-    assembler_.Pop(x64::rax);
-    assembler_.Je(target);
+    Move(scratch, static_cast<uint64_t>(entryThread_->GetGlueAddr()));
+    LoadField(scratch, scratch, static_cast<int32_t>(JSThread::GlueData::GetExceptionOffset(false)));
+    Compare(scratch, static_cast<int32_t>(JSTaggedValue::VALUE_HOLE));
+    JumpIf(Condition::EQUAL, target);
 }
 
 void ArkSteedAssembler::ReturnWithPendingException()
@@ -1049,6 +1071,11 @@ void ArkSteedAssembler::ReserveCallArgSlots(int32_t slotCount)
     if (slotCount > 0) {
         assembler_.Subq(x64::Immediate(slotCount * FRAME_SLOT_SIZE), x64::rsp);
     }
+}
+
+void ArkSteedAssembler::LoadCallArgv(ArkSteedRegister dst)
+{
+    assembler_.Movq(x64::rsp, dst);
 }
 
 void ArkSteedAssembler::FreeCallArgSlots(int32_t slotCount)

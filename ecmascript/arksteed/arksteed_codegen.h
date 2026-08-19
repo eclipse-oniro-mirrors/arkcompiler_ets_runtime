@@ -113,6 +113,12 @@ private:
     int PrepareTrampolineArguments(const Vertex *call, uint32_t actualArgc, uint32_t targetIndex,
                                    uint32_t newTargetIndex, uint32_t receiverIndex, uint32_t firstArgIndex,
                                    ArkSteedRegister scratch);
+    void PrepareKnownCallArguments(const Vertex *call, uint32_t actualArgc, uint32_t expectedArgc,
+                                   uint32_t firstArgIndex);
+    template <typename ConstructorVertexT>
+    void EmitConstructorBodyStubCall(ConstructorVertexT *call);
+    template <typename ConstructorVertexT>
+    void EmitNewObjRangeConstructorBodyCall(ConstructorVertexT *call);
     int PrepareKnownBuiltinStubArguments(CallKnownBuiltinVertex *call);
     int PrepareKnownBuiltinNativeArguments(CallKnownBuiltinVertex *call);
 

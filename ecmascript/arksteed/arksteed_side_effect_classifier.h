@@ -243,6 +243,18 @@ public:
         return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
     }
 
+    static SideEffectDescriptor Classify(CallNewObjRangeBaseVertex *vertex)
+    {
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
+    }
+
+    static SideEffectDescriptor Classify(CallNewObjRangeDerivedVertex *vertex)
+    {
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
+    }
+
     static SideEffectDescriptor Classify(CallSelfVertex *vertex)
     {
         (void)vertex;

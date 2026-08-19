@@ -64,6 +64,14 @@ public:
         return feedback;
     }
 
+    ConstructorFeedback ReadConstructorFeedback(const kungfu::BytecodeInfo &bytecodeInfo)
+    {
+        ConstructorFeedback feedback;
+        ArkSteedFeedbackReader reader(compilerThread_, bytecodeInfo, &broker_);
+        broker_.GetFeedbackForConstructor(reader, &feedback);
+        return feedback;
+    }
+
     bool TargetsCurrentFunction(const CallFeedback &feedback) const
     {
         return feedback.IsMonomorphicJSFunction() && broker_.IsSameFunction(feedback.target);

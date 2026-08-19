@@ -17,6 +17,7 @@
 
 #include "ecmascript/arksteed/arksteed_feedback_reader.h"
 #include "ecmascript/arksteed/arksteed_opcode.h"
+#include "ecmascript/builtin_entries.h"
 #include "ecmascript/js_object-inl.h"
 #include "ecmascript/jspandafile/program_object.h"
 #include "ecmascript/layout_info.h"
@@ -135,6 +136,21 @@ bool ArkSteedHeapBroker::TryGetObjectLiteralFromConstantPool(uint16_t cpIdx,
     return true;
 }
 
+bool ArkSteedHeapBroker::TryGetBuiltinIndexFromConstantPool(uint16_t cpIdx, size_t *index) const
+{
+    ASSERT(index != nullptr);
+    ArkSteedNameRef name;
+    if (!TryGetNameFromConstantPool(cpIdx, &name)) {
+        return false;
+    }
+    size_t builtinIndex = BuiltinIndex::GetInstance().GetBuiltinIndex(compilerThread_, name.ValueAllowHandleDeref());
+    if (builtinIndex == BuiltinIndex::NOT_FOUND) {
+        return false;
+    }
+    *index = builtinIndex;
+    return true;
+}
+
 bool ArkSteedHeapBroker::GetFeedbackForNamedAccess(const ArkSteedFeedbackReader &reader, int slotIndex,
                                                    NamedAccessFeedback *feedback) const
 {
@@ -208,6 +224,14 @@ bool ArkSteedHeapBroker::GetFeedbackForCall(const ArkSteedFeedbackReader &reader
     *feedback = {};
     SerializingScope scope(this, "ArkSteedHeapBroker::GetFeedbackForCall");
     return reader.ReadCallFeedback(feedback);
+}
+
+bool ArkSteedHeapBroker::GetFeedbackForConstructor(const ArkSteedFeedbackReader &reader,
+                                                   ConstructorFeedback *feedback) const
+{
+    *feedback = {};
+    SerializingScope scope(this, "ArkSteedHeapBroker::GetFeedbackForConstructor");
+    return reader.ReadConstructorFeedback(feedback);
 }
 
 }  // namespace panda::ecmascript::arksteed

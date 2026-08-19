@@ -41,6 +41,9 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(ActualArgc)                       \
     V(LoadActualArgument)               \
     V(Call)                             \
+    V(CallNewObjRangeBase)              \
+    V(CallNewObjRangeDerived)           \
+    V(LoadBuiltinObject)                \
     V(CallKnownJSFunction)              \
     V(CallKnownBuiltin)                 \
     V(CallSelf)                         \
@@ -135,6 +138,7 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(DeoptIfFloat64Condition)      \
     V(DeoptIfNotNumber)             \
     V(DeoptIfNotHeapObject)         \
+    V(DeoptIfNotJSHClass)           \
     V(DeoptIfNotBoolean)            \
     V(DeoptIfNotBigInt)             \
     V(DeoptIfNotUndefinedOrNull)    \
@@ -168,19 +172,22 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     VALUE_VERTEX_LIST(V)
 
 #define BRANCH_CONTROL_VERTEX_LIST(V)       \
-    V(BranchIfTrue)                         \
-    V(BranchIfTaggedString)                 \
-    V(BranchIfHClassIn)                     \
-    V(BranchIfInt32Compare)                 \
-    V(BranchIfInt64Compare)                 \
-    V(BranchIfFloat64Compare)               \
-    V(BranchIfReferenceEqual)               \
-    V(BranchIfObjectType)                   \
-    V(BranchIfCallable)                     \
-    V(BranchIfTaggedHeapObject)             \
-    V(BranchIfJSConstructorFunction)        \
-    V(BranchIfNewTargetHClassReady)         \
-    V(BranchIfBase)
+    V(BranchIfTrue)                          \
+    V(BranchIfTaggedString)                  \
+    V(BranchIfHClassIn)                      \
+    V(BranchIfInt32Compare)                  \
+    V(BranchIfInt64Compare)                  \
+    V(BranchIfFloat64Compare)                \
+    V(BranchIfReferenceEqual)                \
+    V(BranchIfObjectType)                    \
+    V(BranchIfCallable)                      \
+    V(BranchIfTaggedHeapObject)              \
+    V(BranchIfJSConstructorFunction)         \
+    V(BranchIfNewTargetHClassReady)          \
+    V(BranchIfBase)                          \
+    V(BranchIfTaggedNumber)                  \
+    V(BranchIfTaggedBoolean)                 \
+    V(BranchIfECMAObject)
 
 #define UNCONDITIONAL_CONTROL_VERTEX_LIST(V) \
     V(Jump)                                  \

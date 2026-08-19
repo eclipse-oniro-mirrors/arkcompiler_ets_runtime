@@ -96,6 +96,7 @@ public:
 
     // Get memory operand for C calling convention stack argument slot (SP-relative)
     inline MemoryOperand GetCallArgSlot(int32_t slotIndex);
+    void LoadCallArgv(ArkSteedRegister dst);
     void ReserveCallArgSlots(int32_t slotCount);
     void FreeCallArgSlots(int32_t slotCount);
     void ReserveCallArgSlots(ArkSteedRegister slotCount);
@@ -145,6 +146,7 @@ public:
 
     void LoadField(ArkSteedRegister dst, ArkSteedRegister base, int32_t offset);
     void LoadInt32Field(ArkSteedRegister dst, ArkSteedRegister base, int32_t offset);
+    void LoadUint8Field(ArkSteedRegister dst, ArkSteedRegister base, int32_t offset);
     void LoadTaggedElement(ArkSteedRegister dst, ArkSteedRegister elements, ArkSteedRegister index);
     void StoreTaggedElement(ArkSteedRegister elements, ArkSteedRegister index, ArkSteedRegister value,
                             ArkSteedRegister scratch);
@@ -191,8 +193,11 @@ public:
     void Sub(ArkSteedRegister dst, int32_t immediate);
     void SignExtendInt32ToInt64(ArkSteedRegister dst, ArkSteedRegister src);
     void Int32Add(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
+    void Int32Add(ArkSteedRegister dst, ArkSteedRegister left, int32_t immediate);
     void Int32Sub(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
+    void Int32Sub(ArkSteedRegister dst, ArkSteedRegister left, int32_t immediate);
     void Int32Mul(ArkSteedRegister dst, ArkSteedRegister src);
+    void Int32Mul(ArkSteedRegister dst, int32_t immediate);
     void Int32MulWide(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
     void Int32MulHigh(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
     void Int32Div(ArkSteedRegister dst, ArkSteedRegister dividend, ArkSteedRegister divisor);
@@ -263,6 +268,8 @@ public:
 #endif
     void JumpIf(Condition condition, Label *target);
     void JumpIfNotTaggedHeapObject(ArkSteedRegister value, Label *target);
+    void JumpIfNotStrongHeapObject(ArkSteedRegister value, Label *target);
+    void JumpIfNotECMAObject(ArkSteedRegister value, Label *target);
     void JumpIfNotJSFunction(ArkSteedRegister value, Label *target);
     void JumpIfNotEcmaObject(ArkSteedRegister value, Label *target);
     void JumpIfNotJSConstructorFunction(ArkSteedRegister value, Label *target);

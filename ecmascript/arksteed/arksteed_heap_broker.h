@@ -206,6 +206,8 @@ public:
         return name->IsSafeForCompile();
     }
 
+    bool TryGetBuiltinIndexFromConstantPool(uint16_t cpIdx, size_t *index) const;
+
     bool TryGetMethodFromConstantPool(uint16_t cpIdx, ArkSteedObjectRef *method) const
     {
         ASSERT(method != nullptr);
@@ -289,6 +291,8 @@ public:
     bool GetFeedbackForOperation(const ArkSteedFeedbackReader &reader, OperationFeedback *feedback) const;
 
     bool GetFeedbackForCall(const ArkSteedFeedbackReader &reader, CallFeedback *feedback) const;
+
+    bool GetFeedbackForConstructor(const ArkSteedFeedbackReader &reader, ConstructorFeedback *feedback) const;
 
     bool TryGetCachedNamedAccessFeedback(AccessFeedbackSource source, NamedAccessFeedback *feedback) const
     {

@@ -294,6 +294,11 @@ DEF_CALL_SIGNATURE(TypeOf)
     TWO_ARGS_CALL_SIGNATURE(TypeOf, VariableType::JS_POINTER())
 }
 
+DEF_CALL_SIGNATURE(ArkSteedStringToNumber)
+{
+    TWO_ARGS_CALL_SIGNATURE(ArkSteedStringToNumber, VariableType::JS_ANY());
+}
+
 DEF_CALL_SIGNATURE(JSTaggedValueHasProperty)
 {
     FOUR_ARGS_CALL_SIGNATURE(JSTaggedValueHasProperty, VariableType::JS_ANY())
@@ -1072,6 +1077,28 @@ DEF_CALL_SIGNATURE(NewJSObject)
         VariableType::NATIVE_POINTER(),  // glue
         VariableType::JS_ANY(),          // hclass
         VariableType::INT64(),           // size
+    };
+    callSign->SetParameters(params.data());
+    callSign->SetCallConv(CallSignature::CallConv::CCallConv);
+}
+
+DEF_CALL_SIGNATURE(ArkSteedNewObjectFromPrimitive)
+{
+    THREE_ARGS_CALL_SIGNATURE(ArkSteedNewObjectFromPrimitive, VariableType::JS_ANY());
+}
+
+DEF_CALL_SIGNATURE(ArkSteedCallConstructorBody)
+{
+    constexpr size_t NUM_INPUTS = ArkSteedCallConstructorBodyInputs::NUM_INPUTS;
+    *callSign = CallSignature("ArkSteedCallConstructorBody", 0, NUM_INPUTS, ArgumentsOrder::DEFAULT_ORDER,
+                              VariableType::JS_ANY());
+    std::array<VariableType, NUM_INPUTS> params = {
+        VariableType::NATIVE_POINTER(),  // glue
+        VariableType::INT64(),           // user argc
+        VariableType::JS_ANY(),          // target
+        VariableType::JS_ANY(),          // newTarget
+        VariableType::JS_ANY(),          // receiver
+        VariableType::NATIVE_POINTER(),  // caller-rooted argv
     };
     callSign->SetParameters(params.data());
     callSign->SetCallConv(CallSignature::CallConv::CCallConv);

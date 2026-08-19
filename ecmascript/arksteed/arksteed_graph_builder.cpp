@@ -16,8 +16,9 @@
 #include "ecmascript/arksteed/arksteed_graph_builder.h"
 
 #include <algorithm>
-#include <cstdint>
 #include <cmath>
+#include <cstdint>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <type_traits>
@@ -36,6 +37,7 @@
 #include "ecmascript/arksteed/arksteed_write_barrier_value_kind_pass.h"
 #include "ecmascript/base/bit_helper.h"
 #include "ecmascript/base/number_helper.h"
+#include "ecmascript/builtin_entries.h"
 #include "ecmascript/compiler/lazy_deopt_dependency.h"
 #include "ecmascript/deoptimizer/deoptimizer.h"
 #include "ecmascript/ecma_string-inl.h" // IWYU pragma: keep
@@ -55,7 +57,7 @@
 #include "ecmascript/js_typed_array.h"
 #include "ecmascript/jspandafile/program_object.h"
 #include "ecmascript/lexical_env.h"
-#include "ecmascript/mem/machine_code.h"
+#include "ecmascript/mem/mem.h"
 #include "ecmascript/method.h"
 #include "ecmascript/module/js_module_manager.h"
 #include "ecmascript/string/base_string.h"
@@ -67,6 +69,52 @@ constexpr uint32_t CALL_ARG0 = 0;
 constexpr uint32_t CALL_ARG1 = 1;
 constexpr uint32_t CALL_ARG2 = CALL_ARG1 + 1;
 constexpr uint32_t CALL_ARG3 = CALL_ARG2 + 1;
+
+using BuiltinId = kungfu::BuiltinsStubCSigns::ID;
+
+#define COUNT_BUILTIN_CONSTRUCTOR(name) + 1U
+constexpr uint32_t BUILTIN_CONSTRUCTOR_STUB_COUNT = 0U BUILTINS_CONSTRUCTOR_STUB_LIST(COUNT_BUILTIN_CONSTRUCTOR);
+#undef COUNT_BUILTIN_CONSTRUCTOR
+
+constexpr uint32_t BUILTIN_CONSTRUCTOR_STUB_FIRST_ID =
+    static_cast<uint32_t>(BuiltinId::BUILTINS_CONSTRUCTOR_STUB_FIRST);
+constexpr uint32_t BUILTIN_CONSTRUCTOR_STUB_LAST_ID = static_cast<uint32_t>(BuiltinId::SharedMapConstructor);
+static_assert(BUILTIN_CONSTRUCTOR_STUB_LAST_ID - BUILTIN_CONSTRUCTOR_STUB_FIRST_ID + 1U ==
+              BUILTIN_CONSTRUCTOR_STUB_COUNT);
+
+bool CanOptimizeBuiltinConstructor(BuiltinId id)
+{
+    uint32_t builtinId = static_cast<uint32_t>(id);
+    if (builtinId >= BUILTIN_CONSTRUCTOR_STUB_FIRST_ID && builtinId <= BUILTIN_CONSTRUCTOR_STUB_LAST_ID) {
+        return true;
+    }
+    return id == BuiltinId::BigIntConstructor || id == BuiltinId::ObjectConstructor ||
+           id == BuiltinId::ErrorConstructor;
+}
+
+kungfu::DeoptType GetBuiltinConstructorDeoptType(uint32_t globalEnvFieldIndex)
+{
+    switch (globalEnvFieldIndex) {
+        case GlobalEnv::ARRAY_FUNCTION_INDEX:
+            return kungfu::DeoptType::NEWBUILTINCTORARRAY;
+        case GlobalEnv::OBJECT_FUNCTION_INDEX:
+            return kungfu::DeoptType::NEWBUILTINCTOROBJECT;
+        case GlobalEnv::FLOAT32_ARRAY_FUNCTION_INDEX:
+            return kungfu::DeoptType::NEWBUILTINCTORFLOAT32ARRAY;
+        case GlobalEnv::BOOLEAN_FUNCTION_INDEX:
+            return kungfu::DeoptType::NEWBUILTINCTORBOOLEAN;
+        case GlobalEnv::BUILTINS_MAP_FUNCTION_INDEX:
+            return kungfu::DeoptType::NEWBUILTINCTORMAP;
+        case GlobalEnv::BUILTINS_SET_FUNCTION_INDEX:
+            return kungfu::DeoptType::NEWBUILTINCTORSET;
+        case GlobalEnv::DATE_FUNCTION_INDEX:
+            return kungfu::DeoptType::NEWBUILTINCTORDATE;
+        case GlobalEnv::ERROR_FUNCTION_INDEX:
+            return kungfu::DeoptType::NEWBUILTINCTORERROR;
+        default:
+            return kungfu::DeoptType::NEWBUILTINCTORFAIL1;
+    }
+}
 
 class KnownCallPlan {
 public:
@@ -97,8 +145,7 @@ public:
 
 private:
     KnownCallPlan(uint32_t actualArgc, ValueVertex *expectedTargetConstant)
-        : actualArgc_(actualArgc),
-          expectedTargetConstant_(expectedTargetConstant)
+        : actualArgc_(actualArgc), expectedTargetConstant_(expectedTargetConstant)
     {
     }
 
@@ -109,18 +156,12 @@ private:
 class KnownBuiltinCallPlan {
 public:
     KnownBuiltinCallPlan(uint32_t actualArgc, kungfu::BuiltinsStubCSigns::ID builtinId,
-                         uint32_t globalEnvFieldIndex, BuiltinCallEntryKind entryKind)
-        : actualArgc_(actualArgc), builtinId_(builtinId), globalEnvFieldIndex_(globalEnvFieldIndex),
-          entryKind_(entryKind)
-    {
-    }
-
-    KnownBuiltinCallPlan(uint32_t actualArgc, kungfu::BuiltinsStubCSigns::ID builtinId,
                          uint32_t globalEnvFieldIndex, BuiltinCallEntryKind entryKind,
                          ValueVertex *expectedMethodConstant)
         : actualArgc_(actualArgc), builtinId_(builtinId), globalEnvFieldIndex_(globalEnvFieldIndex),
           entryKind_(entryKind), expectedMethodConstant_(expectedMethodConstant)
     {
+        ASSERT(expectedMethodConstant_ != nullptr);
     }
 
     uint32_t GetActualArgc() const
@@ -154,7 +195,78 @@ private:
     kungfu::BuiltinsStubCSigns::ID builtinId_;
     uint32_t globalEnvFieldIndex_;
     BuiltinCallEntryKind entryKind_;
-    ValueVertex *expectedMethodConstant_ {nullptr};
+    ValueVertex *expectedMethodConstant_;
+};
+
+class BuiltinConstructPlan {
+public:
+    BuiltinConstructPlan(uint32_t actualArgc, BuiltinId builtinId, uint32_t globalEnvFieldIndex)
+        : actualArgc_(actualArgc), builtinId_(builtinId), globalEnvFieldIndex_(globalEnvFieldIndex)
+    {}
+
+    uint32_t GetActualArgc() const
+    {
+        return actualArgc_;
+    }
+
+    BuiltinId GetBuiltinId() const
+    {
+        return builtinId_;
+    }
+
+    uint32_t GetGlobalEnvFieldIndex() const
+    {
+        return globalEnvFieldIndex_;
+    }
+
+    BuiltinCallEntryKind GetEntryKind() const
+    {
+        return BuiltinCallEntryKind::NATIVE_CPP;
+    }
+
+private:
+    uint32_t actualArgc_;
+    BuiltinId builtinId_;
+    uint32_t globalEnvFieldIndex_;
+};
+
+class KnownConstructPlan {
+public:
+    KnownConstructPlan(uint32_t expectedArgc, ValueVertex *target, ValueVertex *hclass, uint32_t size,
+                       bool canAllocateDirectly)
+        : expectedArgc_(expectedArgc),
+          target_(target),
+          hclass_(hclass),
+          size_(size),
+          canAllocateDirectly_(canAllocateDirectly)
+    {}
+    uint32_t GetExpectedParameterCount() const
+    {
+        return expectedArgc_;
+    }
+    ValueVertex *GetExpectedTargetConstant() const
+    {
+        return target_;
+    }
+    ValueVertex *GetHClass() const
+    {
+        return hclass_;
+    }
+    uint32_t GetObjectSize() const
+    {
+        return size_;
+    }
+    bool CanAllocateDirectly() const
+    {
+        return canAllocateDirectly_;
+    }
+
+private:
+    uint32_t expectedArgc_;
+    ValueVertex *target_;
+    ValueVertex *hclass_;
+    uint32_t size_;
+    bool canAllocateDirectly_;
 };
 
 bool IsTaggedCallType(kungfu::VariableType type)
@@ -2320,25 +2432,35 @@ struct GraphBuilder::BytecodeVisitor {
 
     void LowerToBoolean(bool trueIfTruthy)
     {
-        ValueVertex *value = frameState.GetAcc();
+        frameState.SetAcc(BuildToBoolean(frameState.GetAcc(), trueIfTruthy));
+    }
+
+    ValueVertex *TryBuildBooleanWithoutCall(ValueVertex *value, bool trueIfTruthy)
+    {
         bool toBoolean = false;
         if (TryFoldToBooleanConstant(value, &toBoolean)) {
-            frameState.SetAcc(GetBooleanConstant(trueIfTruthy ? toBoolean : !toBoolean));
-            return;
+            return GetBooleanConstant(trueIfTruthy ? toBoolean : !toBoolean);
         }
         // Static type facts are guaranteed by checked producers: no guard is needed.
         if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::BOOLEAN)) {
-            frameState.SetAcc(trueIfTruthy ? value : BuildTaggedNotEqual(value, GetBooleanConstant(true)));
-            return;
+            return trueIfTruthy ? value : BuildTaggedNotEqual(value, GetBooleanConstant(true));
         }
         if (IsAlwaysTruthyHeapObject(value)) {
-            frameState.SetAcc(GetBooleanConstant(trueIfTruthy));
-            return;
+            return GetBooleanConstant(trueIfTruthy);
         }
         ValueVertex *result = TryBuildKnownIntToBoolean(value, trueIfTruthy);
         if (result == nullptr && compileInfoFacts_->CheckType(value, NodeInfo::NodeType::NUMBER)) {
             result = BuildNumberToBoolean(value, trueIfTruthy);
         }
+        if (result != nullptr) {
+            compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
+        }
+        return result;
+    }
+
+    ValueVertex *BuildToBoolean(ValueVertex *value, bool trueIfTruthy)
+    {
+        ValueVertex *result = TryBuildBooleanWithoutCall(value, trueIfTruthy);
         if (result == nullptr) {
             OperationFeedback feedback = self->pgoContext_.ReadOperationFeedback(*currentBcInfo);
             switch (feedback.hint) {
@@ -2372,7 +2494,7 @@ struct GraphBuilder::BytecodeVisitor {
             }
         }
         compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
-        frameState.SetAcc(result);
+        return result;
     }
 
     bool IsAlwaysTruthyHeapObject(ValueVertex *value) const
@@ -2763,6 +2885,26 @@ struct GraphBuilder::BytecodeVisitor {
         return true;
     }
 
+    bool TryBuildLoadBuiltinObject(uint32_t bcIndex, const BytecodeInfo *bcInfo)
+    {
+        if (!self->preproc_->GetEnv()->GetJSOptions().IsEnableLoweringBuiltin()) {
+            return false;
+        }
+        ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
+        auto serializingScope =
+            self->pgoContext_.CreateSerializingScope("ArkSteedGraphBuilder::TryBuildLoadBuiltinObject");
+        size_t builtinIndex = BuiltinIndex::NOT_FOUND;
+        if (!broker->TryGetBuiltinIndexFromConstantPool(GetConstDataId<uint16_t>(bcInfo, 1), &builtinIndex)) {
+            return false;
+        }
+        ValueVertex *result =
+            self->NewVertex<LoadBuiltinObjectVertex>(compileInfoFacts_, currentBlock, {glue}, builtinIndex);
+        ValueVertex *hole = self->graph_->GetTaggedConstant(JSTaggedValue::VALUE_HOLE);
+        BuildCheckTaggedCondition(bcIndex, result, hole, Condition::EQUAL, kungfu::DeoptType::BUILTINISHOLE1);
+        frameState.SetAcc(result);
+        return true;
+    }
+
     bool TryBuildStoreGlobalCell(uint32_t bcIndex, const BytecodeInfo *bcInfo)
     {
         std::optional<ArkSteedObjectRef> boxRef = TryGetGlobalCellBox(bcInfo);
@@ -2780,7 +2922,7 @@ struct GraphBuilder::BytecodeVisitor {
 
     void LowerTryLdGlobalByName(const BytecodeInfo *bcInfo, uint32_t bcIndex)
     {
-        if (!TryBuildLoadGlobalCell(bcIndex, bcInfo)) {
+        if (!TryBuildLoadBuiltinObject(bcIndex, bcInfo) && !TryBuildLoadGlobalCell(bcIndex, bcInfo)) {
             ValueVertex *id = self->graph_->GetIntPtrConstant(GetConstDataId<intptr_t>(bcInfo, 1));
             CommonStubCallToAccWithICAndLazyDeopt(bcInfo, {id, GlobalEnv()}, CommonStubID::TryLdGlobalByName);
         }
@@ -2871,6 +3013,69 @@ struct GraphBuilder::BytecodeVisitor {
             default:
                 return false;
         }
+    }
+
+    std::optional<KnownConstructPlan> TryCreateProfiledKnownConstructPlan(const ConstructorFeedback &feedback)
+    {
+        if (!feedback.IsMonomorphicJSFunction()) {
+            return std::nullopt;
+        }
+
+        ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
+        auto serializingScope =
+            self->pgoContext_.CreateSerializingScope("ArkSteedGraphBuilder::TryCreateProfiledKnownConstructPlan");
+        JSThread *compilerThread = broker->GetCompilerThread();
+        JSTaggedValue target;
+        if (!broker->TryResolveRef(feedback.target, &target) || !target.IsJSFunction() || !target.IsConstructor() ||
+            target.IsJSShared()) {
+            return std::nullopt;
+        }
+
+        auto *function = JSFunction::Cast(target.GetTaggedObject());
+        JSTaggedValue methodValue = function->GetMethod(compilerThread);
+        if ((!function->IsBase(compilerThread) && !function->IsDerivedConstructor(compilerThread)) ||
+            function->IsSharedFunction() || !methodValue.IsMethod()) {
+            return std::nullopt;
+        }
+        auto *method = Method::Cast(methodValue.GetTaggedObject());
+        if (method->IsNativeWithCallField()) {
+            return std::nullopt;
+        }
+
+        ValueVertex *targetConstant = GetHeapConstant(feedback.target);
+        if (targetConstant == nullptr) {
+            return std::nullopt;
+        }
+
+        ValueVertex *hclassConstant = nullptr;
+        uint32_t size = 0;
+        bool canAllocateDirectly = false;
+        if (function->IsBase(compilerThread)) {
+            auto layout = function->GetProtoOrHClass(compilerThread);
+            if (!layout.IsJSHClass()) {
+                return std::nullopt;
+            }
+            auto *hclass = JSHClass::Cast(layout.GetTaggedObject());
+            if (hclass->GetObjectType() != JSType::JS_OBJECT || hclass->IsJSShared()) {
+                return std::nullopt;
+            }
+            if (hclass->IsObjSizeTrackingInProgress()) {
+                // Keep the known call; let FastNewThisObject read the changing layout and size.
+                return KnownConstructPlan(method->GetNumArgsWithCallField(), targetConstant, nullptr, 0, false);
+            }
+            size = hclass->GetObjectSize();
+            hclassConstant = GetHeapConstant(broker->MakeHClassRef(layout));
+            if (hclassConstant == nullptr) {
+                return std::nullopt;
+            }
+            bool hasDirectSize = size >= JSObject::SIZE && size <= MAX_REGULAR_HEAP_OBJECT_SIZE &&
+                                 size % JSTaggedValue::TaggedTypeSize() == 0;
+            canAllocateDirectly = !G_USE_CMS_GC && !g_isEnableCMCGC && hasDirectSize && !hclass->IsAOT() &&
+                                  !hclass->IsDictionaryMode() && !hclass->IsDictionaryElement() &&
+                                  hclass->GetPrototype(compilerThread).IsECMAObject();
+        }
+        return KnownConstructPlan(method->GetNumArgsWithCallField(), targetConstant, hclassConstant, size,
+                                  canAllocateDirectly);
     }
 
     std::optional<KnownCallPlan> TryCreateProfiledKnownCallPlan(const CallFeedback &feedback, uint32_t actualArgc)
@@ -2966,6 +3171,26 @@ struct GraphBuilder::BytecodeVisitor {
             actualArgc, builtinId, globalEnvFieldIndex, entryKind, expectedMethodConstant);
     }
 
+    std::optional<BuiltinConstructPlan> TryCreateProfiledKnownBuiltinConstructPlan(const ConstructorFeedback &feedback,
+                                                                                   uint32_t actualArgc)
+    {
+        if (!feedback.IsMonomorphicBuiltin() || !CanOptimizeBuiltinConstructor(feedback.builtinId)) {
+            return std::nullopt;
+        }
+        size_t globalEnvField = kungfu::BuiltinsStubCSigns::GetGlobalEnvIndex(feedback.builtinId);
+        return BuiltinConstructPlan(actualArgc, feedback.builtinId, static_cast<uint32_t>(globalEnvField));
+    }
+
+    std::optional<BuiltinConstructPlan> TryCreateBuiltinLoadConstructPlan(ValueVertex *target, uint32_t actualArgc)
+    {
+        auto *load = target->TryCast<LoadBuiltinObjectVertex>();
+        if (load == nullptr || load->GetBuiltinIndex() != static_cast<size_t>(BuiltinType::BT_NUMBER)) {
+            return std::nullopt;
+        }
+        return BuiltinConstructPlan(actualArgc, BuiltinId::NumberConstructor,
+                                    static_cast<uint32_t>(GlobalEnv::NUMBER_FUNCTION_INDEX));
+    }
+
     template <class InputRange, class Plan>
     CallKnownJSFunctionVertex *BuildGuardedKnownCall(const InputRange &inputs, const Plan &plan)
     {
@@ -3001,6 +3226,136 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *actualTarget = *std::begin(inputs);
         BuildEagerDeoptIfReferenceNotEqual(actualTarget, plan.GetExpectedTargetConstant());
         return BuildGuardedKnownCall(inputs, plan);
+    }
+
+    template <class ConstructorVertexT, class InputRange>
+    ConstructorVertexT *BuildNewObjRangeCall(const InputRange &inputs, ValueVertex *newTarget, ValueVertex *receiver,
+                                             std::optional<uint32_t> expectedArgc,
+                                             NewObjRangeCallInfo::CallStrategy strategy)
+    {
+        uint32_t actualArgc = std::size(inputs) - 1U;
+        ChunkVector<ValueVertex *> callInputs(self->chunk_);
+        auto input = std::begin(inputs);
+        callInputs.emplace_back(*input++);
+        callInputs.emplace_back(newTarget);
+        callInputs.emplace_back(receiver);
+        callInputs.insert(callInputs.end(), input, std::end(inputs));
+        auto *call = self->NewVertex<ConstructorVertexT>(compileInfoFacts_, currentBlock, callInputs, actualArgc,
+                                                         expectedArgc.value_or(0), expectedArgc.has_value(), strategy);
+        UpdateCatchBlockData(call);
+        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
+        ASSERT(call->HasLazyDeoptFrameState());
+        constexpr auto kind = ConstructorVertexT::IS_BASE_CONSTRUCTOR ? DeoptContinuationKind::BASE_CTOR
+                                                                      : DeoptContinuationKind::DERIVED_CTOR;
+        auto *kindValue = self->graph_->GetTaggedConstant(EncodeDeoptContinuationKind(kind));
+        call->AppendLazyDeoptFrameValue(static_cast<int32_t>(SpecVregIndex::DEOPT_CONTINUATION_KIND_INDEX), kindValue,
+                                        DeoptTranslationKind::TAGGED);
+        if constexpr (ConstructorVertexT::IS_BASE_CONSTRUCTOR) {
+            call->AppendLazyDeoptFrameValue(static_cast<int32_t>(SpecVregIndex::BASE_CONSTRUCTOR_THIS_INDEX), receiver,
+                                            DeoptTranslationKind::TAGGED);
+        }
+        return call;
+    }
+
+    template <class InputRange>
+    ValueVertex *BuildKnownNewObjRange(const InputRange &inputs, ValueVertex *newTarget, const KnownConstructPlan &plan)
+    {
+        ValueVertex *target = *std::begin(inputs);
+        BuildEagerDeoptIfReferenceNotEqual(target, plan.GetExpectedTargetConstant());
+        ValueVertex *hclass = plan.GetHClass();
+        if (hclass != nullptr) {
+            auto *actualHClass = self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {target},
+                                                                        JSFunction::PROTO_OR_DYNCLASS_OFFSET);
+            BuildEagerDeoptIfReferenceNotEqual(actualHClass, hclass);
+        }
+
+        BB *baseBlock = self->NewBlock();
+        BB *derivedBlock = self->NewBlock();
+        BB *doneBlock = self->NewBlock();
+        derivedBlock->SetDeferred(true);
+        CompileInfoFacts *entryFacts = compileInfoFacts_;
+        self->FinishBlockWithBranch<BranchIfBaseVertex>(currentBlock, {target}, baseBlock, derivedBlock);
+
+        currentBlock = baseBlock;
+        compileInfoFacts_ = entryFacts->Clone();
+        ValueVertex *receiver;
+        if (hclass != nullptr && plan.CanAllocateDirectly()) {
+            const uint32_t objectSize = plan.GetObjectSize();
+            auto *size = self->graph_->GetInt64Constant(static_cast<int64_t>(objectSize));
+            auto *allocation = AllocateInYoung(size, hclass);
+            receiver = self->NewVertex<InitializeEmptyObjectVertex>(compileInfoFacts_, currentBlock,
+                                                                    {allocation, glue, hclass, size}, objectSize);
+        } else {
+            receiver = CommonStubCallWithLazyDeopt({glue, target}, CommonStubID::FastNewThisObject);
+        }
+        auto *baseCall = BuildNewObjRangeCall<CallNewObjRangeBaseVertex>(
+            inputs, newTarget, receiver, plan.GetExpectedParameterCount(),
+            NewObjRangeCallInfo::CallStrategy::INLINE_DISPATCH);
+        CompileInfoFacts *mergedFacts = compileInfoFacts_;
+        self->FinishBlockWithJump(currentBlock, doneBlock);
+
+        currentBlock = derivedBlock;
+        compileInfoFacts_ = entryFacts->Clone();
+        auto *derivedCall = BuildNewObjRangeCall<CallNewObjRangeDerivedVertex>(
+            inputs, newTarget, self->undefinedValue_, plan.GetExpectedParameterCount(),
+            NewObjRangeCallInfo::CallStrategy::INLINE_DISPATCH);
+        mergedFacts->Merge(*compileInfoFacts_);
+        self->FinishBlockWithJump(currentBlock, doneBlock);
+
+        currentBlock = doneBlock;
+        compileInfoFacts_ = mergedFacts;
+        return self->NewPhiVertexWith(currentBlock, {baseCall, derivedCall}, self->AccIndex());
+    }
+
+    template <class InputRange>
+    ValueVertex *BuildDynamicNewObjRange(const InputRange &inputs, ValueVertex *newTarget)
+    {
+        ValueVertex *target = *std::begin(inputs);
+        ValueVertex *receiver = CommonStubCallWithLazyDeopt({glue, target}, CommonStubID::NewThisObjectChecked);
+        BB *constructBlock = self->NewBlock();
+        BB *fallbackBlock = self->NewBlock();
+        BB *doneBlock = self->NewBlock();
+        fallbackBlock->SetDeferred(true);
+        CompileInfoFacts *entryFacts = compileInfoFacts_;
+        self->FinishBlockWithBranch<BranchIfReferenceEqualVertex>(
+            currentBlock, {receiver, self->graph_->GetTaggedConstant(JSTaggedValue::VALUE_HOLE)}, fallbackBlock,
+            constructBlock);
+
+        currentBlock = constructBlock;
+        compileInfoFacts_ = entryFacts->Clone();
+        BB *baseBlock = self->NewBlock();
+        BB *derivedBlock = self->NewBlock();
+        BB *constructDone = self->NewBlock();
+        self->FinishBlockWithBranch<BranchIfBaseVertex>(currentBlock, {target}, baseBlock, derivedBlock);
+        currentBlock = baseBlock;
+        compileInfoFacts_ = entryFacts->Clone();
+        auto *baseCall = BuildNewObjRangeCall<CallNewObjRangeBaseVertex>(
+            inputs, newTarget, receiver, std::nullopt, NewObjRangeCallInfo::CallStrategy::COMMON_STUB);
+        CompileInfoFacts *constructFacts = compileInfoFacts_;
+        self->FinishBlockWithJump(currentBlock, constructDone);
+
+        currentBlock = derivedBlock;
+        compileInfoFacts_ = entryFacts->Clone();
+        auto *derivedCall = BuildNewObjRangeCall<CallNewObjRangeDerivedVertex>(
+            inputs, newTarget, self->undefinedValue_, std::nullopt, NewObjRangeCallInfo::CallStrategy::COMMON_STUB);
+        constructFacts->Merge(*compileInfoFacts_);
+        self->FinishBlockWithJump(currentBlock, constructDone);
+
+        currentBlock = constructDone;
+        compileInfoFacts_ = constructFacts;
+        ValueVertex *constructResult = self->NewPhiVertexWith(currentBlock, {baseCall, derivedCall}, self->AccIndex());
+        CompileInfoFacts *mergedFacts = compileInfoFacts_;
+        self->FinishBlockWithJump(currentBlock, doneBlock);
+
+        currentBlock = fallbackBlock;
+        compileInfoFacts_ = entryFacts->Clone();
+        ValueVertex *fallbackResult = RuntimeCallWithLazyDeopt(inputs, RTSTUB_ID(OptNewObjRange));
+        mergedFacts->Merge(*compileInfoFacts_);
+        self->FinishBlockWithJump(currentBlock, doneBlock);
+
+        currentBlock = doneBlock;
+        compileInfoFacts_ = mergedFacts;
+        return self->NewPhiVertexWith(currentBlock, {constructResult, fallbackResult}, self->AccIndex());
     }
 
     template <class InputRange = std::initializer_list<ValueVertex *>>
@@ -3048,26 +3403,72 @@ struct GraphBuilder::BytecodeVisitor {
         return BuildSelfCallVertex(inputs, actualArgc);
     }
 
-    ValueVertex *LoadCanonicalBuiltinTarget(const KnownBuiltinCallPlan &plan)
+    ValueVertex *LoadGlobalEnvValue(uint32_t fieldIndex)
     {
-        int32_t fieldOffset = static_cast<int32_t>(
-            GlobalEnv::HEADER_SIZE + plan.GetGlobalEnvFieldIndex() * JSTaggedValue::TaggedTypeSize());
+        int32_t fieldOffset =
+            static_cast<int32_t>(GlobalEnv::HEADER_SIZE + fieldIndex * JSTaggedValue::TaggedTypeSize());
         return self->NewVertex<LoadTaggedFieldVertex>(
             compileInfoFacts_, currentBlock, {GlobalEnv()}, fieldOffset);
     }
 
-    void BuildEagerDeoptIfReferenceNotEqual(ValueVertex *actual, ValueVertex *expected)
+    template <class Plan>
+    ValueVertex *LoadCanonicalBuiltinTarget(const Plan &plan)
+    {
+        return LoadGlobalEnvValue(plan.GetGlobalEnvFieldIndex());
+    }
+
+    void BuildEagerDeoptIfReferenceNotEqual(ValueVertex *actual, ValueVertex *expected,
+                                            kungfu::DeoptType deoptType = kungfu::DeoptType::NOTCALLTGT1)
     {
         uint32_t bytecodeOffset = self->preproc_->GetBytecodeOffset(currentBcIndex);
         auto *guard = self->NewVertex<DeoptIfReferenceNotEqualVertex>(
-            compileInfoFacts_, currentBlock, {actual, expected}, self->chunk_, bytecodeOffset,
-            kungfu::DeoptType::NOTCALLTGT1);
+            compileInfoFacts_, currentBlock, {actual, expected}, self->chunk_, bytecodeOffset, deoptType);
         guard->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(currentBcIndex));
     }
 
-    template <class InputRange>
-    CallKnownBuiltinVertex *BuildKnownBuiltinCallVertex(
-        const InputRange &inputs, const KnownBuiltinCallPlan &plan, ValueVertex *canonicalTarget)
+    ValueVertex *BuildGuardedCanonicalBuiltinTarget(ValueVertex *actualTarget, const KnownBuiltinCallPlan &plan)
+    {
+        ValueVertex *canonicalTarget = LoadCanonicalBuiltinTarget(plan);
+        BuildEagerDeoptIfReferenceNotEqual(actualTarget, canonicalTarget);
+        auto *currentMethod = self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {canonicalTarget},
+                                                                     JSFunctionBase::METHOD_OFFSET);
+        BuildEagerDeoptIfReferenceNotEqual(currentMethod, plan.GetExpectedMethodConstant());
+        return canonicalTarget;
+    }
+
+    ValueVertex *BuildGuardedCanonicalBuiltinTarget(ValueVertex *actualTarget, const BuiltinConstructPlan &plan)
+    {
+        ValueVertex *canonicalTarget = LoadCanonicalBuiltinTarget(plan);
+        BuildEagerDeoptIfReferenceNotEqual(actualTarget, canonicalTarget,
+                                           GetBuiltinConstructorDeoptType(plan.GetGlobalEnvFieldIndex()));
+        return canonicalTarget;
+    }
+
+    ValueVertex *LoadBuiltinHClass(ValueVertex *constructor)
+    {
+        return self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {constructor},
+                                                      JSFunction::PROTO_OR_DYNCLASS_OFFSET);
+    }
+
+    void BuildEagerDeoptIfNotJSHClass(ValueVertex *value, kungfu::DeoptType deoptType)
+    {
+        uint32_t bytecodeOffset = self->preproc_->GetBytecodeOffset(currentBcIndex);
+        auto *guard = self->NewVertex<DeoptIfNotJSHClassVertex>(compileInfoFacts_, currentBlock, {value}, self->chunk_,
+                                                                bytecodeOffset, deoptType);
+        guard->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(currentBcIndex));
+    }
+
+    ValueVertex *BuildObjectFromPrimitive(ValueVertex *value)
+    {
+        auto *result = CommonStubCallWithLazyDeopt(
+            {glue, value, GlobalEnv()}, CommonStubID::ArkSteedNewObjectFromPrimitive);
+        compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::JS_RECEIVER);
+        return result;
+    }
+
+    template <class InputRange, class Plan>
+    CallKnownBuiltinVertex *BuildKnownBuiltinCallVertex(const InputRange &inputs, const Plan &plan,
+                                                        ValueVertex *canonicalTarget)
     {
         ASSERT(std::size(inputs) == CallKnownBuiltinVertex::FIRST_ARG_INDEX + plan.GetActualArgc());
         auto input = std::begin(inputs);
@@ -3096,12 +3497,229 @@ struct GraphBuilder::BytecodeVisitor {
     {
         ASSERT(std::size(inputs) == CallKnownBuiltinVertex::FIRST_ARG_INDEX + plan.GetActualArgc());
         ValueVertex *actualTarget = *std::begin(inputs);
-        ValueVertex *canonicalTarget = LoadCanonicalBuiltinTarget(plan);
-        BuildEagerDeoptIfReferenceNotEqual(actualTarget, canonicalTarget);
-        auto *currentMethod = self->NewVertex<LoadTaggedFieldVertex>(
-            compileInfoFacts_, currentBlock, {canonicalTarget}, JSFunctionBase::METHOD_OFFSET);
-        BuildEagerDeoptIfReferenceNotEqual(currentMethod, plan.GetExpectedMethodConstant());
+        ValueVertex *canonicalTarget = BuildGuardedCanonicalBuiltinTarget(actualTarget, plan);
         return BuildKnownBuiltinCallVertex(inputs, plan, canonicalTarget);
+    }
+
+    template <class InputRange>
+    ValueVertex *BuildKnownBuiltinNativeConstruct(const InputRange &callInputs, const BuiltinConstructPlan &plan,
+                                                  ValueVertex *canonicalTarget)
+    {
+        auto *call = BuildKnownBuiltinCallVertex(callInputs, plan, canonicalTarget);
+        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
+        compileInfoFacts_->EnsureType(call, NodeInfo::NodeType::JS_RECEIVER);
+        return call;
+    }
+
+    template <class InputRange>
+    ValueVertex *BuildObjectBuiltinConstruct(const InputRange &callInputs, const BuiltinConstructPlan &plan,
+                                             ValueVertex *canonicalTarget)
+    {
+        if (plan.GetActualArgc() == 0) {
+            return BuildEmptyObject();
+        }
+
+        ValueVertex *argument = *std::next(std::begin(callInputs), CallKnownBuiltinVertex::FIRST_ARG_INDEX);
+        if (compileInfoFacts_->CheckType(argument, NodeInfo::NodeType::JS_RECEIVER)) {
+            return argument;
+        }
+        if (compileInfoFacts_->CheckType(argument, NodeInfo::NodeType::SYMBOL) ||
+            compileInfoFacts_->CheckType(argument, NodeInfo::NodeType::BIGINT) ||
+            compileInfoFacts_->CheckType(argument, NodeInfo::NodeType::NUMBER) ||
+            compileInfoFacts_->CheckType(argument, NodeInfo::NodeType::BOOLEAN)) {
+            return BuildObjectFromPrimitive(argument);
+        }
+        if (compileInfoFacts_->CheckType(argument, NodeInfo::NodeType::NULL_OR_UNDEFINED)) {
+            return BuildEmptyObject();
+        }
+        if (compileInfoFacts_->CheckType(argument, NodeInfo::NodeType::STRING)) {
+            return BuildKnownBuiltinNativeConstruct(callInputs, plan, canonicalTarget);
+        }
+
+        BB *identityBlock = self->NewBlock();
+        BB *primitiveBlock = self->NewBlock();
+        BB *doneBlock = self->NewBlock();
+
+        CompileInfoFacts *entryFacts = compileInfoFacts_;
+        self->FinishBlockWithBranch<BranchIfECMAObjectVertex>(currentBlock, {argument}, identityBlock, primitiveBlock);
+
+        currentBlock = identityBlock;
+        compileInfoFacts_ = entryFacts->Clone();
+        compileInfoFacts_->EnsureType(argument, NodeInfo::NodeType::JS_RECEIVER);
+        CompileInfoFacts *mergedFacts = compileInfoFacts_;
+        self->FinishBlockWithJump(currentBlock, doneBlock);
+
+        currentBlock = primitiveBlock;
+        compileInfoFacts_ = entryFacts->Clone();
+        ValueVertex *wrapped = BuildObjectFromPrimitive(argument);
+        mergedFacts->Merge(*compileInfoFacts_);
+        self->FinishBlockWithJump(currentBlock, doneBlock);
+
+        currentBlock = doneBlock;
+        compileInfoFacts_ = mergedFacts;
+        ValueVertex *result = self->NewPhiVertexWith(currentBlock, {argument, wrapped}, self->AccIndex());
+        compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::JS_RECEIVER);
+        return result;
+    }
+
+    template <class InputRange>
+    ValueVertex *BuildBooleanBuiltinConstruct(const InputRange &callInputs, const BuiltinConstructPlan &plan,
+                                              ValueVertex *canonicalTarget)
+    {
+        ValueVertex *argument = plan.GetActualArgc() == 0
+                                    ? self->undefinedValue_
+                                    : *std::next(std::begin(callInputs), CallKnownBuiltinVertex::FIRST_ARG_INDEX);
+        if (ValueVertex *boolean = TryBuildBooleanWithoutCall(argument, true); boolean != nullptr) {
+            return BuildObjectFromPrimitive(boolean);
+        }
+
+        NodeInfo::NodeType knownType = compileInfoFacts_->GetKnownType(argument);
+        if (!NodeInfo::NodeTypeCanBe(knownType, NodeInfo::NodeType::BOOLEAN)) {
+            return BuildKnownBuiltinNativeConstruct(callInputs, plan, canonicalTarget);
+        }
+
+        ValueVertex *result = BuildSelectWithFacts<BranchIfTaggedBooleanVertex>(
+            {argument}, self->AccIndex(),
+            [&]() -> ValueVertex * {
+                compileInfoFacts_->EnsureType(argument, NodeInfo::NodeType::BOOLEAN);
+                return BuildObjectFromPrimitive(argument);
+            },
+            [&]() -> ValueVertex * { return BuildKnownBuiltinNativeConstruct(callInputs, plan, canonicalTarget); });
+        compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::JS_RECEIVER);
+        return result;
+    }
+
+    ValueVertex *BuildNumberStringValue(ValueVertex *argument)
+    {
+        compileInfoFacts_->EnsureType(argument, NodeInfo::NodeType::STRING);
+        ValueVertex *number = CommonStubCallWithLazyDeopt({glue, argument}, CommonStubID::ArkSteedStringToNumber,
+                                                          SideEffectKind::SAFE_CALL);
+        compileInfoFacts_->EnsureType(number, NodeInfo::NodeType::NUMBER);
+        return number;
+    }
+
+    template <class InputRange>
+    ValueVertex *BuildNumberBuiltinConstruct(const InputRange &callInputs, const BuiltinConstructPlan &plan,
+                                             ValueVertex *canonicalTarget)
+    {
+        if (plan.GetActualArgc() == 0) {
+            return BuildObjectFromPrimitive(TaggedConstantFromInt32(0));
+        }
+
+        ValueVertex *argument = *std::next(std::begin(callInputs), CallKnownBuiltinVertex::FIRST_ARG_INDEX);
+        NodeInfo::NodeType knownType = compileInfoFacts_->GetKnownType(argument);
+        if (compileInfoFacts_->CheckType(argument, NodeInfo::NodeType::NUMBER)) {
+            return BuildObjectFromPrimitive(argument);
+        }
+        if (compileInfoFacts_->CheckType(argument, NodeInfo::NodeType::STRING)) {
+            ValueVertex *number = BuildNumberStringValue(argument);
+            return BuildObjectFromPrimitive(number);
+        }
+        constexpr NodeInfo::NodeType NUMBER_OR_STRING =
+            NodeInfo::UnionNodeType(NodeInfo::NodeType::NUMBER, NodeInfo::NodeType::STRING);
+        if (!NodeInfo::NodeTypeCanBe(knownType, NUMBER_OR_STRING)) {
+            return BuildKnownBuiltinNativeConstruct(callInputs, plan, canonicalTarget);
+        }
+
+        BB *numberBlock = self->NewBlock();
+        BB *nonNumberBlock = self->NewBlock();
+        BB *stringBlock = self->NewBlock();
+        BB *nativeBlock = self->NewBlock();
+        BB *allocateBlock = self->NewBlock();
+        BB *doneBlock = self->NewBlock();
+        nativeBlock->SetDeferred(true);
+
+        CompileInfoFacts *entryFacts = compileInfoFacts_;
+        auto activate = [&](BB *block) {
+            currentBlock = block;
+            compileInfoFacts_ = entryFacts->Clone();
+        };
+
+        self->FinishBlockWithBranch<BranchIfTaggedNumberVertex>(currentBlock, {argument}, numberBlock, nonNumberBlock);
+
+        activate(numberBlock);
+        compileInfoFacts_->EnsureType(argument, NodeInfo::NodeType::NUMBER);
+        CompileInfoFacts *numberFacts = compileInfoFacts_;
+        self->FinishBlockWithJump(currentBlock, allocateBlock);
+
+        activate(nonNumberBlock);
+        self->FinishBlockWithBranch<BranchIfTaggedStringVertex>(currentBlock, {argument}, stringBlock, nativeBlock);
+
+        activate(stringBlock);
+        ValueVertex *converted = BuildNumberStringValue(argument);
+        numberFacts->Merge(*compileInfoFacts_);
+        self->FinishBlockWithJump(currentBlock, allocateBlock);
+
+        activate(nativeBlock);
+        ValueVertex *nativeResult = BuildKnownBuiltinNativeConstruct(callInputs, plan, canonicalTarget);
+        CompileInfoFacts *resultFacts = compileInfoFacts_;
+        self->FinishBlockWithJump(currentBlock, doneBlock);
+
+        currentBlock = allocateBlock;
+        compileInfoFacts_ = numberFacts;
+        ValueVertex *number = self->NewPhiVertexWith(currentBlock, {argument, converted}, self->AccIndex());
+        ValueVertex *wrapped = BuildObjectFromPrimitive(number);
+        resultFacts->Merge(*compileInfoFacts_);
+        self->FinishBlockWithJump(currentBlock, doneBlock);
+
+        currentBlock = doneBlock;
+        compileInfoFacts_ = resultFacts;
+        ValueVertex *result = self->NewPhiVertexWith(currentBlock, {nativeResult, wrapped}, self->AccIndex());
+        compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::JS_RECEIVER);
+        return result;
+    }
+
+    template <class InputRange>
+    ValueVertex *BuildFloat32ArrayBuiltinConstruct(const InputRange &callInputs, const BuiltinConstructPlan &plan,
+                                                   ValueVertex *canonicalTarget)
+    {
+        ValueVertex *result;
+        if (plan.GetActualArgc() == 0) {
+            result = CommonStubCallWithLazyDeopt({glue, GlobalEnv()}, CommonStubID::NewFloat32ArrayWithNoArgs);
+        } else if (plan.GetActualArgc() == 1) {
+            ValueVertex *argument = *std::next(std::begin(callInputs), CallKnownBuiltinVertex::FIRST_ARG_INDEX);
+            result = CommonStubCallWithLazyDeopt({glue, canonicalTarget, argument, GlobalEnv()},
+                                                 CommonStubID::NewFloat32Array);
+        } else {
+            result = BuildKnownBuiltinNativeConstruct(callInputs, plan, canonicalTarget);
+        }
+        compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::JS_RECEIVER);
+        return result;
+    }
+
+    template <class InputRange>
+    ValueVertex *BuildKnownBuiltinConstruct(const InputRange &inputs, const BuiltinConstructPlan &plan)
+    {
+        ASSERT(std::size(inputs) == plan.GetActualArgc() + 1U);
+        auto input = std::begin(inputs);
+        ValueVertex *target = *input++;
+
+        ChunkVector<ValueVertex *> callInputs(self->chunk_);
+        callInputs.reserve(CallKnownBuiltinVertex::FIRST_ARG_INDEX + plan.GetActualArgc());
+        callInputs.emplace_back(target);
+        callInputs.emplace_back(target);
+        callInputs.emplace_back(self->undefinedValue_);
+        for (uint32_t index = 0; index < plan.GetActualArgc(); index++) {
+            callInputs.emplace_back(*input++);
+        }
+
+        ValueVertex *canonicalTarget = BuildGuardedCanonicalBuiltinTarget(target, plan);
+        if (plan.GetBuiltinId() == BuiltinId::BooleanConstructor) {
+            ValueVertex *builtinHClass = LoadBuiltinHClass(canonicalTarget);
+            BuildEagerDeoptIfNotJSHClass(builtinHClass, GetBuiltinConstructorDeoptType(plan.GetGlobalEnvFieldIndex()));
+        }
+        switch (plan.GetBuiltinId()) {
+            case BuiltinId::ObjectConstructor:
+                return BuildObjectBuiltinConstruct(callInputs, plan, canonicalTarget);
+            case BuiltinId::BooleanConstructor:
+                return BuildBooleanBuiltinConstruct(callInputs, plan, canonicalTarget);
+            case BuiltinId::NumberConstructor:
+                return BuildNumberBuiltinConstruct(callInputs, plan, canonicalTarget);
+            case BuiltinId::Float32ArrayConstructor:
+                return BuildFloat32ArrayBuiltinConstruct(callInputs, plan, canonicalTarget);
+            default:
+                return BuildKnownBuiltinNativeConstruct(callInputs, plan, canonicalTarget);
+        }
     }
 
     template <class InputRange = std::initializer_list<ValueVertex *>>
@@ -3533,9 +4151,30 @@ struct GraphBuilder::BytecodeVisitor {
     void LowerNewObjRange(const BytecodeInfo *bcInfo)
     {
         uint32_t inputSize = bcInfo->inputs.size();
+        ASSERT(inputSize > 0);
         ChunkVector<ValueVertex *> args(self->chunk_);
         for (uint32_t idx = 0; idx < inputSize; idx++) {
             args.push_back(LoadRegister(bcInfo, idx));
+        }
+        uint32_t actualArgc = inputSize - 1U;
+        std::optional<BuiltinConstructPlan> builtinPlan = TryCreateBuiltinLoadConstructPlan(args.front(), actualArgc);
+        ConstructorFeedback feedback = self->pgoContext_.ReadConstructorFeedback(*bcInfo);
+        if (!builtinPlan.has_value()) {
+            builtinPlan = TryCreateProfiledKnownBuiltinConstructPlan(feedback, actualArgc);
+        }
+        if (builtinPlan.has_value()) {
+            ValueVertex *result = BuildKnownBuiltinConstruct(args, builtinPlan.value());
+            frameState.SetAcc(result);
+            return;
+        }
+        if (self->IsLazyDeoptEnabled()) {
+            auto plan = TryCreateProfiledKnownConstructPlan(feedback);
+            if (plan.has_value()) {
+                frameState.SetAcc(BuildKnownNewObjRange(args, args.front(), plan.value()));
+                return;
+            }
+            frameState.SetAcc(BuildDynamicNewObjRange(args, args.front()));
+            return;
         }
         RuntimeCallToAccWithLazyDeopt(args, RTSTUB_ID(OptNewObjRange));
     }
@@ -3589,29 +4228,34 @@ struct GraphBuilder::BytecodeVisitor {
         return self->NewPhiVertexWith(currentBlock, {fastAllocation, slowAllocation}, self->AccIndex());
     }
 
-    void LowerCreateEmptyObject()
+    ValueVertex *BuildEmptyObject()
     {
         uint32_t objectSize = 0;
         ValueVertex* hclass = nullptr;
         {
             auto* broker = self->pgoContext_.GetBroker();
-            ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::LowerCreateEmptyObject");
+            ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::BuildEmptyObject");
             ArkSteedHClassRef hclassRef;
             if (broker->TryGetEmptyObjectLayout(&hclassRef, &objectSize)) {
                 hclass = GetHeapConstant(hclassRef);
             }
         }
         if (hclass == nullptr) {
-            auto* result = RuntimeCallToAccWithLazyDeopt({}, RTSTUB_ID(CreateEmptyObject));
+            auto* result = RuntimeCallWithLazyDeopt({}, RTSTUB_ID(CreateEmptyObject));
             compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::OTHER_JS_RECEIVER);
-            return;
+            return result;
         }
         ValueVertex* size = self->graph_->GetInt64Constant(static_cast<int64_t>(objectSize));
         auto* allocation = AllocateInYoung(size, hclass);
         auto* object = self->NewVertex<InitializeEmptyObjectVertex>(
             compileInfoFacts_, currentBlock, {allocation, glue, hclass, size}, objectSize);
-        frameState.SetAcc(object);
         compileInfoFacts_->EnsureType(object, NodeInfo::NodeType::OTHER_JS_RECEIVER);
+        return object;
+    }
+
+    void LowerCreateEmptyObject()
+    {
+        frameState.SetAcc(BuildEmptyObject());
     }
 
     void LowerCreateEmptyArray(const BytecodeInfo *bcInfo)
@@ -5010,12 +5654,17 @@ struct GraphBuilder::BytecodeVisitor {
             case CommonStubID::ToBooleanTrue:
             case CommonStubID::ToBooleanFalse:
                 return true;
+            // String-only conversion cannot run user hooks. It returns an intermediate
+            // number before wrapper allocation, not the completed newobjrange result.
+            case CommonStubID::ArkSteedStringToNumber:
+                return compileInfoFacts_->CheckType(call->GetInput(1), NodeInfo::NodeType::STRING);
             // typeof is observable only through the input value category and does not mutate dependencies.
             case CommonStubID::TypeOf:
                 return true;
             // A capacity slow call may run a native finalizer that invalidates dependencies.
             case CommonStubID::CreateEmptyArray:
             case CommonStubID::CreateArrayWithBuffer:
+            case CommonStubID::ArkSteedNewObjectFromPrimitive:
                 return false;
             // These allocation/constant-pool helpers create or load values without observing receiver hooks.
             case CommonStubID::CreateObjectHavingMethod:
@@ -5023,7 +5672,9 @@ struct GraphBuilder::BytecodeVisitor {
             case CommonStubID::GetObjectFromConstPool:
             case CommonStubID::GetStringFromConstPool:
             case CommonStubID::GetUnmappedArgs:
+            case CommonStubID::FastNewThisObject:
             case CommonStubID::NewLexicalEnv:
+            case CommonStubID::NewFloat32ArrayWithNoArgs:
                 return true;
             // Abstract equality may call user-defined conversion on mixed object/non-object operands.
             // Unlike relational comparison, object-object equality is a reference check and skips ToPrimitive.
@@ -5168,12 +5819,10 @@ struct GraphBuilder::BytecodeVisitor {
         // E refers to exception lazy-deopt
         bool needsE = HasNeverExecutedCatchBlock();
         // D refers to dependency lazy-deopt.
-        bool needsD = vertex->Is<CallVertex>() ||
-                      vertex->Is<CallKnownJSFunctionVertex>() ||
-                      vertex->Is<CallKnownBuiltinVertex>() ||
-                      vertex->Is<CallSelfVertex>() ||
-                      vertex->Is<CallBaseConstructorVertex>() ||
-                      vertex->Is<CallDerivedConstructorVertex>();
+        bool needsD = vertex->Is<CallVertex>() || vertex->Is<CallKnownJSFunctionVertex>() ||
+                      vertex->Is<CallKnownBuiltinVertex>() || vertex->Is<CallSelfVertex>() ||
+                      vertex->Is<CallBaseConstructorVertex>() || vertex->Is<CallDerivedConstructorVertex>() ||
+                      vertex->Is<CallNewObjRangeBaseVertex>() || vertex->Is<CallNewObjRangeDerivedVertex>();
         if (auto *call = vertex->TryCast<CallCommonStubVertex>()) {
             needsD = !IsDependencySafeCommonStubCall(call);
         } else if (auto *call = vertex->TryCast<CallRuntimeVertex>()) {
@@ -5252,6 +5901,35 @@ struct GraphBuilder::BytecodeVisitor {
         self->FinishBlockWithJump(currentBlock, doneBlock);
 
         currentBlock = doneBlock;
+        return self->NewPhiVertexWith(currentBlock, {trueResult, falseResult}, resultVreg);
+    }
+
+    template <class BranchVertexT, class BuildTrue, class BuildFalse, class... BranchArgs>
+    ValueVertex *BuildSelectWithFacts(std::initializer_list<ValueVertex *> branchInputs, VRegIDType resultVreg,
+                                      BuildTrue buildTrue, BuildFalse buildFalse, BranchArgs &&...branchArgs)
+    {
+        BB *trueBlock = self->NewBlock();
+        BB *falseBlock = self->NewBlock();
+        BB *doneBlock = self->NewBlock();
+        CompileInfoFacts *entryFacts = compileInfoFacts_;
+
+        self->FinishBlockWithBranch<BranchVertexT>(currentBlock, branchInputs, trueBlock, falseBlock,
+                                                   std::forward<BranchArgs>(branchArgs)...);
+
+        currentBlock = trueBlock;
+        compileInfoFacts_ = entryFacts->Clone();
+        ValueVertex *trueResult = buildTrue();
+        CompileInfoFacts *mergedFacts = compileInfoFacts_;
+        self->FinishBlockWithJump(currentBlock, doneBlock);
+
+        currentBlock = falseBlock;
+        compileInfoFacts_ = entryFacts->Clone();
+        ValueVertex *falseResult = buildFalse();
+        mergedFacts->Merge(*compileInfoFacts_);
+        self->FinishBlockWithJump(currentBlock, doneBlock);
+
+        currentBlock = doneBlock;
+        compileInfoFacts_ = mergedFacts;
         return self->NewPhiVertexWith(currentBlock, {trueResult, falseResult}, resultVreg);
     }
 
@@ -7093,21 +7771,48 @@ struct GraphBuilder::BytecodeVisitor {
         if (ValueVertex *constant = TryBuildConstantUnaryOperation(stubId, value)) {
             return constant;
         }
-        bool valueKnownInt = compileInfoFacts_->CheckType(value, NodeInfo::NodeType::INT);
-        if (valueKnownInt) {
-            return BuildIntUnaryOp(stubId, value, true);
-        }
 
         OperationFeedback feedback = self->pgoContext_.ReadOperationFeedback(*currentBcInfo);
-        if (feedback.hint == ArkSteedOperationHint::INT) {
-            LogOperationFeedback(feedback, "Unary", "IntUnaryOp");
-            return BuildIntUnaryOp(stubId, value, false);
+        bool valueKnownInt = compileInfoFacts_->CheckType(value, NodeInfo::NodeType::INT);
+        bool hasIntFeedback = feedback.hint == ArkSteedOperationHint::INT;
+        bool hasNumberFeedback = feedback.hint == ArkSteedOperationHint::NUMBER ||
+                                 feedback.hint == ArkSteedOperationHint::NUMBER_OR_STRING;
+
+        switch (stubId) {
+            case CommonStubID::Neg:
+            case CommonStubID::Inc:
+            case CommonStubID::Dec:
+                if (hasNumberFeedback) {
+                    // Int32 inputs can still produce -0 or overflow results. Checking valueKnownInt first would
+                    // select Int32 lowering for these sites and repeatedly deoptimize.
+                    LogOperationFeedback(feedback, "Unary", "F64UnaryOp");
+                    return BuildF64UnaryOp(stubId, value);
+                }
+                if (valueKnownInt) {
+                    return BuildIntUnaryOp(stubId, value, true);
+                }
+                if (hasIntFeedback) {
+                    LogOperationFeedback(feedback, "Unary", "IntUnaryOp");
+                    return BuildIntUnaryOp(stubId, value, false);
+                }
+                break;
+            case CommonStubID::Not:
+                if (valueKnownInt) {
+                    return BuildIntUnaryOp(stubId, value, true);
+                }
+                if (hasIntFeedback) {
+                    LogOperationFeedback(feedback, "Unary", "IntUnaryOp");
+                    return BuildIntUnaryOp(stubId, value, false);
+                }
+                if (hasNumberFeedback) {
+                    LogOperationFeedback(feedback, "Unary", "F64UnaryOp");
+                    return BuildF64UnaryOp(stubId, value);
+                }
+                break;
+            default:
+                UNREACHABLE();
         }
-        if (feedback.hint == ArkSteedOperationHint::NUMBER ||
-            feedback.hint == ArkSteedOperationHint::NUMBER_OR_STRING) {
-            LogOperationFeedback(feedback, "Unary", "F64UnaryOp");
-            return BuildF64UnaryOp(stubId, value);
-        }
+
         LogOperationFeedback(feedback, "Unary", "GenericUnaryOp");
         return BuildGenericUnaryOp(stubId, value);
     }
@@ -8382,9 +9087,12 @@ struct GraphBuilder::BytecodeVisitor {
     }
 
     void BuildStoreTaggedField(ValueVertex *object, int32_t offset, ValueVertex *value,
-                                PropertyKey key = PropertyKey::Unknown())
+                               PropertyKey key = PropertyKey::Unknown(),
+                               ArkSteedWriteBarrierValueKind provenValueKind = ArkSteedWriteBarrierValueKind::Unknown)
     {
-        ArkSteedWriteBarrierValueKind valueKind = ClassifyDirectWriteBarrierValueKind(value);
+        ArkSteedWriteBarrierValueKind valueKind = provenValueKind == ArkSteedWriteBarrierValueKind::Unknown
+                                                      ? ClassifyDirectWriteBarrierValueKind(value)
+                                                      : provenValueKind;
         if (valueKind == ArkSteedWriteBarrierValueKind::NonHeap) {
             NewFieldStore<StoreTaggedFieldVertex>(key, {object, value}, offset);
             return;
@@ -10396,6 +11104,7 @@ BB *GraphBuilder::VisitBytecodesOfBasicBlock(SharedBCFrameState frameState, uint
             break;
         }
     }
+    compileInfoFacts_[rpoIndex] = visitor.compileInfoFacts_;
 
     if (visitor.currentBlock->GetControlVertex() == nullptr) {
         ASSERT(blockInfo->IsFallthrough());

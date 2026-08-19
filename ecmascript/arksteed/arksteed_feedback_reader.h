@@ -38,6 +38,7 @@ public:
     bool TryGetFeedbackSlotId(int index, bool allowImmediate, uint32_t *slotId) const; // input slot
     bool TryGetFeedbackSlotId(uint32_t *slotId) const; // primary slot
     bool ReadCallFeedback(CallFeedback *feedback) const;
+    bool ReadConstructorFeedback(ConstructorFeedback *feedback) const;
     bool ReadOperationFeedback(OperationFeedback *feedback) const;
 
 private:

@@ -45,6 +45,12 @@ enum class CallFeedbackKind : uint8_t {
     MONOMORPHIC_BUILTIN,
 };
 
+enum class ConstructorFeedbackKind : uint8_t {
+    INSUFFICIENT,
+    MONOMORPHIC_JS_FUNCTION,
+    MONOMORPHIC_BUILTIN,
+};
+
 enum class ArkSteedOperationHint : uint8_t {
     NONE,
     INT,
@@ -100,6 +106,22 @@ struct CallFeedback {
     bool IsMonomorphicBuiltin() const
     {
         return kind == CallFeedbackKind::MONOMORPHIC_BUILTIN;
+    }
+};
+
+struct ConstructorFeedback {
+    ConstructorFeedbackKind kind {ConstructorFeedbackKind::INSUFFICIENT};
+    ArkSteedFunctionRef target {};
+    kungfu::BuiltinsStubCSigns::ID builtinId {kungfu::BuiltinsStubCSigns::ID::NONE};
+
+    bool IsMonomorphicJSFunction() const
+    {
+        return kind == ConstructorFeedbackKind::MONOMORPHIC_JS_FUNCTION;
+    }
+
+    bool IsMonomorphicBuiltin() const
+    {
+        return kind == ConstructorFeedbackKind::MONOMORPHIC_BUILTIN;
     }
 };
 

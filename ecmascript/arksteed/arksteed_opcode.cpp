@@ -174,6 +174,66 @@ void CallVertex::SetValueLocationConstraints()
     UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
 }
 
+void CallNewObjRangeBaseVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+#if defined(PANDA_TARGET_ARM64)
+    SetTemporariesNeeded(3);
+#else
+    SetTemporariesNeeded(2);
+#endif
+    if (UsesCommonStub()) {
+        using Inputs = kungfu::ArkSteedCallConstructorBodyInputs;
+        UseAndClobberFixed(Arg(TARGET_INDEX), ArkSteedAssembler::GetParameterRegister(Inputs::TARGET));
+        UseAndClobberFixed(Arg(NEW_TARGET_INDEX), ArkSteedAssembler::GetParameterRegister(Inputs::NEW_TARGET));
+        UseSlot(Arg(THIS_INDEX));
+    } else {
+        UseAndClobberFixed(Arg(TARGET_INDEX), ArkSteedAssembler::CALLEE_TARGET_REGISTER);
+        UseAny(Arg(NEW_TARGET_INDEX));
+        UseSlot(Arg(THIS_INDEX));
+    }
+    for (uint32_t index = FIRST_ARG_INDEX; index < GetInputCount(); index++) {
+        UseAny(Arg(index));
+    }
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
+
+void CallNewObjRangeDerivedVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+#if defined(PANDA_TARGET_ARM64)
+    SetTemporariesNeeded(3);
+#else
+    SetTemporariesNeeded(2);
+#endif
+    if (UsesCommonStub()) {
+        using Inputs = kungfu::ArkSteedCallConstructorBodyInputs;
+        UseAndClobberFixed(Arg(TARGET_INDEX), ArkSteedAssembler::GetParameterRegister(Inputs::TARGET));
+        UseAndClobberFixed(Arg(NEW_TARGET_INDEX), ArkSteedAssembler::GetParameterRegister(Inputs::NEW_TARGET));
+        UseAndClobberFixed(Arg(THIS_INDEX), ArkSteedAssembler::GetParameterRegister(Inputs::RECEIVER));
+    } else {
+        UseAndClobberFixed(Arg(TARGET_INDEX), ArkSteedAssembler::CALLEE_TARGET_REGISTER);
+        UseAny(Arg(NEW_TARGET_INDEX));
+        UseAny(Arg(THIS_INDEX));
+    }
+    for (uint32_t index = FIRST_ARG_INDEX; index < GetInputCount(); index++) {
+        UseAny(Arg(index));
+    }
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
+
+void LoadBuiltinObjectVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(GLUE_INDEX));
+}
+
+void BranchIfECMAObjectVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(0));
+    SetTemporariesNeeded(1);
+}
+
 void CallKnownJSFunctionVertex::SetValueLocationConstraints()
 {
     DefineAsFixed(this, 0);
@@ -444,6 +504,13 @@ void DeoptIfNotUndefinedOrNullVertex::SetValueLocationConstraints()
 }
 
 void DeoptIfNotHeapObjectVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    SetTemporariesNeeded(1);
+    UseEagerDeoptFrameSlots(this);
+}
+
+void DeoptIfNotJSHClassVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(VALUE_INDEX));
     SetTemporariesNeeded(1);
@@ -931,21 +998,33 @@ void I32DivByConstWithCheckVertex::SetValueLocationConstraints()
 void I32AddVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(LEFT_INDEX));
-    UseRegister(Arg(RIGHT_INDEX));
+    if (GetInput(RIGHT_INDEX)->Is<Int32ConstantVertex>()) {
+        UseAny(Arg(RIGHT_INDEX));
+    } else {
+        UseRegister(Arg(RIGHT_INDEX));
+    }
     DefineSameAsFirst(this);
 }
 
 void I32SubVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(LEFT_INDEX));
-    UseRegister(Arg(RIGHT_INDEX));
+    if (GetInput(RIGHT_INDEX)->Is<Int32ConstantVertex>()) {
+        UseAny(Arg(RIGHT_INDEX));
+    } else {
+        UseRegister(Arg(RIGHT_INDEX));
+    }
     DefineSameAsFirst(this);
 }
 
 void I32MulVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(LEFT_INDEX));
-    UseRegister(Arg(RIGHT_INDEX));
+    if (GetInput(RIGHT_INDEX)->Is<Int32ConstantVertex>()) {
+        UseAny(Arg(RIGHT_INDEX));
+    } else {
+        UseRegister(Arg(RIGHT_INDEX));
+    }
     DefineSameAsFirst(this);
 }
 
@@ -1128,6 +1207,18 @@ void BranchIfTrueVertex::SetValueLocationConstraints()
     UseRegister(Arg(0));
 }
 
+void BranchIfTaggedNumberVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    SetTemporariesNeeded(1);
+}
+
+void BranchIfTaggedBooleanVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    SetTemporariesNeeded(1);
+}
+
 void BranchIfTaggedStringVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(VALUE_INDEX));
@@ -1143,7 +1234,11 @@ void BranchIfHClassInVertex::SetValueLocationConstraints()
 void BranchIfInt32CompareVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(LEFT_INDEX));
-    UseRegister(Arg(RIGHT_INDEX));
+    if (GetInput(RIGHT_INDEX)->Is<Int32ConstantVertex>()) {
+        UseAny(Arg(RIGHT_INDEX));
+    } else {
+        UseRegister(Arg(RIGHT_INDEX));
+    }
 }
 
 void BranchIfInt64CompareVertex::SetValueLocationConstraints()
@@ -1408,6 +1503,36 @@ DUMP_EXTRA(Call)
     out << "  actualArgc = " << vertex->GetActualArgc();
 }
 
+DUMP_EXTRA(CallNewObjRangeBase)
+{
+    out << "  actualArgc = " << vertex->GetActualArgc();
+    if (vertex->UsesCommonStub()) {
+        out << "  commonStub = ArkSteedCallConstructorBody";
+        return;
+    }
+    if (vertex->HasKnownExpectedParameterCount()) {
+        out << "  expectedParameterCount = " << vertex->GetExpectedParameterCount() << "  argumentPreparation = "
+            << (vertex->GetActualArgc() == vertex->GetExpectedParameterCount() ? "fixed" : "dynamic");
+    } else {
+        out << "  expectedParameterCount = unknown  argumentPreparation = dynamic";
+    }
+}
+
+DUMP_EXTRA(CallNewObjRangeDerived)
+{
+    out << "  actualArgc = " << vertex->GetActualArgc();
+    if (vertex->UsesCommonStub()) {
+        out << "  commonStub = ArkSteedCallConstructorBody";
+        return;
+    }
+    if (vertex->HasKnownExpectedParameterCount()) {
+        out << "  expectedParameterCount = " << vertex->GetExpectedParameterCount() << "  argumentPreparation = "
+            << (vertex->GetActualArgc() == vertex->GetExpectedParameterCount() ? "fixed" : "dynamic");
+    } else {
+        out << "  expectedParameterCount = unknown  argumentPreparation = dynamic";
+    }
+}
+
 DUMP_EXTRA(CallKnownJSFunction)
 {
     out << "  actualArgc = " << vertex->GetActualArgc()
@@ -1431,7 +1556,17 @@ DUMP_EXTRA(CallSelf)
         << "  reservedCallSlotCount = " << vertex->GetReservedCallSlotCount();
 }
 
+DUMP_EXTRA(LoadBuiltinObject)
+{
+    out << "  builtinIndex = " << vertex->GetBuiltinIndex();
+}
+
 DUMP_EXTRA(DeoptIfReferenceNotEqual)
+{
+    out << "  type = " << static_cast<int>(vertex->GetDeoptType());
+}
+
+DUMP_EXTRA(DeoptIfNotJSHClass)
 {
     out << "  type = " << static_cast<int>(vertex->GetDeoptType());
 }

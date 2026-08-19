@@ -406,11 +406,13 @@ protected:
     // Allow updating bits from subclasses
     void SetTemporariesNeeded(uint8_t value)
     {
+        ASSERT(value < (1U << NumTempField::SIZE));
         bitfield_ = NumTempField::Update(bitfield_, value);
     }
 
     void SetDoubleTemporariesNeeded(uint8_t value)
     {
+        ASSERT(value < (1U << NumDoubleTempField::SIZE));
         bitfield_ = NumDoubleTempField::Update(bitfield_, value);
     }
 

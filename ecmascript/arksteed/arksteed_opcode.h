@@ -329,6 +329,12 @@ public:
         return *lazyDeoptFrameState_;
     }
 
+    void AppendLazyDeoptFrameValue(int32_t vreg, ValueVertex *value, DeoptTranslationKind kind)
+    {
+        ASSERT(lazyDeoptFrameState_ != nullptr);
+        lazyDeoptFrameState_->emplace_back(static_cast<VRegIDType>(vreg), value, kind);
+    }
+
     uint32_t GetBytecodeOffset() const
     {
         ASSERT(lazyDeoptFrameState_ != nullptr);
@@ -1856,6 +1862,128 @@ public:
 
 private:
     uint32_t actualArgc_;
+};
+
+class NewObjRangeCallInfo {
+public:
+    enum class CallStrategy : uint8_t { INLINE_DISPATCH, COMMON_STUB };
+    enum Indices : uint32_t {
+        TARGET_INDEX = 0,
+        NEW_TARGET_INDEX = 1,
+        THIS_INDEX = 2,
+        RECEIVER_INDEX = THIS_INDEX,
+        FIRST_ARG_INDEX = 3,
+    };
+
+    NewObjRangeCallInfo(uint32_t actualArgc, uint32_t expectedParameterCount, bool hasKnownExpectedParameterCount,
+                        CallStrategy strategy)
+        : actualArgc_(actualArgc),
+          expectedParameterCount_(expectedParameterCount),
+          hasKnownExpectedParameterCount_(hasKnownExpectedParameterCount),
+          strategy_(strategy)
+    {}
+
+    bool UsesCommonStub() const
+    {
+        return strategy_ == CallStrategy::COMMON_STUB;
+    }
+
+    uint32_t GetActualArgc() const
+    {
+        return actualArgc_;
+    }
+
+    uint32_t GetExpectedParameterCount() const
+    {
+        ASSERT(hasKnownExpectedParameterCount_);
+        return expectedParameterCount_;
+    }
+
+    bool HasKnownExpectedParameterCount() const
+    {
+        return hasKnownExpectedParameterCount_;
+    }
+
+private:
+    uint32_t actualArgc_;
+    uint32_t expectedParameterCount_;
+    bool hasKnownExpectedParameterCount_;
+    CallStrategy strategy_;
+};
+
+class CallNewObjRangeBaseVertex : public VertexMixin<ValueVertex, CallNewObjRangeBaseVertex>,
+                                  public ThrowableMixin,
+                                  public LazyDeoptimizableMixin,
+                                  public NewObjRangeCallInfo {
+public:
+    static constexpr bool IS_BASE_CONSTRUCTOR = true;
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::IS_CALL | VertexPropertyFlag::CAN_READ |
+                                                     VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::CAN_ALLOCATE |
+                                                     VertexPropertyFlag::CAN_LAZY_DEOPT | VertexPropertyFlag::CAN_THROW;
+
+    CallNewObjRangeBaseVertex(uint32_t actualArgc, uint32_t expectedParameterCount, bool hasKnownExpectedParameterCount,
+                              CallStrategy strategy)
+        : VertexMixin(),
+          NewObjRangeCallInfo(actualArgc, expectedParameterCount, hasKnownExpectedParameterCount, strategy)
+    {}
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == FIRST_ARG_INDEX + GetActualArgc());
+        for (uint32_t index = 0; index < GetInputCount(); ++index) {
+            ASSERT(GetInput(index)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        }
+    }
+};
+
+class CallNewObjRangeDerivedVertex : public VertexMixin<ValueVertex, CallNewObjRangeDerivedVertex>,
+                                     public ThrowableMixin,
+                                     public LazyDeoptimizableMixin,
+                                     public NewObjRangeCallInfo {
+public:
+    static constexpr bool IS_BASE_CONSTRUCTOR = false;
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::IS_CALL | VertexPropertyFlag::CAN_READ |
+                                                     VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::CAN_ALLOCATE |
+                                                     VertexPropertyFlag::CAN_LAZY_DEOPT | VertexPropertyFlag::CAN_THROW;
+
+    CallNewObjRangeDerivedVertex(uint32_t actualArgc, uint32_t expectedParameterCount,
+                                 bool hasKnownExpectedParameterCount, CallStrategy strategy)
+        : VertexMixin(),
+          NewObjRangeCallInfo(actualArgc, expectedParameterCount, hasKnownExpectedParameterCount, strategy)
+    {}
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == FIRST_ARG_INDEX + GetActualArgc());
+        for (uint32_t index = 0; index < GetInputCount(); ++index) {
+            ASSERT(GetInput(index)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        }
+    }
+};
+
+class LoadBuiltinObjectVertex : public FixedInputVertexMixin<ValueVertex, LoadBuiltinObjectVertex> {
+public:
+    static constexpr uint32_t NUM_INPUTS = 1;
+    static constexpr uint32_t GLUE_INDEX = 0;
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {ValueRepresentation::INT_PTR};
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_READ | VertexPropertyFlag::IS_NOT_IDEMPOTENT;
+    explicit LoadBuiltinObjectVertex(size_t builtinIndex) : FixedInputVertexMixin(), builtinIndex_(builtinIndex) {}
+    size_t GetBuiltinIndex() const
+    {
+        return builtinIndex_;
+    }
+    void SetValueLocationConstraints();
+
+private:
+    size_t builtinIndex_;
 };
 
 class CallKnownJSFunctionVertex : public VertexMixin<ValueVertex, CallKnownJSFunctionVertex>,
@@ -3698,6 +3826,37 @@ public:
     }
 };
 
+class DeoptIfNotJSHClassVertex : public VertexMixin<NonControlVertex, DeoptIfNotJSHClassVertex>,
+                                 public EagerDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        VALUE_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::CAN_EAGER_DEOPT;
+
+    DeoptIfNotJSHClassVertex(Chunk *chunk, uint32_t bytecodeOffset, kungfu::DeoptType deoptType)
+        : VertexMixin(), EagerDeoptimizableMixin(chunk, bytecodeOffset), deoptType_(deoptType)
+    {}
+
+    kungfu::DeoptType GetDeoptType() const
+    {
+        return deoptType_;
+    }
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+        ASSERT(GetInput(VALUE_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(deoptType_ != kungfu::DeoptType::NONE);
+    }
+
+private:
+    kungfu::DeoptType deoptType_;
+};
+
 class DeoptIfArrayBufferDetachedVertex : public VertexMixin<NonControlVertex, DeoptIfArrayBufferDetachedVertex>,
                                          public EagerDeoptimizableMixin {
 public:
@@ -3900,6 +4059,40 @@ public:
     void SetValueLocationConstraints();
 };
 
+class BranchIfTaggedNumberVertex : public BranchControlVertexT<BranchIfTaggedNumberVertex> {
+public:
+    enum Indices : uint32_t {
+        VALUE_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    BranchIfTaggedNumberVertex(BB *ifTrue, BB *ifFalse) : BranchControlVertexT(ifTrue, ifFalse) {}
+
+    void SetValueLocationConstraints();
+};
+
+class BranchIfTaggedBooleanVertex : public BranchControlVertexT<BranchIfTaggedBooleanVertex> {
+public:
+    enum Indices : uint32_t {
+        VALUE_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    BranchIfTaggedBooleanVertex(BB *ifTrue, BB *ifFalse) : BranchControlVertexT(ifTrue, ifFalse) {}
+
+    void SetValueLocationConstraints();
+};
+
 class BranchIfTaggedStringVertex : public BranchControlVertexT<BranchIfTaggedStringVertex> {
 public:
     enum Indices : uint32_t {
@@ -4060,6 +4253,16 @@ public:
 
     BranchIfCallableVertex(BB *ifTrue, BB *ifFalse) : BranchControlVertexT(ifTrue, ifFalse) {}
 
+    void SetValueLocationConstraints();
+};
+
+class BranchIfECMAObjectVertex : public BranchControlVertexT<BranchIfECMAObjectVertex> {
+public:
+    static constexpr uint32_t NUM_INPUTS = 1;
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {ValueRepresentation::TAGGED};
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+    BranchIfECMAObjectVertex(BB *ifTrue, BB *ifFalse) : BranchControlVertexT(ifTrue, ifFalse) {}
     void SetValueLocationConstraints();
 };
 

@@ -32,6 +32,11 @@ enum class ArgumentsOrder {
     DEFAULT_ORDER,  // Push Arguments in stack from right -> left
 };
 
+// Fixed C ABI; ARGC counts only user arguments in the caller-rooted ARGV.
+struct ArkSteedCallConstructorBodyInputs {
+    enum : uint32_t { GLUE, ARGC, TARGET, NEW_TARGET, RECEIVER, ARGV, NUM_INPUTS };
+};
+
 // Lightweight replacement for std::function<void*(void*)>.
 // Avoids type-erasure overhead per stub (~956 unique lambda closures → a few template factories).
 class TargetConstructor {
@@ -789,7 +794,10 @@ private:
     V(BatchMarkInBuffer)                             \
     V(LoadBarrierCopyBack)                           \
     V(CMCSetValueWithBarrier)                        \
-    V(CheckObjectForCMS)
+    V(CheckObjectForCMS)                             \
+    V(ArkSteedStringToNumber)                        \
+    V(ArkSteedNewObjectFromPrimitive)                \
+    V(ArkSteedCallConstructorBody)
 
 #define DECL_CALL_SIGNATURE(name)                                  \
 class name##CallSignature final {                                  \
