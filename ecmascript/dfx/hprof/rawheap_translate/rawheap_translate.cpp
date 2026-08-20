@@ -550,9 +550,41 @@ bool RawHeapTranslateV1::Translate()
     }
 
     AddPrimitiveNodes();
+    RecomputeNodeSize();
 
     LOG_INFO_ << "success!";
     return true;
+}
+
+// Rawheap files generated with compressed pointers carry CONSTANT_POOL sizes in
+// the expanded (non-compressed) form; divide them back by the layout's
+// compressed factor and re-align to the heap object alignment.
+// The restore is intentionally approximate, not exact: with compressed pointers
+// a ConstantPool packs two 4-byte cache entries into each 8-byte slot, so for n
+// cache entries the true heap size is 88 + 4*n (the 16-byte header, 7 extend
+// slots and 16-byte tail do not compress) while the dumped size is 88 + 8*n.
+// Halving shrinks that fixed 88-byte part as well:
+// AlignUp((88 + 8*n) / 2, 8) = 48 + 4*n, a constant 40 bytes below the true
+// size for every pool regardless of n. The exact restore would be
+// dumpedSize / 2 + 44; the constant shortfall is accepted here.
+void RawHeapTranslateV1::RecomputeNodeSize()
+{
+    MetaData *cpMeta = metaParser_->GetMetaData("CONSTANT_POOL");
+    // 1: factor 1 (or 0 from a malformed entry) means no compression, nothing to restore.
+    if (cpMeta == nullptr || cpMeta->compressedFactor <= 1) {
+        return;
+    }
+    auto nodes = GetNodes();
+    size_t cnt = nodes->size();
+    // 5: normal nodes start from 5 (synthetic + 4 root groups)
+    for (size_t i = 5; i < cnt; i++) {
+        Node *node = (*nodes)[i];
+        if (node->jsType != cpMeta->type) {
+            continue;
+        }
+        node->size /= cpMeta->compressedFactor;
+        node->size = AlignUp(node->size, MEM_ALIGN_OBJECT);
+    }
 }
 
 bool RawHeapTranslateV1::ReadLocalHandleRoots(FileReader &file)
@@ -1554,9 +1586,41 @@ bool RawHeapTranslateV2::Translate()
     }
 
     AddPrimitiveNodes();
+    RecomputeNodeSize();
 
     LOG_INFO_ << "success!";
     return true;
+}
+
+// Rawheap files generated with compressed pointers carry CONSTANT_POOL sizes in
+// the expanded (non-compressed) form; divide them back by the layout's
+// compressed factor and re-align to the heap object alignment.
+// The restore is intentionally approximate, not exact: with compressed pointers
+// a ConstantPool packs two 4-byte cache entries into each 8-byte slot, so for n
+// cache entries the true heap size is 88 + 4*n (the 16-byte header, 7 extend
+// slots and 16-byte tail do not compress) while the dumped size is 88 + 8*n.
+// Halving shrinks that fixed 88-byte part as well:
+// AlignUp((88 + 8*n) / 2, 8) = 48 + 4*n, a constant 40 bytes below the true
+// size for every pool regardless of n. The exact restore would be
+// dumpedSize / 2 + 44; the constant shortfall is accepted here.
+void RawHeapTranslateV2::RecomputeNodeSize()
+{
+    MetaData *cpMeta = metaParser_->GetMetaData("CONSTANT_POOL");
+    // 1: factor 1 (or 0 from a malformed entry) means no compression, nothing to restore.
+    if (cpMeta == nullptr || cpMeta->compressedFactor <= 1) {
+        return;
+    }
+    auto nodes = GetNodes();
+    size_t cnt = nodes->size();
+    // 6: normal node start from 6 (synthetic + 4 root groups + 1 metadata)
+    for (size_t i = 6; i < cnt; i++) {
+        Node *node = (*nodes)[i];
+        if (node->jsType != cpMeta->type) {
+            continue;
+        }
+        node->size /= cpMeta->compressedFactor;
+        node->size = AlignUp(node->size, MEM_ALIGN_OBJECT);
+    }
 }
 
 bool RawHeapTranslateV2::ReadLocalHandleRoots(FileReader &file)

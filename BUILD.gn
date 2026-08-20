@@ -2322,6 +2322,13 @@ action("gen_js_type_metadata") {
 
   metadata_file_gen_dir = "$root_gen_dir/arkcompiler/ets_runtime"
 
+  # Compressed pointer halves the tagged slot size (4B vs 8B), so the
+  # CONSTANT_POOL layout needs a scale factor of 2 when enabled, else 1.
+  constpool_compressed_factor = 1
+  if (ets_runtime_enable_compressed_pointer) {
+    constpool_compressed_factor = 2
+  }
+
   args = [
     "--enum",
     rebase_path("$js_root/ecmascript/js_type_metadata/type_enums.json"),
@@ -2331,6 +2338,8 @@ action("gen_js_type_metadata") {
     rebase_path("$metadata_file_gen_dir/metadata.json"),
     "--version",
     "1.0.0",
+    "--constpool-compressed-factor",
+    "${constpool_compressed_factor}",
   ]
 
   outputs = [ "$metadata_file_gen_dir/metadata.json" ]
