@@ -15,9 +15,16 @@
 
 #include "ecmascript/arksteed/arksteed_access_info_factory.h"
 
+#include "ecmascript/accessor_data.h"
+#include "ecmascript/builtins/builtins_typedarray.h"
+#include "ecmascript/ecma_string.h"
 #include "ecmascript/global_env.h"
 #include "ecmascript/ic/ic_handler.h"
+#include "ecmascript/js_array.h"
 #include "ecmascript/js_hclass.h"
+#include "ecmascript/js_hclass-inl.h"
+#include "ecmascript/js_object-inl.h"
+#include "ecmascript/layout_info-inl.h"
 #include "ecmascript/tagged_array.h"
 
 namespace panda::ecmascript::arksteed {
@@ -54,6 +61,64 @@ struct ParsedLoadHandler {
     bool holderIsReceiver {true};
     bool hasProtoCell {false};
 };
+
+bool IsTypedArrayLengthAccessor(const ArkSteedHeapBroker *broker, JSThread *thread,
+                                const ArkSteedHClassRef &receiver, const ParsedLoadHandler &parsed,
+                                const ArkSteedNameRef &name)
+{
+    if (parsed.holderIsReceiver || !parsed.hasProtoCell || !HandlerBase::IsAccessor(parsed.handlerInfo)) {
+        return false;
+    }
+    JSTaggedValue receiverValue;
+    JSTaggedValue holderValue;
+    JSTaggedValue nameValue;
+    if (!broker->TryResolveRef(receiver, &receiverValue) || !receiverValue.IsJSHClass() ||
+        !IsFixedLengthTypedArrayType(JSHClass::Cast(receiverValue.GetTaggedObject())->GetObjectType()) ||
+        !broker->TryResolveRef(parsed.holder, &holderValue) || !holderValue.IsJSObject() ||
+        !broker->TryResolveRef(name, &nameValue) || !nameValue.IsString() ||
+        !EcmaStringAccessor::StringsAreEqual(thread, EcmaString::Cast(nameValue.GetTaggedObject()),
+            EcmaString::Cast(thread->GlobalConstants()->GetLengthString().GetTaggedObject()))) {
+        return false;
+    }
+    // IC snapshots can predate a shadowing property added to an intermediate prototype.
+    JSTaggedValue current = JSHClass::Cast(receiverValue.GetTaggedObject())->GetPrototype(thread);
+    while (current != holderValue) {
+        if (!current.IsJSObject() || current.IsJSProxy()) {
+            return false;
+        }
+        auto *currentHClass = current.GetTaggedObject()->GetClass();
+        if (currentHClass->IsDictionaryMode() || !currentHClass->GetLayout(thread).IsTaggedArray() ||
+            JSHClass::FindPropertyEntry(thread, currentHClass, nameValue) >= 0) {
+            return false;
+        }
+        current = currentHClass->GetPrototype(thread);
+    }
+    auto *holder = JSObject::Cast(holderValue.GetTaggedObject());
+    auto *hclass = holder->GetClass();
+    if (hclass->IsDictionaryMode() || !hclass->GetLayout(thread).IsTaggedArray()) {
+        return false;
+    }
+    int entry = JSHClass::FindPropertyEntry(thread, hclass, nameValue);
+    if (entry < 0) {
+        return false;
+    }
+    auto attr = LayoutInfo::Cast(hclass->GetLayout(thread).GetTaggedObject())->GetAttr(thread, entry);
+    if (!attr.IsAccessor()) {
+        return false;
+    }
+    JSTaggedValue accessor = holder->GetProperty(thread, hclass, attr);
+    if (!accessor.IsAccessorData() || accessor.IsInternalAccessor()) {
+        return false;
+    }
+    JSTaggedValue getter = AccessorData::Cast(accessor.GetTaggedObject())->GetGetter(thread);
+    if (!getter.IsJSFunction()) {
+        return false;
+    }
+    auto *function = JSFunction::Cast(getter.GetTaggedObject());
+    auto *method = Method::Cast(function->GetMethod(thread).GetTaggedObject());
+    return method->IsNativeWithCallField() &&
+        function->GetNativePointer() == reinterpret_cast<const void *>(builtins::BuiltinsTypedArray::GetLength);
+}
 
 bool IsNamedLoadBytecode(kungfu::EcmaOpcode opcode)
 {
@@ -571,6 +636,7 @@ bool ArkSteedAccessInfoFactory::TryMakeNamedStoreAccessInfo(const NamedAccessCas
 }
 
 bool ArkSteedAccessInfoFactory::TryMakeNamedLoadAccessInfo(const NamedAccessCaseFeedback &caseFeedback,
+                                                           ArkSteedNameRef name,
                                                            NamedLoadAccessInfo *info) const
 {
     *info = {};
@@ -582,6 +648,28 @@ bool ArkSteedAccessInfoFactory::TryMakeNamedLoadAccessInfo(const NamedAccessCase
     if (!TryReadLoadHandler(broker_, compilerThread_, caseFeedback.handler, &parsed)) {
         return false;
     }
+    if (parsed.holderIsReceiver && HandlerBase::IsAccessor(parsed.handlerInfo)) {
+        JSTaggedValue nameValue;
+        JSTaggedValue hclassValue;
+        if (broker_->TryResolveRef(name, &nameValue) && nameValue.IsString() &&
+            broker_->TryResolveRef(caseFeedback.expectedHClass, &hclassValue) && hclassValue.IsJSHClass() &&
+            JSHClass::Cast(hclassValue.GetTaggedObject())->IsJSArray() &&
+            EcmaStringAccessor::StringsAreEqual(compilerThread_, EcmaString::Cast(nameValue.GetTaggedObject()),
+                EcmaString::Cast(compilerThread_->GlobalConstants()->GetLengthString().GetTaggedObject()))) {
+            // Normalize the built-in accessor to its mutable uint32 field, not the accessor slot.
+            info->kind = AccessKind::DATA_FIELD;
+            info->fieldStorage = AccessFieldStorage::IN_OBJECT;
+            info->fieldOffset = JSArray::LENGTH_OFFSET;
+            info->fieldRepresentation = AccessFieldRepresentation::UINT32;
+            info->fieldType = AccessFieldType::NUMBER;
+            info->holderHClass = caseFeedback.expectedHClass;
+            info->fieldOwnerHClass = caseFeedback.expectedHClass;
+            FillNamedAccessInfo(caseFeedback, parsed.handlerInfo, {}, false, info);
+            // Length has a fixed layout even on non-leaf HClasses; the receiver guard is sufficient.
+            info->dependencies.hclassDependency = AccessDependencyKind::NONE;
+            return true;
+        }
+    }
     if (!parsed.holderIsReceiver) {
         if (!parsed.holder.IsSafeForCompile() || !parsed.holderHClass.IsSafeForCompile()) {
             return false;
@@ -589,7 +677,9 @@ bool ArkSteedAccessInfoFactory::TryMakeNamedLoadAccessInfo(const NamedAccessCase
         parsed.holderDepth = 1;
     }
 
-    if (!HandlerBase::IsNonExist(parsed.handlerInfo)) {
+    bool isTypedArrayLength = IsTypedArrayLengthAccessor(
+        broker_, compilerThread_, caseFeedback.expectedHClass, parsed, name);
+    if (!isTypedArrayLength && !HandlerBase::IsNonExist(parsed.handlerInfo)) {
         if (!HandlerBase::IsField(parsed.handlerInfo) || HandlerBase::IsAccessor(parsed.handlerInfo) ||
             HandlerBase::RepresentationBit::Get(parsed.handlerInfo) != Representation::TAGGED) {
             return false;
@@ -598,9 +688,11 @@ bool ArkSteedAccessInfoFactory::TryMakeNamedLoadAccessInfo(const NamedAccessCase
     }
 
     info->mode = AccessMode::NAMED_LOAD;
-    info->kind = HandlerBase::IsNonExist(parsed.handlerInfo)
-                     ? AccessKind::NON_EXIST
-                     : (parsed.hasProtoCell ? AccessKind::PROTOTYPE_FIELD : AccessKind::FIELD);
+    info->kind = HandlerBase::IsNonExist(parsed.handlerInfo) ? AccessKind::NON_EXIST :
+        (parsed.hasProtoCell ? AccessKind::PROTOTYPE_FIELD : AccessKind::FIELD);
+    if (isTypedArrayLength) {
+        info->kind = AccessKind::TYPED_ARRAY_LENGTH;
+    }
     info->holder = parsed.holder;
     info->holderHClass = parsed.holderIsReceiver ? caseFeedback.expectedHClass : parsed.holderHClass;
     info->fieldOwnerHClass = parsed.holderIsReceiver ? caseFeedback.expectedHClass : parsed.holderHClass;
@@ -614,6 +706,9 @@ bool ArkSteedAccessInfoFactory::TryMakeNamedLoadAccessInfo(const NamedAccessCase
     info->guards.holderIsReceiver = parsed.holderIsReceiver;
     info->guards.hasNotFoundProtoCellGuard = info->hasNotFoundProtoCellGuard;
     FillNamedAccessInfo(caseFeedback, parsed.handlerInfo, parsed.protoCell, parsed.hasProtoCell, info);
+    if (isTypedArrayLength) {
+        info->dependencies.hclassDependency = AccessDependencyKind::NONE;
+    }
     return true;
 }
 
@@ -681,6 +776,7 @@ bool ArkSteedAccessInfoFactory::TryBuildElementStoreAccessInfo(int slotIndex, El
             !hclass->IsDictionaryElement() && HandlerBase::IsNormalElement(handlerInfo) &&
             HandlerBase::IsJSArray(handlerInfo)) {
             caseKind = ElementStoreKind::JS_ARRAY;
+            access->handlesCOW |= HandlerBase::StoreHandlesCOW(handlerInfo);
             elementsKind = hclass->GetElementsKind();
             if (parsed.hasTransitionHClass) {
                 JSTaggedValue transitionHClassValue = JSTaggedValue::Undefined();
@@ -839,7 +935,7 @@ bool ArkSteedAccessInfoFactory::ComputeNamedLoadAccessInfo(const NamedAccessFeed
 
     for (uint32_t i = 0; i < feedback.caseCount && access->caseCount < MAX_NAMED_IC_POLY_CASES; ++i) {
         NamedLoadAccessInfo info;
-        if (!TryMakeNamedLoadAccessInfo(feedback.cases[i], &info)) {
+        if (!TryMakeNamedLoadAccessInfo(feedback.cases[i], feedback.name, &info)) {
             *access = {};
             return false;
         }

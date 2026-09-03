@@ -39,6 +39,8 @@ BytecodePreprocessor::BytecodePreprocessor(JitCompilationEnv *env, Chunk *chunk)
       basicBlocks_(chunk),
       bytecodes_(chunk),
       rpoList_(chunk),
+      loopInfos_(chunk),
+      loopInfosByHeaderRpo_(chunk),
       bcOffsets_(chunk),
       bcBlockIndices_(chunk),
       bcIndexOfOffset_(chunk),
@@ -60,7 +62,103 @@ bool BytecodePreprocessor::Run()
     LoopAnalysis();
     MakeRPO();
     ClearDeadPredecessors();
+    BuildLoopInfos();
     return true;
+}
+
+void BytecodePreprocessor::BuildLoopInfos()
+{
+    loopInfosByHeaderRpo_.resize(rpoList_.size(), nullptr);
+    for (const BasicBlockInfo *header : rpoList_) {
+        if (!header->IsLoopHeader()) {
+            continue;
+        }
+
+        auto *loop = GetChunk()->New<BytecodeLoopInfo>(GetChunk());
+        loop->header = header;
+        loop->latch = header->loopBackBlock;
+        ASSERT(!header->IsSynthetic());
+        loop->loopStartOffset = bcOffsets_[header->startBcIndex];
+        loopInfosByHeaderRpo_[header->rpoIndex] = loop;
+        loopInfos_.push_back(loop);
+    }
+
+    for (BytecodeLoopInfo *loop : loopInfos_) {
+        if (loop->header->loopHeaderBlock != nullptr) {
+            loop->parent = TryGetLoopInfo(loop->header->loopHeaderBlock);
+            ASSERT(loop->parent != nullptr);
+            const_cast<BytecodeLoopInfo *>(loop->parent)->innermost = false;
+        }
+    }
+
+    auto innermostLoopOf = [this](const BasicBlockInfo *block) -> BytecodeLoopInfo * {
+        if (block == nullptr) {
+            return nullptr;
+        }
+        const BasicBlockInfo *header = block->IsLoopHeader() ? block : block->loopHeaderBlock;
+        return const_cast<BytecodeLoopInfo *>(TryGetLoopInfo(header));
+    };
+    for (const BasicBlockInfo *block : rpoList_) {
+        BytecodeLoopInfo *innermostLoop = innermostLoopOf(block);
+        if (innermostLoop == nullptr) {
+            continue;
+        }
+
+        bool resumable = false;
+        uint32_t blockEndOffset = 0;
+        if (!block->IsSynthetic()) {
+            uint32_t endIndex = block->endBcIndex + 1;
+            blockEndOffset = endIndex < bcOffsets_.size() ? bcOffsets_[endIndex] : bcSizeBytes_;
+            for (uint32_t bcIndex = block->startBcIndex; bcIndex <= block->endBcIndex; ++bcIndex) {
+                resumable |= bytecodes_[bcIndex].IsBc(EcmaOpcode::RESUMEGENERATOR) ||
+                             bytecodes_[bcIndex].IsBc(EcmaOpcode::DEPRECATED_RESUMEGENERATOR_PREF_V8);
+            }
+        }
+
+        for (BytecodeLoopInfo *loop = innermostLoop; loop != nullptr;
+             loop = const_cast<BytecodeLoopInfo *>(loop->parent)) {
+            loop->members.push_back(block);
+            loop->resumable |= resumable;
+            if (!block->IsSynthetic()) {
+                loop->loopEndOffset = std::max(loop->loopEndOffset, blockEndOffset);
+            }
+        }
+    }
+
+    auto belongsTo = [&innermostLoopOf](const BasicBlockInfo *block, const BytecodeLoopInfo *expected) {
+        for (const BytecodeLoopInfo *loop = innermostLoopOf(block); loop != nullptr; loop = loop->parent) {
+            if (loop == expected) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (BytecodeLoopInfo *loop : loopInfos_) {
+        ASSERT(!loop->members.empty() && loop->loopStartOffset < loop->loopEndOffset);
+        for (const BasicBlockInfo *predecessor : loop->header->jumpPredecessors) {
+            if (!belongsTo(predecessor, loop)) {
+                if (loop->preheader != nullptr) {
+                    loop->preheader = nullptr;
+                    break;
+                }
+                loop->preheader = predecessor;
+            }
+        }
+    }
+
+    std::sort(loopInfos_.begin(), loopInfos_.end(), [](const BytecodeLoopInfo *lhs, const BytecodeLoopInfo *rhs) {
+        return lhs->loopStartOffset < rhs->loopStartOffset;
+    });
+}
+
+const BytecodePreprocessor::BytecodeLoopInfo *BytecodePreprocessor::TryGetLoopInfo(
+    const BasicBlockInfo *header) const
+{
+    if (header == nullptr) {
+        return nullptr;
+    }
+    ASSERT(header->rpoIndex < loopInfosByHeaderRpo_.size());
+    return loopInfosByHeaderRpo_[header->rpoIndex];
 }
 
 uint32_t BytecodePreprocessor::JumpTargetBcIndexOfBytecode(uint32_t bcIndex, uint32_t bcOffset)
@@ -732,9 +830,8 @@ void BytecodePreprocessor::MakeRPO()
         // that RPO index of blocks in a loop will be continuous.
         if (fallthroughs && jumps) {
             const BasicBlockInfo *curLoop = curBlock->IsLoopHeader() ? curBlock : curBlock->loopHeaderBlock;
-            if (jumpBlock->loopHeaderBlock != curLoop) {
-                // Jumps out of current loop (note: we assume that multi-level break does not exist in input)
-                ASSERT(fallthroughBlock->loopHeaderBlock == curLoop);
+            if (jumpBlock->loopHeaderBlock != curLoop && fallthroughBlock->loopHeaderBlock == curLoop) {
+                // Visit the outside edge first so loop-body blocks tend to stay together in RPO.
                 dfs(dfs, jumpBlock);
                 dfs(dfs, fallthroughBlock);
             } else {

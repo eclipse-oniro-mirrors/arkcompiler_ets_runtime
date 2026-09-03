@@ -455,6 +455,14 @@ void ArkSteedAssembler::Float64Add(ArkSteedDoubleRegister dst, ArkSteedDoubleReg
     assembler_.Addsd(src, dst);
 }
 
+void ArkSteedAssembler::Uint32ToFloat64(ArkSteedDoubleRegister dst, ArkSteedRegister src)
+{
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister scratch = scope.AcquireScratch();
+    assembler_.Movl(src, scratch);
+    assembler_.Cvtsi2sd(scratch, dst);
+}
+
 void ArkSteedAssembler::Float64Sub(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister src)
 {
     assembler_.Subsd(src, dst);

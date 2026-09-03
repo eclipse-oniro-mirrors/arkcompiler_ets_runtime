@@ -470,6 +470,7 @@ private:
     V(ToBooleanFalse)                           \
     V(SetPropertyByName)                        \
     V(EnsurePropertiesCapacity)                 \
+    V(CopyCOWElements)                          \
     V(DeprecatedSetPropertyByName)              \
     V(SetPropertyByNameWithOwn)                 \
     V(SetPropertyByValue)                       \

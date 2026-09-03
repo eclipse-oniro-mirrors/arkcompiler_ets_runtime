@@ -924,6 +924,11 @@ void ArkSteedRegisterAllocator::SaveDeferredRegisterSnapshot(Vertex *vertex)
     DeferredRegisterSnapshot snapshot;
     snapshot.liveRegisters = generalRegisters_.Used();
     snapshot.liveDoubleRegisters = doubleRegisters_.Used();
+    generalRegisters_.ForEachUsedRegister([&snapshot](ArkSteedRegister reg, ValueVertex *value) {
+        if (value->GetValueRepresentation() == ValueRepresentation::TAGGED) {
+            snapshot.liveTaggedRegisters.Set(reg);
+        }
+    });
     vertex->GetRegallocInfo()->SetDeferredRegisterSnapshot(snapshot);
 }
 

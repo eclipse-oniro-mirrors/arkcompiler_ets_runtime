@@ -558,6 +558,14 @@ void TransitionHClassWithBarrierVertex::SetValueLocationConstraints()
     UseRegister(Arg(HCLASS_INDEX));
 }
 
+void EnsureWritableElementsVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(ELEMENTS_INDEX));
+    UseRegister(Arg(OBJECT_INDEX));
+    DefineSameAsFirst(this);
+    SetTemporariesNeeded(1);
+}
+
 void PrepareSharedStoreFieldVertex::SetValueLocationConstraints()
 {
     DefineAsFixed(this, 0);
@@ -1091,6 +1099,13 @@ void RawI64ToTaggedVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
     UseRegister(Arg(INPUT_INDEX));
+}
+
+void U32ToTaggedNumberVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+    SetDoubleTemporariesNeeded(1);
 }
 
 void TaggedToRawI64Vertex::SetValueLocationConstraints()

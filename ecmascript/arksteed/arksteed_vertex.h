@@ -60,9 +60,13 @@ enum class SideEffectKind : uint8_t {
     NO_SIDE_EFFECT,
     FIELD_WRITE,
     ELEMENTS_WRITE,
+    TYPED_ARRAY_WRITE,
     ENV_SLOT_WRITE,
     MAP_TRANSITION,
+    ELEMENTS_KIND_TRANSITION,
     UNKNOWN_CALL,
+    // Internal work may write memory or allocate, but preserves JS property,
+    // HClass and environment-slot facts. Memory-read CSE still needs a new epoch.
     SAFE_CALL,
 };
 
@@ -393,6 +397,12 @@ protected:
     void SetDoubleTemporariesNeeded(uint8_t value)
     {
         bitfield_ = NumDoubleTempField::Update(bitfield_, value);
+    }
+
+    void SetInputCountForTransform(uint32_t inputCount)
+    {
+        ASSERT(inputCount <= GetInputCount());
+        bitfield_ = InputCountField::Update(bitfield_, inputCount);
     }
 
 private:

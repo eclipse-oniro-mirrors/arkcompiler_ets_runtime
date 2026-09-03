@@ -52,7 +52,8 @@ private:
                                     NamedLoadAccessSet *access) const;
     bool TryMakeNamedStoreAccessInfo(const NamedAccessCaseFeedback &caseFeedback, ArkSteedNameRef name,
                                      NamedStoreAccessInfo *info) const;
-    bool TryMakeNamedLoadAccessInfo(const NamedAccessCaseFeedback &caseFeedback, NamedLoadAccessInfo *info) const;
+    bool TryMakeNamedLoadAccessInfo(const NamedAccessCaseFeedback &caseFeedback, ArkSteedNameRef name,
+                                     NamedLoadAccessInfo *info) const;
     bool RegisterDependencies(PropertyAccessSet *access) const;
 
     JSThread *compilerThread_ {nullptr};

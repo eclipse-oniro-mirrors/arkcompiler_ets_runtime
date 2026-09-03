@@ -14,11 +14,10 @@
  */
 
 //! METHOD      compute
-//! COUNT       BranchIfReferenceEqual  3
-//! COUNT       CallCommonStub   GetStringFromConstPool  3
-// Note: three guards survive because each guard's throw block emits
-// GetStringFromConstPool (unknown side effect) which clears the env-slot CSE
-// between reads, so every read yields a fresh value vertex.
+//! COUNT       BranchIfReferenceEqual  2
+//! COUNT       CallCommonStub   GetStringFromConstPool  2
+// The first two reads share a non-hole check. Generic Add still invalidates
+// lexical-slot facts, so the third read needs another check after that call.
 
 declare function print(arg: number): string;
 

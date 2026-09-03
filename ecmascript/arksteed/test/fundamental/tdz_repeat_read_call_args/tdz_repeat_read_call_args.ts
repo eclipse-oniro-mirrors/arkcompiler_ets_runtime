@@ -14,10 +14,10 @@
  */
 
 //! METHOD      compute
-//! COUNT       BranchIfReferenceEqual  3
-//! COUNT       CallCommonStub   GetStringFromConstPool  3
-// Note: see tdz_same_var_repeat_read - guard throw blocks break the env-slot
-// CSE between argument reads, so each read keeps its own guard.
+//! COUNT       BranchIfReferenceEqual  1
+//! COUNT       CallCommonStub   GetStringFromConstPool  1
+// Loading the error-name string preserves the cached lexical value. All three
+// argument reads reuse the first non-hole check before the JS call.
 
 declare function print(arg: number): string;
 
@@ -33,7 +33,7 @@ function tdz_repeat_read_call_args(): number {
     }
 
     function compute(): number {
-        return add3(x, x, x);  // three hole guards on the same value
+        return add3(x, x, x);
     }
     ArkTools.arkSteedCompileSync(compute);
 

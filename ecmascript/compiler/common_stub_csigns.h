@@ -165,7 +165,8 @@ namespace panda::ecmascript::kungfu {
     V(LdLexVar)                                         \
     V(StLexVar)                                         \
     V(CMCSetValueWithBarrier)                           \
-    V(EnsurePropertiesCapacity)
+    V(EnsurePropertiesCapacity)                         \
+    V(CopyCOWElements)
 
 #define COMMON_STUB_ID_LIST(V)          \
     COMMON_STUB_LIST(V)
@@ -183,7 +184,7 @@ public:
         COMMON_STW_COPY_STUB_LIST(DEF_STUB_ID)
 #undef DEF_STUB_ID
         NUM_OF_STUBS,
-        NUM_OF_ALL_NORMAL_STUBS = EnsurePropertiesCapacity + 1,
+        NUM_OF_ALL_NORMAL_STUBS = CopyCOWElements + 1,
     };
 #define ASSERT_ID_EQUAL(name)                                 \
     static_assert((static_cast<uint32_t>(ID::name##StwCopy)) == \

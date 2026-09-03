@@ -59,6 +59,7 @@ struct RegListRegisterTraits<x64::XMMRegister> {
 
 struct DeferredRegisterSnapshot {
     ArkSteedRegList liveRegisters;
+    ArkSteedRegList liveTaggedRegisters;
     ArkDoubleRegList liveDoubleRegisters;
 };
 

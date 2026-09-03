@@ -76,7 +76,8 @@ public:
                                                                                       // shared with Load bits: [4, 30)
     using SOutOfBoundsBit = IsOnHeapBit::NextFlag;                                    // reuse: [30, 31) bit
     using SFieldTypeBit = SOutOfBoundsBit::NextField<SharedFieldType, PropertyAttributes::FIELD_TYPE_NUM>;  // [31, 39)
-    static_assert(SFieldTypeBit::END_BIT <= MAX_BIT_SIZE, "store handler overflow");
+    using SHandleCOWBit = SFieldTypeBit::NextFlag;
+    static_assert(SHandleCOWBit::END_BIT <= MAX_BIT_SIZE, "store handler overflow");
     using Type = uint64_t;
     static_assert(sizeof(Type) <= JSTaggedValue::TaggedTypeSize());
 
@@ -121,6 +122,11 @@ public:
     static inline bool IsStoreOutOfBounds(Type handler)
     {
         return SOutOfBoundsBit::Get(handler);
+    }
+
+    static inline bool StoreHandlesCOW(Type handler)
+    {
+        return SHandleCOWBit::Get(handler);
     }
 
     static inline void ClearStoreOutOfBounds(Type &handler)

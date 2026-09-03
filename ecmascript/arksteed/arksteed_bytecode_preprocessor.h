@@ -16,6 +16,8 @@
 #ifndef ECMASCRIPT_ARKSTEED_BYTECODE_PREPROCESSOR_NEW_H
 #define ECMASCRIPT_ARKSTEED_BYTECODE_PREPROCESSOR_NEW_H
 
+#include <algorithm>
+
 #include "ecmascript/arksteed/arksteed_vreg.h"
 #include "ecmascript/compiler/jit_compilation_env.h"
 #include "ecmascript/jspandafile/method_literal.h"
@@ -100,6 +102,40 @@ public:
         bool IsSynthetic() const;
     };
 
+    struct BytecodeLoopInfo {
+        explicit BytecodeLoopInfo(Chunk *chunk) : members(chunk) {}
+
+        const BasicBlockInfo *header {nullptr};
+        const BasicBlockInfo *preheader {nullptr};
+        const BasicBlockInfo *latch {nullptr};
+        const BytecodeLoopInfo *parent {nullptr};
+        ChunkVector<const BasicBlockInfo *> members;
+        uint32_t loopStartOffset {0};
+        uint32_t loopEndOffset {0};
+        bool innermost {true};
+        bool resumable {false};
+
+        bool Contains(uint32_t rpoIndex) const
+        {
+            auto it = std::lower_bound(members.begin(), members.end(), rpoIndex,
+                                       [](const BasicBlockInfo *member, uint32_t rpoIndex) {
+                                           return member->rpoIndex < rpoIndex;
+                                       });
+            return it != members.end() && (*it)->rpoIndex == rpoIndex;
+        }
+
+        bool Contains(const BasicBlockInfo *block) const
+        {
+            return block != nullptr && Contains(block->rpoIndex);
+        }
+
+        uint32_t BytecodeSize() const
+        {
+            ASSERT(loopEndOffset >= loopStartOffset);
+            return loopEndOffset - loopStartOffset;
+        }
+    };
+
     BytecodePreprocessor(JitCompilationEnv *env, Chunk *chunk);
 
     bool Run();
@@ -123,6 +159,13 @@ public:
     {
         return rpoList_[rpoIndex];
     }
+
+    const ChunkVector<BytecodeLoopInfo *> &GetLoopInfos() const
+    {
+        return loopInfos_;
+    }
+
+    const BytecodeLoopInfo *TryGetLoopInfo(const BasicBlockInfo *header) const;
 
     const BytecodeInfo *GetBytecode(uint32_t bcIndex) const
     {
@@ -182,6 +225,7 @@ private:
     void LoopAnalysis();
     void MakeRPO();
     void ClearDeadPredecessors();
+    void BuildLoopInfos();
 
     std::string DumpBasicBlocksString() const;
     std::string DumpTryBlocksString() const;
@@ -199,6 +243,8 @@ private:
     ChunkVector<BasicBlockInfo> basicBlocks_;
     ChunkVector<BytecodeInfo> bytecodes_;
     ChunkVector<const BasicBlockInfo *> rpoList_;
+    ChunkVector<BytecodeLoopInfo *> loopInfos_;
+    ChunkVector<BytecodeLoopInfo *> loopInfosByHeaderRpo_;
 
     // Auxiliary data
     ChunkVector<uint32_t> bcOffsets_;

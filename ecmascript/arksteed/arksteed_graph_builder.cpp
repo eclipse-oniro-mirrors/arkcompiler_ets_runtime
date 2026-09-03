@@ -29,6 +29,7 @@
 #include "ecmascript/arksteed/arksteed_constant_folding.h"
 #include "ecmascript/arksteed/arksteed_graph.h"
 #include "ecmascript/arksteed/arksteed_heap_broker.h"
+#include "ecmascript/arksteed/arksteed_loop_effects.h"
 #include "ecmascript/arksteed/arksteed_opcode.h"
 #include "ecmascript/arksteed/arksteed_register_merge_state.h"
 #include "ecmascript/arksteed/arksteed_side_effect_classifier.h"
@@ -58,6 +59,7 @@
 #include "ecmascript/string/base_string.h"
 
 namespace panda::ecmascript::arksteed {
+
 namespace {
 constexpr uint32_t CALL_ARG0 = 0;
 constexpr uint32_t CALL_ARG1 = 1;
@@ -535,8 +537,12 @@ struct GraphBuilder::CatchBlockInputData {
     }
 };
 
-GraphBuilder::GraphBuilder(JSThread *compilerThread, Graph *destGraph, uintptr_t glueAddr,
-                           BytecodePreprocessor *preproc, BytecodeAnalysis *analysis)
+GraphBuilder::GraphBuilder(JSThread *compilerThread,
+                           Graph *destGraph,
+                           uintptr_t glueAddr,
+                           BytecodePreprocessor *preproc,
+                           BytecodeAnalysis *analysis,
+                           bool isOsr)
     : graph_(destGraph),
       compilerThread_(compilerThread),
       glueAddr_(glueAddr),
@@ -545,34 +551,323 @@ GraphBuilder::GraphBuilder(JSThread *compilerThread, Graph *destGraph, uintptr_t
       pgoContext_(compilerThread, preproc->GetEnv()),
       numLocal_(preproc->GetNumLocalVRegs()),
       numParams_(preproc->GetNumParamVRegs()),
+      isOsr_(isOsr),
       chunk_(preproc->GetChunk()),
       blocks_(preproc->GetNumLiveBasicBlocks(), preproc->GetChunk()),
       exitBlocks_(preproc->GetNumLiveBasicBlocks(), preproc->GetChunk()),
-      frameStates_(preproc->GetNumLiveBasicBlocks(), preproc->GetChunk()),
       compileInfoFacts_(preproc->GetNumLiveBasicBlocks(), preproc->GetChunk()),
-      catchBlockInputs_(preproc->GetNumLiveBasicBlocks(), preproc->GetChunk())
+      catchBlockInputs_(preproc->GetNumLiveBasicBlocks(), preproc->GetChunk()),
+      outgoingBlockStates_(preproc->GetChunk()),
+      loopHeadersToPeel_(preproc->GetNumLiveBasicBlocks(), preproc->GetChunk()),
+      handledSourceBlocks_(preproc->GetNumLiveBasicBlocks(), preproc->GetChunk()),
+      loopEffectsStack_(preproc->GetChunk()),
+      loopExitEdges_(preproc->GetChunk())
 {}
 
 bool GraphBuilder::Run()
 {
     ASSERT(preproc_->GetNumLiveBasicBlocks() > 0);
     DebugLog();
+    InitializeLoopPeeling();
 
     SharedBCFrameState frameState(preproc_->GetNumVRegs(), nullptr, chunk_);
     InitializeStartBlock(frameState);
-    frameStates_[0] = CondensedBCFrameState(frameState, analysis_->GetLiveOutOfBlock(0), chunk_);
+    RecordOutgoingBlockState(0, frameState);
 
     // 1 : Skips the start block (which is initialized before)
     for (uint32_t i = 1, n = preproc_->GetNumLiveBasicBlocks(); i < n; i++) {
+        if (handledSourceBlocks_[i] != 0) {
+            continue;
+        }
+        if (loopHeadersToPeel_[i] && blocks_[i] != nullptr) {
+            BuildPeeledLoop(preproc_->TryGetLoopInfo(preproc_->GetBasicBlockByRPO(i)));
+            continue;
+        }
         if (blocks_[i] == nullptr) {
             ProcessDeadBasicBlock(i);
             continue;
         }
         frameState.Reset(nullptr);
         ProcessBasicBlock(frameState, i);
-        frameStates_[i] = CondensedBCFrameState(frameState, analysis_->GetLiveOutOfBlock(i), chunk_);
+        RecordOutgoingBlockState(i, frameState);
+    }
+    SynchronizeLoopEffects(nullptr);
+    return true;
+}
+
+BB *&GraphBuilder::BlockAt(uint32_t rpoIndex)
+{
+    return blocks_[rpoIndex];
+}
+
+BB *&GraphBuilder::ExitBlockAt(uint32_t rpoIndex)
+{
+    return exitBlocks_[rpoIndex];
+}
+
+CompileInfoFacts *&GraphBuilder::CompileInfoFactsAt(uint32_t rpoIndex)
+{
+    return compileInfoFacts_[rpoIndex];
+}
+
+const GraphBuilder::OutgoingBlockState &GraphBuilder::GetOutgoingBlockState(BB *block) const
+{
+    auto it = outgoingBlockStates_.find(block);
+    ASSERT(it != outgoingBlockStates_.end());
+    return it->second;
+}
+
+GraphBuilder::CatchBlockInputData *&GraphBuilder::CatchBlockInputsAt(uint32_t rpoIndex)
+{
+    return catchBlockInputs_[rpoIndex];
+}
+
+void GraphBuilder::BeginLoopEffects(const BytecodeLoopInfo *loop)
+{
+    BB *header = BlockAt(loop->header->rpoIndex);
+    LoopEffects *effects = header == nullptr ? nullptr : header->GetLoopEffects();
+    if (effects == nullptr) {
+        effects = chunk_->New<LoopEffects>(chunk_);
+    }
+    loopEffectsStack_.push_back(LoopEffectScope {loop, effects});
+}
+
+LoopEffects *GraphBuilder::EndLoopEffects()
+{
+    ASSERT(!loopEffectsStack_.empty());
+    LoopEffectScope scope = loopEffectsStack_.back();
+    loopEffectsStack_.pop_back();
+    BB *header = BlockAt(scope.source->header->rpoIndex);
+    if (header != nullptr && header->IsLoopHeader()) {
+        header->SetLoopEffects(scope.effects);
+    }
+    if (LoopEffects *outer = CurrentLoopEffects()) {
+        outer->Merge(*scope.effects);
+    }
+    return scope.effects;
+}
+
+void GraphBuilder::SynchronizeLoopEffects(const BytecodeLoopInfo *loop)
+{
+    while (!loopEffectsStack_.empty()) {
+        const BytecodeLoopInfo *parent = loop;
+        while (parent != nullptr && parent != loopEffectsStack_.back().source) {
+            parent = parent->parent;
+        }
+        if (parent != nullptr) {
+            break;
+        }
+        EndLoopEffects();
+    }
+    if (loop != nullptr && (loopEffectsStack_.empty() || loopEffectsStack_.back().source != loop)) {
+        SynchronizeLoopEffects(loop->parent);
+        BeginLoopEffects(loop);
+    }
+}
+
+void GraphBuilder::InitializeLoopPeeling()
+{
+    constexpr uint32_t MAX_LOOP_SIZE = 400;
+    constexpr uint32_t MAX_CUMULATIVE_SIZE = 900;
+    uint64_t cumulativeSize = 0;
+    for (const BytecodeLoopInfo *loop : preproc_->GetLoopInfos()) {
+        uint32_t loopSize = loop->BytecodeSize();
+        if (!IsEligibleForLoopPeeling(loop) || loopSize >= MAX_LOOP_SIZE ||
+            cumulativeSize + loopSize >= MAX_CUMULATIVE_SIZE) {
+            continue;
+        }
+
+        loopHeadersToPeel_[loop->header->rpoIndex] = 1;
+        cumulativeSize += loopSize;
+    }
+}
+
+bool GraphBuilder::IsEligibleForLoopPeeling(const BytecodeLoopInfo *loop) const
+{
+    if (!loop->innermost || loop->resumable || isOsr_) {
+        return false;
+    }
+    // CanonicalizeLoopsDFS has already merged multiple entries and backedges.
+    ASSERT(loop->header != nullptr && loop->preheader != nullptr && loop->latch != nullptr);
+    ASSERT(!loop->members.empty());
+    ASSERT(loop->header->jumpPredecessors.size() == 2);
+    ASSERT(loop->latch->jumpBlock == loop->header);
+    ASSERT(loop->preheader->rpoIndex < loop->header->rpoIndex);
+    uint32_t firstBytecodeSize = static_cast<uint32_t>(preproc_->GetBytecode(loop->header->startBcIndex)->GetSize());
+    return loop->loopStartOffset + firstBytecodeSize < loop->loopEndOffset;
+}
+
+void GraphBuilder::RecordOutgoingBlockState(uint32_t rpoIndex, SharedBCFrameState frameState)
+{
+    BB *exit = ExitBlockAt(rpoIndex);
+    if (exit == nullptr || CompileInfoFactsAt(rpoIndex) == nullptr) {
+        return;
+    }
+    CondensedBCFrameState condensed(frameState, analysis_->GetLiveOutOfBlock(rpoIndex), chunk_);
+    outgoingBlockStates_[exit] = OutgoingBlockState {
+        .frameState = condensed,
+        .facts = CompileInfoFactsAt(rpoIndex),
+    };
+}
+
+void GraphBuilder::FinalizeLoopExitEdges(uint32_t sourceRpoIndex)
+{
+    BB *sourceExit = ExitBlockAt(sourceRpoIndex);
+    if (sourceExit == nullptr) {
+        return;
+    }
+    const OutgoingBlockState &outgoing = GetOutgoingBlockState(sourceExit);
+    for (const LoopExitEdge &edge : loopExitEdges_) {
+        if (edge.sourceRpoIndex != sourceRpoIndex) {
+            continue;
+        }
+        ASSERT(edge.landing->GetControlVertex() == nullptr);
+        FinishBlockWithJump(edge.landing, edge.target);
+        outgoingBlockStates_[edge.landing] = outgoing;
+    }
+}
+
+BB *GraphBuilder::GetOrCreateLoopExitLanding(uint32_t sourceRpoIndex, uint32_t targetRpoIndex, BB *target)
+{
+    ASSERT(activePeeledLoop_ != nullptr && target != nullptr);
+    const BasicBlockInfo *source = preproc_->GetBasicBlockByRPO(sourceRpoIndex);
+    if (!source->IsConditionalJump()) {
+        return target;
+    }
+    auto existing = std::find_if(loopExitEdges_.begin(), loopExitEdges_.end(),
+                                 [sourceRpoIndex, targetRpoIndex](const LoopExitEdge &edge) {
+                                     return edge.sourceRpoIndex == sourceRpoIndex &&
+                                            edge.targetRpoIndex == targetRpoIndex;
+                                 });
+    if (existing != loopExitEdges_.end()) {
+        ASSERT(existing->target == target);
+        return existing->landing;
+    }
+
+    BB *landing = NewBlock();
+    loopExitEdges_.push_back(LoopExitEdge {sourceRpoIndex, targetRpoIndex, landing, target});
+    return landing;
+}
+
+void GraphBuilder::ResetLoopBuildState(const BytecodeLoopInfo *loop)
+{
+    // Already emitted blocks and outgoing states remain alive. Only the source-to-build
+    // lookup is reset, including internal catch merges; exits outside the loop are shared.
+    for (const BasicBlockInfo *block : loop->members) {
+        uint32_t index = block->rpoIndex;
+        blocks_[index] = nullptr;
+        exitBlocks_[index] = nullptr;
+        compileInfoFacts_[index] = nullptr;
+        catchBlockInputs_[index] = nullptr;
+    }
+    loopExitEdges_.clear();
+}
+
+void GraphBuilder::BuildPeeledLoop(const BytecodeLoopInfo *loop)
+{
+    ASSERT(loop != nullptr && activePeeledLoop_ == nullptr);
+    SynchronizeLoopEffects(loop->parent);
+    activePeeledLoop_ = loop;
+    loopPeelingStage_ = LoopPeelingStage::PEELED_ITERATION;
+    SharedBCFrameState frameState(preproc_->GetNumVRegs(), nullptr, chunk_);
+    do {
+        nextLoopHeader_ = nullptr;
+        optimisticHeaderFacts_ = nullptr;
+        BeginLoopEffects(loop);
+        for (const BasicBlockInfo *block : loop->members) {
+            uint32_t index = block->rpoIndex;
+            if (BlockAt(index) == nullptr) {
+                if (loopPeelingStage_ == LoopPeelingStage::CONSERVATIVE_LOOP) {
+                    ProcessDeadBasicBlock(index);
+                }
+                continue;
+            }
+            frameState.Reset(nullptr);
+            ProcessBasicBlock(frameState, index);
+            RecordOutgoingBlockState(index, frameState);
+            FinalizeLoopExitEdges(index);
+        }
+        LoopEffects *effects = EndLoopEffects();
+        if (nextLoopHeader_ == nullptr) {
+            // A compatible backedge closed the loop, or all paths exited.
+            if (loopPeelingStage_ == LoopPeelingStage::OPTIMISTIC_LOOP &&
+                BlockAt(loop->header->rpoIndex)->IsLoopHeader() &&
+                BlockAt(loop->header->rpoIndex)->PredecessorCount() == 1) {
+                TurnOptimisticLoopIntoPeeledIteration();
+            }
+            break;
+        }
+        ASSERT(loopPeelingStage_ == LoopPeelingStage::PEELED_ITERATION ||
+               loopPeelingStage_ == LoopPeelingStage::OPTIMISTIC_LOOP);
+        if (loopPeelingStage_ == LoopPeelingStage::PEELED_ITERATION) {
+            peeledLoopEffects_ = effects;
+        }
+        ResetLoopBuildState(loop);
+        BlockAt(loop->header->rpoIndex) = nextLoopHeader_;
+        loopPeelingStage_ = loopPeelingStage_ == LoopPeelingStage::PEELED_ITERATION
+            ? LoopPeelingStage::OPTIMISTIC_LOOP : LoopPeelingStage::CONSERVATIVE_LOOP;
+    } while (true);
+
+    for (const BasicBlockInfo *block : loop->members) {
+        handledSourceBlocks_[block->rpoIndex] = 1;
+    }
+    loopExitEdges_.clear();
+    activePeeledLoop_ = nullptr;
+    loopPeelingStage_ = LoopPeelingStage::NONE;
+    peeledLoopEffects_ = nullptr;
+    optimisticHeaderFacts_ = nullptr;
+    nextLoopHeader_ = nullptr;
+    currentSourceRpoIndex_ = BytecodePreprocessor::NULL_INDEX;
+}
+
+bool GraphBuilder::IsOptimisticBackedgeCompatible(SharedBCFrameState frameState, CompileInfoFacts *facts) const
+{
+    ASSERT(activePeeledLoop_ != nullptr && optimisticHeaderFacts_ != nullptr && facts != nullptr);
+    BB *header = blocks_[activePeeledLoop_->header->rpoIndex];
+    if (!facts->IsCompatibleWithLoopHeader(*optimisticHeaderFacts_, header)) {
+        return false;
+    }
+    for (PhiVertex *phi : header->GetPhis()) {
+        NodeInfo::NodeType expected = optimisticHeaderFacts_->GetKnownType(phi);
+        ValueVertex *backedgeValue = frameState.Get(phi->GetOwner().GetId());
+        NodeInfo::NodeType actual = facts->GetKnownType(backedgeValue);
+        if (!NodeInfo::NodeTypeIs(actual, expected)) {
+            return false;
+        }
     }
     return true;
+}
+
+void GraphBuilder::TurnOptimisticLoopIntoPeeledIteration()
+{
+    ASSERT(activePeeledLoop_ != nullptr && loopPeelingStage_ == LoopPeelingStage::OPTIMISTIC_LOOP);
+    BB *header = BlockAt(activePeeledLoop_->header->rpoIndex);
+    header->SetIsLoopHeader(false);
+    header->SetLoopEffects(nullptr);
+    for (PhiVertex *phi : header->GetPhis()) {
+        phi->ReduceToSinglePredecessor();
+    }
+}
+
+void GraphBuilder::FinishLoopBackedge(BB *owner, SharedBCFrameState frameState, CompileInfoFacts *facts,
+                                      uint32_t targetRpoIndex)
+{
+    if (activePeeledLoop_ == nullptr) {
+        FinishBlockWithJumpLoop(owner, ActivateNonCatchBlock(targetRpoIndex));
+        return;
+    }
+    ASSERT(activePeeledLoop_->header->rpoIndex == targetRpoIndex);
+    if (loopPeelingStage_ == LoopPeelingStage::PEELED_ITERATION ||
+        (loopPeelingStage_ == LoopPeelingStage::OPTIMISTIC_LOOP &&
+         !IsOptimisticBackedgeCompatible(frameState, facts))) {
+        if (loopPeelingStage_ == LoopPeelingStage::OPTIMISTIC_LOOP) {
+            TurnOptimisticLoopIntoPeeledIteration();
+        }
+        nextLoopHeader_ = NewBlock();
+        FinishBlockWithJump(owner, nextLoopHeader_);
+        return;
+    }
+    FinishBlockWithJumpLoop(owner, BlockAt(targetRpoIndex));
 }
 
 void GraphBuilder::DebugLog()
@@ -640,16 +935,16 @@ void GraphBuilder::ProcessDeadBasicBlock(uint32_t rpoIndex)
         return;
     }
     uint32_t headerRpoIndex = bcBlock->jumpBlock->rpoIndex;
-    if (blocks_[headerRpoIndex] == nullptr) {
+    if (BlockAt(headerRpoIndex) == nullptr) {
         LOG_COMPILER(DEBUG) << "Skips block #" << rpoIndex << " which is dead.";
         return;
     }
     // For the rare case where the loop-back block is dead (due to pattern like if (true) break),
     // a dummy basic block is created, which simply jumps the loop header.
     // Uses JumpLoopVertex so that LivenessProcessor can pop the loop from loopUsedVertices_.
-    blocks_[rpoIndex] = BB::New(chunk_);
-    FinishDeadLoopBackEdge(blocks_[rpoIndex], rpoIndex);
-    exitBlocks_[rpoIndex] = blocks_[rpoIndex];
+    BlockAt(rpoIndex) = BB::New(chunk_);
+    FinishDeadLoopBackEdge(BlockAt(rpoIndex), rpoIndex);
+    ExitBlockAt(rpoIndex) = BlockAt(rpoIndex);
 }
 
 void GraphBuilder::FinishDeadLoopBackEdge(BB *owner, uint32_t rpoIndex)
@@ -657,10 +952,10 @@ void GraphBuilder::FinishDeadLoopBackEdge(BB *owner, uint32_t rpoIndex)
     const BasicBlockInfo *bcBlock = preproc_->GetBasicBlockByRPO(rpoIndex);
     ASSERT(bcBlock->IsEndOfLoop());
     uint32_t headerRpoIndex = bcBlock->jumpBlock->rpoIndex;
-    ASSERT(blocks_[headerRpoIndex] != nullptr);
-    FinishBlockWithJumpLoop(owner, blocks_[headerRpoIndex]);
+    ASSERT(BlockAt(headerRpoIndex) != nullptr);
+    FinishBlockWithJumpLoop(owner, BlockAt(headerRpoIndex));
 
-    for (PhiVertex *phi : blocks_[headerRpoIndex]->GetPhis()) {
+    for (PhiVertex *phi : BlockAt(headerRpoIndex)->GetPhis()) {
         ASSERT(phi->GetInputCount() == 2);  // 2 : Two jumpPredecessors: one is entry, the other is loop-back
         phi->SetInput(1, undefinedValue_);
     }
@@ -669,43 +964,62 @@ void GraphBuilder::FinishDeadLoopBackEdge(BB *owner, uint32_t rpoIndex)
 void GraphBuilder::ProcessBasicBlock(SharedBCFrameState frameState, uint32_t rpoIndex)
 {
     const BasicBlockInfo *bcBlock = preproc_->GetBasicBlockByRPO(rpoIndex);
+    currentSourceRpoIndex_ = rpoIndex;
+    bool isAcyclicLoopCopy = activePeeledLoop_ != nullptr && loopPeelingStage_ == LoopPeelingStage::PEELED_ITERATION;
+    if (activePeeledLoop_ == nullptr) {
+        const BasicBlockInfo *header = bcBlock->IsLoopHeader() ? bcBlock : bcBlock->loopHeaderBlock;
+        SynchronizeLoopEffects(preproc_->TryGetLoopInfo(header));
+    }
     if (bcBlock->IsCatchBlockHeader()) {
         ProcessCatchBlockHead(frameState, rpoIndex);
         return;
     }
     InitCompileInfoFacts(rpoIndex);
-    if (bcBlock->IsLoopHeader()) {
-        blocks_[rpoIndex]->SetIsLoopHeader(true);
+    if (bcBlock->IsLoopHeader() && !isAcyclicLoopCopy) {
+        BlockAt(rpoIndex)->SetIsLoopHeader(true);
+        BlockAt(rpoIndex)->SetHasPeeledIteration(activePeeledLoop_ != nullptr);
     }
-    bcBlock->IsLoopHeader() ? InitFrameStateForLoopHeader(frameState, rpoIndex) : InitFrameState(frameState, rpoIndex);
+    (bcBlock->IsLoopHeader() && !isAcyclicLoopCopy)
+        ? InitFrameStateForLoopHeader(frameState, rpoIndex)
+        : InitFrameState(frameState, rpoIndex);
+
+    if (bcBlock->IsLoopHeader() && loopPeelingStage_ == LoopPeelingStage::OPTIMISTIC_LOOP) {
+        optimisticHeaderFacts_ = CompileInfoFactsAt(rpoIndex)->Clone();
+    }
 
     if (bcBlock->IsSynthetic()) {
         // Edge-split block, etc. No bytecode inside.
-        BB *target = ActivateNonCatchBlock(bcBlock->jumpBlock->rpoIndex);
         if (bcBlock->IsEndOfLoop()) {
-            FinishBlockWithJumpLoop(blocks_[rpoIndex], target);
+            FinishLoopBackedge(BlockAt(rpoIndex), frameState, CompileInfoFactsAt(rpoIndex),
+                               bcBlock->jumpBlock->rpoIndex);
         } else {
-            FinishBlockWithJump(blocks_[rpoIndex], target);
+            BB *target = ActivateNonCatchBlock(bcBlock->jumpBlock->rpoIndex);
+            FinishBlockWithJump(BlockAt(rpoIndex), target);
         }
-        exitBlocks_[rpoIndex] = blocks_[rpoIndex];
+        ExitBlockAt(rpoIndex) = BlockAt(rpoIndex);
     } else {
-        exitBlocks_[rpoIndex] = VisitBytecodesOfBasicBlock(frameState, rpoIndex);
+        ExitBlockAt(rpoIndex) = VisitBytecodesOfBasicBlock(frameState, rpoIndex, &CompileInfoFactsAt(rpoIndex));
     }
     if (bcBlock->IsEndOfLoop()) {
-        ControlVertex *control = exitBlocks_[rpoIndex]->GetControlVertex();
-        if (control->Is<DeoptVertex>()) {
-            // Keep the structural backedge needed by loop phis and liveness after the real path deopts.
-            FinishDeadLoopBackEdge(BB::New(chunk_), rpoIndex);
-        } else {
-            ASSERT(control->Is<JumpLoopVertex>());
+        ControlVertex *control = ExitBlockAt(rpoIndex)->GetControlVertex();
+        if (control->Is<DeoptVertex>() && !isAcyclicLoopCopy) {
+            // An optimistic loop without a real backedge becomes a peeled iteration.
+            // Other loops still need their structural backedge for phis and liveness.
+            if (loopPeelingStage_ != LoopPeelingStage::OPTIMISTIC_LOOP) {
+                FinishDeadLoopBackEdge(BB::New(chunk_), rpoIndex);
+            }
+        } else if (control->Is<JumpLoopVertex>()) {
             WriteBackFrameStateToLoopHeader(frameState, rpoIndex);
+        } else {
+            ASSERT(isAcyclicLoopCopy || (activePeeledLoop_ != nullptr &&
+                   loopPeelingStage_ == LoopPeelingStage::OPTIMISTIC_LOOP && nextLoopHeader_ != nullptr));
         }
     }
 }
 
 void GraphBuilder::ProcessCatchBlockHead(SharedBCFrameState frameState, uint32_t rpoIndex)
 {
-    blocks_[rpoIndex]->SetIsExceptionHandler(true);
+    BlockAt(rpoIndex)->SetIsExceptionHandler(true);
     InitCompileInfoFactsForCatchBlock(rpoIndex);
     InitFrameStateForCatchBlockHeader(frameState, rpoIndex);
 
@@ -714,38 +1028,18 @@ void GraphBuilder::ProcessCatchBlockHead(SharedBCFrameState frameState, uint32_t
 
     // Catch block header is always synthetic. Only an unconditional jump.
     ASSERT(bcBlock->IsJump());
-    FinishBlockWithJump(blocks_[rpoIndex], ActivateNonCatchBlock(bcBlock->jumpBlock->rpoIndex));
-    exitBlocks_[rpoIndex] = blocks_[rpoIndex];
-}
-
-bool GraphBuilder::HasEmittedNormalEdge(uint32_t predRpoIndex, uint32_t targetRpoIndex) const
-{
-    BB *predExit = exitBlocks_[predRpoIndex];
-    BB *target = blocks_[targetRpoIndex];
-    if (predExit == nullptr || target == nullptr) {
-        return false;
-    }
-    const auto &predecessors = target->GetPredecessors();
-    return std::find(predecessors.begin(), predecessors.end(), predExit) != predecessors.end();
+    FinishBlockWithJump(BlockAt(rpoIndex), ActivateNonCatchBlock(bcBlock->jumpBlock->rpoIndex));
+    ExitBlockAt(rpoIndex) = BlockAt(rpoIndex);
 }
 
 void GraphBuilder::InitFrameState(SharedBCFrameState frameState, uint32_t rpoIndex)
 {
-    const BasicBlockInfo *bcBlock = preproc_->GetBasicBlockByRPO(rpoIndex);
-
-    BB *target = blocks_[rpoIndex];
+    BB *target = BlockAt(rpoIndex);
     uint32_t actualNumPreds = target->PredecessorCount();
-    uint32_t actualPredIndex = 0;
-    for (const BasicBlockInfo *predecessor : bcBlock->jumpPredecessors) {
-        uint32_t predRpoIndex = predecessor->rpoIndex;
-        if (!HasEmittedNormalEdge(predRpoIndex, rpoIndex)) {
-            continue;
-        }
-        ASSERT(actualPredIndex < actualNumPreds);
-        ASSERT(target->GetPredecessor(actualPredIndex) == exitBlocks_[predRpoIndex]);
-        MergeFrameState(frameState, rpoIndex, predRpoIndex, actualPredIndex++, actualNumPreds);
+    for (uint32_t actualPredIndex = 0; actualPredIndex < actualNumPreds; ++actualPredIndex) {
+        BB *predecessor = target->GetPredecessor(actualPredIndex);
+        MergeFrameState(frameState, rpoIndex, GetOutgoingBlockState(predecessor), actualPredIndex, actualNumPreds);
     }
-    ASSERT(actualPredIndex == actualNumPreds);
 }
 
 void GraphBuilder::InitFrameStateForLoopHeader(SharedBCFrameState frameState, uint32_t rpoIndex)
@@ -760,22 +1054,29 @@ void GraphBuilder::InitFrameStateForLoopHeader(SharedBCFrameState frameState, ui
     for (uint32_t vregIndex = 0, n = frameState.NumVRegs(); vregIndex < n; vregIndex++) {
         if (phiCandidates.TestBit(vregIndex)) {
             // 2 : One is entry, the other is loop-back
-            frameState.Set(vregIndex, NewPhiVertex(blocks_[rpoIndex], 2, vregIndex));
+            frameState.Set(vregIndex, NewPhiVertex(BlockAt(rpoIndex), 2, vregIndex));
         }
     }
-    uint32_t predRpoIndex = blockInfo->jumpPredecessors[0]->rpoIndex;
-    ASSERT(blocks_[predRpoIndex] != nullptr);
+    BB *header = BlockAt(rpoIndex);
+    ASSERT(header->PredecessorCount() == 1);
     // 0 : The first predecessor which is loop entry; 2 : Two jumpPredecessors, one is entry, the other is loop-back
-    MergeFrameState(frameState, rpoIndex, predRpoIndex, 0, 2);
+    MergeFrameState(frameState, rpoIndex, GetOutgoingBlockState(header->GetPredecessor(0)), 0, 2);
+
+    CompileInfoFacts *facts = CompileInfoFactsAt(rpoIndex);
+    if (activePeeledLoop_ != nullptr && loopPeelingStage_ == LoopPeelingStage::OPTIMISTIC_LOOP) {
+        for (PhiVertex *phi : header->GetPhis()) {
+            facts->EnsureType(phi, facts->GetKnownType(phi->GetInput(0)));
+        }
+    }
 }
 
 void GraphBuilder::InitFrameStateForCatchBlockHeader(SharedBCFrameState frameState, uint32_t rpoIndex)
 {
     const BasicBlockInfo *bcBlock = preproc_->GetBasicBlockByRPO(rpoIndex);
     // For catch blocks, acc is always initialized as the exception object
-    frameState.SetAcc(NewVertex<LoadExceptionVertex>(blocks_[rpoIndex], {glue_}));
+    frameState.SetAcc(NewVertex<LoadExceptionVertex>(BlockAt(rpoIndex), {glue_}));
 
-    CatchBlockInputData *data = catchBlockInputs_[rpoIndex];
+    CatchBlockInputData *data = CatchBlockInputsAt(rpoIndex);
     ASSERT(data != nullptr);
     ASSERT(data->totalCount >= 1);
 
@@ -794,7 +1095,7 @@ void GraphBuilder::InitFrameStateForCatchBlockHeader(SharedBCFrameState frameSta
             frameState.Set(vregIndex, curInputList[0].vertex);
             continue;
         }
-        PhiVertex *phi = NewPhiVertex(blocks_[rpoIndex], data->totalCount, vregIndex);
+        PhiVertex *phi = NewPhiVertex(BlockAt(rpoIndex), data->totalCount, vregIndex);
         uint32_t inputIndex = 0;
         for (const auto &[input, count] : curInputList) {
             // Decompress input list
@@ -811,37 +1112,41 @@ void GraphBuilder::InitCompileInfoFacts(uint32_t rpoIndex)
     const BasicBlockInfo *blockInfo = preproc_->GetBasicBlockByRPO(rpoIndex);
     ASSERT(!blockInfo->IsCatchBlockHeader() && "Use InitCompileInfoFactsForCatchBlock() instead.");
 
-    if (blockInfo->IsLoopHeader()) {
-        ASSERT(blockInfo->jumpPredecessors.size() == 2);  // 2: loop entry and loop backedge
-        uint32_t entryPredIndex = blockInfo->jumpPredecessors[0]->rpoIndex;
-        ASSERT(compileInfoFacts_[entryPredIndex] != nullptr);
-        compileInfoFacts_[rpoIndex] = compileInfoFacts_[entryPredIndex]->CloneForLoopHeader();
+    bool isAcyclicLoopCopy = activePeeledLoop_ != nullptr && loopPeelingStage_ == LoopPeelingStage::PEELED_ITERATION;
+    if (blockInfo->IsLoopHeader() && !isAcyclicLoopCopy) {
+        BB *header = BlockAt(rpoIndex);
+        ASSERT(header->PredecessorCount() == 1);
+        CompileInfoFacts *incoming = GetOutgoingBlockState(header->GetPredecessor(0)).facts;
+        ASSERT(incoming != nullptr);
+        if (activePeeledLoop_ != nullptr && loopPeelingStage_ == LoopPeelingStage::OPTIMISTIC_LOOP) {
+            ASSERT(peeledLoopEffects_ != nullptr);
+            CompileInfoFactsAt(rpoIndex) = incoming->CloneForOptimisticLoopHeader(*peeledLoopEffects_);
+        } else {
+            CompileInfoFactsAt(rpoIndex) = incoming->CloneForLoopHeader();
+        }
         return;
     }
 
     CompileInfoFacts *facts = nullptr;
-    for (const BasicBlockInfo *predecessor : blockInfo->jumpPredecessors) {
-        uint32_t predRpoIndex = predecessor->rpoIndex;
-        if (!HasEmittedNormalEdge(predRpoIndex, rpoIndex)) {
-            continue;
-        }
-        ASSERT(compileInfoFacts_[predRpoIndex] != nullptr);
+    for (BB *predecessor : BlockAt(rpoIndex)->GetPredecessors()) {
+        CompileInfoFacts *incoming = GetOutgoingBlockState(predecessor).facts;
+        ASSERT(incoming != nullptr);
         if (facts == nullptr) {
-            facts = compileInfoFacts_[predRpoIndex]->Clone();
+            facts = incoming->Clone();
         } else {
-            facts->Merge(*compileInfoFacts_[predRpoIndex]);
+            facts->Merge(*incoming);
         }
     }
     ASSERT(facts != nullptr);
-    compileInfoFacts_[rpoIndex] = facts;
+    CompileInfoFactsAt(rpoIndex) = facts;
 }
 
 void GraphBuilder::InitCompileInfoFactsForCatchBlock(uint32_t rpoIndex)
 {
-    CatchBlockInputData *data = catchBlockInputs_[rpoIndex];
+    CatchBlockInputData *data = CatchBlockInputsAt(rpoIndex);
     ASSERT(data != nullptr);
     ASSERT(data->facts != nullptr);
-    compileInfoFacts_[rpoIndex] = data->facts;
+    CompileInfoFactsAt(rpoIndex) = data->facts;
 }
 
 void GraphBuilder::WriteBackFrameStateToLoopHeader(SharedBCFrameState current, uint32_t rpoIndex)
@@ -851,18 +1156,19 @@ void GraphBuilder::WriteBackFrameStateToLoopHeader(SharedBCFrameState current, u
     ASSERT(blockInfo->jumpBlock->jumpPredecessors.size() == 2);  // 2 : One is entry, the other is loop-back
 
     uint32_t headerIndex = blockInfo->jumpBlock->rpoIndex;
-    for (PhiVertex *phi : blocks_[headerIndex]->GetPhis()) {
+    for (PhiVertex *phi : BlockAt(headerIndex)->GetPhis()) {
         ASSERT(phi->GetInputCount() == 2);  // 2 : One is entry, the other is loop-back
         ValueVertex *fromCurrent = current.Get(phi->GetOwner().GetId());
         phi->SetInput(1, fromCurrent != nullptr ? fromCurrent : undefinedValue_);
     }
 }
 
-void GraphBuilder::MergeFrameState(SharedBCFrameState dest, uint32_t rpoIndex, uint32_t predRpoIndex,
+void GraphBuilder::MergeFrameState(SharedBCFrameState dest, uint32_t rpoIndex,
+                                   const OutgoingBlockState &incoming,
                                    uint32_t actualPredIndex, uint32_t actualNumPreds)
 {
     const kungfu::BitSet &liveIn = analysis_->GetLiveInOfBlock(rpoIndex);
-    frameStates_[predRpoIndex].ForEach([&, this](ValueVertex *fromPred, VRegIDType vregIndex) {
+    incoming.frameState.ForEach([&, this](ValueVertex *fromPred, VRegIDType vregIndex) {
         if (!liveIn.TestBit(vregIndex)) {
             return;
         }
@@ -875,11 +1181,11 @@ void GraphBuilder::MergeFrameState(SharedBCFrameState dest, uint32_t rpoIndex, u
             return;
         }
         PhiVertex *phi = cur->TryCast<PhiVertex>();
-        if (phi != nullptr && cur->GetOwner() == blocks_[rpoIndex]) {
+        if (phi != nullptr && cur->GetOwner() == BlockAt(rpoIndex)) {
             phi->SetInput(actualPredIndex, fromPred);
             return;
         }
-        phi = NewPhiVertex(blocks_[rpoIndex], actualNumPreds, vregIndex);
+        phi = NewPhiVertex(BlockAt(rpoIndex), actualNumPreds, vregIndex);
         for (uint32_t k = 0; k < actualPredIndex; k++) {
             phi->SetInput(k, cur);
         }
@@ -911,7 +1217,7 @@ PhiVertex *GraphBuilder::NewPhiVertexWith(BB *owner, const InputRange &inputs, V
 }
 
 template <class VertexT, class InputRange, class... Args>
-VertexT *GraphBuilder::NewVertex(BB *owner, const InputRange &inputs, Args &&...args)
+VertexT *GraphBuilder::NewVertexImpl(BB *owner, const InputRange &inputs, Args &&...args)
 {
     VertexT *vertex = Vertex::New<VertexT>(chunk_, inputs, std::forward<Args>(args)...);
     vertex->SetOwner(owner);
@@ -923,10 +1229,26 @@ VertexT *GraphBuilder::NewVertex(BB *owner, const InputRange &inputs, Args &&...
 }
 
 template <class VertexT, class InputRange, class... Args>
-VertexT *GraphBuilder::NewVertex(CompileInfoFacts *compileInfoFacts, BB *owner, const InputRange &inputs,
-                                 Args &&...args)
+VertexT *GraphBuilder::NewVertex(BB *owner, const InputRange &inputs, Args &&...args)
+{
+    VertexT *vertex = NewVertexImpl<VertexT>(owner, inputs, std::forward<Args>(args)...);
+    if constexpr (CanWrite(VertexT::PROPERTIES)) {
+        if (LoopEffects *effects = CurrentLoopEffects()) {
+            SideEffectDescriptor effect = ArkSteedSideEffectClassifier::Classify(vertex);
+            // Without facts there is no alias analysis for environment stores.
+            effects->Record(effect.kind == SideEffectKind::ENV_SLOT_WRITE
+                ? SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL} : effect);
+        }
+    }
+    return vertex;
+}
+
+template <class VertexT, class InputRange, class... Args>
+VertexT *GraphBuilder::NewVertex(
+    CompileInfoFacts *compileInfoFacts, BB *owner, const InputRange &inputs, Args &&...args)
 {
     if constexpr (CseCanUseAvailableExpression<VertexT>()) {
+        static_assert(!CanWrite(VertexT::PROPERTIES));
         CompileInfoFacts::ExpressionInputs expressionInputs(chunk_);
         for (ValueVertex *input : inputs) {
             expressionInputs.push_back(input);
@@ -947,17 +1269,21 @@ VertexT *GraphBuilder::NewVertex(CompileInfoFacts *compileInfoFacts, BB *owner, 
             return cached->Cast<VertexT>();
         }
 
-        VertexT *vertex = Vertex::New<VertexT>(chunk_, inputs, std::forward<Args>(args)...);
-        vertex->SetOwner(owner);
-        owner->AddVertex(vertex);
+        VertexT *vertex = NewVertexImpl<VertexT>(owner, inputs, std::forward<Args>(args)...);
         compileInfoFacts->AddExpression(hash, vertex, expressionInputs, options, needsEpochCheck);
         return vertex;
     }
-    VertexT *vertex = NewVertex<VertexT>(owner, inputs, std::forward<Args>(args)...);
+    VertexT *vertex = NewVertexImpl<VertexT>(owner, inputs, std::forward<Args>(args)...);
     if constexpr (CanWrite(VertexT::PROPERTIES)) {
-        compileInfoFacts->MarkPossibleSideEffect(ArkSteedSideEffectClassifier::Classify(vertex));
+        SideEffectDescriptor effect = ArkSteedSideEffectClassifier::Classify(vertex);
+        compileInfoFacts->MarkPossibleSideEffect(effect, CurrentLoopEffects());
     }
     return vertex;
+}
+
+LoopEffects *GraphBuilder::CurrentLoopEffects()
+{
+    return loopEffectsStack_.empty() ? nullptr : loopEffectsStack_.back().effects;
 }
 
 JumpVertex *GraphBuilder::FinishBlockWithJump(BB *owner, BB *target)
@@ -1050,21 +1376,28 @@ BB *GraphBuilder::NewBlock()
 
 BB *GraphBuilder::ActivateNonCatchBlock(uint32_t rpoIndex)
 {
-    if (blocks_[rpoIndex] == nullptr) {
-        blocks_[rpoIndex] = NewBlock();
+    BB *&block = BlockAt(rpoIndex);
+    if (block == nullptr) {
+        block = NewBlock();
     }
-    return blocks_[rpoIndex];
+    if (activePeeledLoop_ != nullptr && !activePeeledLoop_->Contains(rpoIndex)) {
+        ASSERT(currentSourceRpoIndex_ != BytecodePreprocessor::NULL_INDEX);
+        return GetOrCreateLoopExitLanding(currentSourceRpoIndex_, rpoIndex, block);
+    }
+    return block;
 }
 
 BB *GraphBuilder::ActivateCatchBlock(GraphBuilder::CatchBlockInputData **inputData, uint32_t rpoIndex)
 {
-    if (UNLIKELY(blocks_[rpoIndex] == nullptr)) {
-        blocks_[rpoIndex] = NewBlock();
-        catchBlockInputs_[rpoIndex] = chunk_->New<CatchBlockInputData>(analysis_->GetLiveInOfBlock(rpoIndex), chunk_);
+    BB *&block = BlockAt(rpoIndex);
+    CatchBlockInputData *&data = CatchBlockInputsAt(rpoIndex);
+    if (UNLIKELY(block == nullptr)) {
+        block = NewBlock();
+        data = chunk_->New<CatchBlockInputData>(analysis_->GetLiveInOfBlock(rpoIndex), chunk_);
     }
-    ASSERT(catchBlockInputs_[rpoIndex] != nullptr);
-    *inputData = catchBlockInputs_[rpoIndex];
-    return blocks_[rpoIndex];
+    ASSERT(data != nullptr);
+    *inputData = data;
+    return block;
 }
 
 LoadTaggedFieldVertex *GraphBuilder::ActivateGlobalEnv()
@@ -1091,6 +1424,9 @@ struct GraphBuilder::BytecodeVisitor {
         PropertyLookupResult plr;
         uint32_t holderDepth {0};
         bool isConst {false};
+        bool isJSArrayLength {false};
+        JSType typedArrayLengthType {JSType::INVALID};
+        OnHeapMode typedArrayOnHeapMode {OnHeapMode::NONE};
         bool canAssumeStableHClasses {false};
         bool hasStableProtoChain {false};
     };
@@ -2088,7 +2424,8 @@ struct GraphBuilder::BytecodeVisitor {
                     break;
                 default:
                     result = CommonStubCall({glue, value},
-                                            trueIfTruthy ? CommonStubID::ToBooleanTrue : CommonStubID::ToBooleanFalse);
+                                            trueIfTruthy ? CommonStubID::ToBooleanTrue : CommonStubID::ToBooleanFalse,
+                                            SideEffectKind::SAFE_CALL);
                     break;
             }
         }
@@ -2283,7 +2620,7 @@ struct GraphBuilder::BytecodeVisitor {
         NamedStoreAccessSet access;
         auto factory = self->pgoContext_.CreateAccessInfoFactory(*bcInfo);
         if (factory.TryBuildNamedStoreAccessInfo(0, &access) &&
-            TryLowerNamedStoreAccessSet(bcIndex, access, receiver, value)) {
+            TryLowerNamedStoreAccessSet(bcIndex, access, receiver, value, PropertyKey::ConstDataId(constDataId))) {
             return;
         }
         if (TryBuildStoreNamedProperty(bcIndex, receiver, constDataId, value)) {
@@ -3354,7 +3691,7 @@ struct GraphBuilder::BytecodeVisitor {
                 ASSERT(access.cases[i].kind == AccessKind::TRANSITION);
                 ASSERT(!access.cases[i].isSharedStore);
             }
-            if (TryLowerNamedStoreAccessSet(bcIndex, access, receiver, value)) {
+            if (TryLowerNamedStoreAccessSet(bcIndex, access, receiver, value, PropertyKey::ConstDataId(constDataId))) {
                 return;
             }
         }
@@ -3786,7 +4123,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *obj = frameState.GetAcc();
         TypeOfKind kind = ClassifyTypeOf(obj);
         if (kind == TypeOfKind::UNKNOWN) {
-            frameState.SetAcc(CommonStubCall({glue, obj}, CommonStubID::TypeOf));
+            frameState.SetAcc(CommonStubCall({glue, obj}, CommonStubID::TypeOf, SideEffectKind::SAFE_CALL));
             return;
         }
         frameState.SetAcc(StringFromGlobalConstant(StringIndexOfTypeOfKind(kind)));
@@ -4226,13 +4563,11 @@ struct GraphBuilder::BytecodeVisitor {
     void LowerJumpConstant()
     {
         ASSERT(blockInfo->IsJump());
-        BB *target = self->ActivateNonCatchBlock(blockInfo->jumpBlock->rpoIndex);
-
         if (blockInfo->jumpBlock->loopBackBlock == blockInfo) {
-            self->FinishBlockWithJumpLoop(currentBlock, target);
-        } else {
-            self->FinishBlockWithJump(currentBlock, target);
+            self->FinishLoopBackedge(currentBlock, frameState, compileInfoFacts_, blockInfo->jumpBlock->rpoIndex);
+            return;
         }
+        self->FinishBlockWithJump(currentBlock, self->ActivateNonCatchBlock(blockInfo->jumpBlock->rpoIndex));
     }
 
     // -------- Deoptimization Helpers --------
@@ -4822,8 +5157,14 @@ struct GraphBuilder::BytecodeVisitor {
 
     static bool IsSupportedNamedLoadAccessInfo(const PropertyAccessInfo &accessInfo)
     {
+        if (accessInfo.IsTypedArrayLength()) {
+            return accessInfo.mode == AccessMode::NAMED_LOAD && accessInfo.expectedHClass.IsSafeForCompile() &&
+                !accessInfo.holderIsReceiver && accessInfo.hasProtoCell &&
+                accessInfo.dependencies.canAssumeStableProtoChain;
+        }
         if (accessInfo.mode != AccessMode::NAMED_LOAD || !accessInfo.IsDataField() ||
-            accessInfo.fieldRepresentation != AccessFieldRepresentation::TAGGED ||
+            (accessInfo.fieldRepresentation != AccessFieldRepresentation::TAGGED &&
+             accessInfo.fieldRepresentation != AccessFieldRepresentation::UINT32) ||
             (accessInfo.fieldStorage != AccessFieldStorage::IN_OBJECT &&
              accessInfo.fieldStorage != AccessFieldStorage::PROPERTIES_ARRAY) ||
             !accessInfo.expectedHClass.IsSafeForCompile()) {
@@ -4872,6 +5213,22 @@ struct GraphBuilder::BytecodeVisitor {
         ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
         if (broker == nullptr) {
             return std::nullopt;
+        }
+        if (accessInfo.IsTypedArrayLength()) {
+            ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::TryConvertTypedArrayLength");
+            auto receiverHClass = TryResolveHClassRef(accessInfo.expectedHClass);
+            if (!receiverHClass.has_value() || !IsFixedLengthTypedArrayType(receiverHClass.value()->GetObjectType())) {
+                return std::nullopt;
+            }
+            NamedLoadAccessInfo result;
+            result.receiverHClass = receiverHClass.value();
+            result.lookupStartObjectHClasses = {receiverHClass.value()};
+            result.lookupStartObjectHClassRefs = {accessInfo.expectedHClass};
+            result.typedArrayLengthType = receiverHClass.value()->GetObjectType();
+            result.typedArrayOnHeapMode = receiverHClass.value()->IsOnHeapFromBitField() ?
+                OnHeapMode::ON_HEAP : OnHeapMode::NOT_ON_HEAP;
+            result.hasStableProtoChain = true;
+            return result;
         }
         ArkSteedObjectRef holderRef {};
         uint32_t holderHandleIndex = JitCompilationEnv::INVALID_HEAP_CONSTANT_INDEX;
@@ -4929,7 +5286,13 @@ struct GraphBuilder::BytecodeVisitor {
                 return std::nullopt;
             }
         }
-        std::optional<PropertyLookupResult> plr =
+        bool isJSArrayLength = accessInfo.fieldRepresentation == AccessFieldRepresentation::UINT32;
+        if (isJSArrayLength && (!accessInfo.holderIsReceiver || !holderHClass->IsJSArray() ||
+            accessInfo.fieldStorage != AccessFieldStorage::IN_OBJECT ||
+            accessInfo.fieldOffset != JSArray::LENGTH_OFFSET)) {
+            return std::nullopt;
+        }
+        std::optional<PropertyLookupResult> plr = isJSArrayLength ? PropertyLookupResult() :
             TryMakePropertyLookupResultFromAccessInfo(accessInfo, holderHClass, nameRef);
         if (!plr.has_value()) {
             return std::nullopt;
@@ -4947,6 +5310,7 @@ struct GraphBuilder::BytecodeVisitor {
             .plr = plr.value(),
             .holderDepth = holderDepth,
             .isConst = false,
+            .isJSArrayLength = isJSArrayLength,
             .canAssumeStableHClasses = accessInfo.dependencies.canAssumeStableHClass,
             .hasStableProtoChain = hasStableProtoChain,
         };
@@ -4965,7 +5329,10 @@ struct GraphBuilder::BytecodeVisitor {
 
     static bool HasSameLoadFieldAccess(const NamedLoadAccessInfo &lhs, const NamedLoadAccessInfo &rhs)
     {
-        if (lhs.plr.GetData() != rhs.plr.GetData() || lhs.isConst != rhs.isConst ||
+        if (lhs.isJSArrayLength != rhs.isJSArrayLength ||
+            lhs.typedArrayLengthType != rhs.typedArrayLengthType ||
+            lhs.typedArrayOnHeapMode != rhs.typedArrayOnHeapMode ||
+            lhs.plr.GetData() != rhs.plr.GetData() || lhs.isConst != rhs.isConst ||
             lhs.holderDepth != rhs.holderDepth) {
             return false;
         }
@@ -5177,7 +5544,7 @@ struct GraphBuilder::BytecodeVisitor {
             return value;
         }
         if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::NUMBER)) {
-            ValueVertex *result = RuntimeCall({value}, RTSTUB_ID(NumberToString));
+            ValueVertex *result = RuntimeCall({value}, RTSTUB_ID(NumberToString), SideEffectKind::SAFE_CALL);
             compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::STRING);
             return result;
         }
@@ -5186,7 +5553,7 @@ struct GraphBuilder::BytecodeVisitor {
             {value}, self->AccIndex(), [&]() -> ValueVertex * { return value; },
             [&]() -> ValueVertex * {
                 BuildDeoptIfNotNumber(value);
-                ValueVertex *numberResult = RuntimeCall({value}, RTSTUB_ID(NumberToString));
+                ValueVertex *numberResult = RuntimeCall({value}, RTSTUB_ID(NumberToString), SideEffectKind::SAFE_CALL);
                 compileInfoFacts_->EnsureType(numberResult, NodeInfo::NodeType::STRING);
                 return numberResult;
             });
@@ -5235,41 +5602,49 @@ struct GraphBuilder::BytecodeVisitor {
         return BuildTaggedI32Result(rawResult);
     }
 
+    template <class VertexT, class... Args>
+    ValueVertex *BuildCheckedI32Arithmetic(std::initializer_list<ValueVertex *> operands, Args... args)
+    {
+        static_assert(std::is_same_v<VertexT, I32AddWithOverflowVertex> ||
+                      std::is_same_v<VertexT, I32SubWithOverflowVertex> ||
+                      std::is_same_v<VertexT, I32MulWithOverflowVertex> ||
+                      std::is_same_v<VertexT, I32DivWithOverflowVertex> ||
+                      std::is_same_v<VertexT, CheckedI32ModVertex> ||
+                      std::is_same_v<VertexT, I32DivByConstWithCheckVertex> ||
+                      std::is_same_v<VertexT, I32IncWithOverflowVertex> ||
+                      std::is_same_v<VertexT, I32DecWithOverflowVertex>);
+        CompileInfoFacts::ExpressionInputs inputs(self->chunk_);
+        inputs.insert(inputs.end(), operands.begin(), operands.end());
+        CompileInfoFacts::ExpressionOptions options(self->chunk_);
+        CseBuildExpressionOptions(options, args...);
+        uint32_t hash = CseHashExpression(OpcodeOf<VertexT>, inputs, options);
+        if (ValueVertex *cached = compileInfoFacts_->FindExpression(
+                hash, OpcodeOf<VertexT>, inputs, options, false)) {
+            return cached;
+        }
+
+        // The dominating computation has already passed these checks for the same operands.
+        // Keep its frame state; only semantic options, not bytecode offsets, identify the result.
+        auto *result = self->NewVertex<VertexT>(
+            currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex), args...);
+        result->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(currentBcIndex));
+        compileInfoFacts_->AddExpression(hash, result, inputs, options, false);
+        return result;
+    }
+
     ValueVertex *BuildI32BinOpWithOverflow(BinaryOpKind kind, ValueVertex *leftI32, ValueVertex *rightI32)
     {
-        std::vector<ValueVertex *> inputs {leftI32, rightI32};
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
         switch (kind) {
-            case BinaryOpKind::ADD: {
-                ValueVertex *result = self->NewVertex<I32AddWithOverflowVertex>(
-                    currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex));
-                result->Cast<I32AddWithOverflowVertex>()->SetEagerDeoptFrameState(std::move(deoptFrameState));
-                return result;
-            }
-            case BinaryOpKind::SUB: {
-                ValueVertex *result = self->NewVertex<I32SubWithOverflowVertex>(
-                    currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex));
-                result->Cast<I32SubWithOverflowVertex>()->SetEagerDeoptFrameState(std::move(deoptFrameState));
-                return result;
-            }
-            case BinaryOpKind::MUL: {
-                ValueVertex *result = self->NewVertex<I32MulWithOverflowVertex>(
-                    currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex));
-                result->Cast<I32MulWithOverflowVertex>()->SetEagerDeoptFrameState(std::move(deoptFrameState));
-                return result;
-            }
-            case BinaryOpKind::DIV: {
-                ValueVertex *result = self->NewVertex<I32DivWithOverflowVertex>(
-                    currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex));
-                result->Cast<I32DivWithOverflowVertex>()->SetEagerDeoptFrameState(std::move(deoptFrameState));
-                return result;
-            }
-            case BinaryOpKind::MOD: {
-                ValueVertex *result = self->NewVertex<CheckedI32ModVertex>(
-                    currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex));
-                result->Cast<CheckedI32ModVertex>()->SetEagerDeoptFrameState(std::move(deoptFrameState));
-                return result;
-            }
+            case BinaryOpKind::ADD:
+                return BuildCheckedI32Arithmetic<I32AddWithOverflowVertex>({leftI32, rightI32});
+            case BinaryOpKind::SUB:
+                return BuildCheckedI32Arithmetic<I32SubWithOverflowVertex>({leftI32, rightI32});
+            case BinaryOpKind::MUL:
+                return BuildCheckedI32Arithmetic<I32MulWithOverflowVertex>({leftI32, rightI32});
+            case BinaryOpKind::DIV:
+                return BuildCheckedI32Arithmetic<I32DivWithOverflowVertex>({leftI32, rightI32});
+            case BinaryOpKind::MOD:
+                return BuildCheckedI32Arithmetic<CheckedI32ModVertex>({leftI32, rightI32});
             default:
                 return nullptr;
         }
@@ -5339,12 +5714,8 @@ struct GraphBuilder::BytecodeVisitor {
     {
         SignedDivisorMagic magic = ComputeSignedDivisorMagic(divisor);
         ValueVertex *leftI32 = BuildI32Operand(left, leftKnownInt);
-        std::vector<ValueVertex *> inputs {leftI32};
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
-        ValueVertex *rawResult = self->NewVertex<I32DivByConstWithCheckVertex>(
-            currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex), divisor, magic.magic,
-            magic.shift);
-        rawResult->Cast<I32DivByConstWithCheckVertex>()->SetEagerDeoptFrameState(std::move(deoptFrameState));
+        ValueVertex *rawResult = BuildCheckedI32Arithmetic<I32DivByConstWithCheckVertex>(
+            {leftI32}, divisor, magic.magic, magic.shift);
         return BuildTaggedI32Result(rawResult);
     }
 
@@ -5964,8 +6335,9 @@ struct GraphBuilder::BytecodeVisitor {
 
     ValueVertex *BuildStringAdd(ValueVertex *left, ValueVertex *right)
     {
-        ValueVertex *result = CommonStubCall({glue, left, right, self->graph_->GetInt32Constant(0), GlobalEnv()},
-                                             CommonStubID::StringAdd);
+        ValueVertex *result = CommonStubCall(
+            {glue, left, right, self->graph_->GetInt32Constant(0), GlobalEnv()}, CommonStubID::StringAdd,
+            SideEffectKind::SAFE_CALL);
         compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::STRING);
         return result;
     }
@@ -6076,7 +6448,9 @@ struct GraphBuilder::BytecodeVisitor {
             default:
                 UNREACHABLE();
         }
-        ValueVertex *result = CommonStubCall({glue, left, right, GlobalEnv()}, stubId);
+        SideEffectKind sideEffectKind = IsStrictEqualityCompare(kind)
+            ? SideEffectKind::SAFE_CALL : SideEffectKind::UNKNOWN_CALL;
+        ValueVertex *result = CommonStubCall({glue, left, right, GlobalEnv()}, stubId, sideEffectKind);
         compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
         return result;
     }
@@ -6181,7 +6555,8 @@ struct GraphBuilder::BytecodeVisitor {
     ValueVertex *BuildStringCompareOp(JSCondition kind, ValueVertex *left, ValueVertex *right)
     {
         if (kind == JSCondition::EQUAL || kind == JSCondition::STRICT_EQUAL) {
-            ValueVertex *result = self->NewVertex<StringEqualVertex>(currentBlock, {glue, left, right, GlobalEnv()});
+            ValueVertex *result = self->NewVertex<StringEqualVertex>(
+                compileInfoFacts_, currentBlock, {glue, left, right, GlobalEnv()});
             compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
             return result;
         }
@@ -6364,17 +6739,11 @@ struct GraphBuilder::BytecodeVisitor {
 
         switch (stubId) {
             case CommonStubID::Inc: {
-                EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
-                ValueVertex *rawResult = self->NewVertex<I32IncWithOverflowVertex>(
-                    currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex));
-                rawResult->Cast<I32IncWithOverflowVertex>()->SetEagerDeoptFrameState(std::move(deoptFrameState));
+                ValueVertex *rawResult = BuildCheckedI32Arithmetic<I32IncWithOverflowVertex>({valueI32});
                 return BuildTaggedI32Result(rawResult);
             }
             case CommonStubID::Dec: {
-                EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
-                ValueVertex *rawResult = self->NewVertex<I32DecWithOverflowVertex>(
-                    currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex));
-                rawResult->Cast<I32DecWithOverflowVertex>()->SetEagerDeoptFrameState(std::move(deoptFrameState));
+                ValueVertex *rawResult = BuildCheckedI32Arithmetic<I32DecWithOverflowVertex>({valueI32});
                 return BuildTaggedI32Result(rawResult);
             }
             case CommonStubID::Neg: {
@@ -7247,6 +7616,18 @@ struct GraphBuilder::BytecodeVisitor {
         return true;
     }
 
+    template <class VertexT, class... Args>
+    VertexT *NewElementsKindTransition(const NodeInfo::PossibleHClasses &sourceHClasses,
+                                       std::initializer_list<ValueVertex *> inputs, Args &&...args)
+    {
+        static_assert(CanWrite(VertexT::PROPERTIES));
+        VertexT *vertex = self->NewVertexImpl<VertexT>(currentBlock, inputs, std::forward<Args>(args)...);
+        SideEffectDescriptor effect {SideEffectKind::ELEMENTS_KIND_TRANSITION};
+        effect.transitionSources = &sourceHClasses;
+        compileInfoFacts_->MarkPossibleSideEffect(effect, self->CurrentLoopEffects());
+        return vertex;
+    }
+
     void BuildTransitionElementsKind(ValueVertex *receiver, const ResolvedElementStoreTransitionGroup &group,
                                      JSHClass *knownSourceHClass = nullptr)
     {
@@ -7261,16 +7642,56 @@ struct GraphBuilder::BytecodeVisitor {
         }
         if (group.useExactHClassTransition) {
             ASSERT(group.targetHClassConstant != nullptr);
-            self->NewVertex<TransitionHClassWithBarrierVertex>(compileInfoFacts_, currentBlock,
-                                                               {glue, receiver, group.targetHClassConstant});
-            compileInfoFacts_->MarkHClassesStaleForElementsKindTransition(sourceHClasses);
+            NewElementsKindTransition<TransitionHClassWithBarrierVertex>(
+                sourceHClasses, {glue, receiver, group.targetHClassConstant});
             compileInfoFacts_->RecordHClass(receiver, group.target.hclass, false);
             return;
         }
         // Mutant backing is rejected by the access-info factory, so changing to the canonical array HClass is enough.
-        RuntimeCall({receiver, TaggedConstantFromInt32(static_cast<int32_t>(group.targetElementsKind))},
-                    RTSTUB_ID(UpdateHClassForElementsKind));
-        compileInfoFacts_->MarkHClassesStaleForElementsKindTransition(sourceHClasses);
+        auto *call = NewElementsKindTransition<CallRuntimeVertex>(
+            sourceHClasses, {receiver, TaggedConstantFromInt32(static_cast<int32_t>(group.targetElementsKind))},
+            RTSTUB_ID(UpdateHClassForElementsKind));
+        UpdateCatchBlockData(call);
+        compileInfoFacts_->RecordHClass(receiver, group.target.hclass, false);
+    }
+
+    ValueVertex *BuildLoadJSArrayLength(ValueVertex *receiver)
+    {
+        if (ValueVertex *length = compileInfoFacts_->LookupLoadedProperty(receiver, PropertyKey::Length())) {
+            return length;
+        }
+        ValueVertex *length = self->NewVertex<LoadInt32FieldVertex>(
+            compileInfoFacts_, currentBlock, {receiver}, static_cast<int32_t>(JSArray::LENGTH_OFFSET));
+        compileInfoFacts_->RecordLoadedProperty(receiver, PropertyKey::Length(), length);
+        return length;
+    }
+
+    ValueVertex *BuildLoadTypedArrayLength(ValueVertex *receiver, JSType type)
+    {
+        bool isFixedLength = IsFixedLengthTypedArrayType(type);
+        if (isFixedLength) {
+            if (ValueVertex *length = compileInfoFacts_->LookupLoadedConstantProperty(
+                    receiver, PropertyKey::TypedArrayLength())) {
+                return length;
+            }
+        }
+        ValueVertex *length = self->NewVertex<LoadInt32FieldVertex>(
+            compileInfoFacts_, currentBlock, {receiver}, static_cast<int32_t>(JSTypedArray::ARRAY_LENGTH_OFFSET));
+        if (isFixedLength) {
+            compileInfoFacts_->RecordLoadedConstantProperty(receiver, PropertyKey::TypedArrayLength(), length);
+        }
+        return length;
+    }
+
+    ValueVertex *BuildLoadElements(ValueVertex *receiver)
+    {
+        if (ValueVertex *elements = compileInfoFacts_->LookupLoadedProperty(receiver, PropertyKey::Elements())) {
+            return elements;
+        }
+        ValueVertex *elements = self->NewVertex<LoadTaggedFieldVertex>(
+            compileInfoFacts_, currentBlock, {receiver}, static_cast<int32_t>(JSObject::ELEMENTS_OFFSET));
+        compileInfoFacts_->RecordLoadedProperty(receiver, PropertyKey::Elements(), elements);
+        return elements;
     }
 
     void BuildJSArrayElementAppend(ValueVertex *receiver, ValueVertex *index, ValueVertex *value,
@@ -7337,16 +7758,27 @@ struct GraphBuilder::BytecodeVisitor {
         compileInfoFacts_->Merge(*growExitFacts);
     }
 
+    ValueVertex *BuildEnsureWritableElements(ValueVertex *receiver, ValueVertex *elements)
+    {
+        ValueVertex *writableElements = self->NewVertex<EnsureWritableElementsVertex>(
+            compileInfoFacts_, currentBlock, {elements, receiver});
+        compileInfoFacts_->RecordLoadedProperty(receiver, PropertyKey::Elements(), writableElements);
+        return writableElements;
+    }
+
     void BuildJSArrayElementStore(ValueVertex *receiver, ValueVertex *index, ValueVertex *value,
-                                  ElementsKind elementsKind)
+                                  ElementsKind elementsKind, bool handlesCOW)
     {
         BuildDeoptIfElementsUnstable(receiver);
-        ValueVertex *length = self->NewVertex<LoadInt32FieldVertex>(compileInfoFacts_, currentBlock, {receiver},
-                                                                    static_cast<int32_t>(JSArray::LENGTH_OFFSET));
-        BuildDeoptIfInt32Condition(index, length, Condition::GREATER_THAN_OR_EQUAL, kungfu::DeoptType::NOTLEGALIDX1);
-        ValueVertex *elements = self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {receiver},
-                                                                       static_cast<int32_t>(JSObject::ELEMENTS_OFFSET));
-        BuildDeoptIfCOWElements(elements);
+        ValueVertex *length = BuildLoadJSArrayLength(receiver);
+        BuildDeoptIfInt32Condition(index, length, Condition::GREATER_THAN_OR_EQUAL,
+                                   kungfu::DeoptType::NOTLEGALIDX1);
+        ValueVertex *elements = BuildLoadElements(receiver);
+        if (handlesCOW) {
+            elements = BuildEnsureWritableElements(receiver, elements);
+        } else {
+            BuildDeoptIfCOWElements(elements);
+        }
         if (Elements::IsIntOrHoleInt(elementsKind)) {
             BuildCheckedTaggedIntToI32(value);
             BuildStoreTaggedElement(elements, index, value, ArkSteedWriteBarrierValueKind::NonHeap);
@@ -7378,8 +7810,9 @@ struct GraphBuilder::BytecodeVisitor {
     {
         return BuildJSArrayElementStoreDispatchImpl(
             access, groups, knownHClass, receiver, index, value,
-            [this](ValueVertex *receiver, ValueVertex *index, ValueVertex *value, ElementsKind kind) {
-                BuildJSArrayElementStore(receiver, index, value, kind);
+            [this, handlesCOW = access.handlesCOW](ValueVertex *receiver, ValueVertex *index,
+                                                  ValueVertex *value, ElementsKind kind) {
+                BuildJSArrayElementStore(receiver, index, value, kind, handlesCOW);
             });
     }
 
@@ -7509,6 +7942,8 @@ struct GraphBuilder::BytecodeVisitor {
 
             currentBlock = actionBlocks[groupIndex];
             compileInfoFacts_ = actionEntryFacts;
+            // Both the target-map edge and the completed transition reach this block with the target HClass.
+            compileInfoFacts_->RecordHClass(receiver, groups[groupIndex].target.hclass, false);
             storeAction(receiver, index, value, groups[groupIndex].targetElementsKind);
             self->FinishBlockWithJump(currentBlock, doneBlock);
             if (mergedExitFacts == nullptr) {
@@ -7630,8 +8065,7 @@ struct GraphBuilder::BytecodeVisitor {
 
         ValueVertex *index = BuildCheckedNonNegativeIndex(key);
         BuildDeoptIfArrayBufferDetached(receiver, access.onHeapMode);
-        ValueVertex *length = self->NewVertex<LoadInt32FieldVertex>(
-            compileInfoFacts_, currentBlock, {receiver}, static_cast<int32_t>(JSTypedArray::ARRAY_LENGTH_OFFSET));
+        ValueVertex *length = BuildLoadTypedArrayLength(receiver, access.typedArrayType);
         BuildDeoptIfInt32Condition(index, length, Condition::GREATER_THAN_OR_EQUAL,
                                    kungfu::DeoptType::NOTLEGALIDX1);
         switch (access.typedArrayType) {
@@ -7660,28 +8094,40 @@ struct GraphBuilder::BytecodeVisitor {
         }
     }
 
-    void BuildStoreTaggedField(ValueVertex *object, int32_t offset, ValueVertex *value)
+    template <class VertexT, class InputRange = std::initializer_list<ValueVertex *>, class... Args>
+    VertexT *NewFieldStore(PropertyKey key, const InputRange &inputs, Args &&...args)
+    {
+        static_assert(CanWrite(VertexT::PROPERTIES));
+        VertexT *vertex = self->NewVertexImpl<VertexT>(currentBlock, inputs, std::forward<Args>(args)...);
+        SideEffectDescriptor effect = ArkSteedSideEffectClassifier::Classify(vertex);
+        ASSERT(effect.kind == SideEffectKind::FIELD_WRITE);
+        effect.propertyKey = key;
+        compileInfoFacts_->MarkPossibleSideEffect(effect, self->CurrentLoopEffects());
+        return vertex;
+    }
+
+    void BuildStoreTaggedField(ValueVertex *object, int32_t offset, ValueVertex *value,
+                                PropertyKey key = PropertyKey::Unknown())
     {
         ArkSteedWriteBarrierValueKind valueKind = ClassifyDirectWriteBarrierValueKind(value);
         if (valueKind == ArkSteedWriteBarrierValueKind::NonHeap) {
-            self->NewVertex<StoreTaggedFieldVertex>(compileInfoFacts_, currentBlock, {object, value}, offset);
+            NewFieldStore<StoreTaggedFieldVertex>(key, {object, value}, offset);
             return;
         }
-        self->NewVertex<StoreTaggedFieldWithBarrierVertex>(compileInfoFacts_, currentBlock, {glue, object, value},
-                                                           offset, valueKind);
+        NewFieldStore<StoreTaggedFieldWithBarrierVertex>(key, {glue, object, value}, offset, valueKind);
     }
 
-    void BuildStoreField(ValueVertex *object, ValueVertex *value, PropertyLookupResult plr)
+    void BuildStoreField(ValueVertex *object, ValueVertex *value, PropertyLookupResult plr, PropertyKey key)
     {
         if (plr.IsInlinedProps()) {
-            BuildStoreTaggedField(object, static_cast<int32_t>(plr.GetOffset()), value);
+            BuildStoreTaggedField(object, static_cast<int32_t>(plr.GetOffset()), value, key);
             return;
         }
         ValueVertex *properties = self->NewVertex<LoadTaggedFieldVertex>(
             compileInfoFacts_, currentBlock, {object}, static_cast<int32_t>(JSObject::PROPERTIES_OFFSET));
-        int32_t offset =
-            static_cast<int32_t>(TaggedArray::DATA_OFFSET + plr.GetOffset() * JSTaggedValue::TaggedTypeSize());
-        BuildStoreTaggedField(properties, offset, value);
+        int32_t offset = static_cast<int32_t>(
+            TaggedArray::DATA_OFFSET + plr.GetOffset() * JSTaggedValue::TaggedTypeSize());
+        BuildStoreTaggedField(properties, offset, value, key);
     }
 
     ValueVertex *BuildPropertyLoadSource(uint32_t bcIndex, ValueVertex *object, const NamedLoadAccessInfo &accessInfo)
@@ -7844,7 +8290,7 @@ struct GraphBuilder::BytecodeVisitor {
     }
 
     bool TryLowerNamedStoreShared(uint32_t bcIndex, const NamedStoreAccessInfo &access, ValueVertex *receiver,
-                                  ValueVertex *value)
+                                  ValueVertex *value, PropertyKey key)
     {
         JSHClass *receiverHClass = nullptr;
         if (access.mode != AccessMode::NAMED_STORE || !access.isSharedStore || !access.holderIsReceiver ||
@@ -7868,8 +8314,8 @@ struct GraphBuilder::BytecodeVisitor {
             compileInfoFacts_, currentBlock, std::initializer_list<ValueVertex *> {value}, access.handlerInfo);
         UpdateCatchBlockData(prepareField);
         LoadLazyDeoptFrameStateForThrowableCall(bcIndex, prepareField);
-        self->NewVertex<StoreSharedFieldWithBarrierVertex>(compileInfoFacts_, currentBlock,
-                                                           {glue, storeTarget, prepareField}, access.fieldOffset);
+        NewFieldStore<StoreSharedFieldWithBarrierVertex>(
+            key, std::initializer_list<ValueVertex *> {glue, storeTarget, prepareField}, access.fieldOffset);
         return true;
     }
 
@@ -7982,17 +8428,19 @@ struct GraphBuilder::BytecodeVisitor {
     }
 
     void BuildPreparedNamedStoreField(ValueVertex *storeTarget, int32_t offset, ValueVertex *value,
-                                      AccessFieldRepresentation representation)
+                                      AccessFieldRepresentation representation, PropertyKey key = PropertyKey::Unknown())
     {
         switch (representation) {
             case AccessFieldRepresentation::TAGGED:
-                BuildStoreTaggedField(storeTarget, offset, value);
+                BuildStoreTaggedField(storeTarget, offset, value, key);
                 return;
             case AccessFieldRepresentation::INT32:
-                self->NewVertex<StoreInt32FieldVertex>(compileInfoFacts_, currentBlock, {storeTarget, value}, offset);
+                NewFieldStore<StoreInt32FieldVertex>(
+                    key, std::initializer_list<ValueVertex *> {storeTarget, value}, offset);
                 return;
             case AccessFieldRepresentation::DOUBLE:
-                self->NewVertex<StoreDoubleFieldVertex>(compileInfoFacts_, currentBlock, {storeTarget, value}, offset);
+                NewFieldStore<StoreDoubleFieldVertex>(
+                    key, std::initializer_list<ValueVertex *> {storeTarget, value}, offset);
                 return;
             default:
                 UNREACHABLE();
@@ -8091,14 +8539,14 @@ struct GraphBuilder::BytecodeVisitor {
                access.fieldRepresentation == AccessFieldRepresentation::DOUBLE;
     }
 
-    bool TryLowerNamedStoreField(uint32_t bcIndex, const NamedStoreAccessInfo &access, ValueVertex *receiver,
-                                 ValueVertex *value)
+    bool TryLowerNamedStoreField(uint32_t bcIndex, const NamedStoreAccessInfo &access,
+                                 ValueVertex *receiver, ValueVertex *value, PropertyKey key)
     {
         if (access.kind == AccessKind::TRANSITION) {
             return TryLowerNamedStoreTransition(bcIndex, access, receiver, value);
         }
         if (access.isSharedStore) {
-            return TryLowerNamedStoreShared(bcIndex, access, receiver, value);
+            return TryLowerNamedStoreShared(bcIndex, access, receiver, value, key);
         }
         if (access.mode != AccessMode::NAMED_STORE) {
             return false;
@@ -8140,19 +8588,22 @@ struct GraphBuilder::BytecodeVisitor {
             storeInputs.emplace_back(value);
             EagerDeoptimizableMixin *store = nullptr;
             if (access.fieldRepresentation == AccessFieldRepresentation::INT32) {
-                store = self->NewVertex<StoreInt32FieldWithRepVertex>(compileInfoFacts_, currentBlock, storeInputs,
-                                                                      self->chunk_, access.fieldOffset,
-                                                                      self->preproc_->GetBytecodeOffset(bcIndex));
+                store = NewFieldStore<StoreInt32FieldWithRepVertex>(
+                    key, storeInputs, self->chunk_, access.fieldOffset,
+                    self->preproc_->GetBytecodeOffset(bcIndex));
             } else {
-                store = self->NewVertex<StoreDoubleFieldWithRepVertex>(compileInfoFacts_, currentBlock, storeInputs,
-                                                                       self->chunk_, access.fieldOffset,
-                                                                       self->preproc_->GetBytecodeOffset(bcIndex));
+                store = NewFieldStore<StoreDoubleFieldWithRepVertex>(
+                    key, storeInputs, self->chunk_, access.fieldOffset,
+                    self->preproc_->GetBytecodeOffset(bcIndex));
             }
             store->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
             return true;
         }
 
-        BuildStoreTaggedField(storeTarget, access.fieldOffset, value);
+        BuildStoreTaggedField(storeTarget, access.fieldOffset, value, key);
+        if (access.holderIsReceiver) {
+            compileInfoFacts_->RecordLoadedProperty(receiver, key, value);
+        }
         return true;
     }
 
@@ -8201,8 +8652,8 @@ struct GraphBuilder::BytecodeVisitor {
         return left.fieldStorage == right.fieldStorage && left.fieldOffset == right.fieldOffset;
     }
 
-    bool TryLowerEquivalentNamedStoreFields(uint32_t bcIndex, const NamedStoreAccessSet &access, ValueVertex *receiver,
-                                            ValueVertex *value)
+    bool TryLowerEquivalentNamedStoreFields(uint32_t bcIndex, const NamedStoreAccessSet &access,
+                                            ValueVertex *receiver, ValueVertex *value, PropertyKey key)
     {
         if (access.caseCount < 2 || !IsLocalTaggedStoreField(access.cases[0])) {
             return false;
@@ -8251,12 +8702,13 @@ struct GraphBuilder::BytecodeVisitor {
             storeTarget = self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {receiver},
                                                                  static_cast<int32_t>(JSObject::PROPERTIES_OFFSET));
         }
-        BuildStoreTaggedField(storeTarget, access.cases[0].fieldOffset, value);
+        BuildStoreTaggedField(storeTarget, access.cases[0].fieldOffset, value, key);
+        compileInfoFacts_->RecordLoadedProperty(receiver, key, value);
         return true;
     }
 
-    bool TryLowerPolyNamedStoreFields(uint32_t bcIndex, const NamedStoreAccessSet &access, ValueVertex *receiver,
-                                      ValueVertex *value)
+    bool TryLowerPolyNamedStoreFields(uint32_t bcIndex, const NamedStoreAccessSet &access,
+                                      ValueVertex *receiver, ValueVertex *value, PropertyKey key)
     {
         if (access.caseCount < 2) {
             return false;
@@ -8302,16 +8754,17 @@ struct GraphBuilder::BytecodeVisitor {
         storeInputs.emplace_back(glue);
         storeInputs.emplace_back(receiver);
         storeInputs.emplace_back(value);
-        auto *store = self->NewVertex<StoreTaggedFieldByHClassVertex>(
-            compileInfoFacts_, currentBlock, storeInputs, self->chunk_, storeCases,
+        auto *store = NewFieldStore<StoreTaggedFieldByHClassVertex>(
+            key, storeInputs, self->chunk_, storeCases,
             ClassifyDirectWriteBarrierValueKind(value), self->preproc_->GetBytecodeOffset(bcIndex));
         store->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
         compileInfoFacts_->RecordPossibleHClasses(receiver, provenHClasses);
+        compileInfoFacts_->RecordLoadedProperty(receiver, key, value);
         return true;
     }
 
-    bool TryLowerMixedPolyNamedStores(uint32_t bcIndex, const NamedStoreAccessSet &access, ValueVertex *receiver,
-                                      ValueVertex *value)
+    bool TryLowerMixedPolyNamedStores(uint32_t bcIndex, const NamedStoreAccessSet &access,
+                                      ValueVertex *receiver, ValueVertex *value, PropertyKey key)
     {
         if (access.caseCount < 2) {
             return false;
@@ -8389,8 +8842,9 @@ struct GraphBuilder::BytecodeVisitor {
             compileInfoFacts_ = entryFacts->Clone();
             compileInfoFacts_->RecordHClass(
                 receiver, expectedHClasses[i],
-                IsHClassStableForFacts(expectedHClasses[i], access.cases[i].dependencies.canAssumeStableHClass));
-            bool lowered = TryLowerNamedStoreField(bcIndex, access.cases[i], receiver, value);
+                IsHClassStableForFacts(expectedHClasses[i],
+                                       access.cases[i].dependencies.canAssumeStableHClass));
+            bool lowered = TryLowerNamedStoreField(bcIndex, access.cases[i], receiver, value, key);
             ASSERT(lowered);
             if (!lowered) {
                 UNREACHABLE();
@@ -8419,8 +8873,8 @@ struct GraphBuilder::BytecodeVisitor {
         return true;
     }
 
-    bool TryLowerNamedStoreAccessSet(uint32_t bcIndex, const NamedStoreAccessSet &access, ValueVertex *receiver,
-                                     ValueVertex *value)
+    bool TryLowerNamedStoreAccessSet(uint32_t bcIndex, const NamedStoreAccessSet &access,
+                                     ValueVertex *receiver, ValueVertex *value, PropertyKey key)
     {
         if (access.caseCount == 0) {
             return false;
@@ -8436,7 +8890,7 @@ struct GraphBuilder::BytecodeVisitor {
             if (checkResult != HClassCheckResult::SUCCESS) {
                 return checkResult == HClassCheckResult::UNREACHABLE;
             }
-            return TryLowerNamedStoreField(bcIndex, access.cases[0], receiver, value);
+            return TryLowerNamedStoreField(bcIndex, access.cases[0], receiver, value, key);
         }
 
         JSHClass *knownHClass = TryGetFreshKnownHClass(receiver);
@@ -8469,19 +8923,37 @@ struct GraphBuilder::BytecodeVisitor {
                     return true;
                 }
                 if (freshnessResult == HClassCheckResult::SUCCESS) {
-                    return TryLowerNamedStoreField(bcIndex, *matched, receiver, value);
+                    return TryLowerNamedStoreField(bcIndex, *matched, receiver, value, key);
                 }
             }
         }
 
-        return TryLowerEquivalentNamedStoreFields(bcIndex, access, receiver, value) ||
-               TryLowerPolyNamedStoreFields(bcIndex, access, receiver, value) ||
-               TryLowerMixedPolyNamedStores(bcIndex, access, receiver, value);
+        return TryLowerEquivalentNamedStoreFields(bcIndex, access, receiver, value, key) ||
+            TryLowerPolyNamedStoreFields(bcIndex, access, receiver, value, key) ||
+            TryLowerMixedPolyNamedStores(bcIndex, access, receiver, value, key);
+    }
+
+    void BuildTypedArrayLengthGuards(uint32_t bcIndex, ValueVertex *object, const NamedLoadAccessInfo &accessInfo)
+    {
+        // Replacing an accessor in place need not change its holder's HClass.
+        auto *guard = self->NewVertex<DeoptIfPrototypeChangedVertex>(
+            currentBlock, {object}, self->chunk_, true, false, self->preproc_->GetBytecodeOffset(bcIndex));
+        guard->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+        BuildDeoptIfArrayBufferDetached(object, accessInfo.typedArrayOnHeapMode);
     }
 
     ValueVertex *TryBuildPropertyLoad(uint32_t bcIndex, ValueVertex *object, const LoadedPropertyKey &key,
                                       const NamedLoadAccessInfo &accessInfo)
     {
+        if (accessInfo.isJSArrayLength) {
+            return self->NewVertex<U32ToTaggedNumberVertex>(
+                compileInfoFacts_, currentBlock, {BuildLoadJSArrayLength(object)});
+        }
+        if (accessInfo.typedArrayLengthType != JSType::INVALID) {
+            BuildTypedArrayLengthGuards(bcIndex, object, accessInfo);
+            return self->NewVertex<U32ToTaggedNumberVertex>(compileInfoFacts_, currentBlock,
+                {BuildLoadTypedArrayLength(object, accessInfo.typedArrayLengthType)});
+        }
         ValueVertex *cached = compileInfoFacts_->LookupLoadedProperty(key);
         if (cached == nullptr) {
             cached = compileInfoFacts_->LookupLoadedConstantProperty(key);
@@ -8508,6 +8980,17 @@ struct GraphBuilder::BytecodeVisitor {
     {
         // Internal case blocks share CompileInfoFacts. Do not let a load from one sibling case
         // enter the property cache or available-expression table and leak into another case.
+        if (accessInfo.isJSArrayLength) {
+            ValueVertex *length = self->NewVertex<LoadInt32FieldVertex>(
+                currentBlock, {object}, static_cast<int32_t>(JSArray::LENGTH_OFFSET));
+            return self->NewVertex<U32ToTaggedNumberVertex>(currentBlock, {length});
+        }
+        if (accessInfo.typedArrayLengthType != JSType::INVALID) {
+            BuildTypedArrayLengthGuards(bcIndex, object, accessInfo);
+            ValueVertex *length = self->NewVertex<LoadInt32FieldVertex>(
+                currentBlock, {object}, static_cast<int32_t>(JSTypedArray::ARRAY_LENGTH_OFFSET));
+            return self->NewVertex<U32ToTaggedNumberVertex>(currentBlock, {length});
+        }
         ValueVertex *loadSource = BuildPropertyLoadSource(bcIndex, object, accessInfo);
         return BuildLoadFieldWithoutCse(loadSource, accessInfo.plr);
     }
@@ -8644,6 +9127,12 @@ struct GraphBuilder::BytecodeVisitor {
     bool TryBuildLoadNamedProperty(const BytecodeInfo *bcInfo, uint32_t bcIndex, ValueVertex *receiver,
                                    uint16_t constDataId)
     {
+        // Successful own-field stores cache the JS value independently of the field's physical layout.
+        if (ValueVertex *stored = compileInfoFacts_->LookupLoadedProperty(
+                receiver, PropertyKey::ConstDataId(constDataId))) {
+            frameState.SetAcc(stored);
+            return true;
+        }
         auto factory = self->pgoContext_.CreateAccessInfoFactory(*bcInfo);
         PropertyAccessSet accessSet;
         if (!factory.TryBuildNamedLoadAccessInfo(0, &accessSet)) {
@@ -8779,11 +9268,11 @@ struct GraphBuilder::BytecodeVisitor {
     void BuildNormalElementLoad(uint32_t bcIndex, ValueVertex *receiver, ValueVertex *key)
     {
         ValueVertex *index = BuildCheckedTaggedIntToI32(key);
-        ValueVertex *elements = self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {receiver},
-                                                                       static_cast<int32_t>(JSObject::ELEMENTS_OFFSET));
-        ValueVertex *capacity = self->NewVertex<LoadInt32FieldVertex>(compileInfoFacts_, currentBlock, {elements},
-                                                                      static_cast<int32_t>(TaggedArray::LENGTH_OFFSET));
-        BuildDeoptIfInt32Condition(index, capacity, Condition::ABOVE_OR_EQUAL, kungfu::DeoptType::RANGE_ERROR);
+        ValueVertex *elements = BuildLoadElements(receiver);
+        ValueVertex *capacity = self->NewVertex<LoadInt32FieldVertex>(
+            compileInfoFacts_, currentBlock, {elements}, static_cast<int32_t>(TaggedArray::LENGTH_OFFSET));
+        BuildDeoptIfInt32Condition(
+            index, capacity, Condition::ABOVE_OR_EQUAL, kungfu::DeoptType::RANGE_ERROR);
 
         ValueVertex *result =
             self->NewVertex<LoadTaggedElementVertex>(compileInfoFacts_, currentBlock, {elements, index});
@@ -8868,16 +9357,17 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *cachedChar =
             self->NewVertex<LoadSingleCharTableElementVertex>(compileInfoFacts_, currentBlock, {glue, charCode});
         self->FinishBlockWithJump(currentBlock, doneBlock);
+        CompileInfoFacts *cachedCharFacts = compileInfoFacts_;
 
         currentBlock = createCharBlock;
         compileInfoFacts_ = entryFacts->Clone();
         ValueVertex *createdChar =
-            CommonStubCallToAccWithLazyDeopt({glue, charCode, GlobalEnv()}, CommonStubID::CreateStringBySingleCharCode);
+            CommonStubCallToAccWithLazyDeopt(
+            {glue, charCode, GlobalEnv()}, CommonStubID::CreateStringBySingleCharCode, SideEffectKind::SAFE_CALL);
         self->FinishBlockWithJump(currentBlock, doneBlock);
 
         currentBlock = doneBlock;
-        compileInfoFacts_ = entryFacts;
-        compileInfoFacts_->OnSideEffect();
+        compileInfoFacts_->Merge(*cachedCharFacts);
         frameState.SetAcc(self->NewPhiVertexWith(currentBlock, {cachedChar, createdChar}, self->AccIndex()));
         return true;
     }
@@ -8968,10 +9458,6 @@ struct GraphBuilder::BytecodeVisitor {
         JSType objectType = receiverHClass->GetObjectType();
 
         ValueVertex *index = checkedIndex == nullptr ? BuildCheckedTaggedIntToI32(key) : checkedIndex;
-        ValueVertex *length = self->NewVertex<LoadInt32FieldVertex>(
-            compileInfoFacts_, currentBlock, {receiver}, static_cast<int32_t>(JSTypedArray::ARRAY_LENGTH_OFFSET));
-        BuildDeoptIfInt32Condition(index, length, Condition::ABOVE_OR_EQUAL, kungfu::DeoptType::RANGE_ERROR);
-
         bool isOnHeap = receiverHClass->IsOnHeapFromBitField();
         ValueVertex *storage =
             self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {receiver},
@@ -8984,6 +9470,10 @@ struct GraphBuilder::BytecodeVisitor {
                                       kungfu::DeoptType::ARRAYBUFFERISDETACHED);
         }
 
+        ValueVertex *length = BuildLoadTypedArrayLength(receiver, objectType);
+        BuildDeoptIfInt32Condition(
+            index, length, Condition::ABOVE_OR_EQUAL, kungfu::DeoptType::RANGE_ERROR);
+
         switch (objectType) {
             case JSType::JS_INT8_ARRAY:
             case JSType::JS_UINT8_ARRAY:
@@ -8993,7 +9483,7 @@ struct GraphBuilder::BytecodeVisitor {
             case JSType::JS_INT32_ARRAY: {
                 ValueVertex *raw = self->NewVertex<TypedArrayIntLoadElementVertex>(
                     compileInfoFacts_, currentBlock, {receiver, index, storage}, objectType, isOnHeap);
-                frameState.SetAcc(self->NewVertex<I32ToTaggedIntVertex>(compileInfoFacts_, currentBlock, {raw}));
+                frameState.SetAcc(BuildTaggedI32Result(raw));
                 break;
             }
             case JSType::JS_UINT32_ARRAY:
@@ -9001,7 +9491,7 @@ struct GraphBuilder::BytecodeVisitor {
             case JSType::JS_FLOAT64_ARRAY: {
                 ValueVertex *raw = self->NewVertex<TypedArrayDoubleLoadElementVertex>(
                     compileInfoFacts_, currentBlock, {receiver, index, storage}, objectType, isOnHeap);
-                frameState.SetAcc(self->NewVertex<F64ToTaggedDoubleVertex>(compileInfoFacts_, currentBlock, {raw}));
+                frameState.SetAcc(BuildTaggedF64Value(raw));
                 break;
             }
             default:
@@ -9038,6 +9528,10 @@ struct GraphBuilder::BytecodeVisitor {
 
         ValueVertex *index = BuildCheckedTaggedIntToI32(key);
         BB *doneBlock = self->NewBlock();
+        CompileInfoFacts *entryFacts = compileInfoFacts_;
+        ValueVertex *entryAcc = frameState.GetAcc();
+        std::vector<CompileInfoFacts *> caseExitFacts;
+        caseExitFacts.reserve(access.elementCount);
         std::vector<ValueVertex *> results;
         results.reserve(access.elementCount);
         for (uint32_t i = 0; i + 1 < access.elementCount; ++i) {
@@ -9052,21 +9546,32 @@ struct GraphBuilder::BytecodeVisitor {
                 std::vector<uint32_t> {expectedHClassHandleIndex.value()});
 
             currentBlock = caseBlock;
+            compileInfoFacts_ = entryFacts->Clone();
+            frameState.SetAcc(entryAcc);
             if (!TryBuildTypedArrayElementLoad(bcIndex, receiver, key, access.elements[i], index, false)) {
                 return false;
             }
             results.push_back(frameState.GetAcc());
+            caseExitFacts.push_back(compileInfoFacts_);
             self->FinishBlockWithJump(currentBlock, doneBlock);
             currentBlock = nextCaseBlock;
+            compileInfoFacts_ = entryFacts;
         }
 
+        compileInfoFacts_ = entryFacts->Clone();
+        frameState.SetAcc(entryAcc);
         if (!TryBuildTypedArrayElementLoad(bcIndex, receiver, key, access.elements[access.elementCount - 1], index,
                                            false)) {
             return false;
         }
         results.push_back(frameState.GetAcc());
+        caseExitFacts.push_back(compileInfoFacts_);
         self->FinishBlockWithJump(currentBlock, doneBlock);
         currentBlock = doneBlock;
+        compileInfoFacts_ = caseExitFacts.front()->Clone();
+        for (size_t i = 1; i < caseExitFacts.size(); ++i) {
+            compileInfoFacts_->Merge(*caseExitFacts[i]);
+        }
         frameState.SetAcc(self->NewPhiVertexWith(currentBlock, results, self->AccIndex()));
         return true;
     }
@@ -9277,7 +9782,8 @@ struct GraphBuilder::BytecodeVisitor {
             storeOffset =
                 static_cast<int32_t>(TaggedArray::DATA_OFFSET + fieldOffset * JSTaggedValue::TaggedTypeSize());
         }
-        BuildPreparedNamedStoreField(storeTarget, storeOffset, preparedValue, fieldRepresentation);
+        BuildPreparedNamedStoreField(storeTarget, storeOffset, preparedValue, fieldRepresentation,
+                                     PropertyKey::ConstDataId(constDataId));
         return true;
     }
 
@@ -9542,7 +10048,8 @@ struct GraphBuilder::BytecodeVisitor {
             }
         }
         ValueVertex *constpool = SharedConstPool();
-        return CommonStubCall({glue, constpool, stringId}, CommonStubID::GetStringFromConstPool);
+        return CommonStubCall({glue, constpool, stringId}, CommonStubID::GetStringFromConstPool,
+                              SideEffectKind::SAFE_CALL);
     }
 
     ValueVertex *ObjectFromConstPool(ValueVertex *index)
@@ -9583,7 +10090,8 @@ struct GraphBuilder::BytecodeVisitor {
     uint32_t currentBcIndex {0};
 };
 
-BB *GraphBuilder::VisitBytecodesOfBasicBlock(SharedBCFrameState frameState, uint32_t rpoIndex)
+BB *GraphBuilder::VisitBytecodesOfBasicBlock(SharedBCFrameState frameState, uint32_t rpoIndex,
+                                             CompileInfoFacts **outFacts)
 {
     const BasicBlockInfo *blockInfo = preproc_->GetBasicBlockByRPO(rpoIndex);
 
@@ -9592,8 +10100,8 @@ BB *GraphBuilder::VisitBytecodesOfBasicBlock(SharedBCFrameState frameState, uint
     if (blockInfo->catchBlock != nullptr) {
         uint32_t catchBlockIndex = blockInfo->catchBlock->rpoIndex;
         // May be nullptr (indicating that the catch block is not activated yet)
-        catchBlock = blocks_[catchBlockIndex];
-        caughtByData = catchBlockInputs_[catchBlockIndex];
+        catchBlock = BlockAt(catchBlockIndex);
+        caughtByData = CatchBlockInputsAt(catchBlockIndex);
     }
 
     BytecodeVisitor visitor {
@@ -9601,9 +10109,9 @@ BB *GraphBuilder::VisitBytecodesOfBasicBlock(SharedBCFrameState frameState, uint
         .glue = glue_,
         .lazyGlobalEnv = lazyGlobalEnv_,
         .blockInfo = blockInfo,
-        .currentBlock = blocks_[rpoIndex],  // visitor.currentBlock may be updated by subgraph creation
+        .currentBlock = BlockAt(rpoIndex),  // visitor.currentBlock may be updated by subgraph creation
         .lazyCatchBlock = catchBlock,
-        .compileInfoFacts_ = compileInfoFacts_[rpoIndex],
+        .compileInfoFacts_ = CompileInfoFactsAt(rpoIndex),
         .frameState = frameState,
         .lazyCatchBlockInputs = caughtByData,
     };
@@ -9618,6 +10126,7 @@ BB *GraphBuilder::VisitBytecodesOfBasicBlock(SharedBCFrameState frameState, uint
         BB *target = ActivateNonCatchBlock(blockInfo->fallthroughBlock->rpoIndex);
         FinishBlockWithJump(visitor.currentBlock, target);
     }
+    *outFacts = visitor.compileInfoFacts_;
     // Lowering may create internal subgraphs, so callers need the actual exit block rather than blocks_[rpoIndex].
     return visitor.currentBlock;
 }

@@ -35,6 +35,7 @@
 namespace panda::ecmascript::arksteed {
 
 class ValueVertex;
+class LoopEffects;
 enum class VertexOpcode : uint16_t;
 
 class AlternativeNodes {
@@ -230,6 +231,7 @@ public:
     void MarkPossibleHClassesFresh();
     bool MarkPossibleHClassStable(JSHClass *hclass);
     bool MergeWith(const NodeInfo &other);
+    bool IsCompatibleWith(const NodeInfo &expected) const;
 
     AlternativeNodes &GetAlternatives()
     {
@@ -270,6 +272,7 @@ public:
         INDEX,
         ELEMENTS,
         LENGTH,
+        TYPED_ARRAY_LENGTH,
         CONST_DATA_ID,
         HEAP_CONSTANT,
         UNKNOWN,
@@ -293,6 +296,12 @@ public:
     static PropertyKey Length()
     {
         return PropertyKey(Kind::LENGTH, 0);
+    }
+
+    // Internal array length, not the overridable JavaScript "length" property.
+    static PropertyKey TypedArrayLength()
+    {
+        return PropertyKey(Kind::TYPED_ARRAY_LENGTH, 0);
     }
 
     static PropertyKey ConstDataId(uint32_t constDataId)
@@ -447,6 +456,8 @@ struct SideEffectDescriptor {
     ValueVertex *env {nullptr};
     int32_t envSlot {-1};
     ValueVertex *envSlotValue {nullptr};
+    // Borrowed only for the synchronous facts/effects update during graph building.
+    const NodeInfo::PossibleHClasses *transitionSources {nullptr};
 };
 
 class CompileInfoFacts {
@@ -462,6 +473,8 @@ public:
 
     CompileInfoFacts *Clone() const;
     CompileInfoFacts *CloneForLoopHeader() const;
+    CompileInfoFacts *CloneForOptimisticLoopHeader(const LoopEffects &effects) const;
+    bool IsCompatibleWithLoopHeader(const CompileInfoFacts &headerFacts, const BB *loopHeader) const;
     void Merge(const CompileInfoFacts &other);
 
     NodeInfo *GetOrCreateInfoFor(ValueVertex *node);
@@ -516,8 +529,8 @@ public:
     void RecordLoadedConstantProperty(ValueVertex *object, PropertyKey key, ValueVertex *value);
     ValueVertex *LookupLoadedConstantProperty(ValueVertex *object, PropertyKey key) const;
     void ClearLoadedProperties();
-    void ClearLoadedPropertiesForReceiver(ValueVertex *receiver);
-    void ClearLoadedPropertiesForKey(PropertyKey key);
+    void ClearLoadedPropertiesForReceiver(ValueVertex *receiver, LoopEffects *effects = nullptr);
+    void ClearLoadedPropertiesForKey(PropertyKey key, LoopEffects *effects = nullptr);
 
     void RecordEnvSlot(ValueVertex *env, int32_t slot, ValueVertex *value);
     ValueVertex *LookupEnvSlot(ValueVertex *env, int32_t slot) const;
@@ -532,7 +545,7 @@ public:
                                 const ExpressionOptions &options, bool needsEpochCheck);
     void ClearAvailableExpressions();
 
-    void MarkPossibleSideEffect(const SideEffectDescriptor &effect);
+    void MarkPossibleSideEffect(const SideEffectDescriptor &effect, LoopEffects *loopEffects = nullptr);
     void MarkHClassesStaleForElementsKindTransition(const NodeInfo::PossibleHClasses &sourceHClasses);
     void ClearAll();
     void OnSideEffect();
@@ -586,6 +599,7 @@ private:
     void MergeLoadedProperties(LoadedPropertyMap &target, const LoadedPropertyMap &other);
     void MergeEnvSlots(LoadedEnvSlots &target, const LoadedEnvSlots &other);
     void MergeAvailableExpressions(const CompileInfoFacts &other);
+    void CopyAvailableExpressionsForLoopHeader(const CompileInfoFacts &source);
     void CopyLoadedProperties(LoadedPropertyMap &target, const LoadedPropertyMap &source) const;
     void CopyEnvSlots(LoadedEnvSlots &target, const LoadedEnvSlots &source) const;
     void UpdateEnvSlotAliasMode(ValueVertex *env);

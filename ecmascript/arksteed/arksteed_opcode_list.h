@@ -65,6 +65,7 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(LoadHClassAddress)                \
     V(PrepareSharedStoreField)          \
     V(EnsurePropertiesCapacity)         \
+    V(EnsureWritableElements)           \
     V(LoadException)                    \
     V(TaggedIntToI32)                   \
     V(CheckedTaggedIntToI32)            \
@@ -89,6 +90,7 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(CheckedI32Mod)                    \
     V(I32BitwiseBinary)                 \
     V(I32ToTaggedInt)                   \
+    V(U32ToTaggedNumber)                \
     V(RawI64ToTagged)                   \
     V(TaggedToRawI64)                   \
     V(I64BitwiseBinary)                 \

@@ -29,6 +29,7 @@ class NonControlVertex;
 class ValueVertex;
 class PhiVertex;
 class RegisterMergeState;
+class LoopEffects;
 
 constexpr uint32_t INVALID_BLOCK_ID = static_cast<uint32_t>(-1);
 
@@ -112,6 +113,26 @@ public:
     void SetIsLoopHeader(bool v)
     {
         isLoopHeader_ = v;
+    }
+
+    LoopEffects *GetLoopEffects() const
+    {
+        return loopEffects_;
+    }
+
+    void SetLoopEffects(LoopEffects *effects)
+    {
+        loopEffects_ = effects;
+    }
+
+    bool HasPeeledIteration() const
+    {
+        return hasPeeledIteration_;
+    }
+
+    void SetHasPeeledIteration(bool peeled)
+    {
+        hasPeeledIteration_ = peeled;
     }
 
     bool IsExceptionHandler() const
@@ -277,7 +298,8 @@ private:
           vertices_(chunk),
           predecessors_(chunk),
           registerMergeState_(nullptr),
-          regallocLoopInfo_(nullptr)
+          regallocLoopInfo_(nullptr),
+          loopEffects_(nullptr)
     {}
 
     uint32_t id_;
@@ -290,6 +312,8 @@ private:
     ChunkVector<BB *> predecessors_;
     RegisterMergeState *registerMergeState_;
     RegallocLoopInfo *regallocLoopInfo_;
+    LoopEffects *loopEffects_;
+    bool hasPeeledIteration_ {false};
     Label label_;
 };
 

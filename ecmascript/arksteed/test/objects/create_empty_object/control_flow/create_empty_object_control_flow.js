@@ -15,8 +15,8 @@
 
 //! PARAMS --compiler-jit-hotness-threshold=60000
 //! METHOD allocateInControlFlow
-//! COUNT CreateEmptyObject 5
-//! COUNT CallCommonStub NewJSObject 5
+//! COUNT CreateEmptyObject 7
+//! COUNT CallCommonStub NewJSObject 7
 //! HAS_NOT CallRuntime CreateEmptyObject
 
 function allocateInControlFlow(mode, count) {

@@ -911,6 +911,18 @@ void EnsurePropertiesCapacityStubBuilder::GenerateCircuit()
     Return(*properties);
 }
 
+void CopyCOWElementsStubBuilder::GenerateCircuit()
+{
+    GateRef glue = PtrArgument(0);
+    GateRef receiver = TaggedArgument(1);
+    GateRef oldElements = GetElementsArray(glue, receiver);
+    GateRef length = GetLengthOfTaggedArray(oldElements);
+    NewObjectStubBuilder newBuilder(this);
+    GateRef elements = newBuilder.CopyArray(glue, oldElements, length, length);
+    SetElementsArray(VariableType::JS_POINTER(), glue, receiver, elements);
+    Return(elements);
+}
+
 void GetPropertyByNameWithMegaStubBuilder::GenerateCircuit()
 {
     GateRef glue = PtrArgument(0);

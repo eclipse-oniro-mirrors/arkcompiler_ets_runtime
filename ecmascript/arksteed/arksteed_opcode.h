@@ -1349,9 +1349,32 @@ public:
     void SetValueLocationConstraints();
 };
 
-class PrepareSharedStoreFieldVertex : public VertexMixin<ValueVertex, PrepareSharedStoreFieldVertex>,
-                                      public ThrowableMixin,
-                                      public LazyDeoptimizableMixin {
+class EnsureWritableElementsVertex : public FixedInputVertexMixin<ValueVertex, EnsureWritableElementsVertex> {
+public:
+    enum Indices : uint32_t {
+        ELEMENTS_INDEX = 0,
+        OBJECT_INDEX = 1,
+        NUM_INPUTS = 2,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_ALLOCATE |
+        VertexPropertyFlag::CAN_WRITE |
+        VertexPropertyFlag::IS_DEFERRED_CALL;
+
+    explicit EnsureWritableElementsVertex() : FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
+class PrepareSharedStoreFieldVertex
+    : public VertexMixin<ValueVertex, PrepareSharedStoreFieldVertex>,
+      public ThrowableMixin,
+      public LazyDeoptimizableMixin {
 public:
     enum Indices : uint32_t {
         VALUE_INDEX = 0,
@@ -3314,7 +3337,7 @@ private:
     OnHeapMode onHeapMode_ {OnHeapMode::NONE};
 };
 
-class DeoptIfCOWElementsVertex : public VertexMixin<NonControlVertex, DeoptIfCOWElementsVertex>,
+class DeoptIfCOWElementsVertex : public FixedInputVertexMixin<NonControlVertex, DeoptIfCOWElementsVertex>,
                                  public EagerDeoptimizableMixin {
 public:
     enum Indices : uint32_t {
@@ -3322,19 +3345,15 @@ public:
         NUM_INPUTS = 1,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
-    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_EAGER_DEOPT | VertexPropertyFlag::CAN_READ;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {ValueRepresentation::TAGGED};
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_EAGER_DEOPT | VertexPropertyFlag::CAN_READ;
 
-    explicit DeoptIfCOWElementsVertex(Chunk *chunk, uint32_t bytecodeOffset)
-        : VertexMixin(), EagerDeoptimizableMixin(chunk, bytecodeOffset)
+    DeoptIfCOWElementsVertex(Chunk *chunk, uint32_t bytecodeOffset)
+        : FixedInputVertexMixin(), EagerDeoptimizableMixin(chunk, bytecodeOffset)
     {}
 
     void SetValueLocationConstraints();
-
-    void VerifyInputs() const
-    {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(ELEMENTS_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
-    }
 };
 
 class DeoptIfElementsUnstableVertex : public VertexMixin<NonControlVertex, DeoptIfElementsUnstableVertex>,
@@ -3873,6 +3892,12 @@ public:
 
     void SetValueLocationConstraints();
 
+    void ReduceToSinglePredecessor()
+    {
+        ASSERT(GetInputCount() == 2);
+        SetInputCountForTransform(1);
+    }
+
     // VerifyInputs: Variable-input vertex must validate input count and type consistency
     void VerifyInputs() const
     {
@@ -3901,6 +3926,21 @@ public:
     {
         return GetInput(INPUT_INDEX);
     }
+
+    void SetValueLocationConstraints();
+};
+
+class U32ToTaggedNumberVertex : public FixedInputVertexMixin<ValueVertex, U32ToTaggedNumberVertex> {
+public:
+    enum Indices : uint32_t {
+        INPUT_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {ValueRepresentation::INT32};
+
+    explicit U32ToTaggedNumberVertex() : FixedInputVertexMixin() {}
 
     void SetValueLocationConstraints();
 };

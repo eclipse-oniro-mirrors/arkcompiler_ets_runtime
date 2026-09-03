@@ -54,7 +54,39 @@ public:
         return descriptor;
     }
 
+    static SideEffectDescriptor Classify(EnsureWritableElementsVertex *vertex)
+    {
+        SideEffectDescriptor descriptor;
+        descriptor.kind = SideEffectKind::FIELD_WRITE;
+        descriptor.receiver = vertex->GetInput(EnsureWritableElementsVertex::OBJECT_INDEX);
+        descriptor.propertyKey = PropertyKey::Elements();
+        return descriptor;
+    }
+
     static SideEffectDescriptor Classify(EnsurePropertiesCapacityVertex *vertex)
+    {
+        // Growth copies existing values without changing the HClass. The effect
+        // epoch still invalidates loads of the old properties backing store.
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+    }
+
+    static SideEffectDescriptor Classify(PrepareSharedStoreFieldVertex *vertex)
+    {
+        // Only validates the value, flattens a string, or throws a type error.
+        // The following StoreSharedFieldWithBarrier records the property write.
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+    }
+
+    static SideEffectDescriptor Classify(StringEqualVertex *vertex)
+    {
+        // Flattening strings may allocate, but does not modify JS properties.
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+    }
+
+    static SideEffectDescriptor Classify(CallVertex *vertex)
     {
         (void)vertex;
         return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
@@ -138,12 +170,14 @@ public:
 
     static SideEffectDescriptor Classify(StoreIntTypedArrayElementVertex *vertex)
     {
-        return ElementsWrite(vertex->GetInput(StoreIntTypedArrayElementVertex::RECEIVER_INDEX));
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::TYPED_ARRAY_WRITE};
     }
 
     static SideEffectDescriptor Classify(StoreFloatTypedArrayElementVertex *vertex)
     {
-        return ElementsWrite(vertex->GetInput(StoreFloatTypedArrayElementVertex::RECEIVER_INDEX));
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::TYPED_ARRAY_WRITE};
     }
 
     static SideEffectDescriptor Classify(StoreEnvSlotVertex *vertex)
@@ -154,6 +188,13 @@ public:
         descriptor.envSlot = vertex->GetOffset();
         descriptor.envSlotValue = vertex->GetInput(StoreEnvSlotVertex::VALUE_INDEX);
         return descriptor;
+    }
+
+    static SideEffectDescriptor Classify(SetValueWithBarrierVertex *vertex)
+    {
+        // This node only maintains GC metadata; StoreEnvSlot has recorded the write.
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
     }
 
     static SideEffectDescriptor Classify(CallRuntimeVertex *vertex)

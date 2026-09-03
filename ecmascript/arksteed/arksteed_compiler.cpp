@@ -210,7 +210,8 @@ bool ArkSteedCompilerTask::BuildGraph(JSThread *compilerThread, uintptr_t hostGl
     {
         ArkSteedPipelineStatistics stats(pipelineStatistics_, "GraphBuilder");
 
-        GraphBuilder graphBuilder(compilerThread, graph_, hostGlueAddr, &preproc, &analysis);
+        GraphBuilder graphBuilder(compilerThread, graph_, hostGlueAddr, &preproc, &analysis,
+                                  arkSteedTask_->IsOsrTask());
         if (!graphBuilder.Run()) {
             LOG_COMPILER(WARN) << "JIT compilation halts due to graph building error.";
             return false;

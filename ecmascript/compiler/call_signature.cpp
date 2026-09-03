@@ -323,6 +323,11 @@ DEF_CALL_SIGNATURE(EnsurePropertiesCapacity)
     TWO_ARGS_CALL_SIGNATURE(EnsurePropertiesCapacity, VariableType::JS_ANY());
 }
 
+DEF_CALL_SIGNATURE(CopyCOWElements)
+{
+    TWO_ARGS_CALL_SIGNATURE(CopyCOWElements, VariableType::JS_ANY());
+}
+
 DEF_CALL_SIGNATURE(DeprecatedSetPropertyByName)
 {
     constexpr size_t paramCount = 5;

@@ -16,7 +16,8 @@
 // @ts-nocheck
 //! PARAMS --compiler-jit-hotness-threshold=10000
 //! METHOD storeThenLoad
-//! COUNT_LE LoadTaggedElement 2
+//! COUNT LoadTaggedElement 2
+//! COUNT LoadTaggedField 1
 //! HAS StoreTaggedElement
 //! HAS_NOT CallCommonStub GetPropertyByValue
 declare function print(arg: any): string;

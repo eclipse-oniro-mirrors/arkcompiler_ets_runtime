@@ -3635,6 +3635,11 @@ GateRef StubBuilder::ICStoreElement(GateRef glue, GateRef receiver, GateRef key,
                 BRANCH(IsJsCOWArray(glue, receiver), &isJsCOWArray, &isNotJsCOWArray);
                 Bind(&isJsCOWArray);
                 {
+                    Label copyCOW(env);
+                    GateRef handlesCOW = Int64NotEqual(
+                        Int64And(handlerInfo, Int64(1ULL << HandlerBase::SHandleCOWBit::START_BIT)), Int64(0));
+                    BRANCH(handlesCOW, &copyCOW, &exit);
+                    Bind(&copyCOW);
                     CallRuntime(glue, RTSTUB_ID(CheckAndCopyArray), {receiver});
                     Jump(&setElementsLength);
                 }

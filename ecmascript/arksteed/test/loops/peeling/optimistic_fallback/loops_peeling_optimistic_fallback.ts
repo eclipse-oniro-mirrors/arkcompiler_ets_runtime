@@ -4,7 +4,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,21 +13,21 @@
  * limitations under the License.
  */
 
-// @ts-nocheck
-declare function print(value: any): void;
+//! METHOD peeling_optimistic_fallback
+//! COUNT CallCommonStub Less 3
+//! COUNT JumpLoop 1
 
-function incrementElement(array, index) {
-    let value = array[index] + 1;
-    array[index] = value;
-    return array[index];
+function peeling_optimistic_fallback(n)
+{
+    let value = 0;
+    for (let i = 0; i < n; i++) {
+        value = i === 0 ? 1 : 1.5;
+    }
+    return value;
 }
 
-let warm = [0, 0, 0, 0];
-for (let i = 0; i < 20; i++) {
-    incrementElement(warm, 1);
-}
-ArkTools.arkSteedCompileSync(incrementElement);
+ArkTools.arkSteedCompileSync(peeling_optimistic_fallback);
 
-let fresh = [0, 0, 0, 0];
-print(incrementElement(fresh, 1));
-print(incrementElement(fresh, 1));
+print(peeling_optimistic_fallback(0));
+print(peeling_optimistic_fallback(1));
+print(peeling_optimistic_fallback(3));

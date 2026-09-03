@@ -15,7 +15,8 @@
 
 //! METHOD      sumOverArray
 //! HAS         BranchIfTaggedHeapObject       # fallback inline check chain is emitted
-//! COUNT       BranchIfInt64Compare  2        # [ECMA_OBJECT_FIRST, ECMA_OBJECT_LAST] range
+//! COUNT       BranchIfInt64Compare  4        # Object range checks in the peeled copy and loop.
+//! COUNT       JumpLoop              1
 // Test: throw.ifnotobject no-throw path over a real array iterator (compiled code).
 // The for-of loop guards each iterator.next() result with throw.ifnotobject.
 // Whether the guard is elided by known-type facts or emitted inline, the compiled

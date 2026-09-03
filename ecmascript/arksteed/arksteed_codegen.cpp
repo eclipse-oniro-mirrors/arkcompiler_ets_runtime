@@ -54,6 +54,87 @@ namespace panda::ecmascript::arksteed {
 
 constexpr JSTaggedType HCLASS_ADDRESS_MASK = ~JSTaggedValueInternals::TAG_MARK;
 
+namespace {
+
+class DeferredCopyCOWElements final : public ArkSteedDeferredCode {
+public:
+    DeferredCopyCOWElements(ArkSteedRegister object, ArkSteedRegister result,
+                           const DeferredRegisterSnapshot &snapshot,
+                           ArkSteedSafepointTableBuilder *safepointBuilder)
+        : object_(object), result_(result), snapshot_(snapshot), safepointBuilder_(safepointBuilder)
+    {}
+
+    Label *GetReturnLabel()
+    {
+        return &returnLabel_;
+    }
+
+    void Generate(ArkSteedAssembler *assembler) override
+    {
+        // The result replaces the first input. RA preserves that input elsewhere if it is still live.
+        snapshot_.liveRegisters.Clear(result_);
+        snapshot_.liveTaggedRegisters.Clear(result_);
+        ArkSteedRegList untagged = snapshot_.liveRegisters - snapshot_.liveTaggedRegisters;
+        // Keep raw integers/doubles above the GC root range, with a padding slot at the frame boundary.
+        // Each area has an even slot count so the call remains 16-byte aligned.
+        int32_t untaggedSlots = (untagged.Count() + snapshot_.liveDoubleRegisters.Count() + 2) & ~1;
+        int32_t taggedSlots = (snapshot_.liveTaggedRegisters.Count() + 1) & ~1;
+        int32_t totalSlots = untaggedSlots + taggedSlots;
+        assembler->ReserveCallArgSlots(totalSlots);
+
+        int32_t slot = taggedSlots;
+        for (ArkSteedRegister reg : untagged) {
+            assembler->MoveRepr(MachineRepresentation::Word64, assembler->GetCallArgSlot(slot++), reg);
+        }
+        for (ArkSteedDoubleRegister reg : snapshot_.liveDoubleRegisters) {
+            assembler->StoreFloat64(assembler->GetCallArgSlot(slot++), reg);
+        }
+        slot = 0;
+        for (ArkSteedRegister reg : snapshot_.liveTaggedRegisters) {
+            assembler->MoveRepr(MachineRepresentation::Tagged, assembler->GetCallArgSlot(slot++), reg);
+        }
+
+        // Save all live registers before setting up the stub ABI; the input may overlap either argument.
+        assembler->Move(ArkSteedAssembler::GetParameterRegister(1), object_);
+        assembler->LoadGlue(ArkSteedAssembler::GetParameterRegister(0));
+        if (slot < taggedSlots) {
+            TemporaryRegisterScope scope(assembler);
+            ArkSteedRegister scratch = scope.AcquireScratch();
+            assembler->LoadTaggedValue(scratch, JSTaggedValue::VALUE_UNDEFINED);
+            assembler->MoveRepr(MachineRepresentation::Tagged, assembler->GetCallArgSlot(slot), scratch);
+        }
+        assembler->RecordComment("CopyCOWElements deferred call");
+        assembler->CallCommonStub(kungfu::CommonStubCSigns::CopyCOWElements);
+        // Steed's range scanner starts one slot below the local frame. Exclude the raw save area;
+        // only the tagged area below it is visited and updated when the copying allocation triggers GC.
+        safepointBuilder_->DefineSafepoint(assembler->GetPcOffset()).SetNumExtraSpillSlots(untaggedSlots - 1);
+        assembler->Move(result_, kReturnRegister);
+
+        slot = 0;
+        for (ArkSteedRegister reg : snapshot_.liveTaggedRegisters) {
+            assembler->MoveRepr(MachineRepresentation::Tagged, reg, assembler->GetCallArgSlot(slot++));
+        }
+        slot = taggedSlots;
+        for (ArkSteedRegister reg : untagged) {
+            assembler->MoveRepr(MachineRepresentation::Word64, reg, assembler->GetCallArgSlot(slot++));
+        }
+        for (ArkSteedDoubleRegister reg : snapshot_.liveDoubleRegisters) {
+            assembler->LoadFloat64(reg, assembler->GetCallArgSlot(slot++));
+        }
+        assembler->FreeCallArgSlots(totalSlots);
+        assembler->Jump(&returnLabel_);
+    }
+
+private:
+    ArkSteedRegister object_;
+    ArkSteedRegister result_;
+    DeferredRegisterSnapshot snapshot_;
+    ArkSteedSafepointTableBuilder *safepointBuilder_;
+    Label returnLabel_;
+};
+
+}  // namespace
+
 class GapMoveResolver {
 public:
     using AssignmentPair = std::pair<AllocatedState, AllocatedState>;
@@ -1871,29 +1952,19 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfArrayBufferDetachedVert
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfCOWElementsVertex>(DeoptIfCOWElementsVertex *check)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << check->GetId() << ": DeoptIfCOWElementsVertex";
-#endif
     auto elements = GetInputRegister(check, DeoptIfCOWElementsVertex::ELEMENTS_INDEX);
     TemporaryRegisterScope scope(assembler_);
     ArkSteedRegister objectType = scope.Acquire();
-#if defined(PANDA_TARGET_AMD64)
-    Label *deopt = RecordEagerDeoptTarget(check, kungfu::DeoptType::INCONSISTENTELEMENTSKIND);
-#else
-    Label deoptLabel;
-    Label *deopt = &deoptLabel;
-#endif
-    Label done;
     LoadObjectType(assembler_, objectType, elements);
-    __ Compare(objectType, static_cast<int32_t>(JSType::COW_TAGGED_ARRAY));
-    __ JumpIf(Condition::EQUAL, deopt);
-    __ Compare(objectType, static_cast<int32_t>(JSType::COW_MUTANT_TAGGED_ARRAY));
-    __ JumpIf(Condition::NOT_EQUAL, &done);
-#if !defined(PANDA_TARGET_AMD64)
-    __ Bind(deopt);
+    __ Compare(objectType, static_cast<int32_t>(JSType::TAGGED_ARRAY));
+#if defined(PANDA_TARGET_AMD64)
+    __ JumpIf(Condition::NOT_EQUAL, RecordEagerDeoptTarget(check, kungfu::DeoptType::INCONSISTENTELEMENTSKIND));
+#else
+    Label done;
+    __ JumpIf(Condition::EQUAL, &done);
     EmitEagerDeoptExit(check, kungfu::DeoptType::INCONSISTENTELEMENTSKIND);
-#endif
     __ Bind(&done);
+#endif
 }
 
 template <>
@@ -2150,6 +2221,31 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<StoreI32ToAddressVertex>(Store
     auto obj = GetInputRegister(storeField, StoreI32ToAddressVertex::OBJECT_INDEX);
     auto value = GetInputRegister(storeField, StoreI32ToAddressVertex::VALUE_INDEX);
     __ StoreField(value, obj, storeField->GetOffset());
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<EnsureWritableElementsVertex>(EnsureWritableElementsVertex *ensure)
+{
+    ArkSteedRegister elements = GetInputRegister(ensure, EnsureWritableElementsVertex::ELEMENTS_INDEX);
+    ArkSteedRegister object = GetInputRegister(ensure, EnsureWritableElementsVertex::OBJECT_INDEX);
+    ASSERT(GetResultRegister(ensure) == elements);
+    // RA rounds local tagged slots to odd and untagged slots to even, so the frame has no extra padding.
+    ASSERT((graph_->GetTaggedStackSlots() & 1U) != 0);
+    ASSERT((graph_->GetUntaggedStackSlots() & 1U) == 0);
+    auto *copy = graph_->GetChunk()->New<DeferredCopyCOWElements>(
+        object, elements, ensure->GetRegallocInfo()->GetDeferredRegisterSnapshot(), safepointBuilder_);
+    deferredCode_.push_back(copy);
+
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister objectType = scope.Acquire();
+    __ LoadField(objectType, elements, static_cast<int32_t>(TaggedObject::HCLASS_OFFSET));
+    __ And(objectType, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    __ LoadField(objectType, objectType, static_cast<int32_t>(JSHClass::BIT_FIELD_OFFSET));
+    static_assert(JSHClass::ObjectTypeBits::START_BIT == 0);
+    __ And(objectType, static_cast<int32_t>((1U << JSHClass::ObjectTypeBits::SIZE) - 1));
+    __ Compare(objectType, static_cast<int32_t>(JSType::TAGGED_ARRAY));
+    __ JumpIf(Condition::NOT_EQUAL, copy->GetEntryLabel());
+    __ Bind(copy->GetReturnLabel());
 }
 
 template <>
@@ -2732,6 +2828,27 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<I32ToTaggedIntVertex>(I32ToTag
     auto src = GetInputRegister(toTaggedInt, I32ToTaggedIntVertex::INPUT_INDEX);
     __ SignExtendInt32ToInt64(dst, src);
     __ Or(dst, static_cast<int64_t>(JSTaggedValue::TAG_INT));
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<U32ToTaggedNumberVertex>(U32ToTaggedNumberVertex *convert)
+{
+    auto dst = GetResultRegister(convert);
+    auto src = GetInputRegister(convert, U32ToTaggedNumberVertex::INPUT_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedDoubleRegister number = scope.AcquireDouble();
+    Label asDouble;
+    Label done;
+    __ SignExtendInt32ToInt64(dst, src);
+    __ Compare(dst, 0);
+    __ JumpIf(Condition::LESS_THAN, &asDouble);
+    __ Or(dst, static_cast<int64_t>(JSTaggedValue::TAG_INT));
+    __ Jump(&done);
+    __ Bind(&asDouble);
+    __ Uint32ToFloat64(number, src);
+    __ Move(dst, number);
+    __ Add(dst, static_cast<int64_t>(JSTaggedValue::DOUBLE_ENCODE_OFFSET));
+    __ Bind(&done);
 }
 
 template <>

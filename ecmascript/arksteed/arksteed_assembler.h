@@ -198,6 +198,7 @@ public:
                               ArkSteedRegister divisor);
     void PositiveInt32Mod(ArkSteedRegister dst, ArkSteedRegister dividend, ArkSteedRegister divisor);
     void Int32ToFloat64(ArkSteedDoubleRegister dst, ArkSteedRegister src);
+    void Uint32ToFloat64(ArkSteedDoubleRegister dst, ArkSteedRegister src);
     void Float64Add(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister src);
     void Float64Sub(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister src);
     void Float64Mul(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister src);
