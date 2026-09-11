@@ -25,7 +25,8 @@ class DynamicImport {
 public:
     static JSTaggedValue ExecuteNativeOrJsonModule(JSThread *thread, const CString &specifierString,
         ModuleTypes moduleType, JSHandle<JSPromiseReactionsFunction> resolve,
-        JSHandle<JSPromiseReactionsFunction> reject, const JSPandaFile *jsPandaFile = nullptr);
+        JSHandle<JSPromiseReactionsFunction> reject, const JSPandaFile *jsPandaFile = nullptr,
+        const CString &callerRecord = "", const CString &callerFile = "");
 };
 }  // namespace panda::ecmascript
 #endif  // ECMASCRIPT_MODULE_JS_DYNAMIC_IMPORT_H

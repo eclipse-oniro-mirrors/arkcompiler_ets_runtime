@@ -85,6 +85,7 @@ enum ArkProperties {
     ENABLE_HANDLE_LEAK_LOG_OUTPUT = 1ULL << 35,
     DISABLE_CONSTPOOL_SNAPSHOT = 1ULL << 36,
     ENABLE_SNAPSHOT_STATS = 1ULL << 37,
+    ENABLE_MODULE_DEPENDENCY_LOG = 1ULL << 38,
 };
 
 enum ArkTSMode {
@@ -791,6 +792,11 @@ public:
     bool EnableModuleLog() const
     {
         return (static_cast<uint64_t>(arkProperties_) & ArkProperties::ENABLE_MODULE_LOG) != 0;
+    }
+
+    bool EnableModuleDependencyLog() const
+    {
+        return (static_cast<uint64_t>(arkProperties_) & ArkProperties::ENABLE_MODULE_DEPENDENCY_LOG) != 0;
     }
 
     bool EnableSerializationTimeoutCheck() const

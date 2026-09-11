@@ -36,6 +36,7 @@
 #include "ecmascript/lexical_env.h"
 #include "ecmascript/linked_hash_table.h"
 #include "ecmascript/mem/idle_gc_trigger.h"
+#include "ecmascript/module/dependency_extractor.h"
 #include "ecmascript/module/module_logger.h"
 #include "ecmascript/module/napi_module_loader.h"
 #include "ecmascript/napi/jsnapi_class_creation_helper.h"
@@ -6910,6 +6911,7 @@ void JSNApi::SetCancelTimerCallback(EcmaVM *vm, CancelTimerCallback callback)
 void JSNApi::NotifyEnvInitialized(EcmaVM *vm)
 {
     ecmascript::ModuleLogger::SetModuleLoggerTask(vm);
+    ecmascript::DependencyLogger::SetDependencyLoggerTask(vm);
 }
 
 void JSNApi::SetReleaseSecureMemCallback(ReleaseSecureMemCallback releaseSecureMemFunc)

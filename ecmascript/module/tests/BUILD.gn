@@ -112,6 +112,7 @@ host_unittest_action("ModuleTest") {
 
   sources = [
     # test file
+    "dependency_extractor_test.cpp",
     "ecma_module_test.cpp",
     "js_dynamic_import_test.cpp",
     "js_module_deregister_test.cpp",
