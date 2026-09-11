@@ -20,19 +20,22 @@
 #include <optional>
 #include <sstream>
 
-#include "ecmascript/arksteed/arksteed_assembler-inl.h"  // IWYU pragma: keep
+#include "ecmascript/arksteed/arksteed_assembler-inl.h" // IWYU pragma: keep
 #include "ecmascript/arksteed/arksteed_deopt_helper.h"
 #include "ecmascript/arksteed/arksteed_dump_helper.h"
 #include "ecmascript/arksteed/arksteed_register_merge_state.h"
 #include "ecmascript/arksteed/arksteed_safepoint_table.h"
 #include "ecmascript/arksteed/arksteed_write_barrier.h"
+#include "ecmascript/base/config.h"
 #include "ecmascript/base/number_helper.h"
 #include "ecmascript/byte_array.h"
 #include "ecmascript/compiler/common_stub_csigns.h"
 #include "ecmascript/deoptimizer/deoptimizer.h"
+#include "ecmascript/global_env.h"
 #include "ecmascript/global_env_constants.h"
 #include "ecmascript/ic/ic_handler.h"
 #include "ecmascript/ic/proto_change_details.h"
+#include "ecmascript/js_array.h"
 #include "ecmascript/js_arraybuffer.h"
 #include "ecmascript/js_function.h"
 #include "ecmascript/js_hclass.h"
@@ -41,8 +44,9 @@
 #include "ecmascript/js_tagged_value.h"
 #include "ecmascript/js_tagged_value_internals.h"
 #include "ecmascript/js_typed_array.h"
-#include "ecmascript/message_string.h"
+#include "ecmascript/mem/mem.h"
 #include "ecmascript/mem/tagged_object.h"
+#include "ecmascript/message_string.h"
 #include "ecmascript/tagged_array.h"
 
 namespace panda::ecmascript::arksteed {
@@ -1280,6 +1284,122 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CallVertex>(CallVertex *call)
     __ Bind(&callGeneric);
     EmitCallGeneric(call, scratch);
     __ Bind(&exit);
+}
+
+template<>
+void ArkSteedCodeGenerator::VisitNonControlVertex<AllocateJSArrayVertex>(AllocateJSArrayVertex* allocate)
+{
+#ifndef NDEBUG
+    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << allocate->GetId() << ": AllocateJSArrayVertex";
+#endif
+    ArkSteedRegister result = GetResultRegister(allocate);
+    Label allocationFailed;
+    Label done;
+
+#if defined(ARK_ASAN_ON)
+    // ASAN allocations must go through the instrumented allocator.
+    __ Jump(&allocationFailed);
+#else
+    if constexpr (G_USE_CMS_GC) {
+        // CMS uses a different allocation protocol and HClass state encoding.
+        __ Jump(&allocationFailed);
+    } else {
+        ArkSteedRegister glue = GetInputRegister(allocate, AllocateJSArrayVertex::GLUE_INDEX);
+        ArkSteedRegister globalEnv = GetInputRegister(allocate, AllocateJSArrayVertex::GLOBAL_ENV_INDEX);
+        TemporaryRegisterScope scope(assembler_);
+        ArkSteedRegister temp1 = scope.Acquire();
+        ArkSteedRegister temp2 = scope.Acquire();
+        ASSERT(result != glue);
+        // result may alias globalEnv: the HClass is loaded before result is written.
+        ASSERT(glue != globalEnv);
+        ASSERT(temp1 != result);
+        ASSERT(temp1 != glue);
+        ASSERT(temp1 != globalEnv);
+        ASSERT(temp2 != result);
+        ASSERT(temp2 != glue);
+        ASSERT(temp2 != globalEnv);
+        ASSERT(temp2 != temp1);
+
+        // CMC uses a different thread-local allocation-buffer layout.
+        __ JumpIfCMCGCEnabled(glue, temp2, &allocationFailed);
+
+#ifdef ECMASCRIPT_SUPPORT_HEAPSAMPLING
+        // Heap sampling must observe every allocation, so use the runtime allocator while it is active.
+        __ JumpIfHeapSamplingActive(glue, temp2, &allocationFailed);
+#endif
+
+        constexpr size_t arrayFunctionOffset
+            = GlobalEnv::HEADER_SIZE + GlobalEnv::ARRAY_FUNCTION_INDEX * JSTaggedValue::TaggedTypeSize();
+        static_assert(arrayFunctionOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+        // Keep the allocation HClass in temp1 until the object header is initialized.
+        __ LoadField(temp1, globalEnv, static_cast<int32_t>(arrayFunctionOffset));
+        __ LoadField(temp1, temp1, static_cast<int32_t>(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
+
+        {
+            // Only the architecture-reserved scratch is needed in addition to the two RA temporaries.
+            // Arithmetic immediates below must stay scratch-free on x64; ARM64 may use its second
+            // reserved scratch register to materialize a large field address.
+            TemporaryRegisterScope scratchScope(assembler_);
+            ArkSteedRegister scratch = scratchScope.AcquireScratch();
+
+            // Trust the intrinsic Array instance HClass, just like CreateEmptyArrayCommon.
+            __ LoadObjectSizeFromHClass(temp1, temp2);
+
+            __ TryAllocateInYoungSpace(glue, temp2, result, scratch, &allocationFailed);
+
+            // Allocation is committed: finish initialization without calls, safepoints, deopt, or fallback.
+            // The object is fresh and young, so none of these stores need a write barrier.
+            __ StoreField(temp1, result, static_cast<int32_t>(TaggedObject::HCLASS_OFFSET));
+            __ Move(temp1, static_cast<uint64_t>(JSTaggedValue::VALUE_UNDEFINED));
+
+            __ Move(scratch, static_cast<int32_t>(JSArray::SIZE));
+            Label initializeSlots;
+            Label slotsInitialized;
+            __ Bind(&initializeSlots);
+            __ Compare(scratch, temp2);
+            __ JumpIf(Condition::ABOVE_OR_EQUAL, &slotsInitialized);
+            __ StoreField(temp1, result, scratch);
+            __ Add(scratch, static_cast<int32_t>(JSTaggedValue::TaggedTypeSize()));
+            __ Jump(&initializeSlots);
+            __ Bind(&slotsInitialized);
+
+            // The hash word is GC-visible when it later holds auxiliary references. Raw zero is
+            // encoded as a heap pointer, so initialize it with tagged integer zero.
+            __ Move(temp2, static_cast<uint64_t>(JSTaggedValue::VALUE_ZERO));
+            __ StoreField(temp2, result, static_cast<int32_t>(ECMAObject::HASH_OFFSET));
+            __ Move(temp2, 0);
+            __ StoreInt32Field(temp2, result, static_cast<int32_t>(JSArray::LENGTH_OFFSET));
+            __ StoreInt32Field(temp2, result, static_cast<int32_t>(JSArray::TRACE_INDEX_OFFSET));
+            __ StoreField(temp1, result, static_cast<int32_t>(JSArray::TRACK_INFO_OFFSET));
+
+            constexpr size_t emptyArrayOffset
+                = static_cast<size_t>(ConstantIndex::EMPTY_ARRAY_OBJECT_INDEX) * JSTaggedValue::TaggedTypeSize();
+            constexpr size_t lengthAccessorOffset
+                = static_cast<size_t>(ConstantIndex::ARRAY_LENGTH_ACCESSOR) * JSTaggedValue::TaggedTypeSize();
+            static_assert(emptyArrayOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+            static_assert(lengthAccessorOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+
+            __ LoadField(temp2, glue, static_cast<int32_t>(JSThread::GlueData::GetGlobalConstOffset(false)));
+            __ LoadField(scratch, temp2, static_cast<int32_t>(emptyArrayOffset));
+            __ StoreField(scratch, result, static_cast<int32_t>(JSObject::PROPERTIES_OFFSET));
+            __ StoreField(scratch, result, static_cast<int32_t>(JSObject::ELEMENTS_OFFSET));
+
+            // Match SetPropertyInlinedProps instead of assuming a fixed in-object offset.
+            static_assert(JSArray::LENGTH_INLINE_PROPERTY_INDEX == 0);
+            __ LoadField(temp1, temp2, static_cast<int32_t>(lengthAccessorOffset));
+            __ LoadField(temp2, result, static_cast<int32_t>(TaggedObject::HCLASS_OFFSET));
+            __ LoadInlinedPropsStartFromHClass(temp2, scratch);
+            __ StoreField(temp1, result, scratch);
+            RecordComment("AllocateJSArray inline success");
+            __ Jump(&done);
+        }
+    }
+#endif
+
+    __ Bind(&allocationFailed);
+    RecordComment("AllocateJSArray fallback sentinel");
+    __ Move(result, static_cast<uint64_t>(JSTaggedValue::VALUE_HOLE));
+    __ Bind(&done);
 }
 
 template <>

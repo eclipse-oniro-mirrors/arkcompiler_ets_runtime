@@ -1886,6 +1886,31 @@ private:
 };
 
 /**
+ * Allocates and fully initializes a local empty JSArray in young space without a call or safepoint.
+ * Returns Hole without allocating when the fast path is unavailable or the allocation buffer is full.
+ */
+class AllocateJSArrayVertex : public FixedInputVertexMixin<ValueVertex, AllocateJSArrayVertex> {
+public:
+    enum Indices : uint32_t {
+        GLUE_INDEX = 0,
+        GLOBAL_ENV_INDEX = 1,
+        NUM_INPUTS = 2,
+    };
+
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT_PTR,
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES
+        = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::CAN_ALLOCATE;
+
+    explicit AllocateJSArrayVertex(): FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
+/**
  * CallCommonStub vertex - for common stub calls
  */
 class CallCommonStubVertex : public VertexMixin<ValueVertex, CallCommonStubVertex>,

@@ -269,6 +269,30 @@ public:
                        bool fallthroughWhenFalse);
 
     // =========================================================================
+    // Allocation
+    // =========================================================================
+
+    // Work registers are supplied by the caller; these helpers acquire no RA temporaries.
+    // Runtime-mode checks preserve glue and clobber temp.
+    inline void JumpIfCMCGCEnabled(ArkSteedRegister glue, ArkSteedRegister temp, Label* target);
+    inline void JumpIfHeapSamplingActive(ArkSteedRegister glue, ArkSteedRegister temp, Label* target);
+    // Read the trusted HClass layout without guards, as the interpreter does. Preserve hclass;
+    // the distinct output register receives the object size or inlined-property start in bytes.
+    inline void LoadObjectSizeFromHClass(ArkSteedRegister hclass, ArkSteedRegister objectSize);
+    inline void LoadInlinedPropsStartFromHClass(ArkSteedRegister hclass, ArkSteedRegister offset);
+
+    // Requires a positive, aligned regular-object size and ordinary young-space allocation mode.
+    // All register operands must be distinct. Preserves glue/size and clobbers temp.
+    // On failure, top is unchanged and result is unspecified. On success, result is uninitialized
+    // memory and top is already advanced: initialize immediately without calls, safepoints, deopt,
+    // or a branch back to failed.
+    inline void TryAllocateInYoungSpace(ArkSteedRegister glue,
+                                        ArkSteedRegister size,
+                                        ArkSteedRegister result,
+                                        ArkSteedRegister temp,
+                                        Label* failed);
+
+    // =========================================================================
     // Call/Return
     // =========================================================================
 

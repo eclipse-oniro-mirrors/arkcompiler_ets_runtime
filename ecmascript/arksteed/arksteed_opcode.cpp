@@ -233,6 +233,14 @@ void CallSelfVertex::SetValueLocationConstraints()
     UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
 }
 
+void AllocateJSArrayVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    SetTemporariesNeeded(2); // Saved HClass and dynamic object size; codegen also uses the architecture scratch.
+    UseRegister(Arg(GLUE_INDEX));
+    UseRegister(Arg(GLOBAL_ENV_INDEX));
+}
+
 void CallCommonStubVertex::SetValueLocationConstraints()
 {
     // Define return value in x0/rax (C calling convention)

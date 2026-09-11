@@ -60,6 +60,12 @@ public:
         return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
     }
 
+    static SideEffectDescriptor Classify(AllocateJSArrayVertex* vertex)
+    {
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+    }
+
     static SideEffectDescriptor Classify(StoreInt32FieldVertex *vertex)
     {
         SideEffectDescriptor descriptor;

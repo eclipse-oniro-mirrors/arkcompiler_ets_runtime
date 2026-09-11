@@ -22,9 +22,10 @@ sources with es2abc, runs them under ark_js_vm with the compiler log
 unconditionally enabled, and verifies:
 
   * stdout (with log lines filtered out) matches expected_output.txt;
-  * the `//!` annotations (COMPILE_MODE, PARAMS, and the IR constraints
-    HAS, HAS_NOT, COUNT, COUNT_GE, COUNT_LE, etc.) hold on the CFG dumps
-    parsed from the compiler log.
+  * the `//!` annotations (COMPILE_MODE, PARAMS, the IR constraints HAS,
+    HAS_NOT, COUNT, COUNT_GE, COUNT_LE, etc., BYTECODE_COUNT, and
+    CODEGEN_COUNT) hold on the CFG dumps, abc disassembly, or generated-code
+    comments.
 
 All generated artifacts (abc, disassembly, stdout/stderr captures) are
 written to a fresh /tmp/arksteed-<mode>-<timestamp>/ directory whose tree
@@ -105,6 +106,18 @@ COMPILE_START_RE = re.compile(
 GRAPH_DUMP_START = "[compiler] ===== Starts Graph Dump ====="
 GRAPH_DUMP_END = "[compiler] ===== Finishes Graph Dump ====="
 
+# ark_disasm renders function bodies as `.function ... {`, followed by
+# indented instruction lines and a closing `}`. Restrict bytecode matching to
+# those bodies so records and annotations cannot be mistaken for instructions.
+DISASM_FUNCTION_START_RE = re.compile(r"^\.function\b.*\{\s*$")
+DISASM_FUNCTION_NAME_RE = re.compile(r"^\.function\s+\S+\s+([^\s(]*)\(")
+DISASM_INSTRUCTION_RE = re.compile(
+    r"^\s+([A-Za-z_][A-Za-z0-9_.]*)(?:\s+(.*?\S))?\s*$"
+)
+CODEGEN_ASM_START = "[compiler] ========== ArkSteed After Codegen ASM =========="
+CODEGEN_ASM_END = "[compiler] ================================================"
+ARKSTEED_COMMENT_RE = re.compile(r"^\[compiler\]\s+\[ArkSteed\]\s*(.*?)\s*$")
+
 
 def iter_graph_dumps(stdout: str):
     """Yield (method_name, dump_text) for every CFG dump in the log.
@@ -126,6 +139,15 @@ def iter_graph_dumps(stdout: str):
             method = match.group(1) or "(anonymous)"
         yield method, stdout[start:end]
         position = end
+
+
+def iter_compilation_sections(stdout: str):
+    """Yield (method_name, section) for each ArkSteed compilation task."""
+
+    starts = list(COMPILE_START_RE.finditer(stdout))
+    for index, start in enumerate(starts):
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(stdout)
+        yield start.group(1) or "(anonymous)", stdout[start.end():end]
 
 
 # Vertex lines look like `<label>:  <Opcode> [...] (inputs) ; extras` where the
@@ -382,6 +404,68 @@ class ConstraintError(Exception):
 
 
 @dataclass(frozen=True)
+class BytecodeCountConstraint:
+    """Exact count of a mnemonic and optional operand pattern in ark_disasm."""
+
+    mnemonic: str
+    operands: Optional[str]
+    count: int
+
+    @classmethod
+    def from_tokens(cls, tokens: List[str]) -> "BytecodeCountConstraint":
+        if len(tokens) < 3 or not tokens[-1].isdigit():
+            raise ConstraintError(
+                "'BYTECODE_COUNT' expects <mnemonic> [<operand-pattern>] <n>"
+            )
+        mnemonic = tokens[1]
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", mnemonic) is None:
+            raise ConstraintError(f"invalid bytecode mnemonic '{mnemonic}'")
+        # Annotation tokenization has already normalized whitespace. Match the
+        # same normalized representation produced by collect_bytecode_instructions.
+        operands = " ".join(tokens[2:-1]) or None
+        return cls(mnemonic, operands, int(tokens[-1]))
+
+    def label(self) -> str:
+        operands = f" {self.operands}" if self.operands is not None else ""
+        return f"BYTECODE_COUNT {self.mnemonic}{operands} == {self.count}"
+
+    def violated(self, instructions: List[Tuple[str, str]]) -> Optional[str]:
+        actual = sum(
+            1 for mnemonic, operands in instructions
+            if mnemonic == self.mnemonic
+            and (self.operands is None or fnmatchcase(operands, self.operands))
+        )
+        if actual == self.count:
+            return None
+        return f'"{self.label()}" violated, found {actual}'
+
+
+@dataclass(frozen=True)
+class CodegenCountConstraint:
+    """Exact count of a comment emitted with generated ArkSteed code."""
+
+    pattern: str
+    count: int
+
+    @classmethod
+    def from_tokens(cls, tokens: List[str]) -> "CodegenCountConstraint":
+        if len(tokens) < 3 or not tokens[-1].isdigit():
+            raise ConstraintError(
+                "'CODEGEN_COUNT' expects <comment-pattern> <n>"
+            )
+        return cls(" ".join(tokens[1:-1]), int(tokens[-1]))
+
+    def label(self) -> str:
+        return f"CODEGEN_COUNT {self.pattern} == {self.count}"
+
+    def violated(self, comments: List[str]) -> Optional[str]:
+        actual = sum(1 for comment in comments if fnmatchcase(comment, self.pattern))
+        if actual == self.count:
+            return None
+        return f'"{self.label()}" violated, found {actual}'
+
+
+@dataclass(frozen=True)
 class Constraint(ABC):
     """Base class of the `//!` IR constraints.
 
@@ -550,6 +634,10 @@ class TestCase:
     compile_mode: str = "module"
     params: List[str] = field(default_factory=list)
     constraints: Dict[str, List[Constraint]] = field(default_factory=dict)
+    bytecode_constraints: Dict[str, List[BytecodeCountConstraint]] = field(
+        default_factory=dict
+    )
+    codegen_constraints: Dict[str, List[CodegenCountConstraint]] = field(default_factory=dict)
     config_errors: List[str] = field(default_factory=list)
 
     @property
@@ -638,7 +726,7 @@ def load_opcode_names() -> Optional[set]:
 
 
 def parse_annotations(case: TestCase, valid_opcodes: Optional[set]) -> None:
-    """Fill case.compile_mode / case.params / case.constraints; record problems in case.config_errors."""
+    """Fill case options and constraints; record problems in config_errors."""
 
     compile_mode: Optional[str] = None
     params: Optional[List[str]] = None
@@ -693,6 +781,24 @@ def parse_annotations(case: TestCase, valid_opcodes: Optional[set]) -> None:
             else:
                 current_method = tokens[1]
                 case.constraints.setdefault(current_method, [])
+        elif keyword == "BYTECODE_COUNT":
+            if current_method is None:
+                err("'BYTECODE_COUNT' constraint appears before any METHOD annotation")
+                continue
+            try:
+                constraint = BytecodeCountConstraint.from_tokens(tokens)
+                case.bytecode_constraints.setdefault(current_method, []).append(constraint)
+            except ConstraintError as error:
+                err(str(error))
+        elif keyword == "CODEGEN_COUNT":
+            if current_method is None:
+                err("'CODEGEN_COUNT' constraint appears before any METHOD annotation")
+                continue
+            try:
+                constraint = CodegenCountConstraint.from_tokens(tokens)
+                case.codegen_constraints.setdefault(current_method, []).append(constraint)
+            except ConstraintError as error:
+                err(str(error))
         elif keyword in CONSTRAINT_BY_KEYWORD:
             if current_method is None:
                 err(f"'{keyword}' constraint appears before any METHOD annotation")
@@ -740,25 +846,30 @@ def compile_case(case: TestCase, abc_path: Path, cfg: BuildConfig) -> Tuple[bool
 
 
 def disassemble_case(case: TestCase, abc_path: Path, disasm_path: Path,
-                     cfg: BuildConfig, log: List[str]) -> None:
-    """Dump abc disassembly; diagnostic only - failures are reported as warnings."""
+                     cfg: BuildConfig, log: List[str]) -> Optional[str]:
+    """Dump abc disassembly, returning an error also recorded as a warning."""
 
     if not cfg.ark_disasm.exists():
-        log.append(f"warning: ark_disasm does not exist: {cfg.ark_disasm}")
-        return
+        error = f"ark_disasm does not exist: {cfg.ark_disasm}"
+        log.append(f"warning: {error}")
+        return error
     cmd = cfg.command_prefix + [str(cfg.ark_disasm), str(abc_path), str(disasm_path)]
     timeout = DISASM_TIMEOUT_ARM64 if cfg.is_cross_build else DISASM_TIMEOUT
     try:
         result = subprocess.run(cmd, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        log.append(f"warning: ark_disasm timed out for {case.rel}")
-        return
+        error = f"ark_disasm timed out for {case.rel}"
+        log.append(f"warning: {error}")
+        return error
     except OSError as e:
-        log.append(f"warning: ark_disasm failed to run for {case.rel}: {e}")
-        return
+        error = f"ark_disasm failed to run for {case.rel}: {e}"
+        log.append(f"warning: {error}")
+        return error
     if result.returncode != 0:
-        log.append(f"warning: ark_disasm failed for {case.rel} "
-                   f"(return code {result.returncode})")
+        error = f"ark_disasm failed for {case.rel} (return code {result.returncode})"
+        log.append(f"warning: {error}")
+        return error
+    return None
 
 
 def build_repro_command(cmd: List[str], cfg: BuildConfig) -> str:
@@ -817,7 +928,7 @@ def execute_abc(
     defaults.append(f"--log-components={args.log_components_value}")
     defaults.append("--compiler-arksteed-print-graph=true")
     defaults.append("--compiler-arksteed-print-method-name=false")
-    if args.print_asm_code:
+    if args.print_asm_code or any(case.codegen_constraints.values()):
         defaults.append("--compiler-arksteed-print-code=true")
         defaults.append("--compiler-arksteed-enable-code-comment=true")
     if args.fully_colored:
@@ -948,6 +1059,120 @@ def check_constraints(
     return errors
 
 
+def disasm_method_name(function_header: str) -> Optional[str]:
+    """Extract the source-level method name from an ark_disasm function header."""
+
+    match = DISASM_FUNCTION_NAME_RE.match(function_header)
+    if match is None:
+        return None
+    qualified_name = match.group(1)
+    if "#" in qualified_name:
+        return qualified_name.rsplit("#", 1)[1]
+    return qualified_name.rsplit(".", 1)[-1]
+
+
+def collect_bytecode_instructions(
+    disassembly: str,
+) -> Dict[str, List[Tuple[str, str]]]:
+    """Collect normalized bytecode instructions grouped by method name."""
+
+    instructions: Dict[str, List[Tuple[str, str]]] = {}
+    current_method: Optional[str] = None
+    for line in disassembly.splitlines():
+        stripped = line.strip()
+        if DISASM_FUNCTION_START_RE.match(stripped):
+            current_method = disasm_method_name(stripped)
+            if current_method is not None:
+                instructions.setdefault(current_method, [])
+            continue
+        if current_method is None:
+            continue
+        if stripped == "}":
+            current_method = None
+            continue
+        instruction = DISASM_INSTRUCTION_RE.match(line)
+        if instruction is None:
+            continue
+        mnemonic = instruction.group(1)
+        operands = " ".join((instruction.group(2) or "").split())
+        instructions[current_method].append((mnemonic, operands))
+    return instructions
+
+
+def check_bytecode_constraints(
+    disasm_path: Path, constraints: Dict[str, List[BytecodeCountConstraint]]
+) -> List[str]:
+    """Verify method-scoped BYTECODE_COUNT constraints against abc disassembly."""
+
+    if not constraints:
+        return []
+    try:
+        disassembly = disasm_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        return [f"cannot read abc disassembly: {error}"]
+    if not any(DISASM_FUNCTION_START_RE.match(line.strip())
+               for line in disassembly.splitlines()):
+        return ["abc disassembly contains no function bodies "
+                "(empty output or unsupported ark_disasm format)"]
+    instructions = collect_bytecode_instructions(disassembly)
+    errors: List[str] = []
+    for method, method_constraints in constraints.items():
+        method_instructions = instructions.get(method)
+        if method_instructions is None:
+            errors.append(f"method '{method}' does not appear in abc disassembly")
+            continue
+        for constraint in method_constraints:
+            message = constraint.violated(method_instructions)
+            if message is not None:
+                errors.append(f"{method}: {message}")
+    return errors
+
+
+def collect_codegen_comments(stdout: str) -> Dict[str, List[str]]:
+    """Collect normalized ArkSteed generated-code comments by method."""
+
+    comments: Dict[str, List[str]] = {}
+    for method, section in iter_compilation_sections(stdout):
+        method_comments = comments.setdefault(method, [])
+        in_asm_dump = False
+        for raw_line in section.splitlines():
+            line = ANSI_ESCAPE_RE.sub("", raw_line)
+            if line == CODEGEN_ASM_START:
+                in_asm_dump = True
+                continue
+            if line == CODEGEN_ASM_END:
+                in_asm_dump = False
+                continue
+            if not in_asm_dump:
+                continue
+            match = ARKSTEED_COMMENT_RE.match(line)
+            if match is not None:
+                method_comments.append(" ".join(match.group(1).split()))
+    return comments
+
+
+def check_codegen_constraints(
+    constraints: Dict[str, List[CodegenCountConstraint]],
+    comments: Dict[str, List[str]],
+) -> List[str]:
+    """Verify method-scoped CODEGEN_COUNT constraints."""
+
+    errors: List[str] = []
+    for method, method_constraints in constraints.items():
+        method_comments = comments.get(method)
+        if method_comments is None:
+            errors.append(
+                f"method '{method}' was never JIT-compiled "
+                "(no generated-code section in compiler log)"
+            )
+            continue
+        for constraint in method_constraints:
+            message = constraint.violated(method_comments)
+            if message is not None:
+                errors.append(f"{method}: {message}")
+    return errors
+
+
 # Live range checking (ported from the retired batch runner; the patterns are
 # adapted to the current vertex dump format: `v<id>:` labels and the
 # `→ live range: [start-end]` suffix).
@@ -1051,7 +1276,17 @@ def run_case(
         result.duration = time.time() - start
         return result
 
-    disassemble_case(case, abc_path, art_dir / f"{case.entry}.disasm.txt", cfg, result.log)
+    disasm_path = art_dir / f"{case.entry}.disasm.txt"
+    disasm_error = disassemble_case(case, abc_path, disasm_path, cfg, result.log)
+    bytecode_errors: List[str] = []
+    if case.bytecode_constraints:
+        if disasm_error is not None:
+            bytecode_errors.append(
+                f"bytecode constraints unavailable: {disasm_error}")
+        else:
+            bytecode_errors.extend(
+                check_bytecode_constraints(disasm_path, case.bytecode_constraints))
+    result.reasons.extend(bytecode_errors)
 
     cmd, returncode, stdout, stderr, timed_out = execute_abc(
         case, abc_path, cfg, args, result.log)
@@ -1086,6 +1321,27 @@ def run_case(
             detail.extend(f"  {constraint}" for constraint in constraints)
         result.log.append("All IR constraints are satisfied:\n" + "\n".join(detail))
     result.reasons.extend(constraint_errors)
+    codegen_errors = check_codegen_constraints(
+        case.codegen_constraints, collect_codegen_comments(stdout)
+    )
+    if args.verbose and case.codegen_constraints and not codegen_errors:
+        codegen_detail: List[str] = []
+        for method, constraints in case.codegen_constraints.items():
+            codegen_detail.append(f"METHOD {method}:")
+            codegen_detail.extend(f"  {constraint.label()}" for constraint in constraints)
+        result.log.append(
+            "All codegen constraints are satisfied:\n" + "\n".join(codegen_detail))
+    result.reasons.extend(codegen_errors)
+    if args.verbose and case.bytecode_constraints and not bytecode_errors:
+        bytecode_detail: List[str] = []
+        for method, constraints in case.bytecode_constraints.items():
+            bytecode_detail.append(f"METHOD {method}:")
+            bytecode_detail.extend(
+                f"  {constraint.label()}" for constraint in constraints
+            )
+        result.log.append(
+            "All bytecode constraints are satisfied:\n" +
+            "\n".join(bytecode_detail))
     result.reasons.extend(check_live_ranges(stdout))
     result.duration = time.time() - start
     return result

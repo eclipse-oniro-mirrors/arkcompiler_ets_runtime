@@ -17,7 +17,10 @@
 #define ECMASCRIPT_ARKSTEED_ASSEMBLER_INL_H
 
 #include "ecmascript/arksteed/arksteed_assembler.h"
+#include "ecmascript/js_hclass.h"
 #include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_thread.h"
+#include "ecmascript/mem/mem.h"
 
 // Include platform-specific implementations
 #if defined(PANDA_TARGET_AMD64)
@@ -56,6 +59,73 @@ inline void ArkSteedAssembler::Branch(Condition condition, Label *ifTrue, bool f
         }
     }
 }
+
+inline void ArkSteedAssembler::JumpIfCMCGCEnabled(ArkSteedRegister glue, ArkSteedRegister temp, Label* target)
+{
+    ASSERT(glue != temp);
+    LoadInt32Field(temp, glue, static_cast<int32_t>(JSThread::GlueData::GetIsEnableCMCGCOffset(false)));
+    Compare(temp, 0);
+    JumpIf(Condition::NOT_EQUAL, target);
+}
+
+inline void ArkSteedAssembler::JumpIfHeapSamplingActive(ArkSteedRegister glue, ArkSteedRegister temp, Label* target)
+{
+    ASSERT(glue != temp);
+    LoadField(temp, glue, static_cast<int32_t>(JSThread::GlueData::GetIsStartHeapSamplingOffset(false)));
+    Compare(temp, static_cast<int32_t>(JSTaggedValue::VALUE_TRUE));
+    JumpIf(Condition::EQUAL, target);
+}
+
+inline void ArkSteedAssembler::LoadObjectSizeFromHClass(ArkSteedRegister hclass, ArkSteedRegister objectSize)
+{
+    ASSERT(hclass != objectSize);
+    static_assert(JSTaggedValue::TaggedTypeSize() == (1U << TAGGED_TYPE_SIZE_LOG));
+    constexpr int32_t objectSizeMask = static_cast<int32_t>((1U << JSHClass::ObjectSizeInWordsBits::SIZE) - 1U);
+
+    LoadInt32Field(objectSize, hclass, static_cast<int32_t>(JSHClass::BIT_FIELD1_OFFSET));
+    Lsr(objectSize, JSHClass::ObjectSizeInWordsBits::START_BIT);
+    And(objectSize, objectSizeMask);
+    ShiftLeft(objectSize, TAGGED_TYPE_SIZE_LOG);
+}
+
+inline void ArkSteedAssembler::LoadInlinedPropsStartFromHClass(ArkSteedRegister hclass, ArkSteedRegister offset)
+{
+    ASSERT(hclass != offset);
+    static_assert(JSTaggedValue::TaggedTypeSize() == (1U << TAGGED_TYPE_SIZE_LOG));
+    constexpr int32_t inlinedPropsStartMask
+        = static_cast<int32_t>((1U << JSHClass::InlinedPropsStartBits::SIZE) - 1U);
+
+    LoadInt32Field(offset, hclass, static_cast<int32_t>(JSHClass::BIT_FIELD1_OFFSET));
+    Lsr(offset, JSHClass::InlinedPropsStartBits::START_BIT);
+    And(offset, inlinedPropsStartMask);
+    ShiftLeft(offset, TAGGED_TYPE_SIZE_LOG);
+}
+
+inline void ArkSteedAssembler::TryAllocateInYoungSpace(
+    ArkSteedRegister glue, ArkSteedRegister size, ArkSteedRegister result, ArkSteedRegister temp, Label* failed)
+{
+    ASSERT(glue != size);
+    ASSERT(glue != result);
+    ASSERT(glue != temp);
+    ASSERT(size != result);
+    ASSERT(size != temp);
+    ASSERT(result != temp);
+
+    LoadField(result, glue, static_cast<int32_t>(JSThread::GlueData::GetNewSpaceAllocationTopAddressOffset(false)));
+    LoadField(result, result, 0);
+    LoadField(temp, glue, static_cast<int32_t>(JSThread::GlueData::GetNewSpaceAllocationEndAddressOffset(false)));
+    LoadField(temp, temp, 0);
+    // Match the interpreter allocator: the trusted regular-object size cannot overflow a valid heap address.
+    Add(result, size);
+    Compare(result, temp);
+    JumpIf(Condition::ABOVE, failed);
+
+    // Publishing top commits the allocation. No failure path is allowed after this store.
+    LoadField(temp, glue, static_cast<int32_t>(JSThread::GlueData::GetNewSpaceAllocationTopAddressOffset(false)));
+    StoreField(result, temp, 0);
+    Sub(result, size);
+}
+
 void ArkSteedAssembler::CallRuntime(kungfu::RuntimeStubCSigns::ID runtimeId)
 {
     TemporaryRegisterScope scope(this);

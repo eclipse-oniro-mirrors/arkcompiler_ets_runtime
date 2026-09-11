@@ -2936,7 +2936,35 @@ struct GraphBuilder::BytecodeVisitor {
 
     void LowerCreateEmptyArray()
     {
-        CommonStubCallToAccWithLazyDeopt({glue, GlobalEnv()}, CommonStubID::CreateEmptyArray);
+        ValueVertex* globalEnv = GlobalEnv();
+        ValueVertex* fastArray
+            = self->NewVertex<AllocateJSArrayVertex>(compileInfoFacts_, currentBlock, {glue, globalEnv});
+        ValueVertex* hole = self->graph_->GetTaggedConstant(JSTaggedValue::VALUE_HOLE);
+
+        CompileInfoFacts* entryFacts = compileInfoFacts_;
+        BB* slowBlock = self->NewBlock();
+        BB* fastBlock = self->NewBlock();
+        BB* doneBlock = self->NewBlock();
+        slowBlock->SetDeferred(true);
+        self->FinishBlockWithBranch<BranchIfReferenceEqualVertex>(
+            currentBlock, {fastArray, hole}, slowBlock, fastBlock);
+
+        currentBlock = slowBlock;
+        compileInfoFacts_ = entryFacts->Clone();
+        ValueVertex* slowArray = CommonStubCallToAccWithLazyDeopt(
+            {glue, globalEnv}, CommonStubID::CreateEmptyArray, SideEffectKind::SAFE_CALL);
+        self->FinishBlockWithJump(currentBlock, doneBlock);
+
+        currentBlock = fastBlock;
+        compileInfoFacts_ = entryFacts->Clone();
+        self->FinishBlockWithJump(currentBlock, doneBlock);
+
+        currentBlock = doneBlock;
+        compileInfoFacts_ = entryFacts;
+        compileInfoFacts_->OnSideEffect();
+        ValueVertex* array = self->NewPhiVertexWith(currentBlock, {slowArray, fastArray}, self->AccIndex());
+        compileInfoFacts_->EnsureType(array, NodeInfo::NodeType::JS_ARRAY);
+        frameState.SetAcc(array);
     }
 
     void LowerCreateObjectWithBuffer(const BytecodeInfo *bcInfo)
