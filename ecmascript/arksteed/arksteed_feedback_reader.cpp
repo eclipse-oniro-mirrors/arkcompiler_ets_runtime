@@ -452,6 +452,12 @@ ArkSteedOperationHint ArkSteedFeedbackReader::MakeOperationHint(uint32_t rawBits
             return ArkSteedOperationHint::STRING;
         case pgo::PGOSampleType::Type::NUMBER_OR_STRING:
             return ArkSteedOperationHint::NUMBER_OR_STRING;
+        case pgo::PGOSampleType::Type::BOOLEAN:
+            return ArkSteedOperationHint::BOOLEAN;
+        case pgo::PGOSampleType::Type::UNDEFINED_OR_NULL:
+            return ArkSteedOperationHint::UNDEFINED_OR_NULL;
+        case pgo::PGOSampleType::Type::BIG_INT:
+            return ArkSteedOperationHint::BIG_INT;
         default:
             break;
     }

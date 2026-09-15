@@ -1,0 +1,9 @@
+1
+0
+false
+0
+NaN
+41
+true
+5
+undefined

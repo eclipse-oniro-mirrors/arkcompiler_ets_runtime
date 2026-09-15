@@ -307,6 +307,28 @@ void DeoptIfNotNumberVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(VALUE_INDEX));
     SetTemporariesNeeded(1);
+    UseEagerDeoptFrameSlots(this);
+}
+
+void DeoptIfNotBooleanVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    SetTemporariesNeeded(1);
+    UseEagerDeoptFrameSlots(this);
+}
+
+void DeoptIfNotBigIntVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    SetTemporariesNeeded(1);
+    UseEagerDeoptFrameSlots(this);
+}
+
+void DeoptIfNotUndefinedOrNullVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    SetTemporariesNeeded(1);
+    UseEagerDeoptFrameSlots(this);
 }
 
 void DeoptIfNotHeapObjectVertex::SetValueLocationConstraints()
@@ -633,6 +655,29 @@ void F64ConditionCheckVertex::SetValueLocationConstraints()
     DefineAsRegister(this);
     UseRegister(Arg(LEFT_INDEX));
     UseRegister(Arg(RIGHT_INDEX));
+}
+
+void Float64ToBooleanVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+    SetTemporariesNeeded(1);
+}
+
+void TaggedNumberToBooleanVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+    SetTemporariesNeeded(2);
+    UseEagerDeoptFrameSlots(this);
+}
+
+void TaggedDoubleToBooleanVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+    SetTemporariesNeeded(2);
+    UseEagerDeoptFrameSlots(this);
 }
 
 void TaggedEqualVertex::SetValueLocationConstraints()

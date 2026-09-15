@@ -475,6 +475,7 @@ namespace panda::ecmascript::kungfu {
     APPEND_SUFFIX(HandleGreatereqImm8V8, V)           \
     APPEND_SUFFIX(HandleStrictnoteqImm8V8, V)         \
     APPEND_SUFFIX(HandleStricteqImm8V8, V)            \
+    APPEND_SUFFIX(HandleTonumberImm8, V)              \
     APPEND_SUFFIX(HandleTonumericImm8, V)             \
     APPEND_SUFFIX_IMM8_SECONDBC(HandleCallRuntimeIstruePrefImm8, V)       \
     APPEND_SUFFIX_IMM8_SECONDBC(HandleCallRuntimeIsfalsePrefImm8, V)      \

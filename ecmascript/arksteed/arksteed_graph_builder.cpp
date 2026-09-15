@@ -20,6 +20,7 @@
 #include <cmath>
 #include <limits>
 #include <optional>
+#include <type_traits>
 
 #include "securec.h"
 
@@ -2025,41 +2026,190 @@ struct GraphBuilder::BytecodeVisitor {
 
     void LowerIsTrue()
     {
-        ValueVertex *value = frameState.GetAcc();
-        ValueVertex *result = nullptr;
-        bool toBoolean = false;
-        if (TryFoldToBooleanConstant(value, &toBoolean)) {
-            uint64_t value = toBoolean ? JSTaggedValue::VALUE_TRUE : JSTaggedValue::VALUE_FALSE;
-            result = TaggedConstantFromFoldedValue(JSTaggedValue(value));
-        }
-        if (result == nullptr) {
-            result = TryBuildKnownIntToBoolean(value, true);
-        }
-        if (result == nullptr) {
-            result = CommonStubCall({glue, value}, CommonStubID::ToBooleanTrue);
-        }
-        frameState.SetAcc(result);
+        LowerToBoolean(true);
     }
 
     void LowerIsFalse()
     {
+        LowerToBoolean(false);
+    }
+
+    void LowerToBoolean(bool trueIfTruthy)
+    {
         ValueVertex *value = frameState.GetAcc();
-        ValueVertex *result = nullptr;
         bool toBoolean = false;
         if (TryFoldToBooleanConstant(value, &toBoolean)) {
-            uint64_t value = toBoolean ? JSTaggedValue::VALUE_FALSE : JSTaggedValue::VALUE_TRUE;
-            result = TaggedConstantFromFoldedValue(JSTaggedValue(value));
+            frameState.SetAcc(GetBooleanConstant(trueIfTruthy ? toBoolean : !toBoolean));
+            return;
+        }
+        // Static type facts are guaranteed by checked producers: no guard is needed.
+        if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::BOOLEAN)) {
+            frameState.SetAcc(trueIfTruthy ? value : BuildTaggedNotEqual(value, GetBooleanConstant(true)));
+            return;
+        }
+        if (IsAlwaysTruthyHeapObject(value)) {
+            frameState.SetAcc(GetBooleanConstant(trueIfTruthy));
+            return;
+        }
+        ValueVertex *result = TryBuildKnownIntToBoolean(value, trueIfTruthy);
+        if (result == nullptr && compileInfoFacts_->CheckType(value, NodeInfo::NodeType::NUMBER)) {
+            result = BuildNumberToBoolean(value, trueIfTruthy);
         }
         if (result == nullptr) {
-            result = TryBuildKnownIntToBoolean(value, false);
+            OperationFeedback feedback = self->pgoContext_.ReadOperationFeedback(*currentBcInfo);
+            switch (feedback.hint) {
+                case ArkSteedOperationHint::BOOLEAN:
+                    BuildDeoptIfNotBoolean(value);
+                    compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::BOOLEAN);
+                    result = trueIfTruthy ? value : BuildTaggedNotEqual(value, GetBooleanConstant(true));
+                    break;
+                case ArkSteedOperationHint::UNDEFINED_OR_NULL:
+                    BuildDeoptIfNotUndefinedOrNull(value);
+                    compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::NULL_OR_UNDEFINED);
+                    result = GetBooleanConstant(!trueIfTruthy);
+                    break;
+                case ArkSteedOperationHint::INT:
+                    result = BuildI32ToBoolean(BuildCheckedTaggedIntToI32(value), trueIfTruthy);
+                    break;
+                case ArkSteedOperationHint::NUMBER:
+                    // Double-only sites skip the int arm of the fused vertex;
+                    // mixed int/double sites keep it to avoid deopt loops.
+                    if (feedback.IsDoubleOnly()) {
+                        result = BuildTaggedDoubleToBoolean(value, trueIfTruthy);
+                    } else {
+                        result = BuildNumberToBoolean(value, trueIfTruthy);
+                    }
+                    break;
+                default:
+                    result = CommonStubCall({glue, value},
+                                            trueIfTruthy ? CommonStubID::ToBooleanTrue : CommonStubID::ToBooleanFalse);
+                    break;
+            }
         }
-        if (result == nullptr) {
-            result = CommonStubCall({glue, value}, CommonStubID::ToBooleanFalse);
-        }
+        compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
         frameState.SetAcc(result);
     }
 
+    bool IsAlwaysTruthyHeapObject(ValueVertex *value) const
+    {
+        // SYMBOL and JS_RECEIVER exclude string ("" is falsy) and bigint (0n is falsy),
+        // and ArkTS has no undetectable objects: ToBoolean of such values is constant true.
+        constexpr NodeInfo::NodeType alwaysTruthy =
+            NodeInfo::UnionNodeType(NodeInfo::NodeType::SYMBOL, NodeInfo::NodeType::JS_RECEIVER);
+        return compileInfoFacts_->CheckType(value, alwaysTruthy);
+    }
+
     // -------- Category #6: Type Conversions --------
+
+    ValueVertex *BuildNumberToBoolean(ValueVertex *value, bool trueIfNonZero)
+    {
+        // Values already materialized as f64 use it directly; the tagged
+        // form would require re-boxing.
+        if (ValueVertex *f64 = compileInfoFacts_->TryGetAlternative(value, AlternativeNodes::Kind::HOLEY_FLOAT64)) {
+            ValueVertex *result = self->NewVertex<Float64ToBooleanVertex>(
+                compileInfoFacts_, currentBlock, {f64}, trueIfNonZero);
+            compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
+            return result;
+        }
+        // Otherwise the fused vertex: the tag dispatch is the NOTNUMBER1
+        // guard, ints test the raw low-32 bits, tagged doubles decode in
+        // place for the branchless magnitude trick.
+        std::vector<ValueVertex *> inputs {value};
+        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
+        ValueVertex *result = self->NewVertex<TaggedNumberToBooleanVertex>(
+            currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex), trueIfNonZero);
+        result->Cast<TaggedNumberToBooleanVertex>()->SetEagerDeoptFrameState(std::move(deoptFrameState));
+        compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::NUMBER);
+        compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
+        return result;
+    }
+
+    ValueVertex *BuildTaggedDoubleToBoolean(ValueVertex *value, bool trueIfNonZero)
+    {
+        // Values already materialized as f64 use it directly; the tagged
+        // form would require re-boxing.
+        if (ValueVertex *f64 = compileInfoFacts_->TryGetAlternative(value, AlternativeNodes::Kind::HOLEY_FLOAT64)) {
+            ValueVertex *result = self->NewVertex<Float64ToBooleanVertex>(
+                compileInfoFacts_, currentBlock, {f64}, trueIfNonZero);
+            compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
+            return result;
+        }
+        // Double-only site: the tag check is the NOTDOUBLE1 guard, the decoded
+        // payload feeds the branchless magnitude trick.
+        std::vector<ValueVertex *> inputs {value};
+        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
+        ValueVertex *result = self->NewVertex<TaggedDoubleToBooleanVertex>(
+            currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex), trueIfNonZero);
+        result->Cast<TaggedDoubleToBooleanVertex>()->SetEagerDeoptFrameState(std::move(deoptFrameState));
+        compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::DOUBLE);
+        compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
+        return result;
+    }
+
+    ValueVertex *BuildBooleanToNumber(ValueVertex *value)
+    {
+        ValueVertex *raw = self->NewVertex<TaggedToRawI64Vertex>(compileInfoFacts_, currentBlock, {value});
+        ValueVertex *maskOne = self->graph_->GetInt64Constant(1);
+        ValueVertex *masked = self->NewVertex<I64BitwiseBinaryVertex>(
+            compileInfoFacts_, currentBlock, {raw, maskOne}, IntBitwiseKind::BITWISE_AND);
+        ValueVertex *tagInt = self->graph_->GetInt64Constant(static_cast<int64_t>(JSTaggedValue::TAG_INT));
+        ValueVertex *taggedIntRaw = self->NewVertex<I64BitwiseBinaryVertex>(
+            compileInfoFacts_, currentBlock, {masked, tagInt}, IntBitwiseKind::BITWISE_OR);
+        ValueVertex *result = self->NewVertex<RawI64ToTaggedVertex>(compileInfoFacts_, currentBlock, {taggedIntRaw});
+        compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::INT);
+        return result;
+    }
+
+    ValueVertex *BuildUndefinedOrNullToNumber(ValueVertex *value)
+    {
+        ValueVertex *raw = self->NewVertex<TaggedToRawI64Vertex>(compileInfoFacts_, currentBlock, {value});
+        ValueVertex *undefinedValue =
+            self->graph_->GetInt64Constant(static_cast<int64_t>(JSTaggedValue::VALUE_UNDEFINED));
+        ValueVertex *nanValue = self->graph_->GetTaggedConstant(base::NumberHelper::GetNaN());
+        ValueVertex *zeroValue = self->graph_->GetTaggedConstant(JSTaggedValue::VALUE_ZERO);
+        ValueVertex *result = BuildSelect<BranchIfInt64CompareVertex>(
+            {raw, undefinedValue}, self->AccIndex(),
+            [&]() -> ValueVertex * { return nanValue; },
+            [&]() -> ValueVertex * { return zeroValue; },
+            Condition::EQUAL);
+        compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::NUMBER);
+        return result;
+    }
+
+    // Shared PGO specialization for ToNumber/ToNumeric: boolean and
+    // null/undefined sites convert inline, number sites pass through behind an
+    // eager-deopt guard, and ToNumeric additionally passes bigint through.
+    // Polymorphic bits never match a single hint, so such sites conservatively
+    // fall back to the runtime call. Returns false when the feedback does not
+    // justify a specialization.
+    bool TrySpecializeNumericConversion(ValueVertex *value, bool allowBigInt)
+    {
+        OperationFeedback feedback = self->pgoContext_.ReadOperationFeedback(*currentBcInfo);
+        switch (feedback.hint) {
+            case ArkSteedOperationHint::BOOLEAN:
+                BuildDeoptIfNotBoolean(value);
+                frameState.SetAcc(BuildBooleanToNumber(value));
+                return true;
+            case ArkSteedOperationHint::UNDEFINED_OR_NULL:
+                BuildDeoptIfNotUndefinedOrNull(value);
+                frameState.SetAcc(BuildUndefinedOrNullToNumber(value));
+                return true;
+            case ArkSteedOperationHint::INT:
+            case ArkSteedOperationHint::NUMBER:
+                BuildDeoptIfNotNumber(value);
+                frameState.SetAcc(value);
+                return true;
+            case ArkSteedOperationHint::BIG_INT:
+                if (allowBigInt) {
+                    BuildDeoptIfNotBigInt(value);
+                    frameState.SetAcc(value);
+                    return true;
+                }
+                return false;
+            default:
+                return false;
+        }
+    }
 
     void LowerToNumber()
     {
@@ -2071,6 +2221,9 @@ struct GraphBuilder::BytecodeVisitor {
         }
         if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::NUMBER)) {
             frameState.SetAcc(value);
+            return;
+        }
+        if (TrySpecializeNumericConversion(value, false)) {
             return;
         }
         RuntimeCallToAccWithLazyDeopt({value}, RTSTUB_ID(ToNumber));
@@ -2087,6 +2240,9 @@ struct GraphBuilder::BytecodeVisitor {
         if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::NUMBER) ||
             compileInfoFacts_->CheckType(value, NodeInfo::NodeType::BIGINT)) {
             frameState.SetAcc(value);
+            return;
+        }
+        if (TrySpecializeNumericConversion(value, true)) {
             return;
         }
         RuntimeCallToAccWithLazyDeopt({value}, RTSTUB_ID(ToNumeric));
@@ -4344,8 +4500,8 @@ struct GraphBuilder::BytecodeVisitor {
         BB *doneBlock = self->NewBlock();
         BB *branchBlock = currentBlock;
 
-        self->FinishBlockWith<BranchVertexT>(branchBlock, branchInputs, std::forward<BranchArgs>(branchArgs)...,
-                                             trueBlock, falseBlock);
+        self->FinishBlockWith<BranchVertexT>(branchBlock, branchInputs, trueBlock, falseBlock,
+                                             std::forward<BranchArgs>(branchArgs)...);
         trueBlock->AddPredecessor(branchBlock);
         falseBlock->AddPredecessor(branchBlock);
 
@@ -4837,11 +4993,54 @@ struct GraphBuilder::BytecodeVisitor {
 
     void BuildDeoptIfNotNumber(ValueVertex *value)
     {
+        if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::NUMBER)) {
+            return;
+        }
         std::vector<ValueVertex *> inputs {value};
         EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
         self->NewVertex<DeoptIfNotNumberVertex>(currentBlock, inputs, self->chunk_,
                                                 self->preproc_->GetBytecodeOffset(currentBcIndex))
             ->SetEagerDeoptFrameState(std::move(deoptFrameState));
+        compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::NUMBER);
+    }
+
+    void BuildDeoptIfNotBoolean(ValueVertex *value)
+    {
+        if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::BOOLEAN)) {
+            return;
+        }
+        std::vector<ValueVertex *> inputs {value};
+        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
+        self->NewVertex<DeoptIfNotBooleanVertex>(
+            currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex))
+            ->SetEagerDeoptFrameState(std::move(deoptFrameState));
+        compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::BOOLEAN);
+    }
+
+    void BuildDeoptIfNotBigInt(ValueVertex *value)
+    {
+        if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::BIGINT)) {
+            return;
+        }
+        std::vector<ValueVertex *> inputs {value};
+        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
+        self->NewVertex<DeoptIfNotBigIntVertex>(
+            currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex))
+            ->SetEagerDeoptFrameState(std::move(deoptFrameState));
+        compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::BIGINT);
+    }
+
+    void BuildDeoptIfNotUndefinedOrNull(ValueVertex *value)
+    {
+        if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::NULL_OR_UNDEFINED)) {
+            return;
+        }
+        std::vector<ValueVertex *> inputs {value};
+        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
+        self->NewVertex<DeoptIfNotUndefinedOrNullVertex>(
+            currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex))
+            ->SetEagerDeoptFrameState(std::move(deoptFrameState));
+        compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::NULL_OR_UNDEFINED);
     }
 
     ValueVertex *BuildNumberToString(ValueVertex *value)
@@ -5705,11 +5904,15 @@ struct GraphBuilder::BytecodeVisitor {
         if (!compileInfoFacts_->CheckType(value, NodeInfo::NodeType::INT)) {
             return nullptr;
         }
-        ValueVertex *valueI32 = BuildTaggedIntToI32(value);
+        return BuildI32ToBoolean(BuildTaggedIntToI32(value), trueIfNonZero);
+    }
+
+    ValueVertex *BuildI32ToBoolean(ValueVertex *i32, bool trueIfNonZero)
+    {
         ValueVertex *zero = self->graph_->GetInt32Constant(0);
         Condition condition = trueIfNonZero ? Condition::NOT_EQUAL : Condition::EQUAL;
-        ValueVertex *result =
-            self->NewVertex<I32ConditionCheckVertex>(compileInfoFacts_, currentBlock, {valueI32, zero}, condition);
+        ValueVertex *result = self->NewVertex<I32ConditionCheckVertex>(
+            compileInfoFacts_, currentBlock, {i32, zero}, condition);
         compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
         return result;
     }

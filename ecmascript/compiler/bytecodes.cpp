@@ -2321,11 +2321,17 @@ void BytecodeInfo::InitBytecodeInfo(BytecodeInfo &info, const uint8_t *pc,
         case EcmaOpcode::INC_IMM8:
         case EcmaOpcode::DEC_IMM8:
         case EcmaOpcode::NOT_IMM8:
-        case EcmaOpcode::NEG_IMM8: {
+        case EcmaOpcode::NEG_IMM8:
+        case EcmaOpcode::TONUMBER_IMM8:
+        case EcmaOpcode::TONUMERIC_IMM8: {
             info.slotId = ICSlotId(READ_INST_8_0());
             break;
         }
-        case EcmaOpcode::TONUMERIC_IMM8:
+        case EcmaOpcode::CALLRUNTIME_ISTRUE_PREF_IMM8:
+        case EcmaOpcode::CALLRUNTIME_ISFALSE_PREF_IMM8: {
+            info.slotId = ICSlotId(READ_INST_8_1());
+            break;
+        }
         case EcmaOpcode::JMP_IMM8:
         case EcmaOpcode::JMP_IMM16:
         case EcmaOpcode::JMP_IMM32:
@@ -2351,7 +2357,6 @@ void BytecodeInfo::InitBytecodeInfo(BytecodeInfo &info, const uint8_t *pc,
         case EcmaOpcode::ASYNCFUNCTIONENTER:
         case EcmaOpcode::TYPEOF_IMM8:
         case EcmaOpcode::TYPEOF_IMM16:
-        case EcmaOpcode::TONUMBER_IMM8:
         case EcmaOpcode::THROW_PREF_NONE:
         case EcmaOpcode::GETPROPITERATOR:
         case EcmaOpcode::GETRESUMEMODE:
@@ -2361,8 +2366,6 @@ void BytecodeInfo::InitBytecodeInfo(BytecodeInfo &info, const uint8_t *pc,
         case EcmaOpcode::DEBUGGER:
         case EcmaOpcode::ISTRUE:
         case EcmaOpcode::ISFALSE:
-        case EcmaOpcode::CALLRUNTIME_ISTRUE_PREF_IMM8:
-        case EcmaOpcode::CALLRUNTIME_ISFALSE_PREF_IMM8:
         case EcmaOpcode::NOP:
         case EcmaOpcode::GETITERATOR_IMM8:
         case EcmaOpcode::GETITERATOR_IMM16:

@@ -1700,6 +1700,94 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfNotNumberVertex>(DeoptI
 }
 
 template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfNotBooleanVertex>(DeoptIfNotBooleanVertex *check)
+{
+    auto value = GetInputRegister(check, DeoptIfNotBooleanVertex::VALUE_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister bits = scope.Acquire();
+#if defined(PANDA_TARGET_AMD64)
+    Label *deopt = RecordEagerDeoptTarget(check, kungfu::DeoptType::NOTBOOL1);
+#else
+    Label deoptLabel;
+    Label *deopt = &deoptLabel;
+#endif
+    Label done;
+    // (value | 1) == VALUE_TRUE accepts exactly {VALUE_FALSE, VALUE_TRUE}: the
+    // OR-immediate replaces the movabs+AND mask sequence and also rejects
+    // internal sentinels (VALUE_EXCEPTION, VALUE_OPTIMIZED_OUT) that share the
+    // boolean tag bits.
+    __ Move(bits, value);
+    __ Or(bits, 1);
+    __ Compare(bits, static_cast<int32_t>(JSTaggedValue::VALUE_TRUE));
+    __ JumpIf(Condition::NOT_EQUAL, deopt);
+#if !defined(PANDA_TARGET_AMD64)
+    __ Jump(&done);
+    __ Bind(deopt);
+    EmitEagerDeoptExit(check, kungfu::DeoptType::NOTBOOL1);
+#endif
+    __ Bind(&done);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfNotBigIntVertex>(DeoptIfNotBigIntVertex *check)
+{
+    auto value = GetInputRegister(check, DeoptIfNotBigIntVertex::VALUE_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister scratch = scope.Acquire();
+#if defined(PANDA_TARGET_AMD64)
+    Label *deopt = RecordEagerDeoptTarget(check, kungfu::DeoptType::NOT_BIG_INT);
+#else
+    Label deoptLabel;
+    Label *deopt = &deoptLabel;
+#endif
+    Label done;
+    // The Compare after And is required on arm64: AND does not set NZCV there.
+    __ Move(scratch, value);
+    __ And(scratch, static_cast<int64_t>(JSTaggedValue::TAG_HEAPOBJECT_MASK));
+    __ Compare(scratch, 0);
+    __ JumpIf(Condition::NOT_EQUAL, deopt);
+    LoadObjectType(assembler_, scratch, value);
+    __ Compare(scratch, static_cast<int32_t>(JSType::BIGINT));
+    __ JumpIf(Condition::NOT_EQUAL, deopt);
+#if !defined(PANDA_TARGET_AMD64)
+    __ Jump(&done);
+    __ Bind(deopt);
+    EmitEagerDeoptExit(check, kungfu::DeoptType::NOT_BIG_INT);
+#endif
+    __ Bind(&done);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfNotUndefinedOrNullVertex>(
+    DeoptIfNotUndefinedOrNullVertex *check)
+{
+    auto value = GetInputRegister(check, DeoptIfNotUndefinedOrNullVertex::VALUE_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister bits = scope.Acquire();
+#if defined(PANDA_TARGET_AMD64)
+    Label *deopt = RecordEagerDeoptTarget(check, kungfu::DeoptType::NOT_UNDEFINED_OR_NULL);
+#else
+    Label deoptLabel;
+    Label *deopt = &deoptLabel;
+#endif
+    Label done;
+    // (value | 1) == VALUE_NULL accepts exactly {VALUE_UNDEFINED, VALUE_NULL}:
+    // the OR-immediate replaces the movabs+AND mask sequence and also rejects
+    // internal sentinels (VALUE_EXCEPTION, VALUE_OPTIMIZED_OUT) that share the
+    // special tag bits.
+    __ Move(bits, value);
+    __ Or(bits, 1);
+    __ Compare(bits, static_cast<int32_t>(JSTaggedValue::VALUE_NULL));
+    __ JumpIf(Condition::NOT_EQUAL, deopt);
+#if !defined(PANDA_TARGET_AMD64)
+    __ Jump(&done);
+    __ Bind(deopt);
+    EmitEagerDeoptExit(check, kungfu::DeoptType::NOT_UNDEFINED_OR_NULL);
+#endif
+    __ Bind(&done);
+}
+
+template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfNotHeapObjectVertex>(DeoptIfNotHeapObjectVertex *check)
 {
 #ifndef NDEBUG
@@ -2775,6 +2863,134 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<F64ConditionCheckVertex>(F64Co
     auto right = GetInputDoubleRegister(check, F64ConditionCheckVertex::RIGHT_INDEX);
     __ CompareFloat64(left, right);
     EmitTaggedBooleanFromFloat64Compare(assembler_, dst, check->GetCondition());
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<Float64ToBooleanVertex>(Float64ToBooleanVertex *op)
+{
+    auto dst = GetResultRegister(op);
+    auto src = GetInputDoubleRegister(op, Float64ToBooleanVertex::INPUT_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister bits = scope.Acquire();
+    // Branchless ToBoolean for a double: with u the raw bits and m = u & 0x7fff'ffff
+    // 'ffff'ffff, the value is falsy exactly when m == 0 (+/-0.0) or m > 0x7ff0'0000
+    // '0000'0000 (NaN). Tracking 2m via the shift: d = 2m - 2 wraps to all-ones for
+    // m == 0 and is 0 for m == 1, so v = d >>> 52 gives falsy <=> v + 2 >= 0x1000 and
+    // f = (v + 2) >>> 12 is 1 exactly on the falsy set. VALUE_TRUE (0x07) and
+    // VALUE_FALSE (0x06) differ only in bit 0, so the tagged result is 7 - f for
+    // IsTrue and 6 + f for IsFalse - no conditional instruction is needed.
+    __ Move(bits, src);                  // u
+    __ ShiftLeft(bits, 1);               // 2m
+    __ Sub(bits, 2);                     // d = 2m - 2
+    __ ShiftRightLogical(bits, 52);      // v = d >>> 52
+    __ Add(bits, 2);                     // v + 2
+    __ ShiftRightLogical(bits, 12);      // f: 1 = falsy
+    if (op->IsTrueIfNonZero()) {
+        __ Move(dst, static_cast<int32_t>(JSTaggedValue::VALUE_TRUE));
+        __ Sub(dst, bits);
+    } else {
+        __ Move(dst, static_cast<int32_t>(JSTaggedValue::VALUE_FALSE));
+        __ Add(dst, bits);
+    }
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<TaggedNumberToBooleanVertex>(TaggedNumberToBooleanVertex *op)
+{
+    auto dst = GetResultRegister(op);
+    auto input = GetInputRegister(op, TaggedNumberToBooleanVertex::INPUT_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister bits = scope.Acquire();
+    ArkSteedRegister scratch = scope.Acquire();
+    Label intCase;
+    Label done;
+
+    // The tag dispatch doubles as the NOTNUMBER1 guard, mirroring
+    // CheckedNumberToF64Vertex: high16 == 0xFFFF is a TaggedInt, high16 == 0x0000
+    // is a non-number and deopts, anything else is a TaggedDouble.
+    __ Move(bits, input);
+    __ Move(scratch, JSTaggedValue::TAG_MARK);
+    __ Word64And(bits, scratch);
+    __ Compare(bits, scratch);
+    __ JumpIf(Condition::EQUAL, &intCase);
+    __ Compare(bits, static_cast<int64_t>(JSTaggedValue::TAG_OBJECT));
+    BranchToEagerDeoptTarget(Condition::EQUAL, op, kungfu::DeoptType::NOTNUMBER1);
+
+    // TaggedDouble arm: decode in place (subtract DOUBLE_ENCODE_OFFSET) and run
+    // the branchless magnitude trick of Float64ToBooleanVertex on the raw bits.
+    __ Move(bits, input);
+    __ Move(scratch, static_cast<uint64_t>(JSTaggedValue::DOUBLE_ENCODE_OFFSET));
+    __ Sub(bits, scratch);                // decoded double bits
+    __ ShiftLeft(bits, 1);                // 2m
+    __ Sub(bits, 2);                      // 2m - 2
+    __ ShiftRightLogical(bits, 52);       // v
+    __ Add(bits, 2);                      // v + 2
+    __ ShiftRightLogical(bits, 12);       // f: 1 = falsy
+    if (op->IsTrueIfNonZero()) {
+        __ Move(dst, static_cast<int32_t>(JSTaggedValue::VALUE_TRUE));
+        __ Sub(dst, bits);                // 7 - f
+    } else {
+        __ Move(dst, static_cast<int32_t>(JSTaggedValue::VALUE_FALSE));
+        __ Add(dst, bits);                // 6 + f
+    }
+    __ Jump(&done);
+
+    // TaggedInt arm: the answer is a property of the raw encoding - falsy
+    // exactly when the low 32 bits are zero (the tag and sign extension never
+    // touch them). (v | -v) >>> 31 is 1 exactly for v != 0, so this arm never
+    // leaves the GPR domain and pays no int-to-double conversion.
+    __ Bind(&intCase);
+    __ Move(bits, input);
+    __ Int32Neg(bits, bits);
+    __ Int32Or(bits, input);
+    __ ShiftRightLogical32(bits, 31);     // t: 1 = truthy
+    if (op->IsTrueIfNonZero()) {
+        __ Move(dst, static_cast<int32_t>(JSTaggedValue::VALUE_FALSE));
+        __ Add(dst, bits);                // 6 + t
+    } else {
+        __ Move(dst, static_cast<int32_t>(JSTaggedValue::VALUE_TRUE));
+        __ Sub(dst, bits);                // 7 - t
+    }
+
+    __ Bind(&done);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<TaggedDoubleToBooleanVertex>(TaggedDoubleToBooleanVertex *op)
+{
+    auto dst = GetResultRegister(op);
+    auto input = GetInputRegister(op, TaggedDoubleToBooleanVertex::INPUT_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister bits = scope.Acquire();
+    ArkSteedRegister scratch = scope.Acquire();
+
+    // The tag check is the NOTDOUBLE1 guard: high16 == 0xFFFF is a TaggedInt and
+    // high16 == 0x0000 is a heap object - both deopt, anything else is a TaggedDouble.
+    __ Move(bits, input);
+    __ Move(scratch, JSTaggedValue::TAG_MARK);
+    __ Word64And(bits, scratch);
+    __ Compare(bits, scratch);
+    BranchToEagerDeoptTarget(Condition::EQUAL, op, kungfu::DeoptType::NOTDOUBLE1);
+    __ Compare(bits, static_cast<int64_t>(JSTaggedValue::TAG_OBJECT));
+    BranchToEagerDeoptTarget(Condition::EQUAL, op, kungfu::DeoptType::NOTDOUBLE1);
+
+    // Decode in place (subtract DOUBLE_ENCODE_OFFSET) and run the branchless
+    // magnitude trick of Float64ToBooleanVertex on the raw bits.
+    __ Move(bits, input);
+    __ Move(scratch, static_cast<uint64_t>(JSTaggedValue::DOUBLE_ENCODE_OFFSET));
+    __ Sub(bits, scratch);                // decoded double bits
+    __ ShiftLeft(bits, 1);                // 2m
+    __ Sub(bits, 2);                      // 2m - 2
+    __ ShiftRightLogical(bits, 52);       // v
+    __ Add(bits, 2);                      // v + 2
+    __ ShiftRightLogical(bits, 12);       // f: 1 = falsy
+    if (op->IsTrueIfNonZero()) {
+        __ Move(dst, static_cast<int32_t>(JSTaggedValue::VALUE_TRUE));
+        __ Sub(dst, bits);                // 7 - f
+    } else {
+        __ Move(dst, static_cast<int32_t>(JSTaggedValue::VALUE_FALSE));
+        __ Add(dst, bits);                // 6 + f
+    }
 }
 
 template <>

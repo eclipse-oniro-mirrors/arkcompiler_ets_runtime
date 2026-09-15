@@ -8818,15 +8818,16 @@ GateRef StubBuilder::FastToBooleanWithProfile(GateRef glue, GateRef value, Profi
         }
         Bind(&isNumber);
         {
-            callback.ProfileOpType(TaggedInt(PGOSampleType::NumberType()));
             BRANCH(TaggedIsInt(value), &isInt, &isDouble);
             Bind(&isInt);
             {
+                callback.ProfileOpType(TaggedInt(PGOSampleType::IntType()));
                 auto intValue = GetInt32OfTInt(value);
                 BRANCH(Int32Equal(intValue, Int32(0)), &returnFalse, &returnTrue);
             }
             Bind(&isDouble);
             {
+                callback.ProfileOpType(TaggedInt(PGOSampleType::DoubleType()));
                 auto doubleValue = GetDoubleOfTDouble(value);
                 BRANCH(DoubleIsNAN(doubleValue), &returnFalse, &notNan);
                 Bind(&notNan);
@@ -8988,6 +8989,48 @@ GateRef StubBuilder::FastToBooleanWithProfileBaseline(GateRef glue, GateRef valu
     auto ret = *result;
     env->SubCfgExit();
     return ret;
+}
+
+// includeBigInt is a circuit-generation-time flag: only the selected ladder
+// level is emitted, so the two public wrappers below share one shape without
+// any runtime cost.
+void StubBuilder::ProfileNonNumberOpTypeImpl(GateRef glue, GateRef value, ProfileOperation callback,
+                                              bool includeBigInt)
+{
+    if (callback.IsEmpty()) {
+        return;
+    }
+    IR_IF (TaggedIsBoolean(value)) {
+        callback.ProfileOpType(TaggedInt(PGOSampleType::BooleanType()));
+    } IR_ELSE {
+        IR_IF (TaggedIsUndefinedOrNull(value)) {
+            callback.ProfileOpType(TaggedInt(PGOSampleType::UndefinedOrNullType()));
+        } IR_ELSE {
+            IR_IF (TaggedIsString(glue, value)) {
+                callback.ProfileOpType(TaggedInt(PGOSampleType::StringType()));
+            } IR_ELSE {
+                if (includeBigInt) {
+                    IR_IF (TaggedIsBigInt(glue, value)) {
+                        callback.ProfileOpType(TaggedInt(PGOSampleType::BigIntType()));
+                    } IR_ELSE {
+                        callback.ProfileOpType(TaggedInt(PGOSampleType::AnyType()));
+                    }
+                } else {
+                    callback.ProfileOpType(TaggedInt(PGOSampleType::AnyType()));
+                }
+            }
+        }
+    }
+}
+
+void StubBuilder::ProfileNonNumberOpType(GateRef glue, GateRef value, ProfileOperation callback)
+{
+    ProfileNonNumberOpTypeImpl(glue, value, callback, true);
+}
+
+void StubBuilder::ProfileNonNumericOpType(GateRef glue, GateRef value, ProfileOperation callback)
+{
+    ProfileNonNumberOpTypeImpl(glue, value, callback, false);
 }
 
 GateRef StubBuilder::FastDiv(GateRef left, GateRef right, ProfileOperation callback)

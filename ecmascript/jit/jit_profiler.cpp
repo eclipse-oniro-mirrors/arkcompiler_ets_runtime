@@ -189,11 +189,13 @@ void JITProfiler::ProfileBytecode(JSThread *thread, const JSHandle<ProfileTypeIn
                 break;
             }
             case EcmaOpcode::EXP_IMM8_V8:
+            case EcmaOpcode::TONUMBER_IMM8:
             case EcmaOpcode::TONUMERIC_IMM8: {
                 Jit::JitLockHolder lock(thread);
                 uint8_t slotId = READ_INST_8_0();
                 CHECK_SLOTID_BREAK(slotId);
                 ConvertOpType(slotId, bcOffset);
+                UpdateBcOffsetBool(bcOffset, slotId);
                 break;
             }
             case EcmaOpcode::CALLRUNTIME_ISTRUE_PREF_IMM8:

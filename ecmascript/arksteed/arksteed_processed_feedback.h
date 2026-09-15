@@ -21,6 +21,7 @@
 #include "ecmascript/arksteed/arksteed_pgo_access_info.h"
 #include "ecmascript/compiler/builtins/builtins_call_signature.h"
 #include "ecmascript/js_tagged_value_wrapper.h"
+#include "ecmascript/pgo_profiler/types/pgo_profiler_type.h"
 
 namespace panda::ecmascript::arksteed {
 
@@ -51,6 +52,9 @@ enum class ArkSteedOperationHint : uint8_t {
     STRING,
     NUMBER_OR_STRING,
     ANY,
+    BOOLEAN,
+    UNDEFINED_OR_NULL,
+    BIG_INT,
 };
 
 struct ProcessedFeedbackBase {
@@ -73,6 +77,12 @@ struct OperationFeedback {
     bool IsInsufficient() const
     {
         return hint == ArkSteedOperationHint::NONE;
+    }
+
+    // The slot only ever recorded TaggedDouble inputs.
+    bool IsDoubleOnly() const
+    {
+        return rawTypeBits == static_cast<uint32_t>(pgo::PGOSampleType::Type::DOUBLE);
     }
 };
 

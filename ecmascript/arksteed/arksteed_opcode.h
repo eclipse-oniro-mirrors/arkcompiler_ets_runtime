@@ -2073,6 +2073,108 @@ public:
     void SetValueLocationConstraints();
 };
 
+class Float64ToBooleanVertex : public FixedInputVertexMixin<ValueVertex, Float64ToBooleanVertex> {
+public:
+    enum Indices : uint32_t {
+        INPUT_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::FLOAT64,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    explicit Float64ToBooleanVertex(bool trueIfNonZero)
+        : FixedInputVertexMixin(), trueIfNonZero_(trueIfNonZero)
+    {}
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+        ASSERT(GetInput(INPUT_INDEX)->GetValueRepresentation() == ValueRepresentation::FLOAT64);
+    }
+
+    bool IsTrueIfNonZero() const
+    {
+        return trueIfNonZero_;
+    }
+
+private:
+    bool trueIfNonZero_;
+};
+
+class TaggedNumberToBooleanVertex : public VertexMixin<ValueVertex, TaggedNumberToBooleanVertex>,
+                                    public EagerDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        INPUT_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::IS_NOT_IDEMPOTENT |
+        VertexPropertyFlag::CAN_EAGER_DEOPT;
+
+    TaggedNumberToBooleanVertex(Chunk *chunk, uint32_t bytecodeOffset, bool trueIfNonZero)
+        : VertexMixin(), EagerDeoptimizableMixin(chunk, bytecodeOffset), trueIfNonZero_(trueIfNonZero)
+    {}
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+        ASSERT(GetInput(INPUT_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+    }
+
+    bool IsTrueIfNonZero() const
+    {
+        return trueIfNonZero_;
+    }
+
+private:
+    bool trueIfNonZero_;
+};
+
+class TaggedDoubleToBooleanVertex : public VertexMixin<ValueVertex, TaggedDoubleToBooleanVertex>,
+                                     public EagerDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        INPUT_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::IS_NOT_IDEMPOTENT |
+        VertexPropertyFlag::CAN_EAGER_DEOPT;
+
+    TaggedDoubleToBooleanVertex(Chunk *chunk, uint32_t bytecodeOffset, bool trueIfNonZero)
+        : VertexMixin(), EagerDeoptimizableMixin(chunk, bytecodeOffset), trueIfNonZero_(trueIfNonZero)
+    {}
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+        ASSERT(GetInput(INPUT_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+    }
+
+    bool IsTrueIfNonZero() const
+    {
+        return trueIfNonZero_;
+    }
+
+private:
+    bool trueIfNonZero_;
+};
+
 class TaggedEqualVertex : public FixedInputVertexMixin<ValueVertex, TaggedEqualVertex> {
 public:
     enum Indices : uint32_t {
@@ -3037,6 +3139,78 @@ public:
 
     explicit DeoptIfNotNumberVertex(Chunk *chunk, uint32_t bytecodeOffset)
         : VertexMixin(), EagerDeoptimizableMixin(chunk, bytecodeOffset)
+    {}
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+        ASSERT(GetInput(VALUE_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+    }
+};
+
+class DeoptIfNotBooleanVertex : public VertexMixin<NonControlVertex, DeoptIfNotBooleanVertex>,
+                                public EagerDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        VALUE_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_EAGER_DEOPT;
+
+    explicit DeoptIfNotBooleanVertex(Chunk *chunk, uint32_t bytecodeOffset)
+        : VertexMixin(),
+          EagerDeoptimizableMixin(chunk, bytecodeOffset)
+    {}
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+        ASSERT(GetInput(VALUE_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+    }
+};
+
+class DeoptIfNotBigIntVertex : public VertexMixin<NonControlVertex, DeoptIfNotBigIntVertex>,
+                               public EagerDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        VALUE_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_EAGER_DEOPT;
+
+    explicit DeoptIfNotBigIntVertex(Chunk *chunk, uint32_t bytecodeOffset)
+        : VertexMixin(),
+          EagerDeoptimizableMixin(chunk, bytecodeOffset)
+    {}
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+        ASSERT(GetInput(VALUE_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+    }
+};
+
+class DeoptIfNotUndefinedOrNullVertex : public VertexMixin<NonControlVertex, DeoptIfNotUndefinedOrNullVertex>,
+                                        public EagerDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        VALUE_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_EAGER_DEOPT;
+
+    explicit DeoptIfNotUndefinedOrNullVertex(Chunk *chunk, uint32_t bytecodeOffset)
+        : VertexMixin(),
+          EagerDeoptimizableMixin(chunk, bytecodeOffset)
     {}
 
     void SetValueLocationConstraints();

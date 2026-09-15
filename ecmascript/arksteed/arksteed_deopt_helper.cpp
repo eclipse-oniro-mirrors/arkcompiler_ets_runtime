@@ -250,7 +250,7 @@ uint64_t GetTranslationHeaderKey(uint32_t bodyId, kungfu::DeoptType type)
 bool IsValidDeoptType(uint8_t type)
 {
     return type >= static_cast<uint8_t>(kungfu::DeoptType::LAZYDEOPT) &&
-           type <= static_cast<uint8_t>(kungfu::DeoptType::HOTRELOAD_PATCHMAIN);
+           type < static_cast<uint8_t>(kungfu::DeoptType::COUNT);
 }
 
 bool IsTaggedSpecial(const JSTaggedValue &value)
