@@ -28,6 +28,7 @@
 #include "ecmascript/arksteed/arksteed_compile_info_facts.h"
 #include "ecmascript/arksteed/arksteed_constant_folding.h"
 #include "ecmascript/arksteed/arksteed_graph.h"
+#include "ecmascript/arksteed/arksteed_heap_broker.h"
 #include "ecmascript/arksteed/arksteed_register_merge_state.h"
 #include "ecmascript/arksteed/arksteed_side_effect_classifier.h"
 #include "ecmascript/arksteed/arksteed_write_barrier_value_kind_pass.h"
@@ -1447,7 +1448,7 @@ struct GraphBuilder::BytecodeVisitor {
                 break;
             case kungfu::EcmaOpcode::CREATEEMPTYARRAY_IMM8:
             case kungfu::EcmaOpcode::CREATEEMPTYARRAY_IMM16:
-                LowerCreateEmptyArray();
+                LowerCreateEmptyArray(bcInfo);
                 break;
             case kungfu::EcmaOpcode::CREATEEMPTYOBJECT:
                 LowerCreateEmptyObject();
@@ -3138,7 +3139,7 @@ struct GraphBuilder::BytecodeVisitor {
         frameState.SetAcc(object);
     }
 
-    void LowerCreateEmptyArray()
+    void LowerCreateEmptyArray(const BytecodeInfo *bcInfo)
     {
         ValueVertex* globalEnv = GlobalEnv();
         ValueVertex* fastArray
@@ -3168,6 +3169,20 @@ struct GraphBuilder::BytecodeVisitor {
         compileInfoFacts_->OnSideEffect();
         ValueVertex* array = self->NewPhiVertexWith(currentBlock, {slowArray, fastArray}, self->AccIndex());
         compileInfoFacts_->EnsureType(array, NodeInfo::NodeType::JS_ARRAY);
+        ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
+        ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::LowerCreateEmptyArray");
+        uint32_t rawSlotId = static_cast<uint32_t>(bcInfo->slotId.GetId());
+        ArkSteedHClassRef creatorHClassRef;
+        if (broker->TryGetArrayCreationHClass(rawSlotId, &creatorHClassRef)) {
+            JSHClass *creatorHClass = nullptr;
+            ValueVertex *creatorHClassConstant = GetHeapConstant(creatorHClassRef);
+            if (TryResolveHClassRef(creatorHClassRef, &creatorHClass) && creatorHClass != nullptr &&
+                creatorHClass->IsJSArray() && creatorHClassConstant != nullptr) {
+                self->NewVertex<TransitionHClassWithBarrierVertex>(
+                    compileInfoFacts_, currentBlock, {glue, array, creatorHClassConstant});
+                compileInfoFacts_->RecordHClass(array, creatorHClass, false);
+            }
+        }
         frameState.SetAcc(array);
     }
 
@@ -3193,10 +3208,27 @@ struct GraphBuilder::BytecodeVisitor {
     {
         ValueVertex *index = self->graph_->GetInt32Constant(GetConstDataId<int>(bcInfo, 0));
         ValueVertex *jsFunc = LoadParam(CALL_TARGET_PARAM_INDEX);
-        ValueVertex *slotId = self->graph_->GetInt32Constant(GetICSlotId<int>(bcInfo, 1));
+        uint32_t rawSlotId = GetICSlotId<uint32_t>(bcInfo, 1);
+        ValueVertex *slotId = self->graph_->GetInt32Constant(static_cast<int32_t>(rawSlotId));
 
-        CommonStubCallToAccWithLazyDeopt({glue, index, jsFunc, slotId, GlobalEnv()},
-                                         CommonStubID::CreateArrayWithBuffer);
+        ValueVertex *array = CommonStubCallToAccWithLazyDeopt(
+            {glue, index, jsFunc, slotId, GlobalEnv()}, CommonStubID::CreateArrayWithBuffer);
+
+        ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
+        ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::LowerCreateArrayWithBuffer");
+        ArkSteedHClassRef creatorHClassRef;
+        if (!broker->TryGetArrayCreationHClass(rawSlotId, &creatorHClassRef)) {
+            return;
+        }
+        JSHClass *creatorHClass = nullptr;
+        ValueVertex *creatorHClassConstant = GetHeapConstant(creatorHClassRef);
+        if (!TryResolveHClassRef(creatorHClassRef, &creatorHClass) || creatorHClass == nullptr ||
+            !creatorHClass->IsJSArray() || creatorHClassConstant == nullptr) {
+            return;
+        }
+        self->NewVertex<TransitionHClassWithBarrierVertex>(
+            compileInfoFacts_, currentBlock, {glue, array, creatorHClassConstant});
+        compileInfoFacts_->RecordHClass(array, creatorHClass, false);
     }
 
     void LowerCreateRegExpWithLiteral(const BytecodeInfo *bcInfo)

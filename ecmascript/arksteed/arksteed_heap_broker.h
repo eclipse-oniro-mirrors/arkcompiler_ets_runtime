@@ -25,6 +25,7 @@
 #include "ecmascript/compiler/jit_compilation_env.h"
 #include "ecmascript/ic/profile_type_info.h"
 #include "ecmascript/jit/jit.h"
+#include "ecmascript/js_array.h"
 #include "ecmascript/js_thread.h"
 #include "ecmascript/js_tagged_value_wrapper.h"
 
@@ -108,6 +109,34 @@ public:
 
         *profileTypeArray = ProfileTypeInfo::Cast(profileTypeInfoValue.GetTaggedObject());
         return true;
+    }
+
+    bool TryGetArrayCreationHClass(uint32_t slotId, ArkSteedHClassRef *hclassRef) const
+    {
+        if (hclassRef == nullptr) {
+            return false;
+        }
+        SerializingScope scope(this, "ArkSteedHeapBroker::TryGetArrayCreationHClass");
+        ProfileTypeInfo *profileTypeInfo = nullptr;
+        if (!TryGetProfileTypeInfo(&profileTypeInfo) || slotId >= profileTypeInfo->GetICSlotLength()) {
+            return false;
+        }
+        JSTaggedValue slotValue = profileTypeInfo->GetICSlot(compilerThread_, slotId);
+        if (!slotValue.IsTrackInfoObject()) {
+            return false;
+        }
+        TrackInfo *trackInfo = TrackInfo::Cast(slotValue.GetTaggedObject());
+        ElementsKind kind = trackInfo->GetElementsKind();
+        if (kind == ElementsKind::NONE || Elements::IsGeneric(kind)) {
+            return false;
+        }
+        JSHClass *hclass = env_->GetHostThread()->GetArrayInstanceHClass(
+            env_->GetGlobalEnv(), kind, false, JSThread::ThreadKind::JitThread);
+        if (hclass == nullptr) {
+            return false;
+        }
+        *hclassRef = MakeHClassRef(JSTaggedValue(hclass));
+        return hclassRef->IsSafeForCompile();
     }
 
     ArkSteedObjectRef MakeObjectRef(JSTaggedValue value) const

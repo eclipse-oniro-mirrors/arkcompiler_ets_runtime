@@ -2332,6 +2332,14 @@ void BytecodeInfo::InitBytecodeInfo(BytecodeInfo &info, const uint8_t *pc,
             info.slotId = ICSlotId(READ_INST_8_1());
             break;
         }
+        case EcmaOpcode::CREATEEMPTYARRAY_IMM8: {
+            info.slotId = ICSlotId(READ_INST_8_0());
+            break;
+        }
+        case EcmaOpcode::CREATEEMPTYARRAY_IMM16: {
+            info.slotId = ICSlotId(READ_INST_16_0());
+            break;
+        }
         case EcmaOpcode::JMP_IMM8:
         case EcmaOpcode::JMP_IMM16:
         case EcmaOpcode::JMP_IMM32:
@@ -2360,8 +2368,6 @@ void BytecodeInfo::InitBytecodeInfo(BytecodeInfo &info, const uint8_t *pc,
         case EcmaOpcode::THROW_PREF_NONE:
         case EcmaOpcode::GETPROPITERATOR:
         case EcmaOpcode::GETRESUMEMODE:
-        case EcmaOpcode::CREATEEMPTYARRAY_IMM8:
-        case EcmaOpcode::CREATEEMPTYARRAY_IMM16:
         case EcmaOpcode::CREATEEMPTYOBJECT:
         case EcmaOpcode::DEBUGGER:
         case EcmaOpcode::ISTRUE:
