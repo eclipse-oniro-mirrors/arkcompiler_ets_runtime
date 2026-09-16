@@ -46,6 +46,7 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(AllocateJSArray)                  \
     V(CallRuntime)                      \
     V(CallCommonStub)                   \
+    V(CreateEmptyObject)                \
     V(LineStringLoadElement)            \
     V(Phi)                              \
     V(LoadTaggedFromAddress)            \

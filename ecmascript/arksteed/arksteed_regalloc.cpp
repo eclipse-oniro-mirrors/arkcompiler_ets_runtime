@@ -438,16 +438,19 @@ void ArkSteedRegisterAllocator::MarkAsClobbered(ValueVertex *vertex, const Alloc
 
 void ArkSteedRegisterAllocator::AssignInputs(Vertex *vertex)
 {
-    // We allocate arbitrary register inputs after fixed inputs, since the fixed
-    // inputs may clobber the arbitrarily chosen ones. Finally we assign the
-    // location for the remaining inputs. Since inputs can alias a vertex, one of
-    // the inputs could be assigned a register in AssignArbitraryRegisterInput
-    // (and respectively its vertex location), therefore we wait until all
-    // registers are allocated before assigning any location for these inputs.
-    for (uint32_t i = 0, n = vertex->GetInputCount(); i < n; i++) {
-        Input input(vertex, i);
-        AssignFixedInput(input);
-    }
+  resultExcludedGeneralRegisters_.Reset();
+  resultExcludedDoubleRegisters_.Reset();
+
+  // We allocate arbitrary register inputs after fixed inputs, since the fixed
+  // inputs may clobber the arbitrarily chosen ones. Finally we assign the
+  // location for the remaining inputs. Since inputs can alias a vertex, one of
+  // the inputs could be assigned a register in AssignArbitraryRegisterInput
+  // (and respectively its vertex location), therefore we wait until all
+  // registers are allocated before assigning any location for these inputs.
+  for (uint32_t i = 0, n = vertex->GetInputCount(); i < n; i++) {
+    Input input(vertex, i);
+    AssignFixedInput(input);
+  }
     AssignFixedTemporaries(vertex);
     for (uint32_t i = 0, n = vertex->GetInputCount(); i < n; i++) {
         Input input(vertex, i);
@@ -663,6 +666,17 @@ void ArkSteedRegisterAllocator::AssignArbitraryRegisterInput(Vertex *resultVerte
         location = allocation;
     }
 
+    // SetAllocated replaces LifetimeFlag, and UpdateUse may free a last-use
+    // value. Preserve UseRegister's location until ordinary result selection.
+    if (unallocated.IsUsedAtEnd()) {
+      if (location.IsDoubleRegister()) {
+        resultExcludedDoubleRegisters_.Set(
+            AllocatedState::Cast(location).GetDoubleRegister());
+      } else {
+        resultExcludedGeneralRegisters_.Set(
+            AllocatedState::Cast(location).GetRegister());
+      }
+    }
     input.GetLocation()->SetAllocated(AllocatedState::Cast(location));
 
     UpdateUse(vertex, input.GetLocation());
@@ -1082,14 +1096,15 @@ AllocatedState ArkSteedRegisterAllocator::AllocateRegisterAtEnd(ValueVertex *ver
     return generalRegisters_.AllocateRegister(vertex, hint);
 }
 
-template <typename RegisterT>
-RegisterT ArkSteedRegisterAllocator::FindReusableBlockedInputRegister(RegisterSnapshot<RegisterT> &registers,
-                                                                      RegisterT hintReg)
+template<typename RegisterT>
+RegisterT ArkSteedRegisterAllocator::FindReusableBlockedInputRegister(RegisterSnapshot<RegisterT>& registers,
+                                                                      RegisterT hintReg,
+                                                                      RegListBase<RegisterT> excluded)
 {
     RegisterT fallback = RegisterT::Invalid();
     for (uint32_t i = 0; i < currentVertex_->GetInputCount(); i++) {
         RegisterT reg = GetAllocatedRegister<RegisterT>(currentVertex_->GetInputLocation(i)->GetOperand());
-        if (!reg.IsValid()) {
+        if (!reg.IsValid() || excluded.Has(reg)) {
             continue;
         }
         if (!registers.Free().Has(reg) || !registers.IsBlocked(reg)) {
@@ -1105,13 +1120,14 @@ RegisterT ArkSteedRegisterAllocator::FindReusableBlockedInputRegister(RegisterSn
     return fallback;
 }
 
-template <typename RegisterT>
-RegisterT ArkSteedRegisterAllocator::FindLastUseBlockedRegister(RegisterSnapshot<RegisterT> &registers,
-                                                                RegisterT hintReg)
+template<typename RegisterT>
+RegisterT ArkSteedRegisterAllocator::FindLastUseBlockedRegister(RegisterSnapshot<RegisterT>& registers,
+                                                                RegisterT hintReg,
+                                                                RegListBase<RegisterT> excluded)
 {
     RegisterT fallback = RegisterT::Invalid();
-    for (RegisterT reg : (registers.Blocked() - registers.Free())) {
-        ValueVertex *value = registers.GetValue(reg);
+    for (RegisterT reg: (registers.Blocked() - registers.Free() - excluded)) {
+        ValueVertex* value = registers.GetValue(reg);
         if (value == nullptr || !IsCurrentVertexLastUse(value)) {
             continue;
         }
@@ -1125,33 +1141,40 @@ RegisterT ArkSteedRegisterAllocator::FindLastUseBlockedRegister(RegisterSnapshot
     return fallback;
 }
 
-template <typename RegisterT>
-void ArkSteedRegisterAllocator::EnsureFreeRegisterAtEnd(RegisterSnapshot<RegisterT> &registers,
-                                                        const InstructionOperand &hint)
+template<typename RegisterT>
+void ArkSteedRegisterAllocator::EnsureFreeRegisterAtEnd(RegisterSnapshot<RegisterT>& registers,
+                                                        const InstructionOperand& hint)
 {
+    RegListBase<RegisterT> excluded = GetResultExcludedRegisters<RegisterT>();
+    // Value liveness is not input-location lifetime. Keep UseRegister's
+    // USED_AT_END locations out of the ordinary result's free-list path too.
+    for (RegisterT reg: excluded) {
+        registers.Block(reg);
+    }
     if (!registers.UnblockedFreeIsEmpty()) {
         return;
     }
 
     RegisterT hintReg = GetRegisterHint<RegisterT>(hint);
 
-    // Last-use inputs are freed during UpdateUse but remain blocked until the current vertex finishes.
-    // They are safe result registers, unlike arbitrary free-and-blocked temporaries.
-    RegisterT reg = FindReusableBlockedInputRegister(registers, hintReg);
+    // Last-use inputs are freed during UpdateUse but remain blocked until the
+    // current vertex finishes. UseRegister's USED_AT_END inputs are excluded,
+    // even on their last use; free-and-blocked temporaries cannot be reused.
+    RegisterT reg = FindReusableBlockedInputRegister(registers, hintReg, excluded);
     if (reg.IsValid()) {
         registers.Unblock(reg);
         return;
     }
 
-    reg = FindLastUseBlockedRegister(registers, hintReg);
+    reg = FindLastUseBlockedRegister(registers, hintReg, excluded);
     if (reg.IsValid()) {
         DropRegisterValueAtEnd(registers, reg);
         return;
     }
 
     reg = hintReg;
-    if (!reg.IsValid() || registers.Free().Has(reg)) {
-        reg = PickRegisterToFree<RegisterT>(RegListBase<RegisterT>());
+    if (!reg.IsValid() || registers.Free().Has(reg) || excluded.Has(reg)) {
+        reg = PickRegisterToFree<RegisterT>(excluded);
     }
     ASSERT(reg.IsValid());
     DropRegisterValueAtEnd(registers, reg);

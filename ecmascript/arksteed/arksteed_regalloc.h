@@ -305,6 +305,11 @@ public:
 private:
     RegisterSnapshot<ArkSteedRegister> generalRegisters_;
     RegisterSnapshot<ArkSteedDoubleRegister> doubleRegisters_;
+    // UseRegister's USED_AT_END locations, captured before SetAllocated/UpdateUse.
+    // Reset for each vertex and consulted only by ordinary result selection;
+    // explicit fixed/tied results and call clobbering retain their own policies.
+    ArkSteedRegList resultExcludedGeneralRegisters_;
+    ArkDoubleRegList resultExcludedDoubleRegisters_;
 
     // Template helper to get register frame state
     template <typename RegisterT>
@@ -448,12 +453,29 @@ private:
     AllocatedState AllocateRegister(ValueVertex *vertex, const InstructionOperand &hint);
     AllocatedState AllocateRegisterAtEnd(ValueVertex *vertex);
 
+    template<typename RegisterT>
+    RegListBase<RegisterT> GetResultExcludedRegisters() const
+    {
+        if constexpr (std::is_same_v<RegisterT, ArkSteedRegister>) {
+            return resultExcludedGeneralRegisters_;
+        } else {
+            static_assert(std::is_same_v<RegisterT, ArkSteedDoubleRegister>);
+            return resultExcludedDoubleRegisters_;
+        }
+    }
+    friend class ArkSteedRegisterAllocatorTest;
+
     template <typename RegisterT>
     void EnsureFreeRegisterAtEnd(RegisterSnapshot<RegisterT> &registers, const InstructionOperand &hint);
     template <typename RegisterT>
-    RegisterT FindReusableBlockedInputRegister(RegisterSnapshot<RegisterT> &registers, RegisterT hintReg);
+    RegisterT
+    FindReusableBlockedInputRegister(RegisterSnapshot<RegisterT> &registers,
+                                     RegisterT hintReg,
+                                     RegListBase<RegisterT> excluded);
     template <typename RegisterT>
-    RegisterT FindLastUseBlockedRegister(RegisterSnapshot<RegisterT> &registers, RegisterT hintReg);
+    RegisterT FindLastUseBlockedRegister(RegisterSnapshot<RegisterT> &registers,
+                                         RegisterT hintReg,
+                                         RegListBase<RegisterT> excluded);
 
     template <typename RegisterT>
     AllocatedState ForceAllocate(RegisterSnapshot<RegisterT> &registers, RegisterT reg, ValueVertex *vertex);

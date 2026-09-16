@@ -1425,6 +1425,42 @@ private:
     int32_t fieldIndex_ {0};
 };
 
+// Creates a fully initialized young object, or returns Hole without allocating.
+// Fast allocation and initialization cannot trigger GC; the CFG owns
+// the GC-capable allocation fallback.
+class CreateEmptyObjectVertex
+    : public FixedInputVertexMixin<ValueVertex, CreateEmptyObjectVertex> {
+  public:
+    enum Indices : uint32_t {
+      GLUE_INDEX = 0,
+      HCLASS_INDEX = 1,
+      NUM_INPUTS = 2,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT_PTR,
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::CAN_WRITE |
+                                                     VertexPropertyFlag::CAN_ALLOCATE |
+                                                     VertexPropertyFlag::IS_NOT_IDEMPOTENT;
+
+    explicit CreateEmptyObjectVertex(uint32_t objectSize)
+        : FixedInputVertexMixin(), objectSize_(objectSize)
+    {
+    }
+
+    uint32_t GetObjectSize() const
+    {
+        return objectSize_;
+    }
+
+    void SetValueLocationConstraints();
+
+private:
+    uint32_t objectSize_ {0};
+};
+
 class StoreInt32FieldVertex : public FixedInputVertexMixin<NonControlVertex, StoreInt32FieldVertex>,
                               public OffsetMixin {
 public:

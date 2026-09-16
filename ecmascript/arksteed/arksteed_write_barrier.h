@@ -40,7 +40,8 @@ public:
                             ArkSteedRegister value, ArkSteedRegister scratch, ArkSteedWriteBarrierValueKind valueKind);
 
 private:
-    void EmitFastWriteBarrier(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister value, int32_t offset);
+    void EmitFastWriteBarrier(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister value,
+                              int32_t offset);
     void EmitWriteBarrier(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister value, int32_t offset,
                           ArkSteedWriteBarrierKind barrierKind, ArkSteedRegister objectRegionScratch,
                           ArkSteedRegister valueRegionScratch);
@@ -50,8 +51,9 @@ private:
     void EmitPostStoreWriteBarrier(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister value,
                                    int32_t offset, ArkSteedWriteBarrierKind barrierKind,
                                    ArkSteedRegister objectRegionScratch, ArkSteedRegister valueRegionScratch);
-    void CallBarrierRuntime(kungfu::RuntimeStubCSigns::ID runtimeId, ArkSteedRegister glue, ArkSteedRegister object,
-                            int32_t offset, ArkSteedRegister value, bool preserveInputs);
+    void CallBarrierRuntime(kungfu::RuntimeStubCSigns::ID runtimeId, ArkSteedRegister glue,
+                            ArkSteedRegister object, int32_t offset, ArkSteedRegister value,
+                            bool preserveInputs);
 
     ArkSteedAssembler *assembler_ {nullptr};
     Chunk *chunk_ {nullptr};

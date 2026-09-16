@@ -66,6 +66,13 @@ public:
         return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
     }
 
+    static SideEffectDescriptor Classify(CreateEmptyObjectVertex *vertex)
+    {
+        (void)vertex;
+        // Fast allocation and initialization cannot run user JS.
+        return SideEffectDescriptor{SideEffectKind::SAFE_CALL};
+    }
+
     static SideEffectDescriptor Classify(StoreInt32FieldVertex *vertex)
     {
         SideEffectDescriptor descriptor;

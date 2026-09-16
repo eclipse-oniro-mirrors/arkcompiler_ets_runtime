@@ -358,6 +358,18 @@ void ArkSteedAssembler::StoreInt32FieldRelease(ArkSteedRegister src, ArkSteedReg
     assembler_.Stlr(src.W(), operand);
 }
 
+void ArkSteedAssembler::StoreHeaderRelease(ArkSteedRegister src,
+                                           ArkSteedRegister object) {
+    static_assert(TaggedObject::HCLASS_OFFSET == 0);
+    // AssemblerAarch64::Stlr currently only encodes the W-register form.
+    // HClass headers are full tagged words, so emit STLR Xt, [Xn] directly.
+    ASSERT(src.IsX());
+    ASSERT(object.IsX());
+    constexpr uint32_t STLR_X = 0xc89ffc00;
+    constexpr uint32_t RN_SHIFT = 5;
+    assembler_.EmitU32(STLR_X | (object.GetId() << RN_SHIFT) | src.GetId());
+}
+
 void ArkSteedAssembler::StoreFloat64Field(ArkSteedDoubleRegister src, ArkSteedRegister base, int32_t offset)
 {
     StoreFloat64(aarch64::MemoryOperand(base, offset, aarch64::AddrMode::OFFSET), src);

@@ -236,7 +236,8 @@ void CallSelfVertex::SetValueLocationConstraints()
 void AllocateJSArrayVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
-    SetTemporariesNeeded(2); // Saved HClass and dynamic object size; codegen also uses the architecture scratch.
+    // Saved HClass and dynamic object size; codegen also uses the architecture scratch.
+    SetTemporariesNeeded(2);
     UseRegister(Arg(GLUE_INDEX));
     UseRegister(Arg(GLOBAL_ENV_INDEX));
 }
@@ -571,6 +572,15 @@ void EnsurePropertiesCapacityVertex::SetValueLocationConstraints()
     SetTemporariesNeeded(2);  // 2: properties and length
     SetStubValueLocationConstraints(this, GetArgCount());
     UseLazyDeoptFrameSlots(this);
+}
+
+void CreateEmptyObjectVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    SetTemporariesNeeded(2); // 2: allocation address and new top.
+    // Both inputs are still read after the allocation result is written.
+    UseRegister(Arg(GLUE_INDEX));
+    UseRegister(Arg(HCLASS_INDEX));
 }
 
 void StoreInt32FieldVertex::SetValueLocationConstraints()
@@ -1303,6 +1313,11 @@ DUMP_EXTRA(PrepareSharedStoreField)
 DUMP_EXTRA(EnsurePropertiesCapacity)
 {
     out << "  fieldIndex = " << vertex->GetFieldIndex();
+}
+
+DUMP_EXTRA(CreateEmptyObject)
+{
+    out << "  objectSize = " << vertex->GetObjectSize();
 }
 
 DUMP_EXTRA(StoreTaggedFieldByHClass)

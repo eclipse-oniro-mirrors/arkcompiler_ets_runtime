@@ -164,6 +164,9 @@ public:
     void StoreInt16Field(ArkSteedRegister src, ArkSteedRegister base, int32_t offset);
     void StoreInt32Field(ArkSteedRegister src, ArkSteedRegister base, int32_t offset);
     void StoreInt32FieldRelease(ArkSteedRegister src, ArkSteedRegister base, int32_t offset);
+    // Store a full-width HClass word at the zero-offset object header with
+    // release ordering.
+    void StoreHeaderRelease(ArkSteedRegister src, ArkSteedRegister object);
     void StoreFloat64Field(ArkSteedDoubleRegister src, ArkSteedRegister base, int32_t offset);
     void StoreFloat32Field(ArkSteedDoubleRegister src, ArkSteedDoubleRegister scratch, ArkSteedRegister base,
                            int32_t offset);

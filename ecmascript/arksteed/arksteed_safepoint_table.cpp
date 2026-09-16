@@ -88,8 +88,8 @@ ArkSteedSafepointTableBuilder::Safepoint ArkSteedSafepointTableBuilder::DefineSa
     return Safepoint(&entries_.back());
 }
 
-void ArkSteedSafepointTableBuilder::DefineDeoptSafepoint(uint32_t pcOffset, std::vector<ArkSteedDeoptValue> deopts,
-                                                         ExceptionHandlerKind exceptionHandlerKind)
+void ArkSteedSafepointTableBuilder::DefineDeoptSafepoint(
+    uint32_t pcOffset, std::vector<ArkSteedDeoptValue> deopts, ExceptionHandlerKind exceptionHandlerKind)
 {
     if (entries_.empty()) {
         encodedDeoptData_.clear();

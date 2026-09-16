@@ -323,6 +323,11 @@ public:
         return LifetimeField::Decode(value_) == static_cast<unsigned>(LifetimeFlag::USED_AT_START);
     }
 
+    bool IsUsedAtEnd() const {
+      return LifetimeField::Decode(value_) ==
+             static_cast<unsigned>(LifetimeFlag::USED_AT_END);
+    }
+
     bool IsFixedSlotPolicy() const
     {
         return BasicPolicyField::Decode(value_) == BasicPolicy::FIXED_SLOT;
@@ -651,7 +656,7 @@ public:
         return &nextUseId_;
     }
 
-private:
+  private:
     VertexId nextUseId_ = INVALID_VERTEX_ID;
 };
 

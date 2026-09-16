@@ -34,20 +34,20 @@
 #include "ecmascript/base/bit_helper.h"
 #include "ecmascript/base/number_helper.h"
 #include "ecmascript/compiler/lazy_deopt_dependency.h"
-#include "ecmascript/ecma_string-inl.h"  // IWYU pragma: keep
 #include "ecmascript/deoptimizer/deoptimizer.h"
+#include "ecmascript/ecma_string-inl.h" // IWYU pragma: keep
 #include "ecmascript/elements.h"
 #include "ecmascript/global_env_constants.h"
 #include "ecmascript/ic/ic_handler.h"
 #include "ecmascript/ic/ic_info.h"
-#include "ecmascript/ic/property_box.h"
 #include "ecmascript/ic/profile_type_info.h"
 #include "ecmascript/ic/profile_type_info_cell.h"
+#include "ecmascript/ic/property_box.h"
+#include "ecmascript/js_array.h"
 #include "ecmascript/js_arraybuffer.h"
 #include "ecmascript/js_function.h"
-#include "ecmascript/js_array.h"
-#include "ecmascript/js_thread.h"
 #include "ecmascript/js_function_kind.h"
+#include "ecmascript/js_thread.h"
 #include "ecmascript/js_typed_array.h"
 #include "ecmascript/jspandafile/program_object.h"
 #include "ecmascript/lexical_env.h"
@@ -3089,7 +3089,53 @@ struct GraphBuilder::BytecodeVisitor {
 
     void LowerCreateEmptyObject()
     {
-        RuntimeCallToAccWithLazyDeopt({}, RTSTUB_ID(CreateEmptyObject));
+        uint32_t objectSize;
+        ValueVertex* hclass;
+        {
+            auto scope = self->pgoContext_.CreateSerializingScope("GraphBuilder::LowerCreateEmptyObject");
+            JitCompilationEnv* env = self->preproc_->GetEnv();
+            auto initialHClassValue = env->GetGlobalEnv()->GetObjectFunctionClassWithBarrier();
+            JSHandle<JSHClass> initialHClass(initialHClassValue);
+            objectSize = initialHClass->GetObjectSize();
+            hclass = GetHeapConstant(ArkSteedHClassRef(initialHClassValue));
+        }
+        if (hclass == nullptr) {
+            auto* result = RuntimeCallToAccWithLazyDeopt({}, RTSTUB_ID(CreateEmptyObject));
+            compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::OTHER_JS_RECEIVER);
+            return;
+        }
+
+        ValueVertex* fastObject =
+            self->NewVertex<CreateEmptyObjectVertex>(compileInfoFacts_, currentBlock, {glue, hclass}, objectSize);
+        ValueVertex *hole =
+            self->graph_->GetTaggedConstant(JSTaggedValue::VALUE_HOLE);
+
+        CompileInfoFacts *entryFacts = compileInfoFacts_;
+        BB *slowBlock = self->NewBlock();
+        BB *fastBlock = self->NewBlock();
+        BB *doneBlock = self->NewBlock();
+        slowBlock->SetDeferred(true);
+        self->FinishBlockWithBranch<BranchIfReferenceEqualVertex>(
+            currentBlock, {fastObject, hole}, slowBlock, fastBlock);
+
+        currentBlock = slowBlock;
+        compileInfoFacts_ = entryFacts->Clone();
+        ValueVertex* slowObject = CommonStubCallToAccWithLazyDeopt(
+            {glue, hclass, self->graph_->GetInt64Constant(objectSize)}, CommonStubID::NewJSObject);
+        self->FinishBlockWithJump(currentBlock, doneBlock);
+
+        currentBlock = fastBlock;
+        compileInfoFacts_ = entryFacts->Clone();
+        self->FinishBlockWithJump(currentBlock, doneBlock);
+
+        currentBlock = doneBlock;
+        compileInfoFacts_ = entryFacts;
+        compileInfoFacts_->OnSideEffect();
+        ValueVertex *object = self->NewPhiVertexWith(
+            currentBlock, {slowObject, fastObject}, self->AccIndex());
+        compileInfoFacts_->EnsureType(object,
+                                      NodeInfo::NodeType::OTHER_JS_RECEIVER);
+        frameState.SetAcc(object);
     }
 
     void LowerCreateEmptyArray()
@@ -4448,8 +4494,10 @@ struct GraphBuilder::BytecodeVisitor {
         // E refers to exception lazy-deopt
         bool needsE = HasNeverExecutedCatchBlock();
         // D refers to dependency lazy-deopt.
-        bool needsD = vertex->Is<CallVertex>() || vertex->Is<CallKnownJSFunctionVertex>() ||
-                      vertex->Is<CallKnownBuiltinVertex>() || vertex->Is<CallSelfVertex>();
+        bool needsD = vertex->Is<CallVertex>() ||
+                      vertex->Is<CallKnownJSFunctionVertex>() ||
+                      vertex->Is<CallKnownBuiltinVertex>() ||
+                      vertex->Is<CallSelfVertex>();
         if (auto *call = vertex->TryCast<CallCommonStubVertex>()) {
             needsD = !IsDependencySafeCommonStubCall(call);
         } else if (auto *call = vertex->TryCast<CallRuntimeVertex>()) {
