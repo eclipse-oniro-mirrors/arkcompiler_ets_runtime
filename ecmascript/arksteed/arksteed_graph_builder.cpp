@@ -1549,9 +1549,11 @@ struct GraphBuilder::BytecodeVisitor {
                 break;
             case kungfu::EcmaOpcode::LDEXTERNALMODULEVAR_IMM8:
             case kungfu::EcmaOpcode::WIDE_LDEXTERNALMODULEVAR_PREF_IMM16:
+                LowerLdExternalModuleVar(bcInfo);
+                break;
             case kungfu::EcmaOpcode::CALLRUNTIME_LDLAZYMODULEVAR_PREF_IMM8:
             case kungfu::EcmaOpcode::CALLRUNTIME_WIDELDLAZYMODULEVAR_PREF_IMM16:
-                LowerLdExternalModuleVar(bcInfo);
+                LowerLdLazyExternalModuleVar(bcInfo);
                 break;
             case kungfu::EcmaOpcode::GETMODULENAMESPACE_IMM8:
             case kungfu::EcmaOpcode::WIDE_GETMODULENAMESPACE_PREF_IMM16:
@@ -3435,8 +3437,20 @@ struct GraphBuilder::BytecodeVisitor {
     void LowerLdExternalModuleVar(const BytecodeInfo *bcInfo)
     {
         ValueVertex *jsFunc = LoadParam(CALL_TARGET_PARAM_INDEX);
-        ValueVertex *index = TaggedConstantFromInt32(GetImmediate<int>(bcInfo, 0));
-        RuntimeCallToAccWithLazyDeopt({index, jsFunc}, RTSTUB_ID(LdExternalModuleVarByIndexOnJSFunc));
+        int32_t index = GetImmediate<int32_t>(bcInfo, 0);
+        if (TryBuildLoadExternalModuleVar(jsFunc, index)) {
+            return;
+        }
+        ValueVertex *taggedIndex = TaggedConstantFromInt32(index);
+        RuntimeCallToAccWithLazyDeopt({taggedIndex, jsFunc}, RTSTUB_ID(LdExternalModuleVarByIndexOnJSFunc));
+    }
+
+    void LowerLdLazyExternalModuleVar(const BytecodeInfo *bcInfo)
+    {
+        ValueVertex *jsFunc = LoadParam(CALL_TARGET_PARAM_INDEX);
+        int32_t index = GetImmediate<int32_t>(bcInfo, 0);
+        ValueVertex *taggedIndex = TaggedConstantFromInt32(index);
+        RuntimeCallToAccWithLazyDeopt({taggedIndex, jsFunc}, RTSTUB_ID(LdLazyExternalModuleVarByIndex));
     }
 
     void LowerGetModuleNamespace(const BytecodeInfo *bcInfo)
@@ -9012,6 +9026,53 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *hole = self->graph_->GetTaggedConstant(JSTaggedValue::VALUE_HOLE);
         BuildCheckTaggedCondition(bcIndex, value, hole, Condition::EQUAL, kungfu::DeoptType::PROPERTYBOXINVALID);
         return value;
+    }
+
+    bool TryBuildLoadExternalModuleVar(ValueVertex *jsFunc, int32_t index)
+    {
+        JitCompilationEnv *env = self->preproc_->GetEnv();
+        JSThread *hostThread = env->GetHostThread();
+        uint32_t methodOffset = env->GetMethodLiteral()->GetMethodId().GetOffset();
+        uint32_t bcOffset = self->preproc_->GetBytecodeOffset(currentBcIndex);
+        bool isResolved = env->IsLdExtModuleVarResolved(methodOffset, bcOffset);
+        if (!isResolved) {
+            return false;
+        }
+
+        if (self->IsLazyDeoptEnabled()) {
+            auto *dependencies = env->GetDependencies();
+            if (!dependencies->DependOnNotHotReloadPatchMain(hostThread)) {
+                return false;
+            }
+        } else {
+            ValueVertex *stage = self->NewVertex<LoadI32FromAddressVertex>(
+                compileInfoFacts_, currentBlock, {glue},
+                static_cast<int32_t>(JSThread::GlueData::GetStageOfHotReloadOffset(false)));
+            ValueVertex *patchMain =
+                self->graph_->GetInt32Constant(static_cast<int32_t>(StageOfHotReload::LOAD_END_EXECUTE_PATCHMAIN));
+            BuildDeoptIfInt32Condition(stage, patchMain, Condition::EQUAL, kungfu::DeoptType::HOTRELOAD_PATCHMAIN);
+        }
+
+        int32_t moduleOffset = static_cast<int32_t>(JSFunction::ECMA_MODULE_OFFSET);
+        ValueVertex *module =
+            self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {jsFunc}, moduleOffset);
+        int32_t environmentOffset = static_cast<int32_t>(SourceTextModule::SOURCE_TEXT_MODULE_OFFSET);
+        ValueVertex *environment =
+            self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {module}, environmentOffset);
+        ValueVertex *binding = GetValueFromTaggedArray(environment, static_cast<uint32_t>(index));
+        int32_t targetModuleOffset = static_cast<int32_t>(ResolvedIndexBinding::MODULE_OFFSET);
+        ValueVertex *targetModule =
+            self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {binding}, targetModuleOffset);
+        int32_t targetIndexOffset = static_cast<int32_t>(ResolvedIndexBinding::INDEX_OFFSET);
+        ValueVertex *targetIndex =
+            self->NewVertex<LoadInt32FieldVertex>(compileInfoFacts_, currentBlock, {binding}, targetIndexOffset);
+        int32_t dictionaryIndex = static_cast<int32_t>(SourceTextModule::NAME_DICTIONARY_OFFSET);
+        ValueVertex *dictionary =
+            self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {targetModule}, dictionaryIndex);
+        ValueVertex *result =
+            self->NewVertex<LoadTaggedElementVertex>(compileInfoFacts_, currentBlock, {dictionary, targetIndex});
+        frameState.SetAcc(result);
+        return true;
     }
 
     template <class VertexT>

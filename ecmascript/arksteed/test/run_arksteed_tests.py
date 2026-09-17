@@ -76,7 +76,7 @@ DISASM_TIMEOUT_ARM64 = 30
 EXECUTION_TIMEOUT = 300
 QEMU_TIMEOUT_FACTOR = 10
 
-SOURCE_SUFFIXES = (".ts", ".js")
+SOURCE_SUFFIXES = (".ts", ".js", ".cjs")
 EXPECTED_OUTPUT_NAME = "expected_output.txt"
 
 # COMPILE_MODE values and the es2abc flag each mode maps to. "module" is the
@@ -631,6 +631,11 @@ class TestCase:
     rel: str  # path relative to TEST_DIR, e.g. "example/test_1"
     source: Path
     expected: Path
+    # Extra module sources compiled as sibling .abc files next to the entry
+    # abc, so the runtime can resolve `import ... from './<stem>'` records
+    # across files (e.g. shared/sendable module tests). Empty for the common
+    # single-file (self-import via --merge-abc) cases.
+    siblings: List[Path] = field(default_factory=list)
     compile_mode: str = "module"
     params: List[str] = field(default_factory=list)
     constraints: Dict[str, List[Constraint]] = field(default_factory=dict)
@@ -696,12 +701,28 @@ def discover_cases(
         rel = case_dir.relative_to(TEST_DIR).as_posix()
         if rel == ".":
             continue
-        if len(sources) != 1:
+        if not sources:
             if verbose:
-                print(f"warning: skipping {rel}: "
-                      f"expected exactly one source file, found {len(sources)}",
-                      file=sys.stderr)
+                print(f"warning: skipping {rel}: no source file", file=sys.stderr)
             continue
+        # Single-source cases keep the historical behaviour (any file name,
+        # self-imports resolved by --merge-abc). With several sources, exactly
+        # one must follow the <dirname>.<ext> entry convention; the rest are
+        # compiled as sibling modules.
+        entry_source: Optional[Path] = None
+        siblings: List[Path] = []
+        if len(sources) == 1:
+            entry_source = case_dir / sources[0]
+        else:
+            matches = [case_dir / s for s in sources if Path(s).stem == case_dir.name]
+            if len(matches) != 1:
+                if verbose:
+                    print(f"warning: skipping {rel}: {len(sources)} source files "
+                          f"but {len(matches)} match the '<dirname>.ts' entry convention",
+                          file=sys.stderr)
+                continue
+            entry_source = matches[0]
+            siblings = [case_dir / s for s in sources if case_dir / s != entry_source]
         if EXPECTED_OUTPUT_NAME not in filenames:
             if verbose:
                 print(f"warning: skipping {rel}: missing {EXPECTED_OUTPUT_NAME}", file=sys.stderr)
@@ -710,7 +731,8 @@ def discover_cases(
             continue
         if excludes and _pattern_matches(rel, excludes):
             continue
-        cases.append(TestCase(rel, case_dir / sources[0], case_dir / EXPECTED_OUTPUT_NAME))
+        cases.append(TestCase(rel, entry_source, case_dir / EXPECTED_OUTPUT_NAME,
+                              siblings=siblings))
     return cases
 
 
@@ -820,28 +842,41 @@ def parse_annotations(case: TestCase, valid_opcodes: Optional[set]) -> None:
 
 
 def compile_case(case: TestCase, abc_path: Path, cfg: BuildConfig) -> Tuple[bool, str]:
-    """Compile the source to abc with es2abc in the case's COMPILE_MODE."""
+    """Compile the source(s) to abc with es2abc in the case's COMPILE_MODE."""
 
-    cmd = [
-        str(cfg.es2abc),
-        str(case.source),
-        "--merge-abc",
-        "--output",
-        str(abc_path),
-    ]
-    cmd.extend(COMPILE_MODE_FLAGS[case.compile_mode])
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=COMPILE_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        return False, "es2abc timed out"
-    except OSError as e:
-        return False, f"failed to run es2abc: {e}"
-    if result.returncode != 0:
-        tail = "\n".join((result.stderr or result.stdout or "").splitlines()[-15:])
-        return False, f"es2abc exited with {result.returncode}:\n{tail}"
+    # Single-file cases use --merge-abc (self-imports resolve into the one
+    # merged record). Multi-file cases compile every source as its own module
+    # abc placed next to the entry abc, so the runtime resolves sibling
+    # records ('./<stem>') from the artifact directory by file name.
+    merge_abc = not case.siblings
+    targets = [(case.source, abc_path, COMPILE_MODE_FLAGS[case.compile_mode])]
+    for sib in case.siblings:
+        # Sibling modules compile as ES modules; a `.cjs` sibling compiles as
+        # CommonJS (its exports become by-name bindings, not index bindings).
+        mode = "commonjs" if sib.suffix == ".cjs" else "module"
+        targets.append((sib, abc_path.parent / f"{sib.stem}.abc",
+                        COMPILE_MODE_FLAGS[mode]))
+    for source, output, mode_flags in targets:
+        cmd = [
+            str(cfg.es2abc),
+            str(source),
+        ]
+        if merge_abc:
+            cmd.append("--merge-abc")
+        cmd += ["--output", str(output)]
+        cmd.extend(mode_flags)
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=COMPILE_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "es2abc timed out"
+        except OSError as e:
+            return False, f"failed to run es2abc: {e}"
+        if result.returncode != 0:
+            tail = "\n".join((result.stderr or result.stdout or "").splitlines()[-15:])
+            return False, f"es2abc exited with {result.returncode}:\n{tail}"
     return True, ""
 
 
