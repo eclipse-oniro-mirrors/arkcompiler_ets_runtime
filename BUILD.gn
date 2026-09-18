@@ -2298,11 +2298,11 @@ action("gen_js_type_metadata") {
   outputs = [ "$metadata_file_gen_dir/metadata.json" ]
 }
 
-ohos_prebuilt_shared_library("js_type_metadata") {
+ohos_prebuilt_etc("js_type_metadata") {
   deps = [ ":gen_js_type_metadata" ]
   source = "$root_gen_dir/arkcompiler/ets_runtime/metadata.json"
 
-  relative_install_dir = arkcompiler_relative_lib_path
+  relative_install_dir = "arkcompiler"
   part_name = "ets_runtime"
   subsystem_name = "arkcompiler"
 }
