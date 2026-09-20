@@ -304,7 +304,17 @@ host_unittest_action("RawHeapTranslateTest") {
 
   configs = [ "$js_root:ecma_test_config" ]
 
-  deps = [ "$js_root:libark_jsruntime_test" ]
+  deps = [
+    ":gen_metadata_for_test",
+    "$js_root:libark_jsruntime_test",
+  ]
+
+  if (is_ohos && is_standard_system) {
+    test_metadata_dir = "/system/etc/arkcompiler/"
+  } else {
+    test_metadata_dir = rebase_path("$metadata_json_path")
+  }
+  defines = [ "HPROF_TEST_METADATA_JSON_DIR=\"${test_metadata_dir}\"" ]
 
   cflags_cc = [ "-std=c++17", "-DRAWHEAP_TRANSLATOR_UNITTEST" ]
 

@@ -37,6 +37,8 @@ namespace panda::test {
 
 // Test timestamp value used in header serialization.
 static constexpr uint64_t TEST_TIMESTAMP_VALUE = 1000000;
+static constexpr uint32_t TEST_STRING_INSTANCE_SIZE = 24;
+static constexpr uint32_t TEST_ARRAY_INSTANCE_SIZE = 24;
 
 // Parameter struct for WriteStaticArrayDumpRecord (reduces function parameter
 // count). Object identifiers are u32 nodeIds (even numbers >= 2) in the new
@@ -101,6 +103,18 @@ public:
         AppendU32(body, static_cast<uint32_t>(str.size()));
         body.insert(body.end(), reinterpret_cast<const uint8_t *>(str.data()),
                     reinterpret_cast<const uint8_t *>(str.data()) + str.size());
+        EndRecord(body);
+    }
+
+    void WriteStaticStringDumpRecord(uint32_t objectId, uint32_t classId, const std::string &value)
+    {
+        BeginRecord(TAG_STATIC_STRING_DUMP);
+        std::vector<uint8_t> body;
+        AppendU32(body, objectId);
+        AppendU32(body, classId);
+        AppendU32(body, TEST_STRING_INSTANCE_SIZE);
+        AppendU32(body, static_cast<uint32_t>(value.size()));
+        body.insert(body.end(), value.begin(), value.end());
         EndRecord(body);
     }
 
@@ -539,17 +553,50 @@ private:
     }
 };
 
+// Exercise allocation, insertion and deferred auxiliary nodes through the same factory.
+class NodeCreationHeap : public RawHeapTranslateV1 {
+public:
+    NodeCreationHeap() : RawHeapTranslateV1(nullptr) {}
+    using RawHeap::AddMetadataPropertyNode;
+    using RawHeap::AppendDeferredNodes;
+    using RawHeap::CreateHashEdge;
+    using RawHeap::CreateNodeAt;
+};
+
 // ============================================================================
 // Test fixture
 // ============================================================================
 
 class RawHeapStaticSnapshotTest : public testing::Test {
 public:
+    static constexpr uint32_t pruneClassNameId = 10;
+    static constexpr uint32_t pruneFieldNameId = 20;
+    static constexpr uint32_t pruneStringNodeId = 6;
+    static constexpr uint32_t pruneIntArrayNodeId = 10;
+    static constexpr uint32_t pruneCharArrayNodeId = 12;
+    static constexpr uint32_t pruneTaggedArrayNodeId = 14;
+    static constexpr size_t prunedStaticNodeCount = 20;
+    static constexpr uint32_t pruneClassNodeId = 2;
+    static constexpr uint32_t pruneBoxedNodeId = 8;
+    static constexpr uint32_t pruneObjectInstanceSize = 16;
+    static constexpr uint32_t rootObjectNodeId = 4;
+    static constexpr size_t pruneReferenceCount = 2;
+    static constexpr size_t mergedRootNodeCount = 2;
+    static constexpr uint32_t taggedStrongIndex = 1;
+    static constexpr uint32_t taggedWeakIndex = 3;
+    static constexpr uint32_t identityHashShift = 32;
+
     static void SetUpTestCase() {}
     static void TearDownTestCase() {}
 
+    void SetUp() override
+    {
+        RawHeap::SetPruneMode(PruneMode::DISABLED);
+    }
+
     void TearDown() override
     {
+        RawHeap::SetPruneMode(PruneMode::DISABLED);
         for (const auto &path : tempFiles_) {
             std::remove(path.c_str());
         }
@@ -610,15 +657,179 @@ public:
         return strings->GetStringByKey(strings->GetKeyByStringId(id));
     }
 
-    static rawheap_translate::Node *FindArrayBuffer(StaticRawheapTranslate &parser,
-                                                    const rawheap_translate::Node *arrayNode)
+    static rawheap_translate::Node *FindArrayBuffer(RawHeap &heap, const rawheap_translate::Node *arrayNode)
     {
-        for (rawheap_translate::Edge *edge : *parser.GetEdges()) {
+        for (rawheap_translate::Edge *edge : *heap.GetEdges()) {
             if (edge->from == arrayNode && edge->to != nullptr) {
                 return edge->to;
             }
         }
         return nullptr;
+    }
+
+    static void VerifyGraph(RawHeap &heap)
+    {
+        const auto &nodes = *heap.GetNodes();
+        const auto &edges = *heap.GetEdges();
+        size_t cursor = 0;
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            EXPECT_EQ(nodes[i]->index, i);
+            for (uint32_t j = 0; j < nodes[i]->edgeCount; ++j) {
+                ASSERT_LT(cursor, edges.size());
+                const auto *edge = edges[cursor++];
+                EXPECT_TRUE(edge->from == nullptr || edge->from == nodes[i]);
+                ASSERT_NE(edge->to, nullptr);
+                ASSERT_LT(edge->to->index, nodes.size());
+                EXPECT_EQ(nodes[edge->to->index], edge->to);
+            }
+        }
+        EXPECT_EQ(cursor, edges.size());
+    }
+
+    static void WritePruneStaticObjects(StaticSnapshotDataBuilder &builder)
+    {
+        builder.WriteHeader();
+        builder.WriteStringRecord(pruneClassNameId, "std.core.Int");
+        builder.WriteStringRecord(pruneFieldNameId, "field");
+        builder.WriteLoadClassRecord(pruneClassNodeId, pruneClassNameId);
+        StaticSnapshotDataBuilder::StaticClassDumpRecordFields fields;
+        for (auto type : {StaFieldType::BOOLEAN, StaFieldType::BYTE, StaFieldType::CHAR, StaFieldType::SHORT,
+                          StaFieldType::INT, StaFieldType::LONG, StaFieldType::FLOAT, StaFieldType::DOUBLE,
+                          StaFieldType::TAGGED}) {
+            fields.staticFields.push_back({pruneFieldNameId, static_cast<uint8_t>(type)});
+            fields.staticValues.push_back({static_cast<uint8_t>(type),
+                                          type == StaFieldType::TAGGED ? STATIC_TAGGED_UNDEFINED : 'A'});
+        }
+        for (uint32_t id : {pruneStringNodeId, pruneBoxedNodeId, pruneIntArrayNodeId,
+                           pruneCharArrayNodeId, pruneTaggedArrayNodeId}) {
+            auto type = static_cast<uint8_t>(id == pruneBoxedNodeId ? StaFieldType::WEAK_OBJECT : StaFieldType::OBJECT);
+            fields.staticFields.push_back({pruneFieldNameId, type});
+            fields.staticValues.push_back({type, id});
+        }
+        fields.instanceFieldNames = {pruneFieldNameId};
+        fields.methodNameIds = {pruneFieldNameId};
+        builder.WriteStaticClassDumpRecordFull(pruneClassNodeId, 0, pruneObjectInstanceSize, fields);
+        // Same name as the primitive char value.
+        builder.WriteStaticStringDumpRecord(pruneStringNodeId, pruneClassNodeId, "A");
+        // Real boxed object, with a self-reference.
+        builder.WriteStaticInstanceDumpRecord(pruneBoxedNodeId, pruneClassNodeId, pruneObjectInstanceSize,
+                                              {pruneBoxedNodeId});
+    }
+
+    static void WritePruneStaticArrays(StaticSnapshotDataBuilder &builder)
+    {
+        for (auto type : {StaFieldType::INT, StaFieldType::CHAR}) {
+            ArrayDumpParams params;
+            params.objectId = type == StaFieldType::INT ? pruneIntArrayNodeId : pruneCharArrayNodeId;
+            params.classObjectId = pruneClassNodeId;
+            params.instanceSize = TEST_ARRAY_INSTANCE_SIZE;
+            params.elementType = static_cast<uint8_t>(type);
+            params.primitiveValues = {'A', 'B'};
+            params.arrayLength = static_cast<uint32_t>(params.primitiveValues.size());
+            builder.WriteStaticArrayDumpRecord(params);
+        }
+        ArrayDumpParams tagged;
+        tagged.objectId = pruneTaggedArrayNodeId;
+        tagged.classObjectId = pruneClassNodeId;
+        tagged.elementType = static_cast<uint8_t>(StaFieldType::TAGGED);
+        tagged.taggedValues = {{static_cast<uint8_t>(StaFieldType::INT), 'A'},
+                               {static_cast<uint8_t>(StaFieldType::OBJECT), pruneStringNodeId},
+                               {static_cast<uint8_t>(StaFieldType::TAGGED), STATIC_TAGGED_NULL},
+                               {static_cast<uint8_t>(StaFieldType::WEAK_OBJECT), pruneBoxedNodeId},
+                               {static_cast<uint8_t>(StaFieldType::CHAR), 'A'}};
+        tagged.arrayLength = static_cast<uint32_t>(tagged.taggedValues.size());
+        builder.WriteStaticArrayDumpRecord(tagged);
+        builder.WriteRootRecord(pruneClassNodeId);
+    }
+
+    static bool MergeWithSyntheticRoot(RawHeapTranslateV1 &dynamic, StaticRawheapTranslate &parser)
+    {
+        auto *root = dynamic.CreateNode();
+        root->nodeId = 1;
+        root->type = SYNTHETIC_NODETYPE;
+        SnapshotMerger merger;
+        return merger.Merge(dynamic, parser);
+    }
+
+    static void VerifyStaticRootEdges(RawHeap &heap, StaticRawheapTranslate &parser)
+    {
+        auto *syntheticRoot = heap.GetNodes()->front();
+        rawheap_translate::Node *staticRoot = nullptr;
+        for (auto *node : *heap.GetNodes()) {
+            if (ResolveString(heap.GetStringTable(), node->strId) == "StaticRoot[2]") {
+                staticRoot = node;
+            }
+        }
+        ASSERT_NE(staticRoot, nullptr);
+        EXPECT_EQ(staticRoot->edgeCount, parser.GetRoots().size());
+        for (uint32_t id : {rootObjectNodeId, pruneClassNodeId}) {
+            auto *target = parser.FindNodeByNodeId(id);
+            size_t directCount = 0;
+            size_t groupCount = 0;
+            for (auto *edge : *heap.GetEdges()) {
+                directCount += edge->from == syntheticRoot && edge->to == target && edge->type == EdgeType::SHORTCUT;
+                groupCount += edge->to == target && edge->type == EdgeType::ELEMENT;
+            }
+            EXPECT_EQ(directCount, 1U);
+            EXPECT_EQ(groupCount, 1U);
+        }
+        ASSERT_NO_FATAL_FAILURE(VerifyGraph(heap));
+    }
+
+    static void VerifyRetainedStaticIds(StaticRawheapTranslate &baseline, StaticRawheapTranslate &pruned)
+    {
+        for (const auto *node : *pruned.GetNodes()) {
+            if (node->nodeId < pruneClassNodeId) {
+                continue;  // Framework roots are not entries in the object-ID map.
+            }
+            const auto *original = baseline.FindNodeByNodeId(static_cast<uint32_t>(node->nodeId));
+            ASSERT_NE(original, nullptr);
+            EXPECT_EQ(node->type, original->type);
+            EXPECT_EQ(node->size, original->size);
+            EXPECT_EQ(ResolveString(pruned.GetStringTable(), node->strId),
+                      ResolveString(baseline.GetStringTable(), original->strId));
+        }
+    }
+
+    static void VerifyPrunedStaticGraph(RawHeap &heap, StaticRawheapTranslate &parser, size_t beforeCount)
+    {
+        auto *stringNode = parser.FindNodeByNodeId(pruneStringNodeId);
+        auto *boxedNode = parser.FindNodeByNodeId(pruneBoxedNodeId);
+        ASSERT_NE(stringNode, nullptr);
+        ASSERT_NE(boxedNode, nullptr);
+        auto *intBuffer = FindArrayBuffer(heap, parser.FindNodeByNodeId(pruneIntArrayNodeId));
+        auto *charBuffer = FindArrayBuffer(heap, parser.FindNodeByNodeId(pruneCharArrayNodeId));
+        auto *taggedBuffer = FindArrayBuffer(heap, parser.FindNodeByNodeId(pruneTaggedArrayNodeId));
+        EXPECT_EQ(heap.GetNodeCount() + prunedStaticNodeCount, beforeCount);
+        const auto &nodes = *heap.GetNodes();
+        EXPECT_NE(std::find(nodes.begin(), nodes.end(), stringNode), nodes.end());
+        EXPECT_NE(std::find(nodes.begin(), nodes.end(), boxedNode), nodes.end());
+        EXPECT_EQ(stringNode->type, STRING);
+        EXPECT_EQ(boxedNode->type, OBJECT_NODETYPE);
+        ASSERT_NE(intBuffer, nullptr);
+        ASSERT_NE(charBuffer, nullptr);
+        ASSERT_NE(taggedBuffer, nullptr);
+        EXPECT_EQ(intBuffer->edgeCount, 0U);
+        EXPECT_EQ(charBuffer->edgeCount, 0U);
+        EXPECT_EQ(taggedBuffer->edgeCount, pruneReferenceCount);  // Strong and weak references survive.
+        size_t weakCount = 0;
+        size_t selfCount = 0;
+        size_t methodCount = 0;
+        for (auto *edge : *heap.GetEdges()) {
+            if (edge->from == taggedBuffer && edge->type == EdgeType::ELEMENT) {
+                EXPECT_EQ(edge->nameOrIndex, taggedStrongIndex);
+            }
+            if (edge->from == taggedBuffer && edge->type == EdgeType::WEAK) {
+                EXPECT_EQ(ResolveString(heap.GetStringTable(), edge->nameOrIndex), std::to_string(taggedWeakIndex));
+            }
+            weakCount += edge->type == EdgeType::WEAK && edge->to == boxedNode;
+            selfCount += edge->from == boxedNode && edge->to == boxedNode;
+            methodCount += edge->to->type == CLOSURE_NODETYPE;
+        }
+        EXPECT_EQ(weakCount, pruneReferenceCount);
+        EXPECT_EQ(selfCount, 1U);
+        EXPECT_EQ(methodCount, 1U);
+        ASSERT_NO_FATAL_FAILURE(VerifyGraph(heap));
     }
 
     static void VerifyTaggedArrayEdges(StaticRawheapTranslate &parser, const rawheap_translate::Node *buffer,
@@ -1878,8 +2089,11 @@ HWTEST_F_L0(RawHeapStaticSnapshotTest, ParseTaggedArrayRejectsUnknownRuntimeType
     params.taggedValues = {{0xFFU, 0}};
     builder.WriteStaticArrayDumpRecord(params);
 
-    StaticRawheapTranslate parser;
-    EXPECT_FALSE(ParseForMerge(builder, "tagged_array_bad_type", parser));
+    for (auto mode : {PruneMode::DISABLED, PruneMode::ENABLED}) {
+        RawHeap::SetPruneMode(mode);
+        StaticRawheapTranslate parser;
+        EXPECT_FALSE(ParseForMerge(builder, "tagged_array_bad_type", parser));
+    }
 }
 
 HWTEST_F_L0(RawHeapStaticSnapshotTest, ParseStaticArrayDump_IntElement)
@@ -1993,6 +2207,160 @@ HWTEST_F_L0(RawHeapStaticSnapshotTest, ParseStaticArrayDump_EmptyArray)
     StaticRawheapTranslate parser;
     ASSERT_TRUE(ParseSingle(builder, "emptyarr", parser));
     ASSERT_NE(parser.FindNodeByNodeId(4), nullptr);  // 0x2000 -> nodeId 4
+}
+
+HWTEST_F_L0(RawHeapStaticSnapshotTest, PrimitiveCreationRolesRespectModeAndKeepIndices)
+{
+    const std::vector<rawheap_translate::NodeType> outputTypes = {
+        HEAP_NUMBER, STRING, SYNTHETIC_NODETYPE, OBJECT_NODETYPE};
+    const std::vector<NodeRole> roles = {
+        NodeRole::PRIMITIVE_VALUE, NodeRole::PRIMITIVE_VALUE, NodeRole::PRIMITIVE_VALUE, NodeRole::PRIMITIVE_WRAPPER};
+    for (auto mode : {PruneMode::DISABLED, PruneMode::ENABLED, PruneMode::DISABLED}) {
+        RawHeap::SetPruneMode(mode);
+        NodeCreationHeap heap;
+        auto *first = heap.CreateNode(STRING);
+        ASSERT_NE(first, nullptr);
+        EXPECT_EQ(first->index, 0U);
+        const auto stringCount = heap.GetStringTable()->GetCapacity();
+        for (size_t i = 0; i < outputTypes.size(); ++i) {
+            const auto before = heap.GetNodeCount();
+            auto *node = heap.CreateNode(outputTypes[i], roles[i]);
+            if (mode == PruneMode::ENABLED) {
+                EXPECT_EQ(node, nullptr);
+                EXPECT_EQ(heap.GetNodeCount(), before);
+            } else {
+                ASSERT_NE(node, nullptr);
+                EXPECT_EQ(node->type, outputTypes[i]);
+                EXPECT_EQ(node->index, before);
+            }
+        }
+        auto *last = heap.CreateNode(OBJECT_NODETYPE);
+        ASSERT_NE(last, nullptr);
+        EXPECT_EQ(last->index + 1U, heap.GetNodeCount());
+        EXPECT_EQ(heap.GetStringTable()->GetCapacity(), stringCount);
+        ASSERT_NO_FATAL_FAILURE(VerifyGraph(heap));
+    }
+}
+
+HWTEST_F_L0(RawHeapStaticSnapshotTest, CreationRolesAreIndependentOfSnapshotTypes)
+{
+    RawHeap::SetPruneMode(PruneMode::ENABLED);
+    NodeCreationHeap heap;
+    for (rawheap_translate::NodeType type = 0; type <= CLASS_NODETYPE; ++type) {
+        auto *node = heap.CreateNode(type);
+        ASSERT_NE(node, nullptr);
+        EXPECT_EQ(node->type, type);
+        EXPECT_EQ(node->index, type);
+        EXPECT_EQ(heap.CreateNode(type, NodeRole::PRIMITIVE_VALUE), nullptr);
+        EXPECT_EQ(heap.CreateNode(type, NodeRole::PRIMITIVE_WRAPPER), nullptr);
+    }
+    ASSERT_NO_FATAL_FAILURE(VerifyGraph(heap));
+}
+
+HWTEST_F_L0(RawHeapStaticSnapshotTest, CreationPruningPreservesDeferredHashesAndMetadata)
+{
+    RawHeap::SetPruneMode(PruneMode::ENABLED);
+    NodeCreationHeap heap;
+    auto *owner = heap.CreateNode();
+    owner->nodeId = (static_cast<uint64_t>(pruneClassNameId) << identityHashShift) | pruneClassNodeId;
+    heap.AddMetadataPropertyNode(owner, "Int", "type");
+    heap.CreateHashEdge(owner);
+    heap.AppendDeferredNodes();
+    ASSERT_EQ(heap.GetNodeCount(), 3U);
+    EXPECT_EQ(owner->nodeId, pruneClassNodeId);
+    EXPECT_EQ(ResolveString(heap.GetStringTable(), (*heap.GetNodes())[1]->strId), "Int");
+    EXPECT_EQ(ResolveString(heap.GetStringTable(), (*heap.GetNodes())[2]->strId), "Int:10");
+    heap.AppendDeferredNodes();
+    EXPECT_EQ(heap.GetNodeCount(), 3U);
+    auto *tail = heap.CreateNode();
+    EXPECT_EQ(tail->index + 1U, heap.GetNodeCount());
+    ASSERT_NO_FATAL_FAILURE(VerifyGraph(heap));
+}
+
+HWTEST_F_L0(RawHeapStaticSnapshotTest, DeferredNodesAreOwnedBeforeGraphCompletion)
+{
+    RawHeap::SetPruneMode(PruneMode::ENABLED);
+    NodeCreationHeap heap;
+    auto *owner = heap.CreateNode();
+    owner->nodeId = (static_cast<uint64_t>(pruneClassNameId) << identityHashShift) | pruneClassNodeId;
+    heap.AddMetadataPropertyNode(owner, "Int", "type");
+    heap.CreateHashEdge(owner);
+    EXPECT_EQ(heap.GetNodeCount(), 1U);
+    EXPECT_EQ(owner->edgeCount, pruneReferenceCount);
+    // Destruction must free pending nodes even if parsing/translation stops before append.
+}
+
+HWTEST_F_L0(RawHeapStaticSnapshotTest, InsertedNodesKeepAllIndicesConsistent)
+{
+    RawHeap::SetPruneMode(PruneMode::ENABLED);
+    NodeCreationHeap heap;
+    auto *first = heap.CreateNode();
+    auto *last = heap.CreateNode();
+    auto *inserted = heap.CreateNodeAt(1);
+    EXPECT_EQ((*heap.GetNodes())[0], first);
+    EXPECT_EQ((*heap.GetNodes())[1], inserted);
+    EXPECT_EQ((*heap.GetNodes())[2], last);
+    EXPECT_EQ(heap.CreateNode(OBJECT_NODETYPE, NodeRole::PRIMITIVE_WRAPPER), nullptr);
+    auto *tail = heap.CreateNode();
+    EXPECT_EQ(tail->index + 1U, heap.GetNodeCount());
+    ASSERT_NO_FATAL_FAILURE(VerifyGraph(heap));
+}
+
+HWTEST_F_L0(RawHeapStaticSnapshotTest, StaticRootsAreUniqueAndDirectlyReachable)
+{
+    StaticSnapshotDataBuilder builder;
+    builder.WriteHeader();
+    builder.WriteStringRecord(10, "RootObject");
+    builder.WriteStringRecord(11, "self");
+    builder.WriteLoadClassRecord(2, 10);
+    builder.WriteStaticClassDumpRecord(2, 16, {11});
+    builder.WriteStaticInstanceDumpRecord(4, 2, 16, {4});
+    // Separate records exercise deduplication across record batches.
+    for (uint32_t id : {4U, 0U, 4U, 2U, 4U}) {
+        builder.WriteRootRecord(id);
+    }
+    for (bool merge : {false, true}) {
+        SCOPED_TRACE(merge);
+        StaticRawheapTranslate parser;
+        RawHeapTranslateV1 dynamic(nullptr);
+        ASSERT_TRUE(merge ? ParseForMerge(builder, "unique_roots_merge", parser)
+                          : ParseSingle(builder, "unique_roots", parser));
+        EXPECT_EQ(parser.GetRoots(), (std::vector<uint32_t> {4, 2}));
+        EXPECT_EQ(parser.FindNodeByNodeId(0), nullptr);
+        RawHeap *heap = &parser;
+        if (merge) {
+            ASSERT_TRUE(MergeWithSyntheticRoot(dynamic, parser));
+            heap = &dynamic;
+        }
+        ASSERT_NO_FATAL_FAILURE(VerifyStaticRootEdges(*heap, parser));
+    }
+}
+
+HWTEST_F_L0(RawHeapStaticSnapshotTest, PruneStaticValuesPreservesObjectsAndReferences)
+{
+    StaticSnapshotDataBuilder builder;
+    WritePruneStaticObjects(builder);
+    WritePruneStaticArrays(builder);
+    for (bool merge : {false, true}) {
+        SCOPED_TRACE(merge);
+        StaticRawheapTranslate baseline;
+        StaticRawheapTranslate parser;
+        RawHeapTranslateV1 dynamic(nullptr);
+        RawHeap::SetPruneMode(PruneMode::DISABLED);
+        ASSERT_TRUE(merge ? ParseForMerge(builder, "baseline_static_merge", baseline)
+                          : ParseSingle(builder, "baseline_static", baseline));
+        RawHeap::SetPruneMode(PruneMode::ENABLED);
+        ASSERT_TRUE(merge ? ParseForMerge(builder, "prune_static_merge", parser)
+                          : ParseSingle(builder, "prune_static", parser));
+        const auto beforeCount = baseline.GetNodeCount() + (merge ? mergedRootNodeCount : 0U);
+        ASSERT_NO_FATAL_FAILURE(VerifyRetainedStaticIds(baseline, parser));
+        RawHeap *heap = &parser;
+        if (merge) {
+            ASSERT_TRUE(MergeWithSyntheticRoot(dynamic, parser));
+            heap = &dynamic;
+        }
+        ASSERT_NO_FATAL_FAILURE(VerifyPrunedStaticGraph(*heap, parser, beforeCount));
+    }
 }
 
 }  // namespace panda::test

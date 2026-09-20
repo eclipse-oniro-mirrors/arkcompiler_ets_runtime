@@ -164,6 +164,7 @@ public:
             return false;
         }
 
+        const auto &nodes = *translate.GetNodes();
         int checkCnt = 0;
         for (auto const &ref : refs) {
             if (!ref.value_.IsJSObject()) {
@@ -176,7 +177,7 @@ public:
             }
 
             std::string expected = "Int:" + std::to_string(hash);
-            bool found = std::any_of(translate.primitiveNodes_.begin(), translate.primitiveNodes_.end(),
+            bool found = std::any_of(nodes.begin(), nodes.end(),
                                      [&translate, &expected](const rawheap_translate::Node *node) {
                                          auto key = translate.strTable_->GetKeyByStringId(node->strId);
                                          return translate.strTable_->GetStringByKey(key) == expected;
