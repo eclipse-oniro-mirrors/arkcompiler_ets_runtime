@@ -640,8 +640,10 @@ void SlowPathLowering::Lower(GateRef gate)
             break;
         case EcmaOpcode::STOWNBYINDEX_IMM8_V8_IMM16:
         case EcmaOpcode::STOWNBYINDEX_IMM16_V8_IMM16:
+            LowerStOwnByIndex(gate, true);
+            break;
         case EcmaOpcode::WIDE_STOWNBYINDEX_PREF_V8_IMM32:
-            LowerStOwnByIndex(gate);
+            LowerStOwnByIndex(gate, false);
             break;
         case EcmaOpcode::STOWNBYNAME_IMM8_ID16_V8:
         case EcmaOpcode::STOWNBYNAME_IMM16_ID16_V8:
@@ -2618,13 +2620,13 @@ void SlowPathLowering::LowerStOwnByValue(GateRef gate)
     ReplaceHirWithValue(gate, *result);
 }
 
-void SlowPathLowering::LowerStOwnByIndex(GateRef gate)
+void SlowPathLowering::LowerStOwnByIndex(GateRef gate, bool hasIcSlot)
 {
-    // 3: number of value inputs
-    ASSERT(acc_.GetNumValueIn(gate) == 3);
-    GateRef receiver = acc_.GetValueIn(gate, 0);
-    GateRef index = acc_.GetValueIn(gate, 1);
-    GateRef accValue = acc_.GetValueIn(gate, 2);
+    // 4: number of value inputs (ICSlotId, receiver, index, acc)
+    ASSERT(acc_.GetNumValueIn(gate) == (hasIcSlot ? 4 : 3));
+    GateRef receiver = acc_.GetValueIn(gate, hasIcSlot ? 1 : 0);
+    GateRef index = acc_.GetValueIn(gate, hasIcSlot ? 2 : 1);
+    GateRef accValue = acc_.GetValueIn(gate, hasIcSlot ? 3 : 2);
     // we do not need to merge outValueGate, so using GateRef directly instead of using Variable
     GateRef holeConst = builder_.HoleConstant();
     DEFVALUE(result, (&builder_), VariableType::JS_ANY(), holeConst);

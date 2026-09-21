@@ -270,7 +270,7 @@ private:
     void LowerCreateObjectWithExcludedKeys(GateRef gate);
     void LowerCreateRegExpWithLiteral(GateRef gate);
     void LowerStOwnByValue(GateRef gate);
-    void LowerStOwnByIndex(GateRef gate);
+    void LowerStOwnByIndex(GateRef gate, bool hasIcSlot);
     void LowerStOwnByName(GateRef gate);
     void LowerDefineFunc(GateRef gate);
     void LowerNewLexicalEnv(GateRef gate);

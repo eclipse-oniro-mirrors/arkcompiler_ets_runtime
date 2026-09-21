@@ -1732,19 +1732,25 @@ void BytecodeInfo::InitBytecodeInfo(BytecodeInfo &info, const uint8_t *pc,
             break;
         }
         case EcmaOpcode::STOWNBYINDEX_IMM8_V8_IMM16: {
+            uint16_t slotId = READ_INST_8_0();
             uint8_t v0 = READ_INST_8_1();
             uint16_t index = READ_INST_16_2();
+            info.inputs.emplace_back(ICSlotId(slotId));
             info.inputs.emplace_back(VirtualRegister(v0));
             info.inputs.emplace_back(Immediate(index));
             break;
         }
         case EcmaOpcode::STOWNBYINDEX_IMM16_V8_IMM16: {
+            uint16_t slotId = READ_INST_16_0();
             uint8_t v0 = READ_INST_8_2();
             uint16_t index = READ_INST_16_3();
+            info.inputs.emplace_back(ICSlotId(slotId));
             info.inputs.emplace_back(VirtualRegister(v0));
             info.inputs.emplace_back(Immediate(index));
             break;
         }
+        // No IC slot in WIDE_STOWNBYINDEX encoding: [pref][op][v0][index], and no
+        // execution engine records feedback for it.
         case EcmaOpcode::WIDE_STOWNBYINDEX_PREF_V8_IMM32: {
             uint32_t v0 = READ_INST_8_1();
             uint32_t index = READ_INST_32_2();

@@ -85,6 +85,16 @@ bool IsElementStoreInputShape(const kungfu::BytecodeInfo &bytecodeInfo)
                std::holds_alternative<kungfu::VirtualRegister>(bytecodeInfo.inputs[ELEMENT_STORE_KEY_INPUT]);
     }
 
+    bool isStoreOwnByIndex = bytecodeInfo.GetOpcode() == kungfu::EcmaOpcode::STOWNBYINDEX_IMM8_V8_IMM16 ||
+                             bytecodeInfo.GetOpcode() == kungfu::EcmaOpcode::STOWNBYINDEX_IMM16_V8_IMM16;
+    if (isStoreOwnByIndex) {
+        // Same slot/receiver layout as STOBJBYVALUE, but the key is an immediate index.
+        return bytecodeInfo.inputs.size() == ELEMENT_STORE_INPUT_COUNT &&
+               std::holds_alternative<kungfu::ICSlotId>(bytecodeInfo.inputs[ELEMENT_STORE_SLOT_INPUT]) &&
+               std::holds_alternative<kungfu::VirtualRegister>(bytecodeInfo.inputs[ELEMENT_STORE_RECEIVER_INPUT]) &&
+               std::holds_alternative<kungfu::Immediate>(bytecodeInfo.inputs[ELEMENT_STORE_KEY_INPUT]);
+    }
+
     bool isStoreThisByValue = bytecodeInfo.GetOpcode() == kungfu::EcmaOpcode::STTHISBYVALUE_IMM8_V8 ||
                               bytecodeInfo.GetOpcode() == kungfu::EcmaOpcode::STTHISBYVALUE_IMM16_V8;
     return isStoreThisByValue && bytecodeInfo.inputs.size() == THIS_ELEMENT_STORE_INPUT_COUNT &&
@@ -652,7 +662,13 @@ bool ArkSteedAccessInfoFactory::TryBuildElementStoreAccessInfo(int slotIndex, El
 
         uint64_t handlerInfo = parsed.handlerInfo;
         JSHClass *hclass = JSHClass::Cast(hclassValue.GetTaggedObject());
-        if (HandlerBase::IsStoreOutOfBounds(handlerInfo) || hclass->IsJSShared()) {
+        // STOWNBYINDEX stores a compile-time constant index into the array built by the surrounding
+        // literal, so its handlers are always marked store-out-of-bounds: the store appends at or
+        // beyond the current length. That deterministic append case is lowered explicitly, so the
+        // bit only rejects stores with a runtime-computed key.
+        bool isOwnByIndexStore = bytecodeInfo_.GetOpcode() == kungfu::EcmaOpcode::STOWNBYINDEX_IMM8_V8_IMM16 ||
+                                 bytecodeInfo_.GetOpcode() == kungfu::EcmaOpcode::STOWNBYINDEX_IMM16_V8_IMM16;
+        if ((HandlerBase::IsStoreOutOfBounds(handlerInfo) && !isOwnByIndexStore) || hclass->IsJSShared()) {
             *access = {};
             return false;
         }

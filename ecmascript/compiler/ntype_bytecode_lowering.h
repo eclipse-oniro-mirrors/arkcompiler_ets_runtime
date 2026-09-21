@@ -48,7 +48,7 @@ private:
     void LowerNTypedCreateArrayWithBuffer(GateRef gate);
     void LowerNTypedCopyRestArgs(GateRef gate);
     void LowerNTypedGetUnmappedArgs(GateRef gate);
-    void LowerNTypedStownByIndex(GateRef gate);
+    void LowerNTypedStownByIndex(GateRef gate, bool hasIcSlot);
     void LowerLdLexVar(GateRef gate);
     void LowerStLexVar(GateRef gate);
     void LowerThrowUndefinedIfHoleWithName(GateRef gate);

@@ -542,10 +542,10 @@ DEF_RUNTIME_STUBS(JSArrayReduceUnStable)
 DEF_RUNTIME_STUBS(JSObjectGrowElementsCapacity)
 {
     RUNTIME_STUBS_HEADER(JSObjectGrowElementsCapacity);
-    JSHandle<JSObject> elements = GetHArg<JSObject>(argv, argc, 0);  // 0: means the zeroth parameter
-    JSTaggedValue length = GetArg(argv, argc, 1);                    // 1: means the zeroth parameter
+    JSHandle<JSObject> receiver = GetHArg<JSObject>(argv, argc, 0);  // 0: the array owning the elements
+    JSTaggedValue length = GetArg(argv, argc, 1);                    // 1: wanted capacity as a tagged int
     uint32_t newLength = static_cast<uint32_t>(length.GetInt());
-    JSHandle<TaggedArray> newElements = JSObject::GrowElementsCapacity(thread, elements, newLength, true);
+    JSHandle<TaggedArray> newElements = JSObject::GrowElementsCapacity(thread, receiver, newLength, true);
     return newElements.GetTaggedValue().GetRawData();
 }
 

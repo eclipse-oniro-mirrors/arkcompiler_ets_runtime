@@ -1418,7 +1418,12 @@ StoreBuiltinObjTypeInfoAccessor::StoreBuiltinObjTypeInfoAccessor(const Compilati
     EcmaOpcode ecmaOpcode = acc_.GetByteCodeOpcode(gate);
     switch (ecmaOpcode) {
         case EcmaOpcode::STOWNBYINDEX_IMM8_V8_IMM16:
-        case EcmaOpcode::STOWNBYINDEX_IMM16_V8_IMM16:
+        case EcmaOpcode::STOWNBYINDEX_IMM16_V8_IMM16: {
+            receiver_ = acc_.GetValueIn(gate, 1);  // 1: receiver
+            key_ = acc_.GetValueIn(gate, 2);  // 2: key
+            value_ = acc_.GetValueIn(gate, 3);  // 3: value
+            break;
+        }
         case EcmaOpcode::STOBJBYINDEX_IMM8_V8_IMM16:
         case EcmaOpcode::STOBJBYINDEX_IMM16_V8_IMM16:
         case EcmaOpcode::WIDE_STOBJBYINDEX_PREF_V8_IMM32: {

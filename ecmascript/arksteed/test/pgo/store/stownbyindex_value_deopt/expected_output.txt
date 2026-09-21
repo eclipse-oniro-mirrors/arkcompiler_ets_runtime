@@ -1,0 +1,4 @@
+strings: x,y len=2
+mixed: 7,3.5 same:true
+double/null: 1.5, len=2
+ints-after-deopt: PASS
