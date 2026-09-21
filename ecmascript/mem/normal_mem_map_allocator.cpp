@@ -28,8 +28,7 @@ void MemMapAllocator::InitializeRegularRegionMap([[maybe_unused]] size_t alignme
     size_t initialRegularObjectCapacity = std::min(capacity_ / 3, INITIAL_REGULAR_OBJECT_CAPACITY);
     size_t i = 0;
     while (i < MEM_MAP_RETRY_NUM) {
-        void *addr = reinterpret_cast<void *>(ToUintPtr(RandomGenerateBigAddr(REGULAR_OBJECT_MEM_MAP_BEGIN_ADDR)) +
-            i * STEP_INCREASE_MEM_MAP_ADDR);
+        void *addr = reinterpret_cast<void *>(ToUintPtr(RandomGenerateBigAddr(REGULAR_OBJECT_MEM_MAP_BEGIN_ADDR)));
         MemMap memMap = PageMap(initialRegularObjectCapacity, PAGE_PROT_NONE, alignment, addr);
         if (ToUintPtr(memMap.GetMem()) >= ToUintPtr(addr)) {
             PageTag(memMap.GetMem(), memMap.GetSize(), PageTagType::HEAP);
@@ -53,8 +52,7 @@ void MemMapAllocator::InitializeHugeRegionMap(size_t alignment)
     size_t initialHugeObjectCapacity = std::min(capacity_ / 3, INITIAL_HUGE_OBJECT_CAPACITY);
     size_t i = 0;
     while (i <= MEM_MAP_RETRY_NUM) {
-        void *addr = reinterpret_cast<void *>(ToUintPtr(RandomGenerateBigAddr(HUGE_OBJECT_MEM_MAP_BEGIN_ADDR)) +
-            i * STEP_INCREASE_MEM_MAP_ADDR);
+        void *addr = reinterpret_cast<void *>(ToUintPtr(RandomGenerateBigAddr(HUGE_OBJECT_MEM_MAP_BEGIN_ADDR)));
         MemMap memMap = PageMap(initialHugeObjectCapacity, PAGE_PROT_NONE, alignment, addr);
         if (ToUintPtr(memMap.GetMem()) >= ToUintPtr(addr) || i == MEM_MAP_RETRY_NUM) {
             PageTag(memMap.GetMem(), memMap.GetSize(), PageTagType::HEAP);
@@ -91,8 +89,7 @@ void MemMapAllocator::InitializeCompressRegionMap([[maybe_unused]] size_t alignm
 #if !WIN_OR_MAC_OR_IOS_PLATFORM && defined(NDEBUG)
     size_t i = 0;
     while (i <= MEM_MAP_RETRY_NUM) {
-        void *addr = reinterpret_cast<void *>(ToUintPtr(RandomGenerateBigAddr(HUGE_OBJECT_MEM_MAP_BEGIN_ADDR)) +
-            i * STEP_INCREASE_MEM_MAP_ADDR);
+        void *addr = reinterpret_cast<void *>(ToUintPtr(RandomGenerateBigAddr(HUGE_OBJECT_MEM_MAP_BEGIN_ADDR)));
         MemMap memMap = PageMap(alignNonmovableObjectCapacity, PAGE_PROT_NONE, alignment, addr);
         if (ToUintPtr(memMap.GetMem()) >= ToUintPtr(addr) || i == MEM_MAP_RETRY_NUM) {
             memMap = AlignMemMapTo4G(memMap, initialNonmovableObjectCapacity);
