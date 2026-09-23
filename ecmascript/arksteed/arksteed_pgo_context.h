@@ -33,11 +33,6 @@ public:
                                          const_cast<ArkSteedHeapBroker *>(&broker_));
     }
 
-    ArkSteedHeapBroker::SerializingScope CreateSerializingScope(CString message) const
-    {
-        return ArkSteedHeapBroker::SerializingScope(&broker_, message);
-    }
-
     ArkSteedHeapBroker *GetBroker()
     {
         return &broker_;

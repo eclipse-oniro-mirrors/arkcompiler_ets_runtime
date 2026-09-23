@@ -2679,8 +2679,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *receiver = LoadRegister(bcInfo, 2);  // 2: receiver register index
         uint16_t constDataId = GetConstDataId(bcInfo, 1);
         ValueVertex *value = frameState.GetAcc();
-        auto serializingScope =
-            self->pgoContext_.CreateSerializingScope("GraphBuilder::BytecodeVisitor::LowerStObjByName");
+
         NamedStoreAccessSet access;
         auto factory = self->pgoContext_.CreateAccessInfoFactory(*bcInfo);
         if (factory.TryBuildNamedStoreAccessInfo(0, &access) &&
@@ -2891,8 +2890,6 @@ struct GraphBuilder::BytecodeVisitor {
             return false;
         }
         ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
-        auto serializingScope =
-            self->pgoContext_.CreateSerializingScope("ArkSteedGraphBuilder::TryBuildLoadBuiltinObject");
         size_t builtinIndex = BuiltinIndex::NOT_FOUND;
         if (!broker->TryGetBuiltinIndexFromConstantPool(GetConstDataId<uint16_t>(bcInfo, 1), &builtinIndex)) {
             return false;
@@ -3020,62 +3017,24 @@ struct GraphBuilder::BytecodeVisitor {
         if (!feedback.IsMonomorphicJSFunction()) {
             return std::nullopt;
         }
-
-        ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
-        auto serializingScope =
-            self->pgoContext_.CreateSerializingScope("ArkSteedGraphBuilder::TryCreateProfiledKnownConstructPlan");
-        JSThread *compilerThread = broker->GetCompilerThread();
-        JSTaggedValue target;
-        if (!broker->TryResolveRef(feedback.target, &target) || !target.IsJSFunction() || !target.IsConstructor() ||
-            target.IsJSShared()) {
+        auto *broker = self->pgoContext_.GetBroker();
+        ArkSteedHeapBroker::KnownConstructInfo info;
+        if (!broker->TryGetKnownConstructInfo(feedback.target, &info)) {
             return std::nullopt;
         }
-
-        auto *function = JSFunction::Cast(target.GetTaggedObject());
-        JSTaggedValue methodValue = function->GetMethod(compilerThread);
-        if ((!function->IsBase(compilerThread) && !function->IsDerivedConstructor(compilerThread)) ||
-            function->IsSharedFunction() || !methodValue.IsMethod()) {
-            return std::nullopt;
-        }
-        auto *method = Method::Cast(methodValue.GetTaggedObject());
-        if (method->IsNativeWithCallField()) {
-            return std::nullopt;
-        }
-
         ValueVertex *targetConstant = GetHeapConstant(feedback.target);
         if (targetConstant == nullptr) {
             return std::nullopt;
         }
-
         ValueVertex *hclassConstant = nullptr;
-        uint32_t size = 0;
-        bool canAllocateDirectly = false;
-        if (function->IsBase(compilerThread)) {
-            auto layout = function->GetProtoOrHClass(compilerThread);
-            if (!layout.IsJSHClass()) {
-                return std::nullopt;
-            }
-            auto *hclass = JSHClass::Cast(layout.GetTaggedObject());
-            if (hclass->GetObjectType() != JSType::JS_OBJECT || hclass->IsJSShared()) {
-                return std::nullopt;
-            }
-            if (hclass->IsObjSizeTrackingInProgress()) {
-                // Keep the known call; let FastNewThisObject read the changing layout and size.
-                return KnownConstructPlan(method->GetNumArgsWithCallField(), targetConstant, nullptr, 0, false);
-            }
-            size = hclass->GetObjectSize();
-            hclassConstant = GetHeapConstant(broker->MakeHClassRef(layout));
+        if (info.initialHClass.IsSafeForCompile()) {
+            hclassConstant = GetHeapConstant(info.initialHClass);
             if (hclassConstant == nullptr) {
                 return std::nullopt;
             }
-            bool hasDirectSize = size >= JSObject::SIZE && size <= MAX_REGULAR_HEAP_OBJECT_SIZE &&
-                                 size % JSTaggedValue::TaggedTypeSize() == 0;
-            canAllocateDirectly = !G_USE_CMS_GC && !g_isEnableCMCGC && hasDirectSize && !hclass->IsAOT() &&
-                                  !hclass->IsDictionaryMode() && !hclass->IsDictionaryElement() &&
-                                  hclass->GetPrototype(compilerThread).IsECMAObject();
         }
-        return KnownConstructPlan(method->GetNumArgsWithCallField(), targetConstant, hclassConstant, size,
-                                  canAllocateDirectly);
+        return KnownConstructPlan(info.formalArgc, targetConstant, hclassConstant, info.objectSize,
+                                  info.canAllocateDirectly);
     }
 
     std::optional<KnownCallPlan> TryCreateProfiledKnownCallPlan(const CallFeedback &feedback, uint32_t actualArgc)
@@ -3085,27 +3044,8 @@ struct GraphBuilder::BytecodeVisitor {
         }
 
         ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
-        auto serializingScope = self->pgoContext_.CreateSerializingScope(
-            "ArkSteedGraphBuilder::TryCreateProfiledKnownCallPlan");
-        JSThread *compilerThread = broker->GetCompilerThread();
-        JSTaggedValue target;
-        if (!broker->TryResolveRef(feedback.target, &target) || !target.IsJSFunction() || target.IsJSShared() ||
-            target.IsClassConstructor()) {
-            return std::nullopt;
-        }
 
-        auto *function = JSFunction::Cast(target.GetTaggedObject());
-        JSTaggedValue methodValue = function->GetMethod(compilerThread);
-        if (function->IsSharedFunction() || !methodValue.IsMethod()) {
-            return std::nullopt;
-        }
-        auto *method = Method::Cast(methodValue.GetTaggedObject());
-        if (method->IsNativeWithCallField()) {
-            return std::nullopt;
-        }
-
-        uint32_t expectedParameterCount = method->GetNumArgsWithCallField();
-        if (actualArgc != expectedParameterCount) {
+        if (!broker->CanCallFunction(feedback.target, actualArgc)) {
             return std::nullopt;
         }
         ValueVertex *expectedTargetConstant = GetHeapConstant(feedback.target);
@@ -3121,26 +3061,9 @@ struct GraphBuilder::BytecodeVisitor {
                                                       uint32_t globalEnvFieldIndex)
     {
         ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
-        auto serializingScope = self->pgoContext_.CreateSerializingScope(
-            "ArkSteedGraphBuilder::TryGetCanonicalBuiltinMethodConstant");
-        JSThread *compilerThread = broker->GetCompilerThread();
-        auto globalEnv = self->preproc_->GetEnv()->GetGlobalEnv();
-        JSHandle<JSTaggedValue> canonicalTarget =
-            globalEnv->GetGlobalEnvObjectWithBarrierByIndex(globalEnvFieldIndex);
-        if (!canonicalTarget->IsJSFunction()) {
-            return nullptr;
-        }
 
-        auto *function = JSFunction::Cast(canonicalTarget->GetTaggedObject());
-        JSTaggedValue methodValue = function->GetMethod(compilerThread);
-        if (!methodValue.IsMethod()) {
-            return nullptr;
-        }
-        auto *method = Method::Cast(methodValue.GetTaggedObject());
-        if (!method->IsNativeWithCallField() || method->GetBuiltinId() != static_cast<uint16_t>(builtinId)) {
-            return nullptr;
-        }
-        return GetHeapConstant(broker->MakeObjectRef(methodValue));
+        auto method = broker->GetBuiltinMethod(static_cast<uint16_t>(builtinId), globalEnvFieldIndex);
+        return method.IsSafeForCompile() ? GetHeapConstant(method) : nullptr;
     }
 
     std::optional<KnownBuiltinCallPlan> TryCreateProfiledKnownBuiltinCallPlan(
@@ -3982,8 +3905,6 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *expectedSuperCtor = nullptr;
         CallFeedback feedback = self->pgoContext_.ReadCallFeedback(*bcInfo);
         if (feedback.IsMonomorphicJSFunction()) {
-            auto serializingScope = self->pgoContext_.CreateSerializingScope(
-                "ArkSteedGraphBuilder::BuildSuperCallWithFastPath");
             expectedSuperCtor = GetHeapConstant(feedback.target);
         }
 
@@ -4234,7 +4155,6 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex* hclass = nullptr;
         {
             auto* broker = self->pgoContext_.GetBroker();
-            ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::BuildEmptyObject");
             ArkSteedHClassRef hclassRef;
             if (broker->TryGetEmptyObjectLayout(&hclassRef, &objectSize)) {
                 hclass = GetHeapConstant(hclassRef);
@@ -4258,13 +4178,29 @@ struct GraphBuilder::BytecodeVisitor {
         frameState.SetAcc(BuildEmptyObject());
     }
 
+    void ApplyArrayCreationHClass(ValueVertex *array, uint32_t slotId)
+    {
+        auto *broker = self->pgoContext_.GetBroker();
+        ArkSteedHClassRef hclassRef;
+        if (!broker->TryGetArrayCreationHClass(slotId, &hclassRef)) {
+            return;
+        }
+        JSHClass *hclass = nullptr;
+        ValueVertex *constant = GetHeapConstant(hclassRef);
+        if (!TryResolveHClassRef(hclassRef, &hclass) || !hclass->IsJSArray() || constant == nullptr) {
+            return;
+        }
+        self->NewVertex<TransitionHClassWithBarrierVertex>(
+            compileInfoFacts_, currentBlock, {glue, array, constant});
+        compileInfoFacts_->RecordHClass(array, hclass, false);
+    }
+
     void LowerCreateEmptyArray(const BytecodeInfo *bcInfo)
     {
         uint32_t objectSize = 0;
         ValueVertex* globalEnv = nullptr;
         {
             auto* broker = self->pgoContext_.GetBroker();
-            ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::LowerCreateEmptyArray");
             ArkSteedObjectRef envRef;
             if (broker->TryGetEmptyArrayLayout(&envRef, &objectSize)) {
                 globalEnv = GetHeapConstant(envRef);
@@ -4287,20 +4223,7 @@ struct GraphBuilder::BytecodeVisitor {
         }
         frameState.SetAcc(array);
         compileInfoFacts_->EnsureType(array, NodeInfo::NodeType::JS_ARRAY);
-        ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
-        ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::LowerCreateEmptyArray");
-        uint32_t rawSlotId = static_cast<uint32_t>(bcInfo->slotId.GetId());
-        ArkSteedHClassRef creatorHClassRef;
-        if (broker->TryGetArrayCreationHClass(rawSlotId, &creatorHClassRef)) {
-            JSHClass *creatorHClass = nullptr;
-            ValueVertex *creatorHClassConstant = GetHeapConstant(creatorHClassRef);
-            if (TryResolveHClassRef(creatorHClassRef, &creatorHClass) && creatorHClass != nullptr &&
-                creatorHClass->IsJSArray() && creatorHClassConstant != nullptr) {
-                self->NewVertex<TransitionHClassWithBarrierVertex>(
-                    compileInfoFacts_, currentBlock, {glue, array, creatorHClassConstant});
-                compileInfoFacts_->RecordHClass(array, creatorHClass, false);
-            }
-        }
+        ApplyArrayCreationHClass(array, static_cast<uint32_t>(bcInfo->slotId.GetId()));
         frameState.SetAcc(array);
     }
 
@@ -4312,7 +4235,6 @@ struct GraphBuilder::BytecodeVisitor {
         ArkSteedHeapBroker* broker = self->pgoContext_.GetBroker();
         // These GC modes require the complete creation stub, including its initialization barriers.
         if (!g_isEnableCMCGC && !G_USE_CMS_GC && broker != nullptr) {
-            ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::LowerCreateObjectWithBuffer");
             ArkSteedObjectRef literalRef;
             if (broker->TryGetObjectLiteralFromConstantPool(cpIdx, self->chunk_, &literalRef, &info)) {
                 literal = GetHeapConstant(literalRef);
@@ -4357,7 +4279,6 @@ struct GraphBuilder::BytecodeVisitor {
         ArkSteedHeapBroker* broker = self->pgoContext_.GetBroker();
         // These GC modes require the complete creation stub, including its initialization barriers.
         if (!g_isEnableCMCGC && !G_USE_CMS_GC && broker != nullptr) {
-            ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::LowerCreateArrayWithBuffer");
             ArkSteedObjectRef literalRef;
             if (broker->TryGetArrayLiteralFromConstantPool(cpIdx, &literalRef, &objectSize)) {
                 literal = GetHeapConstant(literalRef);
@@ -4387,7 +4308,6 @@ struct GraphBuilder::BytecodeVisitor {
             return;
         }
 
-        ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::LowerCreateArrayWithBuffer");
         ArkSteedHClassRef creatorHClassRef;
         if (!broker->TryGetArrayCreationHClass(rawSlotId, &creatorHClassRef)) {
             return;
@@ -4498,8 +4418,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *receiver = LoadRegister(bcInfo, 2);  // 2: obj register index
         uint16_t constDataId = GetConstDataId(bcInfo, 1);
         ValueVertex *value = frameState.GetAcc();
-        auto serializingScope = self->pgoContext_.CreateSerializingScope(
-            "GraphBuilder::BytecodeVisitor::LowerDefinePropertyByName");
+
         NamedStoreAccessSet access;
         auto factory = self->pgoContext_.CreateAccessInfoFactory(*bcInfo);
         if (factory.TryBuildNamedStoreAccessInfo(0, &access) && access.caseCount > 0) {
@@ -4507,7 +4426,8 @@ struct GraphBuilder::BytecodeVisitor {
                 ASSERT(access.cases[i].kind == AccessKind::TRANSITION);
                 ASSERT(!access.cases[i].isSharedStore);
             }
-            if (TryLowerNamedStoreAccessSet(bcIndex, access, receiver, value, PropertyKey::ConstDataId(constDataId))) {
+            if (TryLowerNamedStoreAccessSet(
+                    bcIndex, access, receiver, value, PropertyKey::ConstDataId(constDataId))) {
                 return;
             }
         }
@@ -4775,19 +4695,15 @@ struct GraphBuilder::BytecodeVisitor {
         UNKNOWN,
     };
 
-    static TypeOfKind TypeOfKindFromHClass(const JSHClass *hclass)
+    static TypeOfKind TypeOfKindFromObjectType(JSType type, bool callable)
     {
-        if (hclass == nullptr) {
-            return TypeOfKind::UNKNOWN;
-        }
-        JSType type = hclass->GetObjectType();
         if (type >= JSType::STRING_FIRST && type <= JSType::STRING_LAST) {
             return TypeOfKind::STRING;
         }
         if (type == JSType::SYMBOL) {
             return TypeOfKind::SYMBOL;
         }
-        if (hclass->IsCallable()) {
+        if (callable) {
             return TypeOfKind::FUNCTION;
         }
         if (type == JSType::BIGINT) {
@@ -4797,6 +4713,12 @@ struct GraphBuilder::BytecodeVisitor {
             return TypeOfKind::NATIVE_MODULE_FAILURE_INFO;
         }
         return TypeOfKind::OBJECT;
+    }
+
+    static TypeOfKind TypeOfKindFromHClass(const JSHClass *hclass)
+    {
+        return hclass == nullptr ? TypeOfKind::UNKNOWN :
+            TypeOfKindFromObjectType(hclass->GetObjectType(), hclass->IsCallable());
     }
 
     static TypeOfKind TypeOfKindFromConstant(JSTaggedValue value)
@@ -4816,9 +4738,8 @@ struct GraphBuilder::BytecodeVisitor {
         if (value.IsHole()) {
             return TypeOfKind::UNKNOWN;
         }
-        if (value.IsHeapObject()) {
-            return TypeOfKindFromHClass(value.GetTaggedObject()->GetClass());
-        }
+        // Managed constants use HeapConstantVertex, not embedded raw addresses.
+        ASSERT(!value.IsHeapObject());
         return TypeOfKind::UNKNOWN;
     }
 
@@ -4878,10 +4799,10 @@ struct GraphBuilder::BytecodeVisitor {
         if (std::optional<ArkSteedHeapRef> constantRef = TryGetConstantHeapRef(value)) {
             ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
             if (broker != nullptr) {
-                ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::ClassifyTypeOf");
-                JSTaggedValue constant = JSTaggedValue::Undefined();
-                if (broker->TryResolveRef(*constantRef, &constant)) {
-                    return TypeOfKindFromConstant(constant);
+                JSType type;
+                bool callable = false;
+                if (broker->TryGetObjectType(*constantRef, &type, &callable)) {
+                    return TypeOfKindFromObjectType(type, callable);
                 }
             }
         }
@@ -4897,7 +4818,6 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *constant = nullptr;
         ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
         if (broker != nullptr) {
-            ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::StringFromGlobalConstant");
             ArkSteedNameRef stringRef;
             if (broker->TryGetGlobalConstantRef(index, &stringRef)) {
                 constant = GetHeapConstant(stringRef);
@@ -4950,14 +4870,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *numArgs = ActualArgc();
         ValueVertex *globalEnv = GlobalEnv();
 
-        uint32_t argumentsObjectSize = 0;
-        {
-            auto scope = self->pgoContext_.CreateSerializingScope("GraphBuilder::LowerGetUnmappedArgs");
-            JitCompilationEnv *env = self->preproc_->GetEnv();
-            auto argumentsClassValue = env->GetGlobalEnv()->GetArgumentsClassWithBarrier();
-            JSHandle<JSHClass> argumentsClass(argumentsClassValue);
-            argumentsObjectSize = argumentsClass->GetObjectSize();
-        }
+        uint32_t argumentsObjectSize = self->pgoContext_.GetBroker()->GetArgumentsObjectSize();
 
         constexpr uint64_t slotSize = JSTaggedValue::TaggedTypeSize();
         constexpr uint64_t mandatoryArgc = NUM_MANDATORY_JSFUNC_ARGS;
@@ -5999,25 +5912,23 @@ struct GraphBuilder::BytecodeVisitor {
         if (auto *constant = node->TryCast<TaggedConstantVertex>()) {
             JSTaggedValue value(constant->GetValue());
             if (value.IsHole()) {
-                return ArkSteedHeapRef(value, true);
+                return ArkSteedHeapRef::FromImmediate(value);
             }
-            if (!value.IsHeapObject()) {
-                return std::nullopt;
-            }
-            ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
-            if (broker == nullptr) {
-                return std::nullopt;
-            }
-            ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::TryGetConstantHeapRef");
-            ArkSteedHeapRef ref = broker->MakeObjectRef(value);
-            return ref.IsSafeForCompile() ? std::optional<ArkSteedHeapRef>(ref) : std::nullopt;
+            // Heap constants must be rooted before entering the graph.
+            ASSERT(!value.IsHeapObject());
+            return std::nullopt;
         }
         if (auto *constant = node->TryCast<HeapConstantVertex>()) {
             JitCompilationEnv *env = self->preproc_->GetEnv();
             if (env == nullptr || constant->GetHandleIndex() >= env->GetHeapConstantTable().size()) {
                 return std::nullopt;
             }
-            return ArkSteedHeapRef(env->GetHeapConstantHandle(constant->GetHandleIndex()));
+            auto *broker = self->pgoContext_.GetBroker();
+            if (broker == nullptr) {
+                return std::nullopt;
+            }
+            ArkSteedHeapRef ref = broker->MakeObjectRef(env->GetHeapConstantHandle(constant->GetHandleIndex()));
+            return ref.IsSafeForCompile() ? std::optional<ArkSteedHeapRef>(ref) : std::nullopt;
         }
         return std::nullopt;
     }
@@ -6025,16 +5936,11 @@ struct GraphBuilder::BytecodeVisitor {
     bool IsEmptyStringRef(const ArkSteedHeapRef &stringRef) const
     {
         ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
-        if (broker == nullptr) {
+        if (broker == nullptr || !stringRef.IsString()) {
             return false;
         }
-        ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::IsEmptyStringRef");
-        JSTaggedValue string = JSTaggedValue::Undefined();
-        if (!broker->TryResolveRef(stringRef, &string) || !string.IsString()) {
-            return false;
-        }
-        ALLOW_DEREF_HANDLE;
-        return EcmaStringAccessor(string).GetLength() == 0;
+        uint32_t length = 0;
+        return broker->TryGetStringLength(stringRef, &length) && length == 0;
     }
 
     bool IsEmptyStringConstant(ValueVertex *value) const
@@ -6076,7 +5982,6 @@ struct GraphBuilder::BytecodeVisitor {
         }
 
         ArkSteedNameRef name;
-        ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::TryGetNameRefFromConstDataId");
         if (!broker->TryGetNameFromConstantPool(constDataId, &name)) {
             return std::nullopt;
         }
@@ -6086,26 +5991,15 @@ struct GraphBuilder::BytecodeVisitor {
     std::optional<PropertyLookupResult> TryLookupPropertyInPGOHClass(JSHClass *hclass,
                                                                      const ArkSteedNameRef &nameRef) const
     {
-        ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
-        if (hclass == nullptr || broker == nullptr) {
-            return std::nullopt;
-        }
-        ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::TryLookupPropertyInPGOHClass");
-        JSTaggedValue name = JSTaggedValue::Undefined();
-        if (!broker->TryResolveRef(nameRef, &name) || (!name.IsString() && !name.IsSymbol())) {
-            return std::nullopt;
-        }
-        return JSHClass::LookupPropertyInPGOHClass(self->compilerThread_, hclass, name);
+        auto *broker = self->pgoContext_.GetBroker();
+        return broker == nullptr ? std::nullopt : broker->TryLookupProperty(hclass, nameRef);
     }
 
     std::optional<JSHClass *> TryResolveHClassRef(const ArkSteedHClassRef &hclassRef) const
     {
-        ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
-        JSTaggedValue hclassValue = JSTaggedValue::Undefined();
-        if (broker == nullptr || !broker->TryResolveRef(hclassRef, &hclassValue) || !hclassValue.IsJSHClass()) {
-            return std::nullopt;
-        }
-        return JSHClass::Cast(hclassValue.GetTaggedObject());
+        auto *broker = self->pgoContext_.GetBroker();
+        auto *hclass = broker == nullptr ? nullptr : broker->TryGetHClass(hclassRef);
+        return hclass == nullptr ? std::nullopt : std::optional<JSHClass *>(hclass);
     }
 
     static bool IsSupportedNamedLoadAccessInfo(const PropertyAccessInfo &accessInfo)
@@ -6168,7 +6062,6 @@ struct GraphBuilder::BytecodeVisitor {
             return std::nullopt;
         }
         if (accessInfo.IsTypedArrayLength()) {
-            ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::TryConvertTypedArrayLength");
             auto receiverHClass = TryResolveHClassRef(accessInfo.expectedHClass);
             if (!receiverHClass.has_value() || !IsFixedLengthTypedArrayType(receiverHClass.value()->GetObjectType())) {
                 return std::nullopt;
@@ -6196,10 +6089,9 @@ struct GraphBuilder::BytecodeVisitor {
             holderRef = accessInfo.holder;
             holderHandleIndex = recordedHolderHandleIndex.value();
         }
-        ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::TryConvertNamedLoadAccessInfo");
+
         std::optional<JSHClass *> receiverHClass = TryResolveHClassRef(accessInfo.expectedHClass);
-        if (!receiverHClass.has_value() || receiverHClass.value() == nullptr ||
-            !receiverHClass.value()->GetLayout(self->compilerThread_).IsTaggedArray()) {
+        if (!receiverHClass.has_value()) {
             return std::nullopt;
         }
         JSHClass *holderHClass = receiverHClass.value();
@@ -6212,32 +6104,18 @@ struct GraphBuilder::BytecodeVisitor {
                 return std::nullopt;
             }
             holderHClass = holder.value();
-            if (holderHClass == nullptr || !holderHClass->GetLayout(self->compilerThread_).IsTaggedArray()) {
+            if (!broker->TryGetPrototypeHClasses(accessInfo.expectedHClass, accessInfo.fieldOwnerHClass,
+                                                &expectedPrototypeHClassRefs)) {
                 return std::nullopt;
             }
-            JSTaggedValue current = receiverHClass.value()->GetPrototype(self->compilerThread_);
-            holderDepth = 1;
-            while (current.IsHeapObject()) {
-                JSHClass *currentHClass = current.GetTaggedObject()->GetClass();
-                expectedPrototypeHClasses.push_back(currentHClass);
-                ArkSteedHClassRef currentHClassRef = broker->MakeHClassRef(JSTaggedValue(currentHClass));
-                if (!currentHClassRef.IsSafeForCompile()) {
+            for (const auto &ref : expectedPrototypeHClassRefs) {
+                auto hclass = TryResolveHClassRef(ref);
+                if (!hclass.has_value()) {
                     return std::nullopt;
                 }
-                expectedPrototypeHClassRefs.push_back(currentHClassRef);
-                if (currentHClass == holderHClass) {
-                    break;
-                }
-                current = currentHClass->GetPrototype(self->compilerThread_);
-                holderDepth++;
+                expectedPrototypeHClasses.push_back(*hclass);
             }
-            if (!current.IsHeapObject()) {
-                return std::nullopt;
-            }
-            if (expectedPrototypeHClasses.empty() || expectedPrototypeHClasses.back() != holderHClass ||
-                expectedPrototypeHClasses.size() != holderDepth) {
-                return std::nullopt;
-            }
+            holderDepth = expectedPrototypeHClasses.size();
         }
         bool isJSArrayLength = accessInfo.fieldRepresentation == AccessFieldRepresentation::UINT32;
         if (isJSArrayLength && (!accessInfo.holderIsReceiver || !holderHClass->IsJSArray() ||
@@ -6304,7 +6182,8 @@ struct GraphBuilder::BytecodeVisitor {
         if (hclass == nullptr || !hclassRef.IsSafeForCompile()) {
             return false;
         }
-        if (std::find(hclasses->begin(), hclasses->end(), hclass) != hclasses->end()) {
+        if (std::any_of(hclassRefs->begin(), hclassRefs->end(),
+                       [&hclassRef](const ArkSteedHClassRef &existing) { return existing.Equals(hclassRef); })) {
             return true;
         }
         hclasses->push_back(hclass);
@@ -8111,14 +7990,10 @@ struct GraphBuilder::BytecodeVisitor {
             bool isSharedHClass = JSTaggedValue(hclass).IsInSharedHeap();
             bool isStable = IsHClassStableForFacts(hclass, requested->hasExternalStableDependency);
             bool shouldInstallDependency = installStableDependencies && self->IsLazyDeoptEnabled() &&
-                                           kungfu::StableHClassDependency::IsValid(hclass) && !isSharedHClass &&
-                                           !isStable;
-            if (shouldInstallDependency) {
-                auto *dependencies = self->preproc_->GetEnv()->GetDependencies();
-                if (dependencies == nullptr || !dependencies->DependOnStableHClass(hclass)) {
-                    return HClassCheckResult::FAILURE;
-                }
-                isStable = true;
+                !isSharedHClass && !isStable;
+            if (shouldInstallDependency &&
+                !self->pgoContext_.GetBroker()->TryInstallStableHClassDependency(hclass, &isStable)) {
+                return HClassCheckResult::FAILURE;
             }
             resolvedHClasses->push_back(NodeInfo::PossibleHClassInfo {
                 .hclass = hclass,
@@ -8140,17 +8015,13 @@ struct GraphBuilder::BytecodeVisitor {
         if (broker == nullptr) {
             return HClassCheckResult::FAILURE;
         }
-        JSTaggedValue constant = JSTaggedValue::Undefined();
-        {
-            ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::TryFoldConstantHClassCheck");
-            if (!broker->TryResolveRef(*constantRef, &constant)) {
-                return HClassCheckResult::FAILURE;
-            }
-        }
-        if (constant.IsHole() || !constant.IsHeapObject()) {
+        if (!constantRef->IsHeapObject()) {
             return EmitUnconditionalHClassDeopt(bcIndex);
         }
-        JSHClass *constantHClass = constant.GetTaggedObject()->GetClass();
+        JSHClass *constantHClass = broker->TryGetObjectHClass(*constantRef);
+        if (constantHClass == nullptr) {
+            return HClassCheckResult::FAILURE;
+        }
         if (merger.FindRequestedInfo(constantHClass) == nullptr) {
             return EmitUnconditionalHClassDeopt(bcIndex);
         }
@@ -8270,10 +8141,8 @@ struct GraphBuilder::BytecodeVisitor {
             if (!constantRef.has_value() || broker == nullptr) {
                 return;
             }
-            ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::HClassInference");
-            JSTaggedValue constant = JSTaggedValue::Undefined();
-            if (broker->TryResolveRef(constantRef.value(), &constant) && constant.IsHeapObject()) {
-                hclasses_.push_back(constant.GetTaggedObject()->GetClass());
+            if (auto *hclass = broker->TryGetObjectHClass(*constantRef)) {
+                hclasses_.push_back(hclass);
                 hclassesComeFromConstant_ = true;
             }
         }
@@ -8354,10 +8223,9 @@ struct GraphBuilder::BytecodeVisitor {
             }
             std::vector<RequestedHClassInfo> requestedHClasses;
             requestedHClasses.reserve(hclasses_.size());
-            ArkSteedHeapBroker::SerializingScope scope(broker,
-                                                       "GraphBuilder::HClassInference::TryBuildRequestedHClasses");
+
             for (JSHClass *hclass : hclasses_) {
-                ArkSteedHClassRef hclassRef = broker->MakeHClassRef(JSTaggedValue(hclass));
+                ArkSteedHClassRef hclassRef = broker->MakeHClassRef(hclass);
                 if (!hclassRef.IsSafeForCompile()) {
                     return std::nullopt;
                 }
@@ -8979,6 +8847,7 @@ struct GraphBuilder::BytecodeVisitor {
         if ((!access.IsJSArray() && !access.IsTypedArray()) || access.caseCount == 0) {
             return false;
         }
+
         if (access.IsTypedArray()) {
             return TryLowerElementStoreTypedArray(bcIndex, access, receiver, key, value);
         }
@@ -8999,6 +8868,7 @@ struct GraphBuilder::BytecodeVisitor {
         if (!access.IsJSArray() || access.caseCount == 0) {
             return false;
         }
+
         std::vector<ResolvedElementStoreTransitionGroup> jsArrayGroups;
         if (!ResolveElementStoreTransitionGroups(access, &jsArrayGroups)) {
             return false;
@@ -9139,71 +9009,28 @@ struct GraphBuilder::BytecodeVisitor {
         return loadHolder;
     }
 
-    bool TryResolveHeapRef(const ArkSteedHeapRef &ref, JSTaggedValue *value) const
-    {
-        auto *broker = self->pgoContext_.GetBroker();
-        return broker != nullptr && broker->TryResolveRef(ref, value);
-    }
-
     bool TryResolveHClassRef(const ArkSteedHClassRef &ref, JSHClass **hclass) const
     {
-        if (hclass == nullptr) {
+        auto *broker = self->pgoContext_.GetBroker();
+        if (hclass == nullptr || broker == nullptr) {
             return false;
         }
-        JSTaggedValue value = JSTaggedValue::Undefined();
-        if (!TryResolveHeapRef(ref, &value) || !value.IsJSHClass()) {
-            return false;
-        }
-        *hclass = JSHClass::Cast(value.GetTaggedObject());
-        return true;
+        *hclass = broker->TryGetHClass(ref);
+        return *hclass != nullptr;
     }
 
     JSHClass *TryGetGenericInitialArrayHClass(JSHClass *receiverHClass, ArkSteedHClassRef *genericHClassRef) const
     {
-        if (genericHClassRef == nullptr || receiverHClass == nullptr || !receiverHClass->IsJSArray() ||
-            receiverHClass->GetElementsKind() == ElementsKind::GENERIC) {
-            return nullptr;
-        }
-
-        JitCompilationEnv *env = self->preproc_->GetEnv();
-        ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
-        JSThread *hostThread = env == nullptr ? nullptr : env->GetHostThread();
-        if (hostThread == nullptr || broker == nullptr) {
-            return nullptr;
-        }
-
-        ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::TryGetGenericInitialArrayHClass");
-        auto globalEnv = env->GetGlobalEnv();
-        bool isPrototype = receiverHClass->IsPrototype();
-        JSHClass *initialHClass = hostThread->GetArrayInstanceHClass(globalEnv, receiverHClass->GetElementsKind(),
-                                                                     isPrototype, JSThread::ThreadKind::JitThread);
-        if (initialHClass != receiverHClass) {
-            return nullptr;
-        }
-        JSHClass *genericHClass = hostThread->GetArrayInstanceHClass(globalEnv, ElementsKind::GENERIC, isPrototype,
-                                                                     JSThread::ThreadKind::JitThread);
-        *genericHClassRef = broker->MakeHClassRef(JSTaggedValue(genericHClass));
-        return genericHClassRef->IsSafeForCompile() ? genericHClass : nullptr;
-    }
-
-    bool TryRecordHeapConstant(const ArkSteedHeapRef &ref, uint32_t *handleIndex, JSTaggedValue *value) const
-    {
-        if (g_isEnableCMCGC || handleIndex == nullptr || value == nullptr) {
-            return false;
-        }
-        ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
-        if (broker == nullptr) {
-            return false;
-        }
-        ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::GetHeapConstant");
-        return broker->TryRecordHeapConstant(ref, handleIndex, value);
+        auto *broker = self->pgoContext_.GetBroker();
+        return broker == nullptr ? nullptr :
+            broker->TryGetGenericInitialArrayHClass(receiverHClass, genericHClassRef);
     }
 
     std::optional<uint32_t> GetHeapConstantHandleIndex(const ArkSteedHeapRef &ref) const
     {
+        auto *broker = self->pgoContext_.GetBroker();
         uint32_t handleIndex = JitCompilationEnv::INVALID_HEAP_CONSTANT_INDEX;
-        JSTaggedValue value = JSTaggedValue::Undefined();
-        if (!TryRecordHeapConstant(ref, &handleIndex, &value)) {
+        if (g_isEnableCMCGC || broker == nullptr || !broker->TryGetHeapConstantIndex(ref, &handleIndex)) {
             return std::nullopt;
         }
         return handleIndex;
@@ -9211,21 +9038,7 @@ struct GraphBuilder::BytecodeVisitor {
 
     std::optional<uint32_t> GetHeapConstantNameHandleIndex(const ArkSteedNameRef &ref) const
     {
-        if (g_isEnableCMCGC) {
-            return std::nullopt;
-        }
-        ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
-        if (broker == nullptr) {
-            return std::nullopt;
-        }
-
-        ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::GetHeapConstantNameHandleIndex");
-        uint32_t handleIndex = JitCompilationEnv::INVALID_HEAP_CONSTANT_INDEX;
-        JSTaggedValue value = JSTaggedValue::Undefined();
-        if (!broker->TryRecordHeapConstant(ref, &handleIndex, &value) || (!value.IsString() && !value.IsSymbol())) {
-            return std::nullopt;
-        }
-        return handleIndex;
+        return ref.IsName() ? GetHeapConstantHandleIndex(ref) : std::nullopt;
     }
 
     bool GetHeapConstantHandleIndices(const std::vector<ArkSteedHClassRef> &refs,
@@ -9248,13 +9061,15 @@ struct GraphBuilder::BytecodeVisitor {
 
     ValueVertex *GetHeapConstant(const ArkSteedHeapRef &ref)
     {
-        uint32_t handleIndex = JitCompilationEnv::INVALID_HEAP_CONSTANT_INDEX;
-        JSTaggedValue value = JSTaggedValue::Undefined();
-        if (!TryRecordHeapConstant(ref, &handleIndex, &value)) {
+        auto handleIndex = GetHeapConstantHandleIndex(ref);
+        if (!handleIndex.has_value()) {
             return nullptr;
         }
-        uint16_t staticNodeType = static_cast<uint16_t>(NodeTypeFromJSTaggedValue(value));
-        return self->graph_->GetHeapConstant(handleIndex, staticNodeType);
+        JSType type;
+        if (!self->pgoContext_.GetBroker()->TryGetObjectType(ref, &type)) {
+            return nullptr;
+        }
+        return self->graph_->GetHeapConstant(handleIndex.value(), static_cast<uint16_t>(NodeTypeFromJSType(type)));
     }
 
     JSHClass *TryGetFreshKnownHClass(ValueVertex *receiver) const
@@ -10357,7 +10172,6 @@ struct GraphBuilder::BytecodeVisitor {
 
     bool TryFoldConstantStringElement(ValueVertex *receiver, ValueVertex *key)
     {
-        ALLOW_DEREF_HANDLE;
         std::optional<int32_t> index = TryGetInt32Value(key);
         if (!index.has_value() || *index < 0) {
             return false;
@@ -10384,16 +10198,10 @@ struct GraphBuilder::BytecodeVisitor {
             return false;
         }
 
-        ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::TryFoldConstantStringElement");
-        JSTaggedValue string = JSTaggedValue::Undefined();
-        if (!broker->TryResolveRef(*stringRef, &string) || !string.IsString()) {
+        uint16_t charCode = 0;
+        if (!broker->TryGetStringChar(*stringRef, static_cast<uint32_t>(*index), &charCode)) {
             return false;
         }
-        EcmaStringAccessor accessor(string);
-        if (static_cast<uint32_t>(*index) >= accessor.GetLength()) {
-            return false;
-        }
-        uint16_t charCode = accessor.Get(thread, static_cast<uint32_t>(*index));
         if (charCode < LoadSingleCharTableElementVertex::MIN_CHAR_CODE ||
             charCode > LoadSingleCharTableElementVertex::MAX_CHAR_CODE) {
             return false;
@@ -10721,21 +10529,18 @@ struct GraphBuilder::BytecodeVisitor {
         std::vector<JSHClass *> pendingStableHClasses;
         pendingStableHClasses.reserve(possibleHClasses->size());
         bool needsNotPrototypeGuard = false;
-        auto *env = self->preproc_->GetEnv();
-        auto *dependencies = env == nullptr ? nullptr : env->GetDependencies();
+        auto *broker = self->pgoContext_.GetBroker();
         for (JSHClass *hclass : possibleHClasses.value()) {
             bool isStable = JSTaggedValue(hclass).IsInSharedHeap();
-            if (!isStable && self->IsLazyDeoptEnabled() && kungfu::StableHClassDependency::IsValid(hclass)) {
-                if (dependencies == nullptr || !dependencies->DependOnStableHClass(hclass)) {
-                    return false;
-                }
-                isStable = true;
+            if (!isStable && self->IsLazyDeoptEnabled() &&
+                !broker->TryInstallStableHClassDependency(hclass, &isStable)) {
+                return false;
             }
             if (isStable) {
                 pendingStableHClasses.push_back(hclass);
             }
-            bool hasNotPrototypeDependency =
-                self->IsLazyDeoptEnabled() && dependencies != nullptr && dependencies->DependOnNotPrototype(hclass);
+            bool hasNotPrototypeDependency = self->IsLazyDeoptEnabled() &&
+                broker->TryInstallNotPrototypeDependency(hclass);
             needsNotPrototypeGuard |= !hasNotPrototypeDependency;
         }
 
@@ -10791,22 +10596,10 @@ struct GraphBuilder::BytecodeVisitor {
 
     bool TryBuildLoadExternalModuleVar(ValueVertex *jsFunc, int32_t index)
     {
-        JitCompilationEnv *env = self->preproc_->GetEnv();
-        JSThread *hostThread = env->GetHostThread();
-        ArkSteedHeapBroker::SerializingScope scope(
-            self->pgoContext_.GetBroker(), "GraphBuilder::TryBuildLoadExternalModuleVar");
-        JSFunction *compiledFunction = *env->GetJsFunction();
-        if (compiledFunction == nullptr ||
-            !ModuleManager::CheckModuleValueOutterResolved(hostThread, index, compiledFunction)) {
+        if (!self->pgoContext_.GetBroker()->CanLoadExternalModuleVar(index, self->IsLazyDeoptEnabled())) {
             return false;
         }
-
-        if (self->IsLazyDeoptEnabled()) {
-            auto *dependencies = env->GetDependencies();
-            if (!dependencies->DependOnNotHotReloadPatchMain(hostThread)) {
-                return false;
-            }
-        } else {
+        if (!self->IsLazyDeoptEnabled()) {
             ValueVertex *stage = self->NewVertex<LoadI32FromAddressVertex>(
                 compileInfoFacts_, currentBlock, {glue},
                 static_cast<int32_t>(JSThread::GlueData::GetStageOfHotReloadOffset(false)));
@@ -11023,7 +10816,6 @@ struct GraphBuilder::BytecodeVisitor {
         ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
         if (TryGetConstPoolIndex(stringId, &index) && index <= std::numeric_limits<uint16_t>::max() &&
             broker != nullptr) {
-            ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::StringFromConstPool");
             ArkSteedNameRef stringRef;
             if (broker->TryGetNameFromConstantPool(static_cast<uint16_t>(index), &stringRef)) {
                 if (ValueVertex *constant = GetHeapConstant(stringRef); constant != nullptr) {
@@ -11049,7 +10841,6 @@ struct GraphBuilder::BytecodeVisitor {
         ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
         if (TryGetConstPoolIndex(index, &methodIndex) && methodIndex <= std::numeric_limits<uint16_t>::max() &&
             broker != nullptr) {
-            ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::MethodFromConstPool");
             ArkSteedObjectRef methodRef;
             if (broker->TryGetMethodFromConstantPool(static_cast<uint16_t>(methodIndex), &methodRef)) {
                 if (ValueVertex *constant = GetHeapConstant(methodRef); constant != nullptr) {

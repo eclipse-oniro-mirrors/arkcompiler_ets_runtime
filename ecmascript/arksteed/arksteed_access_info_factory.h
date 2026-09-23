@@ -38,7 +38,7 @@ public:
           env_(env),
           broker_(broker == nullptr ? &ownedBroker_ : broker),
           feedbackReader_(compilerThread_, bytecodeInfo_, broker_),
-          dependencyRecorder_(compilerThread_, env_, broker_)
+          dependencyRecorder_(env_, broker_)
     {}
 
     bool TryBuildNamedStoreAccessInfo(int slotIndex, NamedStoreAccessSet *access) const;

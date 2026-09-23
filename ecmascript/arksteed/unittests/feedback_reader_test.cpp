@@ -86,6 +86,13 @@
 
 namespace panda::ecmascript::arksteed {
 
+// Keep raw-value comparisons inside the broker's private read scope without
+// exposing that scope to production callers.
+class ArkSteedHeapBrokerTestAccess {
+public:
+    using SerializingScope = ArkSteedHeapBroker::SerializingScope;
+};
+
 namespace {
 
 // Poly limit of the named and element inline caches, stated independently of the
@@ -244,7 +251,7 @@ std::vector<ProfileCasePair> CapturePolyCasePairs(JSThread *hostThread, ProfileT
 ::testing::AssertionResult ResolvesToProfileValue(const ArkSteedHeapBroker *broker, const ArkSteedHeapRef &ref,
                                                   const JSHandle<JSTaggedValue> &expected, const char *what)
 {
-    ArkSteedHeapBroker::SerializingScope scope(broker, kResolveScope);
+    ArkSteedHeapBrokerTestAccess::SerializingScope scope(broker, kResolveScope);
     JSTaggedValue resolved;
     if (!broker->TryResolveRef(ref, &resolved)) {
         return ::testing::AssertionFailure() << what << ": the published reference is not resolvable";
@@ -268,7 +275,7 @@ std::vector<ProfileCasePair> CapturePolyCasePairs(JSThread *hostThread, ProfileT
 bool MatchesPolyProfileCases(ArkSteedHeapBroker *broker, const NamedAccessFeedback &feedback, uint32_t expectedSlot,
                              const std::vector<ProfileCasePair> &expected)
 {
-    ArkSteedHeapBroker::SerializingScope scope(broker, kPolyProfileScope);
+    ArkSteedHeapBrokerTestAccess::SerializingScope scope(broker, kPolyProfileScope);
     if (feedback.base.kind != ProcessedFeedbackKind::NAMED_ACCESS ||
         feedback.base.source.slotId != expectedSlot || !feedback.base.source.isPoly || expected.empty() ||
         feedback.caseCount != expected.size() || !feedback.name.HasHandle()) {
@@ -504,7 +511,7 @@ TEST_F(ArkSteedFeedbackReaderTest, NamedAccessMonoSlotPublishesOneCase)
         NamedAccessFeedback feedback {};
         bool read = false;
         {
-            ArkSteedHeapBroker::SerializingScope scope(method.broker, kMonoScope);
+            ArkSteedHeapBrokerTestAccess::SerializingScope scope(method.broker, kMonoScope);
             read = reader.ReadNamedAccessFeedback(0, &feedback);
         }
         EXPECT_TRUE(read) << "the reader refused the mono named-access slot";
@@ -574,7 +581,7 @@ TEST_F(ArkSteedFeedbackReaderTest, NamedAccessPolySlotPublishesEveryCaseAtTheLim
         NamedAccessFeedback feedback {};
         bool read = false;
         {
-            ArkSteedHeapBroker::SerializingScope scope(method.broker, kPolyScope);
+            ArkSteedHeapBrokerTestAccess::SerializingScope scope(method.broker, kPolyScope);
             read = reader.ReadNamedAccessFeedback(0, &feedback);
         }
         EXPECT_TRUE(read) << "the reader refused the poly named-access slot at the limit";
@@ -642,7 +649,7 @@ TEST_F(ArkSteedFeedbackReaderTest, NamedAccessRefusesOverflowMegaAndUnmaterializ
             NamedAccessFeedback feedback {};
             bool read = true;
             {
-                ArkSteedHeapBroker::SerializingScope scope(method.broker, kRefusedScope);
+                ArkSteedHeapBrokerTestAccess::SerializingScope scope(method.broker, kRefusedScope);
                 read = reader.ReadNamedAccessFeedback(0, &feedback);
             }
             EXPECT_FALSE(read) << "the reader accepted the " << state.text;
@@ -711,7 +718,7 @@ TEST_F(ArkSteedFeedbackReaderTest, ValueAndElementAccessStates)
             ElementAccessFeedback feedback {};
             bool read = false;
             {
-                ArkSteedHeapBroker::SerializingScope scope(mono.broker, kValueAndElementScope);
+                ArkSteedHeapBrokerTestAccess::SerializingScope scope(mono.broker, kValueAndElementScope);
                 read = reader.ReadElementAccessFeedback(0, &feedback);
             }
             EXPECT_TRUE(read);
@@ -733,7 +740,7 @@ TEST_F(ArkSteedFeedbackReaderTest, ValueAndElementAccessStates)
             ValueAccessFeedback feedback {};
             bool read = false;
             {
-                ArkSteedHeapBroker::SerializingScope scope(mono.broker, kValueAndElementScope);
+                ArkSteedHeapBrokerTestAccess::SerializingScope scope(mono.broker, kValueAndElementScope);
                 read = reader.ReadValueAccessFeedback(&feedback);
             }
             EXPECT_TRUE(read);
@@ -758,7 +765,7 @@ TEST_F(ArkSteedFeedbackReaderTest, ValueAndElementAccessStates)
             bool elementRead = false;
             bool valueRead = false;
             {
-                ArkSteedHeapBroker::SerializingScope scope(poly.broker, kValueAndElementScope);
+                ArkSteedHeapBrokerTestAccess::SerializingScope scope(poly.broker, kValueAndElementScope);
                 elementRead = reader.ReadElementAccessFeedback(0, &elementFeedback);
                 valueRead = reader.ReadValueAccessFeedback(&valueFeedback);
             }
@@ -795,7 +802,7 @@ TEST_F(ArkSteedFeedbackReaderTest, ValueAndElementAccessStates)
             bool elementRead = true;
             bool valueRead = true;
             {
-                ArkSteedHeapBroker::SerializingScope scope(empty.broker, kValueAndElementScope);
+                ArkSteedHeapBrokerTestAccess::SerializingScope scope(empty.broker, kValueAndElementScope);
                 elementRead = reader.ReadElementAccessFeedback(0, &elementFeedback);
                 valueRead = reader.ReadValueAccessFeedback(&valueFeedback);
             }
@@ -880,7 +887,7 @@ TEST_F(ArkSteedFeedbackReaderTest, GlobalAccessAndCallFeedbackStates)
             GlobalAccessFeedback feedback {};
             bool read = false;
             {
-                ArkSteedHeapBroker::SerializingScope scope(global.broker, kGlobalAndCallScope);
+                ArkSteedHeapBrokerTestAccess::SerializingScope scope(global.broker, kGlobalAndCallScope);
                 read = reader.ReadGlobalAccessFeedback(&feedback);
             }
             EXPECT_TRUE(read);
@@ -896,7 +903,7 @@ TEST_F(ArkSteedFeedbackReaderTest, GlobalAccessAndCallFeedbackStates)
             // rejected by the comparison above.
             ArkSteedObjectRef otherBox;
             {
-                ArkSteedHeapBroker::SerializingScope scope(global.broker, kGlobalAndCallScope);
+                ArkSteedHeapBrokerTestAccess::SerializingScope scope(global.broker, kGlobalAndCallScope);
                 otherBox = global.broker->MakeObjectRef(otherTarget.GetTaggedValue());
             }
             ASSERT_TRUE(otherBox.IsSafeForCompile());
@@ -906,7 +913,7 @@ TEST_F(ArkSteedFeedbackReaderTest, GlobalAccessAndCallFeedbackStates)
             ValueAccessFeedback valueFeedback {};
             bool valueRead = true;
             {
-                ArkSteedHeapBroker::SerializingScope scope(global.broker, kGlobalAndCallScope);
+                ArkSteedHeapBrokerTestAccess::SerializingScope scope(global.broker, kGlobalAndCallScope);
                 valueRead = reader.ReadValueAccessFeedback(&valueFeedback);
             }
             EXPECT_FALSE(valueRead);
@@ -919,7 +926,7 @@ TEST_F(ArkSteedFeedbackReaderTest, GlobalAccessAndCallFeedbackStates)
             CallFeedback feedback {};
             bool read = false;
             {
-                ArkSteedHeapBroker::SerializingScope scope(js.broker, kGlobalAndCallScope);
+                ArkSteedHeapBrokerTestAccess::SerializingScope scope(js.broker, kGlobalAndCallScope);
                 read = reader.ReadCallFeedback(&feedback);
             }
             EXPECT_TRUE(read);
@@ -932,7 +939,7 @@ TEST_F(ArkSteedFeedbackReaderTest, GlobalAccessAndCallFeedbackStates)
             // Sensitivity control: a different valid JSFunction is rejected.
             ArkSteedFunctionRef substitutedTarget;
             {
-                ArkSteedHeapBroker::SerializingScope scope(js.broker, kGlobalAndCallScope);
+                ArkSteedHeapBrokerTestAccess::SerializingScope scope(js.broker, kGlobalAndCallScope);
                 substitutedTarget = js.broker->MakeFunctionRef(otherTarget.GetTaggedValue());
             }
             ASSERT_TRUE(substitutedTarget.IsSafeForCompile());
@@ -945,7 +952,7 @@ TEST_F(ArkSteedFeedbackReaderTest, GlobalAccessAndCallFeedbackStates)
             CallFeedback feedback {};
             bool read = false;
             {
-                ArkSteedHeapBroker::SerializingScope scope(builtin.broker, kGlobalAndCallScope);
+                ArkSteedHeapBrokerTestAccess::SerializingScope scope(builtin.broker, kGlobalAndCallScope);
                 read = reader.ReadCallFeedback(&feedback);
             }
             EXPECT_TRUE(read);
@@ -963,7 +970,7 @@ TEST_F(ArkSteedFeedbackReaderTest, GlobalAccessAndCallFeedbackStates)
             CallFeedback feedback {};
             bool read = false;
             {
-                ArkSteedHeapBroker::SerializingScope scope(empty.broker, kValueAndElementScope);
+                ArkSteedHeapBrokerTestAccess::SerializingScope scope(empty.broker, kValueAndElementScope);
                 read = reader.ReadCallFeedback(&feedback);
             }
             EXPECT_TRUE(read);
@@ -1008,7 +1015,7 @@ TEST_F(ArkSteedFeedbackReaderTest, OperationFeedbackPublishesEveryHint)
             OperationFeedback feedback {};
             bool read = false;
             {
-                ArkSteedHeapBroker::SerializingScope scope(method.broker, kOperationScope);
+                ArkSteedHeapBrokerTestAccess::SerializingScope scope(method.broker, kOperationScope);
                 read = reader.ReadOperationFeedback(&feedback);
             }
             EXPECT_TRUE(read) << "the reader refused the operation slot of hint "
@@ -1063,7 +1070,7 @@ TEST_F(ArkSteedFeedbackReaderTest, RepeatedReadsAndImmediateLiteralAreStable)
             // between the resolution that produced them and the comparison that reads
             // them, and a value of the first read cannot be relocated while the second
             // read is resolved.
-            ArkSteedHeapBroker::SerializingScope scope(method.broker, kRepeatedScope);
+            ArkSteedHeapBrokerTestAccess::SerializingScope scope(method.broker, kRepeatedScope);
             ArkSteedFeedbackReader reader(CompilerThread(), *site, method.broker);
             EXPECT_TRUE(reader.ReadNamedAccessFeedback(0, &first));
             EXPECT_TRUE(reader.ReadNamedAccessFeedback(0, &second));
@@ -1145,7 +1152,7 @@ TEST_F(ArkSteedFeedbackReaderTest, PoolDispatchReleasesTaskOwnershipBeforeTeardo
             NamedAccessFeedback feedback {};
             bool read = false;
             {
-                ArkSteedHeapBroker::SerializingScope scope(method.broker, kDispatchScope);
+                ArkSteedHeapBrokerTestAccess::SerializingScope scope(method.broker, kDispatchScope);
                 read = reader.ReadNamedAccessFeedback(0, &feedback);
             }
             EXPECT_TRUE(read) << "the reader refused the mono named-access slot on dispatch "
@@ -1194,7 +1201,7 @@ TEST_F(ArkSteedFeedbackReaderTest, MutationControlsRejectShiftedExpectationsAndS
         NamedAccessFeedback feedback {};
         bool read = false;
         {
-            ArkSteedHeapBroker::SerializingScope scope(method.broker, kMutationScope);
+            ArkSteedHeapBrokerTestAccess::SerializingScope scope(method.broker, kMutationScope);
             ArkSteedFeedbackReader reader(CompilerThread(), *site, method.broker);
             read = reader.ReadNamedAccessFeedback(0, &feedback);
         }
@@ -1242,7 +1249,7 @@ TEST_F(ArkSteedFeedbackReaderTest, MutationControlsRejectShiftedExpectationsAndS
         NamedAccessFeedback substitutedFeedback {};
         bool substitutedRead = true;
         {
-            ArkSteedHeapBroker::SerializingScope scope(method.broker, kMutationScope);
+            ArkSteedHeapBrokerTestAccess::SerializingScope scope(method.broker, kMutationScope);
             ArkSteedFeedbackReader substitutedReader(CompilerThread(), substituted, method.broker);
             substitutedRead = substitutedReader.ReadNamedAccessFeedback(0, &substitutedFeedback);
         }

@@ -85,6 +85,20 @@ if (ets_runtime_enable_ark_steed) {
     ]
   }
 
+  host_unittest_action("ArkSteedHeapRefTest") {
+    module_out_path = module_output_path
+    sources = [ "heap_ref_test.cpp" ]
+    deps = [
+      "$js_root:libark_jsruntime_test_set",
+      "$js_root/ecmascript/compiler:libark_jsoptimizer_set_with_maple",
+      "$js_root/ecmascript/compiler/codegen/maple/maple_be:libcg",
+    ]
+    external_deps = [
+      "runtime_core:libarkfile_static",
+      "zlib:libz",
+    ]
+  }
+
   host_unittest_action("ArkSteedRegisterAllocatorTest") {
     module_out_path = module_output_path
     sources = [ "input_result_alias_test.cpp" ]
@@ -412,6 +426,7 @@ group("arksteed_host_unittest") {
   deps = []
   if (ets_runtime_enable_ark_steed) {
     deps += [
+      ":ArkSteedHeapRefTestAction",
       ":ArkSteedPipelineStatisticsTestAction",
       ":ArkSteedRegisterAllocatorTestAction",
       ":ArkSteedPositionTableTestAction",
