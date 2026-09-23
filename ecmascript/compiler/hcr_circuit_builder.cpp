@@ -55,8 +55,16 @@ GateRef CircuitBuilder::ToLength(GateRef receiver)
 GateRef CircuitBuilder::CallStub(GateRef glue, GateRef hirGate, int index, const std::vector<GateRef> &args,
                                  const char* comment)
 {
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
     const CallSignature *cs = env_->IsBaselineBuiltin() ? BaselineStubCSigns::Get(index) :
                                                           CommonStubCSigns::Get(index);
+#else
+    if (env_->IsBaselineBuiltin()) {
+        LOG_COMPILER(FATAL) << "Baseline stubs are disabled in this build";
+        UNREACHABLE();
+    }
+    const CallSignature *cs = CommonStubCSigns::Get(index);
+#endif
     ASSERT(cs->IsCommonStub() || cs->IsBaselineStub());
     GateRef target = IntPtr(index);
     auto label = GetCurrentLabel();

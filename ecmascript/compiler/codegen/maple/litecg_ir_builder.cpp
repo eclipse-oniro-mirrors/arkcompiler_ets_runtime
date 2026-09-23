@@ -1707,12 +1707,17 @@ void LiteCGIRBuilder::VisitCall(GateRef gate, const std::vector<GateRef> &inList
             kind = CallInfoKind::NO_FRAME_STATE;
         }
     } else if (op == OpCode::BASELINE_CALL) {
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
         const size_t index = acc_.GetConstantValue(inList[targetIndex]);
         calleeDescriptor = BaselineStubCSigns::Get(index);
         Expr rtoffset = GetBaselineStubOffset(glue, index);
         Expr rtbaseoffset = lmirBuilder_->Add(glue.GetType(), glue, rtoffset);
         callee = GetFunction(bb, glue, calleeDescriptor, rtbaseoffset);
         kind = GetCallInfoKind(op);
+#else
+        LOG_COMPILER(FATAL) << "Baseline stubs are disabled in this build";
+        UNREACHABLE();
+#endif
     } else if (op == OpCode::ASM_CALL_BARRIER) {
         const size_t index = acc_.GetConstantValue(inList[targetIndex]);
         calleeDescriptor = RuntimeStubCSigns::Get(index);

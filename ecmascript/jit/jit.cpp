@@ -174,6 +174,11 @@ void Jit::SetEnableOrDisable(const JSRuntimeOptions &options, bool isEnableFastJ
         return;
     }
 #endif
+#if !defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
+    // Keep this clamp before enableJit/resource initialization. Runtime options must not
+    // enable Baseline handlers absent from stub.an; Fast JIT remains independently available.
+    isEnableBaselineJit = false;
+#endif
     bool enableJit = isEnableFastJit || isEnableBaselineJit;
     if (enableJit) {
         if (!initialized_) {

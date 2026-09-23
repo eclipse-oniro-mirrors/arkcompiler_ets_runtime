@@ -109,7 +109,9 @@ void StubCompiler::InitializeCS() const
 {
     BytecodeStubCSigns::Initialize();
     CommonStubCSigns::Initialize();
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
     BaselineStubCSigns::Initialize();
+#endif
     BuiltinsStubCSigns::Initialize();
     RuntimeStubCSigns::Initialize();
 }
@@ -128,6 +130,7 @@ bool StubCompiler::BuildStubModuleAndSave() const
     StubFileGenerator generator(log, logList, triple_, concurrentCompile_);
 
 #if defined(STUB_FUNCTION_REORDERING)
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
     LOG_COMPILER(INFO) << "=============== compiling baseline stubs ===============";
     LOptions baselineOp(optLevel_, FPFlag::RESERVE_FP, relocMode_);
     Module* baselineM = generator.AddModule(&allocator, "baseline_stub", triple_, baselineOp, log->OutputASM(),
@@ -137,6 +140,7 @@ bool StubCompiler::BuildStubModuleAndSave() const
         return false;
     }
     RunPipeline(static_cast<LLVMModule*>(baselineM->GetModule()), &allocator);
+#endif
 
     LOG_COMPILER(INFO) << "=============== compiling builtins stubs ===============";
     LOptions builtinOp(optLevel_, FPFlag::RESERVE_FP, relocMode_);
@@ -234,6 +238,7 @@ bool StubCompiler::BuildStubModuleAndSave() const
     }
     RunPipeline(static_cast<LLVMModule*>(builtinStwCopyM->GetModule()), &allocator);
 
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
     LOG_COMPILER(INFO) << "=============== compiling baseline stubs ===============";
     LOptions baselineOp(optLevel_, FPFlag::RESERVE_FP, relocMode_);
     Module* baselineM = generator.AddModule(&allocator, "baseline_stub", triple_, baselineOp, log->OutputASM(),
@@ -243,6 +248,7 @@ bool StubCompiler::BuildStubModuleAndSave() const
         return false;
     }
     RunPipeline(static_cast<LLVMModule*>(baselineM->GetModule()), &allocator);
+#endif
 #endif
 
     generator.SaveStubFile(filePath_);

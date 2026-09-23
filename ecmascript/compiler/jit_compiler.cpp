@@ -115,6 +115,7 @@ JitCompilerTask *JitCompilerTask::CreateJitCompilerTask(JitTask *jitTask)
 bool JitCompilerTask::Compile()
 {
     if (compilerTier_.IsBaseLine()) {
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
         auto baselineCompiler = new (std::nothrow) BaselineCompiler(jitCompilationEnv_->GetHostThread()->GetEcmaVM(),
             jitCompilationEnv_.get());
         if (baselineCompiler == nullptr) {
@@ -123,6 +124,9 @@ bool JitCompilerTask::Compile()
         baselineCompiler_.reset(baselineCompiler);
         baselineCompiler_->Compile(jitCompilationEnv_->GetJSPandaFile(), jitCompilationEnv_->GetMethodLiteral());
         return true;
+#else
+        return false;
+#endif
     }
 
     JitCompiler *jitCompiler = JitCompiler::GetInstance();
@@ -163,7 +167,11 @@ bool JitCompilerTask::Finalize(JitTask *jitTask)
         return false;
     }
     if (compilerTier_.IsBaseLine()) {
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
         return baselineCompiler_->CollectMemoryCodeInfos(jitTask->GetMachineCodeDesc());
+#else
+        return false;
+#endif
     }
     jitCodeGenerator_->JitCreateLitecgModule();
     bool result = true;

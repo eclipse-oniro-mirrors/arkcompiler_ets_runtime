@@ -264,6 +264,8 @@ private:
     bool IsLibResourcesResolved() const;
     bool initialized_ { false };
     bool fastJitEnable_ { false };
+    // Effective capability, not a copy of the runtime option. Keep enabling writes in
+    // SetEnableOrDisable(): bypassing its build guard can call absent Baseline handlers.
     bool baselineJitEnable_ { false };
 #if ECMASCRIPT_ENABLE_ARK_STEED
     JitBackend jitBackend_ { JitBackend::ARKSTEED };

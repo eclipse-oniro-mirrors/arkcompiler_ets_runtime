@@ -139,7 +139,11 @@ private:
     std::unordered_map<uint32_t, uint32_t> bcStubIndexMap_;
     void AddIndexMapping(uint32_t compileTimeIndex, uint32_t runtimePosition);
 #endif
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
     static constexpr uint32_t ASMSTUB_MODULE_NUM = 6;
+#else
+    static constexpr uint32_t ASMSTUB_MODULE_NUM = 5;
+#endif
 
     bool MmapLoad(const std::string &fileName);
 #ifndef PANDA_TARGET_OHOS

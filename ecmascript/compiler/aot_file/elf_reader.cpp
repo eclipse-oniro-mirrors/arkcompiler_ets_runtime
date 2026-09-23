@@ -361,7 +361,11 @@ void ElfReader::SeparateTextSections(BinaryBufferParser &parser,
             secOffset = AlignUp(secOffset, AOTFileInfo::TEXT_SEC_ALIGN);
         }
         uint32_t textSize = moduleInfo.textSize;
-        parser.ParseBuffer(reinterpret_cast<void *>(secAddr + secOffset), textSize, curShOffset + secOffset);
+        // Empty stub slots are part of the fixed module layout. Do not remove this guard:
+        // BinaryBufferParser intentionally rejects zero-length copies.
+        if (textSize != 0) {
+            parser.ParseBuffer(reinterpret_cast<void *>(secAddr + secOffset), textSize, curShOffset + secOffset);
+        }
         des[i].SetSecAddrAndSize(ElfSecName::TEXT, secAddr + secOffset, textSize);
         secOffset += textSize;
         if (rodataSizeAfterText != 0) {
@@ -382,7 +386,9 @@ void ElfReader::SeparateArkStackMapSections(BinaryBufferParser &parser,
     for (size_t i = 0; i < des.size(); ++i) {
         auto moduleInfo = moduleInfo_[i];
         uint32_t stackMapSize = moduleInfo.stackMapSize;
-        parser.ParseBuffer(reinterpret_cast<void *>(secAddr + secOffset), stackMapSize, curShOffset + secOffset);
+        if (stackMapSize != 0) {
+            parser.ParseBuffer(reinterpret_cast<void *>(secAddr + secOffset), stackMapSize, curShOffset + secOffset);
+        }
         des[i].SetArkStackMapPtr(reinterpret_cast<uint8_t *>(secAddr + secOffset));
         des[i].SetArkStackMapSize(stackMapSize);
         uint32_t index = moduleInfo.startIndex;
@@ -402,7 +408,9 @@ void ElfReader::SeparateStrtabSections(BinaryBufferParser &parser,
     for (size_t i = 0; i < des.size(); ++i) {
         auto moduleInfo = moduleInfo_[i];
         uint32_t strtabSize = moduleInfo.strtabSize;
-        parser.ParseBuffer(reinterpret_cast<void *>(secAddr + secOffset), strtabSize, curShOffset + secOffset);
+        if (strtabSize != 0) {
+            parser.ParseBuffer(reinterpret_cast<void *>(secAddr + secOffset), strtabSize, curShOffset + secOffset);
+        }
         des[i].SetSecAddrAndSize(ElfSecName::STRTAB, secAddr + secOffset, strtabSize);
         secOffset += strtabSize;
     }
@@ -417,7 +425,9 @@ void ElfReader::SeparateSymtabSections(BinaryBufferParser &parser,
     for (size_t i = 0; i < des.size(); ++i) {
         auto moduleInfo = moduleInfo_[i];
         uint32_t symtabSize = moduleInfo.symtabSize;
-        parser.ParseBuffer(reinterpret_cast<void *>(secAddr + secOffset), symtabSize, curShOffset + secOffset);
+        if (symtabSize != 0) {
+            parser.ParseBuffer(reinterpret_cast<void *>(secAddr + secOffset), symtabSize, curShOffset + secOffset);
+        }
         des[i].SetSecAddrAndSize(ElfSecName::SYMTAB, secAddr + secOffset, symtabSize);
         secOffset += symtabSize;
     }

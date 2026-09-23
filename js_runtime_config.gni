@@ -44,6 +44,10 @@ declare_args() {
   # Enable reordering of stub functions.
   ets_runtime_feature_enable_stub_function_reordering = true
 
+  # Request Baseline JIT and its handlers on supported architectures (not ARM32).
+  # This only makes Baseline available; runtime options still control activation.
+  ets_runtime_feature_enable_baseline_stub = false
+
   # Set pgo profdata path.
   ets_runtime_feature_pgo_path = ""
 
@@ -110,6 +114,12 @@ declare_args() {
 }
 
 enable_c_interpreter_arm64 = enable_c_interpreter && (current_cpu == "arm64")
+
+# ARM32 must never enable Baseline, even when explicitly requested. Do not remove
+# the target_cpu check: the x64/ARM64 host generator must also trim ARM32 products.
+# Check current_cpu as well to exclude ARM32 secondary toolchains in 64-bit builds.
+compile_baseline_stub = ets_runtime_feature_enable_baseline_stub &&
+                        target_cpu != "arm" && current_cpu != "arm"
 
 if (defined(enable_cmc_gc)) {
   ets_runtime_enable_cmc_gc = enable_cmc_gc

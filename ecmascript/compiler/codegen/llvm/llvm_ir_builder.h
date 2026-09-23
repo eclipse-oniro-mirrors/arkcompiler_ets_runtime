@@ -113,7 +113,9 @@ public:
     void SetUpForBytecodeStwCopyHandlerStubs();
     void SetUpForBuiltinsStubs();
     void SetUpForBuiltinsStwCopyStubs();
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
     void SetUpForBaselineStubs();
+#endif
 #if defined(STUB_FUNCTION_REORDERING)
     void SetUpForMergedStubs(const std::string &stubOrder, StubFileInfo *stubInfo);
 #endif

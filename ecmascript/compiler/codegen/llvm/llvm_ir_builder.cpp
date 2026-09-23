@@ -1113,11 +1113,16 @@ void LLVMIRBuilder::VisitCall(GateRef gate, const std::vector<GateRef> &inList, 
         calleeDescriptor = RuntimeStubCSigns::GetOptimizedFastCallSign();
         callee = GetCallee(inList, calleeDescriptor);
     } else if (op == OpCode::BASELINE_CALL) {
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
         const size_t index = acc_.GetConstantValue(inList[targetIndex]);
         calleeDescriptor = BaselineStubCSigns::Get(index);
         rtoffset = GetBaselineStubOffset(glue, index);
         rtbaseoffset = LLVMBuildAdd(builder_, glue, rtoffset, "");
         callee = GetFunction(glue, calleeDescriptor, rtbaseoffset);
+#else
+        LOG_COMPILER(FATAL) << "Baseline stubs are disabled in this build";
+        UNREACHABLE();
+#endif
     } else if (op == OpCode::ASM_CALL_BARRIER) {
         const size_t index = acc_.GetConstantValue(inList[targetIndex]);
         calleeDescriptor = RuntimeStubCSigns::Get(index);
@@ -3259,11 +3264,13 @@ void LLVMModule::SetUpForBuiltinsStwCopyStubs()
     InitialLLVMFuncTypeAndFuncByModuleCSigns();
 }
 
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
 void LLVMModule::SetUpForBaselineStubs()
 {
     BaselineStubCSigns::GetCSigns(callSigns_);
     InitialLLVMFuncTypeAndFuncByModuleCSigns();
 }
+#endif
 
 #if defined(STUB_FUNCTION_REORDERING)
 class StubOrderingReader {
