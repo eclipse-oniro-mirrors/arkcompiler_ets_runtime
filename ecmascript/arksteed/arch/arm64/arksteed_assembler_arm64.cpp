@@ -95,14 +95,14 @@ void ArkSteedAssembler::Move(ArkSteedRegister dst, int64_t immediate)
         assembler_.Movz(arm64Dst, static_cast<uint64_t>(immediate), 0);
     } else {
         uint64_t uimm = static_cast<uint64_t>(immediate);
-        assembler_.Movz(arm64Dst, uimm & 0xFFFF, 0);               // 0xFFFF: lower 16 bits mask
-        if ((uimm >> 16) & 0xFFFF) {                               // 16: shift to extract bits [16, 31]
+        assembler_.Movz(arm64Dst, uimm & 0xFFFF, 0);  // 0xFFFF: lower 16 bits mask
+        if ((uimm >> 16) & 0xFFFF) {  // 16: shift to extract bits [16, 31]
             assembler_.Movk(arm64Dst, (uimm >> 16) & 0xFFFF, 16);  // 16: LSL shift amount for bits [16, 31]
         }
-        if ((uimm >> 32) & 0xFFFF) {                               // 32: shift to extract bits [32, 47]
+        if ((uimm >> 32) & 0xFFFF) {  // 32: shift to extract bits [32, 47]
             assembler_.Movk(arm64Dst, (uimm >> 32) & 0xFFFF, 32);  // 32: LSL shift amount for bits [32, 47]
         }
-        if ((uimm >> 48) & 0xFFFF) {                               // 48: shift to extract bits [48, 63]
+        if ((uimm >> 48) & 0xFFFF) {  // 48: shift to extract bits [48, 63]
             assembler_.Movk(arm64Dst, (uimm >> 48) & 0xFFFF, 48);  // 48: LSL shift amount for bits [48, 63]
         }
     }
@@ -210,8 +210,8 @@ void ArkSteedAssembler::LoadTaggedElement(ArkSteedRegister dst, ArkSteedRegister
     LoadField(dst, dst, static_cast<int32_t>(TaggedArray::DATA_OFFSET));
 }
 
-void ArkSteedAssembler::StoreTaggedElement(ArkSteedRegister elements, ArkSteedRegister index, ArkSteedRegister value,
-                                           ArkSteedRegister scratch)
+void ArkSteedAssembler::StoreTaggedElement(ArkSteedRegister elements, ArkSteedRegister index,
+                                           ArkSteedRegister value, ArkSteedRegister scratch)
 {
     constexpr uint8_t TAGGED_SIZE_SHIFT = 3;
     assembler_.Add(scratch, elements, aarch64::Operand(index, aarch64::UXTW, TAGGED_SIZE_SHIFT));
@@ -303,8 +303,8 @@ void ArkSteedAssembler::LoadTypedArrayDoubleElement(ArkSteedDoubleRegister dst, 
     }
 }
 
-void ArkSteedAssembler::StoreTypedArrayIntElement(ArkSteedRegister value, ArkSteedRegister data, ArkSteedRegister index,
-                                                  JSType elementType)
+void ArkSteedAssembler::StoreTypedArrayIntElement(ArkSteedRegister value, ArkSteedRegister data,
+                                                  ArkSteedRegister index, JSType elementType)
 {
     switch (elementType) {
         case JSType::JS_INT8_ARRAY:
@@ -356,18 +356,6 @@ void ArkSteedAssembler::StoreInt32FieldRelease(ArkSteedRegister src, ArkSteedReg
 {
     aarch64::MemoryOperand operand(base, offset, aarch64::AddrMode::OFFSET);
     assembler_.Stlr(src.W(), operand);
-}
-
-void ArkSteedAssembler::StoreHeaderRelease(ArkSteedRegister src,
-                                           ArkSteedRegister object) {
-    static_assert(TaggedObject::HCLASS_OFFSET == 0);
-    // AssemblerAarch64::Stlr currently only encodes the W-register form.
-    // HClass headers are full tagged words, so emit STLR Xt, [Xn] directly.
-    ASSERT(src.IsX());
-    ASSERT(object.IsX());
-    constexpr uint32_t STLR_X = 0xc89ffc00;
-    constexpr uint32_t RN_SHIFT = 5;
-    assembler_.EmitU32(STLR_X | (object.GetId() << RN_SHIFT) | src.GetId());
 }
 
 void ArkSteedAssembler::StoreFloat64Field(ArkSteedDoubleRegister src, ArkSteedRegister base, int32_t offset)
@@ -893,17 +881,17 @@ bool ArkSteedAssembler::IsVeneerBranchInRange(uint32_t instruction, int64_t disp
     }
     if (IsVeneerBranchOrCall(instruction)) {
         constexpr int64_t minDisplacement = -(1LL << 27U);  // imm26 scaled by 4: -128 MiB.
-        constexpr int64_t maxDisplacement = 1LL << 27U;     // imm26 scaled by 4: +128 MiB, exclusive.
+        constexpr int64_t maxDisplacement = 1LL << 27U;  // imm26 scaled by 4: +128 MiB, exclusive.
         return displacement >= minDisplacement && displacement < maxDisplacement;
     }
     if (IsVeneerConditionOrCompareBranch(instruction)) {
         constexpr int64_t minDisplacement = -(1LL << 20U);  // imm19 scaled by 4: -1 MiB.
-        constexpr int64_t maxDisplacement = 1LL << 20U;     // imm19 scaled by 4: +1 MiB, exclusive.
+        constexpr int64_t maxDisplacement = 1LL << 20U;  // imm19 scaled by 4: +1 MiB, exclusive.
         return displacement >= minDisplacement && displacement < maxDisplacement;
     }
     if (IsVeneerTestBranch(instruction)) {
         constexpr int64_t minDisplacement = -(1LL << 15U);  // imm14 scaled by 4: -32 KiB.
-        constexpr int64_t maxDisplacement = 1LL << 15U;     // imm14 scaled by 4: +32 KiB, exclusive.
+        constexpr int64_t maxDisplacement = 1LL << 15U;  // imm14 scaled by 4: +32 KiB, exclusive.
         return displacement >= minDisplacement && displacement < maxDisplacement;
     }
     LOG_COMPILER(FATAL) << "Unsupported ARM64 veneer branch instruction: " << std::hex << instruction;
@@ -947,11 +935,14 @@ void ArkSteedAssembler::UpdateEmbeddedLiteralPoolCheck(uint32_t loadOffset, size
 {
     // A literal's position is the pool prefix followed by its index in the current pool.
     uint64_t literalOffsetInPool = static_cast<uint64_t>(literalIndex) * EMBEDDED_LITERAL_SIZE;
-    uint64_t reserve = EMBEDDED_LITERAL_DISTANCE_MARGIN + EMBEDDED_LITERAL_POOL_PREFIX_RESERVE + literalOffsetInPool;
-    uint64_t maximumPoolPosition = static_cast<uint64_t>(loadOffset) + EMBEDDED_LITERAL_MAX_FORWARD_DISPLACEMENT;
+    uint64_t reserve = EMBEDDED_LITERAL_DISTANCE_MARGIN + EMBEDDED_LITERAL_POOL_PREFIX_RESERVE +
+                       literalOffsetInPool;
+    uint64_t maximumPoolPosition = static_cast<uint64_t>(loadOffset) +
+                                   EMBEDDED_LITERAL_MAX_FORWARD_DISPLACEMENT;
     uint64_t deadline = maximumPoolPosition > reserve ? maximumPoolPosition - reserve : 0;
     nextEmbeddedLiteralPoolCheck_ = std::min(
-        nextEmbeddedLiteralPoolCheck_, static_cast<uint32_t>(std::min(deadline, static_cast<uint64_t>(UINT32_MAX))));
+        nextEmbeddedLiteralPoolCheck_,
+        static_cast<uint32_t>(std::min(deadline, static_cast<uint64_t>(UINT32_MAX))));
 }
 
 uint64_t ArkSteedAssembler::GetEmbeddedLiteralPoolMaxSize() const
@@ -983,21 +974,20 @@ void ArkSteedAssembler::EmitEmbeddedLiteralPool(bool precedingCodeCanFallThrough
     for (const auto &literal : pendingEmbeddedLiterals_) {
         uint32_t literalOffset = GetPcOffset();
         ASSERT(literalOffset % EMBEDDED_LITERAL_SIZE == 0);
-        ASSERT(
-            std::all_of(literal->loadOffsets.begin(), literal->loadOffsets.end(), [literalOffset](uint32_t loadOffset) {
-                int64_t displacement = static_cast<int64_t>(literalOffset) - static_cast<int64_t>(loadOffset);
-                return displacement >= 0 && displacement <= EMBEDDED_LITERAL_MAX_FORWARD_DISPLACEMENT &&
-                       displacement % sizeof(uint32_t) == 0;
-            }));
+        ASSERT(std::all_of(literal->loadOffsets.begin(), literal->loadOffsets.end(),
+                           [literalOffset](uint32_t loadOffset) {
+                               int64_t displacement =
+                                   static_cast<int64_t>(literalOffset) - static_cast<int64_t>(loadOffset);
+                               return displacement >= 0 &&
+                                      displacement <= EMBEDDED_LITERAL_MAX_FORWARD_DISPLACEMENT &&
+                                      displacement % sizeof(uint32_t) == 0;
+                           }));
         assembler_.Bind(&literal->label);
-        embeddedRefRelocations_.push_back(
-            {literalOffset, literal->handleIndex, EmbeddedCodeRefRelocKind::ARM64_LITERAL64, RELOC_WIDTH});
-        // EmitU64 bypasses the JIT CodeSign AppendData path. Emit two 32-bit words so CodeSign records the
-        // complete embedded literal while preserving its 64-bit layout.
-        constexpr uint32_t WORD_BITS = 32U;
-        uint64_t placeholder = JSTaggedValue::VALUE_HOLE;
-        assembler_.EmitU32(static_cast<uint32_t>(placeholder));
-        assembler_.EmitU32(static_cast<uint32_t>(placeholder >> WORD_BITS));
+        embeddedRefRelocations_.push_back({literalOffset,
+                                          literal->handleIndex,
+                                          EmbeddedCodeRefRelocKind::ARM64_LITERAL64,
+                                          RELOC_WIDTH});
+        assembler_.EmitU64(JSTaggedValue::VALUE_HOLE);
     }
 
     if (precedingCodeCanFallThrough) {
@@ -1017,12 +1007,13 @@ void ArkSteedAssembler::CheckCodePools(bool precedingCodeCanFallThrough, size_t 
     uint64_t protectedCodeEnd = static_cast<uint64_t>(GetPcOffset()) + protectedCodeSize;
     uint64_t potentialVeneerPoolSize = GetPotentialVeneerPoolSize();
     bool emitLiteralPool = !pendingEmbeddedLiterals_.empty() &&
-                           protectedCodeEnd + potentialVeneerPoolSize >= nextEmbeddedLiteralPoolCheck_;
+        protectedCodeEnd + potentialVeneerPoolSize >= nextEmbeddedLiteralPoolCheck_;
     if (emitLiteralPool) {
         // Veneers emitted before this pool also consume displacement from pending literal loads.
         uint64_t literalPoolSize = GetEmbeddedLiteralPoolMaxSize();
         ASSERT(literalPoolSize <= std::numeric_limits<size_t>::max() - protectedCodeSize);
-        CheckVeneerPool(precedingCodeCanFallThrough, protectedCodeSize + static_cast<size_t>(literalPoolSize));
+        CheckVeneerPool(precedingCodeCanFallThrough,
+                        protectedCodeSize + static_cast<size_t>(literalPoolSize));
         EmitEmbeddedLiteralPool(precedingCodeCanFallThrough);
     }
     CheckVeneerPool(precedingCodeCanFallThrough, protectedCodeSize);
@@ -1047,8 +1038,8 @@ void ArkSteedAssembler::RecordVeneerBranch(uint32_t branchPc, Label *target)
     if (inserted && nextVeneerPoolCheck_ != UINT32_MAX) {
         uint32_t additionalReserve = VENEER_INSTRUCTION_SIZE;
         nextVeneerPoolCheck_ = nextVeneerPoolCheck_ > additionalReserve
-                                   ? nextVeneerPoolCheck_ - additionalReserve
-                                   : 0;  // 0: force a full check at the next safe codegen boundary.
+            ? nextVeneerPoolCheck_ - additionalReserve
+            : 0;  // 0: force a full check at the next safe codegen boundary.
     }
     uint32_t deadline = GetVeneerBranchDeadline(branchPc, assembler_.GetU32(branchPc));
     nextVeneerPoolCheck_ = std::min(nextVeneerPoolCheck_, deadline);
@@ -1132,8 +1123,9 @@ void ArkSteedAssembler::CheckVeneerPool(bool precedingCodeCanFallThrough, size_t
         UpdateVeneerPoolCheck();
         return;
     }
-    std::sort(candidates.begin(), candidates.end(),
-              [](const auto &left, const auto &right) { return left.first < right.first; });
+    std::sort(candidates.begin(), candidates.end(), [](const auto &left, const auto &right) {
+        return left.first < right.first;
+    });
 
     emittingVeneerPool_ = true;
     uint32_t guardPc = UINT32_MAX;  // Sentinel used when fallthrough does not require a guard.
@@ -1278,15 +1270,15 @@ void ArkSteedAssembler::JumpIfClassConstructor(ArkSteedRegister jsFunc, Label *t
     Bind(&notClassConstructor);
 }
 
-void ArkSteedAssembler::JumpIfNotArkSteedEntry(ArkSteedRegister jsFunc, Label *target)
+void ArkSteedAssembler::JumpIfFunctionNotCompiled(ArkSteedRegister jsFunc, Label *target)
 {
     TemporaryRegisterScope scope(this);
-    ArkSteedRegister scratch = scope.Acquire();
-    LoadInt32Field(scratch, jsFunc, JSFunctionBase::BIT_FIELD_OFFSET);
-    TestAndBranchIfZero(scratch, JSFunctionBase::IsArkSteedEntryBit::START_BIT, target);
+    ArkSteedRegister bitfield = scope.Acquire();
+    LoadField(bitfield, jsFunc, JSFunctionBase::BIT_FIELD_OFFSET);
+    TestAndBranchIfZero(bitfield, JSFunctionBase::IsCompiledCodeBit::START_BIT, target);
 }
 
-void ArkSteedAssembler::BranchIfNoPendingException(Label *target)
+void ArkSteedAssembler::BranchIfNoPendingException(Label* target)
 {
     TemporaryRegisterScope scope(this);
     ArkSteedRegister scratch = scope.AcquireScratch();
@@ -1625,9 +1617,9 @@ aarch64::Condition ArkSteedAssembler::ToPhysicalCondition(Condition condition) c
             return aarch64::Condition::EQ;
         case Condition::NOT_ZERO:
             return aarch64::Condition::NE;
-        case Condition::OVERFLOWED:
+        case Condition::OVERFLOW_CONDITION:
             return aarch64::Condition::VS;
-        case Condition::NOT_OVERFLOW:
+        case Condition::NOT_OVERFLOW_CONDITION:
             return aarch64::Condition::VC;
         case Condition::PARITY:
             return aarch64::Condition::VS;

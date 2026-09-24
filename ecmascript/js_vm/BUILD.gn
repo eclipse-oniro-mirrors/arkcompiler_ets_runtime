@@ -43,6 +43,15 @@ ohos_executable("ark_js_vm") {
   } else {
     deps = [ "$js_root:libark_jsruntime" ]
   }
+  # ark_js_vm loads the JIT compiler dynamically at runtime.  Keep the
+  # standalone macOS package self-contained so the optimizer is built beside
+  # the VM (the runtime loader uses the .dylib suffix on macOS).
+  if (ark_standalone_build && is_mac) {
+    deps += [ "$js_root/ecmascript/compiler:libark_jsoptimizer" ]
+    # stub.an is a runtime resource, not a linkable library. Keep it out of
+    # the linker command while retaining the generation ordering.
+    data_deps = [ "$js_root/ecmascript/compiler:stub.an" ]
+  }
   if (ark_standalone_build) {
     if (run_with_qemu && is_ohos) {
       deps += [

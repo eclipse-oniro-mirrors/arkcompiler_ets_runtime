@@ -24,6 +24,7 @@
 #include "ecmascript/ohos/jit_tools.h"
 #include "ecmascript/compiler/jit_compilation_env.h"
 #include "ecmascript/platform/file.h"
+#include "ecmascript/platform/map.h"
 
 namespace panda::ecmascript {
 
@@ -334,6 +335,10 @@ void JitTask::InstallCode()
         return;
     }
 
+#if defined(PANDA_TARGET_MACOS)
+    std::optional<JitWriteScope> jitWriteScope;
+    jitWriteScope.emplace();
+#endif
     JSHandle<MachineCode> machineCodeObj;
     if (Jit::GetInstance()->IsEnableJitFort()) {
         // skip install if JitFort out of memory
@@ -368,16 +373,19 @@ void JitTask::InstallCode()
         hostThread_->ClearExceptionAndExtraErrorMessage();
     }
 
+    // sometimes get ILL_ILLOPC error if i-cache  not flushed for Jit code
+    uintptr_t codeAddr = machineCodeObj->GetFuncAddr();
+    uintptr_t codeAddrEnd = codeAddr + machineCodeObj->GetInstructionsSize();
+    __builtin___clear_cache(reinterpret_cast<char *>(codeAddr), reinterpret_cast<char*>(codeAddrEnd));
+
+#if defined(PANDA_TARGET_MACOS)
+    jitWriteScope.reset();
+#endif
     if (IsOsrTask()) {
         InstallOsrCode(machineCodeObj);
     } else {
         InstallCodeByCompilerTier(machineCodeObj, methodHandle);
     }
-
-    // sometimes get ILL_ILLOPC error if i-cache  not flushed for Jit code
-    uintptr_t codeAddr = machineCodeObj->GetFuncAddr();
-    uintptr_t codeAddrEnd = codeAddr + machineCodeObj->GetInstructionsSize();
-    __builtin___clear_cache(reinterpret_cast<char *>(codeAddr), reinterpret_cast<char*>(codeAddrEnd));
 
     if (Jit::GetInstance()->IsEnableJitFort()) {
         if (g_isEnableCMCGC) {

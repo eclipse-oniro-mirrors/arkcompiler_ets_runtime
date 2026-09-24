@@ -21,6 +21,7 @@
 #include "ecmascript/ecma_vm.h"
 #include "ecmascript/js_thread.h"
 #include "ecmascript/mem/heap.h"
+#include "ecmascript/platform/map.h"
 
 namespace panda::ecmascript {
 inline RSetWorkListHandler::RSetWorkListHandler(Heap *heap, JSThread *thread) : heap_(heap), ownerThread_(thread)
@@ -43,6 +44,7 @@ inline void RSetItem<refType>::MergeBack()
 
 inline void RSetWorkListHandler::EnumerateRegions(const Heap *heap)
 {
+    JIT_WRITE_SCOPE(jitWriteScope, true);
     heap->EnumerateRegions([this](Region *region) {
         RememberedSet *rset = region->CollectLocalToShareRSet();
         CompressedRememberedSet *compressedRSet = region->CollectCompressedLocalToShareRSet();
@@ -170,6 +172,7 @@ inline bool RSetWorkListHandler::TryMergeBack()
 
 inline void RSetWorkListHandler::MergeBackForAllItem()
 {
+    JIT_WRITE_SCOPE(jitWriteScope, true);
     ASSERT(nextItemIndex_ < 0);
     ASSERT(nextCompressedItemIndex_ < 0);
     ASSERT(remainItems_ == 0);

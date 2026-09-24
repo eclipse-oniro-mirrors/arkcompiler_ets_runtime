@@ -489,7 +489,9 @@ ohos_shared_library("libark_jsoptimizer") {
     }
     branch_protector_ret = "pac_ret"
   }
-  version_script = "libark_jsoptimizer.map"
+  if (!is_mac) {
+    version_script = "libark_jsoptimizer.map"
+  }
   deps = [
     ":libark_jsoptimizer_set_with_maple",
     "$js_root:libark_jsruntime",
@@ -680,6 +682,11 @@ action("gen_stub_file") {
         " --stub-file=" + rebase_path(stub_file_gen_dir) + "/stub.an" +
         " --compiler-target-triple=aarch64-unknown-linux-gnu" +
         " --compiler-log=allasm" + " --log-level=info"
+  } else if (current_os == "mac" && current_cpu == "arm64") {
+    # The stub compiler defaults to x64 when no target triple is supplied.
+    stub_option =
+        " --stub-file=" + rebase_path(stub_file_gen_dir) + "/stub.an" +
+        " --compiler-target-triple=aarch64-unknown-linux-gnu"
   } else if (current_toolchain == host_toolchain) {
     stub_option = " --stub-file=" + rebase_path(stub_file_gen_dir) + "/stub.an"
   } else if (current_cpu == "x86_64") {
@@ -698,7 +705,9 @@ action("gen_stub_file") {
   }
   stub_option += " --enable-force-gc=false"
 
-  if (host_cpu == "arm64") {
+  if (host_os == "mac" && host_cpu == "arm64") {
+    llvm_lib_dir = "//prebuilts/clang/ohos/darwin-arm64/llvm/lib/"
+  } else if (host_cpu == "arm64") {
     llvm_lib_dir = "//prebuilts/clang/ohos/linux-aarch64/llvm/lib/"
   } else {
     llvm_lib_dir = "//prebuilts/clang/ohos/linux-x86_64/llvm/lib/"
@@ -729,6 +738,11 @@ action("gen_stub_file") {
     ]
     not_needed([ "llvm_lib_dir" ])
   } else {
+    libuv_lib_dir = ""
+    if (host_os == "mac" && host_cpu == "arm64") {
+      libuv_lib_dir =
+          rebase_path(root_out_dir_with_host_toolchain) + "/thirdparty/libuv:"
+    }
     args += [
       "--env-path",
       rebase_path(root_out_dir_with_host_toolchain) +
@@ -744,7 +758,8 @@ action("gen_stub_file") {
           "/resourceschedule/frame_aware_sched:" +
           rebase_path(root_out_dir_with_host_toolchain) + "/hiviewdfx/hilog:" +
           rebase_path(root_out_dir_with_host_toolchain) +
-          "/thirdparty/bounds_checking_function:" + rebase_path(llvm_lib_dir),
+          "/thirdparty/bounds_checking_function:" +
+          libuv_lib_dir + rebase_path(llvm_lib_dir),
     ]
   }
 

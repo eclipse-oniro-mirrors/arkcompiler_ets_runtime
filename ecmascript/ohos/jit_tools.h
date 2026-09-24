@@ -104,6 +104,11 @@ public:
 
     static bool GetEnableJitFort(bool value)
     {
+#ifdef PANDA_TARGET_MACOS
+        // JitFort relies on the OHOS xpm/prctl ACL, which is unavailable on
+        // macOS. Use the regular MAP_JIT-backed machine-code space instead.
+        return false;
+#endif
 #ifdef ENABLE_OHOS_PARAMETER
         return OHOS::system::GetBoolParameter("persist.ark.jit.enable.jitfort", true);
 #endif

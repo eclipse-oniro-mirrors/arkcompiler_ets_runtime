@@ -34,8 +34,8 @@ enum class Condition : uint8_t {
     BELOW_OR_EQUAL,
     ZERO,
     NOT_ZERO,
-    OVERFLOWED,
-    NOT_OVERFLOW,
+    OVERFLOW_CONDITION,
+    NOT_OVERFLOW_CONDITION,
     PARITY,
     NOT_PARITY
 };
@@ -81,10 +81,10 @@ constexpr Condition NegateCondition(Condition cond)
             return Condition::NOT_ZERO;
         case Condition::NOT_ZERO:
             return Condition::ZERO;
-        case Condition::OVERFLOWED:
-            return Condition::NOT_OVERFLOW;
-        case Condition::NOT_OVERFLOW:
-            return Condition::OVERFLOWED;
+        case Condition::OVERFLOW_CONDITION:
+            return Condition::NOT_OVERFLOW_CONDITION;
+        case Condition::NOT_OVERFLOW_CONDITION:
+            return Condition::OVERFLOW_CONDITION;
         case Condition::PARITY:
             return Condition::NOT_PARITY;
         case Condition::NOT_PARITY:
@@ -121,9 +121,9 @@ constexpr const char *ConditionName(Condition cond)
             return "zero";
         case Condition::NOT_ZERO:
             return "not_zero";
-        case Condition::OVERFLOWED:
+        case Condition::OVERFLOW_CONDITION:
             return "overflow";
-        case Condition::NOT_OVERFLOW:
+        case Condition::NOT_OVERFLOW_CONDITION:
             return "not_overflow";
         case Condition::PARITY:
             return "parity";

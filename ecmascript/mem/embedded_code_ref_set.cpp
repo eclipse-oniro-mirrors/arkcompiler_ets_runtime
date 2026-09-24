@@ -21,6 +21,7 @@
 #include "ecmascript/jit/jit_fort_write_scope.h"
 #include "ecmascript/mem/machine_code.h"
 #include "ecmascript/mem/region-inl.h"
+#include "ecmascript/platform/map.h"
 
 namespace panda::ecmascript {
 
@@ -51,6 +52,7 @@ bool EmbeddedCodeRefSet::ValidateRecord(MachineCode *owner, uint32_t codeOffset,
 bool EmbeddedCodeRefSet::PatchRecord(MachineCode *owner, const EmbeddedCodeRefEntry &entry)
 {
     ASSERT(ValidateRecord(owner, entry.codeOffset, entry.kind, entry.width, entry.target));
+    JIT_WRITE_SCOPE(jitWriteScope, true);
     uintptr_t patchAddress = owner->GetText() + entry.codeOffset;
     if (memcpy_s(reinterpret_cast<void *>(patchAddress), entry.width, &entry.target, sizeof(entry.target)) != EOK) {
         return false;

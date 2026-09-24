@@ -19,11 +19,20 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#if defined(PANDA_TARGET_MACOS)
+#include <pthread.h>
+#endif
 #include <unistd.h>
 
 #include "ecmascript/platform/os.h"
 
 namespace panda::ecmascript {
+
+#if defined(PANDA_TARGET_MACOS)
+// pthread_jit_write_protect_np() controls the calling thread. A nesting count
+// prevents an inner write scope from protecting pages still used by its caller.
+thread_local uint32_t g_jitWriteProtectDepth = 0;
+#endif
 
 #if defined(PANDA_TARGET_ARM64) && defined(PANDA_TARGET_OHOS)
 static long Syscall(unsigned long n, unsigned long a, unsigned long b, unsigned long c, unsigned long d,
@@ -75,6 +84,12 @@ MemMap PageMap(size_t size, int prot, size_t alignment, void *addr, int flags, b
     ASSERT(alignment == AlignUp(alignment, PageSize()));
     size_t allocSize = size + alignment;
     int newFlags = static_cast<int>(MAP_PRIVATE | MAP_ANONYMOUS | static_cast<unsigned int>(flags));
+#if defined(PANDA_TARGET_MACOS)
+    // macOS arm64 requires MAP_JIT for writable executable memory.
+    if (prot == PAGE_PROT_EXEC_READWRITE) {
+        newFlags |= MAP_JIT;
+    }
+#endif
     void *result =
         jitfort ? InlineMmap(addr, allocSize, prot, newFlags, -1, 0) : mmap(addr, allocSize, prot, newFlags, -1, 0);
     if (reinterpret_cast<intptr_t>(result) == -1) {
@@ -288,6 +303,11 @@ void PageClearTag(void *mem, size_t size)
 
 int PageProtect(void *mem, size_t size, int prot)
 {
+#if defined(PANDA_TARGET_MACOS)
+    if (prot == PAGE_PROT_EXEC_READWRITE) {
+        return 0;
+    }
+#endif
     int ret = mprotect(mem, size, prot);
     if (ret != 0) {
         LOG_ECMA(ERROR) << "PageProtect mem = " << mem << ", size = " << size <<
@@ -296,6 +316,23 @@ int PageProtect(void *mem, size_t size, int prot)
     }
     return 0;
 }
+
+#if defined(PANDA_TARGET_MACOS)
+void JitWriteProtect(bool enable)
+{
+    if (__builtin_available(macOS 11.0, *)) {
+        if (!enable) {
+            // Always issue the disable call. This is deliberately idempotent:
+            // a caller may enter a scope after code that changed the
+            // protection state without updating our nesting counter.
+            pthread_jit_write_protect_np(0);
+            ++g_jitWriteProtectDepth;
+        } else if (g_jitWriteProtectDepth != 0 && --g_jitWriteProtectDepth == 0) {
+            pthread_jit_write_protect_np(1);
+        }
+    }
+}
+#endif
 
 size_t PageSize()
 {

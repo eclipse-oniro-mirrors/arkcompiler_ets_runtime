@@ -21,6 +21,7 @@
 #include "ecmascript/mem/heap.h"
 #include "ecmascript/mem/mem_controller.h"
 #include "ecmascript/mem/region-inl.h"
+#include "ecmascript/platform/map.h"
 #include "ecmascript/platform/os.h"
 
 namespace panda::ecmascript {
@@ -64,6 +65,7 @@ void Space::Destroy()
 void Space::ClearAndFreeRegion(Region *region, size_t cachedSize)
 {
     ASSERT(region != nullptr);
+    JIT_WRITE_SCOPE(jitWriteScope, region->InMachineCodeSpace() || region->InHugeMachineCodeSpace());
     LOG_ECMA_MEM(DEBUG) << "Clear region from:" << region << " to " << ToSpaceTypeName(spaceType_)
                         << ", region begin: " << reinterpret_cast<void *>(region->GetBegin());
     region->DeleteCrossRegionRSet();

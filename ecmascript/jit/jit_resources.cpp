@@ -54,12 +54,16 @@ bool JitResources::ResolveLib()
     static const std::string JITCOMPILE = "JitCompile";
     static const std::string JITFINALIZE = "JitFinalize";
     static const std::string DELETEJITCOMPILERTASK = "DeleteJitCompilerTask";
+#if defined(PANDA_TARGET_MACOS)
+    static const std::string LIBARK_JSOPTIMIZER = "libark_jsoptimizer.dylib";
+#else
     static const std::string LIBARK_JSOPTIMIZER = "libark_jsoptimizer.so";
+#endif
 
     libHandle_ = LoadLib(LIBARK_JSOPTIMIZER);
     if (libHandle_ == nullptr) {
         char *error = LoadLibError();
-        LOG_JIT(ERROR) << "jit dlopen libark_jsoptimizer.so failed, as:" <<
+        LOG_JIT(ERROR) << "jit dlopen " << LIBARK_JSOPTIMIZER << " failed, as:" <<
             ((error == nullptr) ? "unknown error" : error);
         return false;
     }

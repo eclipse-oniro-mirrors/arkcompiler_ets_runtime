@@ -43,6 +43,7 @@
 #include "ecmascript/runtime_lock.h"
 #include "ecmascript/runtime.h"
 #include "ecmascript/jit/jit.h"
+#include "ecmascript/platform/map.h"
 #if !WIN_OR_MAC_OR_IOS_PLATFORM
 #include "ecmascript/dfx/hprof/heap_profiler_interface.h"
 #include "ecmascript/dfx/hprof/heap_profiler.h"
@@ -3331,6 +3332,7 @@ bool Heap::ParallelGCTask::Scheduable()
 
 bool Heap::ParallelGCTask::RunInternal(uint32_t threadIndex)
 {
+    JIT_WRITE_SCOPE(jitWriteScope, true);
     // Register before any marker heap access.
     uint64_t generation = heap_->RegisterRunningMarkTask();
     ASSERT(!monitor_->IsExpired(epoch_));
@@ -3396,6 +3398,7 @@ std::shared_ptr<RunningMarkTaskSnapshot> Heap::SnapshotRunningMarkTasks()
 
 bool Heap::AsyncClearTask::Run([[maybe_unused]] uint32_t threadIndex)
 {
+    JIT_WRITE_SCOPE(jitWriteScope, true);
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "AsyncClearTask::Run", "");
     heap_->ReclaimRegions(gcType_, cmsGC_);
     return true;

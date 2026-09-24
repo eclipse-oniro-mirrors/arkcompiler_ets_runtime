@@ -107,6 +107,38 @@ void PageClearTag(void *mem, size_t size);
 const std::string GetPageTagString(PageTagType type, const std::string &spaceName, const uint32_t threadId = 0);
 const char *GetPageTagString(PageTagType type);
 int PageProtect(void *mem, size_t size, int prot);
+
+#if defined(PANDA_TARGET_MACOS)
+void JitWriteProtect(bool enable);
+
+class JitWriteScope {
+public:
+    explicit JitWriteScope(bool allowWrite = true) : allowWrite_(allowWrite)
+    {
+        if (allowWrite_) {
+            JitWriteProtect(false);
+        }
+    }
+
+    ~JitWriteScope()
+    {
+        if (allowWrite_) {
+            JitWriteProtect(true);
+        }
+    }
+
+    JitWriteScope(const JitWriteScope &) = delete;
+    JitWriteScope &operator=(const JitWriteScope &) = delete;
+
+private:
+    bool allowWrite_ {false};
+};
+#define JIT_WRITE_SCOPE(name, allowWrite) JitWriteScope name(allowWrite)
+#else
+// Compile write-protection scopes out completely on non-macOS platforms.
+#define JIT_WRITE_SCOPE(name, allowWrite)
+#endif
+
 size_t PUBLIC_API PageSize();
 
 // ---------------------------------------------------------------------------

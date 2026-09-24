@@ -20,6 +20,7 @@
 
 #include "ecmascript/mem/mem.h"
 #include "ecmascript/mem/native_area_allocator.h"
+#include "ecmascript/platform/map.h"
 
 namespace panda::ecmascript {
 inline RememberedSet *Region::CreateRememberedSet()
@@ -242,6 +243,7 @@ inline GCBitset *Region::GetMarkGCBitset() const
 
 inline bool Region::AtomicMark(void *address)
 {
+    JIT_WRITE_SCOPE(jitWriteScope, InMachineCodeSpace() || InHugeMachineCodeSpace());
     auto addrPtr = reinterpret_cast<uintptr_t>(address);
     ASSERT(InRange(addrPtr));
     return packedData_.markGCBitset_->SetBit<AccessType::ATOMIC>(
@@ -250,6 +252,7 @@ inline bool Region::AtomicMark(void *address)
 
 inline bool Region::NonAtomicMark(void *address)
 {
+    JIT_WRITE_SCOPE(jitWriteScope, InMachineCodeSpace() || InHugeMachineCodeSpace());
     auto addrPtr = reinterpret_cast<uintptr_t>(address);
     ASSERT(InRange(addrPtr));
     return packedData_.markGCBitset_->SetBit<AccessType::NON_ATOMIC>(
@@ -258,6 +261,7 @@ inline bool Region::NonAtomicMark(void *address)
 
 inline void Region::ClearMark(void *address)
 {
+    JIT_WRITE_SCOPE(jitWriteScope, InMachineCodeSpace() || InHugeMachineCodeSpace());
     auto addrPtr = reinterpret_cast<uintptr_t>(address);
     ASSERT(InRange(addrPtr));
     packedData_.markGCBitset_->ClearBit((addrPtr & DEFAULT_REGION_MASK) >> TAGGED_TYPE_SIZE_LOG);
@@ -322,6 +326,7 @@ inline void Region::IterateAllMarkedBits(Visitor &&visitor) const
 
 inline void Region::ClearMarkGCBitset()
 {
+    JIT_WRITE_SCOPE(jitWriteScope, InMachineCodeSpace() || InHugeMachineCodeSpace());
     if (packedData_.markGCBitset_ != nullptr) {
         packedData_.markGCBitset_->Clear(packedData_.bitsetSize_);
     }

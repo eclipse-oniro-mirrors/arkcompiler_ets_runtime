@@ -504,6 +504,15 @@ void MachineCode::ProcessMarkObject()
             // fake machinecode, skip.
             return;
         }
+#if defined(PANDA_TARGET_MACOS)
+        // Without JitFort the generated instructions live inside the
+        // MachineCode object and are kept alive by the object's own region
+        // mark. Treating that MAP_JIT address as a JitFort address produces
+        // an invalid region index on macOS.
+        if (!Jit::GetInstance()->IsEnableJitFort()) {
+            return;
+        }
+#endif
         auto *jitfort = heap->GetOrCreateJitFort();
         ASSERT(jitfort != nullptr);
         bool inHuge = jitfort->InHugeRange(textAddr);

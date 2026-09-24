@@ -20,6 +20,7 @@
 #include "ecmascript/mem/parallel_evacuator_visitor-inl.h"
 #include "ecmascript/mem/tlab_allocator-inl.h"
 #include "ecmascript/mem/work_manager-inl.h"
+#include "ecmascript/platform/map.h"
 #include "ecmascript/runtime_call_id.h"
 
 namespace panda::ecmascript {
@@ -832,6 +833,10 @@ void ParallelEvacuator::WaitFinished()
 bool ParallelEvacuator::ProcessWorkloads(bool isMain, uint32_t threadIndex)
 {
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "GC::ProcessWorkloads", "");
+    // UpdateRSet may mutate slots and region metadata inside the MAP_JIT
+    // machine-code regions; both the main thread and the parallel workers
+    // process workloads, so open the per-thread write window here.
+    JIT_WRITE_SCOPE(jitWriteScope, true);
     DrainWorkloads(updateWorkloadSet_, [&](std::unique_ptr<Workload> &region) {
         region->Process(isMain, threadIndex);
     });
@@ -936,11 +941,13 @@ ParallelEvacuator::EvacuationTask::~EvacuationTask()
 
 bool ParallelEvacuator::EvacuationTask::Run(uint32_t threadIndex)
 {
+    JIT_WRITE_SCOPE(jitWriteScope, true);
     return evacuator_->EvacuateSpace(allocator_, threadIndex, idOrder_);
 }
 
 bool ParallelEvacuator::UpdateReferenceTask::Run([[maybe_unused]] uint32_t threadIndex)
 {
+    JIT_WRITE_SCOPE(jitWriteScope, true);
     evacuator_->ProcessWorkloads(false, threadIndex);
     return true;
 }
