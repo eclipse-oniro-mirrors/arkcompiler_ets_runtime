@@ -279,6 +279,13 @@ void ArkSteedAssembler::StoreInt32FieldRelease(ArkSteedRegister src, ArkSteedReg
     StoreInt32Field(src, base, offset);
 }
 
+void ArkSteedAssembler::StoreHeaderRelease(ArkSteedRegister src,
+                                           ArkSteedRegister object) {
+    static_assert(TaggedObject::HCLASS_OFFSET == 0);
+    // Aligned stores are atomic on x64 and TSO provides release ordering.
+    StoreField(src, object, 0);
+}
+
 void ArkSteedAssembler::StoreFloat64Field(ArkSteedDoubleRegister src, ArkSteedRegister base, int32_t offset)
 {
     StoreFloat64(x64::Operand(base, offset), src);
@@ -751,10 +758,10 @@ void ArkSteedAssembler::JumpIf(Condition condition, Label *target)
         case Condition::BELOW_OR_EQUAL:
             assembler_.Jbe(target);
             break;
-        case Condition::OVERFLOW_CONDITION:
+        case Condition::OVERFLOWS:
             assembler_.Jo(target);
             break;
-        case Condition::NOT_OVERFLOW_CONDITION:
+        case Condition::NOT_OVERFLOW:
             assembler_.Jno(target);
             break;
         case Condition::PARITY:

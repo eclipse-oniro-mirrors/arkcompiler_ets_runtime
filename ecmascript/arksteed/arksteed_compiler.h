@@ -22,7 +22,6 @@
 #include "ecmascript/jit/jit_task.h"
 #include "ecmascript/js_runtime_options.h"
 #include "ecmascript/mem/chunk.h"
-#include "ecmascript/pgo_profiler/pgo_profiler.h"
 
 namespace panda::ecmascript::arksteed {
 

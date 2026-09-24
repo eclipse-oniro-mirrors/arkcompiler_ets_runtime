@@ -1395,6 +1395,77 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CallVertex>(CallVertex *call)
 }
 
 template<>
+void ArkSteedCodeGenerator::VisitNonControlVertex<CreateEmptyObjectVertex>(CreateEmptyObjectVertex* createObject)
+{
+#ifndef NDEBUG
+    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << createObject->GetId() << ": CreateEmptyObjectVertex";
+#endif
+    ArkSteedRegister glue = GetInputRegister(createObject, CreateEmptyObjectVertex::GLUE_INDEX);
+    ArkSteedRegister hclass = GetInputRegister(createObject, CreateEmptyObjectVertex::HCLASS_INDEX);
+    ArkSteedRegister result = GetResultRegister(createObject);
+    uint32_t objectSize = createObject->GetObjectSize();
+    ASSERT(objectSize >= JSObject::SIZE);
+    ASSERT(objectSize % JSTaggedValue::TaggedTypeSize() == 0);
+    ASSERT(objectSize <= static_cast<uint32_t>(std::numeric_limits<int32_t>::max()));
+
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister address = scope.Acquire();
+    ArkSteedRegister newTop = scope.Acquire();
+    ASSERT(result != glue);
+    ASSERT(result != hclass);
+
+    Label allocationFailed;
+    Label done;
+
+#if defined(ARK_ASAN_ON)
+    (void)glue;
+    __ Jump(&allocationFailed);
+#else
+    if constexpr (G_USE_CMS_GC) {
+        __ Jump(&allocationFailed);
+    } else {
+#ifdef ECMASCRIPT_SUPPORT_HEAPSAMPLING
+        __ JumpIfHeapSamplingActive(glue, address, &allocationFailed);
+#endif
+        // CMC allocation uses the common stub, not the regular young-space
+        // layout.
+        __ JumpIfCMCGCEnabled(glue, address, &allocationFailed);
+
+        __ RecordComment("CreateEmptyObject fast bump allocation");
+        __ Move(newTop, static_cast<int64_t>(objectSize));
+        __ TryAllocateInYoungSpace(glue, newTop, result, address, &allocationFailed);
+    }
+#endif
+
+    // Allocation is committed: finish initialization without GC or fallback.
+    __ Move(address, static_cast<int64_t>(JSTaggedValue::VALUE_UNDEFINED));
+    for (uint32_t offset = static_cast<uint32_t>(JSObject::SIZE); offset < objectSize;
+         offset += static_cast<uint32_t>(JSTaggedValue::TaggedTypeSize())) {
+        __ StoreField(address, result, static_cast<int32_t>(offset));
+    }
+    __ Move(address, static_cast<uint64_t>(JSTaggedValue(0).GetRawData()));
+    __ StoreField(address, result, static_cast<int32_t>(JSObject::HASH_OFFSET));
+    constexpr size_t emptyArrayOffset =
+        static_cast<size_t>(ConstantIndex::EMPTY_ARRAY_OBJECT_INDEX) * JSTaggedValue::TaggedTypeSize();
+    static_assert(emptyArrayOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+    __ LoadField(address, glue, static_cast<int32_t>(JSThread::GlueData::GetGlobalConstOffset(false)));
+    __ LoadField(address, address, static_cast<int32_t>(emptyArrayOffset));
+    __ StoreField(address, result, static_cast<int32_t>(JSObject::PROPERTIES_OFFSET));
+    __ StoreField(address, result, static_cast<int32_t>(JSObject::ELEMENTS_OFFSET));
+
+    // GlobalEnv::ObjectFunctionClass keeps this intrinsic HClass alive independently
+    // of the new object. Young-to-local-NonMovable needs no remembered-set entry;
+    // CMC/CMS have already fallen back. Publish the header after all fields are ready.
+    __ StoreHeaderRelease(hclass, result);
+    __ Jump(&done);
+
+    __ Bind(&allocationFailed);
+    __ RecordComment("CreateEmptyObject fallback sentinel");
+    __ Move(result, static_cast<uint64_t>(JSTaggedValue::VALUE_HOLE));
+    __ Bind(&done);
+}
+
+template<>
 void ArkSteedCodeGenerator::VisitNonControlVertex<AllocateJSArrayVertex>(AllocateJSArrayVertex* allocate)
 {
 #ifndef NDEBUG
@@ -3202,11 +3273,11 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<StringEqualVertex>(StringEqual
         I32##Name##WithOverflowVertex *op)                                                              \
     {                                                                                                   \
         auto dst = GetResultRegister(op);                                                               \
-        auto left = GetInputRegister(op, I32##Name##WithOverflowVertex::LEFT_INDEX);                   \
+        auto left = GetInputRegister(op, I32##Name##WithOverflowVertex::LEFT_INDEX);                    \
         auto right = GetInputRegister(op, I32##Name##WithOverflowVertex::RIGHT_INDEX);                  \
         __ Op(dst, left, right);                                                                        \
         ASSERT(!EagerDeoptUsesRegister(op, dst));                                                       \
-        BranchToEagerDeoptTarget(Condition::OVERFLOW_CONDITION, op, kungfu::DeoptType::INT32OVERFLOW1); \
+        BranchToEagerDeoptTarget(Condition::OVERFLOWS, op, kungfu::DeoptType::INT32OVERFLOW1);          \
     }
 
 DEFINE_I32_WITH_OVERFLOW_CODEGEN(Add, Int32Add)
@@ -3270,7 +3341,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<I32MulWithOverflowVertex>(I32M
 #else
     __ Int32Mul(dst, right);
     ASSERT(!EagerDeoptUsesRegister(op, dst));
-    BranchToEagerDeoptTarget(Condition::OVERFLOW_CONDITION, op, kungfu::DeoptType::INT32OVERFLOW1);
+    BranchToEagerDeoptTarget(Condition::OVERFLOWS, op, kungfu::DeoptType::INT32OVERFLOW1);
 #endif
     __ CompareInt32(dst, 0);
     __ JumpIf(Condition::NOT_EQUAL, &success);
@@ -3759,7 +3830,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DoubleToInt32CallVertex>(Doubl
 }
 
 #if defined(PANDA_TARGET_AMD64)
-#define DEFINE_I32_UNARY_WITH_OVERFLOW_CODEGEN(Name, AsmOp, DeoptType, NeedZeroCheck)                \
+#define DEFINE_I32_UNARY_WITH_OVERFLOW_CODEGEN(Name, AsmOp, DeoptType, NeedZeroCheck)                 \
     template <>                                                                                       \
     void ArkSteedCodeGenerator::VisitNonControlVertex<I32##Name##WithOverflowVertex>(                 \
         I32##Name##WithOverflowVertex *op)                                                            \
@@ -3768,11 +3839,11 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DoubleToInt32CallVertex>(Doubl
         auto input = GetInputRegister(op, I32##Name##WithOverflowVertex::VALUE_INDEX);                \
         if constexpr (NeedZeroCheck) {                                                                \
             __ CompareInt32(input, 0);                                                                \
-            BranchToEagerDeoptTarget(Condition::EQUAL, op, DeoptType);                           \
+            BranchToEagerDeoptTarget(Condition::EQUAL, op, DeoptType);                                \
         }                                                                                             \
         __ AsmOp(dst, input);                                                                         \
         ASSERT(!EagerDeoptUsesRegister(op, dst));                                                     \
-        BranchToEagerDeoptTarget(Condition::OVERFLOW_CONDITION, op, DeoptType);                         \
+        BranchToEagerDeoptTarget(Condition::OVERFLOWS, op, DeoptType);                                \
     }
 #else
 #define DEFINE_I32_UNARY_WITH_OVERFLOW_CODEGEN(Name, AsmOp, DeoptType, NeedZeroCheck)                 \
@@ -3786,11 +3857,11 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DoubleToInt32CallVertex>(Doubl
         Label done;                                                                                   \
         if constexpr (NeedZeroCheck) {                                                                \
             __ CompareInt32(input, 0);                                                                \
-            __ JumpIf(Condition::EQUAL, &deopt);                                                 \
+            __ JumpIf(Condition::EQUAL, &deopt);                                                      \
         }                                                                                             \
         __ AsmOp(dst, input);                                                                         \
         ASSERT(!EagerDeoptUsesRegister(op, dst));                                                     \
-        __ JumpIf(Condition::OVERFLOW_CONDITION, &deopt);                                               \
+        __ JumpIf(Condition::OVERFLOWS, &deopt);                                                      \
         __ Jump(&done);                                                                               \
         __ Bind(&deopt);                                                                              \
         EmitEagerDeoptExit(op, DeoptType);                                                            \

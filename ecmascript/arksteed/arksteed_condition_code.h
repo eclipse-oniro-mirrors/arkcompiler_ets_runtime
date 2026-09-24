@@ -17,78 +17,130 @@
 #define ECMASCRIPT_ARKSTEED_CONDITION_CODE_H
 
 #include <cstdint>
+#include <type_traits>
 #include "libpandabase/macros.h"
 
 namespace panda::ecmascript::arksteed {
 
+// Note: The "OVERFLOWS" spelling is intentional since "OVERFLOW" is a macro defined by Both MinGW and Apple SDK.
+#define ARKSTEED_CC_LIST(V)             \
+    V(EQUAL, NOT_EQUAL)                 \
+    V(LESS_THAN, GREATER_THAN_OR_EQUAL) \
+    V(GREATER_THAN, LESS_THAN_OR_EQUAL) \
+    V(BELOW, ABOVE_OR_EQUAL)            \
+    V(ABOVE, BELOW_OR_EQUAL)            \
+    V(ZERO, NOT_ZERO)                   \
+    V(OVERFLOWS, NOT_OVERFLOW)          \
+    V(PARITY, NOT_PARITY)
+
+#define ARKSTEED_JS_CC_LIST(V)          \
+    V(EQUAL, NOT_EQUAL)                 \
+    V(STRICT_EQUAL, STRICT_NOT_EQUAL)   \
+    V(LESS_THAN, GREATER_THAN_OR_EQUAL) \
+    V(GREATER_THAN, LESS_THAN_OR_EQUAL)
+
+#define DEFINE_CC(C, N) C, N,
+
 enum class Condition : uint8_t {
-    EQUAL,
-    NOT_EQUAL,
-    LESS_THAN,
-    LESS_THAN_OR_EQUAL,
-    GREATER_THAN,
-    GREATER_THAN_OR_EQUAL,
-    ABOVE,
-    BELOW,
-    ABOVE_OR_EQUAL,
-    BELOW_OR_EQUAL,
-    ZERO,
-    NOT_ZERO,
-    OVERFLOW_CONDITION,
-    NOT_OVERFLOW_CONDITION,
-    PARITY,
-    NOT_PARITY
+    ARKSTEED_CC_LIST(DEFINE_CC)
 };
 
-// JS-level comparison operators. These are bytecode/front-end semantics, not
-// machine condition codes: strict equality is type-aware and cannot be
-// represented as a single Condition.
+// JS-level comparison operators.
 enum class JSCondition : uint8_t {
-    EQUAL,
-    NOT_EQUAL,
-    LESS_THAN,
-    LESS_THAN_OR_EQUAL,
-    GREATER_THAN,
-    GREATER_THAN_OR_EQUAL,
-    STRICT_EQUAL,
-    STRICT_NOT_EQUAL,
+    ARKSTEED_JS_CC_LIST(DEFINE_CC)
 };
+
+#undef DEFINE_CC
+
+constexpr bool IsEqualityCompare(JSCondition kind)
+{
+    return kind == JSCondition::EQUAL ||
+           kind == JSCondition::NOT_EQUAL ||
+           kind == JSCondition::STRICT_EQUAL ||
+           kind == JSCondition::STRICT_NOT_EQUAL;
+}
+
+#define ARKSTEED_JS_CC_EQ_MATRIX(V)                 \
+    V(Strict,   STRICT_EQUAL, STRICT_NOT_EQUAL)     \
+    V(Loose,    EQUAL, NOT_EQUAL)                   \
+    V(Positive, STRICT_EQUAL, EQUAL)                \
+    V(Negative, STRICT_NOT_EQUAL, NOT_EQUAL)
+
+#define DEFINE_JS_CC_EQ_PREDICATE(Name, C1, C2)                 \
+    constexpr bool Is##Name##EqualityCompare(JSCondition cc)    \
+    {                                                           \
+        return cc == JSCondition::C1 || cc == JSCondition::C2;  \
+    }
+ARKSTEED_JS_CC_EQ_MATRIX(DEFINE_JS_CC_EQ_PREDICATE)
+#undef DEFINE_JS_CC_EQ_PREDICATE
+
+template <class T, class = std::enable_if_t<std::is_arithmetic_v<T>>>
+constexpr bool EvaluateCompare(JSCondition cc, T left, T right)
+{
+    switch (cc) {
+        case JSCondition::EQUAL:
+        case JSCondition::STRICT_EQUAL:
+            return left == right;
+        case JSCondition::NOT_EQUAL:
+        case JSCondition::STRICT_NOT_EQUAL:
+            return left != right;
+        case JSCondition::LESS_THAN:
+            return left < right;
+        case JSCondition::LESS_THAN_OR_EQUAL:
+            return left <= right;
+        case JSCondition::GREATER_THAN:
+            return left > right;
+        case JSCondition::GREATER_THAN_OR_EQUAL:
+            return left >= right;
+        default:
+            UNREACHABLE();
+    }
+}
+
+// Note: Works for primitive type comparison only (integer and floating-points)
+constexpr Condition ToMachineCondition(JSCondition kind)
+{
+    switch (kind) {
+        case JSCondition::EQUAL:
+        case JSCondition::STRICT_EQUAL:
+            return Condition::EQUAL;
+        case JSCondition::NOT_EQUAL:
+        case JSCondition::STRICT_NOT_EQUAL:
+            return Condition::NOT_EQUAL;
+        case JSCondition::LESS_THAN:
+            return Condition::LESS_THAN;
+        case JSCondition::LESS_THAN_OR_EQUAL:
+            return Condition::LESS_THAN_OR_EQUAL;
+        case JSCondition::GREATER_THAN:
+            return Condition::GREATER_THAN;
+        case JSCondition::GREATER_THAN_OR_EQUAL:
+            return Condition::GREATER_THAN_OR_EQUAL;
+        default:
+            UNREACHABLE();
+    }
+}
 
 constexpr Condition NegateCondition(Condition cond)
 {
     switch (cond) {
-        case Condition::EQUAL:
-            return Condition::NOT_EQUAL;
-        case Condition::NOT_EQUAL:
-            return Condition::EQUAL;
-        case Condition::LESS_THAN:
-            return Condition::GREATER_THAN_OR_EQUAL;
-        case Condition::LESS_THAN_OR_EQUAL:
-            return Condition::GREATER_THAN;
-        case Condition::GREATER_THAN:
-            return Condition::LESS_THAN_OR_EQUAL;
-        case Condition::GREATER_THAN_OR_EQUAL:
-            return Condition::LESS_THAN;
-        case Condition::ABOVE:
-            return Condition::BELOW_OR_EQUAL;
-        case Condition::BELOW:
-            return Condition::ABOVE_OR_EQUAL;
-        case Condition::ABOVE_OR_EQUAL:
-            return Condition::BELOW;
-        case Condition::BELOW_OR_EQUAL:
-            return Condition::ABOVE;
-        case Condition::ZERO:
-            return Condition::NOT_ZERO;
-        case Condition::NOT_ZERO:
-            return Condition::ZERO;
-        case Condition::OVERFLOW_CONDITION:
-            return Condition::NOT_OVERFLOW_CONDITION;
-        case Condition::NOT_OVERFLOW_CONDITION:
-            return Condition::OVERFLOW_CONDITION;
-        case Condition::PARITY:
-            return Condition::NOT_PARITY;
-        case Condition::NOT_PARITY:
-            return Condition::PARITY;
+#define CASES(C, N)                             \
+        case Condition::C: return Condition::N; \
+        case Condition::N: return Condition::C;
+        ARKSTEED_CC_LIST(CASES)
+#undef CASES
+        default:
+            UNREACHABLE();
+    }
+}
+
+constexpr JSCondition NegateJSCondition(JSCondition cond)
+{
+    switch (cond) {
+#define CASES(C, N)                                 \
+        case JSCondition::C: return JSCondition::N; \
+        case JSCondition::N: return JSCondition::C;
+        ARKSTEED_JS_CC_LIST(CASES)
+#undef CASES
         default:
             UNREACHABLE();
     }
@@ -97,38 +149,11 @@ constexpr Condition NegateCondition(Condition cond)
 constexpr const char *ConditionName(Condition cond)
 {
     switch (cond) {
-        case Condition::EQUAL:
-            return "equal";
-        case Condition::NOT_EQUAL:
-            return "not_equal";
-        case Condition::LESS_THAN:
-            return "less_than";
-        case Condition::LESS_THAN_OR_EQUAL:
-            return "less_than_or_equal";
-        case Condition::GREATER_THAN:
-            return "greater_than";
-        case Condition::GREATER_THAN_OR_EQUAL:
-            return "greater_than_or_equal";
-        case Condition::ABOVE:
-            return "above";
-        case Condition::BELOW:
-            return "below";
-        case Condition::ABOVE_OR_EQUAL:
-            return "above_or_equal";
-        case Condition::BELOW_OR_EQUAL:
-            return "below_or_equal";
-        case Condition::ZERO:
-            return "zero";
-        case Condition::NOT_ZERO:
-            return "not_zero";
-        case Condition::OVERFLOW_CONDITION:
-            return "overflow";
-        case Condition::NOT_OVERFLOW_CONDITION:
-            return "not_overflow";
-        case Condition::PARITY:
-            return "parity";
-        case Condition::NOT_PARITY:
-            return "not_parity";
+#define CASES(C, N)                     \
+        case Condition::C: return #C;   \
+        case Condition::N: return #N;
+        ARKSTEED_CC_LIST(CASES)
+#undef CASES
         default:
             return "<unknown>";
     }
@@ -137,24 +162,14 @@ constexpr const char *ConditionName(Condition cond)
 constexpr const char *JSConditionName(JSCondition kind)
 {
     switch (kind) {
-        case JSCondition::EQUAL:
-            return "EQUAL";
-        case JSCondition::NOT_EQUAL:
-            return "NOT_EQUAL";
-        case JSCondition::LESS_THAN:
-            return "LESS_THAN";
-        case JSCondition::LESS_THAN_OR_EQUAL:
-            return "LESS_THAN_OR_EQUAL";
-        case JSCondition::GREATER_THAN:
-            return "GREATER_THAN";
-        case JSCondition::GREATER_THAN_OR_EQUAL:
-            return "GREATER_THAN_OR_EQUAL";
-        case JSCondition::STRICT_EQUAL:
-            return "STRICT_EQUAL";
-        case JSCondition::STRICT_NOT_EQUAL:
-            return "STRICT_NOT_EQUAL";
+#define CASES(C, N)                     \
+        case JSCondition::C: return #C; \
+        case JSCondition::N: return #N;
+        ARKSTEED_JS_CC_LIST(CASES)
+#undef CASES
+        default:
+            return "<unknown>";
     }
-    return "UNKNOWN";
 }
 
 }  // namespace panda::ecmascript::arksteed

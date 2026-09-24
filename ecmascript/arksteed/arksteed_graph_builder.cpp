@@ -56,6 +56,7 @@
 #include "ecmascript/lexical_env.h"
 #include "ecmascript/mem/machine_code.h"
 #include "ecmascript/method.h"
+#include "ecmascript/module/js_module_manager.h"
 #include "ecmascript/string/base_string.h"
 
 namespace panda::ecmascript::arksteed {
@@ -254,22 +255,6 @@ bool SupportsF64BinOp(BinaryOpKind kind)
     }
 }
 
-bool IsEqualityCompare(JSCondition kind)
-{
-    return kind == JSCondition::EQUAL || kind == JSCondition::NOT_EQUAL || kind == JSCondition::STRICT_EQUAL ||
-           kind == JSCondition::STRICT_NOT_EQUAL;
-}
-
-bool IsStrictEqualityCompare(JSCondition kind)
-{
-    return kind == JSCondition::STRICT_EQUAL || kind == JSCondition::STRICT_NOT_EQUAL;
-}
-
-bool IsEqualCompare(JSCondition kind)
-{
-    return kind == JSCondition::EQUAL || kind == JSCondition::STRICT_EQUAL;
-}
-
 bool IsReferenceComparableRootValue(ValueVertex *node)
 {
     if (node == nullptr) {
@@ -299,86 +284,6 @@ bool StrictTypesCanBeEqual(NodeInfo::NodeType leftType, NodeInfo::NodeType right
     }
     return NodeInfo::NodeTypeCanBe(leftType, NodeInfo::NodeType::NUMBER) &&
            NodeInfo::NodeTypeCanBe(rightType, NodeInfo::NodeType::NUMBER);
-}
-
-bool EvaluateInt32Compare(JSCondition kind, int32_t left, int32_t right)
-{
-    switch (kind) {
-        case JSCondition::EQUAL:
-        case JSCondition::STRICT_EQUAL:
-            return left == right;
-        case JSCondition::NOT_EQUAL:
-        case JSCondition::STRICT_NOT_EQUAL:
-            return left != right;
-        case JSCondition::LESS_THAN:
-            return left < right;
-        case JSCondition::LESS_THAN_OR_EQUAL:
-            return left <= right;
-        case JSCondition::GREATER_THAN:
-            return left > right;
-        case JSCondition::GREATER_THAN_OR_EQUAL:
-            return left >= right;
-    }
-    UNREACHABLE();
-}
-
-bool EvaluateFloat64Compare(JSCondition kind, double left, double right)
-{
-    bool unordered = std::isnan(left) || std::isnan(right);
-    switch (kind) {
-        case JSCondition::EQUAL:
-        case JSCondition::STRICT_EQUAL:
-            return !unordered && left == right;
-        case JSCondition::NOT_EQUAL:
-        case JSCondition::STRICT_NOT_EQUAL:
-            return unordered || left != right;
-        case JSCondition::LESS_THAN:
-            return !unordered && left < right;
-        case JSCondition::LESS_THAN_OR_EQUAL:
-            return !unordered && left <= right;
-        case JSCondition::GREATER_THAN:
-            return !unordered && left > right;
-        case JSCondition::GREATER_THAN_OR_EQUAL:
-            return !unordered && left >= right;
-    }
-    UNREACHABLE();
-}
-
-Condition Int32ConditionFromCompare(JSCondition kind)
-{
-    switch (kind) {
-        case JSCondition::EQUAL:
-        case JSCondition::STRICT_EQUAL:
-            return Condition::EQUAL;
-        case JSCondition::NOT_EQUAL:
-        case JSCondition::STRICT_NOT_EQUAL:
-            return Condition::NOT_EQUAL;
-        case JSCondition::LESS_THAN:
-            return Condition::LESS_THAN;
-        case JSCondition::LESS_THAN_OR_EQUAL:
-            return Condition::LESS_THAN_OR_EQUAL;
-        case JSCondition::GREATER_THAN:
-            return Condition::GREATER_THAN;
-        case JSCondition::GREATER_THAN_OR_EQUAL:
-            return Condition::GREATER_THAN_OR_EQUAL;
-    }
-    UNREACHABLE();
-}
-
-JSCondition InvertCompare(JSCondition kind)
-{
-    switch (kind) {
-        case JSCondition::EQUAL:
-            return JSCondition::NOT_EQUAL;
-        case JSCondition::NOT_EQUAL:
-            return JSCondition::EQUAL;
-        case JSCondition::STRICT_EQUAL:
-            return JSCondition::STRICT_NOT_EQUAL;
-        case JSCondition::STRICT_NOT_EQUAL:
-            return JSCondition::STRICT_EQUAL;
-        default:
-            UNREACHABLE();
-    }
 }
 
 // ---- Common-subexpression elimination helpers (available expressions) ----
@@ -6472,13 +6377,13 @@ struct GraphBuilder::BytecodeVisitor {
     ValueVertex *TryReduceCompareEqualAgainstConstant(JSCondition kind, ValueVertex *left, ValueVertex *right)
     {
         if (left == right && IsEqualityCompare(kind) && compileInfoFacts_->CheckType(left, NodeInfo::NodeType::INT)) {
-            return GetBooleanConstant(IsEqualCompare(kind));
+            return GetBooleanConstant(IsPositiveEqualityCompare(kind));
         }
         if (!IsStrictEqualityCompare(kind)) {
             return nullptr;
         }
 
-        bool equalResult = IsEqualCompare(kind);
+        bool equalResult = IsPositiveEqualityCompare(kind);
         NodeInfo::NodeType leftType = compileInfoFacts_->GetKnownType(left);
         NodeInfo::NodeType rightType = compileInfoFacts_->GetKnownType(right);
         if (left == right && !NodeInfo::NodeTypeCanBe(leftType, NodeInfo::NodeType::NUMBER)) {
@@ -6505,13 +6410,13 @@ struct GraphBuilder::BytecodeVisitor {
         std::optional<int32_t> leftValue = TryGetInt32Value(left);
         std::optional<int32_t> rightValue = TryGetInt32Value(right);
         if (leftValue.has_value() && rightValue.has_value()) {
-            return GetBooleanConstant(EvaluateInt32Compare(kind, *leftValue, *rightValue));
+            return GetBooleanConstant(EvaluateCompare(kind, *leftValue, *rightValue));
         }
 
         ValueVertex *leftI32 = BuildTaggedIntToI32(left);
         ValueVertex *rightI32 = BuildTaggedIntToI32(right);
         ValueVertex *result = self->NewVertex<I32ConditionCheckVertex>(
-            compileInfoFacts_, currentBlock, {leftI32, rightI32}, Int32ConditionFromCompare(kind));
+            compileInfoFacts_, currentBlock, {leftI32, rightI32}, ToMachineCondition(kind));
         compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
         return result;
     }
@@ -6526,7 +6431,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *leftI32 = leftKnownInt ? BuildTaggedIntToI32(left) : BuildCheckedTaggedIntToI32(left);
         ValueVertex *rightI32 = rightKnownInt ? BuildTaggedIntToI32(right) : BuildCheckedTaggedIntToI32(right);
         ValueVertex *result = self->NewVertex<I32ConditionCheckVertex>(
-            compileInfoFacts_, currentBlock, {leftI32, rightI32}, Int32ConditionFromCompare(kind));
+            compileInfoFacts_, currentBlock, {leftI32, rightI32}, ToMachineCondition(kind));
         compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
         return result;
     }
@@ -6535,12 +6440,12 @@ struct GraphBuilder::BytecodeVisitor {
     {
         if (auto *leftConst = leftF64->TryCast<Float64ConstantVertex>()) {
             if (auto *rightConst = rightF64->TryCast<Float64ConstantVertex>()) {
-                return GetBooleanConstant(EvaluateFloat64Compare(kind, leftConst->GetValue(), rightConst->GetValue()));
+                return GetBooleanConstant(EvaluateCompare(kind, leftConst->GetValue(), rightConst->GetValue()));
             }
         }
 
         ValueVertex *result = self->NewVertex<F64ConditionCheckVertex>(
-            compileInfoFacts_, currentBlock, {leftF64, rightF64}, Int32ConditionFromCompare(kind));
+            compileInfoFacts_, currentBlock, {leftF64, rightF64}, ToMachineCondition(kind));
         compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
         return result;
     }
@@ -6562,7 +6467,7 @@ struct GraphBuilder::BytecodeVisitor {
         }
         if (kind == JSCondition::NOT_EQUAL || kind == JSCondition::STRICT_NOT_EQUAL) {
             // NOT_EQUAL = !EQUAL: build StringEqual then negate the boolean.
-            ValueVertex *equal = BuildStringCompareOp(InvertCompare(kind), left, right);
+            ValueVertex *equal = BuildStringCompareOp(NegateJSCondition(kind), left, right);
             return BuildTaggedNotEqual(equal, GetBooleanConstant(true));
         }
         return BuildGenericCompareOp(kind, left, right);
@@ -6653,7 +6558,7 @@ struct GraphBuilder::BytecodeVisitor {
 
         if (IsEqualityCompare(kind) && left == right &&
             compileInfoFacts_->CheckType(left, NodeInfo::NodeType::STRING)) {
-            return GetBooleanConstant(IsEqualCompare(kind));
+            return GetBooleanConstant(IsPositiveEqualityCompare(kind));
         }
 
         return BuildGenericCompareOp(kind, left, right);
@@ -9810,10 +9715,11 @@ struct GraphBuilder::BytecodeVisitor {
     {
         JitCompilationEnv *env = self->preproc_->GetEnv();
         JSThread *hostThread = env->GetHostThread();
-        uint32_t methodOffset = env->GetMethodLiteral()->GetMethodId().GetOffset();
-        uint32_t bcOffset = self->preproc_->GetBytecodeOffset(currentBcIndex);
-        bool isResolved = env->IsLdExtModuleVarResolved(methodOffset, bcOffset);
-        if (!isResolved) {
+        ArkSteedHeapBroker::SerializingScope scope(
+            self->pgoContext_.GetBroker(), "GraphBuilder::TryBuildLoadExternalModuleVar");
+        JSFunction *compiledFunction = *env->GetJsFunction();
+        if (compiledFunction == nullptr ||
+            !ModuleManager::CheckModuleValueOutterResolved(hostThread, index, compiledFunction)) {
             return false;
         }
 

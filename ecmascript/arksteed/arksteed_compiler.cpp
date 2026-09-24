@@ -35,7 +35,6 @@
 #include "ecmascript/arksteed/arksteed_task.h"
 #include "ecmascript/compiler/jit_compiler.h"
 #include "ecmascript/jit/jit.h"
-#include "ecmascript/jit/jit_profiler.h"
 #include "ecmascript/jspandafile/method_literal.h"
 #include "ecmascript/mem/machine_code.h"
 
@@ -176,19 +175,6 @@ bool ArkSteedCompilerTask::BuildGraph(JSThread *compilerThread, uintptr_t hostGl
     ArkSteedPipelineStatistics statsScope(pipelineStatistics_, "BuildGraph");
 
     JitCompilationEnv *env = jitCompilationEnv_.get();
-    if (env->GetJSOptions().IsEnableJITPGO()) {
-        auto jitProfiler = env->GetPGOProfiler()->GetJITProfile();
-        if (jitProfiler != nullptr) {
-            MethodLiteral *method = env->GetMethodLiteral();
-            const JSPandaFile *jsPandaFile = env->GetJSPandaFile();
-            jitProfiler->SetCompilationEnv(env);
-            jitProfiler->InitChunk(chunk_.get());
-            jitProfiler->ProfileBytecode(env->GetJSThread(), profileTypeInfo_, method->GetMethodId(),
-                                         env->GetMethodAbcId(), env->GetMethodPcStart(),
-                                         method->GetCodeSize(jsPandaFile, method->GetMethodId()),
-                                         jsPandaFile->GetPandaFile()->GetHeader(), jsFunction_, env->GetGlobalEnv());
-        }
-    }
 
     BytecodePreprocessor preproc(env, chunk_.get());
     {
