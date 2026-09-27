@@ -64,21 +64,46 @@ host_unittest_action("PlatformMapTest") {
   ]
 }
 
+host_unittest_action("TimeTest") {
+  module_out_path = module_output_path
+
+  sources = [
+    # test file
+    "time_test.cpp",
+  ]
+
+  configs = [
+    "$js_root:ecma_test_config",
+  ]
+
+  if (ark_standalone_build || is_arkui_x) {
+    configs += [
+      "$ark_root/assembler:arkassembler_public_config",
+      "$ark_root/libpandafile:arkfile_public_config",
+    ]
+  }
+
+  deps = [
+    "$js_root:libark_jsruntime_test",
+  ]
+}
+
 group("unittest") {
   testonly = true
 
   # deps file
-  deps = [ ":ChmodTest", ":PlatformMapTest" ]
+  deps = [ ":ChmodTest", ":PlatformMapTest", ":TimeTest" ]
 }
 
 group("host_unittest") {
   testonly = true
 
   # deps file
-  deps = [ ":ChmodTestAction", ":PlatformMapTestAction" ]
+  deps = [ ":ChmodTestAction", ":PlatformMapTestAction", ":TimeTestAction" ]
 
   if (is_mac) {
     deps -= [ ":ChmodTestAction" ]
     deps -= [ ":PlatformMapTestAction" ]
+    deps -= [ ":TimeTestAction" ]
   }
 }
