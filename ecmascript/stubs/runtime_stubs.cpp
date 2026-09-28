@@ -5435,7 +5435,7 @@ DEF_RUNTIME_STUBS(PrintMethodName)
     Method *method = Method::Cast(func->GetMethod(thread).GetTaggedObject());
     CString recordName = method->GetRecordNameStr(thread);
     const char *methodName = method->GetMethodName(thread);
-    LOG_ECMA(INFO) << ">>> Running method: " << recordName << "." << methodName;
+    LOG_COMPILER(INFO) << ">>> Running method: " << recordName << "." << methodName;
     return JSTaggedValue::Hole().GetRawData();
 }
 

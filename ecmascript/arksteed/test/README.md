@@ -60,6 +60,7 @@ Annotations start with `//!`. In-line comments to annotations (starting with `#`
         * `--log-components`
         * All `--compiler-arksteed-print-*` options
         * `--compiler-arksteed-enable-code-comment`
+        * `--compiler-trace-deopt` and `--compiler-enable-lazy-deopt-trace` (the deopt traces counted by `DEOPT_COUNT`/`DEOPT_COUNT_GE`)
         * `--stub-file`
         * `--icu-data-path`
     * `PARAM` annotation shall appear at most once in each test case.
@@ -89,6 +90,30 @@ Constraints on `CallCommonStub` and `CallRuntime` **must** be followed by a stub
 * The pattern is matched against the stub name as dumped (`COStub_*` / `RTStub_*`) as well as its prefix-stripped form, so `GetPropertyByName`, `Get*ByName` and `COStub_GetPropertyByName` are all valid spellings.
 * Example: `//! HAS_NOT CallCommonStub GetPropertyByName` requires that no `CallCommonStub` node calling `COStub_GetPropertyByName` appears, while e.g. `COStub_Add` calls are unaffected.
 * Example: `//! COUNT CallRuntime Throw* 1` requires exactly one `CallRuntime` node whose stub name starts with `Throw`.
+
+### Evidence annotations (case-scoped, matched against captured stdout)
+
+These annotations count events in the case's captured stdout. `<pattern>` is a shell-style wildcard matched against the useful part of the relevant log line (the text after the `[<component>] ` prefix). `<n>=0` is allowed and asserts the absence of matching events. A violation reports the actual value; an unknown keyword is a case configuration error.
+
+* `COMPILE_COUNT <pattern> <n>`: exactly `n` `ArkSteedCompilerTask: Starts compiling` markers for methods whose name matches `<pattern>` (aggregated over recompilations).
+* `COMPILE_COUNT_GE <pattern> <n>`: at least `n` such markers.
+* `EXEC_COUNT <pattern> <n>`: exactly `n` `>>> Running method:` execution markers whose `<record>.<method>` matches `<pattern>`. Implies `--compiler-arksteed-print-method-name=true` for the case.
+* `EXEC_COUNT_GE <pattern> <n>`: at least `n` such markers. Implies the same option.
+* `DEOPT_COUNT <pattern> <n>`: exactly `n` deopt events matching `<pattern>` (e.g. `Deoptimize*`, `Lazy Deoptimize*`, `*Deoptimize*`). Implies `--compiler-trace-deopt=true` **and** `--compiler-enable-lazy-deopt-trace=true` for the case; neither option can be set through `PARAMS`, so the observation the annotation asserts cannot be disabled.
+* `DEOPT_COUNT_GE <pattern> <n>`: at least `n` such events. Implies the same options.
+* `GC_COUNT_GE <pattern> <n>`: at least `n` `gc`-component lines matching `<pattern>`. Implies enabling the `gc` log component for the case.
+
+Only deopt events are deopt evidence; every other compiler-component line is not. Exactly three line forms are counted, one record per event:
+
+* eager with a JS stack trace: `Deoptimize    at <fn> (<file>:<line>:<col>)`;
+* eager on the ArkSteed path, which skips the GC-capable stack trace: `Eager deopt disables GC; skip GC-capable JS stack trace construction.`; this record also matches the normalized `Deoptimize Eager deopt disables GC*` spelling, so the `Deoptimize*` family counts every eager event;
+* lazy: `Lazy Deoptimize    at <fn> (<file>:<line>:<col>)`.
+
+Compilation markers (`Starts compiling: DeoptimizeTarget`), execution markers of such a method, CFG dumps (`v14: DeoptIfNotBoolean`), debug-level codegen comments and the resume bytecode instruction that follows an eager event carry no deopt identity and are never counted. A record is counted once even when a pattern matches more than one of its spellings.
+
+Normal paths are expected to carry `DEOPT_COUNT <pattern> 0` for the target method, so a silent deopt into the interpreter after entering compiled code is never reported as JIT execution.
+
+The annotation behaviour is covered by `python3 ./runner_self_test.py` (no VM needed), which checks the deopt-evidence classification, the conflicting-`PARAMS` configuration error and the option implication. The in-tree regression cases are `deopt/deopt_count_compile_name`, `deopt/deopt_count_eager` and `deopt/deopt_count_lazy`.
 
 Example:
 

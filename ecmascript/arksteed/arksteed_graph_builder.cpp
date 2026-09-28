@@ -828,6 +828,15 @@ void GraphBuilder::InitializeStartBlock(SharedBCFrameState frameState)
     // -3 : Fixed header lexicalEnv is at slot -3 in word units.
     initialLexicalEnv_ = NewVertex<InitialValueVertex>(blocks_[0], {}, -3);
     frameState.SetLexicalEnv(initialLexicalEnv_);
+    if (!isOsr_ && GetOptions()->GetCompilerArkSteedPrintMethodName()) {
+        // E1 execution marker: emit a single CallRuntime PrintMethodName vertex in the
+        // method entry block for ordinary (non-OSR) compilations. The argument is the
+        // existing function-object value (initialCallTarget_) with no extra countable
+        // operations; the stub logs `>>> Running method: <record>.<method>` on each
+        // activation of the generated code.
+        NewVertex<CallRuntimeVertex>(blocks_[0], {initialCallTarget_}, RTSTUB_ID(PrintMethodName),
+                                     SideEffectKind::SAFE_CALL);
+    }
     FinishBlockWithJump(blocks_[0], ActivateNonCatchBlock(1));
     exitBlocks_[0] = blocks_[0];
 }
@@ -4745,6 +4754,7 @@ struct GraphBuilder::BytecodeVisitor {
             case RTSTUB_ID(LdLocalModuleVarByIndexOnJSFunc):
             case RTSTUB_ID(LdPatchVar):
             case RTSTUB_ID(OptNewLexicalEnvWithName):
+            case RTSTUB_ID(PrintMethodName):
                 return true;
             // NumberToString is dependency-safe only when the input cannot be a receiver.
             case RTSTUB_ID(NumberToString):

@@ -17,9 +17,105 @@ import("//arkcompiler/ets_runtime/test/test_helper.gni")
 module_output_path = "ets_runtime/ets_runtime"
 
 if (ets_runtime_enable_ark_steed) {
+  # Bytecode source of the ArkSteed unit-test fixture, compiled in script mode:
+  # no module flag is passed, and the arguments are the same in Debug and
+  # Release. The action is a private dependency of `:arksteed_bytecode_fixture`.
+  es2abc_gen_abc("gen_arksteed_bytecode_fixture_abc") {
+    src_js = rebase_path("fixtures/arksteed_bytecode_fixture.js")
+    dst_file = rebase_path("$target_out_dir/abc_files/arksteed_bytecode_fixture.abc")
+    extra_args = []
+    in_puts = [ "fixtures/arksteed_bytecode_fixture.js" ]
+    out_puts = [ "$target_out_dir/abc_files/arksteed_bytecode_fixture.abc" ]
+
+    # Only targets in this file can depend on this.
+    extra_visibility = [ ":*" ]
+  }
+
+  # `get_label_info` yields the output directory of the action relative to the
+  # source root, so it is rebased to the absolute path the generated C++ macro
+  # has to carry.
+  arksteed_bytecode_fixture_abc_dir = rebase_path(
+          get_label_info(":gen_arksteed_bytecode_fixture_abc", "target_out_dir") +
+          "/abc_files")
+
+  # Dependent-visible values of the fixture: the directory of the generated abc
+  # and its entry point (the stem of the asset). A target's own `defines` do not
+  # reach targets that depend on it, so both values are published through this
+  # config, which `arksteed_bytecode_fixture` lists in its `public_configs`
+  # together with the definitions its own translation unit uses.
+  config("arksteed_bytecode_fixture_defines") {
+    defines = [
+      "ARKSTEED_FIXTURE_ABC_DIR=\"$arksteed_bytecode_fixture_abc_dir\"",
+      "ARKSTEED_FIXTURE_ENTRY_POINT=\"arksteed_bytecode_fixture\"",
+    ]
+  }
+
+  # Fixture module of the ArkSteed host unit tests (domain
+  # `arksteed-host-unit-bytecode-fixture`). It is a plain source set: it declares
+  # no host_unittest_action and belongs to no group. Its symbols come from the
+  # ArkSteed and compiler source sets, so it uses the heavy dependency pattern.
+  # The test framework is needed for the `testing::Test` base of the public
+  # header, whose include path has to reach the fixture and its consumers.
+  ohos_source_set("arksteed_bytecode_fixture") {
+    testonly = true
+
+    sources = [ "fixtures/bytecode_fixture.cpp" ]
+
+    deps = [
+      ":gen_arksteed_bytecode_fixture_abc",
+      "$js_root:libark_jsruntime_test_set",
+      "$js_root/ecmascript/compiler:libark_jsoptimizer_set_with_maple",
+      "$js_root/ecmascript/compiler/codegen/maple/maple_be:libcg",
+    ]
+
+    external_deps = [
+      "runtime_core:libarkfile_static",
+      "zlib:libz",
+      "googletest:gtest",
+    ]
+
+    public_configs = [
+      "$js_root:ecma_test_config",
+      ":arksteed_bytecode_fixture_defines",
+    ]
+
+    defines = [
+      "ARKSTEED_FIXTURE_ABC_DIR=\"$arksteed_bytecode_fixture_abc_dir\"",
+      "ARKSTEED_FIXTURE_ENTRY_POINT=\"arksteed_bytecode_fixture\"",
+    ]
+  }
+
   host_unittest_action("ArkSteedRegisterAllocatorTest") {
     module_out_path = module_output_path
     sources = [ "input_result_alias_test.cpp" ]
+    deps = [
+      "$js_root:libark_jsruntime_test_set",
+      "$js_root/ecmascript/compiler:libark_jsoptimizer_set_with_maple",
+      "$js_root/ecmascript/compiler/codegen/maple/maple_be:libcg",
+    ]
+    external_deps = [
+      "runtime_core:libarkfile_static",
+      "zlib:libz",
+    ]
+  }
+
+  host_unittest_action("ArkSteedSideEffectClassifierTest") {
+    module_out_path = module_output_path
+    sources = [ "side_effect_classifier_test.cpp" ]
+    deps = [
+      "$js_root:libark_jsruntime_test_set",
+      "$js_root/ecmascript/compiler:libark_jsoptimizer_set_with_maple",
+      "$js_root/ecmascript/compiler/codegen/maple/maple_be:libcg",
+    ]
+    external_deps = [
+      "runtime_core:libarkfile_static",
+      "zlib:libz",
+    ]
+  }
+
+  host_unittest_action("ArkSteedWriteBarrierValueKindTest") {
+    module_out_path = module_output_path
+    sources = [ "write_barrier_value_kind_test.cpp" ]
     deps = [
       "$js_root:libark_jsruntime_test_set",
       "$js_root/ecmascript/compiler:libark_jsoptimizer_set_with_maple",
@@ -45,6 +141,119 @@ if (ets_runtime_enable_ark_steed) {
 
     deps = [ "$js_root:libark_jsruntime_test" ]
   }
+
+  # Constant folding (matrix row G4.1u) calls translation units from
+  # arksteed_jit_sources, so it uses the full optimizer source set pattern.
+  host_unittest_action("ArkSteedConstantFoldingTest") {
+    module_out_path = module_output_path
+    sources = [ "constant_folding_test.cpp" ]
+    deps = [
+      "$js_root:libark_jsruntime_test_set",
+      "$js_root/ecmascript/compiler:libark_jsoptimizer_set_with_maple",
+      "$js_root/ecmascript/compiler/codegen/maple/maple_be:libcg",
+    ]
+    external_deps = [
+      "runtime_core:libarkfile_static",
+      "zlib:libz",
+    ]
+  }
+
+  host_unittest_action("ArkSteedDeoptTranslationTest") {
+    module_out_path = module_output_path
+
+    sources = [
+      # test file
+      "deopt_translation_test.cpp",
+      # The domain constructs real constant vertices for GetConstantSourceForDeoptTranslation.
+      # Vertex::New assigns a vertex a debug-only label through NextVertexLabel(), which is defined
+      # in this ArkSteed translation unit; compiling the unit into the target keeps the dependency
+      # pattern light (config ecma_test_config, deps libark_jsruntime_test) while the test still
+      # exercises the real vertex construction.
+      "$js_root/ecmascript/arksteed/arksteed_vertex.cpp",
+    ]
+
+    configs = [
+      "$js_root:ecma_test_config",
+    ]
+
+    deps = [ "$js_root:libark_jsruntime_test" ]
+  }
+
+  # Deopt ABI / frame layout (matrix row G7.1u) reads header-only constants
+  # from arksteed_deopt_abi.h and ArkSteedAssembler::GetParameterRegister, so
+  # it uses the light pattern with libark_jsruntime_test only.
+  host_unittest_action("ArkSteedDeoptAbiTest") {
+    module_out_path = module_output_path
+
+    sources = [
+      # test file
+      "deopt_abi_test.cpp",
+    ]
+
+    configs = [
+      "$js_root:ecma_test_config",
+    ]
+
+    deps = [ "$js_root:libark_jsruntime_test" ]
+  }
+
+  # Symbols of the barrier emitter and the assembler come from the compiler
+  # source set, so this target uses the same heavy dependency pattern as
+  # ArkSteedRegisterAllocatorTest.
+  host_unittest_action("ArkSteedWriteBarrierEmitterTest") {
+    module_out_path = module_output_path
+
+    sources = [
+      # test file
+      "write_barrier_emitter_test.cpp",
+    ]
+
+    deps = [
+      "$js_root:libark_jsruntime_test_set",
+      "$js_root/ecmascript/compiler:libark_jsoptimizer_set_with_maple",
+      "$js_root/ecmascript/compiler/codegen/maple/maple_be:libcg",
+    ]
+    external_deps = [
+      "runtime_core:libarkfile_static",
+      "zlib:libz",
+    ]
+  }
+
+  # Compile-info facts / NodeInfo (matrix row G2.5) calls translation units from
+  # arksteed_jit_sources (arksteed_compile_info_facts.cpp), so it uses the full
+  # optimizer source set pattern. The domain also creates a VM-light fixture
+  # with real JSHClass objects; the runtime source set is linked statically, so
+  # the VM is created from the same objects.
+  host_unittest_action("ArkSteedCompileInfoFactsTest") {
+    module_out_path = module_output_path
+    sources = [ "compile_info_facts_test.cpp" ]
+    deps = [
+      "$js_root:libark_jsruntime_test_set",
+      "$js_root/ecmascript/compiler:libark_jsoptimizer_set_with_maple",
+      "$js_root/ecmascript/compiler/codegen/maple/maple_be:libcg",
+    ]
+    external_deps = [
+      "runtime_core:libarkfile_static",
+      "zlib:libz",
+    ]
+  }
+
+  # The safepoint table (matrix row G8.1) lives in the main ecma_source, so the
+  # light H3 dependency pattern (shared runtime test library) is sufficient.
+  host_unittest_action("ArkSteedSafepointTableTest") {
+    module_out_path = module_output_path
+
+    sources = [
+      # test file
+      "safepoint_table_test.cpp",
+    ]
+
+    configs = [
+      "$js_root:ecma_test_config",
+    ]
+
+    deps = [ "$js_root:libark_jsruntime_test" ]
+  }
 }
 
 group("unittest") {
@@ -53,7 +262,9 @@ group("unittest") {
   # deps file
   deps = []
   if (ets_runtime_enable_ark_steed) {
-    deps += [":ArkSteedPipelineStatisticsTest"]
+    deps += [
+      ":ArkSteedPipelineStatisticsTest",
+    ]
   }
 }
 
@@ -62,6 +273,17 @@ group("arksteed_host_unittest") {
 
   deps = []
   if (ets_runtime_enable_ark_steed) {
-    deps += [ ":ArkSteedRegisterAllocatorTestAction", ":ArkSteedPipelineStatisticsTestAction" ]
+    deps += [
+      ":ArkSteedRegisterAllocatorTestAction",
+      ":ArkSteedSideEffectClassifierTestAction",
+      ":ArkSteedWriteBarrierValueKindTestAction",
+      ":ArkSteedPipelineStatisticsTestAction",
+      ":ArkSteedConstantFoldingTestAction",
+      ":ArkSteedDeoptTranslationTestAction",
+      ":ArkSteedDeoptAbiTestAction",
+      ":ArkSteedWriteBarrierEmitterTestAction",
+      ":ArkSteedCompileInfoFactsTestAction",
+      ":ArkSteedSafepointTableTestAction",
+    ]
   }
 }

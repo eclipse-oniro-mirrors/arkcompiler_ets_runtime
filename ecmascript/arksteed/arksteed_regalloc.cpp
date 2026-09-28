@@ -883,6 +883,15 @@ RegisterT ArkSteedRegisterAllocator::PickRegisterToFree(RegListBase<RegisterT> r
     return best;
 }
 
+// The test target instantiates FreeUnblockedRegister (and therefore this helper)
+// in its own translation unit. Without an explicit definition here, LTO Release
+// links drop the unreferenced implicit instantiation and fail with an undefined
+// symbol for the concrete register types.
+template ArkSteedRegister
+ArkSteedRegisterAllocator::PickRegisterToFree(RegListBase<ArkSteedRegister> reserved);
+template ArkSteedDoubleRegister
+ArkSteedRegisterAllocator::PickRegisterToFree(RegListBase<ArkSteedDoubleRegister> reserved);
+
 void ArkSteedRegisterAllocator::Spill(ValueVertex *vertex)
 {
     if (vertex->GetRegallocInfo()->IsLoadable()) {
