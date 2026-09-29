@@ -22,6 +22,8 @@ test_js_files = [
   "termination_2",
   "termination_3",
   "termination",
+  "microtask_scope_dep",
+  "microtask_scope_main",
 ]
 
 test_ts_files = [
@@ -143,6 +145,13 @@ host_unittest_action("Jsnapi_003_Test") {
   foreach(file, test_js_files) {
     deps += [ ":gen_${file}_abc" ]
   }
+
+  if (is_ohos && is_standard_system) {
+    test_abc_dir = "/data/test/"
+  } else {
+    test_abc_dir = rebase_path(target_out_dir)
+  }
+  defines = ["ABC_PATH=\"${test_abc_dir}/\""]
 
   # hiviewdfx libraries
   external_deps = hiviewdfx_ext_deps

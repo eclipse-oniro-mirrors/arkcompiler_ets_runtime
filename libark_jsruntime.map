@@ -97,6 +97,7 @@
       panda::JsiRuntimeCallInfo::*;
       panda::JsiNativeScope::*;
       panda::JsiFastNativeScope::*;
+      panda::JsiMicrotaskScope::*;
       panda::JSExecutionScope::*;
       common::BaseRuntime::*;
       common::HeapAllocator::*;

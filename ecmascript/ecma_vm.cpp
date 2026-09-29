@@ -2183,6 +2183,27 @@ bool EcmaVM::ExecutePromisePendingJob()
     }
     return false;
 }
+
+bool EcmaVM::OpenMicrotaskScope()
+{
+    if (microtaskScopeOpen_) {
+        LOG_ECMA(ERROR) << "EcmaVM::OpenMicrotaskScope nested open is not allowed";
+        return false;
+    }
+    microtaskScopeOpen_ = true;
+    return true;
+}
+
+bool EcmaVM::CloseMicrotaskScope()
+{
+    if (!microtaskScopeOpen_) {
+        LOG_ECMA(ERROR) << "EcmaVM::CloseMicrotaskScope without matching open";
+        return false;
+    }
+    microtaskScopeOpen_ = false;
+    return true;
+}
+
 // just find unshared constpool, not create
 JSTaggedValue EcmaVM::FindUnsharedConstpool(JSTaggedValue sharedConstpool)
 {

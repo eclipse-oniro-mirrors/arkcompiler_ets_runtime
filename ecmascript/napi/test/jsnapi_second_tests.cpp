@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024 Huawei Device Co., Ltd.
+ * Copyright (c) 2023-2026 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -2275,5 +2275,177 @@ HWTEST_F_L0(JSNApiTests, NewConcurrentClassFunctionWithNameCase3_InlinePropLimit
             << "Non-static property key[" << trueIdx << "] has incorrect value, expected " << trueIdx << " but got "
             << realVal;
     }
+}
+
+class MicrotaskScopeModuleTest : public testing::Test {
+public:
+    static void SetUpTestCase()
+    {
+        GTEST_LOG_(INFO) << "SetUpTestCase";
+    }
+
+    static void TearDownTestCase()
+    {
+        GTEST_LOG_(INFO) << "TearDownCase";
+    }
+
+    void SetUp() override
+    {
+        TestHelper::CreateEcmaVMWithScope(instance, thread, scope);
+    }
+
+    void TearDown() override
+    {
+        TestHelper::DestroyEcmaVMWithScope(instance, scope);
+    }
+
+protected:
+    EcmaVM *instance {nullptr};
+    ecmascript::EcmaHandleScope *scope {nullptr};
+    JSThread *thread {nullptr};
+
+    static bool IsMicrotaskDone(const EcmaVM *vm)
+    {
+        Local<ObjectRef> globalObject = JSNApi::GetGlobalObject(vm);
+        Local<JSValueRef> done = globalObject->Get(vm, StringRef::NewFromUtf8(vm, "microtaskDone"));
+        return done->IsTrue();
+    }
+
+    static bool ExecuteMicrotaskScopeMain(const EcmaVM *vm)
+    {
+        std::string baseFileName = ABC_PATH "microtask_scope_main.abc";
+        return JSNApi::Execute(vm, baseFileName, "microtask_scope_main");
+    }
+};
+
+/**
+ * @tc.number: microtask_scope_api_001
+ * @tc.name: MicrotaskScopeIsOpened
+ * @tc.desc: IsOpened reflects the scope state of the vm: false on a fresh vm, true while a scope is
+ *           alive, false after it is destroyed, and the state is reusable across sequential scopes
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(MicrotaskScopeModuleTest, MicrotaskScopeIsOpened)
+{
+    ecmascript::ThreadNativeScope nativeScope(thread);
+
+    // no scope is open on a fresh vm
+    ASSERT_FALSE(JsiMicrotaskScope::IsOpened(instance));
+    {
+        JsiMicrotaskScope firstScope(instance);
+        ASSERT_TRUE(JsiMicrotaskScope::IsOpened(instance));
+    }
+    ASSERT_FALSE(JsiMicrotaskScope::IsOpened(instance));
+    {
+        JsiMicrotaskScope secondScope(instance);
+        ASSERT_TRUE(JsiMicrotaskScope::IsOpened(instance));
+    }
+    ASSERT_FALSE(JsiMicrotaskScope::IsOpened(instance));
+}
+
+/**
+ * @tc.number: microtask_scope_api_002
+ * @tc.name: MicrotaskScopeSuppressModuleMicrotask
+ * @tc.desc: While a scope is open, the microtask drain at the end of module evaluation is suppressed;
+ *           when the scope is destroyed, the still-queued microtask is drained once and runs
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(MicrotaskScopeModuleTest, MicrotaskScopeSuppressModuleMicrotask)
+{
+    ecmascript::ThreadNativeScope nativeScope(thread);
+    JSNApi::EnableUserUncaughtErrorHandler(instance);
+
+    {
+        JsiMicrotaskScope scopeGuard(instance);
+
+        // each test gets a fresh VM, so the module with the static import is not yet loaded;
+        // the drains at the end of module evaluation are suppressed by the queue gate
+        ASSERT_TRUE(ExecuteMicrotaskScopeMain(instance));
+        ASSERT_FALSE(IsMicrotaskDone(instance));
+    }
+
+    // the scope was closed and the pending microtask queue was drained once
+    ASSERT_TRUE(IsMicrotaskDone(instance));
+}
+
+/**
+ * @tc.number: microtask_scope_api_003
+ * @tc.name: MicrotaskScopeNestedOpenIsNoOp
+ * @tc.desc: Creating a scope while an outer one is open is rejected by the vm; the nested scope stays
+ *           passive (its destructor is a no-op), the outer scope keeps suppressing, and the queue is
+ *           drained exactly once when the outermost scope is destroyed
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(MicrotaskScopeModuleTest, MicrotaskScopeNestedOpenIsNoOp)
+{
+    ecmascript::ThreadNativeScope nativeScope(thread);
+    JSNApi::EnableUserUncaughtErrorHandler(instance);
+
+    {
+        JsiMicrotaskScope outerScope(instance);
+        ASSERT_TRUE(JsiMicrotaskScope::IsOpened(instance));
+        {
+            // the nested open is rejected (the "nested open is not allowed" ERROR log is expected);
+            // the inner scope stays passive and never owns the gate
+            JsiMicrotaskScope innerScope(instance);
+            ASSERT_TRUE(JsiMicrotaskScope::IsOpened(instance));
+        }
+
+        // the inner scope's destructor was a no-op: the gate is still held by the outer scope
+        ASSERT_TRUE(JsiMicrotaskScope::IsOpened(instance));
+
+        // suppression is still in effect under the outer scope
+        ASSERT_TRUE(ExecuteMicrotaskScopeMain(instance));
+        ASSERT_FALSE(IsMicrotaskDone(instance));
+    }
+    ASSERT_FALSE(JsiMicrotaskScope::IsOpened(instance));
+
+    // the queue is drained exactly once, when the outermost scope is destroyed
+    ASSERT_TRUE(IsMicrotaskDone(instance));
+}
+
+/**
+ * @tc.number: microtask_scope_api_004
+ * @tc.name: MicrotaskScopeModuleMicrotaskBaseline
+ * @tc.desc: Without a scope, the microtask enqueued during module evaluation is drained when the
+ *           module evaluation finishes
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(MicrotaskScopeModuleTest, MicrotaskScopeModuleMicrotaskBaseline)
+{
+    ecmascript::ThreadNativeScope nativeScope(thread);
+    JSNApi::EnableUserUncaughtErrorHandler(instance);
+
+    ASSERT_TRUE(ExecuteMicrotaskScopeMain(instance));
+
+    // without a scope the reaction is drained when the module evaluation finishes
+    ASSERT_TRUE(IsMicrotaskDone(instance));
+}
+
+/**
+ * @tc.number: microtask_scope_api_005
+ * @tc.name: MicrotaskScopeCloseWithoutOpenIsRejected
+ * @tc.desc: Closing the microtask scope without a matching open is rejected by the vm and leaves the
+ *           state unchanged; the vm stays usable, a subsequent open and close still succeed
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(MicrotaskScopeModuleTest, MicrotaskScopeCloseWithoutOpenIsRejected)
+{
+    ecmascript::ThreadNativeScope nativeScope(thread);
+
+    // the unmatched close is rejected (the "without matching open" ERROR log is expected)
+    // and leaves the scope closed
+    ASSERT_FALSE(instance->CloseMicrotaskScope());
+    ASSERT_FALSE(JsiMicrotaskScope::IsOpened(instance));
+
+    // the rejected close does not corrupt the state: open and close still succeed
+    ASSERT_TRUE(instance->OpenMicrotaskScope());
+    ASSERT_TRUE(instance->CloseMicrotaskScope());
+    ASSERT_FALSE(JsiMicrotaskScope::IsOpened(instance));
 }
 } // namespace panda::test
