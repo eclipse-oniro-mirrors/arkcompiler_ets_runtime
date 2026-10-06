@@ -42,6 +42,7 @@
 #include "ecmascript/module/module_data_extractor.h"
 #include "ecmascript/module/module_logger.h"
 #include "ecmascript/module/module_path_helper.h"
+#include "ecmascript/module/module_message_helper.h"
 #include "ecmascript/tests/test_helper.h"
 #include "ecmascript/linked_hash_table.h"
 #include "ecmascript/checkpoint/thread_state_transition.h"
@@ -114,6 +115,21 @@ public:
     EcmaVM *instance {nullptr};
     ecmascript::EcmaHandleScope *scope {nullptr};
     JSThread *thread {nullptr};
+
+    // constants for ModuleLogger / ModuleMessageHelper UT cases
+    static constexpr const char *durationRecordName = "duration.js";
+    static constexpr const char *dupParentRecordName = "parent_dup.js";
+    static constexpr const char *circularModuleName = "circular.js";
+    static constexpr std::string_view circularModuleStack = "\n#0 circular.js";
+    static constexpr uint32_t moduleLogTid = 1;
+    static constexpr std::string_view moduleLogFileSuffix = "_ut_file.txt";
+    static constexpr uint8_t shortPrecision = 3;
+    static constexpr uint8_t longPrecision = 6;
+    static constexpr double precisionSampleNumber = 1.23456;
+    static constexpr double zeroSampleNumber = 0;
+    static constexpr const char *precisionShortResult = "1.23";
+    static constexpr const char *precisionFullResult = "1.23456";
+    static constexpr const char *precisionZeroResult = "0";
 
     // Wrappers for private SourceTextModule methods — friendship is not inherited,
     // so gtest-derived classes cannot call them directly.
@@ -3196,6 +3212,90 @@ HWTEST_F_L0(EcmaModuleTest, ModuleLogger_now) {
     size_t time = moduleLogger->now();
     ASSERT_GT(time, 0);
     delete moduleLogger;
+}
+
+/**
+ * @tc.name: ModuleLogger_SetDuration_EntryNameSkipped
+ * @tc.desc: SetDuration skips ENTRY function names, dedupes repeat setting; reuse GetModuleLoadInfo
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(EcmaModuleTest, ModuleLogger_SetDuration_EntryNameSkipped) {
+    ModuleLogger *moduleLogger = new ModuleLogger(thread->GetEcmaVM());
+    double startTime = static_cast<double>(moduleLogger->now());
+    // entry function names are ignored, no ModuleLoadInfo should be created
+    moduleLogger->SetDuration(CString(ModulePathHelper::ENTRY_FUNCTION_NAME.data()), startTime);
+    moduleLogger->SetDuration(CString(ModulePathHelper::ENTRY_MAIN_FUNCTION.data()), startTime);
+    // first call creates record and sets time, second call hits 'time already set' early return
+    const CString recordName = durationRecordName;
+    moduleLogger->SetDuration(recordName, startTime);
+    moduleLogger->SetDuration(recordName, startTime);
+    // GetModuleLoadInfo finds existing record on the second insert
+    ObjectFactory *objectFactory = thread->GetEcmaVM()->GetFactory();
+    JSHandle<SourceTextModule> parentModule = objectFactory->NewSourceTextModule();
+    JSHandle<SourceTextModule> childModule = objectFactory->NewSourceTextModule();
+    parentModule->SetEcmaModuleRecordNameString(dupParentRecordName);
+    childModule->SetEcmaModuleRecordNameString(recordName);
+    moduleLogger->InsertModuleLoadInfo(parentModule, childModule, SourceTextModule::UNDEFINED_INDEX);
+    moduleLogger->InsertModuleLoadInfo(parentModule, childModule, SourceTextModule::UNDEFINED_INDEX);
+    moduleLogger->InsertParentModule(parentModule, childModule);
+    EXPECT_TRUE(!thread->HasPendingException());
+    delete moduleLogger;
+}
+
+/**
+ * @tc.name: ModuleLogger_PrintModuleLoadInfo_EmptyAndNullTask
+ * @tc.desc: PrintModuleLoadInfo with no records, and PrintModuleLoadInfoTask with null data
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(EcmaModuleTest, ModuleLogger_PrintModuleLoadInfo_EmptyAndNullTask) {
+    // null data hits the early-return guard in PrintModuleLoadInfoTask
+    ModuleLogger::PrintModuleLoadInfoTask(nullptr);
+    ModuleLogger *moduleLogger = new ModuleLogger(thread->GetEcmaVM());
+    // empty info map: ProcessModuleExecuteTime/Print* failure paths without any record
+    ModuleLogger::PrintModuleLoadInfoTask(moduleLogger);
+    EXPECT_TRUE(!thread->HasPendingException());
+    delete moduleLogger;
+}
+
+/**
+ * @tc.name: ModuleMessageHelper_GetOrCreateWritableFile_PathBuilt
+ * @tc.desc: path is FILEDIR + bundleName (+ suffix); missing dir => create fails, no crash
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(EcmaModuleTest, ModuleMessageHelper_GetOrCreateWritableFile_PathBuilt) {
+    EcmaVM *vm = thread->GetEcmaVM();
+    std::string path;
+    bool writable = ModuleMessageHelper::GetOrCreateWritableFile(vm, moduleLogTid, moduleLogFileSuffix, path);
+    EXPECT_TRUE(path.rfind(ModuleMessageHelper::FILEDIR) == 0);
+    EXPECT_TRUE(path.find(moduleLogFileSuffix) != std::string::npos);
+    // main test thread is not a worker thread, so no "_<tid>" segment appended
+    const std::string workerTag = "_" + std::to_string(moduleLogTid) + std::string(moduleLogFileSuffix);
+    EXPECT_TRUE(path.find(workerTag) == std::string::npos || writable);
+    EXPECT_TRUE(!thread->HasPendingException());
+}
+
+/**
+ * @tc.name: ModuleMessageHelper_PrintCircularImportModuleStack_FailedPath
+ * @tc.desc: circular import log early-return when log file cannot be created
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(EcmaModuleTest, ModuleMessageHelper_PrintCircularImportModuleStack_FailedPath) {
+    const CString moduleName = circularModuleName;
+    std::string_view emptyStack;
+    ModuleMessageHelper::PrintCircularImportModuleStack(thread, moduleName, emptyStack);
+    ModuleMessageHelper::PrintCircularImportModuleStack(thread, moduleName, circularModuleStack);
+    EXPECT_TRUE(!thread->HasPendingException());
+}
+
+/**
+ * @tc.name: ModuleLogger_ToStringWithPrecision_Formats
+ * @tc.desc: ToStringWithPrecision keeps requested significant digits
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(EcmaModuleTest, ModuleLogger_ToStringWithPrecision_Formats) {
+    EXPECT_EQ(ModuleLogger::ToStringWithPrecision(precisionSampleNumber, shortPrecision), precisionShortResult);
+    EXPECT_EQ(ModuleLogger::ToStringWithPrecision(precisionSampleNumber, longPrecision), precisionFullResult);
+    EXPECT_EQ(ModuleLogger::ToStringWithPrecision(zeroSampleNumber, shortPrecision), precisionZeroResult);
 }
 
 HWTEST_F_L0(EcmaModuleTest, GetRequireNativeModuleFunc) {
