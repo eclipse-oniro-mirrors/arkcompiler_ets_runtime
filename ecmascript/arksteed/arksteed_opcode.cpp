@@ -910,24 +910,6 @@ void StringEqualVertex::SetValueLocationConstraints()
     SetStubValueLocationConstraints(this, GetInputCount());
 }
 
-template <class VertexT>
-void VerifyI32BinaryDeoptInputs(const VertexT *vertex)
-{
-    ASSERT(vertex->GetInputCount() == VertexT::NUM_INPUTS);
-    ASSERT(vertex->GetInput(VertexT::LEFT_INDEX)->GetValueRepresentation() == ValueRepresentation::INT32);
-    ASSERT(vertex->GetInput(VertexT::RIGHT_INDEX)->GetValueRepresentation() == ValueRepresentation::INT32);
-}
-
-void I32AddWithOverflowVertex::VerifyI32BinOpInputs() const
-{
-    VerifyI32BinaryDeoptInputs(this);
-}
-
-void I32SubWithOverflowVertex::VerifyI32BinOpInputs() const
-{
-    VerifyI32BinaryDeoptInputs(this);
-}
-
 #if defined(PANDA_TARGET_AMD64)
 #define DEFINE_I32_WITH_OVERFLOW_RESULT_CONSTRAINT() DefineSameAsFirst(this)
 #else
@@ -946,16 +928,6 @@ DEFINE_I32_WITH_OVERFLOW_CONSTRAINTS(Add)
 DEFINE_I32_WITH_OVERFLOW_CONSTRAINTS(Sub)
 #undef DEFINE_I32_WITH_OVERFLOW_CONSTRAINTS
 #undef DEFINE_I32_WITH_OVERFLOW_RESULT_CONSTRAINT
-
-void I32MulWithOverflowVertex::VerifyI32BinOpInputs() const
-{
-    VerifyI32BinaryDeoptInputs(this);
-}
-
-void I32DivWithOverflowVertex::VerifyI32BinOpInputs() const
-{
-    VerifyI32BinaryDeoptInputs(this);
-}
 
 void I32MulWithOverflowVertex::SetValueLocationConstraints()
 {
@@ -1090,28 +1062,6 @@ void I32BNotVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(VALUE_INDEX));
     DefineSameAsFirst(this);
-}
-
-template <class VertexT>
-void VerifyI32UnaryDeoptInputs(const VertexT *vertex)
-{
-    ASSERT(vertex->GetInputCount() == VertexT::NUM_INPUTS);
-    ASSERT(vertex->GetInput(VertexT::VALUE_INDEX)->GetValueRepresentation() == ValueRepresentation::INT32);
-}
-
-void I32NegWithOverflowVertex::VerifyI32UnaryOpInputs() const
-{
-    VerifyI32UnaryDeoptInputs(this);
-}
-
-void I32IncWithOverflowVertex::VerifyI32UnaryOpInputs() const
-{
-    VerifyI32UnaryDeoptInputs(this);
-}
-
-void I32DecWithOverflowVertex::VerifyI32UnaryOpInputs() const
-{
-    VerifyI32UnaryDeoptInputs(this);
 }
 
 #if defined(PANDA_TARGET_AMD64)

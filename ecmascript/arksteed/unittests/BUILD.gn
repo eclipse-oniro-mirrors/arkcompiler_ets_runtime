@@ -197,6 +197,32 @@ if (ets_runtime_enable_ark_steed) {
     ]
   }
 
+  # Shared DCE contract: the removal proof gate
+  # (`DceRemovalPolicy`), the complete dependency enumeration (`DceDependencies`)
+  # and the graph filtering authority (`DceGraphEditor`) live in one component
+  # pair, `arksteed_dce.{h,cpp}`. The target drives the production symbols over a
+  # VM-free graph fixture and a real `ArkSteedGraphVerifier` run, so it uses the
+  # same heavy dependency pattern as `ArkSteedConstantFoldingTest`.
+  host_unittest_action("ArkSteedDceTest") {
+    module_out_path = module_output_path
+    sources = [
+      "dce_closure_test.cpp",
+      "dce_editor_test.cpp",
+      "dce_policy_test.cpp",
+      "dce_test_fixture.cpp",
+    ]
+    configs = [ "$js_root:ecma_test_config" ]
+    deps = [
+      "$js_root:libark_jsruntime_test_set",
+      "$js_root/ecmascript/compiler:libark_jsoptimizer_set_with_maple",
+      "$js_root/ecmascript/compiler/codegen/maple/maple_be:libcg",
+    ]
+    external_deps = [
+      "runtime_core:libarkfile_static",
+      "zlib:libz",
+    ]
+  }
+
   host_unittest_action("ArkSteedDeoptTranslationTest") {
     module_out_path = module_output_path
 
@@ -435,6 +461,7 @@ group("arksteed_host_unittest") {
       ":ArkSteedSideEffectClassifierTestAction",
       ":ArkSteedWriteBarrierValueKindTestAction",
       ":ArkSteedConstantFoldingTestAction",
+      ":ArkSteedDceTestAction",
       ":ArkSteedDeoptTranslationTestAction",
       ":ArkSteedDeoptAbiTestAction",
       ":ArkSteedWriteBarrierEmitterTestAction",

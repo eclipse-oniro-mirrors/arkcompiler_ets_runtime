@@ -14,7 +14,12 @@
  */
 
 //! METHOD switch_true_nested
-//! HAS TaggedNotEqual
+// Core DCE (ISSUE-0102) removes this dead TaggedNotEqual value: the branch
+// carries the live comparison and no surviving vertex or frame state references
+// it. The case still exercises the retained `switch (true)` dispatch with its
+// nested `if` and inner `switch`; the printed results check the selected case
+// bodies.
+//! HAS_NOT TaggedNotEqual
 //! COMPILE_COUNT_GE switch_true_nested 1
 //! EXEC_COUNT_GE *switch_true_nested 1
 //! DEOPT_COUNT *Deoptimize* 0

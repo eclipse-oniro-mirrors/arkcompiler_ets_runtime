@@ -14,7 +14,12 @@
  */
 
 //! METHOD if_nested_2
-//! HAS I32ConditionCheck
+// Core DCE (ISSUE-0102) removes this dead I32ConditionCheck value: the branch
+// carries the live comparison and no surviving vertex or frame state references
+// it. The case still exercises the nested-if chains of the early and late RPO
+// blocks and the final merge Phis; the printed sums check the retained
+// `x > 10`, `x < 20` and deeper nested comparison branches.
+//! HAS_NOT I32ConditionCheck
 //! COMPILE_COUNT_GE if_nested_2 1
 //! EXEC_COUNT_GE *if_nested_2 1
 //! DEOPT_COUNT *Deoptimize* 0

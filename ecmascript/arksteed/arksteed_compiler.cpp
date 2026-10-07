@@ -25,6 +25,7 @@
 #include "ecmascript/arksteed/arksteed_deopt_helper.h"
 #include "ecmascript/arksteed/arksteed_graph_builder.h"
 #include "ecmascript/arksteed/arksteed_codegen.h"
+#include "ecmascript/arksteed/arksteed_dce.h"
 #include "ecmascript/arksteed/arksteed_graph_printer.h"
 #include "ecmascript/arksteed/arksteed_graph_processor.h"
 #include "ecmascript/arksteed/arksteed_graph_verifier.h"
@@ -258,9 +259,24 @@ bool ArkSteedCompilerTask::Compile()
         WriteBarrierValueKindPass writeBarrierValueKindPass(graph_);
         writeBarrierValueKindPass.Run();
     }
-#ifndef NDEBUG
+
+    // Verify graph integrity before the DCE boundary
     VerifyGraph(graph_);
-#endif
+
+    // Core dead-value/Phi elimination. It runs after the existing producers
+    // (graph construction, CSE/folding and `WriteBarrierValueKindPass`) and
+    // before allocation metadata, location constraints, maximum call depth and
+    // allocator liveness, so all four pre-regalloc consumers observe the final
+    // filtered graph. The pass has no failure result: the graph is verified
+    // immediately before this boundary and Release trusts internal IR;
+    // unknown effects are retained by the removal policy.
+    {
+        ArkSteedPipelineStatistics stats(pipelineStatistics_, "CoreDce");
+        ArkSteedDce::Run(graph_);
+    }
+
+    // Verify graph integrity after the DCE boundary
+    VerifyGraph(graph_);
     RunPreRegallocProcessors();
 
     // Print graph with labeller if option is enabled

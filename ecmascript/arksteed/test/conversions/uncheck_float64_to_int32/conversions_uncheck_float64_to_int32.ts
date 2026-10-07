@@ -13,6 +13,12 @@
  * limitations under the License.
  */
 
+//! METHOD f4
+// Core DCE (ISSUE-0102) removes this dead F64ConditionCheck value: the branch
+// carries the live comparison and no surviving vertex or frame state references
+// it. The retained `x++` increment and returned value still produce the printed
+// result, and the method still deopts on the large double operand.
+//! HAS_NOT F64ConditionCheck
 // Test scenario: No deopt check when storing a float value to an int typed array.
 function f1(x) {
     x = x * 1.1;

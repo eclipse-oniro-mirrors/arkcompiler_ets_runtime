@@ -16,6 +16,10 @@
 #ifndef ECMASCRIPT_ARKSTEED_GRAPH_BUILDER_NEW_H
 #define ECMASCRIPT_ARKSTEED_GRAPH_BUILDER_NEW_H
 
+#include <cstdint>
+#include <map>
+#include <tuple>
+
 #include "ecmascript/arksteed/arksteed_bb.h"
 #include "ecmascript/arksteed/arksteed_bc_frame_state.h"
 #include "ecmascript/arksteed/arksteed_bytecode_analysis.h"
@@ -28,6 +32,7 @@ class CompileInfoFacts;
 class Graph;
 class LoopEffects;
 struct SideEffectDescriptor;
+
 
 class GraphBuilder {
 public:

@@ -106,6 +106,20 @@ public:
     DEFAULT_MOVE_SEMANTIC(ChunkUnorderedMap);
 };
 
+template<typename K, typename Hash = std::hash<K>, typename KeyEqual = std::equal_to<K>>
+class PUBLIC_API ChunkUnorderedSet : public std::unordered_set<K, Hash, KeyEqual, ChunkAllocator<K>> {
+public:
+    // NOLINTNEXTLINE(readability-magic-numbers)
+    explicit ChunkUnorderedSet(Chunk *chunk, size_t bucket_count = 100)
+        : std::unordered_set<K, Hash, KeyEqual, ChunkAllocator<K>>(
+              bucket_count, Hash(), KeyEqual(), ChunkAllocator<K>(chunk))
+    {
+    }
+    ~ChunkUnorderedSet() = default;
+    NO_COPY_SEMANTIC(ChunkUnorderedSet);
+    DEFAULT_MOVE_SEMANTIC(ChunkUnorderedSet);
+};
+
 template<typename K, typename V, typename Compare = std::less<K>>
 class PUBLIC_API ChunkMultimap : public std::multimap<K, V, Compare, ChunkAllocator<std::pair<const K, V>>> {
 public:

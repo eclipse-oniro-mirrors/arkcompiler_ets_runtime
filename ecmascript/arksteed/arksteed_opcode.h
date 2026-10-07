@@ -114,6 +114,55 @@ struct HasInputTypes : std::false_type {};
 
 template <typename T>
 struct HasInputTypes<T, decltype(void(T::INPUT_TYPES))> : std::true_type {};
+
+// Non-asserting helpers of the per-opcode input contracts below. The concrete
+// `VerifyInputs()` implementations assert those contracts, but `ASSERT` is
+// Debug-only. Each contract hook next to its opcode calls these helpers, and
+// the normal Debug `ArkSteedGraphVerifier` consumes the same contract through
+// `VerifyInputs()`. The stored input count is always read through the `Vertex`
+// base on purpose: `FixedInputVertexMixin::GetInputCount()` is a static
+// compile-time accessor that hides the stored `InputCountField`.
+template <typename VertexT>
+uint32_t StoredInputCount(const VertexT *vertex)
+{
+    return static_cast<const Vertex *>(vertex)->GetInputCount();
+}
+
+// The expected count is deliberately a 64-bit value: the descriptor-backed call
+// contracts add `FIRST_ARG_INDEX + actualArgc_`, and a corrupted 32-bit actual
+// argument count would wrap that sum into an accepted small stored arity. The
+// bounded slot reads of those contracts would then address inputs the call was
+// not allocated with, so the caller computes the sum in 64-bit arithmetic and
+// the comparison against the stored (16-bit) count widens instead of truncating.
+template <typename VertexT>
+bool CheckStoredArity(const VertexT *vertex, uint64_t expected)
+{
+    return static_cast<uint64_t>(StoredInputCount(vertex)) == expected;
+}
+
+// Reads no slot when the stored arity does not cover `index`, so a real object
+// whose stored arity is malformed cannot cause an out-of-bounds read here.
+template <typename VertexT>
+bool CheckSlotRepresentation(const VertexT *vertex, uint32_t index, ValueRepresentation expected)
+{
+    if (index >= StoredInputCount(vertex)) {
+        return false;
+    }
+    const ValueVertex *input = vertex->GetInput(index);
+    return input != nullptr && input->GetValueRepresentation() == expected;
+}
+
+template <typename VertexT>
+bool CheckAllSlotRepresentations(const VertexT *vertex, ValueRepresentation expected)
+{
+    const uint32_t storedCount = StoredInputCount(vertex);
+    for (uint32_t index = 0; index < storedCount; ++index) {
+        if (!CheckSlotRepresentation(vertex, index, expected)) {
+            return false;
+        }
+    }
+    return true;
+}
 }  // namespace details
 
 /**
@@ -457,6 +506,18 @@ public:
     {
         ASSERT(HasCatchBlock() && "Check required.");
         ASSERT(catchPredIndex_ != NULL_INDEX);
+        return catchPredIndex_;
+    }
+
+    // Non-asserting inspection of the stored catch-predecessor index. A DCE
+    // integrity check must be able to reject a malformed sentinel index before
+    // the asserting accessor above is invoked, so this accessor reads the stored
+    // field without asserting, mutation or allocation. It changes no layout and
+    // no valid-case semantics; ordinary consumers keep using
+    // `GetCatchPredecessorIndex()`. The value equals `NULL_INDEX` when no index
+    // was stored.
+    uint32_t GetStoredCatchPredecessorIndex() const
+    {
         return catchPredIndex_;
     }
 
@@ -1059,12 +1120,19 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return holderDepth_ != 0 && details::CheckStoredArity(this, NUM_INPUTS) &&
+               expectedHClassHandleIndices_.size() == holderDepth_ &&
+               details::CheckSlotRepresentation(this, RECEIVER_INDEX, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(holderDepth_ != 0);
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(expectedHClassHandleIndices_.size() == holderDepth_);
-        ASSERT(GetInput(RECEIVER_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(CheckInputs());
     }
 
 private:
@@ -1082,7 +1150,7 @@ public:
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::TAGGED,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit ConvertHoleToUndefinedVertex() : FixedInputVertexMixin() {}
 
@@ -1436,10 +1504,18 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, VALUE_INDEX + 1) &&
+               details::CheckSlotRepresentation(this, VALUE_INDEX, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == VALUE_INDEX + 1);
-        ASSERT(GetInput(VALUE_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(CheckInputs());
     }
 
 private:
@@ -1474,11 +1550,19 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, OBJECT_INDEX + 1) &&
+               details::CheckSlotRepresentation(this, GLUE_INDEX, ValueRepresentation::INT_PTR) &&
+               details::CheckSlotRepresentation(this, OBJECT_INDEX, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == OBJECT_INDEX + 1);
-        ASSERT(GetInput(GLUE_INDEX)->GetValueRepresentation() == ValueRepresentation::INT_PTR);
-        ASSERT(GetInput(OBJECT_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(CheckInputs());
     }
 
 private:
@@ -1627,14 +1711,20 @@ public:
 
     void SetValueLocationConstraints();
 
-    void VerifyInputs() const
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
     {
-        ASSERT(GetInputCount() == VALUE_INDEX + 1);
-        ASSERT(GetInput(STORE_TARGET_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
-        ASSERT(GetInput(VALUE_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        return details::CheckStoredArity(this, VALUE_INDEX + 1) &&
+               details::CheckSlotRepresentation(this, STORE_TARGET_INDEX, ValueRepresentation::TAGGED) &&
+               details::CheckSlotRepresentation(this, VALUE_INDEX, ValueRepresentation::TAGGED);
     }
 
-private:
+    void VerifyInputs() const
+    {
+        ASSERT(CheckInputs());
+    }
 };
 
 class StoreDoubleFieldWithRepVertex : public VertexMixin<NonControlVertex, StoreDoubleFieldWithRepVertex>,
@@ -1656,14 +1746,20 @@ public:
 
     void SetValueLocationConstraints();
 
-    void VerifyInputs() const
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
     {
-        ASSERT(GetInputCount() == VALUE_INDEX + 1);
-        ASSERT(GetInput(STORE_TARGET_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
-        ASSERT(GetInput(VALUE_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        return details::CheckStoredArity(this, VALUE_INDEX + 1) &&
+               details::CheckSlotRepresentation(this, STORE_TARGET_INDEX, ValueRepresentation::TAGGED) &&
+               details::CheckSlotRepresentation(this, VALUE_INDEX, ValueRepresentation::TAGGED);
     }
 
-private:
+    void VerifyInputs() const
+    {
+        ASSERT(CheckInputs());
+    }
 };
 
 struct StoreTaggedFieldByHClassCase {
@@ -1710,13 +1806,20 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return !cases_.empty() && details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, GLUE_INDEX, ValueRepresentation::INT_PTR) &&
+               details::CheckSlotRepresentation(this, OBJECT_INDEX, ValueRepresentation::TAGGED) &&
+               details::CheckSlotRepresentation(this, VALUE_INDEX, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(!cases_.empty());
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(GLUE_INDEX)->GetValueRepresentation() == ValueRepresentation::INT_PTR);
-        ASSERT(GetInput(OBJECT_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
-        ASSERT(GetInput(VALUE_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(CheckInputs());
     }
 
 private:
@@ -1856,9 +1959,15 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Shared input contract for the Debug verifier and assertion wrapper.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, static_cast<uint64_t>(FIRST_ARG_INDEX) + actualArgc_);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == FIRST_ARG_INDEX + actualArgc_);
+        ASSERT(CheckInputs());
     }
 
 private:
@@ -2030,12 +2139,16 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Shared input contract for the Debug verifier and assertion wrapper.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, static_cast<uint64_t>(FIRST_ARG_INDEX) + GetActualArgc()) &&
+               details::CheckAllSlotRepresentations(this, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == FIRST_ARG_INDEX + actualArgc_);
-        for (uint32_t index = 0; index < GetInputCount(); ++index) {
-            ASSERT(GetInput(index)->GetValueRepresentation() == ValueRepresentation::TAGGED);
-        }
+        ASSERT(CheckInputs());
     }
 
 private:
@@ -2096,14 +2209,28 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        if (!details::CheckStoredArity(this, static_cast<uint64_t>(FIRST_ARG_INDEX) + actualArgc_)) {
+            return false;
+        }
+        if (!(builtinId_ > kungfu::BuiltinsStubCSigns::ID::NONE) ||
+            !(builtinId_ < kungfu::BuiltinsStubCSigns::ID::NUM_OF_BUILTINS_ID)) {
+            return false;
+        }
+        if (entryKind_ != BuiltinCallEntryKind::FAST_STUB &&
+            entryKind_ != BuiltinCallEntryKind::NATIVE_CPP) {
+            return false;
+        }
+        return !UsesFastStub() || actualArgc_ <= 3U;
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == FIRST_ARG_INDEX + actualArgc_);
-        ASSERT(builtinId_ > kungfu::BuiltinsStubCSigns::ID::NONE);
-        ASSERT(builtinId_ < kungfu::BuiltinsStubCSigns::ID::NUM_OF_BUILTINS_ID);
-        ASSERT(entryKind_ == BuiltinCallEntryKind::FAST_STUB ||
-               entryKind_ == BuiltinCallEntryKind::NATIVE_CPP);
-        ASSERT(!UsesFastStub() || actualArgc_ <= 3U);  // 3U: fast stubs accept at most three actual arguments
+        ASSERT(CheckInputs());
     }
 
 private:
@@ -2162,12 +2289,18 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, static_cast<uint64_t>(FIRST_ARG_INDEX) + actualArgc_) &&
+               details::CheckAllSlotRepresentations(this, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == FIRST_ARG_INDEX + actualArgc_);
-        for (uint32_t index = 0; index < GetInputCount(); ++index) {
-            ASSERT(GetInput(index)->GetValueRepresentation() == ValueRepresentation::TAGGED);
-        }
+        ASSERT(CheckInputs());
     }
 
 private:
@@ -2481,9 +2614,17 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::StoredInputCount(this) >= 1;
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() >= 1);
+        ASSERT(CheckInputs());
     }
 
 private:
@@ -2562,7 +2703,7 @@ public:
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::TAGGED,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit TaggedIntToI32Vertex() : FixedInputVertexMixin() {}
 
@@ -2585,10 +2726,19 @@ public:
     {}
 
     void SetValueLocationConstraints();
+
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, INPUT_INDEX, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(INPUT_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(CheckInputs());
     }
 };
 
@@ -2608,10 +2758,19 @@ public:
     {}
 
     void SetValueLocationConstraints();
+
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, INPUT_INDEX, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(INPUT_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(CheckInputs());
     }
 };
 
@@ -2628,7 +2787,7 @@ public:
         ValueRepresentation::INT32,
         ValueRepresentation::INT32,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit I32ConditionCheckVertex(Condition condition) : FixedInputVertexMixin(), ConditionMixin(condition) {}
 
@@ -2648,7 +2807,7 @@ public:
         ValueRepresentation::FLOAT64,
         ValueRepresentation::FLOAT64,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit F64ConditionCheckVertex(Condition condition) : FixedInputVertexMixin(), ConditionMixin(condition) {}
 
@@ -2665,7 +2824,7 @@ public:
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::FLOAT64,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit Float64ToBooleanVertex(bool trueIfNonZero)
         : FixedInputVertexMixin(), trueIfNonZero_(trueIfNonZero)
@@ -2706,10 +2865,18 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, INPUT_INDEX, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(INPUT_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(CheckInputs());
     }
 
     bool IsTrueIfNonZero() const
@@ -2769,7 +2936,7 @@ public:
         ValueRepresentation::TAGGED,
         ValueRepresentation::TAGGED,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit TaggedEqualVertex() : FixedInputVertexMixin() {}
 
@@ -2788,7 +2955,7 @@ public:
         ValueRepresentation::TAGGED,
         ValueRepresentation::TAGGED,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit TaggedNotEqualVertex() : FixedInputVertexMixin() {}
 
@@ -2836,13 +3003,21 @@ public:
     {}
 
     void SetValueLocationConstraints();
-    void VerifyInputs() const
+
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
     {
-        VerifyI32BinOpInputs();
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, LEFT_INDEX, ValueRepresentation::INT32) &&
+               details::CheckSlotRepresentation(this, RIGHT_INDEX, ValueRepresentation::INT32);
     }
 
-private:
-    void VerifyI32BinOpInputs() const;
+    void VerifyInputs() const
+    {
+        ASSERT(CheckInputs());
+    }
 };
 
 class I32SubWithOverflowVertex : public VertexMixin<ValueVertex, I32SubWithOverflowVertex>,
@@ -2862,13 +3037,21 @@ public:
     {}
 
     void SetValueLocationConstraints();
-    void VerifyInputs() const
+
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
     {
-        VerifyI32BinOpInputs();
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, LEFT_INDEX, ValueRepresentation::INT32) &&
+               details::CheckSlotRepresentation(this, RIGHT_INDEX, ValueRepresentation::INT32);
     }
 
-private:
-    void VerifyI32BinOpInputs() const;
+    void VerifyInputs() const
+    {
+        ASSERT(CheckInputs());
+    }
 };
 
 class I32MulWithOverflowVertex : public VertexMixin<ValueVertex, I32MulWithOverflowVertex>,
@@ -2888,13 +3071,21 @@ public:
     {}
 
     void SetValueLocationConstraints();
-    void VerifyInputs() const
+
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
     {
-        VerifyI32BinOpInputs();
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, LEFT_INDEX, ValueRepresentation::INT32) &&
+               details::CheckSlotRepresentation(this, RIGHT_INDEX, ValueRepresentation::INT32);
     }
 
-private:
-    void VerifyI32BinOpInputs() const;
+    void VerifyInputs() const
+    {
+        ASSERT(CheckInputs());
+    }
 };
 
 class I32DivWithOverflowVertex : public VertexMixin<ValueVertex, I32DivWithOverflowVertex>,
@@ -2914,13 +3105,21 @@ public:
     {}
 
     void SetValueLocationConstraints();
-    void VerifyInputs() const
+
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
     {
-        VerifyI32BinOpInputs();
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, LEFT_INDEX, ValueRepresentation::INT32) &&
+               details::CheckSlotRepresentation(this, RIGHT_INDEX, ValueRepresentation::INT32);
     }
 
-private:
-    void VerifyI32BinOpInputs() const;
+    void VerifyInputs() const
+    {
+        ASSERT(CheckInputs());
+    }
 };
 
 class I32DivByConstWithCheckVertex : public VertexMixin<ValueVertex, I32DivByConstWithCheckVertex>,
@@ -2956,12 +3155,20 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        constexpr int32_t MIN_DIVISOR_MAGNITUDE = 2;
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, INPUT_INDEX, ValueRepresentation::INT32) &&
+               (divisor_ <= -MIN_DIVISOR_MAGNITUDE || divisor_ >= MIN_DIVISOR_MAGNITUDE);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(INPUT_INDEX)->GetValueRepresentation() == ValueRepresentation::INT32);
-        // |divisor| >= 2: 0 and +-1 divisors are excluded from the signed-magic lowering
-        ASSERT(divisor_ <= -2 || divisor_ >= 2);
+        ASSERT(CheckInputs());
     }
 
 private:
@@ -2982,7 +3189,7 @@ public:
         ValueRepresentation::INT32,
         ValueRepresentation::INT32,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit I32AddVertex() : FixedInputVertexMixin() {}
 
@@ -3001,7 +3208,7 @@ public:
         ValueRepresentation::INT32,
         ValueRepresentation::INT32,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit I32SubVertex() : FixedInputVertexMixin() {}
 
@@ -3020,7 +3227,7 @@ public:
         ValueRepresentation::INT32,
         ValueRepresentation::INT32,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit I32MulVertex() : FixedInputVertexMixin() {}
 
@@ -3062,11 +3269,20 @@ public:
     {}
 
     void SetValueLocationConstraints();
+
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, LEFT_INDEX, ValueRepresentation::INT32) &&
+               details::CheckSlotRepresentation(this, RIGHT_INDEX, ValueRepresentation::INT32);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(LEFT_INDEX)->GetValueRepresentation() == ValueRepresentation::INT32);
-        ASSERT(GetInput(RIGHT_INDEX)->GetValueRepresentation() == ValueRepresentation::INT32);
+        ASSERT(CheckInputs());
     }
 };
 
@@ -3082,7 +3298,7 @@ public:
         ValueRepresentation::INT32,
         ValueRepresentation::INT32,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit I32BitwiseBinaryVertex(IntBitwiseKind kind) : FixedInputVertexMixin(), kind_(kind) {}
 
@@ -3124,10 +3340,19 @@ public:
     {}
 
     void SetValueLocationConstraints();
+
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, INPUT_INDEX, ValueRepresentation::INT32);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(INPUT_INDEX)->GetValueRepresentation() == ValueRepresentation::INT32);
+        ASSERT(CheckInputs());
     }
 };
 
@@ -3141,7 +3366,7 @@ public:
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::INT32,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit I32BNotVertex() : FixedInputVertexMixin() {}
 
@@ -3164,13 +3389,20 @@ public:
     {}
 
     void SetValueLocationConstraints();
-    void VerifyInputs() const
+
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
     {
-        VerifyI32UnaryOpInputs();
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, VALUE_INDEX, ValueRepresentation::INT32);
     }
 
-private:
-    void VerifyI32UnaryOpInputs() const;
+    void VerifyInputs() const
+    {
+        ASSERT(CheckInputs());
+    }
 };
 
 class I32IncWithOverflowVertex : public VertexMixin<ValueVertex, I32IncWithOverflowVertex>,
@@ -3189,13 +3421,20 @@ public:
     {}
 
     void SetValueLocationConstraints();
-    void VerifyInputs() const
+
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
     {
-        VerifyI32UnaryOpInputs();
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, VALUE_INDEX, ValueRepresentation::INT32);
     }
 
-private:
-    void VerifyI32UnaryOpInputs() const;
+    void VerifyInputs() const
+    {
+        ASSERT(CheckInputs());
+    }
 };
 
 class I32DecWithOverflowVertex : public VertexMixin<ValueVertex, I32DecWithOverflowVertex>,
@@ -3214,13 +3453,20 @@ public:
     {}
 
     void SetValueLocationConstraints();
-    void VerifyInputs() const
+
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
     {
-        VerifyI32UnaryOpInputs();
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, VALUE_INDEX, ValueRepresentation::INT32);
     }
 
-private:
-    void VerifyI32UnaryOpInputs() const;
+    void VerifyInputs() const
+    {
+        ASSERT(CheckInputs());
+    }
 };
 
 class I32ToF64Vertex : public FixedInputVertexMixin<ValueVertex, I32ToF64Vertex> {
@@ -3233,7 +3479,7 @@ public:
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::INT32,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit I32ToF64Vertex() : FixedInputVertexMixin() {}
 
@@ -3256,10 +3502,19 @@ public:
     {}
 
     void SetValueLocationConstraints();
+
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, INPUT_INDEX, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(INPUT_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(CheckInputs());
     }
 };
 
@@ -3273,7 +3528,7 @@ public:
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::FLOAT64,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit F64ToI32TruncVertex() : FixedInputVertexMixin() {}
 
@@ -3290,7 +3545,7 @@ public:
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::INT32,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit I32ToUint8ClampedVertex() : FixedInputVertexMixin() {}
 
@@ -3307,7 +3562,7 @@ public:
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::FLOAT64,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit F64ToUint8ClampedVertex() : FixedInputVertexMixin() {}
 
@@ -3341,7 +3596,7 @@ public:
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::FLOAT64,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit F64ToTaggedDoubleVertex() : FixedInputVertexMixin() {}
 
@@ -3358,7 +3613,7 @@ public:
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::FLOAT64,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit F64NegVertex() : FixedInputVertexMixin() {}
 
@@ -3377,7 +3632,7 @@ public:
         ValueRepresentation::FLOAT64,
         ValueRepresentation::FLOAT64,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit F64AddVertex() : FixedInputVertexMixin() {}
 
@@ -3396,7 +3651,7 @@ public:
         ValueRepresentation::FLOAT64,
         ValueRepresentation::FLOAT64,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit F64SubVertex() : FixedInputVertexMixin() {}
 
@@ -3415,7 +3670,7 @@ public:
         ValueRepresentation::FLOAT64,
         ValueRepresentation::FLOAT64,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit F64MulVertex() : FixedInputVertexMixin() {}
 
@@ -3434,7 +3689,7 @@ public:
         ValueRepresentation::FLOAT64,
         ValueRepresentation::FLOAT64,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit F64DivVertex() : FixedInputVertexMixin() {}
 
@@ -3468,12 +3723,20 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, LEFT_INDEX, ValueRepresentation::TAGGED) &&
+               details::CheckSlotRepresentation(this, RIGHT_INDEX, ValueRepresentation::TAGGED) &&
+               deoptType_ != kungfu::DeoptType::NONE;
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(LEFT_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
-        ASSERT(GetInput(RIGHT_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
-        ASSERT(deoptType_ != kungfu::DeoptType::NONE);
+        ASSERT(CheckInputs());
     }
 
 private:
@@ -3503,10 +3766,18 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, RECEIVER_INDEX, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(RECEIVER_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(CheckInputs());
     }
 
 private:
@@ -3543,11 +3814,18 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return GetExpectedHClassCount() != 0 && details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, RECEIVER_INDEX, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetExpectedHClassCount() != 0);
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(RECEIVER_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(CheckInputs());
     }
 
 private:
@@ -3583,10 +3861,24 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`. The receiver
+    // contract is TAGGED: this class declares no `INPUT_TYPES`, so the generic
+    // representation check cannot replace it, and the
+    // guard's code generator (`arksteed_codegen.cpp`
+    // `VisitNonControlVertex<DeoptIfPrototypeChangedVertex>`) treats the
+    // receiver as a heap object, so only TAGGED is a valid receiver.
+    bool CheckInputs() const
+    {
+        return (checkProtoChangeMarker_ || checkNotPrototype_) &&
+               details::CheckStoredArity(this, RECEIVER_INDEX + 1) &&
+               details::CheckSlotRepresentation(this, RECEIVER_INDEX, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(checkProtoChangeMarker_ || checkNotPrototype_);
-        ASSERT(GetInputCount() == RECEIVER_INDEX + 1);
+        ASSERT(CheckInputs());
     }
 
 private:
@@ -3623,11 +3915,19 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, LEFT_INDEX, ValueRepresentation::TAGGED) &&
+               details::CheckSlotRepresentation(this, RIGHT_INDEX, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(LEFT_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
-        ASSERT(GetInput(RIGHT_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(CheckInputs());
     }
 
 private:
@@ -3661,11 +3961,19 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, LEFT_INDEX, ValueRepresentation::INT32) &&
+               details::CheckSlotRepresentation(this, RIGHT_INDEX, ValueRepresentation::INT32);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(LEFT_INDEX)->GetValueRepresentation() == ValueRepresentation::INT32);
-        ASSERT(GetInput(RIGHT_INDEX)->GetValueRepresentation() == ValueRepresentation::INT32);
+        ASSERT(CheckInputs());
     }
 
 private:
@@ -3699,11 +4007,19 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, LEFT_INDEX, ValueRepresentation::FLOAT64) &&
+               details::CheckSlotRepresentation(this, RIGHT_INDEX, ValueRepresentation::FLOAT64);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(LEFT_INDEX)->GetValueRepresentation() == ValueRepresentation::FLOAT64);
-        ASSERT(GetInput(RIGHT_INDEX)->GetValueRepresentation() == ValueRepresentation::FLOAT64);
+        ASSERT(CheckInputs());
     }
 
 private:
@@ -3726,10 +4042,18 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, VALUE_INDEX, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(VALUE_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(CheckInputs());
     }
 };
 
@@ -3750,10 +4074,18 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, VALUE_INDEX, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(VALUE_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(CheckInputs());
     }
 };
 
@@ -3774,10 +4106,18 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, VALUE_INDEX, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(VALUE_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(CheckInputs());
     }
 };
 
@@ -3798,10 +4138,18 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, VALUE_INDEX, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(VALUE_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(CheckInputs());
     }
 };
 
@@ -3821,10 +4169,18 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, VALUE_INDEX, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(VALUE_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(CheckInputs());
     }
 };
 
@@ -3882,10 +4238,18 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, RECEIVER_INDEX, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(RECEIVER_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(CheckInputs());
     }
 
 private:
@@ -3927,10 +4291,18 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, RECEIVER_INDEX, ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(RECEIVER_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(CheckInputs());
     }
 };
 
@@ -4146,12 +4518,19 @@ public:
 
     void SetValueLocationConstraints();
 
+    // Non-asserting mirror of `VerifyInputs()`: one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        return GetExpectedHClassCount() != 0 && details::CheckStoredArity(this, NUM_INPUTS) &&
+               details::CheckSlotRepresentation(this, VALUE_INDEX, inputIsHClassAddress_ ? ValueRepresentation::INT64
+                                                            : ValueRepresentation::TAGGED);
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetExpectedHClassCount() != 0);
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(VALUE_INDEX)->GetValueRepresentation() ==
-               (inputIsHClassAddress_ ? ValueRepresentation::INT64 : ValueRepresentation::TAGGED));
+        ASSERT(CheckInputs());
     }
 
 private:
@@ -4540,7 +4919,7 @@ private:
 class PhiVertex : public VertexMixin<ValueVertex, PhiVertex> {
 public:
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit PhiVertex(VirtualRegister owner) : VertexMixin(), owner_(owner) {}
 
@@ -4576,14 +4955,32 @@ public:
         SetInputCountForTransform(1);
     }
 
-    // VerifyInputs: Variable-input vertex must validate input count and type consistency
+    // Non-asserting mirror of `VerifyInputs()` ("Variable-input vertex must
+    // validate input count and type consistency"): one declaration of this
+    // opcode's input contract, reused by the Debug assertion below and by the
+    // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    bool CheckInputs() const
+    {
+        const uint32_t storedCount = details::StoredInputCount(this);
+        if (storedCount == 0) {
+            return false;
+        }
+        const ValueVertex *first = GetInput(0);
+        if (first == nullptr) {
+            return false;
+        }
+        const ValueRepresentation representation = first->GetValueRepresentation();
+        for (uint32_t index = 1; index < storedCount; ++index) {
+            if (!details::CheckSlotRepresentation(this, index, representation)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     void VerifyInputs() const
     {
-        ASSERT(GetInputCount() > 0);
-        ValueRepresentation repr = GetInput(0)->GetValueRepresentation();
-        for (uint32_t i = 1, n = GetInputCount(); i < n; ++i) {
-            ASSERT(GetInput(i)->GetValueRepresentation() == repr);
-        }
+        ASSERT(CheckInputs());
     }
 
     const VirtualRegister owner_;
@@ -4596,7 +4993,7 @@ public:
         NUM_INPUTS = 1,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit I32ToTaggedIntVertex() : FixedInputVertexMixin() {}
 
@@ -4615,7 +5012,7 @@ public:
         NUM_INPUTS = 1,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {ValueRepresentation::INT32};
 
     explicit U32ToTaggedNumberVertex() : FixedInputVertexMixin() {}
@@ -4630,7 +5027,7 @@ public:
         NUM_INPUTS = 1,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit RawI64ToTaggedVertex() : FixedInputVertexMixin() {}
 
@@ -4644,7 +5041,7 @@ public:
         NUM_INPUTS = 1,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::INT64;
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit TaggedToRawI64Vertex() : FixedInputVertexMixin() {}
 
@@ -4726,7 +5123,7 @@ public:
         ValueRepresentation::INT64,
         ValueRepresentation::INT64,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit I64BitwiseBinaryVertex(IntBitwiseKind kind) : FixedInputVertexMixin(), kind_(kind) {}
 
@@ -4794,6 +5191,16 @@ inline uint32_t CatchPredecessorIndexOf(Vertex *vertex)
 {
     ThrowableMixin *mixin = ThrowableMixinOf(vertex);
     return mixin != nullptr ? mixin->GetCatchPredecessorIndex() : static_cast<uint32_t>(-1);
+}
+
+// Non-asserting counterpart of `CatchPredecessorIndexOf`: it reads the stored
+// catch-predecessor index without invoking the asserting accessor, so an
+// integrity check can reject a sentinel index before any indexed read. A
+// non-throwable vertex answers the same sentinel as the asserting variant.
+inline uint32_t StoredCatchPredecessorIndexOf(const Vertex *vertex)
+{
+    const ThrowableMixin *mixin = ThrowableMixinOf(vertex);
+    return mixin != nullptr ? mixin->GetStoredCatchPredecessorIndex() : static_cast<uint32_t>(-1);
 }
 
 inline bool HasExceptionLazyDeopt(const Vertex *vertex)

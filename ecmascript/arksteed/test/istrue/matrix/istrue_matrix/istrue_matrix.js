@@ -31,7 +31,6 @@
 //! COMPILE_COUNT_GE *intDoubleBang 1
 //! EXEC_COUNT_GE *intDoubleBang 1
 //! HAS CheckedTaggedIntToI32
-//! HAS I32ConditionCheck
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD doubleDoubleBang
@@ -63,7 +62,6 @@
 //! METHOD staticInt
 //! COMPILE_COUNT_GE *staticInt 1
 //! EXEC_COUNT_GE *staticInt 1
-//! HAS I32ConditionCheck
 //! HAS_NOT DeoptIfNotNumber
 //! HAS_NOT CallCommonStub ToBoolean*
 

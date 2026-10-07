@@ -14,7 +14,6 @@
  */
 
 //! METHOD nullish_assignment
-//! HAS TaggedEqual
 //! COMPILE_COUNT_GE nullish_assignment 1
 //! EXEC_COUNT_GE *nullish_assignment 1
 //! DEOPT_COUNT *Deoptimize* 0

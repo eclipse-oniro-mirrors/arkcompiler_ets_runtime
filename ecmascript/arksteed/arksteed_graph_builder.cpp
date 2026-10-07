@@ -42,6 +42,7 @@
 #include "ecmascript/deoptimizer/deoptimizer.h"
 #include "ecmascript/ecma_string-inl.h" // IWYU pragma: keep
 #include "ecmascript/elements.h"
+#include "ecmascript/frames.h"
 #include "ecmascript/global_env_constants.h"
 #include "ecmascript/ic/ic_handler.h"
 #include "ecmascript/ic/ic_info.h"
@@ -930,9 +931,7 @@ void GraphBuilder::InitializeStartBlock(SharedBCFrameState frameState)
     compileInfoFacts_[0]->EnsureType(undefinedValue_, NodeInfo::NodeType::UNDEFINED);
 
     blocks_[0] = BB::New(chunk_);
-    // caller argument area (in fp-slot words): +2 argc, +3 call-target, +4 new-target, +5 this, +6... user args.
-    const int32_t ACTUAL_ARGC_FP_SLOT_INDEX = 2;
-    const int32_t CALL_TARGET_FP_SLOT_INDEX = 3;
+    // Caller argument descriptors use the shared FP-slot layout in frames.h.
     initialActualArgc_ = NewVertex<InitialValueVertex>(blocks_[0], {}, ACTUAL_ARGC_FP_SLOT_INDEX);
     for (uint32_t i = 0, n = numParams_; i < n; i++) {
         int32_t slotIndex = static_cast<int32_t>(i + CALL_TARGET_FP_SLOT_INDEX);

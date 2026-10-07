@@ -38,16 +38,14 @@ python3 ark.py x64.release arksteed_host_unittest -j4 \
   `../test/coverage/matrix.md` 的「Записи закрытия строк кластера unit」章节和本文件末节）。该目标
   使用完整优化器 source set；图由真实 IR 顶点手工构造（夹具 A），汇编器开启注释（夹具 C），
   不新增 abc 资产。
-- `ArkSteedGraphVerifierTest`（`graph_verifier_test.cpp`，graph verifier 单元域：真实 IR 顶点通过
-  `GraphProcessor<ArkSteedGraphVerifier>` 驱动 production verifier，八个 Debug 损坏类别 X1–X8 的
-  条件化 death 观察、repaired 双生子、两模式正向控制与 Release 定义控制，矩阵行 G3.5，见本文件末节）。
+- `ArkSteedGraphVerifierTest`（`graph_verifier_test.cpp`，通过真实 IR 驱动 production verifier 的 Debug 断言与有效图正向控制，详见本文件末节）。
 
 选择单个目标不替代分组门禁：只有整个 `arksteed_host_unittest` 在两个模式下的完整运行才算 gate。
 
-组织规则（H1）：每个域名一个文件和恰好一个 `host_unittest_action`（“一个文件一个域名、
-一个域名一个目标”）；其他工作（例如 async 史诗）向同一组件追加的用例进入该域名已有的文件-所有者，
-而不是新建平行文件。每个新目标只注册在 `arksteed_host_unittest` 分组一次，不加入本目录的
-`unittest` 分组（后者进入 arm64/amd64 套件，H2）。夹具初始化失败、断言失败或链接失败都会使分组变红：
+组织规则（H1）：每个域名恰好一个 `host_unittest_action`；大型域可按行为拆分为多个源文件，
+共享同一个 fixture 类型和目标，避免复制夹具或建立平行测试入口。新增用例应追加到已有域及目标。
+每个新目标只注册在 `arksteed_host_unittest` 分组一次，不加入本目录的 `unittest` 分组
+（后者进入 arm64/amd64 套件，H2）。夹具初始化失败、断言失败或链接失败都会使分组变红：
 测试不会被跳过、禁用或从分组中移除。
 
 该目标自动构建当前测试和依赖，然后通过项目统一执行器运行。无需预先构建运行时、读取链接响应文件或使用专用 Python 脚本。启用 ArkSteed 时，目标也接入 `ark_unittest` 的编译器宿主测试分组；沿用该分组的 ASAN 和独立 OHOS 宿主测试限制。
@@ -78,6 +76,8 @@ python3 ark.py x64.release arksteed_host_unittest -j4 \
 快分配节点检查普通输入/结果寄存器约束及活跃寄存器保留；慢分配使用通用 `CallRuntime AllocateInYoung`，检查 tagged size 及可选的 tagged HClass 参数、固定输入/返回寄存器、既有调用深度统计、tagged/Float64 跨调用保存和编译事实分类。通用节点保留 GC 分配及其他保守调用属性；单参数和双参数形式均返回未初始化完成的对象，禁止 lazy frame、catch 和异常恢复元数据；四类初始化检查输入、共用结果和临时寄存器约束。初始化结果共用 allocation 输入，四类字面量初始化器均使用显式 tagged HClass 输入和一个临时寄存器。区间验证覆盖 `CanAllocateInYoung → BranchIfTrue`、快慢块、合并 Phi 和初始化：检查谓词的只读/不可复用属性与寄存器约束、参数与分支方向、Phi 输入与前驱对应关系、原始内存唯一用途，以及检查到分配和分配到初始化之间的安全操作。谓词必须在分支所在块内计算；拒绝其他布尔条件、未调度或旧块中的谓词、重复调度，以及谓词与分支之间的调用、写入和普通计算，寄存器分配后的搬移除外。快慢块和初始化块之间允许跳转，寄存器分配后允许搬移；慢调用大小须为与检查值相等的 tagged 整数常量，或由同一 INT64 大小与整数标记编码得到的动态值；带 HClass 的重载进入同一初始化区间，其他 runtime 调用不能代替分配。新增检查覆盖 0/3 参数、非 tagged size/HClass、两种形式的恢复元数据、分配后调用或反优化，以及未初始化对象进入帧状态。双参数正向夹具验证四类字面量及 arguments 的合流和初始化，寄存器测试覆盖常量/动态大小及跨调用存活的 HClass 根。HClass 来源由构图保证，不新增输入身份比较或运行时类型检查。
 
 arguments 专项校验覆盖实际参数数量、完整 64 位元素区大小公式、快慢大小一致性、对象固定布局大小，以及非法操作和裸地址逃逸。正向用例覆盖零参数、动态参数、大于普通对象阈值和高于 32 位的大小；负向用例覆盖大小截断、参数数量错配和慢路径参数错配。arguments 对象初始化仅允许已有的非 GC 屏障调用。元素区初始化节点只写入数组头；原生夹具验证分配和数组头契约，未建模后续元素复制循环。实际循环在第二次分配前写完所有元素且没有 safepoint，由 JS 压力及显式 GC 用例补充验证。这些原生测试不等同于大于 4 GiB 的真实内存分配或机器码执行测试。
+
+`initialization_interval_verifier_test.cpp` 的手工图夹具同时满足公共 pre-regalloc 图契约：已安装的普通顶点、Phi 及控制顶点显式设置其基础 `Vertex` owner，所有基本块具有终结控制顶点，跳转的 predecessor index 与目标块的前驱顺序一致。分配语义负向用例保留这些结构条件，仅破坏被测的分配/初始化约束；专门破坏公共图结构的用例只要求断言终止，不依赖先触发哪条诊断。
 
 同步重入专项测试及构建注册随旧完整创建调用契约一并删除；这不表示同步重入已经安全。GC、同步回调、异常及依赖失效恢复由其他 PR 处理，当前聚焦测试不证明这些边界。
 
@@ -169,83 +169,77 @@ python3 ark.py x64.debug ArkSteedDeferredCodeTestAction \
 支持 `--gtest_filter`/`--gtest_output`；门禁仍为 `arksteed_host_unittest` 在 x64 Debug 和 Release
 两个模式下的整体运行。
 
-## Graph verifier（`graph_verifier_test.cpp`）
+本测试不替代 JavaScript 对象/数组分配、真实调用、GC、反优化及跨架构运行回归。
 
-`ArkSteedGraphVerifierTest` 是矩阵行 G3.5 的 unit 域名（契约 C5），遵循“一个文件一个域名”和
-“一个域名一个 `host_unittest_action`”。域覆盖 production `ArkSteedGraphVerifier`：每个用例都像
-真实编译一样通过 `GraphProcessor<ArkSteedGraphVerifier>` 运行 verifier（`RunVerifier` 为每次运行
-构造新的处理器实例，`seen_` 不会在两次运行之间复用）。夹具 A（`NativeAreaAllocator` + `Chunk` +
-真实 `Graph`/`BB`/`Vertex::New`）不创建 VM、`JSThread`、`EcmaHandleScope`、汇编器和字节码资产，
-也不修改生产逻辑或导出符号。
+## DCE 契约域
 
-有效图覆盖处理器的全部位置：五个常量池、带控制顶点的三个基本块、一个 Phi 与非控制序列；零输入的
-`DeoptVertex` 和零输入的 `CallRuntimeVertex` 都是合法形状。两模式共有的正向控制
-`ValidGraphPassesEveryProcessorStageWithoutMutation` 运行 verifier 两次，要求完成且前后结构快照
-（块顺序/身份与 id、常量池成员、控制顶点、Phi 与非控制组成、每个顶点的 opcode/表示/输入数与输入
-身份）相等，从而确认 verifier 不修改图；快照从不调用 `Vertex::GetId()`。
+`ArkSteedDceTest` 包含 34 个 GTest 用例，Debug 和 Release 运行相同的有效 IR 语义测试，覆盖 `arksteed_dce.{h,cpp}` 的删除策略、依赖遍历、图过滤和完整 DCE pass。
 
-独立 oracle（D2）是文档化契约而不是被测谓词的返回值：调用布局是
-`GetInputCount() == CallVertex::FIRST_ARG_INDEX + GetActualArgc()`（`FIRST_ARG_INDEX == 3`，
-即 target、new.target、this 加实际参数），`DeoptVertex` 固定零输入，runtime call 可以有零输入。
+The single target uses `dce_policy_test.cpp`, `dce_editor_test.cpp` and `dce_closure_test.cpp` for the
+behavioral cases. `dce_test_fixture.{h,cpp}` supplies one shared fixture type and graph helpers; declarations
+and short templates stay in the header, while graph construction and assertions are defined out of line.
+The former opcode/property-table duplication tests are removed; behavior tests retain conservative
+required-operation handling, unknown opcodes, hidden dependencies, exact survivors and rootless cycles.
 
-用例清单与两个模式的实际计数（名称与 `--gtest_output=json` 报告一致）：
+Allocation retention fixtures use the current capacity-check branch, fast/slow allocation paths, merge Phi
+and matching initializer. The initialized array result is unused; both filtering and full DCE must preserve
+the complete allocation interval. These fixtures pass the production verifier before and after DCE.
 
-x64 Debug — 九个用例：
+- `DceRemovalPolicy::Classify` 使用 opcode 的正向 `CAN_BE_REMOVED_IF_DEAD` 属性，仅允许已证明可删除的纯值操作和 Phi；调用、写入、分配、可抛出或反优化操作及 GC 相关节点必须保留。
+- 公共 `DceDependencies::Visit` 返回 `void`，按稳定顺序遍历普通输入、eager/lazy 帧状态及 catch Phi 依赖。私有活跃性遍历不让 throwable 保留 dead catch Phi 的独占输入；live Phi 通过自己的普通输入保留 producer。
+- `DceGraphEditor::Filter` 删除未标记的可删除值和 dead Phi，保留控制节点、参数及必要操作，返回 `Changed` 或 `Unchanged`。调用者必须提供当前图的有效 live set，且所有保留节点的依赖必须保留；Debug 断言检查这些选择义务。
+- `ArkSteedDce::Run` 的用例覆盖 dead chain、共享 producer、普通及 catch Phi cycle、隐藏依赖、dead catch Phi 删除、遍历顺序无关性及幂等性；有效图通过前后图校验及 pre-regalloc 消费者。
+- `ArkSteedDce::Run` 使用一个 invocation-local `DcePreparation`：保留 registry 指针集合、计算一次单调依赖闭包并稳定过滤；不保留独立 probe、重复准备、Release 图校验或错误诊断。瞬时标记先记录清理所有权，再设置 `DceMarked`，退出时清除，包括已从图中移除的节点。
+- finalized pre-allocation 图的公共完整性由正常的 `ArkSteedGraphVerifier` Debug 断言负责，编译器在 DCE 前后调用它。Release 信任内部 IR；DCE 不再提供 `Failed` 或畸形图恢复契约。外部输入及生产边界的既有拒绝路径不受此策略影响。
 
-- `ValidGraphPassesEveryProcessorStageWithoutMutation`（两模式共有的正向控制）；
-- `DuplicateBlockIdIsDetectedInDebug`（X1：两个块复用同一个范围内 id，条件文本
-  `seen_[block->GetId()] == 0`）；
-- `EmptyPhiIsDetectedInDebug`（X2：Phi 没有任何输入，`GetInputCount() > 0`）；
-- `PhiRepresentationMismatchIsDetectedInDebug`（X3：Phi 输入表示不一致，
-  `GetInput(i)->GetValueRepresentation() == repr`）；
-- `NullPhiInputIsDetectedInDebug`（X4：Phi 的第二个输入槽为 null，`input != nullptr`）；
-- `CallLayoutMismatchIsDetectedInDebug`（X5：实际参数数为 1 的调用只有三个输入槽，
-  `GetInputCount() == FIRST_ARG_INDEX + actualArgc_`）；
-- `ConversionRepresentationMismatchIsDetectedInDebug`（X6：`U32ToTaggedNumberVertex` 取 TAGGED
-  而不是必需的 INT32，`input->GetValueRepresentation() == expectedRepr`）；
-- `EmptyCommonStubCallIsDetectedInDebug`（X7：common-stub 调用没有任何输入，
-  `GetInputCount() >= 1`）；
-- `BranchRepresentationMismatchIsDetectedInDebug`（X8：`BranchIfInt32CompareVertex` 取 TAGGED
-  而不是必需的 INT32，`input->GetValueRepresentation() == expectedRepr`）。
+Both DCE entry points require a non-null graph: Debug asserts this precondition, and Release provides no
+null-input recovery. Property predicates and getters share X-macro lists with local `G.PRE.02-CPP`
+annotations because these macros generate declarations rather than replace ordinary function calls.
+Keep each macro within the `G.PRE.06` ten-line limit, including the `#define` line.
+The compiler retains both DCE-boundary graph checks without separate pipeline-statistics entries;
+`CoreDce` remains timed. Debug verification work still contributes to the total compilation time.
 
-x64 Release — 两个用例：
+仅构建并运行 DCE 域（从 OpenHarmony 源码根目录执行）：
 
-- `ValidGraphPassesEveryProcessorStageWithoutMutation`；
-- `CorruptionFixturesWithoutActiveAssertionsDoNotAbortAndDoNotMutateTheGraph`。
+```bash
+python3 ark.py x64.debug ArkSteedDceTestAction \
+  --gn-args=ets_runtime_enable_ark_steed=true
+```
 
-检测语义：只有 verifier 通过 `RunVerifier` 真实运行时的死亡才算检测，而且每个 death 用例的
-`ASSERT_DEATH` 都匹配该违反自身的条件文本（例如 `seen_[block->GetId()] == 0`），因此通用
-`ASSERTION FAILED`、其它断言或无关崩溃都不能当作检测。夹具构造失败或 `Vertex::New` 返回空同样
-不是检测：每个 death 用例先在同一父进程里运行该类的 repaired 双生子（只去掉唯一违反的同一张图），
-要求 verifier 完成且前后快照相等——去掉违反后死亡变成完成，这就是敏感性；随后才在满足全部先决条件
-的损坏图上观察死亡。损坏与 repaired 的区分、以及 X1 的全部块都先经 `Graph::Add` 取得合法 id
-（范围内），都属于夹具事实，不依赖生产谓词。
+目标通过现有 `host_unittest_action` 构建测试和依赖，再由 `script/run_ark_executable.py` 设置共享库搜索路径并运行 GTest；无需手工链接或直接执行缺少环境的测试程序。
 
-Debug/Release 模式划分：death 用例只在 `#ifndef NDEBUG` 下声明，因为 production `ASSERT` 在
-`NDEBUG` 下是 no-op。Release 用例在 `#ifdef NDEBUG` 下，只运行六种已定义的损坏形状 X1、X3、X5、
-X6、X7、X8 以及全部八类 X1–X8 的 repaired 双生子，要求完成且前后快照相等，不断言任何 Release
-检测。损坏的 X2（Phi 无输入）和 X4（Phi 的 null 输入）在 Release 下不被任何路径调用：关闭断言后
-它们的 verifier 路径会读取无效的输入槽（X4 还会解引用 null 输入），因此对它们不承诺任何 Release
-行为（包括“不崩溃”）；只有它们的 repaired 半边参与 Release 控制。用例不跳过、不禁用，也不使用
-`GTEST_SKIP`。
+For an already configured x64 Debug tree, build and run just the DCE and initialization-interval domains
+from the OpenHarmony source root:
 
-头文件文档残留（单独工作，不在本单元域范围）：`ecmascript/arksteed/arksteed_graph_verifier.h:62-69`
-的注释曾经不准确地描述调用最小值和 Deopt/runtime-call 最小值，不能当作强制契约；真实契约是上面的
-调用布局、`DeoptVertex` 固定零输入和 runtime call 可以零输入。该残留已记录为单独工作
-（ISSUE-0079）；本单元域不修改 production，也不发明新的任务标识。
+```bash
+prebuilts/build-tools/linux-x86/bin/ninja -C out/x64.debug -j4 \
+  ArkSteedDceTestAction ArkSteedInitializationIntervalVerifierTestAction
+```
 
-单独运行该目标：
+Use `out/x64.release` for the corresponding Release targets. The initialization-interval test includes
+`js_array.h` and `js_arguments.h` directly; it must not depend on verifier implementation includes.
+
+JS/TS 运行时回归的六个 DCE 用例及运行命令见 `../test/README.md` 的 DCE 小节；原生图契约测试不替代真实运行时的副作用、异常和 GC 检查。
+
+## 图校验域（`graph_verifier_test.cpp`）
+
+`ArkSteedGraphVerifierTest` 在 Debug 中有 9 个用例：一个有效图正向控制，以及重复 block id、空 Phi、Phi 表示不匹配、空 Phi 输入、调用布局不匹配、转换输入表示不匹配、缺少 glue 的 common-stub 调用、分支输入表示不匹配这八类断言控制。每类畸形图都有修复后的有效图对照，检查完整校验不修改图。Release 仅运行一个有效图用例，不对畸形内部 IR 承诺结果。
+
+校验器通过真实 `GraphProcessor<ArkSteedGraphVerifier>` 运行，使用无 VM 的原生图 fixture。公共检查涵盖 concrete 输入布局及选项、成员及 owner、常量池及参数、普通/帧/catch 引用、CFG/Phi/异常边及 loop 约定，并要求尚未安装寄存器分配元数据。普通输入沿用本分支的精确表示匹配（`FLOAT64` 和 `HOLEY_FLOAT64` 不互换）；帧值仅保留实际 argc 描述符的既有配对例外。所有校验 scratch、索引及循环均处于 `#ifndef NDEBUG` 内；Release 的显式校验调用不执行完整性检查。
+
+`ecmascript/frames.h` owns the ArkSteed caller-argument FP-slot constants used by the graph builder and verifier: raw argc is slot +2 and the tagged call target is slot +3. Moving these declarations does not change the frame ABI or broaden the argc-only deopt representation exception.
+
+`arksteed_graph_verifier.h` keeps the verifier interface; its Debug implementation and typed graph-processor
+instantiation live in `arksteed_graph_verifier.cpp`. The optimizer source set supplies that implementation to
+the compiler and native tests. Release keeps the existing no-op verifier interface and performs no IR preflight.
+
+编译器还在寄存器分配之后以 `afterRegalloc=true` 调用同一个校验器。该阶段不再要求 pre-regalloc 图域及空分配元数据；保留基础分支的 young-allocation 初始化区间校验，并仅在该阶段允许区间内的 `GapMove` 和 `ConstantGapMove`。普通 DCE 前后调用仍执行完整的 pre-regalloc 公共契约。
+
+单独运行图校验域：
 
 ```bash
 python3 ark.py x64.debug ArkSteedGraphVerifierTestAction \
   --gn-args=ets_runtime_enable_ark_steed=true
 ```
 
-二进制位于 `out/x64.<mode>/tests/unittest/ets_runtime/ets_runtime/ArkSteedGraphVerifierTest`
-（`<mode>` 为 `debug` 或 `release`），支持 `--gtest_filter`/`--gtest_output`；门禁仍为
-`arksteed_host_unittest` 在 x64 Debug 和 Release 两个模式下的整体运行：
-
-```bash
-python3 ark.py x64.debug arksteed_host_unittest -j4 --gn-args=ets_runtime_enable_ark_steed=true
-python3 ark.py x64.release arksteed_host_unittest -j4 --gn-args=ets_runtime_enable_ark_steed=true
-```
+将 `x64.debug` 替换为 `x64.release` 可运行对应 Release 目标。

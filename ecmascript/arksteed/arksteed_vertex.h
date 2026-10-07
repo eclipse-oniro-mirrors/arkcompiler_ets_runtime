@@ -145,6 +145,17 @@ enum class VertexPropertyFlag : uint16_t {
     IS_NOT_IDEMPOTENT   = 1u << 6,
     IS_CALL             = 1u << 7,
     IS_DEFERRED_CALL    = 1u << 8,
+    // Positive removal proof of the core DCE pass (`ArkSteedDce`). It is set on
+    // exactly the opcodes whose per-opcode, per-backend audit admits them as a
+    // total value: the emitted code cannot throw, deopt, write, read observable
+    // state, allocate, invoke a hook or reach a runtime helper or safepoint, so
+    // dropping an unused instance of the opcode cannot be observed. An opcode
+    // without the bit stays `Required`, and the conservative
+    // `MayHaveSideEffects()`/`CanParticipateInCSE()` predicates are deliberately
+    // NOT the removal proof: `I32AddVertex` and the trap-sensitive
+    // `I32DivVertex` share the same empty flag set. The bit occupies bit 9, i.e.
+    // the existing 16-bit property field of `Vertex`, so it resizes no vertex.
+    CAN_BE_REMOVED_IF_DEAD = 1u << 9,
 };
 
 constexpr VertexPropertyFlag operator|(VertexPropertyFlag lhs, VertexPropertyFlag rhs)
@@ -154,30 +165,33 @@ constexpr VertexPropertyFlag operator|(VertexPropertyFlag lhs, VertexPropertyFla
     return static_cast<VertexPropertyFlag>(u | v);
 }
 
-#define VERTEX_PROPERTY_FLAGS(V)            \
-    V(CanEagerDeopt,    CAN_EAGER_DEOPT)    \
-    V(CanLazyDeopt,     CAN_LAZY_DEOPT)     \
-    V(CanThrow,         CAN_THROW)          \
-    V(CanRead,          CAN_READ)           \
-    V(CanWrite,         CAN_WRITE)          \
-    V(CanAllocate,      CAN_ALLOCATE)       \
-    V(IsNotIdempotent,  IS_NOT_IDEMPOTENT)  \
-    V(IsCall,           IS_CALL)            \
-    V(IsDeferredCall,   IS_DEFERRED_CALL)
+// CC-OFFNXT(G.PRE.02-CPP) X-macro keeps property predicates and getters in sync.
+#define VERTEX_PROPERTY_FLAGS(V)                    \
+    V(CanEagerDeopt,       CAN_EAGER_DEOPT)          \
+    V(CanLazyDeopt,        CAN_LAZY_DEOPT)           \
+    V(CanThrow,            CAN_THROW)               \
+    V(CanRead,             CAN_READ)                \
+    V(CanWrite,            CAN_WRITE)               \
+    V(CanAllocate,         CAN_ALLOCATE)            \
+    V(IsNotIdempotent,     IS_NOT_IDEMPOTENT)        \
+    V(IsCall, IS_CALL) V(IsDeferredCall, IS_DEFERRED_CALL) \
+    V(CanBeRemovedIfDead,  CAN_BE_REMOVED_IF_DEAD)
 
-#define VERTEX_PROPERTY_COMPOUND_FLAGS(V)   \
-    V(CanDeopt)                             \
-    V(CanParticipateInCSE)                  \
+// CC-OFFNXT(G.PRE.02-CPP) X-macro shares the compound-property getter list.
+#define VERTEX_PROPERTY_COMPOUND_FLAGS(V) \
+    V(CanDeopt)                         \
+    V(CanParticipateInCSE)              \
     V(MayHaveSideEffects)
 
-#define VERTEX_PROPERTY_FLAGS_PREDICATE(Name, FLAG)                     \
+// CC-OFFNXT(G.PRE.02-CPP) X-macro generates typed constexpr predicates.
+#define VERTEX_PROPERTY_FLAGS_PREDICATE(Name, FLAG)                      \
     constexpr bool Name(VertexPropertyFlag flag)                        \
-    {                                                                   \
-        uint32_t u = static_cast<uint32_t>(flag);                       \
-        uint32_t v = static_cast<uint32_t>(VertexPropertyFlag::FLAG);   \
+    {                                                                  \
+        uint32_t u = static_cast<uint32_t>(flag);                        \
+        uint32_t v = static_cast<uint32_t>(VertexPropertyFlag::FLAG);    \
         return (u & v) != 0;                                            \
     }
-    VERTEX_PROPERTY_FLAGS(VERTEX_PROPERTY_FLAGS_PREDICATE)
+VERTEX_PROPERTY_FLAGS(VERTEX_PROPERTY_FLAGS_PREDICATE)
 #undef VERTEX_PROPERTY_FLAGS_PREDICATE
 
 constexpr bool CanDeopt(VertexPropertyFlag flag)
@@ -215,6 +229,21 @@ public:
     using ValueRepresentationField = PropertyFlagsField::NextField<uint32_t, 3>;  // 3 : Value repr field width
     using NumTempField = ValueRepresentationField::NextField<uint32_t, 2>;        // 2: NumTemp bit width
     using NumDoubleTempField = NumTempField::NextField<uint32_t, 1>;
+    // Transient, compilation-local liveness mark owned exclusively by
+    // `ArkSteedDce` (see `arksteed_dce.h`). It lives in a spare high bit of the
+    // same 64-bit `bitfield_`, so it changes neither the size nor the layout of
+    // a vertex; it is cleared by the pass before it returns and no other
+    // component reads it.
+    using DceMarkField = NumDoubleTempField::NextField<uint32_t, 1>;
+    // Transient, compilation-local integrity marks owned exclusively by the
+    // `ArkSteedDce` preflight (see `arksteed_dce.h`). They live in the remaining
+    // spare high bits of the same 64-bit `bitfield_`, so neither the size nor the
+    // layout of a vertex changes. `DceMember` marks an executable list member
+    // (used for member queries and duplicate detection) and `DceRegistry` marks a
+    // graph-owned entry/constant registry vertex. The pass clears both before it
+    // returns and no other component reads them.
+    using DceMemberField = DceMarkField::NextField<uint32_t, 1>;
+    using DceRegistryField = DceMemberField::NextField<uint32_t, 1>;
 
     // Get opcode of this vertex
     constexpr VertexOpcode GetOpcode() const
@@ -305,9 +334,10 @@ public:
         regallocInfo_->SetId(id);
     }
 
+// CC-OFFNXT(G.PRE.02-CPP) X-macro generates getters from the shared property lists.
 #define VERTEX_PROPERTY_FLAGS_GETTER(Name, ...)                             \
-    constexpr bool Name() const                                             \
-    {                                                                       \
+    constexpr bool Name() const                                            \
+    {                                                                      \
         uint32_t underlying = PropertyFlagsField::Decode(bitfield_);        \
         return arksteed::Name(static_cast<VertexPropertyFlag>(underlying)); \
     }
@@ -336,6 +366,40 @@ public:
     uint32_t GetDoubleTemporariesNeeded() const
     {
         return NumDoubleTempField::Decode(bitfield_);
+    }
+
+    // Transient liveness mark owned by `ArkSteedDce`. It is not part of the
+    // vertex contract: only the DCE pass sets, reads and clears it.
+    constexpr bool IsDceMarked() const
+    {
+        return DceMarkField::Decode(bitfield_) != 0;
+    }
+
+    void SetDceMarked(bool marked)
+    {
+        bitfield_ = DceMarkField::Update(bitfield_, marked ? 1U : 0U);
+    }
+
+    // Transient executable-member mark owned by `ArkSteedDce`.
+    constexpr bool IsDceMember() const
+    {
+        return DceMemberField::Decode(bitfield_) != 0;
+    }
+
+    void SetDceMember(bool member)
+    {
+        bitfield_ = DceMemberField::Update(bitfield_, member ? 1U : 0U);
+    }
+
+    // Transient retained-registry mark owned by `ArkSteedDce`.
+    constexpr bool IsDceRegistry() const
+    {
+        return DceRegistryField::Decode(bitfield_) != 0;
+    }
+
+    void SetDceRegistry(bool registered)
+    {
+        bitfield_ = DceRegistryField::Update(bitfield_, registered ? 1U : 0U);
     }
 
     template <typename RegisterT>
