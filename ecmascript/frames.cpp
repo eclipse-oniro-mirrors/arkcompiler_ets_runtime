@@ -643,6 +643,28 @@ uintptr_t FrameIterator::GetPrevFrameCallSiteSp() const
     return 0;
 }
 
+// Single source of truth for resolving the current STEED frame's bytecode
+// offset in-process. The iterator caches the MachineCode of this STEED frame
+// itself: Advance() located it via the return address into this frame's own
+// call site (the LAZY_DEOPT patch, if any, has already been recovered there),
+// and GetOptimizedReturnAddr() is already the pc offset within that code.
+// Note: the frame's own GetReturnAddr() points into the caller's code and must
+// not be used here, otherwise the trace would be off by one frame.
+uint32_t FrameIterator::GetSteedFrameBcOffset() const
+{
+    JSTaggedValue codeValue(*GetMachineCodeSlot());
+    if (!codeValue.IsMachineCodeObject()) {
+        return 0;
+    }
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    MachineCode *machineCode = MachineCode::Cast(codeValue.GetTaggedObject());
+    uint32_t pcOffset = static_cast<uint32_t>(GetOptimizedReturnAddr());
+    return arksteed::FindBcOffsetByPCOffset(machineCode, pcOffset);
+#else
+    return 0;
+#endif
+}
+
 uint32_t FrameIterator::GetBytecodeOffset() const
 {
     FrameType type = this->GetFrameType();
@@ -661,13 +683,20 @@ uint32_t FrameIterator::GetBytecodeOffset() const
             auto offset = frame->GetPc() - method->GetBytecodeArray();
             return static_cast<uint32_t>(offset);
         }
+        case FrameType::STEED_FUNCTION_FRAME: {
+            // In-process line-number recovery for the vector-based consumers
+            // (e.g. DFXJSNApi::BuildJsStackInfoList): the same helper as
+            // GetStackTraceInfos, so both entry points resolve STEED frames
+            // through one path. Debug metadata unavailable -> bcOffset 0
+            // (function first line), the frame identity is kept by callers.
+            return GetSteedFrameBcOffset();
+        }
         case FrameType::OPTIMIZED_JS_FAST_CALL_FUNCTION_FRAME:
         case FrameType::OPTIMIZED_JS_FUNCTION_FRAME: {
             [[fallthrough]];
         }
         case FrameType::FASTJIT_FUNCTION_FRAME:
-        case FrameType::FASTJIT_FAST_CALL_FUNCTION_FRAME:
-        case FrameType::STEED_FUNCTION_FRAME: {
+        case FrameType::FASTJIT_FAST_CALL_FUNCTION_FRAME: {
             [[fallthrough]];
         }
         default: {
@@ -712,25 +741,11 @@ void FrameIterator::GetStackTraceInfos(std::vector<std::pair<JSTaggedType, uint3
         }
         case FrameType::STEED_FUNCTION_FRAME: {
             auto *frame = this->GetFrame<SteedFunctionFrame>();
-#if ECMASCRIPT_ENABLE_ARK_STEED
-            // The iterator caches the MachineCode of this STEED frame itself: Advance()
-            // located it via the return address into this frame's own call site (the
-            // LAZY_DEOPT patch, if any, has already been recovered there), and
-            // GetOptimizedReturnAddr() is already the pc offset within that code.
-            // Note: frame->GetReturnAddr() points into the caller's code and must not
-            // be used here, otherwise the trace would be off by one frame.
-            JSTaggedValue codeValue(*GetMachineCodeSlot());
-            if (!codeValue.IsMachineCodeObject()) {
-                stackTraceInfos.push_back(std::make_pair(frame->GetFunction().GetRawData(), 0));
-                break;
-            }
-            MachineCode *machineCode = MachineCode::Cast(codeValue.GetTaggedObject());
-            uint32_t pcOffset = static_cast<uint32_t>(GetOptimizedReturnAddr());
-            auto bcOffset = arksteed::FindBcOffsetByPCOffset(machineCode, pcOffset);
-            stackTraceInfos.push_back(std::make_pair(frame->GetFunction().GetRawData(), bcOffset));
-#else
-            stackTraceInfos.push_back(std::make_pair(frame->GetFunction().GetRawData(), 0));
-#endif
+            // machineCode cache + GetOptimizedReturnAddr + the pure-byte
+            // parsing priority chain live in GetSteedFrameBcOffset (single
+            // source of truth, shared with the vector GetBytecodeOffset);
+            stackTraceInfos.push_back(std::make_pair(frame->GetFunction().GetRawData(),
+                                                     GetSteedFrameBcOffset()));
             break;
         }
         default: {

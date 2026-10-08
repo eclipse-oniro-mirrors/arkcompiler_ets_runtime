@@ -26,6 +26,13 @@
 #include "ecmascript/stubs/runtime_stubs-inl.h"
 #include "ecmascript/jit/jit.h"
 #include "ecmascript/ohos/aot_runtime_info.h"
+
+
+#if ECMASCRIPT_ENABLE_ARK_STEED
+#include <limits>
+#include "ecmascript/arksteed/arksteed_safepoint_table.h"
+#endif
+
 #if defined(ENABLE_EXCEPTION_BACKTRACE)
 #include "ecmascript/platform/backtrace.h"
 #endif
@@ -282,6 +289,11 @@ void JsStackInfo::BuildCrashInfo(bool isJsCrash, uintptr_t pc, JSThread *thread)
     if (JsStackInfo::loader == nullptr) {
         return;
     }
+#if !ECMASCRIPT_ENABLE_ARK_STEED
+// In a non-arksteed build no JIT code can appear unless AOT/FastJit/PGO is enabled.
+// In an arksteed build arksteed is the only JIT compiler and the forced compile
+// entry (ArkTools.arkSteedCompileSync/Async) bypasses enable checks, so JIT code
+// may exist even with all three disabled: never skip DumpJitCode there.
     bool isAotOrJitOrPgoEnabled = JsStackInfo::loader->IsEnableAOT();
 #ifndef EXCLUDE_JIT
     isAotOrJitOrPgoEnabled = isAotOrJitOrPgoEnabled || Jit::GetInstance()->IsEnableFastJit();
@@ -292,6 +304,7 @@ void JsStackInfo::BuildCrashInfo(bool isJsCrash, uintptr_t pc, JSThread *thread)
     if (!isAotOrJitOrPgoEnabled) {
         return;
     }
+#endif
     ohos::RuntimeInfoType type;
     if (isJsCrash) {
         type = ohos::RuntimeInfoType::JS;
@@ -454,9 +467,9 @@ __attribute__((no_sanitize("hwaddress"))) bool GetTypeOffsetAndPrevOffsetFromFra
             prevOffset = FASTJITFunctionFrame::GetPrevOffset();
             break;
         case FrameType::STEED_FUNCTION_FRAME:
- 	        typeOffset = SteedFunctionFrame::GetTypeOffset();
- 	        prevOffset = SteedFunctionFrame::GetPrevOffset();
- 	        break;
+            typeOffset = SteedFunctionFrame::GetTypeOffset();
+            prevOffset = SteedFunctionFrame::GetPrevOffset();
+            break;
         default:
             return false;
     }
@@ -724,6 +737,352 @@ bool ArkParseJsFrameInfo(uintptr_t byteCodePc, uintptr_t mapBase, uintptr_t load
     return true;
 }
 
+#if ECMASCRIPT_ENABLE_ARK_STEED
+// ============================================================================
+// Out-of-process STEED frame pc resolution (G2).
+//
+// PC source model (mirrors the in-process FrameIterator::Advance semantics):
+//   - a new unwind sequence keeps the fault PC passed by the unwinder as the
+//     first-frame candidate (never cleared before use);
+//   - each visited frame with a reliable native return-address slot feeds the
+//     next STEED caller's candidate; interpreter/entry-style frames invalidate
+//     it (Advance() sets optimizedReturnAddr_ = 0 for those);
+//   - a candidate outside [funcAddr, funcAddr + instrsiz) degrades that frame
+//     to function-first-line (bcOffset = 0) and never misreports (incl.
+//     lazy-deopt trampoline addresses).
+// The continuity state is thread-local and keyed by ctx, so parallel
+// faultloggerd workers and interleaved sequences never share stale
+// candidates; every termination path clears it idempotently.
+// ============================================================================
+
+// Hard cap for out-of-process arksteed metadata reads: the crash process memory
+// is untrusted, so a corrupted size field must never drive huge allocations.
+constexpr uint32_t MAX_OFFLINE_ARKSTEED_METADATA_SIZE = 16 * 1024 * 1024;  // 16 MiB
+
+namespace {
+struct UnwindPcState {
+    void *ctx {nullptr};
+    uintptr_t candidatePc {0};  // return addr of the last visited frame
+    bool candidateValid {false};
+    uintptr_t firstPc {0};      // original fault PC of the sequence
+    bool seenSteedFrame {false};
+};
+
+thread_local UnwindPcState g_unwindPcState;
+}  // namespace
+
+// Idempotent; safe to call on every termination path (read failure, unsupported
+// frame type, unwind end, jit ELF dump end).
+static void ResetUnwindPcState()
+{
+    g_unwindPcState.ctx = nullptr;
+    g_unwindPcState.candidatePc = 0;
+    g_unwindPcState.candidateValid = false;
+    g_unwindPcState.firstPc = 0;
+    g_unwindPcState.seenSteedFrame = false;
+}
+
+// Initialize/verify the per-sequence continuity state. The unwinder driver
+// passes a constant frameIndex, so a new sequence is identified by a changed
+// ctx only; it re-initializes and preserves the unwinder's input fault PC as
+// the first-frame candidate.
+static void UpdateUnwindPcSequence(void *ctx, uintptr_t inputPc)
+{
+    if (g_unwindPcState.ctx != ctx) {
+        g_unwindPcState.ctx = ctx;
+        g_unwindPcState.candidatePc = inputPc;
+        g_unwindPcState.candidateValid = inputPc != 0;
+        g_unwindPcState.firstPc = inputPc;
+        g_unwindPcState.seenSteedFrame = false;
+    }
+}
+
+// Capture the current frame's native return address as the candidate pc for
+// the next STEED caller (frame N's position is its callee M's return address,
+// exactly like in-process Advance()). Interpreter/entry-style frames have no
+// reliable native return-address slot and invalidate the candidate instead.
+// typeSlot points at the frame's type slot; no-op when no sequence is active.
+static void CaptureFrameReturnAddr(void *ctx, ReadMemFunc readMem, uintptr_t typeSlot,
+                                   uintptr_t frameType)
+{
+    if (g_unwindPcState.ctx != ctx) {
+        return;
+    }
+    FrameType type = static_cast<FrameType>(frameType);
+    uintptr_t returnAddr = 0;
+    bool hasSlot = true;
+    switch (type) {
+        // STEED/FASTJIT: the return address lives at fp + sizeof(uintptr_t),
+        // where fp is the prev-frame slot address.
+        case FrameType::STEED_FUNCTION_FRAME:
+        case FrameType::FASTJIT_FUNCTION_FRAME:
+        case FrameType::FASTJIT_FAST_CALL_FUNCTION_FRAME: {
+            uintptr_t slot = typeSlot - SteedFunctionFrame::GetTypeOffset() +
+                             SteedFunctionFrame::GetPrevOffset() + sizeof(uintptr_t);
+            hasSlot = readMem(ctx, slot, &returnAddr);
+            break;
+        }
+        // frames whose own return-address slot sits at frameBase + offset
+        case FrameType::OPTIMIZED_JS_FAST_CALL_FUNCTION_FRAME:
+        case FrameType::OPTIMIZED_JS_FUNCTION_FRAME:
+        case FrameType::OPTIMIZED_JS_FUNCTION_ARGS_CONFIG_FRAME: {
+            uintptr_t slot = typeSlot - OptimizedJSFunctionFrame::GetTypeOffset() +
+                             OptimizedJSFunctionFrame::GetReturnAddrOffset();
+            hasSlot = readMem(ctx, slot, &returnAddr);
+            break;
+        }
+        case FrameType::BUILTIN_FRAME:
+        case FrameType::BUILTIN_ENTRY_FRAME: {
+            uintptr_t slot = typeSlot - BuiltinFrame::GetTypeOffset() +
+                             BuiltinFrame::GetReturnAddrOffset();
+            hasSlot = readMem(ctx, slot, &returnAddr);
+            break;
+        }
+        case FrameType::BUILTIN_FRAME_WITH_ARGV:
+        case FrameType::BUILTIN_FRAME_WITH_ARGV_STACK_OVER_FLOW_FRAME: {
+            uintptr_t slot = typeSlot - BuiltinWithArgvFrame::GetTypeOffset() +
+                            BuiltinWithArgvFrame::GetReturnAddrOffset();
+            hasSlot = readMem(ctx, slot, &returnAddr);
+            break;
+        }
+        case FrameType::BASELINE_BUILTIN_FRAME: {
+            uintptr_t slot = typeSlot - BaselineBuiltinFrame::GetTypeOffset() +
+                             BaselineBuiltinFrame::GetReturnAddrOffset();
+            hasSlot = readMem(ctx, slot, &returnAddr);
+            break;
+        }
+        case FrameType::ASM_BRIDGE_FRAME: {
+            uintptr_t slot = typeSlot - AsmBridgeFrame::GetTypeOffset() +
+                             AsmBridgeFrame::GetReturnAddrOffset();
+            hasSlot = readMem(ctx, slot, &returnAddr);
+            break;
+        }
+        case FrameType::LEAVE_FRAME: {
+            uintptr_t slot = typeSlot - OptimizedLeaveFrame::GetTypeOffset() +
+                             OptimizedLeaveFrame::GetReturnAddrOffset();
+            hasSlot = readMem(ctx, slot, &returnAddr);
+            break;
+        }
+        case FrameType::LEAVE_FRAME_WITH_ARGV: {
+            uintptr_t slot = typeSlot - OptimizedWithArgvLeaveFrame::GetTypeOffset() +
+                             OptimizedWithArgvLeaveFrame::GetReturnAddrOffset();
+            hasSlot = readMem(ctx, slot, &returnAddr);
+            break;
+        }
+        case FrameType::BUILTIN_CALL_LEAVE_FRAME: {
+            uintptr_t slot = typeSlot - OptimizedBuiltinLeaveFrame::GetTypeOffset() +
+                             OptimizedBuiltinLeaveFrame::GetReturnAddrOffset();
+            hasSlot = readMem(ctx, slot, &returnAddr);
+            break;
+        }
+        case FrameType::OPTIMIZED_FRAME: {
+            uintptr_t slot = typeSlot - OptimizedFrame::GetTypeOffset() +
+                             OptimizedFrame::GetReturnAddrOffset();
+            hasSlot = readMem(ctx, slot, &returnAddr);
+            break;
+        }
+        case FrameType::ASM_INTERPRETER_BRIDGE_FRAME: {
+            uintptr_t slot = typeSlot - AsmInterpretedBridgeFrame::GetTypeOffset() +
+                             AsmInterpretedBridgeFrame::GetReturnAddrOffset(false);
+            hasSlot = readMem(ctx, slot, &returnAddr);
+            break;
+        }
+        case FrameType::OPTIMIZED_JS_FUNCTION_UNFOLD_ARGV_FRAME: {
+            uintptr_t slot = typeSlot - OptimizedJSFunctionUnfoldArgVFrame::GetTypeOffset() +
+                             OptimizedJSFunctionUnfoldArgVFrame::GetReturnAddrOffset();
+            hasSlot = readMem(ctx, slot, &returnAddr);
+            break;
+        }
+        // interpreter-style frames: no reliable native return address
+        case FrameType::ASM_INTERPRETER_FRAME:
+        case FrameType::INTERPRETER_CONSTRUCTOR_FRAME:
+        case FrameType::INTERPRETER_FRAME:
+        case FrameType::INTERPRETER_FAST_NEW_FRAME:
+        default:
+            hasSlot = false;
+            break;
+    }
+    if (hasSlot && returnAddr != 0) {
+        g_unwindPcState.candidatePc = returnAddr;
+        g_unwindPcState.candidateValid = true;
+ 	} else {
+        g_unwindPcState.candidatePc = 0;
+        g_unwindPcState.candidateValid = false;
+    }
+}
+
+struct ReadSteedMachineCodeParam {
+    void *ctx;
+    ReadMemFunc readMem;
+    std::vector<uint8_t>& container;
+    uintptr_t stackmapSize;
+    uintptr_t payloadSize;
+    uintptr_t candAddr;
+};
+
+// Safely copy the ASTB container from one of the two possible layouts
+// (JitFort NonText region after the MachineCode object / right after the
+// text). The crash process memory is untrusted: bound the size, validate
+// the fixed header and the section directory, check every read, drop the
+// whole candidate on any failure.
+static bool tryReadSteedTableContainer(const ReadSteedMachineCodeParam& param)
+{
+    auto ctx = param.ctx;
+    auto readMem = param.readMem;
+    auto stackmapSize = param.stackmapSize;
+    auto payloadSize = param.payloadSize;
+    auto candAddr = param.candAddr;
+    auto& container = param.container;
+
+    if (stackmapSize == 0 || stackmapSize > payloadSize ||
+        stackmapSize > MAX_OFFLINE_ARKSTEED_METADATA_SIZE ||
+        candAddr > std::numeric_limits<uintptr_t>::max() - stackmapSize) {
+        return false;
+    }
+    // fixed header first (word-wise, tail-trimmed)
+    uint8_t headerBytes[arksteed::ArkSteedTableContainerHeader::SIZE] = {0};
+    for (size_t off = 0; off < sizeof(headerBytes); off += sizeof(uintptr_t)) {
+        uintptr_t word = 0;
+        if (!readMem(ctx, candAddr + off, &word)) {
+            return false;
+        }
+        size_t n = std::min(sizeof(uintptr_t), sizeof(headerBytes) - off);
+        if (memcpy_s(headerBytes + off, n, &word, n) != EOK) {
+            return false;
+        }
+    }
+    arksteed::ArkSteedTableContainerHeader header;
+    if (memcpy_s(&header, sizeof(header), headerBytes, sizeof(headerBytes)) != EOK) {
+        return false;
+    }
+    if (header.magic != arksteed::ArkSteedTableContainerHeader::MAGIC ||
+        header.version != arksteed::ArkSteedTableContainerHeader::VERSION) {
+        return false;
+    }
+    // section directory must stay inside the declared container size
+    auto sectionOk = [&](uint32_t off, uint32_t size) {
+        return off >= arksteed::ArkSteedTableContainerHeader::SIZE &&
+               static_cast<uint64_t>(off) + size <= stackmapSize;
+    };
+    if (!sectionOk(header.safepointOffset, header.safepointSize) ||
+        (header.positionSize != 0 && !sectionOk(header.positionOffset, header.positionSize))) {
+        return false;
+    }
+    // machine-word chunked copy; the tail keeps only the valid bytes and
+    // any failed read drops the whole candidate (no partial results)
+    container.assign(stackmapSize, 0);
+    size_t off = 0;
+    while (off < stackmapSize) {
+        uintptr_t word = 0;
+        if (!readMem(ctx, candAddr + off, &word)) {
+            container.clear();
+            return false;
+        }
+        size_t n = std::min(sizeof(uintptr_t), stackmapSize - off);
+        if (memcpy_s(container.data() + off, n, &word, n) != EOK) {
+            container.clear();
+            return false;
+        }
+        off += sizeof(uintptr_t);
+    }
+    return true;
+}
+
+// Resolve a STEED frame's bytecode-space pc: candidate pcs -> machine-code
+// offset (range-checked) -> ASTB container (safely copied) -> position table
+// first, safepoint table fallback, 0 last -> bytecodeArray + bcOffset.
+// Returns 0 on any unreadable input (frame identity is kept by the caller).
+static uintptr_t GetSteedBytecodePc(void *ctx, ReadMemFunc readMem, uintptr_t typeSlot,
+                                    uintptr_t preferredPc, uintptr_t fallbackPc)
+{
+    // frame -> JSFunction -> MachineCode
+    uintptr_t function = 0;
+    if (!readMem(ctx, typeSlot - SteedFunctionFrame::GetTypeOffset() +
+         SteedFunctionFrame::GetFunctionOffset(), &function) || function == 0) {
+        return 0;
+ 	}
+
+    uintptr_t method = 0;
+    if (!readMem(ctx, function + JSFunction::METHOD_OFFSET, &method) || method == 0) {
+        return 0;
+    }
+    uintptr_t bytecodeArray = 0;
+    if (!readMem(ctx, method + Method::NATIVE_POINTER_OR_BYTECODE_ARRAY_OFFSET,
+                 &bytecodeArray) || bytecodeArray == 0) {
+        return 0;
+    }
+
+    uintptr_t machineCode = 0;
+    if (!readMem(ctx, function + JSFunction::MACHINECODE_OFFSET, &machineCode) || machineCode == 0) {
+        return bytecodeArray; // use method first line for fallback
+    }
+    // MachineCode fixed fields. 32-bit fields are read as words and normalized,
+    // so garbage in the neighbouring high half never inflates them.
+    uintptr_t funcAddr = 0;
+    uintptr_t instrsizWord = 0;
+    uintptr_t stackmapSizeWord = 0;
+    uintptr_t payloadSizeWord = 0;
+    if (!readMem(ctx, machineCode + MachineCode::FUNCADDR_OFFSET, &funcAddr) ||
+        !readMem(ctx, machineCode + MachineCode::INSTRSIZ_OFFSET, &instrsizWord) ||
+        !readMem(ctx, machineCode + MachineCode::STACKMAP_OR_OFFSETTABLE_SIZE_OFFSET, &stackmapSizeWord) ||
+        !readMem(ctx, machineCode + MachineCode::PAYLOADSIZE_OFFSET, &payloadSizeWord)) {
+        return bytecodeArray;
+    }
+    uint32_t instrsiz = static_cast<uint32_t>(instrsizWord);
+    uint32_t stackmapSize = static_cast<uint32_t>(stackmapSizeWord);
+    uint32_t payloadSize = static_cast<uint32_t>(payloadSizeWord);
+    if (funcAddr == 0 || instrsiz == 0) {
+        return bytecodeArray;
+    }
+    // Candidate range check: compare first, subtract after. An out-of-range
+    // candidate (fault pc in other code, lazy-deopt trampoline, invalid) only
+    // degrades this frame to function-first-line.
+    uintptr_t codeOffset = 0;
+    if (preferredPc >= funcAddr && preferredPc - funcAddr < instrsiz) {
+        codeOffset = preferredPc - funcAddr;
+    } else if (fallbackPc >= funcAddr && fallbackPc - funcAddr < instrsiz) {
+        codeOffset = fallbackPc - funcAddr;
+    }
+
+    std::vector<uint8_t> container;
+    ReadSteedMachineCodeParam readJitFortEnable{ctx, readMem, container, stackmapSize,
+                                                payloadSize, machineCode + MachineCode::SIZE};
+    ReadSteedMachineCodeParam readFallback{ctx, readMem, container, stackmapSize,
+                                           payloadSize, funcAddr + instrsiz};
+
+    bool copied = tryReadSteedTableContainer(readJitFortEnable) ||
+                  tryReadSteedTableContainer(readFallback);
+
+    // position table first -> safepoint table fallback -> 0 (bcOffset == 0 is a
+    // legal value: the function's first bytecode). codeOffset == 0 means no
+    // candidate was in range: degrade instead of consulting the tables, or
+    // codeOffset-1 would wrap around to UINT32_MAX and floor-hit the last
+    // position entry (a misreport).
+    uint32_t bcOffset = 0;
+    if (copied && codeOffset != 0) {
+        size_t posSize = 0;
+        size_t sfpSize = 0;
+        const uint8_t *posTable =
+            arksteed::GetArkSteedPositionTable(container.data(), container.size(), &posSize);
+        auto bc = (posTable != nullptr) ?
+            arksteed::LookupBcOffsetFromPositionTable(posTable, posSize,
+                                                      static_cast<uint32_t>(codeOffset-1))
+            : std::optional<uint32_t>(std::nullopt);
+        if (!bc) {
+            const uint8_t *sfpTable =
+                arksteed::GetArkSteedSafepointTable(container.data(), container.size(), &sfpSize);
+            if (sfpTable != nullptr) {
+                bc = arksteed::ExtractBcOffsetFromSafepointTable(sfpTable, sfpSize,
+                                                                 static_cast<uint32_t>(codeOffset));
+            }
+        }
+        bcOffset = bc.value_or(0);
+    }
+
+    return bytecodeArray + bcOffset;
+}
+#endif  // ECMASCRIPT_ENABLE_ARK_STEED
+
 __attribute__((no_sanitize("hwaddress"))) uintptr_t GetBytecodeOffset(void *ctx,
                                                                       ReadMemFunc readMem,
                                                                       uintptr_t frameType,
@@ -754,6 +1113,28 @@ __attribute__((no_sanitize("hwaddress"))) uintptr_t GetBytecodeOffset(void *ctx,
             readMem(ctx, currentPtr, &bytecodePc);
             return bytecodePc;
         }
+#if ECMASCRIPT_ENABLE_ARK_STEED
+        case FrameType::STEED_FUNCTION_FRAME: {
+            // Consume the unwind continuity state: the first STEED frame of a
+            // sequence prefers the original fault PC, later ones the previous
+            // callee's return address; both are range-checked inside and only
+            // ever degrade (never misreport). Without an active sequence for
+            // this ctx (e.g. driven outside step_ark_with_record_jit) the
+            // frame degrades to its first bytecode.
+            uintptr_t preferredPc = 0;
+            uintptr_t fallbackPc = 0;
+            if (g_unwindPcState.ctx == ctx) {
+                if (!g_unwindPcState.seenSteedFrame) {
+                    preferredPc = g_unwindPcState.firstPc;
+                    fallbackPc = g_unwindPcState.candidateValid ? g_unwindPcState.candidatePc : 0;
+                } else {
+                    preferredPc = g_unwindPcState.candidateValid ? g_unwindPcState.candidatePc : 0;
+                }
+            }
+            g_unwindPcState.seenSteedFrame = true;
+            return GetSteedBytecodePc(ctx, readMem, currentPtr, preferredPc, fallbackPc);
+        }
+#endif
         // return returnaddr
         case FrameType::OPTIMIZED_JS_FAST_CALL_FUNCTION_FRAME:
         case FrameType::OPTIMIZED_JS_FUNCTION_FRAME:
@@ -832,12 +1213,27 @@ __attribute__((no_sanitize("hwaddress"))) uintptr_t GetBytecodeOffset(void *ctx,
     return 0;
 }
 
-uintptr_t ArkGetFunction(void *ctx, ReadMemFunc readMem, uintptr_t currentPtr)
+uintptr_t ArkGetFunction(void *ctx, ReadMemFunc readMem, uintptr_t frameType, uintptr_t currentPtr)
 {
     // only for jit frame
     uintptr_t funcAddr = currentPtr;
-    funcAddr -= FASTJITFunctionFrame::GetTypeOffset();
-    funcAddr += FASTJITFunctionFrame::GetFunctionOffset();
+    switch (static_cast<FrameType>(frameType)) {
+        case FrameType::FASTJIT_FUNCTION_FRAME:
+        case FrameType::FASTJIT_FAST_CALL_FUNCTION_FRAME: {
+            funcAddr -= FASTJITFunctionFrame::GetTypeOffset();
+            funcAddr += FASTJITFunctionFrame::GetFunctionOffset();
+            break;
+        }
+        case FrameType::STEED_FUNCTION_FRAME: {
+            funcAddr -= SteedFunctionFrame::GetTypeOffset();
+            funcAddr += SteedFunctionFrame::GetFunctionOffset();
+            break;
+        }
+        default: {
+            LOG_ECMA(DEBUG) << "Unsupported frameType for ArkGetFunction: " << frameType;
+            return 0;
+        }
+    }
     uintptr_t function = 0;
     if (!readMem(ctx, funcAddr, &function)) {
         return 0;
@@ -882,14 +1278,32 @@ __attribute__((no_sanitize("hwaddress"))) bool ArkGetNextFrame(void *ctx,
     return ArkGetNextFrame(ctx, readMem, currentPtr, frameType, pc);
 }
 
-bool ArkGetMethodIdWithJit(ArkUnwindParam *arkUnwindParam, uintptr_t currentPtr)
+bool ArkGetMethodIdWithJit(ArkUnwindParam *arkUnwindParam, uintptr_t frameType, uintptr_t currentPtr)
 {
     // only for jit frame
-    uintptr_t function = ArkGetFunction(arkUnwindParam->ctx, arkUnwindParam->readMem, currentPtr);
+    uintptr_t function = ArkGetFunction(arkUnwindParam->ctx, arkUnwindParam->readMem, frameType, currentPtr);
     if (!function) {
         LOG_ECMA(DEBUG) << "Failed to get function";
         return false;
     }
+    // The record key must be the abc methodId (EntityId) carried in the Method's
+    // literalInfo behind the JSFunction: the caller's slot holds no usable id
+    // (faultloggerd keeps it 0), and ArkWriteJitCode joins nameMap by this same
+    // EntityId (ArkParseJsFrameInfo saves names under it). Unreadable method
+    // metadata only skips the code recording, never the frame itself.
+    uintptr_t method = 0;
+    uintptr_t literalInfo = 0;
+    uintptr_t methodId = 0;
+    if (arkUnwindParam->readMem(arkUnwindParam->ctx, function + JSFunction::METHOD_OFFSET, &method) &&
+        method != 0 &&
+        arkUnwindParam->readMem(arkUnwindParam->ctx, method + Method::LITERAL_INFO_OFFSET, &literalInfo)) {
+        methodId = MethodLiteral::GetMethodId(literalInfo).GetOffset();
+    }
+    if (methodId == 0) {
+        LOG_ECMA(DEBUG) << std::hex << "Failed to get methodId, function: " << function;
+        return true;
+    }
+    *arkUnwindParam->methodId = methodId;
     uintptr_t machineCode = 0;
     uintptr_t functionAddr = function + JSFunction::MACHINECODE_OFFSET;
     arkUnwindParam->readMem(arkUnwindParam->ctx, functionAddr, &machineCode);
@@ -908,20 +1322,29 @@ bool ArkGetMethodIdWithJit(ArkUnwindParam *arkUnwindParam, uintptr_t currentPtr)
             arkUnwindParam->readMem(arkUnwindParam->ctx, funcAddr + l, &tmp);
             codeVec.push_back(tmp);
         }
-        arkUnwindParam->jitCache.push_back(*arkUnwindParam->methodId);
-        JsStackInfo::machineCodeMap[EntityId(*arkUnwindParam->methodId)] = codeVec;
+        arkUnwindParam->jitCache.push_back(methodId);
+        JsStackInfo::machineCodeMap[EntityId(methodId)] = codeVec;
     }
     return true;
 }
 
+// 跨进程回栈入口
 bool ArkGetNextFrameWithJit(ArkUnwindParam *arkUnwindParam, uintptr_t &currentPtr, uintptr_t &frameType)
 {
     currentPtr -= sizeof(FrameType);
     if (!arkUnwindParam->readMem(arkUnwindParam->ctx, currentPtr, &frameType)) {
+#if ECMASCRIPT_ENABLE_ARK_STEED
+        ResetUnwindPcState();
+#endif
         return false;
     }
     FrameIterator::TryRemoveLazyDeoptFlag(frameType);
     if (ArkFrameCheck(frameType)) {
+#if ECMASCRIPT_ENABLE_ARK_STEED
+        // entry-style boundary frame: no reliable native return address, so it
+        // invalidates the candidate for the next STEED caller
+        CaptureFrameReturnAddr(arkUnwindParam->ctx, arkUnwindParam->readMem, currentPtr, frameType);
+#endif
         return true;
     }
     bool ret = false;
@@ -931,17 +1354,28 @@ bool ArkGetNextFrameWithJit(ArkUnwindParam *arkUnwindParam, uintptr_t &currentPt
         ret = true;
     } else if (IsFastJitFunctionFrame(frameType) || IsSteedFunctionFrame(frameType)) {
         *arkUnwindParam->pc = GetBytecodeOffset(arkUnwindParam->ctx, arkUnwindParam->readMem, frameType, currentPtr);
-        ret = ArkGetMethodIdWithJit(arkUnwindParam, currentPtr);
+        ret = ArkGetMethodIdWithJit(arkUnwindParam, frameType, currentPtr);
     }
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    // the current frame's pc has been resolved above, so its own return address
+    // can now feed the next STEED caller's candidate (never before consumption)
+    CaptureFrameReturnAddr(arkUnwindParam->ctx, arkUnwindParam->readMem, currentPtr, frameType);
+#endif
 
     uintptr_t typeOffset = 0;
     uintptr_t prevOffset = 0;
     if (!GetTypeOffsetAndPrevOffsetFromFrameType(frameType, typeOffset, prevOffset)) {
+#if ECMASCRIPT_ENABLE_ARK_STEED
+        ResetUnwindPcState();
+#endif
         return false;
     }
     currentPtr -= typeOffset;
     currentPtr += prevOffset;
     if (!arkUnwindParam->readMem(arkUnwindParam->ctx, currentPtr, &currentPtr)) {
+#if ECMASCRIPT_ENABLE_ARK_STEED
+        ResetUnwindPcState();
+#endif
         return false;
     }
 
@@ -975,6 +1409,10 @@ bool ArkWriteJitCode([[maybe_unused]] void *ctx, [[maybe_unused]] ReadMemFunc re
     jitDumpElf.WriteJitElfFile(fd);
     JsStackInfo::nameMap.clear();
     JsStackInfo::machineCodeMap.clear();
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    // unwind sequence finished: clear the per-thread pc continuity state
+    ResetUnwindPcState();
+#endif
     return true;
 #else
     return false;
@@ -987,8 +1425,19 @@ bool StepArkWithRecordJit(ArkUnwindParam *arkUnwindParam)
     uintptr_t currentPtr = *arkUnwindParam->fp;
     if (currentPtr == 0) {
         LOG_ECMA(ERROR) << "fp is nullptr in StepArkWithRecordJit()!";
+#if ECMASCRIPT_ENABLE_ARK_STEED
+        // unwind end: clear the per-thread pc continuity state
+        ResetUnwindPcState();
+#endif
         return false;
     }
+
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    // new-sequence init / continuity check: keeps the unwinder's input fault PC
+    // as the first-frame candidate (a changed ctx re-initializes the state, so
+    // stale candidates never leak across sequences)
+    UpdateUnwindPcSequence(arkUnwindParam->ctx, *arkUnwindParam->pc);
+#endif
 
 #if defined(ENABLE_STATIC_BACKTRACE)
     if (*arkUnwindParam->frameType == StepFrameType::STATIC_JS_FRAME) {
@@ -1013,6 +1462,12 @@ bool StepArkWithRecordJit(ArkUnwindParam *arkUnwindParam)
             ret &= arkUnwindParam->readMem(arkUnwindParam->ctx, currentPtr, arkUnwindParam->pc);
             *arkUnwindParam->isJsFrame = false;
             *arkUnwindParam->frameType = StepFrameType::NATIVE_FRAME;
+#if ECMASCRIPT_ENABLE_ARK_STEED
+            if (!ret) {
+                // read failure at the entry-frame boundary: sequence terminated
+                ResetUnwindPcState();
+            }
+#endif
             return ret;
         } else {
             *arkUnwindParam->fp = currentPtr;
