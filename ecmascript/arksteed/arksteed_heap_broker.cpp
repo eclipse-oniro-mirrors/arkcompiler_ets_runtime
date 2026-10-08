@@ -36,7 +36,8 @@
 
 namespace panda::ecmascript::arksteed {
 
-namespace {
+namespace
+{
 using ParsedStoreHandler = ArkSteedHeapBroker::StoreHandlerData;
 using ParsedLoadHandler = ArkSteedHeapBroker::LoadHandlerData;
 
@@ -67,8 +68,8 @@ bool TryReadPrototypeStoreHandler(const ArkSteedHeapBroker *broker, JSThread *co
     }
     result->protoCell = broker->MakeProtoCellRef(protoCellValue);
     result->hasProtoCell = true;
-    bool hasValidHolder = result->holderIsReceiver ||
-        (result->holder.IsSafeForCompile() && result->holderHClass.IsSafeForCompile());
+    bool hasValidHolder =
+        result->holderIsReceiver || (result->holder.IsSafeForCompile() && result->holderHClass.IsSafeForCompile());
     return hasValidHolder && result->protoCell.IsSafeForCompile();
 }
 
@@ -111,8 +112,7 @@ bool TryReadTransWithProtoStoreHandler(const ArkSteedHeapBroker *broker, JSThrea
     result->protoCell = broker->MakeProtoCellRef(protoCellValue);
     result->hasTransitionHClass = true;
     result->hasProtoCell = true;
-    return result->transitionHClass.IsJSHClass() &&
-        result->protoCell.IsSafeForCompile();
+    return result->transitionHClass.IsJSHClass() && result->protoCell.IsSafeForCompile();
 }
 
 bool TryReadPrototypeLoadHandler(const ArkSteedHeapBroker *broker, JSThread *compilerThread,
@@ -139,8 +139,8 @@ bool TryReadPrototypeLoadHandler(const ArkSteedHeapBroker *broker, JSThread *com
     }
     result->protoCell = broker->MakeProtoCellRef(protoCellValue);
     result->hasProtoCell = true;
-    bool hasValidHolder = holderValue.IsUndefined() ? HandlerBase::IsNonExist(result->handlerInfo) :
-                                                      result->holderHClass.IsSafeForCompile();
+    bool hasValidHolder = holderValue.IsUndefined() ? HandlerBase::IsNonExist(result->handlerInfo)
+                                                    : result->holderHClass.IsSafeForCompile();
     return hasValidHolder && result->protoCell.IsSafeForCompile();
 }
 
@@ -153,7 +153,7 @@ bool IsNonMovableHClass(JSHClass *hclass)
     return region->InNonMovableSpace() || region->InReadOnlySpace() || region->InHugeObjectSpace() ||
            region->InSharedNonMovableSpace() || region->InSharedReadOnlySpace() || region->InSharedHugeObjectSpace();
 }
-}  // namespace
+} // namespace
 
 bool ArkSteedHeapBroker::TryReadStoreHandler(const ArkSteedHandlerRef &handler, StoreHandlerData *result) const
 {
@@ -168,7 +168,7 @@ bool ArkSteedHeapBroker::TryReadStoreHandler(const ArkSteedHandlerRef &handler, 
     if (!OwnsRef(handler) || !handler.IsHeapObject()) {
         return false;
     }
-    SerializingScope scope(this, "ArkSteedHeapBroker::TryReadStoreHandler");
+    NoGCScope scope(this);
     JSTaggedValue cachedHandler;
     if (!TryResolveRef(handler, &cachedHandler)) {
         return false;
@@ -195,7 +195,7 @@ bool ArkSteedHeapBroker::TryReadLoadHandler(const ArkSteedHandlerRef &handler, L
     if (!OwnsRef(handler) || !handler.IsHeapObject()) {
         return false;
     }
-    SerializingScope scope(this, "ArkSteedHeapBroker::TryReadLoadHandler");
+    NoGCScope scope(this);
     JSTaggedValue cachedHandler;
     if (!TryResolveRef(handler, &cachedHandler)) {
         return false;
@@ -203,23 +203,23 @@ bool ArkSteedHeapBroker::TryReadLoadHandler(const ArkSteedHandlerRef &handler, L
     return TryReadPrototypeLoadHandler(this, compilerThread_, cachedHandler, result);
 }
 
-bool ArkSteedHeapBroker::IsTypedArrayLengthAccessor(const ArkSteedHClassRef &receiver,
-                                                   const LoadHandlerData &parsed,
-                                                   const ArkSteedNameRef &name) const
+bool ArkSteedHeapBroker::IsTypedArrayLengthAccessor(const ArkSteedHClassRef &receiver, const LoadHandlerData &parsed,
+                                                    const ArkSteedNameRef &name) const
 {
     if (parsed.holderIsReceiver || !parsed.hasProtoCell || !HandlerBase::IsAccessor(parsed.handlerInfo)) {
         return false;
     }
-    SerializingScope scope(this, "ArkSteedHeapBroker::IsTypedArrayLengthAccessor");
+    NoGCScope scope(this);
     JSThread *thread = compilerThread_;
     JSTaggedValue receiverValue;
     JSTaggedValue holderValue;
     JSTaggedValue nameValue;
     if (!TryResolveRef(receiver, &receiverValue) || !receiverValue.IsJSHClass() ||
         !IsFixedLengthTypedArrayType(JSHClass::Cast(receiverValue.GetTaggedObject())->GetObjectType()) ||
-        !TryResolveRef(parsed.holder, &holderValue) || !holderValue.IsJSObject() ||
-        !TryResolveRef(name, &nameValue) || !nameValue.IsString() ||
-        !EcmaStringAccessor::StringsAreEqual(thread, EcmaString::Cast(nameValue.GetTaggedObject()),
+        !TryResolveRef(parsed.holder, &holderValue) || !holderValue.IsJSObject() || !TryResolveRef(name, &nameValue) ||
+        !nameValue.IsString() ||
+        !EcmaStringAccessor::StringsAreEqual(
+            thread, EcmaString::Cast(nameValue.GetTaggedObject()),
             EcmaString::Cast(thread->GlobalConstants()->GetLengthString().GetTaggedObject()))) {
         return false;
     }
@@ -260,22 +260,22 @@ bool ArkSteedHeapBroker::IsTypedArrayLengthAccessor(const ArkSteedHClassRef &rec
     auto *function = JSFunction::Cast(getter.GetTaggedObject());
     auto *method = Method::Cast(function->GetMethod(thread).GetTaggedObject());
     return method->IsNativeWithCallField() &&
-        function->GetNativePointer() == reinterpret_cast<const void *>(builtins::BuiltinsTypedArray::GetLength);
+           function->GetNativePointer() == reinterpret_cast<const void *>(builtins::BuiltinsTypedArray::GetLength);
 }
 
-bool ArkSteedHeapBroker::IsJSArrayLengthAccessor(const ArkSteedHClassRef &receiver,
-                                                const ArkSteedNameRef &name) const
+bool ArkSteedHeapBroker::IsJSArrayLengthAccessor(const ArkSteedHClassRef &receiver, const ArkSteedNameRef &name) const
 {
     if (!receiver.IsJSHClass() || !name.IsString()) {
         return false;
     }
-    SerializingScope scope(this, "ArkSteedHeapBroker::IsJSArrayLengthAccessor");
+    NoGCScope scope(this);
     JSTaggedValue hclass;
     JSTaggedValue key;
     return TryResolveRef(receiver, &hclass) && TryResolveRef(name, &key) &&
-        JSHClass::Cast(hclass.GetTaggedObject())->IsJSArray() &&
-        EcmaStringAccessor::StringsAreEqual(compilerThread_, EcmaString::Cast(key.GetTaggedObject()),
-            EcmaString::Cast(compilerThread_->GlobalConstants()->GetLengthString().GetTaggedObject()));
+           JSHClass::Cast(hclass.GetTaggedObject())->IsJSArray() &&
+           EcmaStringAccessor::StringsAreEqual(
+               compilerThread_, EcmaString::Cast(key.GetTaggedObject()),
+               EcmaString::Cast(compilerThread_->GlobalConstants()->GetLengthString().GetTaggedObject()));
 }
 
 bool ArkSteedHeapBroker::CanTransitionElementsKind(JSHClass *source, JSHClass *target) const
@@ -283,10 +283,10 @@ bool ArkSteedHeapBroker::CanTransitionElementsKind(JSHClass *source, JSHClass *t
     if (!IsNonMovableHClass(source) || !IsNonMovableHClass(target)) {
         return false;
     }
-    SerializingScope scope(this, "ArkSteedHeapBroker::CanTransitionElementsKind");
+    NoGCScope scope(this);
     JSThread *hostThread = env_->GetHostThread();
-    if (hostThread == nullptr || source == nullptr || target == nullptr || source == target ||
-        !source->IsJSArray() || !target->IsJSArray() || source->IsPrototype() || target->IsPrototype()) {
+    if (hostThread == nullptr || source == nullptr || target == nullptr || source == target || !source->IsJSArray() ||
+        !target->IsJSArray() || source->IsPrototype() || target->IsPrototype()) {
         return false;
     }
 
@@ -334,26 +334,25 @@ bool ArkSteedHeapBroker::TryGetKnownConstructInfo(const ArkSteedFunctionRef &ref
         }
         info->objectSize = hclass->GetObjectSize();
         info->initialHClass = MakeHClassRef(layout);
-        bool hasDirectSize = info->objectSize >= JSObject::SIZE &&
-            info->objectSize <= MAX_REGULAR_HEAP_OBJECT_SIZE &&
-            info->objectSize % JSTaggedValue::TaggedTypeSize() == 0;
+        bool hasDirectSize = info->objectSize >= JSObject::SIZE && info->objectSize <= MAX_REGULAR_HEAP_OBJECT_SIZE &&
+                             info->objectSize % JSTaggedValue::TaggedTypeSize() == 0;
         info->canAllocateDirectly = !G_USE_CMS_GC && !g_isEnableCMCGC && hasDirectSize && !hclass->IsAOT() &&
-            !hclass->IsDictionaryMode() && !hclass->IsDictionaryElement() &&
-            hclass->GetPrototype(compilerThread_).IsECMAObject();
+                                    !hclass->IsDictionaryMode() && !hclass->IsDictionaryElement() &&
+                                    hclass->GetPrototype(compilerThread_).IsECMAObject();
         return info->initialHClass.IsSafeForCompile();
     });
 }
 
 uint32_t ArkSteedHeapBroker::GetArgumentsObjectSize() const
 {
-    SerializingScope scope(this, "ArkSteedHeapBroker::GetArgumentsObjectSize");
+    NoGCScope scope(this);
     JSHandle<JSHClass> argumentsClass(env_->GetGlobalEnv()->GetArgumentsClassWithBarrier());
     return argumentsClass->GetObjectSize();
 }
 
 bool ArkSteedHeapBroker::CanLoadExternalModuleVar(int32_t index, bool installDependency) const
 {
-    SerializingScope scope(this, "ArkSteedHeapBroker::CanLoadExternalModuleVar");
+    NoGCScope scope(this);
     auto *hostThread = env_->GetHostThread();
     auto *function = *env_->GetJsFunction();
     if (function == nullptr || !ModuleManager::CheckModuleValueOutterResolved(hostThread, index, function)) {
@@ -368,7 +367,7 @@ bool ArkSteedHeapBroker::CanLoadExternalModuleVar(int32_t index, bool installDep
 
 bool ArkSteedHeapBroker::CanCallFunction(const ArkSteedFunctionRef &ref, uint32_t actualArgc) const
 {
-    SerializingScope scope(this, "ArkSteedHeapBroker::CanCallFunction");
+    NoGCScope scope(this);
     JSTaggedValue target;
     if (!ref.IsJSFunction() || !TryResolveRef(ref, &target) || target.IsJSShared() || target.IsClassConstructor()) {
         return false;
@@ -384,7 +383,7 @@ bool ArkSteedHeapBroker::CanCallFunction(const ArkSteedFunctionRef &ref, uint32_
 
 ArkSteedObjectRef ArkSteedHeapBroker::GetBuiltinMethod(uint16_t builtinId, uint32_t globalEnvIndex) const
 {
-    SerializingScope scope(this, "ArkSteedHeapBroker::GetBuiltinMethod");
+    NoGCScope scope(this);
     auto target = env_->GetGlobalEnv()->GetGlobalEnvObjectWithBarrierByIndex(globalEnvIndex);
     if (!target->IsJSFunction()) {
         return {};
@@ -403,7 +402,7 @@ ArkSteedObjectRef ArkSteedHeapBroker::GetBuiltinMethod(uint16_t builtinId, uint3
 ArkSteedHClassRef ArkSteedHeapBroker::GetEmptyObjectHClass(uint32_t *objectSize) const
 {
     ASSERT(objectSize != nullptr);
-    SerializingScope scope(this, "ArkSteedHeapBroker::GetEmptyObjectHClass");
+    NoGCScope scope(this);
     auto value = env_->GetGlobalEnv()->GetObjectFunctionClassWithBarrier().GetTaggedValue();
     if (!value.IsJSHClass()) {
         return {};
@@ -430,21 +429,21 @@ bool ArkSteedHeapBroker::TryGetObjectType(const ArkSteedHeapRef &ref, JSType *ty
 bool ArkSteedHeapBroker::TryGetStringLength(const ArkSteedHeapRef &ref, uint32_t *length) const
 {
     return length != nullptr && ref.IsString() && TryReadRef(ref, [&](JSTaggedValue value) {
-        *length = EcmaStringAccessor(value).GetLength();
-        return true;
-    });
+               *length = EcmaStringAccessor(value).GetLength();
+               return true;
+           });
 }
 
 bool ArkSteedHeapBroker::TryGetStringChar(const ArkSteedHeapRef &ref, uint32_t index, uint16_t *character) const
 {
     return character != nullptr && ref.IsString() && TryReadRef(ref, [&](JSTaggedValue value) {
-        EcmaStringAccessor accessor(value);
-        if (index >= accessor.GetLength()) {
-            return false;
-        }
-        *character = accessor.Get(compilerThread_, index);
-        return true;
-    });
+               EcmaStringAccessor accessor(value);
+               if (index >= accessor.GetLength()) {
+                   return false;
+               }
+               *character = accessor.Get(compilerThread_, index);
+               return true;
+           });
 }
 
 JSHClass *ArkSteedHeapBroker::TryGetHClass(const ArkSteedHClassRef &ref) const
@@ -452,7 +451,7 @@ JSHClass *ArkSteedHeapBroker::TryGetHClass(const ArkSteedHClassRef &ref) const
     if (!ref.IsJSHClass() || g_isEnableCMCGC) {
         return nullptr;
     }
-    SerializingScope scope(this, "ArkSteedHeapBroker::TryGetHClass");
+    NoGCScope scope(this);
     JSTaggedValue value;
     if (!TryResolveRef(ref, &value)) {
         return nullptr;
@@ -466,7 +465,7 @@ JSHClass *ArkSteedHeapBroker::TryGetObjectHClass(const ArkSteedHeapRef &ref) con
     if (!ref.IsHeapObject() || g_isEnableCMCGC) {
         return nullptr;
     }
-    SerializingScope scope(this, "ArkSteedHeapBroker::TryGetObjectHClass");
+    NoGCScope scope(this);
     JSTaggedValue value;
     if (!TryResolveRef(ref, &value)) {
         return nullptr;
@@ -481,17 +480,17 @@ ArkSteedHClassRef ArkSteedHeapBroker::MakeHClassRef(JSHClass *hclass) const
     if (!IsNonMovableHClass(hclass)) {
         return {};
     }
-    SerializingScope scope(this, "ArkSteedHeapBroker::MakeHClassRef");
+    NoGCScope scope(this);
     return MakeHClassRef(JSTaggedValue(hclass));
 }
 
-std::optional<PropertyLookupResult> ArkSteedHeapBroker::TryLookupProperty(
-    JSHClass *hclass, const ArkSteedNameRef &name) const
+std::optional<PropertyLookupResult> ArkSteedHeapBroker::TryLookupProperty(JSHClass *hclass,
+                                                                          const ArkSteedNameRef &name) const
 {
     if (!IsNonMovableHClass(hclass) || !name.IsName()) {
         return std::nullopt;
     }
-    SerializingScope scope(this, "ArkSteedHeapBroker::TryLookupProperty");
+    NoGCScope scope(this);
     JSTaggedValue key;
     if (!TryResolveRef(name, &key) || !hclass->GetLayout(compilerThread_).IsTaggedArray()) {
         return std::nullopt;
@@ -499,14 +498,13 @@ std::optional<PropertyLookupResult> ArkSteedHeapBroker::TryLookupProperty(
     return JSHClass::LookupPropertyInPGOHClass(compilerThread_, hclass, key);
 }
 
-bool ArkSteedHeapBroker::TryGetPrototypeHClasses(const ArkSteedHClassRef &receiver,
-                                               const ArkSteedHClassRef &holder,
-                                               std::vector<ArkSteedHClassRef> *chain) const
+bool ArkSteedHeapBroker::TryGetPrototypeHClasses(const ArkSteedHClassRef &receiver, const ArkSteedHClassRef &holder,
+                                                 std::vector<ArkSteedHClassRef> *chain) const
 {
     if (chain == nullptr || !receiver.IsJSHClass() || !holder.IsJSHClass()) {
         return false;
     }
-    SerializingScope scope(this, "ArkSteedHeapBroker::TryGetPrototypeHClasses");
+    NoGCScope scope(this);
     JSTaggedValue receiverValue;
     JSTaggedValue holderValue;
     if (!TryResolveRef(receiver, &receiverValue) || !TryResolveRef(holder, &holderValue)) {
@@ -539,20 +537,20 @@ JSHClass *ArkSteedHeapBroker::TryGetGenericInitialArrayHClass(JSHClass *receiver
     if (ref == nullptr || !IsNonMovableHClass(receiver)) {
         return nullptr;
     }
-    SerializingScope scope(this, "ArkSteedHeapBroker::TryGetGenericInitialArrayHClass");
+    NoGCScope scope(this);
     if (!receiver->IsJSArray() || receiver->GetElementsKind() == ElementsKind::GENERIC) {
         return nullptr;
     }
     auto globalEnv = env_->GetGlobalEnv();
     auto *hostThread = env_->GetHostThread();
     bool isPrototype = receiver->IsPrototype();
-    auto *initial = hostThread->GetArrayInstanceHClass(
-        globalEnv, receiver->GetElementsKind(), isPrototype, JSThread::ThreadKind::JitThread);
+    auto *initial = hostThread->GetArrayInstanceHClass(globalEnv, receiver->GetElementsKind(), isPrototype,
+                                                       JSThread::ThreadKind::JitThread);
     if (initial != receiver) {
         return nullptr;
     }
-    auto *generic = hostThread->GetArrayInstanceHClass(
-        globalEnv, ElementsKind::GENERIC, isPrototype, JSThread::ThreadKind::JitThread);
+    auto *generic = hostThread->GetArrayInstanceHClass(globalEnv, ElementsKind::GENERIC, isPrototype,
+                                                       JSThread::ThreadKind::JitThread);
     *ref = MakeHClassRef(generic);
     return ref->IsSafeForCompile() ? generic : nullptr;
 }
@@ -562,7 +560,7 @@ bool ArkSteedHeapBroker::TryInstallStableHClassDependency(JSHClass *hclass, bool
     if (installed == nullptr || !IsNonMovableHClass(hclass)) {
         return false;
     }
-    SerializingScope scope(this, "ArkSteedHeapBroker::TryInstallStableHClassDependency");
+    NoGCScope scope(this);
     *installed = false;
     if (!kungfu::StableHClassDependency::IsValid(hclass)) {
         return true;
@@ -577,7 +575,7 @@ bool ArkSteedHeapBroker::TryInstallNotPrototypeDependency(JSHClass *hclass) cons
     if (!IsNonMovableHClass(hclass)) {
         return false;
     }
-    SerializingScope scope(this, "ArkSteedHeapBroker::TryInstallNotPrototypeDependency");
+    NoGCScope scope(this);
     auto *dependencies = env_->GetDependencies();
     return dependencies != nullptr && dependencies->DependOnNotPrototype(hclass);
 }
@@ -605,18 +603,17 @@ bool ArkSteedHeapBroker::DependOnStableHClass(const ArkSteedHClassRef &ref) cons
             return false;
         }
         auto *dependencies = env_->GetDependencies();
-        return dependencies != nullptr &&
-            dependencies->DependOnStableHClass(JSHClass::Cast(value.GetTaggedObject()));
+        return dependencies != nullptr && dependencies->DependOnStableHClass(JSHClass::Cast(value.GetTaggedObject()));
     });
 }
 
 bool ArkSteedHeapBroker::DependOnStableProtoChain(const ArkSteedHClassRef &receiver,
-                                                 const ArkSteedHClassRef *holder) const
+                                                  const ArkSteedHClassRef *holder) const
 {
     if (!receiver.IsJSHClass() || env_ == nullptr || !env_->GetJSOptions().IsEnableJitLazyDeopt()) {
         return false;
     }
-    SerializingScope scope(this, "ArkSteedHeapBroker::DependOnStableProtoChain");
+    NoGCScope scope(this);
     JSTaggedValue receiverValue;
     if (!TryResolveRef(receiver, &receiverValue)) {
         return false;
@@ -634,8 +631,8 @@ bool ArkSteedHeapBroker::DependOnStableProtoChain(const ArkSteedHClassRef &recei
     }
     auto *dependencies = env_->GetDependencies();
     return dependencies != nullptr &&
-        dependencies->DependOnStableProtoChain(compilerThread_, JSHClass::Cast(receiverValue.GetTaggedObject()),
-                                                holderHClass, env_->GetGlobalEnv().GetObject<GlobalEnv>());
+           dependencies->DependOnStableProtoChain(compilerThread_, JSHClass::Cast(receiverValue.GetTaggedObject()),
+                                                  holderHClass, env_->GetGlobalEnv().GetObject<GlobalEnv>());
 }
 
 bool ArkSteedHeapBroker::DependOnNotPrototype(const ArkSteedHClassRef &ref) const
@@ -658,15 +655,14 @@ bool ArkSteedHeapBroker::DependOnArrayDetector() const
     if (env_ == nullptr || !env_->GetJSOptions().IsEnableJitLazyDeopt()) {
         return false;
     }
-    SerializingScope scope(this, "ArkSteedHeapBroker::DependOnArrayDetector");
+    NoGCScope scope(this);
     auto *dependencies = env_->GetDependencies();
-    return dependencies != nullptr &&
-        dependencies->DependOnArrayDetector(env_->GetGlobalEnv().GetObject<GlobalEnv>());
+    return dependencies != nullptr && dependencies->DependOnArrayDetector(env_->GetGlobalEnv().GetObject<GlobalEnv>());
 }
 
 bool ArkSteedHeapBroker::TryGetEmptyArrayLayout(ArkSteedObjectRef* globalEnv, uint32_t* objectSize) const
 {
-    SerializingScope scope(this, "ArkSteedHeapBroker::TryGetEmptyArrayLayout");
+    NoGCScope scope(this);
     auto env = env_->GetGlobalEnv();
     JSHandle<JSFunction> constructor(env->GetArrayFunctionWithBarrier());
     auto value = constructor->GetProtoOrHClass(compilerThread_);
@@ -678,7 +674,7 @@ bool ArkSteedHeapBroker::TryGetEmptyArrayLayout(ArkSteedObjectRef* globalEnv, ui
 
 bool ArkSteedHeapBroker::TryGetEmptyObjectLayout(ArkSteedHClassRef* hclass, uint32_t* objectSize) const
 {
-    SerializingScope scope(this, "ArkSteedHeapBroker::TryGetEmptyObjectLayout");
+    NoGCScope scope(this);
     JSHandle<JSHClass> initial(env_->GetGlobalEnv()->GetObjectFunctionClassWithBarrier());
     *objectSize = initial->GetObjectSize();
     *hclass = MakeHClassRef(initial.GetTaggedValue());
@@ -690,7 +686,7 @@ bool ArkSteedHeapBroker::TryGetArrayLiteralFromConstantPool(uint16_t cpIdx,
                                                             uint32_t* objectSize) const
 {
     ASSERT(literal != nullptr);
-    SerializingScope scope(this, "ArkSteedHeapBroker::TryGetArrayLiteralFromConstantPool");
+    NoGCScope scope(this);
     if (env_->GetMethodLiteral() == nullptr) {
         return false;
     }
@@ -728,7 +724,7 @@ bool ArkSteedHeapBroker::TryGetObjectLiteralFromConstantPool(uint16_t cpIdx,
                                                              CreateObjectWithBufferInfo* info) const
 {
     ASSERT(chunk != nullptr && literal != nullptr && info != nullptr);
-    SerializingScope scope(this, "ArkSteedHeapBroker::TryGetObjectLiteralFromConstantPool");
+    NoGCScope scope(this);
     ASSERT(env_->GetMethodLiteral() != nullptr);
     uint32_t methodOffset = env_->GetMethodLiteral()->GetMethodId().GetOffset();
     auto poolValue = env_->NewJSHandle(env_->FindOrCreateUnsharedConstpool(methodOffset));
@@ -778,7 +774,7 @@ bool ArkSteedHeapBroker::TryGetObjectLiteralFromConstantPool(uint16_t cpIdx,
 bool ArkSteedHeapBroker::TryGetBuiltinIndexFromConstantPool(uint16_t cpIdx, size_t *index) const
 {
     ASSERT(index != nullptr);
-    SerializingScope scope(this, "ArkSteedHeapBroker::TryGetBuiltinIndexFromConstantPool");
+    NoGCScope scope(this);
     ArkSteedNameRef name;
     if (!TryGetNameFromConstantPool(cpIdx, &name)) {
         return false;
@@ -808,7 +804,7 @@ bool ArkSteedHeapBroker::GetFeedbackForNamedAccess(const ArkSteedFeedbackReader 
         return true;
     }
 
-    SerializingScope scope(this, "ArkSteedHeapBroker::GetFeedbackForNamedAccess");
+    NoGCScope scope(this);
     bool success = reader.ReadNamedAccessFeedback(slotIndex, feedback);
     if (!success) {
         *feedback = {};
@@ -822,7 +818,7 @@ bool ArkSteedHeapBroker::GetFeedbackForOperation(const ArkSteedFeedbackReader &r
                                                  OperationFeedback *feedback) const
 {
     *feedback = {};
-    SerializingScope scope(this, "ArkSteedHeapBroker::GetFeedbackForOperation");
+    NoGCScope scope(this);
     return reader.ReadOperationFeedback(feedback);
 }
 
@@ -838,7 +834,7 @@ bool ArkSteedHeapBroker::GetFeedbackForValueAccess(const ArkSteedFeedbackReader 
         return true;
     }
 
-    SerializingScope scope(this, "ArkSteedHeapBroker::GetFeedbackForValueAccess");
+    NoGCScope scope(this);
     if (!reader.ReadValueAccessFeedback(feedback)) {
         *feedback = {};
         return false;
@@ -851,7 +847,7 @@ bool ArkSteedHeapBroker::GetFeedbackForElementAccess(const ArkSteedFeedbackReade
                                                      ElementAccessFeedback *feedback) const
 {
     *feedback = {};
-    SerializingScope scope(this, "ArkSteedHeapBroker::GetFeedbackForElementAccess");
+    NoGCScope scope(this);
     return reader.ReadElementAccessFeedback(slotIndex, feedback);
 }
 
@@ -859,14 +855,14 @@ bool ArkSteedHeapBroker::GetFeedbackForGlobalAccess(const ArkSteedFeedbackReader
                                                     GlobalAccessFeedback *feedback) const
 {
     *feedback = {};
-    SerializingScope scope(this, "ArkSteedHeapBroker::GetFeedbackForGlobalAccess");
+    NoGCScope scope(this);
     return reader.ReadGlobalAccessFeedback(feedback);
 }
 
 bool ArkSteedHeapBroker::GetFeedbackForCall(const ArkSteedFeedbackReader &reader, CallFeedback *feedback) const
 {
     *feedback = {};
-    SerializingScope scope(this, "ArkSteedHeapBroker::GetFeedbackForCall");
+    NoGCScope scope(this);
     return reader.ReadCallFeedback(feedback);
 }
 
@@ -874,7 +870,7 @@ bool ArkSteedHeapBroker::GetFeedbackForConstructor(const ArkSteedFeedbackReader 
                                                    ConstructorFeedback *feedback) const
 {
     *feedback = {};
-    SerializingScope scope(this, "ArkSteedHeapBroker::GetFeedbackForConstructor");
+    NoGCScope scope(this);
     return reader.ReadConstructorFeedback(feedback);
 }
 

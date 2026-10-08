@@ -19,7 +19,8 @@
 #include "ecmascript/js_handle.h"
 #include "ecmascript/js_tagged_value_wrapper.h"
 
-namespace panda::ecmascript {
+namespace panda::ecmascript
+{
 class JitCompilationEnv;
 }
 
@@ -49,10 +50,7 @@ public:
         return value_;
     }
 
-    bool HasHandle() const
-    {
-        return IsHeapObject();
-    }
+    bool HasHandle() const { return IsHeapObject(); }
 
     // These predicates inspect serialized metadata, never a handle or the heap.
     bool IsImmediate() const { return kind_ == Kind::IMMEDIATE; }
@@ -66,15 +64,9 @@ public:
     bool IsName() const { return IsString() || IsSymbol(); }
     bool IsProtoCell() const { return kind_ == Kind::PROTO_CELL; }
 
-    bool IsStable() const
-    {
-        return IsSafeForCompile();
-    }
+    bool IsStable() const { return IsSafeForCompile(); }
 
-    bool IsSafeForCompile() const
-    {
-        return kind_ != Kind::INVALID;
-    }
+    bool IsSafeForCompile() const { return kind_ != Kind::INVALID; }
 
     // Object identity, not JavaScript value equality. Indices are local to a compilation.
     // Invalid refs are not identities; even two invalid refs do not compare equal.
@@ -100,25 +92,25 @@ public:
     operator JSTaggedValue() const = delete;
 
 private:
-    enum class Kind : uint8_t {
-        INVALID,
-        IMMEDIATE,
-        HEAP_OBJECT,
-        HCLASS,
-        FUNCTION,
-        STRING,
-        SYMBOL,
-        PROTO_CELL,
-    };
+  enum class Kind : uint8_t {
+      INVALID,
+      IMMEDIATE,
+      HEAP_OBJECT,
+      HCLASS,
+      FUNCTION,
+      STRING,
+      SYMBOL,
+      PROTO_CELL,
+  };
 
-    ArkSteedHeapRef(const JitCompilationEnv *owner, uint32_t index, Kind kind)
-        : owner_(owner), index_(index), kind_(kind)
-    {}
+  ArkSteedHeapRef(const JitCompilationEnv *owner, uint32_t index, Kind kind) : owner_(owner), index_(index), kind_(kind)
+  {
+  }
 
     JSTaggedValue value_ {JSTaggedValue::Undefined()};
-    const JitCompilationEnv *owner_ {nullptr};
-    uint32_t index_ {0};
-    Kind kind_ {Kind::INVALID};
+    const JitCompilationEnv *owner_{nullptr};
+    uint32_t index_{0};
+    Kind kind_{Kind::INVALID};
 
     friend class ArkSteedHeapBroker;
 };

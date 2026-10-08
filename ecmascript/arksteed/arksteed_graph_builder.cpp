@@ -4154,7 +4154,7 @@ struct GraphBuilder::BytecodeVisitor {
         uint32_t objectSize = 0;
         ValueVertex* hclass = nullptr;
         {
-            auto* broker = self->pgoContext_.GetBroker();
+            auto *broker = self->pgoContext_.GetBroker();
             ArkSteedHClassRef hclassRef;
             if (broker->TryGetEmptyObjectLayout(&hclassRef, &objectSize)) {
                 hclass = GetHeapConstant(hclassRef);
@@ -4190,8 +4190,7 @@ struct GraphBuilder::BytecodeVisitor {
         if (!TryResolveHClassRef(hclassRef, &hclass) || !hclass->IsJSArray() || constant == nullptr) {
             return;
         }
-        self->NewVertex<TransitionHClassWithBarrierVertex>(
-            compileInfoFacts_, currentBlock, {glue, array, constant});
+        self->NewVertex<TransitionHClassWithBarrierVertex>(compileInfoFacts_, currentBlock, {glue, array, constant});
         compileInfoFacts_->RecordHClass(array, hclass, false);
     }
 
@@ -4200,7 +4199,7 @@ struct GraphBuilder::BytecodeVisitor {
         uint32_t objectSize = 0;
         ValueVertex* globalEnv = nullptr;
         {
-            auto* broker = self->pgoContext_.GetBroker();
+            auto *broker = self->pgoContext_.GetBroker();
             ArkSteedObjectRef envRef;
             if (broker->TryGetEmptyArrayLayout(&envRef, &objectSize)) {
                 globalEnv = GetHeapConstant(envRef);
@@ -4426,8 +4425,7 @@ struct GraphBuilder::BytecodeVisitor {
                 ASSERT(access.cases[i].kind == AccessKind::TRANSITION);
                 ASSERT(!access.cases[i].isSharedStore);
             }
-            if (TryLowerNamedStoreAccessSet(
-                    bcIndex, access, receiver, value, PropertyKey::ConstDataId(constDataId))) {
+            if (TryLowerNamedStoreAccessSet(bcIndex, access, receiver, value, PropertyKey::ConstDataId(constDataId))) {
                 return;
             }
         }
@@ -4717,8 +4715,8 @@ struct GraphBuilder::BytecodeVisitor {
 
     static TypeOfKind TypeOfKindFromHClass(const JSHClass *hclass)
     {
-        return hclass == nullptr ? TypeOfKind::UNKNOWN :
-            TypeOfKindFromObjectType(hclass->GetObjectType(), hclass->IsCallable());
+        return hclass == nullptr ? TypeOfKind::UNKNOWN
+                                 : TypeOfKindFromObjectType(hclass->GetObjectType(), hclass->IsCallable());
     }
 
     static TypeOfKind TypeOfKindFromConstant(JSTaggedValue value)
@@ -4802,7 +4800,7 @@ struct GraphBuilder::BytecodeVisitor {
                 JSType type;
                 bool callable = false;
                 if (broker->TryGetObjectType(*constantRef, &type, &callable)) {
-                    return TypeOfKindFromObjectType(type, callable);
+                        return TypeOfKindFromObjectType(type, callable);
                 }
             }
         }
@@ -6105,7 +6103,7 @@ struct GraphBuilder::BytecodeVisitor {
             }
             holderHClass = holder.value();
             if (!broker->TryGetPrototypeHClasses(accessInfo.expectedHClass, accessInfo.fieldOwnerHClass,
-                                                &expectedPrototypeHClassRefs)) {
+                                                 &expectedPrototypeHClassRefs)) {
                 return std::nullopt;
             }
             for (const auto &ref : expectedPrototypeHClassRefs) {
@@ -6183,7 +6181,7 @@ struct GraphBuilder::BytecodeVisitor {
             return false;
         }
         if (std::any_of(hclassRefs->begin(), hclassRefs->end(),
-                       [&hclassRef](const ArkSteedHClassRef &existing) { return existing.Equals(hclassRef); })) {
+                        [&hclassRef](const ArkSteedHClassRef &existing) { return existing.Equals(hclassRef); })) {
             return true;
         }
         hclasses->push_back(hclass);
@@ -7989,8 +7987,8 @@ struct GraphBuilder::BytecodeVisitor {
             ASSERT(requested != nullptr);
             bool isSharedHClass = JSTaggedValue(hclass).IsInSharedHeap();
             bool isStable = IsHClassStableForFacts(hclass, requested->hasExternalStableDependency);
-            bool shouldInstallDependency = installStableDependencies && self->IsLazyDeoptEnabled() &&
-                !isSharedHClass && !isStable;
+            bool shouldInstallDependency =
+                installStableDependencies && self->IsLazyDeoptEnabled() && !isSharedHClass && !isStable;
             if (shouldInstallDependency &&
                 !self->pgoContext_.GetBroker()->TryInstallStableHClassDependency(hclass, &isStable)) {
                 return HClassCheckResult::FAILURE;
@@ -9022,8 +9020,7 @@ struct GraphBuilder::BytecodeVisitor {
     JSHClass *TryGetGenericInitialArrayHClass(JSHClass *receiverHClass, ArkSteedHClassRef *genericHClassRef) const
     {
         auto *broker = self->pgoContext_.GetBroker();
-        return broker == nullptr ? nullptr :
-            broker->TryGetGenericInitialArrayHClass(receiverHClass, genericHClassRef);
+        return broker == nullptr ? nullptr : broker->TryGetGenericInitialArrayHClass(receiverHClass, genericHClassRef);
     }
 
     std::optional<uint32_t> GetHeapConstantHandleIndex(const ArkSteedHeapRef &ref) const
@@ -10539,8 +10536,8 @@ struct GraphBuilder::BytecodeVisitor {
             if (isStable) {
                 pendingStableHClasses.push_back(hclass);
             }
-            bool hasNotPrototypeDependency = self->IsLazyDeoptEnabled() &&
-                broker->TryInstallNotPrototypeDependency(hclass);
+            bool hasNotPrototypeDependency =
+                self->IsLazyDeoptEnabled() && broker->TryInstallNotPrototypeDependency(hclass);
             needsNotPrototypeGuard |= !hasNotPrototypeDependency;
         }
 
@@ -10891,6 +10888,10 @@ BB *GraphBuilder::VisitBytecodesOfBasicBlock(SharedBCFrameState frameState, uint
         .lazyCatchBlockInputs = caughtByData,
     };
     for (uint32_t bcIndex = blockInfo->startBcIndex; bcIndex <= blockInfo->endBcIndex; ++bcIndex) {
+        // The previous Visit has returned: its raw heap temporaries are dead.
+        // Persistent compiler state contains refs/handles or rooted non-moving
+        // HClasses, not movable object addresses.
+        static_cast<JitThread *>(compilerThread_)->HeapSafepoint();
         if (!visitor.Visit(preproc_->GetBytecode(bcIndex), bcIndex)) {
             break;
         }

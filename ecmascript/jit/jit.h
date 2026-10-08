@@ -163,11 +163,13 @@ public:
         {
             if (thread->IsJitThread()) {
                 thread_ = static_cast<JitThread*>(thread);
+                // Wait in native state if this legacy mutex is contended.
+                // No-GC scopes reject a hidden pause while raw inputs are live.
+                thread_->GetHostThread()->LockJitMutex(thread_);
                 if (!thread_->IsInRunningState()) {
                     thread_->ManagedCodeBegin();
                     isInManagedCode_ = true;
                 }
-                thread_->GetHostThread()->GetJitLock()->Lock();
                 auto hostHeap = thread_->GetHostThread()->GetEcmaVM()->GetHeap();
                 hostHeap->WaitCCFinished();
             }
@@ -181,11 +183,11 @@ public:
                 JSThread *thread = env->GetJSThread();
                 ASSERT(thread->IsJitThread());
                 thread_ = static_cast<JitThread*>(thread);
+                thread_->GetHostThread()->LockJitMutex(thread_);
                 if (!thread_->IsInRunningState()) {
                     thread_->ManagedCodeBegin();
                     isInManagedCode_ = true;
                 }
-                thread_->GetHostThread()->GetJitLock()->Lock();
                 auto hostHeap = thread_->GetHostThread()->GetEcmaVM()->GetHeap();
                 hostHeap->WaitCCFinished();
             }
@@ -213,7 +215,8 @@ public:
         explicit JitGCLockHolder(JSThread *thread) : thread_(thread)
         {
             ASSERT(!thread->IsJitThread());
-            if (Jit::GetInstance()->IsEnableFastJit() || Jit::GetInstance()->IsEnableBaselineJit()) {
+            if (!g_isEnableCMCGC || Jit::GetInstance()->IsEnableFastJit() ||
+                Jit::GetInstance()->IsEnableBaselineJit()) {
                 LockJit(thread_);
                 locked_ = true;
             }
@@ -222,13 +225,17 @@ public:
         static void LockJit(JSThread *thread)
         {
             Clock::time_point start = Clock::now();
-            thread->GetJitLock()->Lock();
-            Jit::GetInstance()->GetJitDfx()->SetLockHoldingTime(
-            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start).count());
+            thread->LockJitMutex(thread);
+            thread->SuspendJitThreads();
+            if (auto *dfx = Jit::GetInstance()->GetJitDfx(); dfx != nullptr) {
+                dfx->SetLockHoldingTime(
+                    std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start).count());
+            }
         }
 
         static void UnlockJit(JSThread *thread)
         {
+            thread->ResumeJitThreads();
             thread->GetJitLock()->Unlock();
         }
 

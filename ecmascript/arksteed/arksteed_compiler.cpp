@@ -173,6 +173,14 @@ bool ArkSteedCompilerTask::ShouldEnablePipelineStatistics(ArkSteedTask *arkSteed
 bool ArkSteedCompilerTask::BuildGraph(JSThread *compilerThread, uintptr_t hostGlueAddr)
 {
     JitCompilationEnv *env = jitCompilationEnv_.get();
+
+    // Raw heap temporaries are confined to one bytecode/read operation. The
+    // builder polls between bytecodes; broker reads never park or acquire a lock.
+    if (g_isEnableCMCGC) {
+        return false;
+    }
+    JitHeapAccessScope heapAccess(compilerThread);
+    DISALLOW_HEAP_ALLOC;
     BytecodePreprocessor preproc(env, chunk_.get());
     {
         ArkSteedPipelineStatistics stats(pipelineStatistics_, "BytecodePreprocessor");
@@ -181,6 +189,7 @@ bool ArkSteedCompilerTask::BuildGraph(JSThread *compilerThread, uintptr_t hostGl
             return false;
         }
     }
+    static_cast<JitThread *>(compilerThread)->HeapSafepoint();
     BytecodeAnalysis analysis(&preproc);
     {
         ArkSteedPipelineStatistics stats(pipelineStatistics_, "BytecodeAnalysis");
@@ -189,6 +198,8 @@ bool ArkSteedCompilerTask::BuildGraph(JSThread *compilerThread, uintptr_t hostGl
             return false;
         }
     }
+
+    static_cast<JitThread *>(compilerThread)->HeapSafepoint();
     {
         ArkSteedPipelineStatistics stats(pipelineStatistics_, "GraphBuilder");
         bool isOSR = arkSteedTask_->IsOsrTask();

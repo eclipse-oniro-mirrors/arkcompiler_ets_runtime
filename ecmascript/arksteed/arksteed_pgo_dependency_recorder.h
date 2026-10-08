@@ -24,9 +24,8 @@ namespace panda::ecmascript::arksteed {
 
 class ArkSteedPGODependencyRecorder {
 public:
-    ArkSteedPGODependencyRecorder(JitCompilationEnv *env, const ArkSteedHeapBroker *broker)
-        : env_(env), broker_(broker)
-    {}
+  ArkSteedPGODependencyRecorder(JitCompilationEnv *env, const ArkSteedHeapBroker *broker) : env_(env), broker_(broker)
+  {}
 
     bool Install(PropertyAccessSet *access) const
     {
@@ -57,10 +56,7 @@ public:
         return CheckStableHClass(hclass) && DependOnStableHClass(hclass);
     }
 
-    bool InstallArrayDetector() const
-    {
-        return broker_ != nullptr && broker_->DependOnArrayDetector();
-    }
+    bool InstallArrayDetector() const { return broker_ != nullptr && broker_->DependOnArrayDetector(); }
 
     bool InstallStableProtoChain(ArkSteedHClassRef receiverHClass) const
     {

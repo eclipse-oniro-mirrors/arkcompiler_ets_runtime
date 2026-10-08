@@ -1224,13 +1224,21 @@ bool JSThread::PassSuspendBarrier()
 {
     // Use suspendLock_ to avoid data-race between suspend-all-thread and suspended-threads.
     LockHolder lock(suspendLock_);
+    bool passed = false;
     if (suspendBarrier_ != nullptr) {
         suspendBarrier_->PassStrongly();
         suspendBarrier_ = nullptr;
-        ClearFlag(ThreadFlag::ACTIVE_BARRIER);
-        return true;
+        passed = true;
     }
-    return false;
+    if (jitSuspendBarrier_ != nullptr) {
+        jitSuspendBarrier_->PassStrongly();
+        jitSuspendBarrier_ = nullptr;
+        passed = true;
+    }
+    if (passed) {
+        ClearFlag(ThreadFlag::ACTIVE_BARRIER);
+    }
+    return passed;
 }
 
 bool JSThread::ShouldHandleMarkOrCopyFinishedInSafepoint()
@@ -1507,7 +1515,7 @@ ThreadState JSThread::UpdateState(ThreadState newState)
     return oldState;
 }
 
-void JSThread::SuspendThread(bool internalSuspend, SuspendBarrier* barrier)
+void JSThread::SuspendThread(bool internalSuspend, SuspendBarrier *barrier, bool jitLocalGC)
 {
     ASSERT(!g_isEnableCMCGC);
     LockHolder lock(suspendLock_);
@@ -1522,8 +1530,10 @@ void JSThread::SuspendThread(bool internalSuspend, SuspendBarrier* barrier)
     }
 
     if (barrier != nullptr) {
-        ASSERT(suspendBarrier_ == nullptr);
-        suspendBarrier_ = barrier;
+        ASSERT(!jitLocalGC || IsJitThread());
+        auto *&slot = jitLocalGC ? jitSuspendBarrier_ : suspendBarrier_;
+        ASSERT(slot == nullptr);
+        slot = barrier;
         SetFlag(ThreadFlag::ACTIVE_BARRIER);
         SetCheckSafePointStatus();
     }
@@ -1548,6 +1558,9 @@ void JSThread::ResumeThread(bool internalSuspend)
 
 void JSThread::WaitSuspension()
 {
+    if (!g_isEnableCMCGC && IsJitThread()) {
+        CHECK_NO_GC;
+    }
     if (UNLIKELY(g_isEnableCMCGC)) {
         GetThreadHolder()->WaitSuspension();
     } else {
@@ -1576,6 +1589,72 @@ void JSThread::ManagedCodeBegin()
     }
 }
 
+void JSThread::RegisterJitThread(JitThread *compiler)
+{
+    ASSERT(!compiler->IsInRunningState());
+    LockHolder lock(jitMutex_);
+    ASSERT(compiler->nextHostJitThread_ == nullptr);
+    compiler->nextHostJitThread_ = jitThreads_;
+    jitThreads_ = compiler;
+}
+
+void JSThread::UnregisterJitThread(JitThread *compiler)
+{
+    ASSERT(!compiler->IsInRunningState());
+    LockHolder lock(jitMutex_);
+    auto **entry = &jitThreads_;
+    while (*entry != nullptr && *entry != compiler) {
+        entry = &(*entry)->nextHostJitThread_;
+    }
+    ASSERT(*entry == compiler);
+    *entry = compiler->nextHostJitThread_;
+    compiler->nextHostJitThread_ = nullptr;
+}
+
+void JSThread::LockJitMutex(JSThread *current)
+{
+    if (jitMutex_.TryLock()) {
+        return;
+    }
+    // Like V8's ParkedMutexGuard: a blocked mutex waiter must not hold up GC.
+    CHECK_NO_GC;
+    ThreadNativeScope parked(current);
+    jitMutex_.Lock();
+}
+
+void JSThread::SuspendJitThreads()
+{
+    if (g_isEnableCMCGC || jitSuspendDepth_++ != 0) {
+        return;
+    }
+    int32_t count = 0;
+    for (auto *compiler = jitThreads_; compiler != nullptr; compiler = compiler->nextHostJitThread_) {
+        ++count;
+    }
+    // A one-shot GC acknowledgement barrier, not a heap-access counter.
+    SuspendBarrier barrier(count);
+    for (auto *compiler = jitThreads_; compiler != nullptr; compiler = compiler->nextHostJitThread_) {
+        compiler->SuspendThread(true, &barrier, true);
+        if (compiler->IsSuspended()) {
+            compiler->PassSuspendBarrier();
+        }
+    }
+    barrier.Wait();
+}
+
+void JSThread::ResumeJitThreads()
+{
+    if (g_isEnableCMCGC) {
+        return;
+    }
+    ASSERT(jitSuspendDepth_ != 0);
+    if (--jitSuspendDepth_ == 0) {
+        for (auto *compiler = jitThreads_; compiler != nullptr; compiler = compiler->nextHostJitThread_) {
+            compiler->ResumeThread(true);
+        }
+    }
+}
+
 void JSThread::ManagedCodeEnd()
 {
     ASSERT(IsInManagedState());
@@ -1590,6 +1669,9 @@ void JSThread::TransferFromRunningToSuspended(ThreadState newState)
 {
     ASSERT(!g_isEnableCMCGC);
     ASSERT(currentThread == this);
+    if (IsJitThread()) {
+        CHECK_NO_GC;
+    }
     StoreSuspendedState(newState);
     CheckAndPassActiveBarrier();
 }
@@ -1640,6 +1722,9 @@ void JSThread::TransferToRunning()
     ASSERT(!g_isEnableCMCGC);
     ASSERT(!IsDaemonThread());
     ASSERT(currentThread == this);
+    if (IsJitThread()) {
+            CHECK_NO_GC;
+    }
     StoreRunningState(ThreadState::RUNNING);
     // Invoke free weak global callback when thread switch to running
     if (!weakNodeFreeGlobalCallbacks_.empty()) {
@@ -1699,9 +1784,8 @@ void JSThread::StoreRunningState([[maybe_unused]] ThreadState newState)
             newStateAndFlags.asNonvolatileStruct.flags = oldStateAndFlags.asNonvolatileStruct.flags;
             newStateAndFlags.asNonvolatileStruct.state = newState;
 
-            if (glueData_.stateAndFlags_.asAtomicInt.compare_exchange_weak(oldStateAndFlags.asNonvolatileInt,
-                                                                           newStateAndFlags.asNonvolatileInt,
-                                                                           std::memory_order_release)) {
+            if (glueData_.stateAndFlags_.asAtomicInt.compare_exchange_weak(
+                    oldStateAndFlags.asNonvolatileInt, newStateAndFlags.asNonvolatileInt, std::memory_order_acq_rel)) {
                 break;
             }
 #else

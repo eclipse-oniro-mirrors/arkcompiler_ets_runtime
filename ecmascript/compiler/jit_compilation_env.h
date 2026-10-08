@@ -169,10 +169,9 @@ public:
     // moving GC updates the slots while the append-only table preserves their indices.
     uint32_t FindHeapConstantIndex(JSTaggedValue heapObj) const
     {
-        auto it = std::find_if(heapConstantInfo_.heapConstantTable.begin(), heapConstantInfo_.heapConstantTable.end(),
-            [heapObj](const JSHandle<JSTaggedValue> &value) {
-                return value.GetTaggedValue() == heapObj;
-        });
+        auto it =
+            std::find_if(heapConstantInfo_.heapConstantTable.begin(), heapConstantInfo_.heapConstantTable.end(),
+                         [heapObj](const JSHandle<JSTaggedValue> &value) { return value.GetTaggedValue() == heapObj; });
         if (it != heapConstantInfo_.heapConstantTable.end()) {
             return std::distance(heapConstantInfo_.heapConstantTable.begin(), it);
         }

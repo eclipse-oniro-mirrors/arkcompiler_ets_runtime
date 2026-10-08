@@ -88,9 +88,17 @@ namespace panda::ecmascript::arksteed {
 
 // Keep raw-value comparisons inside the broker's private read scope without
 // exposing that scope to production callers.
-class ArkSteedHeapBrokerTestAccess {
-public:
-    using SerializingScope = ArkSteedHeapBroker::SerializingScope;
+class ArkSteedHeapBrokerTestAccess
+{
+  public:
+    class SerializingScope
+    {
+      public:
+        SerializingScope(const ArkSteedHeapBroker *broker, const char *) : scope_(broker) {}
+
+      private:
+        ArkSteedHeapBroker::NoGCScope scope_;
+    };
 };
 
 namespace {
@@ -435,7 +443,10 @@ protected:
         // `GetMethod` request of the case.
         ASSERT_NE(PoolTask(), nullptr) << "the fixture bound no JIT task: " << FailureDiagnostic();
 
-        auto task = std::make_shared<ReaderCallTask>(std::move(body));
+        auto task = std::make_shared<ReaderCallTask>([this, body = std::move(body)] {
+            JitHeapAccessScope heapAccess(CompilerThread());
+            body();
+        });
         auto completion = std::make_shared<PoolDispatchCompletion>();
         // The fixture owns the JIT task; the shared pointer only satisfies the adapter
         // constructor and must not delete it (the fixture deletes it in `TearDown`,

@@ -113,12 +113,10 @@ bool CanApplyExplicitElementTransition(JSHClass *source, JSHClass *target)
                                    target->GetElementsKind();
 }
 
-bool BuildElementStoreTransitionGroups(const ArkSteedHeapBroker *broker,
-                                       const std::array<JSHClass *, MAX_ELEMENT_IC_POLY_CASES> &hclasses,
-                                       const std::array<JSHClass *, MAX_ELEMENT_IC_POLY_CASES> &explicitTargets,
-                                       const std::array<ArkSteedHClassRef,
-                                                        MAX_ELEMENT_IC_POLY_CASES> &explicitTargetRefs,
-                                       ElementStoreAccessInfo *access)
+bool BuildElementStoreTransitionGroups(
+    const ArkSteedHeapBroker *broker, const std::array<JSHClass *, MAX_ELEMENT_IC_POLY_CASES> &hclasses,
+    const std::array<JSHClass *, MAX_ELEMENT_IC_POLY_CASES> &explicitTargets,
+    const std::array<ArkSteedHClassRef, MAX_ELEMENT_IC_POLY_CASES> &explicitTargetRefs, ElementStoreAccessInfo *access)
 {
     std::array<JSHClass *, MAX_ELEMENT_IC_POLY_CASES> selectedTargets {};
     std::array<ArkSteedHClassRef, MAX_ELEMENT_IC_POLY_CASES> selectedTargetRefs {};
@@ -236,16 +234,16 @@ bool SetFieldRepresentation(Representation representation, PropertyAccessInfo *i
     return true;
 }
 
-bool TrySetStoreFieldLocationFromHClass(const ArkSteedHeapBroker *broker,
-                                        const NamedAccessCaseFeedback &caseFeedback,
+bool TrySetStoreFieldLocationFromHClass(const ArkSteedHeapBroker *broker, const NamedAccessCaseFeedback &caseFeedback,
                                         const ParsedStoreHandler &parsed, ArkSteedNameRef name,
                                         PropertyAccessInfo *info)
 {
     if (broker->TryGetHClass(caseFeedback.expectedHClass) == nullptr) {
         return false;
     }
-    ArkSteedHClassRef fieldRef = parsed.hasTransitionHClass ? parsed.transitionHClass :
-        (parsed.holderIsReceiver ? caseFeedback.expectedHClass : parsed.holderHClass);
+    ArkSteedHClassRef fieldRef = parsed.hasTransitionHClass
+                                     ? parsed.transitionHClass
+                                     : (parsed.holderIsReceiver ? caseFeedback.expectedHClass : parsed.holderHClass);
     auto result = broker->TryLookupProperty(broker->TryGetHClass(fieldRef), name);
     if (!result.has_value()) {
         return false;
@@ -561,8 +559,7 @@ bool ArkSteedAccessInfoFactory::TryBuildElementStoreAccessInfo(int slotIndex, El
         return false;
     }
     if (access->IsJSArray() &&
-        !BuildElementStoreTransitionGroups(broker_, hclasses,
-                                           explicitTargets, explicitTargetRefs, access)) {
+        !BuildElementStoreTransitionGroups(broker_, hclasses, explicitTargets, explicitTargetRefs, access)) {
         *access = {};
         return false;
     }

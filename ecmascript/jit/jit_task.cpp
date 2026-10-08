@@ -488,8 +488,11 @@ JitTask::~JitTask()
 
 void JitTask::WaitFinish()
 {
+    // A synchronous compiler wait must not keep shared GC waiting for the host.
+    // Release the task mutex before returning to RUNNING, which can wait for GC.
+    ThreadNativeScope native(hostThread_);
     LockHolder lock(runStateMutex_);
-    if (!IsFinish()) {
+    while (!IsFinish()) {
         runStateCondition_.Wait(&runStateMutex_);
     }
 }
