@@ -16,10 +16,16 @@
 #ifndef ECMASCRIPT_ARKSTEED_SAFEPOINT_TABLE_H
 #define ECMASCRIPT_ARKSTEED_SAFEPOINT_TABLE_H
 
+#include <memory>
+#include <optional>
 #include <vector>
 
 #include "ecmascript/mem/chunk_containers.h"
 #include "ecmascript/stackmap/ark_stackmap.h"
+
+namespace panda::ecmascript {
+    class MachineCode;
+}
 
 namespace panda::ecmascript::arksteed {
 
@@ -189,6 +195,109 @@ private:
     const uint8_t *data_ = nullptr;
     size_t size_ = 0;
 };
+
+// ============================================================================
+// SourcePositionTableBuilder — records pcOffset ↔ bcOffset boundaries during
+// compilation.  Emitted into the position table section of the container.
+//
+// Binary layout:
+//   uint32_t numEntries
+//   Entry[] (2 × uint32_t each, sorted by pcOffset ascending):
+//     uint32_t pcOffset
+//     uint32_t bcOffset
+// ============================================================================
+
+class PUBLIC_API SourcePositionTableBuilder {
+public:
+    explicit SourcePositionTableBuilder(Chunk *chunk)
+        : entries_(chunk)
+    {}
+    ~SourcePositionTableBuilder() = default;
+
+    void RecordBoundary(uint32_t pcOffset, uint32_t bcOffset);
+    size_t GetSize() const;
+    void Emit(uint8_t *buffer) const;
+    std::unique_ptr<uint8_t[]> EmitToNewBuffer() const;
+    void Clear();
+
+    uint32_t GetNumEntries() const
+    {
+        return static_cast<uint32_t>(entries_.size());
+    }
+
+private:
+    struct Entry {
+        uint32_t pcOffset;
+        uint32_t bcOffset;
+    };
+    ChunkVector<Entry> entries_;
+};
+
+// ============================================================================
+// Section Container — wraps safepoint table + position table into one payload
+// ============================================================================
+
+// Binary layout of the container that replaces the raw safepoint table in
+// MachineCode's stack-map area:
+//
+//   Header (24 bytes):
+//     uint32_t magic          "ASTB" = ArkSteed Table Binary
+//     uint32_t version        1
+//     uint32_t safepointOffset  offset from header start to safepoint table section
+//     uint32_t safepointSize    size of safepoint table section
+//     uint32_t positionOffset   offset from header start to position table (0 if absent)
+//     uint32_t positionSize     size of position table (0 if absent)
+//
+//   safepoint table section:
+//     raw ArkSteedSafepointTable data (header + entries + deopt data)
+//
+//   position table section (optional, TASK-3):
+//     raw SourcePositionTable data
+
+struct ArkSteedTableContainerHeader {
+    static constexpr uint32_t MAGIC = 0x41535442;  // "ASTB"
+    static constexpr uint32_t VERSION = 1;
+    static constexpr size_t SIZE = 6 * sizeof(uint32_t);  // 24 bytes
+
+    uint32_t magic;
+    uint32_t version;
+    uint32_t safepointOffset;
+    uint32_t safepointSize;
+    uint32_t positionOffset;
+    uint32_t positionSize;
+};
+
+// Extract the safepoint table data pointer and size from a container.
+// Returns nullptr and sets *outSize = 0 if the container is invalid.
+// The returned pointer is within the container buffer — no ownership transfer.
+const uint8_t* GetArkSteedSafepointTable(const uint8_t* container, size_t containerSize, size_t* outSize);
+
+// Extract the position table data pointer and size from a container.
+// Returns nullptr and sets *outSize = 0 if absent or invalid.
+// The returned pointer is within the container buffer — no ownership transfer.
+const uint8_t* GetArkSteedPositionTable(const uint8_t* container, size_t containerSize, size_t* outSize);
+
+// Look up bcOffset from SourcePositionTable or SafepointTable
+uint32_t FindBcOffsetByPCOffset(MachineCode *machineCode, uint32_t pcOffset);
+
+// ============================================================================
+// Pure functions (no runtime dependency — only const uint8_t* + size_t)
+// ============================================================================
+
+// Extract bcOffset from a safepoint table's deopt data.
+// Scans the deopt entries of the safepoint at pcOffset for PC_OFFSET_INDEX
+// (vreg == -2) with CONSTANT kind and returns the value.
+// Returns std::nullopt if the entry is not found, has no deopt data, or
+// does not contain PC_OFFSET_INDEX with CONSTANT kind.
+std::optional<uint32_t> ExtractBcOffsetFromSafepointTable(
+    const uint8_t *tableData, size_t tableSize, uint32_t pcOffset);
+
+// Look up bcOffset from a SourcePositionTable.
+// Performs binary search for the last boundary with pcOffset <= target.
+// Format: uint32_t numEntries, then (uint32_t pcOffset, uint32_t bcOffset) pairs.
+// Returns std::nullopt if the table is empty or pcOffset is before the first entry.
+std::optional<uint32_t> LookupBcOffsetFromPositionTable(
+    const uint8_t *tableData, size_t tableSize, uint32_t pcOffset);
 
 }  // namespace panda::ecmascript::arksteed
 

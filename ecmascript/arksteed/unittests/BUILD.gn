@@ -249,6 +249,39 @@ if (ets_runtime_enable_ark_steed) {
     ]
 
     configs = [
+      "$js_root:asm_interp_enable_config",
+      "$js_root:ecma_test_config",
+    ]
+
+    deps = [ "$js_root:libark_jsruntime_test" ]
+  }
+
+  host_unittest_action("ArkSteedPositionTableTest") {
+    module_out_path = module_output_path
+
+    sources = [
+      # test file
+      "position_table_test.cpp",
+    ]
+
+    configs = [
+      "$js_root:asm_interp_enable_config",
+      "$js_root:ecma_test_config",
+    ]
+
+    deps = [ "$js_root:libark_jsruntime_test" ]
+  }
+
+  host_unittest_action("ArkSteedSafepointPositionTablehMatrixTest") {
+    module_out_path = module_output_path
+
+    sources = [
+      # test file
+      "safepoint_position_table_matrix_test.cpp",
+    ]
+
+    configs = [
+      "$js_root:asm_interp_enable_config",
       "$js_root:ecma_test_config",
     ]
 
@@ -264,6 +297,9 @@ group("unittest") {
   if (ets_runtime_enable_ark_steed) {
     deps += [
       ":ArkSteedPipelineStatisticsTest",
+      ":ArkSteedPositionTableTest",
+      ":ArkSteedSafepointPositionTablehMatrixTest",
+      ":ArkSteedSafepointTableTest"
     ]
   }
 }
@@ -274,7 +310,11 @@ group("arksteed_host_unittest") {
   deps = []
   if (ets_runtime_enable_ark_steed) {
     deps += [
+      ":ArkSteedPipelineStatisticsTestAction",
       ":ArkSteedRegisterAllocatorTestAction",
+      ":ArkSteedPositionTableTestAction",
+      ":ArkSteedSafepointPositionTablehMatrixTestAction",
+      ":ArkSteedSafepointTableTestAction",
       ":ArkSteedSideEffectClassifierTestAction",
       ":ArkSteedWriteBarrierValueKindTestAction",
       ":ArkSteedPipelineStatisticsTestAction",
@@ -282,8 +322,7 @@ group("arksteed_host_unittest") {
       ":ArkSteedDeoptTranslationTestAction",
       ":ArkSteedDeoptAbiTestAction",
       ":ArkSteedWriteBarrierEmitterTestAction",
-      ":ArkSteedCompileInfoFactsTestAction",
-      ":ArkSteedSafepointTableTestAction",
+      ":ArkSteedCompileInfoFactsTestAction"
     ]
   }
 }

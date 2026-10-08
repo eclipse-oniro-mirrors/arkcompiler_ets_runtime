@@ -4391,6 +4391,7 @@ void ArkSteedCodeGenerator::ProcessNonControlVertex(NonControlVertex *vertex)
             ASSERT(CatchBlockOf(vertex) == nullptr);
             if (__ GetPcOffset() > pcBefore) {
                 RecordVertexComment(pcBefore, vertex);
+                RecordPositionBoundary(pcBefore, vertex->BytecodeOffset());
             }
             return;
         }
@@ -4407,6 +4408,7 @@ void ArkSteedCodeGenerator::ProcessNonControlVertex(NonControlVertex *vertex)
 
     if (__ GetPcOffset() > pcBefore) {
         RecordVertexComment(pcBefore, vertex);
+        RecordPositionBoundary(pcBefore, vertex->BytecodeOffset());
     }
 }
 
@@ -4433,6 +4435,7 @@ void ArkSteedCodeGenerator::ProcessControlVertex(ControlVertex *vertex)
 
     if (__ GetPcOffset() > pcBefore) {
         RecordVertexComment(pcBefore, vertex);
+        RecordPositionBoundary(pcBefore, vertex->BytecodeOffset());
     }
 }
 
@@ -4930,6 +4933,16 @@ void ArkSteedCodeGenerator::AssignBlockColors(const std::vector<std::vector<int>
 
         blockColorAssignment_[blockId] = color % AnsiColorScope::NUM_BRIGHT_COLORS;
     }
+}
+
+void ArkSteedCodeGenerator::RecordPositionBoundary(uint32_t pcBefore, uint32_t bcOffset)
+{
+    if (positionTableBuilder_ == nullptr || bcOffset == 0) {
+        return;
+    }
+    // Only record when code was actually emitted at this pcBefore.
+    // This avoids recording boundaries for vertices that produced no code.
+    positionTableBuilder_->RecordBoundary(pcBefore, bcOffset);
 }
 
 #undef __

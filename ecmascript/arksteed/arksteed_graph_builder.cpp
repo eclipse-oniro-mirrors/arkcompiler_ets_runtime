@@ -1130,6 +1130,28 @@ PhiVertex *GraphBuilder::NewPhiVertexWith(BB *owner, const InputRange &inputs, V
     return phi;
 }
 
+// Populate Vertex bytecode offset: mixin-provided value takes priority; vertices without a mixin
+// offset (no eager/lazy deopt mixin, or lazy mixin without frame state) fall back to the offset
+// of the bytecode currently being processed. This keeps the SourcePositionTable anchor density
+// at vertex level instead of deopt-point level.
+template <class VertexT>
+void GraphBuilder::PopulateVertexBytecodeOffset(VertexT *vertex)
+{
+    if constexpr (std::is_base_of_v<EagerDeoptimizableMixin, VertexT>) {
+        vertex->SetBytecodeOffset(
+            static_cast<const EagerDeoptimizableMixin *>(vertex)->GetBytecodeOffset());
+        return;
+    }
+    if constexpr (std::is_base_of_v<LazyDeoptimizableMixin, VertexT>) {
+        const auto *lazyMixin = static_cast<const LazyDeoptimizableMixin *>(vertex);
+        if (lazyMixin->HasLazyDeoptFrameState()) {
+            vertex->SetBytecodeOffset(lazyMixin->GetBytecodeOffset());
+            return;
+        }
+    }
+    vertex->SetBytecodeOffset(currentBytecodeOffset_);
+}
+
 template <class VertexT, class InputRange, class... Args>
 VertexT *GraphBuilder::NewVertexImpl(BB *owner, const InputRange &inputs, Args &&...args)
 {
@@ -1138,6 +1160,8 @@ VertexT *GraphBuilder::NewVertexImpl(BB *owner, const InputRange &inputs, Args &
     owner->AddVertex(vertex);
     // At most one of: eager_deopt, lazy_deopt
     static_assert(CanEagerDeopt(VertexT::PROPERTIES) + CanLazyDeopt(VertexT::PROPERTIES) <= 1);
+
+    PopulateVertexBytecodeOffset(vertex);
 
     return vertex;
 }
@@ -1277,6 +1301,8 @@ VertexT *GraphBuilder::FinishBlockWith(BB *owner, const InputRange &inputs, Args
     // Note: ThrowVertex is a special case that can throw
     static_assert(!CanLazyDeopt(VertexT::PROPERTIES) && !CanWrite(VertexT::PROPERTIES));
 
+    PopulateVertexBytecodeOffset(vertex);
+
     return vertex;
 }
 
@@ -1355,6 +1381,7 @@ struct GraphBuilder::BytecodeVisitor {
         }
         currentBcInfo = bcInfo;
         currentBcIndex = bcIndex;
+        self->currentBytecodeOffset_ = self->preproc_->GetBytecodeOffset(bcIndex);
         if (self->GetOptions()->GetCompilerArkSteedDeoptOnInsufficientProfile() && bcInfo->IsInsufficientProfile()) {
             EmitUnconditionalDeopt();
             return false;

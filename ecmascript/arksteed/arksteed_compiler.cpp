@@ -117,6 +117,10 @@ ArkSteedCompilerTask::~ArkSteedCompilerTask()
         delete safepointTableBuilder_;
         safepointTableBuilder_ = nullptr;
     }
+    if (positionTableBuilder_ != nullptr) {
+        delete positionTableBuilder_;
+        positionTableBuilder_ = nullptr;
+    }
     if (translationBuilder_ != nullptr) {
         delete translationBuilder_;
         translationBuilder_ = nullptr;
@@ -310,15 +314,19 @@ bool ArkSteedCompilerTask::Compile()
         EnableCodeSign();
 #endif
         safepointTableBuilder_ = new ArkSteedSafepointTableBuilder(chunk_.get());
+        if (arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedSourcePositionTable()) {
+            positionTableBuilder_ = new SourcePositionTableBuilder(chunk_.get());
+        }
         translationBuilder_ = new DeoptTranslationBuilder();
         deoptLiteralTableBuilder_ = new DeoptLiteralTableBuilder();
         bool withColors = arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedPrintWithColors();
-        ArkSteedCodeGenerator codegen(assembler_, graph_, safepointTableBuilder_, translationBuilder_,
-                                      deoptLiteralTableBuilder_, withColors);
+        ArkSteedCodeGenerator codegen(assembler_, graph_, safepointTableBuilder_, translationBuilder_, 
+            deoptLiteralTableBuilder_, positionTableBuilder_, withColors);
         codegen.Generate();
-    }
-    if (arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedPrintCode()) {
-        LogAsm(assembler_);
+
+        if (arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedPrintCode()) {
+            LogAsm(assembler_);
+        }
     }
 
     DebugLogOnCompilationDone();
@@ -362,15 +370,63 @@ void ArkSteedCompilerTask::FillCodeDesc(MachineCodeDesc &codeDesc)
     // Safepoint table
     safepointTableBuilder_->SetFrameSlots(graph_->GetTaggedStackSlots(), graph_->GetUntaggedStackSlots());
     size_t safepointSize = safepointTableBuilder_->GetTableSize();
-    if (safepointSize > 0) {
-        uint8_t *safepointBuffer = safepointTableBuilder_->EmitToNewBuffer();
-        codeDesc.stackMapOrOffsetTableAddr = reinterpret_cast<uintptr_t>(safepointBuffer);
-        codeDesc.stackMapOrOffsetTableSize = safepointSize;
+    std::unique_ptr<uint8_t[]> safepointBuffer;
+    safepointBuffer.reset(safepointTableBuilder_->EmitToNewBuffer());
+
+    LOG_COMPILER(DEBUG) << safepointTableBuilder_->DumpMemoryUsage();
+
+    // Build position table (if enabled and has entries)
+    size_t positionSize = 0;
+    std::unique_ptr<uint8_t[]> positionBuffer;
+    if (positionTableBuilder_ != nullptr && positionTableBuilder_->GetNumEntries() > 0) {
+        positionBuffer = positionTableBuilder_->EmitToNewBuffer();
+        if (positionBuffer != nullptr) {
+            positionSize = positionTableBuilder_->GetSize();
+        }
+    }
+
+    // Wrap safepoint table + position table in a section container:
+    //   [header][safepoint table][position table]
+    constexpr size_t HEADER_SIZE = ArkSteedTableContainerHeader::SIZE;
+    size_t containerSize = HEADER_SIZE + safepointSize + positionSize;
+    if (containerSize > 0) {
+        auto containerBuffer = std::unique_ptr<uint8_t[]>(new uint8_t[containerSize]);
+        auto *header = reinterpret_cast<ArkSteedTableContainerHeader *>(containerBuffer.get());
+        header->magic = ArkSteedTableContainerHeader::MAGIC;
+        header->version = ArkSteedTableContainerHeader::VERSION;
+        header->safepointOffset = static_cast<uint32_t>(HEADER_SIZE);
+        header->safepointSize = static_cast<uint32_t>(safepointSize);
+        if (positionSize > 0) {
+            header->positionOffset = static_cast<uint32_t>(HEADER_SIZE + safepointSize);
+            header->positionSize = static_cast<uint32_t>(positionSize);
+        } else {
+            header->positionOffset = 0;
+            header->positionSize = 0;
+        }
+        if (safepointSize > 0) {
+            if (memcpy_s(containerBuffer.get() + HEADER_SIZE, safepointSize,
+                         safepointBuffer.get(), safepointSize) != EOK) {
+                LOG_COMPILER(ERROR) << "memcpy fail in copy safepoint table to container";
+                codeDesc.stackMapOrOffsetTableAddr = 0;
+                codeDesc.stackMapOrOffsetTableSize = 0;
+                return;
+            }
+        }
+        if (positionSize > 0) {
+            if (memcpy_s(containerBuffer.get() + HEADER_SIZE + safepointSize, positionSize,
+                         positionBuffer.get(), positionSize) != EOK) {
+                LOG_COMPILER(ERROR) << "memcpy fail in copy position table to container";
+                codeDesc.stackMapOrOffsetTableAddr = 0;
+                codeDesc.stackMapOrOffsetTableSize = 0;
+                return;
+            }
+        }
+        codeDesc.stackMapOrOffsetTableAddr = reinterpret_cast<uintptr_t>(containerBuffer.release());
+        codeDesc.stackMapOrOffsetTableSize = containerSize;
     } else {
         codeDesc.stackMapOrOffsetTableAddr = 0;
         codeDesc.stackMapOrOffsetTableSize = 0;
     }
-    LOG_COMPILER(DEBUG) << safepointTableBuilder_->DumpMemoryUsage();
 
 #if ECMASCRIPT_ENABLE_ARK_STEED
     arkSteedTask_->SetDeoptTranslationData(translationBuilder_->Encode());

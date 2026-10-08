@@ -130,6 +130,12 @@ private:
     template <class InputRange = std::initializer_list<ValueVertex *>>
     PhiVertex *NewPhiVertexWith(BB *owner, const InputRange &inputs, VRegIDType vreg);
 
+    // Populate Vertex bytecode offset: mixin-provided value takes priority; vertices without a
+    // mixin offset fall back to the offset of the bytecode currently being processed, so that
+    // every vertex emitted by codegen carries an offset for SourcePositionTable boundaries.
+    template <class VertexT>
+    void PopulateVertexBytecodeOffset(VertexT *vertex);
+
     // VertexT should be neither control vertex nor Phi
     template <class VertexT, class InputRange = std::initializer_list<ValueVertex *>, class... Args>
     VertexT *NewVertex(BB *owner, const InputRange &inputs, Args &&...args);
@@ -206,6 +212,11 @@ private:
     BB *nextLoopHeader_ {nullptr};
     LoopPeelingStage loopPeelingStage_ {LoopPeelingStage::NONE};
     uint32_t currentSourceRpoIndex_ {BytecodePreprocessor::NULL_INDEX};
+
+    // Bytecode offset currently being processed by BytecodeVisitor. Updated at Visit() entry;
+    // consumed as the fallback source of Vertex::bytecodeOffset_ for vertices created without
+    // an eager/lazy deopt mixin offset.
+    uint32_t currentBytecodeOffset_ {0};
 };
 }  // namespace panda::ecmascript::arksteed
 

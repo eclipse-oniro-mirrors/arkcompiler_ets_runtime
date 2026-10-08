@@ -960,8 +960,12 @@ bool Deoptimizier::PrepareForExceptionLazyDeopt(JSThread *thread, JSTaggedType *
             continue;
         }
         MachineCode *machineCode = MachineCode::Cast(codeValue.GetTaggedObject());
-        arksteed::ArkSteedSafepointTable table(
-            machineCode->GetStackMapOrOffsetTableAddress(), machineCode->GetStackMapOrOffsetTableSize());
+        size_t safepointTableSize = 0;
+        const uint8_t *safepointTableData = arksteed::GetArkSteedSafepointTable(
+            machineCode->GetStackMapOrOffsetTableAddress(),
+            machineCode->GetStackMapOrOffsetTableSize(),
+            &safepointTableSize);
+        arksteed::ArkSteedSafepointTable table(safepointTableData, safepointTableSize);
         uint32_t returnPcOffset = static_cast<uint32_t>(it.GetOptimizedReturnAddr());
 
         constexpr auto LAZY_DEOPT = arksteed::ExceptionHandlerKind::LAZY_DEOPT;

@@ -453,6 +453,10 @@ __attribute__((no_sanitize("hwaddress"))) bool GetTypeOffsetAndPrevOffsetFromFra
             typeOffset = FASTJITFunctionFrame::GetTypeOffset();
             prevOffset = FASTJITFunctionFrame::GetPrevOffset();
             break;
+        case FrameType::STEED_FUNCTION_FRAME:
+ 	        typeOffset = SteedFunctionFrame::GetTypeOffset();
+ 	        prevOffset = SteedFunctionFrame::GetPrevOffset();
+ 	        break;
         default:
             return false;
     }

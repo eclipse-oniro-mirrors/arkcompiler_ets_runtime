@@ -62,6 +62,8 @@ const std::string PUBLIC_API HELP_OPTION_MSG =
     "--compiler-arksteed-reuse-stack-slots: Enable stack slot reuse in ArkSteed regalloc. Default: 'true'\n"
     "--compiler-arksteed-deopt-on-insufficient-profile: Enable ArkSteed eager deopt for insufficient profile. "
     "Default: 'true'\n"
+    "--compiler-arksteed-source-position-table: Enable recording of pc↔bc offset position table in "
+    "ArkSteed compiled code for improved exception stack trace line numbers. Default: 'false'\n"
     "--compiler-arksteed-pass-trace:        Enable ArkSteed pass-level time and memory log. Default: 'false'\n"
     "--compiler-arksteed-pass-trace-methods: Comma-separated method name list; when set, pass-trace only "
     "collects statistics for these methods (exact match). Only used when "

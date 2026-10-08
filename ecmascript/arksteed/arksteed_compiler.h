@@ -30,6 +30,7 @@ class ArkSteedSafepointTableBuilder;
 class DeoptLiteralTableBuilder;
 class DeoptTranslationBuilder;
 class Graph;
+class SourcePositionTableBuilder;
 
 extern "C" {
 PUBLIC_API void InitArkSteedCompiler(JSRuntimeOptions options);
@@ -111,6 +112,7 @@ private:
     ArkSteedAssembler *assembler_ = nullptr;
     Graph *graph_ = nullptr;
     ArkSteedSafepointTableBuilder *safepointTableBuilder_ = nullptr;
+    SourcePositionTableBuilder *positionTableBuilder_ = nullptr;
     DeoptTranslationBuilder *translationBuilder_ = nullptr;
     DeoptLiteralTableBuilder *deoptLiteralTableBuilder_ = nullptr;
 

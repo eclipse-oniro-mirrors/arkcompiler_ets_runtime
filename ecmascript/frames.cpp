@@ -712,8 +712,25 @@ void FrameIterator::GetStackTraceInfos(std::vector<std::pair<JSTaggedType, uint3
         }
         case FrameType::STEED_FUNCTION_FRAME: {
             auto *frame = this->GetFrame<SteedFunctionFrame>();
-            // to do: Fix offset
+#if ECMASCRIPT_ENABLE_ARK_STEED
+            // The iterator caches the MachineCode of this STEED frame itself: Advance()
+            // located it via the return address into this frame's own call site (the
+            // LAZY_DEOPT patch, if any, has already been recovered there), and
+            // GetOptimizedReturnAddr() is already the pc offset within that code.
+            // Note: frame->GetReturnAddr() points into the caller's code and must not
+            // be used here, otherwise the trace would be off by one frame.
+            JSTaggedValue codeValue(*GetMachineCodeSlot());
+            if (!codeValue.IsMachineCodeObject()) {
+                stackTraceInfos.push_back(std::make_pair(frame->GetFunction().GetRawData(), 0));
+                break;
+            }
+            MachineCode *machineCode = MachineCode::Cast(codeValue.GetTaggedObject());
+            uint32_t pcOffset = static_cast<uint32_t>(GetOptimizedReturnAddr());
+            auto bcOffset = arksteed::FindBcOffsetByPCOffset(machineCode, pcOffset);
+            stackTraceInfos.push_back(std::make_pair(frame->GetFunction().GetRawData(), bcOffset));
+#else
             stackTraceInfos.push_back(std::make_pair(frame->GetFunction().GetRawData(), 0));
+#endif
             break;
         }
         default: {
@@ -988,14 +1005,16 @@ void SteedFunctionFrame::IterateSafePointTable(const FrameIterator& it, RootVisi
 {
     auto machineCodeSlot = ObjectSlot(ToUintPtr(it.GetMachineCodeSlot()));
     MachineCode *machineCode = MachineCode::Cast(JSTaggedValue(machineCodeSlot.GetTaggedType()).GetTaggedObject());
-    uint8_t *safepointTableAddr = machineCode->GetStackMapOrOffsetTableAddress();
+    // The stack-map area is an ArkSteed section container
+    // [header][safepoint table][position table]; unwrap it first.
+    size_t safepointTableSize = 0;
+    const uint8_t *safepointTableAddr = arksteed::GetArkSteedSafepointTable(
+        machineCode->GetStackMapOrOffsetTableAddress(),
+        machineCode->GetStackMapOrOffsetTableSize(),
+        &safepointTableSize);
     if (safepointTableAddr == nullptr) {
-        LOG_ECMA(ERROR) << "safepointTableAddr is nullptr";
+        LOG_ECMA(ERROR) << "safepoint table not found in section container";
         return;
-    }
-    uint32_t safepointTableSize = machineCode->GetStackMapOrOffsetTableSize();
-    if (safepointTableSize == 0) {
-        LOG_ECMA(ERROR) << "safepointTableSize is 0";
     }
     arksteed::ArkSteedSafepointTable safepointTable(safepointTableAddr, safepointTableSize);
     if (!safepointTable.IsValid()) {
@@ -1041,9 +1060,12 @@ void SteedFunctionFrame::GetDeoptBundleInfo(const FrameIterator &it,
 #if ECMASCRIPT_ENABLE_ARK_STEED
     auto machineCodeSlot = ObjectSlot(ToUintPtr(it.GetMachineCodeSlot()));
     MachineCode *machineCode = MachineCode::Cast(JSTaggedValue(machineCodeSlot.GetTaggedType()).GetTaggedObject());
-    uint8_t *safepointTableAddr = machineCode->GetStackMapOrOffsetTableAddress();
-    uint32_t safepointTableSize = machineCode->GetStackMapOrOffsetTableSize();
-    arksteed::ArkSteedSafepointTable safepointTable(safepointTableAddr, safepointTableSize);
+    size_t safepointTableSize = 0;
+    const uint8_t *safepointTableData = arksteed::GetArkSteedSafepointTable(
+        machineCode->GetStackMapOrOffsetTableAddress(),
+        machineCode->GetStackMapOrOffsetTableSize(),
+        &safepointTableSize);
+    arksteed::ArkSteedSafepointTable safepointTable(safepointTableData, safepointTableSize);
     if (!safepointTable.IsValid()) {
         LOG_ECMA(ERROR) << "ArkSteedSafepointTable is invalid";
         return;

@@ -998,8 +998,12 @@ bool ReadDeoptLiteral(const MachineCode *machineCode, uint32_t literalIndex, uin
     if (machineCode == nullptr || raw == nullptr) {
         return false;
     }
-    ArkSteedSafepointTable safepointTable(machineCode->GetStackMapOrOffsetTableAddress(),
-                                          machineCode->GetStackMapOrOffsetTableSize());
+    size_t safepointTableSize = 0;
+    const uint8_t *safepointTableData = GetArkSteedSafepointTable(
+        machineCode->GetStackMapOrOffsetTableAddress(),
+        machineCode->GetStackMapOrOffsetTableSize(),
+        &safepointTableSize);
+    ArkSteedSafepointTable safepointTable(safepointTableData, safepointTableSize);
     uint32_t literalCount = safepointTable.IsValid() ? safepointTable.GetDeoptLiteralCount() : 0;
     if (literalIndex >= literalCount ||
         static_cast<size_t>(literalCount) * sizeof(uint64_t) > machineCode->GetHeapConstantTableSize()) {

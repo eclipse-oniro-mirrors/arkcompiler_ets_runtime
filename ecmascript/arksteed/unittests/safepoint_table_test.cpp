@@ -13,15 +13,20 @@
  * limitations under the License.
  */
 
-#include "ecmascript/arksteed/arksteed_safepoint_table.h"
-#include "ecmascript/mem/native_area_allocator.h"
-#include "ecmascript/tests/test_helper.h"
-
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <vector>
 
-namespace panda::ecmascript::arksteed {
+#include "ecmascript/arksteed/arksteed_safepoint_table.h"
+#include "ecmascript/deoptimizer/deoptimizer.h"
+#include "ecmascript/tests/test_helper.h"
+
+using namespace panda::ecmascript;
+using namespace panda::ecmascript::arksteed;
+
+namespace panda::test {
+
 namespace {
 
 // Documented binary layout of `arksteed_safepoint_table.h`. The field set, the
@@ -148,8 +153,375 @@ std::vector<uint8_t> HandBuiltSingleEntryTable(uint32_t pcOffset, uint16_t extra
 
 }  // namespace
 
-class ArkSteedSafepointTableTest : public testing::Test {
+// ============================================================================
+// Helper: construct a safepoint table with one entry that has deopt data
+// containing a CONSTANT value for a given vreg.
+// ============================================================================
+class SafepointTableBuilder {
+public:
+    static void AppendLeb128(std::vector<uint8_t> &buf, int64_t value)
+    {
+        bool more = true;
+        while (more) {
+            uint8_t byte = static_cast<uint8_t>(value & 0x7F);
+            value >>= 7;
+            if ((value == 0 && (byte & 0x40) == 0) || (value == -1 && (byte & 0x40) != 0)) {
+                more = false;
+            } else {
+                byte |= 0x80;
+            }
+            buf.push_back(byte);
+        }
+    }
+
+    static std::vector<uint8_t> BuildOneEntry(uint32_t pcOffset, int32_t vreg,
+                                               int64_t constantValue, uint16_t deoptNum = 2)
+    {
+        std::vector<uint8_t> buf;
+        buf.reserve(64);
+
+        // Header (16 bytes): numEntries, numTaggedSlots, numUntaggedSlots, deoptLiteralCount
+        uint32_t numEntries = 1;
+        uint32_t zero32 = 0;
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&numEntries),
+                   reinterpret_cast<const uint8_t*>(&numEntries) + sizeof(numEntries));
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&zero32),
+                   reinterpret_cast<const uint8_t*>(&zero32) + sizeof(zero32));
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&zero32),
+                   reinterpret_cast<const uint8_t*>(&zero32) + sizeof(zero32));
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&zero32),
+                   reinterpret_cast<const uint8_t*>(&zero32) + sizeof(zero32));
+
+        // Entry (12 bytes): pcOffset, deoptOffset, extraSpillSlotsAndFlags, deoptNum
+        uint32_t deoptOffset = sizeof(ArkSteedSafepointHeader) +
+            sizeof(ArkSteedSafepointEntry);
+        uint16_t extraSpillSlotsAndFlags = 0;
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&pcOffset),
+                   reinterpret_cast<const uint8_t*>(&pcOffset) + sizeof(pcOffset));
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&deoptOffset),
+                   reinterpret_cast<const uint8_t*>(&deoptOffset) + sizeof(deoptOffset));
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&extraSpillSlotsAndFlags),
+                   reinterpret_cast<const uint8_t*>(&extraSpillSlotsAndFlags) + sizeof(extraSpillSlotsAndFlags));
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&deoptNum),
+                   reinterpret_cast<const uint8_t*>(&deoptNum) + sizeof(deoptNum));
+
+        // Deopt data: vregAndKind, value (both leb128)
+        if (deoptNum > 0) {
+            int64_t vregAndKind = static_cast<int64_t>(vreg) * 4 +
+                static_cast<int64_t>(ArkSteedDeoptValueKind::CONSTANT);
+            AppendLeb128(buf, vregAndKind);
+            AppendLeb128(buf, constantValue);
+        }
+
+        return buf;
+    }
+
+    static std::vector<uint8_t> BuildMultiEntry()
+    {
+        std::vector<uint8_t> buf;
+        buf.reserve(128);
+
+        uint32_t numEntries = 3;
+        uint32_t zero32 = 0;
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&numEntries),
+                   reinterpret_cast<const uint8_t*>(&numEntries) + sizeof(numEntries));
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&zero32),
+                   reinterpret_cast<const uint8_t*>(&zero32) + sizeof(zero32));
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&zero32),
+                   reinterpret_cast<const uint8_t*>(&zero32) + sizeof(zero32));
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&zero32),
+                   reinterpret_cast<const uint8_t*>(&zero32) + sizeof(zero32));
+
+        // Entry 0: pcOffset=50, no deopt
+        uint32_t pc0 = 50;
+        uint32_t deoptOffset0 = 0;
+        uint16_t deoptNum0 = 0;
+        uint16_t flags0 = 0;
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&pc0),
+                   reinterpret_cast<const uint8_t*>(&pc0) + sizeof(pc0));
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&deoptOffset0),
+                   reinterpret_cast<const uint8_t*>(&deoptOffset0) + sizeof(deoptOffset0));
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&flags0),
+                   reinterpret_cast<const uint8_t*>(&flags0) + sizeof(flags0));
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&deoptNum0),
+                   reinterpret_cast<const uint8_t*>(&deoptNum0) + sizeof(deoptNum0));
+
+        // Entry 1: pcOffset=100, has deopt with PC_OFFSET_INDEX = 42
+        uint32_t pc1 = 100;
+        uint32_t deoptOffset1 = sizeof(ArkSteedSafepointHeader) + 3 * sizeof(ArkSteedSafepointEntry);
+        uint16_t deoptNum1 = 2;
+        uint16_t flags1 = 0;
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&pc1),
+                   reinterpret_cast<const uint8_t*>(&pc1) + sizeof(pc1));
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&deoptOffset1),
+                   reinterpret_cast<const uint8_t*>(&deoptOffset1) + sizeof(deoptOffset1));
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&flags1),
+                   reinterpret_cast<const uint8_t*>(&flags1) + sizeof(flags1));
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&deoptNum1),
+                   reinterpret_cast<const uint8_t*>(&deoptNum1) + sizeof(deoptNum1));
+
+        // Entry 2: pcOffset=200, no deopt
+        uint32_t pc2 = 200;
+        uint32_t deoptOffset2 = 0;
+        uint16_t deoptNum2 = 0;
+        uint16_t flags2 = 0;
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&pc2),
+                   reinterpret_cast<const uint8_t*>(&pc2) + sizeof(pc2));
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&deoptOffset2),
+                   reinterpret_cast<const uint8_t*>(&deoptOffset2) + sizeof(deoptOffset2));
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&flags2),
+                   reinterpret_cast<const uint8_t*>(&flags2) + sizeof(flags2));
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&deoptNum2),
+                   reinterpret_cast<const uint8_t*>(&deoptNum2) + sizeof(deoptNum2));
+
+        // Deopt data for entry 1: vreg = PC_OFFSET_INDEX(-2), kind = CONSTANT, value = 42
+        int64_t vregAndKind = static_cast<int64_t>(SpecVregIndex::PC_OFFSET_INDEX) * 4 +
+            static_cast<int64_t>(ArkSteedDeoptValueKind::CONSTANT);
+        AppendLeb128(buf, vregAndKind);
+        AppendLeb128(buf, 42);
+
+        return buf;
+    }
+
+    static std::vector<uint8_t> BuildGcOnlySafepoint(uint32_t pcOffset)
+    {
+        return BuildOneEntry(pcOffset, 0, 0, 0); // deoptNum=0
+    }
 };
+
+// Position table builder for test
+class PositionTableBuilder {
+public:
+    static std::vector<uint8_t> Build(const std::vector<std::pair<uint32_t, uint32_t>> &entries)
+    {
+        std::vector<uint8_t> buf;
+        uint32_t numEntries = static_cast<uint32_t>(entries.size());
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&numEntries),
+                   reinterpret_cast<const uint8_t*>(&numEntries) + sizeof(numEntries));
+        for (const auto &[pc, bc] : entries) {
+            buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&pc),
+                       reinterpret_cast<const uint8_t*>(&pc) + sizeof(pc));
+            buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(&bc),
+                       reinterpret_cast<const uint8_t*>(&bc) + sizeof(bc));
+        }
+        return buf;
+    }
+};
+
+// ============================================================================
+// Test suite
+// ============================================================================
+class ArkSteedSafepointTableTest : public BaseTestWithScope<false> {
+};
+
+// --- ExtractBcOffsetFromSafepointTable ---
+
+/**
+ * @tc.name: ExactMatchWithDeopt
+ * @tc.desc: Exact match on a safepoint entry with PC_OFFSET_INDEX CONSTANT deopt
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ArkSteedSafepointTableTest, ExactMatchWithDeopt)
+{
+    auto table = SafepointTableBuilder::BuildOneEntry(
+        100,
+        static_cast<int32_t>(SpecVregIndex::PC_OFFSET_INDEX),
+        42);
+
+    auto result = ExtractBcOffsetFromSafepointTable(table.data(), table.size(), 100);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result.value(), 42U);
+}
+
+/**
+ * @tc.name: MultiEntryExactMatch
+ * @tc.desc: Multiple entries, find the one with deopt at exact pcOffset
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ArkSteedSafepointTableTest, MultiEntryExactMatch)
+{
+    auto table = SafepointTableBuilder::BuildMultiEntry();
+    auto result = ExtractBcOffsetFromSafepointTable(table.data(), table.size(), 100);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result.value(), 42U);
+}
+
+/**
+ * @tc.name: GcOnlySafepointReturnsNullopt
+ * @tc.desc: GC-only safepoint (deoptNum=0) should return nullopt
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ArkSteedSafepointTableTest, GcOnlySafepointReturnsNullopt)
+{
+    auto table = SafepointTableBuilder::BuildGcOnlySafepoint(50);
+    auto result = ExtractBcOffsetFromSafepointTable(table.data(), table.size(), 50);
+    EXPECT_FALSE(result.has_value());
+}
+
+/**
+ * @tc.name: PcOffsetNotFound
+ * @tc.desc: pcOffset not in table should return nullopt
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ArkSteedSafepointTableTest, PcOffsetNotFound)
+{
+    auto table = SafepointTableBuilder::BuildOneEntry(
+        100, static_cast<int32_t>(SpecVregIndex::PC_OFFSET_INDEX), 42);
+    auto result = ExtractBcOffsetFromSafepointTable(table.data(), table.size(), 999);
+    EXPECT_FALSE(result.has_value());
+}
+
+/**
+ * @tc.name: EmptyTable
+ * @tc.desc: Empty table (numEntries=0) should return nullopt
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ArkSteedSafepointTableTest, EmptyTable)
+{
+    std::vector<uint8_t> empty(16, 0);
+    auto result = ExtractBcOffsetFromSafepointTable(empty.data(), empty.size(), 0);
+    EXPECT_FALSE(result.has_value());
+}
+
+/**
+ * @tc.name: NullData
+ * @tc.desc: Null data should return nullopt
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ArkSteedSafepointTableTest, NullData)
+{
+    auto result = ExtractBcOffsetFromSafepointTable(nullptr, 0, 100);
+    EXPECT_FALSE(result.has_value());
+}
+
+/**
+ * @tc.name: TruncatedData
+ * @tc.desc: Truncated data (header only) should return nullopt
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ArkSteedSafepointTableTest, TruncatedData)
+{
+    std::vector<uint8_t> truncated(8, 0);
+    auto result = ExtractBcOffsetFromSafepointTable(truncated.data(), truncated.size(), 100);
+    EXPECT_FALSE(result.has_value());
+}
+
+/**
+ * @tc.name: NoDeoptAtExactPc
+ * @tc.desc: Exact pc but entry has no deopt should return nullopt
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ArkSteedSafepointTableTest, NoDeoptAtExactPc)
+{
+    auto table = SafepointTableBuilder::BuildMultiEntry();
+    auto result = ExtractBcOffsetFromSafepointTable(table.data(), table.size(), 50);
+    EXPECT_FALSE(result.has_value());
+}
+
+/**
+ * @tc.name: DeoptWithoutPcOffsetIndex
+ * @tc.desc: Deopt with FUNC_INDEX (not PC_OFFSET_INDEX) should return nullopt
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ArkSteedSafepointTableTest, DeoptWithoutPcOffsetIndex)
+{
+    auto table = SafepointTableBuilder::BuildOneEntry(
+        100, static_cast<int32_t>(SpecVregIndex::FUNC_INDEX), 12345);
+    auto result = ExtractBcOffsetFromSafepointTable(table.data(), table.size(), 100);
+    EXPECT_FALSE(result.has_value());
+}
+
+// --- LookupBcOffsetFromPositionTable ---
+
+/**
+ * @tc.name: PositionTableExactMatch
+ * @tc.desc: Exact pcOffset match in position table
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ArkSteedSafepointTableTest, PositionTableExactMatch)
+{
+    auto table = PositionTableBuilder::Build({{10, 1}, {50, 5}, {100, 10}});
+    auto result = LookupBcOffsetFromPositionTable(table.data(), table.size(), 50);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result.value(), 5U);
+}
+
+/**
+ * @tc.name: PositionTableBetweenBoundaries
+ * @tc.desc: pcOffset between two boundaries returns the lower one
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ArkSteedSafepointTableTest, PositionTableBetweenBoundaries)
+{
+    auto table = PositionTableBuilder::Build({{10, 1}, {50, 5}, {100, 10}});
+    auto result = LookupBcOffsetFromPositionTable(table.data(), table.size(), 75);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result.value(), 5U);
+}
+
+/**
+ * @tc.name: PositionTableBeforeFirst
+ * @tc.desc: pcOffset before first boundary should return nullopt
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ArkSteedSafepointTableTest, PositionTableBeforeFirst)
+{
+    auto table = PositionTableBuilder::Build({{50, 5}, {100, 10}});
+    auto result = LookupBcOffsetFromPositionTable(table.data(), table.size(), 10);
+    EXPECT_FALSE(result.has_value());
+}
+
+/**
+ * @tc.name: PositionTableBeyondLast
+ * @tc.desc: pcOffset beyond last boundary returns last boundary
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ArkSteedSafepointTableTest, PositionTableBeyondLast)
+{
+    auto table = PositionTableBuilder::Build({{10, 1}, {50, 5}});
+    auto result = LookupBcOffsetFromPositionTable(table.data(), table.size(), 999);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result.value(), 5U);
+}
+
+/**
+ * @tc.name: PositionTableEmpty
+ * @tc.desc: Empty position table should return nullopt
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ArkSteedSafepointTableTest, PositionTableEmpty)
+{
+    std::vector<uint8_t> empty(4, 0);
+    auto result = LookupBcOffsetFromPositionTable(empty.data(), empty.size(), 100);
+    EXPECT_FALSE(result.has_value());
+}
+
+/**
+ * @tc.name: PositionTableNullData
+ * @tc.desc: Null position table data should return nullopt
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ArkSteedSafepointTableTest, PositionTableNullData)
+{
+    auto result = LookupBcOffsetFromPositionTable(nullptr, 0, 100);
+    EXPECT_FALSE(result.has_value());
+}
+
+/**
+ * @tc.name: PositionTableSingleEntry
+ * @tc.desc: Single entry position table
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ArkSteedSafepointTableTest, PositionTableSingleEntry)
+{
+    auto table = PositionTableBuilder::Build({{100, 42}});
+    auto result = LookupBcOffsetFromPositionTable(table.data(), table.size(), 100);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result.value(), 42U);
+
+    result = LookupBcOffsetFromPositionTable(table.data(), table.size(), 50);
+    EXPECT_FALSE(result.has_value());
+}
 
 /**
  * @tc.name: SafepointTable_EmptyTable_HeaderOnlyRoundTrip

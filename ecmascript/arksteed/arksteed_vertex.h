@@ -385,6 +385,21 @@ public:
         return GetRegallocInfo()->GetInputLocation(predecessorIdx);
     }
 
+    // Bytecode offset: set during graph construction, used for position table recording.
+    // For vertices with EagerDeoptimizableMixin or LazyDeoptimizableMixin (with frame state),
+    // this is copied from the mixin's bytecodeOffset_ by GraphBuilder; all other vertices fall
+    // back to the bytecode offset currently being processed, so that every code-emitting
+    // vertex carries an offset for SourcePositionTable boundaries.
+    void SetBytecodeOffset(uint32_t offset)
+    {
+        bytecodeOffset_ = offset;
+    }
+
+    uint32_t BytecodeOffset() const
+    {
+        return bytecodeOffset_;
+    }
+
 protected:
     Vertex() = default;
 
@@ -434,6 +449,7 @@ private:
     uint64_t bitfield_ {0};
     BB *owner_ = nullptr;
     RegallocVertexInfo *regallocInfo_ = nullptr;
+    uint32_t bytecodeOffset_ = 0;
 #if !defined(NDEBUG)
     VertexId label_ = INVALID_VERTEX_ID;
 #endif

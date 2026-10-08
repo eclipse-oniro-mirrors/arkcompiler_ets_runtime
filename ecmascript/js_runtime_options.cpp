@@ -51,6 +51,8 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
          OPTION_COMPILER_ARKSTEED_REUSE_STACK_SLOTS},
         {"compiler-arksteed-deopt-on-insufficient-profile", required_argument, nullptr,
          OPTION_COMPILER_ARKSTEED_DEOPT_ON_INSUFFICIENT_PROFILE},
+        {"compiler-arksteed-source-position-table", required_argument, nullptr,
+         OPTION_COMPILER_ARKSTEED_SOURCE_POSITION_TABLE},
         {"compiler-arksteed-pass-trace", required_argument, nullptr, OPTION_COMPILER_ARKSTEED_PASS_TRACE},
         {"compiler-arksteed-pass-trace-methods", required_argument, nullptr,
          OPTION_COMPILER_ARKSTEED_PASS_TRACE_METHODS},
@@ -728,6 +730,14 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
                 ret = ParseBoolParam(&argBool);
                 if (ret) {
                     SetCompilerArkSteedDeoptOnInsufficientProfile(argBool);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_ARKSTEED_SOURCE_POSITION_TABLE:
+                ret = ParseBoolParam(&argBool);
+                if (ret) {
+                    SetCompilerArkSteedSourcePositionTable(argBool);
                 } else {
                     return false;
                 }

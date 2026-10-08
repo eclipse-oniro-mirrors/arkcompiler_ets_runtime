@@ -30,18 +30,22 @@ class ArkSteedSafepointTableBuilder;
 class DeoptLiteralTableBuilder;
 class DeoptTranslationBuilder;
 class GapMoveResolver;
+class SourcePositionTableBuilder;
 
 class ArkSteedCodeGenerator {
 public:
     ArkSteedCodeGenerator(ArkSteedAssembler *assembler, Graph *graph,
                           ArkSteedSafepointTableBuilder *safepointBuilder = nullptr,
                           DeoptTranslationBuilder *translationBuilder = nullptr,
-                          DeoptLiteralTableBuilder *deoptLiteralTableBuilder = nullptr, bool withColors = false)
+                          DeoptLiteralTableBuilder *deoptLiteralTableBuilder = nullptr,
+                          SourcePositionTableBuilder *positionTableBuilder = nullptr,
+                          bool withColors = false)
         : assembler_(assembler),
           graph_(graph),
           safepointBuilder_(safepointBuilder),
           translationBuilder_(translationBuilder),
           deoptLiteralTableBuilder_(deoptLiteralTableBuilder),
+          positionTableBuilder_(positionTableBuilder),
           eagerDeoptTargetsById_(graph->GetChunk()),
           blockColorAssignment_(graph->GetChunk()),
           deferredCode_(graph->GetChunk()),
@@ -141,11 +145,14 @@ private:
     void AssignBlockColors(const std::vector<std::vector<int>> &adjacentBlocks);
     int GetBlockColorIndex(int blockId) const;
 
+    void RecordPositionBoundary(uint32_t pcBefore, uint32_t bcOffset);
+
     ArkSteedAssembler *assembler_;
     Graph *graph_;
     ArkSteedSafepointTableBuilder *safepointBuilder_;
     DeoptTranslationBuilder *translationBuilder_;
     DeoptLiteralTableBuilder *deoptLiteralTableBuilder_;
+    SourcePositionTableBuilder *positionTableBuilder_;
     Label entryLabel_;
     ChunkVector<EagerDeoptTarget *> eagerDeoptTargetsById_;
     int currentBlockColorIndex_ = 0;
