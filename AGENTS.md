@@ -10,6 +10,7 @@
 
 | 目录 | 风险 | 原因 |
 |-----------|------|-----|
+| `ecmascript/arksteed/` | 🔴 高 | 轻量化JIT；平衡编译时间与优化效果 |
 | `ecmascript/interpreter/` | 🔴 高 | 核心节码执行引擎；此处的缺陷会影响所有 ArkTS 应用 |
 | `ecmascript/module/` | 🔴 高  | ES 模块加载器；与 CommonJS 互操作 |
 | `ecmascript/mem/` | 🔴 高 | GC 与分配器；对性能和稳定性高度敏感 |
@@ -33,6 +34,7 @@
 - 新增 NAPI C++ API → `ecmascript/napi/` + `test/`
 - GC 或内存变更 → `ecmascript/mem/` + `common_components/heap/`
 - AOT/JIT 编译器变更 → `ecmascript/compiler/` + `ecmascript/stubs/`
+- 轻量化JIT编译器变更 → `ecmascript/arksteed/`
 - ES 标准库变更 → `ecmascript/builtins/` + 对照 ECMA2021 规范
 - 模块加载器变更 → `ecmascript/module/` + `ecmascript/require/`
 - 调试器变更 → `ecmascript/debugger/` + `docs/knowledge/Debugger-Subsystem.md`
@@ -124,8 +126,41 @@
 - 不要移除或变更错误码而不更新 `docs/`。
 
 ## 4. 编译构建
+### standalone 构建（最常用）
+构建命令从OpenHarmony源码根目录执行（通常是本项目上两层路径）
+```bash
+# Linux
+python ark.py x64.debug
 
-### 编译命令
+# 用QEMU模拟测试ARM64用
+python ark.py arm64.debug --gn-args="run_with_qemu=true"
+```
+
+### arm64测试补充说明
+arm64构建不会自动生成host侧的es2abc, 跑测试前需单独构建
+```bash
+ninja -C out/arm64.release arm64.release/arkcompiler/ets_frontend/es2abc
+```
+
+### 快速构建方法
+构建命令从OpenHarmony源码根目录执行
+#### 只重编运行时so（只编译后改动的arksteed_*.cpp）
+```bash
+# Linux
+ninja -C out/x64.debug libark_jsruntime
+```
+#### 跑abc/test262 需要VM可执行文件（会自动带上so依赖）
+```bash
+# Linux
+ninja -C out/x64.debug ark_js_vm
+```
+#### 单元测试
+```bash
+# Linux
+ninja -C out/x64.debug libark_jsruntime_test
+```
+
+### 完整编译命令
 
 ```bash
 # 构建（在 openharmony/ 目录下执行）
