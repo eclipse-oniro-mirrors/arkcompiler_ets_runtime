@@ -110,6 +110,12 @@ private:
     int PrepareKnownBuiltinStubArguments(CallKnownBuiltinVertex *call);
     int PrepareKnownBuiltinNativeArguments(CallKnownBuiltinVertex *call);
 
+    void EmitInitializeHClassWithBarrier(const DeferredRegisterSnapshot &snapshot, ArkSteedRegister glue,
+                                         ArkSteedRegister object, ArkSteedRegister hclass);
+    void EmitStoreTaggedFieldWithBarrier(const DeferredRegisterSnapshot &snapshot, ArkSteedRegister glue,
+                                         ArkSteedRegister object, ArkSteedRegister value, int32_t offset,
+                                         ArkSteedWriteBarrierValueKind valueKind);
+
     template <class VertexT>
     void VisitNonControlVertex(VertexT *vertex);
 

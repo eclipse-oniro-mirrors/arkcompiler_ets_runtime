@@ -33,6 +33,10 @@ public:
                           ArkSteedWriteBarrierKind barrierKind, ArkSteedRegister objectRegionScratch,
                           ArkSteedRegister valueRegionScratch,
                           ArkSteedWriteBarrierValueKind valueKind = ArkSteedWriteBarrierValueKind::Unknown);
+    // Installs a complete HClass header and emits the default post-write barrier.
+    // SATB and CMS/CMC header-state handling are intentionally not supported here.
+    void InitializeHClass(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister hclass,
+                          ArkSteedRegister objectRegionScratch, ArkSteedRegister hclassRegionScratch);
     void TransitionHClass(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister hclass,
                           ArkSteedRegister objectRegionScratch, ArkSteedRegister hclassRegionScratch);
 

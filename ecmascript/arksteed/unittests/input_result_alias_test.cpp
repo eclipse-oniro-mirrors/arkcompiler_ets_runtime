@@ -21,6 +21,23 @@
 
 namespace panda::ecmascript::arksteed {
 
+// Connect each stand-alone test vertex to valid producers before applying its
+// input constraints. Match the declared representation: INT_PTR constants use
+// Int64ConstantVertex, while tagged inputs use TaggedConstantVertex.
+static ValueVertex *NewConstantProducer(ValueRepresentation representation, Chunk &chunk)
+{
+    ValueVertex *producer;
+    if (representation == ValueRepresentation::TAGGED) {
+        producer = Vertex::New<TaggedConstantVertex>(
+            &chunk, static_cast<size_t>(0), static_cast<uint64_t>(JSTaggedValue::VALUE_UNDEFINED));
+    } else {
+        producer = Vertex::New<Int64ConstantVertex>(&chunk, static_cast<size_t>(0), 0);
+    }
+    producer->SetRegallocInfo(chunk.New<RegallocValueVertexInfo>(
+        &chunk, producer->GetInputCount(), producer->GetMachineRepresentation()));
+    return producer;
+}
+
 // Exercise real input assignment and ordinary result selection under pressure.
 class ArkSteedRegisterAllocatorTest : public testing::Test {
 protected:
@@ -301,7 +318,6 @@ protected:
         Chunk chunk {&native};
         Graph graph {&chunk};
         ArkSteedRegisterAllocator allocator {&graph};
-
         ValueVertex* NewValue(MachineRepresentation rep, VertexId start, VertexId end)
         {
             ValueVertex* vertex;
@@ -569,6 +585,78 @@ protected:
             << "reuse ignored freedAtPosition, so the mutation was not detected";
         EXPECT_NE(SpillFixture::SlotOf(controlNext), SpillFixture::SlotOf(mutatedNext));
     }
+
+    // Runs the real input and temporary assignment for the unmapped-arguments
+    // initializer under full register pressure and verifies the core contract:
+    // a temporary must never land on a register that holds one of the node's
+    // ordinary UseRegister inputs.
+    static void RunUnmappedArgumentsTemporariesNeverAliasInputs()
+    {
+        NativeAreaAllocator native;
+        Chunk chunk {&native};
+        Graph graph {&chunk};
+        ArkSteedRegisterAllocator allocator {&graph};
+        // Constants created through the graph are registered in its constant
+        // tables, so SetupConstantLocations can mark them loadable when the
+        // assignment below has to evict them.
+        auto newGraphConstant = [&graph, &chunk](bool tagged, int64_t value) {
+            ValueVertex *constant = tagged
+                ? graph.GetTaggedConstant(static_cast<uint64_t>(value))
+                : graph.GetInt64Constant(value);
+            if (constant->GetRegallocInfo() == nullptr) {
+                constant->SetRegallocInfo(chunk.New<RegallocValueVertexInfo>(
+                    &chunk, constant->GetInputCount(), constant->GetMachineRepresentation()));
+                constant->SetId(1);
+            }
+            return constant;
+        };
+
+        auto *initialize = Vertex::New<InitializeUnmappedArgumentsVertex>(
+            &chunk, static_cast<size_t>(InitializeUnmappedArgumentsVertex::NUM_INPUTS));
+        initialize->SetRegallocInfo(chunk.New<RegallocValueVertexInfo>(
+            &chunk, initialize->GetInputCount(), initialize->GetMachineRepresentation()));
+        initialize->SetId(CURRENT_ID);
+        for (uint32_t i = 0; i < initialize->GetInputCount(); ++i) {
+            bool tagged = InitializeUnmappedArgumentsVertex::INPUT_TYPES[i] ==
+                          ValueRepresentation::TAGGED;
+            ValueVertex *producer = newGraphConstant(
+                tagged, tagged ? static_cast<int64_t>(JSTaggedValue::VALUE_UNDEFINED)
+                               : static_cast<int64_t>(i));
+            initialize->SetInput(i, producer);
+        }
+        initialize->SetValueLocationConstraints();
+        for (uint32_t i = 0; i < initialize->GetInputCount(); ++i) {
+            Input input = initialize->Arg(i);
+            input.vertex()->GetRegallocInfo()->RecordUse(CURRENT_ID, input.GetLocation());
+        }
+
+        // Occupy every allocatable register with a live, spillable constant so
+        // the temporary assignment must go through eviction. Trivially free
+        // registers would weaken the aliasing check.
+        for (ArkSteedRegister reg : GetAllocatableList<ArkSteedRegister>()) {
+            ValueVertex *value = newGraphConstant(false, 1000 + reg.Code());
+            value->GetRegallocInfo()->RecordUse(FURTHEST_ID, chunk.New<InputLocation>());
+            auto &registers = allocator.GetRegisterSnapshot<ArkSteedRegister>();
+            registers.RemoveFromFree(reg);
+            registers.SetValue(reg, value);
+            registers.Unblock(reg);
+        }
+        allocator.SetupConstantLocations();
+
+        allocator.currentVertex_ = initialize;
+        allocator.AssignInputs(initialize);
+
+        ArkSteedRegList inputRegisters;
+        for (uint32_t i = 0; i < initialize->GetInputCount(); ++i) {
+            auto allocated = AllocatedState::Cast(initialize->GetInputLocation(i)->GetOperand());
+            EXPECT_TRUE(allocated.IsRegister()) << "initializer input did not receive a register";
+            inputRegisters.Set(allocated.GetRegister());
+        }
+        const ArkSteedRegList &temporaries = initialize->GetRegallocInfo()->GetGeneralTemporaries();
+        EXPECT_EQ(temporaries.Count(), 3U);
+        EXPECT_TRUE((inputRegisters & temporaries).IsEmpty())
+            << "initializer temporary was assigned over an input register";
+    }
 };
 
 HWTEST_F_L0(ArkSteedRegisterAllocatorTest, GeneralResultSelection)
@@ -643,6 +731,76 @@ HWTEST_F_L0(ArkSteedRegisterAllocatorTest, SpillSlotsReuseStackSlotsOption)
 HWTEST_F_L0(ArkSteedRegisterAllocatorTest, SpillSlotsNegativeControlShiftsFreedPosition)
 {
     RunSpillSlotNegativeControl();
+}
+
+HWTEST_F_L0(ArkSteedRegisterAllocatorTest, RawYoungAllocationFastConstraints)
+{
+    NativeAreaAllocator native;
+    Chunk chunk {&native};
+    auto *allocation = Vertex::New<AllocateRawInYoungFastVertex>(
+        &chunk, static_cast<size_t>(AllocateRawInYoungFastVertex::NUM_INPUTS));
+    CheckAllocationConstraints(allocation, chunk, 1);
+    EXPECT_FALSE(allocation->IsCall()) << "inline allocation attempt unexpectedly became a call";
+}
+
+HWTEST_F_L0(ArkSteedRegisterAllocatorTest, InitializeUnmappedArgumentsElementsConstraints)
+{
+    NativeAreaAllocator native;
+    Chunk chunk {&native};
+    auto *initialize = Vertex::New<InitializeUnmappedArgumentsElementsVertex>(
+        &chunk, static_cast<size_t>(InitializeUnmappedArgumentsElementsVertex::NUM_INPUTS));
+    initialize->SetRegallocInfo(chunk.New<RegallocValueVertexInfo>(
+        &chunk, initialize->GetInputCount(), initialize->GetMachineRepresentation()));
+    for (uint32_t i = 0; i < initialize->GetInputCount(); ++i) {
+        initialize->SetInput(i, NewConstantProducer(
+            InitializeUnmappedArgumentsElementsVertex::INPUT_TYPES[i], chunk));
+    }
+    initialize->SetValueLocationConstraints();
+    EXPECT_TRUE(UnallocatedState::Cast(initialize->Result().GetOperand()).GetExtendedPolicy() ==
+                Policy::MUST_HAVE_REGISTER);
+    for (unsigned i = 0; i < initialize->GetInputCount(); ++i) {
+        auto operand = UnallocatedState::Cast(initialize->GetInputLocation(i)->GetOperand());
+        EXPECT_TRUE(operand.GetExtendedPolicy() == Policy::MUST_HAVE_REGISTER && !operand.IsUsedAtStart())
+            << "unmapped arguments elements input does not use ordinary UseRegister";
+    }
+    EXPECT_TRUE(initialize->GetNumTemporariesNeeded<ArkSteedRegister>() == 1 &&
+                initialize->GetRegallocInfo()->GetRequiredSpecificTemporaries<ArkSteedRegister>().IsEmpty());
+    EXPECT_FALSE(initialize->IsCall()) << "unmapped arguments elements initialization unexpectedly became a call";
+    EXPECT_FALSE(initialize->IsDeferredCall())
+        << "read-only elements HClass initialization unexpectedly retained a deferred barrier";
+}
+
+HWTEST_F_L0(ArkSteedRegisterAllocatorTest, InitializeUnmappedArgumentsConstraints)
+{
+    NativeAreaAllocator native;
+    Chunk chunk {&native};
+    auto *initialize = Vertex::New<InitializeUnmappedArgumentsVertex>(
+        &chunk, static_cast<size_t>(InitializeUnmappedArgumentsVertex::NUM_INPUTS));
+    initialize->SetRegallocInfo(chunk.New<RegallocValueVertexInfo>(
+        &chunk, initialize->GetInputCount(), initialize->GetMachineRepresentation()));
+    for (uint32_t i = 0; i < initialize->GetInputCount(); ++i) {
+        initialize->SetInput(i, NewConstantProducer(
+            InitializeUnmappedArgumentsVertex::INPUT_TYPES[i], chunk));
+    }
+    initialize->SetValueLocationConstraints();
+    EXPECT_TRUE(UnallocatedState::Cast(initialize->Result().GetOperand()).GetExtendedPolicy() ==
+                Policy::MUST_HAVE_REGISTER);
+    for (unsigned i = 0; i < initialize->GetInputCount(); ++i) {
+        auto operand = UnallocatedState::Cast(initialize->GetInputLocation(i)->GetOperand());
+        EXPECT_TRUE(operand.GetExtendedPolicy() == Policy::MUST_HAVE_REGISTER && !operand.IsUsedAtStart())
+            << "unmapped arguments input does not use ordinary UseRegister";
+    }
+    EXPECT_TRUE(initialize->GetNumTemporariesNeeded<ArkSteedRegister>() == 3 &&
+                initialize->GetRegallocInfo()->GetRequiredSpecificTemporaries<ArkSteedRegister>().IsEmpty());
+    EXPECT_FALSE(initialize->CanAllocate()) << "unmapped arguments initialization still owns allocation";
+    EXPECT_FALSE(initialize->IsCall()) << "unmapped arguments initialization unexpectedly became a call";
+    EXPECT_TRUE(initialize->IsDeferredCall())
+        << "unmapped arguments initialization must expose its deferred barriers";
+}
+
+HWTEST_F_L0(ArkSteedRegisterAllocatorTest, UnmappedArgumentsTemporariesNeverAliasInputs)
+{
+    RunUnmappedArgumentsTemporariesNeverAliasInputs();
 }
 
 } // namespace panda::ecmascript::arksteed

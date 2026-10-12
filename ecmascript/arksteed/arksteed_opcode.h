@@ -624,6 +624,24 @@ public:
     void SetValueLocationConstraints();
 };
 
+// Loads one user argument from the current JS frame by its zero-based index.
+class LoadActualArgumentVertex : public FixedInputVertexMixin<ValueVertex, LoadActualArgumentVertex> {
+public:
+    enum Indices : uint32_t {
+        INDEX_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT32,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_READ;
+
+    explicit LoadActualArgumentVertex() : FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
 // Loads TaggedValue from raw pointer
 class LoadTaggedFromAddressVertex : public FixedInputVertexMixin<ValueVertex, LoadTaggedFromAddressVertex>,
                                     public OffsetMixin {
@@ -1945,6 +1963,35 @@ private:
 };
 
 /**
+ * Performs only the inline young-space allocation attempt. The graph builder
+ * must route Hole to the GC-capable runtime allocator before exposing the
+ * allocation result to an object initializer.
+ */
+class AllocateRawInYoungFastVertex
+    : public FixedInputVertexMixin<ValueVertex, AllocateRawInYoungFastVertex> {
+public:
+    enum Indices : uint32_t {
+        GLUE_INDEX = 0,
+        SIZE_INDEX = 1,
+        NUM_INPUTS = 2,
+    };
+
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT_PTR,
+        ValueRepresentation::INT64,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_READ |
+        VertexPropertyFlag::CAN_WRITE |
+        VertexPropertyFlag::CAN_ALLOCATE;
+
+    explicit AllocateRawInYoungFastVertex() : FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
+/**
  * Allocates and fully initializes a local empty JSArray in young space without a call or safepoint.
  * Returns Hole without allocating when the fast path is unavailable or the allocation buffer is full.
  */
@@ -1965,6 +2012,73 @@ public:
         = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::CAN_ALLOCATE;
 
     explicit AllocateJSArrayVertex(): FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
+/**
+ * Installs the read-only TaggedArray HClass without a barrier and initializes
+ * a raw allocation as the elements array for unmapped arguments.
+ */
+class InitializeUnmappedArgumentsElementsVertex
+    : public FixedInputVertexMixin<ValueVertex, InitializeUnmappedArgumentsElementsVertex> {
+public:
+    enum Indices : uint32_t {
+        NUM_ARGS_INDEX = 0,
+        RAW_ADDRESS_INDEX = 1,
+        HCLASS_INDEX = 2,
+        NUM_INPUTS = 3,
+    };
+
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT64,
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_READ |
+        VertexPropertyFlag::CAN_WRITE;
+
+    explicit InitializeUnmappedArgumentsElementsVertex() : FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
+/**
+ * Installs the HClass and initializes a separately allocated JSArguments
+ * object. Fixed reference fields are stored through write barriers emitted by
+ * this node; deferred barrier calls are non-GC calls and preserve the node's
+ * working registers.
+ */
+class InitializeUnmappedArgumentsVertex
+    : public FixedInputVertexMixin<ValueVertex, InitializeUnmappedArgumentsVertex> {
+public:
+    enum Indices : uint32_t {
+        GLUE_INDEX = 0,
+        NUM_ARGS_INDEX = 1,
+        RAW_ADDRESS_INDEX = 2,
+        ELEMENTS_INDEX = 3,
+        GLOBAL_ENV_INDEX = 4,
+        HCLASS_INDEX = 5,
+        NUM_INPUTS = 6,
+    };
+
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT_PTR,
+        ValueRepresentation::INT64,
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_READ |
+        VertexPropertyFlag::CAN_WRITE |
+        VertexPropertyFlag::IS_DEFERRED_CALL;
+
+    explicit InitializeUnmappedArgumentsVertex() : FixedInputVertexMixin() {}
 
     void SetValueLocationConstraints();
 };
@@ -3971,6 +4085,69 @@ public:
     explicit TaggedToRawI64Vertex() : FixedInputVertexMixin() {}
 
     void SetValueLocationConstraints();
+};
+
+class I64AddVertex : public FixedInputVertexMixin<ValueVertex, I64AddVertex> {
+public:
+    enum Indices : uint32_t {
+        LEFT_INDEX = 0,
+        RIGHT_INDEX = 1,
+        NUM_INPUTS = 2,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::INT64;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT64,
+        ValueRepresentation::INT64,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    explicit I64AddVertex() : FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
+class I64SubVertex : public FixedInputVertexMixin<ValueVertex, I64SubVertex> {
+public:
+    enum Indices : uint32_t {
+        LEFT_INDEX = 0,
+        RIGHT_INDEX = 1,
+        NUM_INPUTS = 2,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::INT64;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT64,
+        ValueRepresentation::INT64,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    explicit I64SubVertex() : FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
+class I64ShiftLeftVertex : public FixedInputVertexMixin<ValueVertex, I64ShiftLeftVertex> {
+public:
+    enum Indices : uint32_t {
+        INPUT_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::INT64;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT64,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    explicit I64ShiftLeftVertex(uint32_t shift) : FixedInputVertexMixin(), shift_(shift) {}
+
+    uint32_t GetShift() const
+    {
+        return shift_;
+    }
+
+    void SetValueLocationConstraints();
+
+private:
+    uint32_t shift_;
 };
 
 class I64BitwiseBinaryVertex : public FixedInputVertexMixin<ValueVertex, I64BitwiseBinaryVertex> {

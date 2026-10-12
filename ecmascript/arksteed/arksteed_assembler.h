@@ -171,6 +171,8 @@ public:
     void StoreFloat32Field(ArkSteedDoubleRegister src, ArkSteedDoubleRegister scratch, ArkSteedRegister base,
                            int32_t offset);
     void LoadActualArgc(ArkSteedRegister dst);
+    // Load the current frame's user argument at a zero-based dynamic index.
+    void LoadActualArgument(ArkSteedRegister dst, ArkSteedRegister index, ArkSteedRegister scratch);
 
     void LoadFloat64(ArkSteedDoubleRegister dst, MemoryOperand srcOp);
     void StoreFloat64(MemoryOperand dstOp, ArkSteedDoubleRegister src);

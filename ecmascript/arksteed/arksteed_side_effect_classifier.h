@@ -105,6 +105,24 @@ public:
         return SideEffectDescriptor{SideEffectKind::SAFE_CALL};
     }
 
+    static SideEffectDescriptor Classify(InitializeUnmappedArgumentsVertex *vertex)
+    {
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+    }
+
+    static SideEffectDescriptor Classify(InitializeUnmappedArgumentsElementsVertex *vertex)
+    {
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+    }
+
+    static SideEffectDescriptor Classify(AllocateRawInYoungFastVertex *vertex)
+    {
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+    }
+
     static SideEffectDescriptor Classify(StoreInt32FieldVertex *vertex)
     {
         SideEffectDescriptor descriptor;

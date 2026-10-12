@@ -19,7 +19,7 @@ python3 ark.py x64.debug arksteed_host_unittest \
 
 该目标自动构建当前测试和依赖，然后通过项目统一执行器运行。无需预先构建运行时、读取链接响应文件或使用专用 Python 脚本。启用 ArkSteed 时，目标也接入 `ark_unittest` 的编译器宿主测试分组；沿用该分组的 ASAN 和独立 OHOS 宿主测试限制。
 
-GTest 将原有检查分成六个用例：通用/浮点结果选择、通用/浮点既有策略、空对象约束、空数组约束。测试程序位于 `out/x64.debug/tests/unittest/ets_runtime/ets_runtime/ArkSteedRegisterAllocatorTest`，支持标准 `--gtest_filter` 和 `--gtest_output` 参数。构建目标依赖完整优化器 source set，而非导出符号有限的动态库；Ninja 会根据源码依赖重新编译，不再手动混用旧目标文件。
+GTest 将检查分成八个用例：通用/浮点结果选择、通用/浮点既有策略、空对象约束、空数组约束、young-space 快速分配约束和 unmapped arguments 初始化约束。测试程序位于 `out/x64.debug/tests/unittest/ets_runtime/ets_runtime/ArkSteedRegisterAllocatorTest`，支持标准 `--gtest_filter` 和 `--gtest_output` 参数。构建目标依赖完整优化器 source set，而非导出符号有限的动态库；Ninja 会根据源码依赖重新编译，不再手动混用旧目标文件。
 
 ## 覆盖
 
@@ -31,6 +31,6 @@ GTest 将原有检查分成六个用例：通用/浮点结果选择、通用/浮
 - 重复输入、空闲表快捷路径、临时寄存器排除及下一个节点清空结果排除集合。
 - `UseAny`、显式固定/共用结果、调用清理序列，以及整数/浮点原地运算声明保持既有行为。
 
-另检查空对象 glue/HClass 和空数组 glue/GlobalEnv 均使用普通 `UseRegister`；两者均需要两个普通临时寄存器，不再保留 glue 副本。空对象的内建初始 HClass 免屏障后，不再声明延迟调用。
+另检查空对象、空数组的既有约束，以及新拆分出的 young-space 快速分配和 unmapped arguments 初始化约束。快速分配需要一个普通临时寄存器；初始化节点接收 glue/argc/GlobalEnv/raw address 并需要两个临时寄存器。初始化节点不分配且不是调用节点，可触发 GC 的分配慢路径由 GraphBuilder 显式构造成 runtime call。
 
 本测试不替代 JavaScript 对象/数组分配、真实调用、GC、反优化及跨架构运行回归。本分支实际验证及环境限制见 `.agents/arksteed-createemptyobject-implementation-report.md`。

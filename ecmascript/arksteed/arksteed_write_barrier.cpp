@@ -364,6 +364,17 @@ void ArkSteedWriteBarrierEmitter::TransitionHClass(ArkSteedRegister glue, ArkSte
 #endif
 }
 
+void ArkSteedWriteBarrierEmitter::InitializeHClass(ArkSteedRegister glue, ArkSteedRegister object,
+                                                   ArkSteedRegister hclass, ArkSteedRegister objectRegionScratch,
+                                                   ArkSteedRegister hclassRegionScratch)
+{
+    static_assert(TaggedObject::HCLASS_OFFSET == 0);
+    constexpr int32_t offset = static_cast<int32_t>(TaggedObject::HCLASS_OFFSET);
+    EmitPostStoreWriteBarrier(glue, object, hclass, offset, ArkSteedWriteBarrierKind::GENERIC_BARRIER,
+                              objectRegionScratch, hclassRegionScratch);
+    __ StoreHeaderRelease(hclass, object);
+}
+
 void ArkSteedWriteBarrierEmitter::StoreTaggedElement(ArkSteedRegister glue, ArkSteedRegister object,
                                                      ArkSteedRegister byteOffset, ArkSteedRegister value,
                                                      ArkSteedRegister scratch, ArkSteedWriteBarrierValueKind valueKind)

@@ -305,6 +305,16 @@ void ArkSteedAssembler::LoadActualArgc(ArkSteedRegister dst)
     assembler_.Movq(operand, dst);
 }
 
+void ArkSteedAssembler::LoadActualArgument(ArkSteedRegister dst, ArkSteedRegister index,
+                                           [[maybe_unused]] ArkSteedRegister scratch)
+{
+    // 3: skip saved fp, return address, and argc; then skip mandatory JS-function arguments.
+    constexpr int32_t FIRST_USER_ARG_SLOT = 3 + NUM_MANDATORY_JSFUNC_ARGS;
+    x64::Operand operand(kFramePointerRegister, index, x64::Scale::Times8,
+                         FIRST_USER_ARG_SLOT * FRAME_SLOT_SIZE);
+    assembler_.Movq(operand, dst);
+}
+
 void ArkSteedAssembler::LoadFloat64(ArkSteedDoubleRegister dst, MemoryOperand srcOp)
 {
     assembler_.Movsd(dst, srcOp);

@@ -39,11 +39,15 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     CONSTANT_VALUE_VERTEX_LIST(V)       \
     V(InitialValue)                     \
     V(ActualArgc)                       \
+    V(LoadActualArgument)               \
     V(Call)                             \
     V(CallKnownJSFunction)              \
     V(CallKnownBuiltin)                 \
     V(CallSelf)                         \
+    V(AllocateRawInYoungFast)           \
     V(AllocateJSArray)                  \
+    V(InitializeUnmappedArgumentsElements) \
+    V(InitializeUnmappedArguments)      \
     V(CallRuntime)                      \
     V(CallCommonStub)                   \
     V(CreateEmptyObject)                \
@@ -93,6 +97,9 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(U32ToTaggedNumber)                \
     V(RawI64ToTagged)                   \
     V(TaggedToRawI64)                   \
+    V(I64Add)                           \
+    V(I64Sub)                           \
+    V(I64ShiftLeft)                     \
     V(I64BitwiseBinary)                 \
     V(CheckedNonNegativeI32ToTaggedInt) \
     V(I32BNot)                          \

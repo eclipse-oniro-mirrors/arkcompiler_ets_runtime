@@ -37,6 +37,7 @@
 #include "ecmascript/ic/proto_change_details.h"
 #include "ecmascript/js_array.h"
 #include "ecmascript/js_arraybuffer.h"
+#include "ecmascript/js_arguments.h"
 #include "ecmascript/js_function.h"
 #include "ecmascript/js_hclass.h"
 #include "ecmascript/js_native_pointer.h"
@@ -1581,6 +1582,233 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<AllocateJSArrayVertex>(Allocat
     __ Bind(&done);
 }
 
+template<>
+void ArkSteedCodeGenerator::VisitNonControlVertex<AllocateRawInYoungFastVertex>(
+    AllocateRawInYoungFastVertex *allocate)
+{
+    ArkSteedRegister result = GetResultRegister(allocate);
+    Label failed;
+    Label done;
+
+#if defined(ARK_ASAN_ON)
+    __ Jump(&failed);
+#else
+    if constexpr (G_USE_CMS_GC) {
+        __ Jump(&failed);
+    } else {
+        ArkSteedRegister glue = GetInputRegister(allocate, AllocateRawInYoungFastVertex::GLUE_INDEX);
+        ArkSteedRegister size = GetInputRegister(allocate, AllocateRawInYoungFastVertex::SIZE_INDEX);
+        TemporaryRegisterScope scope(assembler_);
+        ArkSteedRegister scratch = scope.Acquire();
+
+        ASSERT(result != glue);
+        ASSERT(result != size);
+        ASSERT(result != scratch);
+        ASSERT(glue != size);
+        ASSERT(glue != scratch);
+        ASSERT(size != scratch);
+        static_assert(MAX_REGULAR_HEAP_OBJECT_SIZE <=
+                      static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+
+        __ JumpIfCMCGCEnabled(glue, scratch, &failed);
+#ifdef ECMASCRIPT_SUPPORT_HEAPSAMPLING
+        __ JumpIfHeapSamplingActive(glue, scratch, &failed);
+#endif
+        __ Compare(size, static_cast<int32_t>(MAX_REGULAR_HEAP_OBJECT_SIZE));
+        __ JumpIf(Condition::ABOVE, &failed);
+        RecordComment("AllocateRawInYoungFast inline attempt");
+        __ TryAllocateInYoungSpace(glue, size, result, scratch, &failed);
+        __ Jump(&done);
+    }
+#endif
+
+    __ Bind(&failed);
+    RecordComment("AllocateRawInYoungFast fallback sentinel");
+    __ Move(result, static_cast<uint64_t>(JSTaggedValue::VALUE_HOLE));
+    __ Bind(&done);
+}
+
+template<>
+void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeUnmappedArgumentsElementsVertex>(
+    InitializeUnmappedArgumentsElementsVertex *initialize)
+{
+#ifndef NDEBUG
+    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << initialize->GetId()
+                        << ": InitializeUnmappedArgumentsElementsVertex";
+#endif
+    ArkSteedRegister result = GetResultRegister(initialize);
+    ArkSteedRegister argc =
+        GetInputRegister(initialize, InitializeUnmappedArgumentsElementsVertex::NUM_ARGS_INDEX);
+    ArkSteedRegister rawAddress =
+        GetInputRegister(initialize, InitializeUnmappedArgumentsElementsVertex::RAW_ADDRESS_INDEX);
+    ArkSteedRegister hclass =
+        GetInputRegister(initialize, InitializeUnmappedArgumentsElementsVertex::HCLASS_INDEX);
+
+    constexpr int32_t mandatoryArgc = NUM_MANDATORY_JSFUNC_ARGS;
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister value = scope.Acquire();
+    ASSERT(value != argc);
+    ASSERT(value != rawAddress);
+    ASSERT(value != hclass);
+
+    __ Move(value, argc);
+    __ Sub(value, mandatoryArgc);
+    __ StoreInt32Field(value, rawAddress, static_cast<int32_t>(TaggedArray::LENGTH_OFFSET));
+    __ Move(value, 0);
+    __ StoreInt32Field(value, rawAddress, static_cast<int32_t>(TaggedArray::EXTRA_LENGTH_OFFSET));
+
+    // TAGGED_ARRAY_CLASS_INDEX is allocated in shared read-only space, so
+    // installing it does not require a write barrier.
+    __ StoreHeaderRelease(hclass, rawAddress);
+
+    // Define the result only after all inputs have been consumed, so the
+    // register allocator may safely reuse an input register for the result.
+    __ Move(result, rawAddress);
+    RecordComment("InitializeUnmappedArgumentsElements");
+}
+
+void ArkSteedCodeGenerator::EmitInitializeHClassWithBarrier(
+    const DeferredRegisterSnapshot &snapshot, ArkSteedRegister glue, ArkSteedRegister object,
+    ArkSteedRegister hclass)
+{
+    // Acquire the barrier work registers from the temporaries declared by the current vertex.
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister objectRegionScratch = scope.Acquire();
+    ArkSteedRegister hclassRegionScratch = scope.Acquire();
+    ASSERT(objectRegionScratch != hclassRegionScratch);
+    ASSERT(objectRegionScratch != glue);
+    ASSERT(objectRegionScratch != object);
+    ASSERT(objectRegionScratch != hclass);
+    ASSERT(hclassRegionScratch != glue);
+    ASSERT(hclassRegionScratch != object);
+    ASSERT(hclassRegionScratch != hclass);
+
+    DeferredRegisterSnapshot barrierSnapshot = snapshot;
+    barrierSnapshot.liveRegisters.Set(objectRegionScratch);
+    barrierSnapshot.liveRegisters.Set(hclassRegionScratch);
+    ArkSteedWriteBarrierEmitter(assembler_, graph_->GetChunk(), &deferredCode_, barrierSnapshot)
+        .InitializeHClass(glue, object, hclass, objectRegionScratch, hclassRegionScratch);
+}
+
+void ArkSteedCodeGenerator::EmitStoreTaggedFieldWithBarrier(
+    const DeferredRegisterSnapshot &snapshot, ArkSteedRegister glue, ArkSteedRegister object,
+    ArkSteedRegister value, int32_t offset, ArkSteedWriteBarrierValueKind valueKind)
+{
+    // Acquire the barrier work registers from the temporaries declared by the current vertex.
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister objectRegionScratch = scope.Acquire();
+    ArkSteedRegister valueRegionScratch = scope.Acquire();
+    ASSERT(objectRegionScratch != valueRegionScratch);
+    ASSERT(objectRegionScratch != glue);
+    ASSERT(objectRegionScratch != object);
+    ASSERT(objectRegionScratch != value);
+    ASSERT(valueRegionScratch != glue);
+    ASSERT(valueRegionScratch != object);
+    ASSERT(valueRegionScratch != value);
+
+    DeferredRegisterSnapshot barrierSnapshot = snapshot;
+    barrierSnapshot.liveRegisters.Set(objectRegionScratch);
+    barrierSnapshot.liveRegisters.Set(valueRegionScratch);
+    ArkSteedWriteBarrierEmitter(assembler_, graph_->GetChunk(), &deferredCode_, barrierSnapshot)
+        .StoreTaggedField(glue, object, value, offset, ArkSteedWriteBarrierKind::GENERIC_BARRIER,
+                          objectRegionScratch, valueRegionScratch, valueKind);
+}
+
+template<>
+void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeUnmappedArgumentsVertex>(
+    InitializeUnmappedArgumentsVertex *initialize)
+{
+#ifndef NDEBUG
+    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << initialize->GetId()
+                        << ": InitializeUnmappedArgumentsVertex";
+#endif
+    ArkSteedRegister result = GetResultRegister(initialize);
+    ArkSteedRegister glue =
+        GetInputRegister(initialize, InitializeUnmappedArgumentsVertex::GLUE_INDEX);
+    ArkSteedRegister argc =
+        GetInputRegister(initialize, InitializeUnmappedArgumentsVertex::NUM_ARGS_INDEX);
+    ArkSteedRegister rawAddress =
+        GetInputRegister(initialize, InitializeUnmappedArgumentsVertex::RAW_ADDRESS_INDEX);
+    ArkSteedRegister elements =
+        GetInputRegister(initialize, InitializeUnmappedArgumentsVertex::ELEMENTS_INDEX);
+    ArkSteedRegister globalEnv =
+        GetInputRegister(initialize, InitializeUnmappedArgumentsVertex::GLOBAL_ENV_INDEX);
+    ArkSteedRegister hclass =
+        GetInputRegister(initialize, InitializeUnmappedArgumentsVertex::HCLASS_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister value = scope.Acquire();
+    ASSERT(value != glue);
+    ASSERT(value != argc);
+    ASSERT(value != rawAddress);
+    ASSERT(value != elements);
+    ASSERT(value != globalEnv);
+    ASSERT(value != hclass);
+
+    // RA records liveness at the node boundary. This composite node has
+    // several deferred barriers and continues reading its own inputs and work
+    // registers between them, so preserve those physical registers explicitly.
+    DeferredRegisterSnapshot snapshot = initialize->GetRegallocInfo()->GetDeferredRegisterSnapshot();
+    for (ArkSteedRegister reg : {glue, argc, rawAddress, elements, globalEnv, hclass, value}) {
+        snapshot.liveRegisters.Set(reg);
+    }
+
+    constexpr int32_t mandatoryArgc = NUM_MANDATORY_JSFUNC_ARGS;
+    constexpr int32_t lengthOffset =
+        static_cast<int32_t>(JSArguments::GetInlinedPropertyOffset(JSArguments::LENGTH_INLINE_PROPERTY_INDEX));
+    constexpr int32_t iteratorOffset =
+        static_cast<int32_t>(JSArguments::GetInlinedPropertyOffset(JSArguments::ITERATOR_INLINE_PROPERTY_INDEX));
+    constexpr int32_t callerOffset =
+        static_cast<int32_t>(JSArguments::GetInlinedPropertyOffset(JSArguments::CALLER_INLINE_PROPERTY_INDEX));
+    constexpr int32_t calleeOffset =
+        static_cast<int32_t>(JSArguments::GetInlinedPropertyOffset(JSArguments::CALLEE_INLINE_PROPERTY_INDEX));
+    constexpr size_t emptyArrayOffset =
+        static_cast<size_t>(ConstantIndex::EMPTY_ARRAY_OBJECT_INDEX) * JSTaggedValue::TaggedTypeSize();
+    constexpr size_t iteratorValueOffset =
+        GlobalEnv::HEADER_SIZE +
+        static_cast<size_t>(GlobalEnv::ARRAY_PROTO_VALUES_FUNCTION_INDEX) * JSTaggedValue::TaggedTypeSize();
+    constexpr size_t callerAccessorOffset =
+        GlobalEnv::HEADER_SIZE +
+        static_cast<size_t>(GlobalEnv::ARGUMENTS_CALLER_ACCESSOR) * JSTaggedValue::TaggedTypeSize();
+    constexpr size_t calleeAccessorOffset =
+        GlobalEnv::HEADER_SIZE +
+        static_cast<size_t>(GlobalEnv::ARGUMENTS_CALLEE_ACCESSOR) * JSTaggedValue::TaggedTypeSize();
+    static_assert(emptyArrayOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+    static_assert(iteratorValueOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+    static_assert(callerAccessorOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+    static_assert(calleeAccessorOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+
+    __ Move(value, static_cast<uint64_t>(JSTaggedValue::VALUE_ZERO));
+    __ StoreField(value, rawAddress, static_cast<int32_t>(ECMAObject::HASH_OFFSET));
+    __ LoadField(value, glue, static_cast<int32_t>(JSThread::GlueData::GetGlobalConstOffset(false)));
+    __ LoadField(value, value, static_cast<int32_t>(emptyArrayOffset));
+    __ StoreField(value, rawAddress, static_cast<int32_t>(JSObject::PROPERTIES_OFFSET));
+
+    __ Move(value, argc);
+    __ Sub(value, mandatoryArgc);
+    __ Or(value, static_cast<int64_t>(JSTaggedValue::TAG_INT));
+    __ StoreField(value, rawAddress, lengthOffset);
+
+    EmitInitializeHClassWithBarrier(snapshot, glue, rawAddress, hclass);
+
+    EmitStoreTaggedFieldWithBarrier(snapshot, glue, rawAddress, elements,
+                                    static_cast<int32_t>(JSObject::ELEMENTS_OFFSET),
+                                    ArkSteedWriteBarrierValueKind::HeapObject);
+    __ LoadField(value, globalEnv, static_cast<int32_t>(iteratorValueOffset));
+    EmitStoreTaggedFieldWithBarrier(snapshot, glue, rawAddress, value, iteratorOffset,
+                                    ArkSteedWriteBarrierValueKind::HeapObject);
+    __ LoadField(value, globalEnv, static_cast<int32_t>(callerAccessorOffset));
+    EmitStoreTaggedFieldWithBarrier(snapshot, glue, rawAddress, value, callerOffset,
+                                    ArkSteedWriteBarrierValueKind::HeapObject);
+    __ LoadField(value, globalEnv, static_cast<int32_t>(calleeAccessorOffset));
+    EmitStoreTaggedFieldWithBarrier(snapshot, glue, rawAddress, value, calleeOffset,
+                                    ArkSteedWriteBarrierValueKind::HeapObject);
+
+    // Define the result only after all inputs have been consumed. This keeps
+    // the node safe when the result reuses an input register.
+    __ Move(result, rawAddress);
+    RecordComment("InitializeUnmappedArgumentsObject");
+}
+
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<CallKnownJSFunctionVertex>(CallKnownJSFunctionVertex *call)
 {
@@ -2083,6 +2311,16 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<ActualArgcVertex>(ActualArgcVe
 {
     auto dst = GetResultRegister(actualArgc);
     __ LoadActualArgc(dst);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<LoadActualArgumentVertex>(LoadActualArgumentVertex *load)
+{
+    auto dst = GetResultRegister(load);
+    auto index = GetInputRegister(load, LoadActualArgumentVertex::INDEX_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    auto scratch = scope.Acquire();
+    __ LoadActualArgument(dst, index, scratch);
 }
 
 // ========================================= Slow Value Opcode =========================================
@@ -2940,6 +3178,35 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<TaggedToRawI64Vertex>(TaggedTo
     if (dst != src) {
         __ Move(dst, src);
     }
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<I64AddVertex>(I64AddVertex *op)
+{
+    auto dst = GetResultRegister(op);
+    auto left = GetInputRegister(op, I64AddVertex::LEFT_INDEX);
+    auto right = GetInputRegister(op, I64AddVertex::RIGHT_INDEX);
+    ASSERT(dst == left);
+    __ Add(dst, right);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<I64SubVertex>(I64SubVertex *op)
+{
+    auto dst = GetResultRegister(op);
+    auto left = GetInputRegister(op, I64SubVertex::LEFT_INDEX);
+    auto right = GetInputRegister(op, I64SubVertex::RIGHT_INDEX);
+    ASSERT(dst == left);
+    __ Sub(dst, right);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<I64ShiftLeftVertex>(I64ShiftLeftVertex *op)
+{
+    auto dst = GetResultRegister(op);
+    auto input = GetInputRegister(op, I64ShiftLeftVertex::INPUT_INDEX);
+    ASSERT(dst == input);
+    __ ShiftLeft(dst, op->GetShift());
 }
 
 template <>

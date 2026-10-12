@@ -48,6 +48,7 @@
 #include "ecmascript/ic/property_box.h"
 #include "ecmascript/js_array.h"
 #include "ecmascript/js_arraybuffer.h"
+#include "ecmascript/js_arguments.h"
 #include "ecmascript/js_function.h"
 #include "ecmascript/js_function_kind.h"
 #include "ecmascript/js_thread.h"
@@ -4072,12 +4073,149 @@ struct GraphBuilder::BytecodeVisitor {
 
     void LowerGetUnmappedArgs()
     {
-        ValueVertex *argv = self->graph_->GetIntPtrConstant(0);
         ValueVertex *numArgs = ActualArgc();
-        ValueVertex *argvTaggedArray = self->undefinedValue_;
+        ValueVertex *globalEnv = GlobalEnv();
 
-        CommonStubCallToAccWithLazyDeopt({glue, argv, numArgs, argvTaggedArray, GlobalEnv()},
-                                         CommonStubID::GetUnmappedArgs);
+        uint32_t argumentsObjectSize = 0;
+        {
+            auto scope = self->pgoContext_.CreateSerializingScope("GraphBuilder::LowerGetUnmappedArgs");
+            JitCompilationEnv *env = self->preproc_->GetEnv();
+            auto argumentsClassValue = env->GetGlobalEnv()->GetArgumentsClassWithBarrier();
+            JSHandle<JSHClass> argumentsClass(argumentsClassValue);
+            argumentsObjectSize = argumentsClass->GetObjectSize();
+        }
+
+        constexpr uint64_t slotSize = JSTaggedValue::TaggedTypeSize();
+        constexpr uint64_t mandatoryArgc = NUM_MANDATORY_JSFUNC_ARGS;
+        static_assert(slotSize == (1U << TAGGED_TYPE_SIZE_LOG));
+
+        const size_t globalConstantsOffset = JSThread::GlueData::GetGlobalConstOffset(false);
+        constexpr size_t elementsClassOffset =
+            static_cast<size_t>(ConstantIndex::TAGGED_ARRAY_CLASS_INDEX) * slotSize;
+        constexpr size_t argumentsClassOffset =
+            GlobalEnv::HEADER_SIZE + static_cast<size_t>(GlobalEnv::ARGUMENTS_CLASS) * slotSize;
+        ASSERT(globalConstantsOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+        static_assert(elementsClassOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+        static_assert(argumentsClassOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+
+        ValueVertex *userArgCount = self->NewVertex<I64SubVertex>(
+            compileInfoFacts_, currentBlock,
+            {numArgs, self->graph_->GetInt64Constant(static_cast<int64_t>(mandatoryArgc))});
+
+        CompileInfoFacts *entryFacts = compileInfoFacts_;
+        BB *loopHeader = self->NewBlock();
+        BB *loopBody = self->NewBlock();
+        BB *loopExit = self->NewBlock();
+        loopHeader->SetIsLoopHeader(true);
+
+        // The frame ABI guarantees that argc includes the mandatory arguments
+        // and that the user argument count fits the INT32 frame representation.
+        ValueVertex *globalConstants = self->NewVertex<LoadTaggedFromAddressVertex>(
+            compileInfoFacts_, currentBlock, {glue}, static_cast<int32_t>(globalConstantsOffset));
+        ValueVertex *elementsHClass = self->NewVertex<LoadTaggedFieldVertex>(
+            compileInfoFacts_, currentBlock, {globalConstants}, static_cast<int32_t>(elementsClassOffset));
+        ValueVertex *elementsDataSize = self->NewVertex<I64ShiftLeftVertex>(
+            compileInfoFacts_, currentBlock, {userArgCount}, TAGGED_TYPE_SIZE_LOG);
+        ValueVertex *elementsSize = self->NewVertex<I64AddVertex>(
+            compileInfoFacts_, currentBlock,
+            {elementsDataSize, self->graph_->GetInt64Constant(static_cast<int64_t>(TaggedArray::DATA_OFFSET))});
+        ValueVertex *rawElements = AllocateRawInYoung(elementsSize, elementsHClass);
+        ValueVertex *elements = self->NewVertex<InitializeUnmappedArgumentsElementsVertex>(
+            compileInfoFacts_, currentBlock, {numArgs, rawElements, elementsHClass});
+
+        // Element initialization and the following copy loop contain no
+        // safepoint. Every tagged slot is written before another allocation
+        // can trigger GC.
+        ValueVertex *argumentCount = self->NewVertex<LoadInt32FieldVertex>(
+            compileInfoFacts_, currentBlock, {elements}, static_cast<int32_t>(TaggedArray::LENGTH_OFFSET));
+        JumpVertex *entryJump = self->FinishBlockWithJump(currentBlock, loopHeader);
+
+        currentBlock = loopHeader;
+        compileInfoFacts_ = entryFacts->Clone();
+        PhiVertex *indexPhi = self->NewPhiVertex(currentBlock, 2, self->AccIndex());
+        indexPhi->SetPredecessor(entryJump->GetPredecessorId(), TaggedConstantFromInt32(0));
+        ValueVertex *index = self->NewVertex<TaggedIntToI32Vertex>(
+            compileInfoFacts_, currentBlock, {indexPhi});
+        self->FinishBlockWithBranch<BranchIfInt32CompareVertex>(
+            currentBlock, {index, argumentCount}, loopBody, loopExit, Condition::BELOW);
+
+        currentBlock = loopBody;
+        compileInfoFacts_ = entryFacts->Clone();
+        ValueVertex *argument = self->NewVertex<LoadActualArgumentVertex>(
+            compileInfoFacts_, currentBlock, {index});
+        self->NewVertex<StoreTaggedElementWithBarrierVertex>(
+            compileInfoFacts_, currentBlock, {glue, elements, index, argument},
+            ArkSteedWriteBarrierValueKind::Unknown);
+        compileInfoFacts_->OnSideEffect();
+        ValueVertex *nextIndex = self->NewVertex<I32AddVertex>(
+            compileInfoFacts_, currentBlock, {index, self->graph_->GetInt32Constant(1)});
+        ValueVertex *nextTaggedIndex = self->NewVertex<I32ToTaggedIntVertex>(
+            compileInfoFacts_, currentBlock, {nextIndex});
+        JumpLoopVertex *backedge = self->FinishBlockWithJumpLoop(currentBlock, loopHeader);
+        indexPhi->SetPredecessor(backedge->GetPredecessorId(), nextTaggedIndex);
+
+        ASSERT(loopHeader->IsLoopHeader());
+        ASSERT(loopHeader->PredecessorCount() == 2);
+        ASSERT(indexPhi->GetInputCount() == loopHeader->PredecessorCount());
+        ASSERT(indexPhi->GetPredecessor(entryJump->GetPredecessorId()) != nullptr);
+        ASSERT(indexPhi->GetPredecessor(backedge->GetPredecessorId()) != nullptr);
+        ASSERT(backedge->Target() == loopHeader);
+
+        currentBlock = loopExit;
+        compileInfoFacts_ = entryFacts->Clone();
+        ValueVertex *argumentsHClass = self->NewVertex<LoadTaggedFieldVertex>(
+            compileInfoFacts_, currentBlock, {globalEnv}, static_cast<int32_t>(argumentsClassOffset));
+        ValueVertex *argumentsSize =
+            self->graph_->GetInt64Constant(static_cast<int64_t>(argumentsObjectSize));
+        ValueVertex *rawArguments = AllocateRawInYoung(argumentsSize, argumentsHClass);
+        ValueVertex *arguments = self->NewVertex<InitializeUnmappedArgumentsVertex>(
+            compileInfoFacts_, currentBlock,
+            {glue, numArgs, rawArguments, elements, globalEnv, argumentsHClass});
+        compileInfoFacts_->OnSideEffect();
+        compileInfoFacts_->EnsureType(arguments, NodeInfo::NodeType::OTHER_JS_RECEIVER);
+        frameState.SetAcc(arguments);
+    }
+
+    ValueVertex *AllocateRawInYoung(ValueVertex *size, ValueVertex *hclass)
+    {
+        ASSERT(size->GetValueRepresentation() == ValueRepresentation::INT64);
+        ASSERT(hclass != nullptr);
+        ASSERT(hclass->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ValueVertex *fastAddress = self->NewVertex<AllocateRawInYoungFastVertex>(
+            compileInfoFacts_, currentBlock, {glue, size});
+        ValueVertex *hole = self->graph_->GetTaggedConstant(JSTaggedValue::VALUE_HOLE);
+
+        CompileInfoFacts *entryFacts = compileInfoFacts_;
+        BB *slowBlock = self->NewBlock();
+        BB *fastBlock = self->NewBlock();
+        BB *doneBlock = self->NewBlock();
+        slowBlock->SetDeferred(true);
+        self->FinishBlockWithBranch<BranchIfReferenceEqualVertex>(
+            currentBlock, {fastAddress, hole}, slowBlock, fastBlock);
+
+        currentBlock = slowBlock;
+        compileInfoFacts_ = entryFacts->Clone();
+        ValueVertex *tagMask = self->graph_->GetInt64Constant(
+            static_cast<int64_t>(JSTaggedValue::TAG_INT));
+        ValueVertex *taggedSizeBits = self->NewVertex<I64BitwiseBinaryVertex>(
+            compileInfoFacts_, currentBlock, {size, tagMask}, IntBitwiseKind::BITWISE_OR);
+        ValueVertex *taggedSize = self->NewVertex<RawI64ToTaggedVertex>(
+            compileInfoFacts_, currentBlock, {taggedSizeBits});
+        ValueVertex *slowAddress = RuntimeCall({taggedSize, hclass}, RTSTUB_ID(AllocateInYoung),
+                                               SideEffectKind::SAFE_CALL);
+        JumpVertex *slowJump = self->FinishBlockWithJump(currentBlock, doneBlock);
+
+        currentBlock = fastBlock;
+        compileInfoFacts_ = entryFacts->Clone();
+        JumpVertex *fastJump = self->FinishBlockWithJump(currentBlock, doneBlock);
+
+        currentBlock = doneBlock;
+        compileInfoFacts_ = entryFacts;
+        compileInfoFacts_->OnSideEffect();
+        PhiVertex *address = self->NewPhiVertex(currentBlock, 2, self->AccIndex());
+        address->SetPredecessor(slowJump->GetPredecessorId(), slowAddress);
+        address->SetPredecessor(fastJump->GetPredecessorId(), fastAddress);
+        return address;
     }
 
     void LowerCopyRestArgs(const BytecodeInfo *bcInfo)

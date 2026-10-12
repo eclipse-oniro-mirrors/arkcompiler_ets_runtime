@@ -1,0 +1,8 @@
+compiled:true
+interpreted:true
+basic:true
+fresh:true
+register-pressure:true
+buffer-exhaustion:true
+young-gc-survivors:true
+full-gc-survivors:true

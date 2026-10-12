@@ -390,6 +390,18 @@ void ArkSteedAssembler::LoadActualArgc(ArkSteedRegister dst)
     assembler_.Ldr(dst, operand);
 }
 
+void ArkSteedAssembler::LoadActualArgument(ArkSteedRegister dst, ArkSteedRegister index,
+                                           ArkSteedRegister scratch)
+{
+    // 3: skip saved fp, return address, and argc; then skip mandatory JS-function arguments.
+    constexpr int32_t FIRST_USER_ARG_SLOT = 3 + NUM_MANDATORY_JSFUNC_ARGS;
+    constexpr uint8_t TAGGED_SIZE_SHIFT = 3;
+    static_assert(JSTaggedValue::TaggedTypeSize() == (1U << TAGGED_SIZE_SHIFT));
+    assembler_.Add(scratch, kFramePointerRegister,
+                   aarch64::Operand(index, aarch64::UXTW, TAGGED_SIZE_SHIFT));
+    LoadField(dst, scratch, FIRST_USER_ARG_SLOT * FRAME_SLOT_SIZE);
+}
+
 void ArkSteedAssembler::LoadFloat64(ArkSteedDoubleRegister dst, MemoryOperand srcOp)
 {
     if (FitsScaledImmediateOffset(srcOp, true)) {

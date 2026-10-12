@@ -138,6 +138,13 @@ void ActualArgcVertex::SetValueLocationConstraints()
     DefineAsRegister(this);
 }
 
+void LoadActualArgumentVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INDEX_INDEX));
+    SetTemporariesNeeded(1);
+}
+
 void CallRuntimeVertex::SetValueLocationConstraints()
 {
     // Define return value in x0/rax (C calling convention)
@@ -240,6 +247,35 @@ void AllocateJSArrayVertex::SetValueLocationConstraints()
     SetTemporariesNeeded(2);
     UseRegister(Arg(GLUE_INDEX));
     UseRegister(Arg(GLOBAL_ENV_INDEX));
+}
+
+void AllocateRawInYoungFastVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    SetTemporariesNeeded(1);
+    UseRegister(Arg(GLUE_INDEX));
+    UseRegister(Arg(SIZE_INDEX));
+}
+
+void InitializeUnmappedArgumentsElementsVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    SetTemporariesNeeded(1);
+    UseRegister(Arg(NUM_ARGS_INDEX));
+    UseRegister(Arg(RAW_ADDRESS_INDEX));
+    UseRegister(Arg(HCLASS_INDEX));
+}
+
+void InitializeUnmappedArgumentsVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    SetTemporariesNeeded(3);  // value and two internally acquired write-barrier region scratches
+    UseRegister(Arg(GLUE_INDEX));
+    UseRegister(Arg(NUM_ARGS_INDEX));
+    UseRegister(Arg(RAW_ADDRESS_INDEX));
+    UseRegister(Arg(ELEMENTS_INDEX));
+    UseRegister(Arg(GLOBAL_ENV_INDEX));
+    UseRegister(Arg(HCLASS_INDEX));
 }
 
 void CallCommonStubVertex::SetValueLocationConstraints()
@@ -1114,6 +1150,26 @@ void TaggedToRawI64Vertex::SetValueLocationConstraints()
     UseRegister(Arg(INPUT_INDEX));
 }
 
+void I64AddVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+    DefineSameAsFirst(this);
+}
+
+void I64SubVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+    DefineSameAsFirst(this);
+}
+
+void I64ShiftLeftVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(INPUT_INDEX));
+    DefineSameAsFirst(this);
+}
+
 void I64BitwiseBinaryVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
@@ -1333,6 +1389,11 @@ DUMP_EXTRA(EnsurePropertiesCapacity)
 DUMP_EXTRA(CreateEmptyObject)
 {
     out << "  objectSize = " << vertex->GetObjectSize();
+}
+
+DUMP_EXTRA(I64ShiftLeft)
+{
+    out << "  shift = " << vertex->GetShift();
 }
 
 DUMP_EXTRA(StoreTaggedFieldByHClass)
