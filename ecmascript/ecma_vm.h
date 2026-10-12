@@ -1433,6 +1433,13 @@ public:
 
     bool ExecutePromisePendingJob();
 
+    bool OpenMicrotaskScope();
+    bool CloseMicrotaskScope();
+    bool IsMicrotaskScopeOpen() const
+    {
+        return microtaskScopeOpen_;
+    }
+
     void SetPromiseRejectCallback(PromiseRejectCallback cb)
     {
         promiseRejectCallback_ = cb;
@@ -2013,6 +2020,7 @@ private:
     JSTaggedValue registerSymbols_ {JSTaggedValue::Hole()};
     JSTaggedValue microJobQueue_ {JSTaggedValue::Hole()};
     std::atomic<bool> isProcessingPendingJob_{false};
+    bool microtaskScopeOpen_ {false};
 
     std::vector<JSTaggedValue> typedArrayNameTable_;
     std::vector<JSTaggedValue> sharedTypedArrayNameTable_;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2024 Huawei Device Co., Ltd.
+ * Copyright (c) 2021-2026 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -15,6 +15,7 @@
 
 #include "ecmascript/jobs/micro_job_queue.h"
 
+#include "ecmascript/ecma_vm.h"
 #include "ecmascript/global_env.h"
 #include "ecmascript/jobs/pending_job.h"
 #include "ecmascript/js_tagged_value_wrapper-inl.h"
@@ -56,6 +57,10 @@ void MicroJobQueue::EnqueueJob(JSThread *thread, JSHandle<MicroJobQueue> jobQueu
 
 void MicroJobQueue::ExecutePendingJob(JSThread *thread, JSHandle<MicroJobQueue> jobQueue)
 {
+    if (thread->GetEcmaVM()->IsMicrotaskScopeOpen()) {
+        LOG_ECMA(VERBOSE) << "MicroJobQueue::ExecutePendingJob skipped while microtask scope is open";
+        return;
+    }
     [[maybe_unused]] EcmaHandleScope handleScope(thread);
     JSMutableHandle<TaggedQueue> promiseQueue(thread, jobQueue->GetPromiseJobQueue(thread));
     JSMutableHandle<PendingJob> pendingJob(thread, JSTaggedValue::Undefined());

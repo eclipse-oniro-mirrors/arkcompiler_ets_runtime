@@ -4676,6 +4676,24 @@ JsiFastNativeScope::~JsiFastNativeScope()
 #endif
 }
 
+bool JsiMicrotaskScope::IsOpened(const EcmaVM *vm)
+{
+    return vm->IsMicrotaskScopeOpen();
+}
+
+JsiMicrotaskScope::JsiMicrotaskScope(const EcmaVM *vm) : vm_(vm)
+{
+    ownsExclusiveOpen_ = EcmaVM::ConstCast(vm)->OpenMicrotaskScope();
+}
+
+JsiMicrotaskScope::~JsiMicrotaskScope()
+{
+    if (ownsExclusiveOpen_) {
+        EcmaVM::ConstCast(vm_)->CloseMicrotaskScope();
+        JSNApi::ExecutePendingJob(vm_);
+    }
+}
+
 // ------------------------------------ JsiRuntimeCallInfo -----------------------------------------------
 void *JsiRuntimeCallInfo::GetData()
 {

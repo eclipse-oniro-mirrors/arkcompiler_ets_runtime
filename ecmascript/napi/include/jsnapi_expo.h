@@ -1560,10 +1560,23 @@ private:
     JSThread *thread_ {nullptr};
     uint16_t oldThreadState_ {0};
     uint32_t isEnableCMCGC_ {0};
-    uint32_t hasSwitchState_{0};
+    uint32_t hasSwitchState_ {0};
     // This is a temporary impl to adapt interop to cmc, because some interop
     // call napi without transfering to NATIVE
     [[maybe_unused]] bool extraCoroutineSwitchedForInterop_{false};
+};
+
+class PUBLIC_API JsiMicrotaskScope {
+public:
+    static bool IsOpened(const EcmaVM *vm);
+    explicit JsiMicrotaskScope(const EcmaVM *vm);
+    ~JsiMicrotaskScope();
+    ECMA_DISALLOW_COPY(JsiMicrotaskScope);
+    ECMA_DISALLOW_MOVE(JsiMicrotaskScope);
+
+private:
+    const EcmaVM *vm_ {nullptr};
+    bool ownsExclusiveOpen_ {false};
 };
 
 /**
