@@ -1937,6 +1937,8 @@ public:
     static void HintGC(const EcmaVM *vm, MemoryReduceDegree degree, ecmascript::GCReason reason);
     static void TriggerIdleGC(const EcmaVM *vm, TRIGGER_IDLE_GC_TYPE gcType);
     static size_t GetEcmaVMExpectedMemoryReclamationSize(const EcmaVM *vm);
+    // One-way enable of the proportional handle/primitive storage shrink.
+    static void EnableHandleMemoryOptimization(EcmaVM *vm);
     static void SetStartIdleMonitorCallback(const StartIdleMonitorCallback& callback);
     static StartIdleMonitorCallback GetStartIdleMonitorCallback();
     static void SetNotifyDeferFreezeCallback(const NotifyDeferFreezeCallback& callback);

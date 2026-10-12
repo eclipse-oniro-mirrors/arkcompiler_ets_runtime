@@ -1329,7 +1329,10 @@ void EcmaVM::ShrinkHandleStorage(int prevIndex)
     }
 #endif
 
-    if (lastIndex > MIN_HANDLE_STORAGE_SIZE) {
+    if (lastIndex <= MIN_HANDLE_STORAGE_SIZE) {
+        return;
+    }
+    if (enableHandleMemoryOptimization_) {
         int32_t totalNodes = lastIndex + 1;
         int32_t currentUsage = currentHandleStorageIndex_ + 1;
         int32_t targetNodes = std::max(MIN_HANDLE_STORAGE_SIZE, currentUsage * SHRINK_HEADROOM_FACTOR);
@@ -1339,6 +1342,15 @@ void EcmaVM::ShrinkHandleStorage(int prevIndex)
             LOG_ECMA(DEBUG) << "ShrinkHandleStorage currentUsage:" << currentUsage
                             << " totalNodes:" << totalNodes << " targetNodes:" << targetNodes;
             FreeStorageNodes(handleStorageNodes_, toDelete);
+        }
+        return;
+    }
+    // Legacy conservative shrink: free back down to MIN+1 only when usage < MIN.
+    if (currentHandleStorageIndex_ < MIN_HANDLE_STORAGE_SIZE) {
+        for (int i = MIN_HANDLE_STORAGE_SIZE; i < lastIndex; i++) {
+            auto node = handleStorageNodes_.back();
+            delete node;
+            handleStorageNodes_.pop_back();
         }
     }
 }
@@ -1461,7 +1473,10 @@ void EcmaVM::ShrinkPrimitiveStorage(int prevIndex)
     }
 #endif
 
-    if (lastIndex > MIN_PRIMITIVE_STORAGE_SIZE) {
+    if (lastIndex <= MIN_PRIMITIVE_STORAGE_SIZE) {
+        return;
+    }
+    if (enableHandleMemoryOptimization_) {
         int32_t totalNodes = lastIndex + 1;
         int32_t currentUsage = currentPrimitiveStorageIndex_ + 1;
         int32_t targetNodes = std::max(MIN_PRIMITIVE_STORAGE_SIZE, currentUsage * SHRINK_HEADROOM_FACTOR);
@@ -1471,6 +1486,15 @@ void EcmaVM::ShrinkPrimitiveStorage(int prevIndex)
             LOG_ECMA(DEBUG) << "ShrinkPrimitiveStorage currentUsage:" << currentUsage
                             << " totalNodes:" << totalNodes << " targetNodes:" << targetNodes;
             FreeStorageNodes(primitiveStorageNodes_, toDelete);
+        }
+        return;
+    }
+    // Legacy conservative shrink: free back down to MIN+1 only when usage < MIN.
+    if (currentPrimitiveStorageIndex_ < MIN_PRIMITIVE_STORAGE_SIZE) {
+        for (int i = MIN_PRIMITIVE_STORAGE_SIZE; i < lastIndex; i++) {
+            auto node = primitiveStorageNodes_.back();
+            delete node;
+            primitiveStorageNodes_.pop_back();
         }
     }
 }
