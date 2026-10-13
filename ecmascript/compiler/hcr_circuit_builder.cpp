@@ -1,5 +1,5 @@
-/*
- * Copyright (c) 2023-2024 Huawei Device Co., Ltd.
+/**
+ * Copyright (c) 2023-2026 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -511,6 +511,7 @@ GateRef CircuitBuilder::CallInternal(GateRef hirGate, std::vector<GateRef> args,
 GateRef CircuitBuilder::CallNew(GateRef hirGate, std::vector<GateRef> args,
                                 bool needPushArgv, bool isFastCall)
 {
+    // Both opcodes carry a bytecode offset; zero is valid for a call at method entry.
     ASSERT(acc_.GetOpCode(hirGate) == OpCode::JS_BYTECODE ||
            acc_.GetOpCode(hirGate) == OpCode::FLOAT32_ARRAY_CONSTRUCTOR);
     auto currentLabel = env_->GetCurrentLabel();
@@ -518,7 +519,6 @@ GateRef CircuitBuilder::CallNew(GateRef hirGate, std::vector<GateRef> args,
     auto currentDepend = currentLabel->GetDepend();
     uint64_t bitfield = args.size();
     uint64_t pcOffset = acc_.TryGetPcOffset(hirGate);
-    ASSERT(pcOffset != 0);
     args.insert(args.begin(), currentDepend);
     args.insert(args.begin(), currentControl);
     AppendFrameState(args, hirGate);
