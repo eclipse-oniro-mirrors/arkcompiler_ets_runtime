@@ -300,7 +300,37 @@ public:
 
     // Pick a register to free based on heuristics
     template <typename RegisterT>
-    RegisterT PickRegisterToFree(RegListBase<RegisterT> reserved);
+    RegisterT PickRegisterToFree(RegListBase<RegisterT> reserved)
+    {
+        RegisterSnapshot<RegisterT> &registers = GetRegisterSnapshot<RegisterT>();
+        int furthestUse = 0;
+        RegisterT best = RegisterT::Invalid();
+
+        for (RegisterT reg : (registers.Used() - reserved)) {
+            ValueVertex *value = registers.GetValue(reg);
+            auto *vertexInfo = value->GetRegallocInfo();
+
+            // The cheapest register to clear is a register containing a value that's
+            // contained in another register as well. Since we found the register while
+            // looping over unblocked registers, we can simply use this register.
+            if (vertexInfo->GetRegisterCount() > 1) {
+                best = reg;
+                break;
+            }
+
+            if (vertexInfo->HasNoMoreUses()) {
+                return reg;
+            }
+
+            int use = static_cast<int>(vertexInfo->CurrentNextUse());
+            if (use > furthestUse) {
+                furthestUse = use;
+                best = reg;
+            }
+        }
+
+        return best;
+    }
 
 private:
     RegisterSnapshot<ArkSteedRegister> generalRegisters_;

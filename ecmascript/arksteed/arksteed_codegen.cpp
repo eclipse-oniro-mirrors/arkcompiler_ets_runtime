@@ -45,6 +45,7 @@
 #include "ecmascript/js_tagged_value.h"
 #include "ecmascript/js_tagged_value_internals.h"
 #include "ecmascript/js_typed_array.h"
+#include "ecmascript/layout_info.h"
 #include "ecmascript/mem/mem.h"
 #include "ecmascript/mem/tagged_object.h"
 #include "ecmascript/message_string.h"
@@ -106,8 +107,8 @@ public:
         }
         assembler->RecordComment("CopyCOWElements deferred call");
         assembler->CallCommonStub(kungfu::CommonStubCSigns::CopyCOWElements);
-        // Steed's range scanner starts one slot below the local frame. Exclude the raw save area;
-        // only the tagged area below it is visited and updated when the copying allocation triggers GC.
+        // Steed's range scanner ends one slot below the local frame before subtracting extra slots.
+        // Subtract untaggedSlots - 1 to exclude raw saves and scan only tagged saves during GC.
         safepointBuilder_->DefineSafepoint(assembler->GetPcOffset()).SetNumExtraSpillSlots(untaggedSlots - 1);
         assembler->Move(result_, kReturnRegister);
 
@@ -1396,190 +1397,150 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CallVertex>(CallVertex *call)
 }
 
 template<>
-void ArkSteedCodeGenerator::VisitNonControlVertex<CreateEmptyObjectVertex>(CreateEmptyObjectVertex* createObject)
+void ArkSteedCodeGenerator::VisitNonControlVertex<CanAllocateInYoungVertex>(CanAllocateInYoungVertex* vertex)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << createObject->GetId() << ": CreateEmptyObjectVertex";
-#endif
-    ArkSteedRegister glue = GetInputRegister(createObject, CreateEmptyObjectVertex::GLUE_INDEX);
-    ArkSteedRegister hclass = GetInputRegister(createObject, CreateEmptyObjectVertex::HCLASS_INDEX);
-    ArkSteedRegister result = GetResultRegister(createObject);
-    uint32_t objectSize = createObject->GetObjectSize();
-    ASSERT(objectSize >= JSObject::SIZE);
-    ASSERT(objectSize % JSTaggedValue::TaggedTypeSize() == 0);
-    ASSERT(objectSize <= static_cast<uint32_t>(std::numeric_limits<int32_t>::max()));
-
+    auto glue = GetInputRegister(vertex, CanAllocateInYoungVertex::GLUE_INDEX);
+    auto size = GetInputRegister(vertex, CanAllocateInYoungVertex::SIZE_INDEX);
+    auto result = GetResultRegister(vertex);
     TemporaryRegisterScope scope(assembler_);
-    ArkSteedRegister address = scope.Acquire();
-    ArkSteedRegister newTop = scope.Acquire();
-    ASSERT(result != glue);
-    ASSERT(result != hclass);
-
-    Label allocationFailed;
+    auto top = scope.Acquire();
+    auto end = scope.Acquire();
     Label done;
-
+    __ RecordComment("CanAllocateInYoung capacity predicate");
+    // Unsupported allocation protocols return false before reading bump pointers.
+    __ LoadTaggedValue(result, JSTaggedValue::False().GetRawData());
 #if defined(ARK_ASAN_ON)
-    (void)glue;
-    __ Jump(&allocationFailed);
-#else
-    if constexpr (G_USE_CMS_GC) {
-        __ Jump(&allocationFailed);
-    } else {
+    return;
+#endif
+    __ JumpIfCMSGCEnabled(&done);
+    __ JumpIfCMCGCEnabled(glue, top, &done);
 #ifdef ECMASCRIPT_SUPPORT_HEAPSAMPLING
-        __ JumpIfHeapSamplingActive(glue, address, &allocationFailed);
+    __ JumpIfHeapSamplingActive(glue, top, &done);
 #endif
-        // CMC allocation uses the common stub, not the regular young-space
-        // layout.
-        __ JumpIfCMCGCEnabled(glue, address, &allocationFailed);
-
-        __ RecordComment("CreateEmptyObject fast bump allocation");
-        __ Move(newTop, static_cast<int64_t>(objectSize));
-        __ TryAllocateInYoungSpace(glue, newTop, result, address, &allocationFailed);
-    }
-#endif
-
-    // Allocation is committed: finish initialization without GC or fallback.
-    __ Move(address, static_cast<int64_t>(JSTaggedValue::VALUE_UNDEFINED));
-    for (uint32_t offset = static_cast<uint32_t>(JSObject::SIZE); offset < objectSize;
-         offset += static_cast<uint32_t>(JSTaggedValue::TaggedTypeSize())) {
-        __ StoreField(address, result, static_cast<int32_t>(offset));
-    }
-    __ Move(address, static_cast<uint64_t>(JSTaggedValue(0).GetRawData()));
-    __ StoreField(address, result, static_cast<int32_t>(JSObject::HASH_OFFSET));
-    constexpr size_t emptyArrayOffset =
-        static_cast<size_t>(ConstantIndex::EMPTY_ARRAY_OBJECT_INDEX) * JSTaggedValue::TaggedTypeSize();
-    static_assert(emptyArrayOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
-    __ LoadField(address, glue, static_cast<int32_t>(JSThread::GlueData::GetGlobalConstOffset(false)));
-    __ LoadField(address, address, static_cast<int32_t>(emptyArrayOffset));
-    __ StoreField(address, result, static_cast<int32_t>(JSObject::PROPERTIES_OFFSET));
-    __ StoreField(address, result, static_cast<int32_t>(JSObject::ELEMENTS_OFFSET));
-
-    // GlobalEnv::ObjectFunctionClass keeps this intrinsic HClass alive independently
-    // of the new object. Young-to-local-NonMovable needs no remembered-set entry;
-    // CMC/CMS have already fallen back. Publish the header after all fields are ready.
-    __ StoreHeaderRelease(hclass, result);
-    __ Jump(&done);
-
-    __ Bind(&allocationFailed);
-    __ RecordComment("CreateEmptyObject fallback sentinel");
-    __ Move(result, static_cast<uint64_t>(JSTaggedValue::VALUE_HOLE));
+    __ LoadField(top, glue, static_cast<int32_t>(JSThread::GlueData::GetNewSpaceAllocationTopAddressOffset(false)));
+    __ LoadField(top, top, 0);
+    __ LoadField(end, glue, static_cast<int32_t>(JSThread::GlueData::GetNewSpaceAllocationEndAddressOffset(false)));
+    __ LoadField(end, end, 0);
+    // A trusted regular-object size cannot overflow a valid heap address.
+    __ Add(top, size);
+    __ Compare(top, end);
+    EmitTaggedBooleanFromCondition(assembler_, result, Condition::BELOW_OR_EQUAL);
     __ Bind(&done);
 }
 
 template<>
-void ArkSteedCodeGenerator::VisitNonControlVertex<AllocateJSArrayVertex>(AllocateJSArrayVertex* allocate)
+void ArkSteedCodeGenerator::VisitNonControlVertex<AllocateInYoungVertex>(AllocateInYoungVertex* vertex)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << allocate->GetId() << ": AllocateJSArrayVertex";
-#endif
-    ArkSteedRegister result = GetResultRegister(allocate);
-    Label allocationFailed;
-    Label done;
+    ArkSteedRegister glue = GetInputRegister(vertex, AllocateInYoungVertex::GLUE_INDEX);
+    ArkSteedRegister size = GetInputRegister(vertex, AllocateInYoungVertex::SIZE_INDEX);
+    ArkSteedRegister result = GetResultRegister(vertex);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister temp = scope.Acquire();
+    ASSERT(glue != size);
+    ASSERT(glue != result);
+    ASSERT(glue != temp);
+    ASSERT(size != result);
+    ASSERT(size != temp);
+    ASSERT(result != temp);
 
-#if defined(ARK_ASAN_ON)
-    // ASAN allocations must go through the instrumented allocator.
-    __ Jump(&allocationFailed);
-#else
-    if constexpr (G_USE_CMS_GC) {
-        // CMS uses a different allocation protocol and HClass state encoding.
-        __ Jump(&allocationFailed);
-    } else {
-        ArkSteedRegister glue = GetInputRegister(allocate, AllocateJSArrayVertex::GLUE_INDEX);
-        ArkSteedRegister globalEnv = GetInputRegister(allocate, AllocateJSArrayVertex::GLOBAL_ENV_INDEX);
-        TemporaryRegisterScope scope(assembler_);
-        ArkSteedRegister temp1 = scope.Acquire();
-        ArkSteedRegister temp2 = scope.Acquire();
-        ASSERT(result != glue);
-        // result may alias globalEnv: the HClass is loaded before result is written.
-        ASSERT(glue != globalEnv);
-        ASSERT(temp1 != result);
-        ASSERT(temp1 != glue);
-        ASSERT(temp1 != globalEnv);
-        ASSERT(temp2 != result);
-        ASSERT(temp2 != glue);
-        ASSERT(temp2 != globalEnv);
-        ASSERT(temp2 != temp1);
+    __ RecordComment("AllocateInYoung bump allocation");
+    // BranchIfTrue consumed a fresh CanAllocateInYoung predicate proving that
+    // top + size fits into the bump region. Only this thread advances top, and
+    // no call or safepoint separates the check from the commit below.
+    __ LoadField(result, glue, static_cast<int32_t>(JSThread::GlueData::GetNewSpaceAllocationTopAddressOffset(false)));
+    __ LoadField(result, result, 0);
+    // Match the interpreter allocator: the trusted regular-object size cannot overflow a valid heap address.
+    __ Add(result, size);
+    // Publishing top commits the allocation. Initialize immediately without calls, safepoints or deopt.
+    __ LoadField(temp, glue, static_cast<int32_t>(JSThread::GlueData::GetNewSpaceAllocationTopAddressOffset(false)));
+    __ StoreField(result, temp, 0);
+    __ Sub(result, size);
+}
 
-        // CMC uses a different thread-local allocation-buffer layout.
-        __ JumpIfCMCGCEnabled(glue, temp2, &allocationFailed);
-
-#ifdef ECMASCRIPT_SUPPORT_HEAPSAMPLING
-        // Heap sampling must observe every allocation, so use the runtime allocator while it is active.
-        __ JumpIfHeapSamplingActive(glue, temp2, &allocationFailed);
-#endif
-
-        constexpr size_t arrayFunctionOffset
-            = GlobalEnv::HEADER_SIZE + GlobalEnv::ARRAY_FUNCTION_INDEX * JSTaggedValue::TaggedTypeSize();
-        static_assert(arrayFunctionOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
-        // Keep the allocation HClass in temp1 until the object header is initialized.
-        __ LoadField(temp1, globalEnv, static_cast<int32_t>(arrayFunctionOffset));
-        __ LoadField(temp1, temp1, static_cast<int32_t>(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
-
-        {
-            // Only the architecture-reserved scratch is needed in addition to the two RA temporaries.
-            // Arithmetic immediates below must stay scratch-free on x64; ARM64 may use its second
-            // reserved scratch register to materialize a large field address.
-            TemporaryRegisterScope scratchScope(assembler_);
-            ArkSteedRegister scratch = scratchScope.AcquireScratch();
-
-            // Trust the intrinsic Array instance HClass, just like CreateEmptyArrayCommon.
-            __ LoadObjectSizeFromHClass(temp1, temp2);
-
-            __ TryAllocateInYoungSpace(glue, temp2, result, scratch, &allocationFailed);
-
-            // Allocation is committed: finish initialization without calls, safepoints, deopt, or fallback.
-            // The object is fresh and young, so none of these stores need a write barrier.
-            __ StoreField(temp1, result, static_cast<int32_t>(TaggedObject::HCLASS_OFFSET));
-            __ Move(temp1, static_cast<uint64_t>(JSTaggedValue::VALUE_UNDEFINED));
-
-            __ Move(scratch, static_cast<int32_t>(JSArray::SIZE));
-            Label initializeSlots;
-            Label slotsInitialized;
-            __ Bind(&initializeSlots);
-            __ Compare(scratch, temp2);
-            __ JumpIf(Condition::ABOVE_OR_EQUAL, &slotsInitialized);
-            __ StoreField(temp1, result, scratch);
-            __ Add(scratch, static_cast<int32_t>(JSTaggedValue::TaggedTypeSize()));
-            __ Jump(&initializeSlots);
-            __ Bind(&slotsInitialized);
-
-            // The hash word is GC-visible when it later holds auxiliary references. Raw zero is
-            // encoded as a heap pointer, so initialize it with tagged integer zero.
-            __ Move(temp2, static_cast<uint64_t>(JSTaggedValue::VALUE_ZERO));
-            __ StoreField(temp2, result, static_cast<int32_t>(ECMAObject::HASH_OFFSET));
-            __ Move(temp2, 0);
-            __ StoreInt32Field(temp2, result, static_cast<int32_t>(JSArray::LENGTH_OFFSET));
-            __ StoreInt32Field(temp2, result, static_cast<int32_t>(JSArray::TRACE_INDEX_OFFSET));
-            __ StoreField(temp1, result, static_cast<int32_t>(JSArray::TRACK_INFO_OFFSET));
-
-            constexpr size_t emptyArrayOffset
-                = static_cast<size_t>(ConstantIndex::EMPTY_ARRAY_OBJECT_INDEX) * JSTaggedValue::TaggedTypeSize();
-            constexpr size_t lengthAccessorOffset
-                = static_cast<size_t>(ConstantIndex::ARRAY_LENGTH_ACCESSOR) * JSTaggedValue::TaggedTypeSize();
-            static_assert(emptyArrayOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
-            static_assert(lengthAccessorOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
-
-            __ LoadField(temp2, glue, static_cast<int32_t>(JSThread::GlueData::GetGlobalConstOffset(false)));
-            __ LoadField(scratch, temp2, static_cast<int32_t>(emptyArrayOffset));
-            __ StoreField(scratch, result, static_cast<int32_t>(JSObject::PROPERTIES_OFFSET));
-            __ StoreField(scratch, result, static_cast<int32_t>(JSObject::ELEMENTS_OFFSET));
-
-            // Match SetPropertyInlinedProps instead of assuming a fixed in-object offset.
-            static_assert(JSArray::LENGTH_INLINE_PROPERTY_INDEX == 0);
-            __ LoadField(temp1, temp2, static_cast<int32_t>(lengthAccessorOffset));
-            __ LoadField(temp2, result, static_cast<int32_t>(TaggedObject::HCLASS_OFFSET));
-            __ LoadInlinedPropsStartFromHClass(temp2, scratch);
-            __ StoreField(temp1, result, scratch);
-            RecordComment("AllocateJSArray inline success");
-            __ Jump(&done);
-        }
+template<>
+void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeEmptyObjectVertex>(InitializeEmptyObjectVertex* vertex)
+{
+    ArkSteedRegister glue = GetInputRegister(vertex, InitializeEmptyObjectVertex::GLUE_INDEX);
+    ArkSteedRegister hclass = GetInputRegister(vertex, InitializeEmptyObjectVertex::HCLASS_INDEX);
+    ArkSteedRegister result = GetResultRegister(vertex);
+    ASSERT(result == GetInputRegister(vertex, InitializeEmptyObjectVertex::ALLOCATION_INDEX));
+    uint32_t objectSize = vertex->GetObjectSize();
+    ASSERT(objectSize >= JSObject::SIZE && objectSize % JSTaggedValue::TaggedTypeSize() == 0);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister temp = scope.Acquire();
+    __ Move(temp, static_cast<uint64_t>(JSTaggedValue::VALUE_UNDEFINED));
+    for (uint32_t offset = JSObject::SIZE; offset < objectSize; offset += JSTaggedValue::TaggedTypeSize()) {
+        __ StoreField(temp, result, static_cast<int32_t>(offset));
     }
-#endif
+    __ InitializeObjectHeader(glue, result, temp);
+    __ StoreHeaderRelease(hclass, result);
+}
 
-    __ Bind(&allocationFailed);
-    RecordComment("AllocateJSArray fallback sentinel");
-    __ Move(result, static_cast<uint64_t>(JSTaggedValue::VALUE_HOLE));
-    __ Bind(&done);
+template<>
+void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeObjectWithBufferVertex>(
+    InitializeObjectWithBufferVertex* vertex)
+{
+    ArkSteedRegister glue = GetInputRegister(vertex, InitializeObjectWithBufferVertex::GLUE_INDEX);
+    ArkSteedRegister literal = GetInputRegister(vertex, InitializeObjectWithBufferVertex::LITERAL_INDEX);
+    ArkSteedRegister result = GetResultRegister(vertex);
+    ASSERT(result == GetInputRegister(vertex, InitializeObjectWithBufferVertex::ALLOCATION_INDEX));
+    const auto& info = vertex->GetInfo();
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister temp = scope.Acquire();
+    __ Move(temp, static_cast<uint64_t>(JSTaggedValue::VALUE_UNDEFINED));
+    for (uint32_t offset = JSObject::SIZE + info.fieldCount * JSTaggedValue::TaggedTypeSize();
+         offset < info.objectSize;
+         offset += JSTaggedValue::TaggedTypeSize()) {
+        __ StoreField(temp, result, static_cast<int32_t>(offset));
+    }
+    __ InitializeObjectHeader(glue, result, temp);
+    for (uint32_t i = 0; i < info.fieldCount; ++i) {
+        __ Move(temp, info.fieldValues[i]);
+        __ StoreField(temp, result, static_cast<int32_t>(JSObject::SIZE + i * JSTaggedValue::TaggedTypeSize()));
+    }
+    // No call or deopt can separate this read from publishing the initialized object.
+    __ LoadField(temp, literal, TaggedObject::HCLASS_OFFSET);
+    __ StoreHeaderRelease(temp, result);
+}
+
+template<>
+void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeEmptyArrayVertex>(InitializeEmptyArrayVertex* vertex)
+{
+    ArkSteedRegister result = GetResultRegister(vertex);
+    ASSERT(result == GetInputRegister(vertex, InitializeEmptyArrayVertex::ALLOCATION_INDEX));
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister hclass = scope.Acquire();
+    ArkSteedRegister value = scope.Acquire();
+    constexpr int32_t arrayFunctionOffset
+        = GlobalEnv::HEADER_SIZE + GlobalEnv::ARRAY_FUNCTION_INDEX * JSTaggedValue::TaggedTypeSize();
+    __ LoadField(
+        hclass, GetInputRegister(vertex, InitializeEmptyArrayVertex::GLOBAL_ENV_INDEX), arrayFunctionOffset);
+    __ LoadField(hclass, hclass, JSFunction::PROTO_OR_DYNCLASS_OFFSET);
+    __ InitializeArrayFields(
+        GetInputRegister(vertex, InitializeEmptyArrayVertex::GLUE_INDEX), result, vertex->GetObjectSize(), value);
+    __ StoreHeaderRelease(hclass, result);
+}
+
+template<>
+void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeArrayWithBufferVertex>(
+    InitializeArrayWithBufferVertex* vertex)
+{
+    ArkSteedRegister result = GetResultRegister(vertex);
+    ArkSteedRegister literal = GetInputRegister(vertex, InitializeArrayWithBufferVertex::LITERAL_INDEX);
+    ASSERT(result == GetInputRegister(vertex, InitializeArrayWithBufferVertex::ALLOCATION_INDEX));
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister hclass = scope.Acquire();
+    ArkSteedRegister value = scope.Acquire();
+    __ LoadField(hclass, literal, TaggedObject::HCLASS_OFFSET);
+    __ InitializeArrayFields(GetInputRegister(vertex, InitializeArrayWithBufferVertex::GLUE_INDEX),
+                              result,
+                              vertex->GetObjectSize(),
+                              value);
+    __ LoadField(value, literal, JSObject::ELEMENTS_OFFSET);
+    __ StoreField(value, result, static_cast<int32_t>(JSObject::ELEMENTS_OFFSET));
+    __ LoadInt32Field(value, literal, JSArray::LENGTH_OFFSET);
+    __ StoreInt32Field(value, result, static_cast<int32_t>(JSArray::LENGTH_OFFSET));
+    __ StoreHeaderRelease(hclass, result);
 }
 
 template<>
@@ -4653,7 +4614,9 @@ void ArkSteedCodeGenerator::ProcessNonControlVertex(NonControlVertex *vertex)
         ProcessValueVertex(valueVertex);
     }
 
-    if (vertex->CanThrow() || vertex->IsCall()) {
+    // Allocation returns raw storage, not a bytecode result. Do not add an exit
+    // between it and its initializer; reentry recovery is handled outside this contract.
+    if ((vertex->CanThrow() || vertex->IsCall()) && !IsRawAllocation(vertex)) {
         if (HasExceptionLazyDeopt(vertex)) {
             ASSERT(CatchBlockOf(vertex) == nullptr);
             if (__ GetPcOffset() > pcBefore) {

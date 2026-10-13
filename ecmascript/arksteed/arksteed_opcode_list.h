@@ -45,12 +45,16 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(CallKnownBuiltin)                 \
     V(CallSelf)                         \
     V(AllocateRawInYoungFast)           \
-    V(AllocateJSArray)                  \
     V(InitializeUnmappedArgumentsElements) \
     V(InitializeUnmappedArguments)      \
+    V(CanAllocateInYoung)               \
+    V(AllocateInYoung)                  \
+    V(InitializeEmptyArray)             \
+    V(InitializeArrayWithBuffer)        \
     V(CallRuntime)                      \
     V(CallCommonStub)                   \
-    V(CreateEmptyObject)                \
+    V(InitializeEmptyObject)            \
+    V(InitializeObjectWithBuffer)       \
     V(LineStringLoadElement)            \
     V(Phi)                              \
     V(LoadTaggedFromAddress)            \

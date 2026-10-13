@@ -15,16 +15,18 @@
 
 //! PARAMS --compiler-jit-hotness-threshold=60000 --enable-force-gc=true
 //! METHOD makeObjectAndArray
-//! COUNT CreateEmptyObject 1
-//! COUNT CallCommonStub NewJSObject 1
-//! COUNT AllocateJSArray 1
+//! COUNT AllocateInYoung 2
+//! COUNT InitializeEmptyObject 1
+//! HAS_NOT CallCommonStub NewJSObject
+//! COUNT InitializeEmptyArray 1
 //! HAS_NOT CallRuntime CreateEmptyObject
 //! BYTECODE_COUNT createemptyobject 1
 //! BYTECODE_COUNT createemptyarray 1
-//! CODEGEN_COUNT CreateEmptyObject fast bump allocation 1
-//! CODEGEN_COUNT CreateEmptyObject fallback sentinel 1
-//! CODEGEN_COUNT AllocateJSArray inline success 1
-//! CODEGEN_COUNT AllocateJSArray fallback sentinel 1
+//! CODEGEN_COUNT AllocateInYoung bump allocation 2
+//! CODEGEN_COUNT * InitializeEmptyObject * 1
+//! CODEGEN_COUNT CreateEmptyObject fallback sentinel 0
+//! CODEGEN_COUNT * InitializeEmptyArray * 1
+//! CODEGEN_COUNT AllocateJSArray fallback sentinel 0
 
 function makeObjectAndArray() {
     const object = {};

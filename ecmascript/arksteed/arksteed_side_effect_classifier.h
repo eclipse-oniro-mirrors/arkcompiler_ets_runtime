@@ -92,17 +92,35 @@ public:
         return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
     }
 
-    static SideEffectDescriptor Classify(AllocateJSArrayVertex* vertex)
+    static SideEffectDescriptor Classify(AllocateInYoungVertex* vertex)
+    {
+        (void)vertex;
+        // Allocation is effect-free under the literal allocation contract.
+        return SideEffectDescriptor {SideEffectKind::NO_SIDE_EFFECT};
+    }
+
+    static SideEffectDescriptor Classify(InitializeEmptyObjectVertex* vertex)
     {
         (void)vertex;
         return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
     }
 
-    static SideEffectDescriptor Classify(CreateEmptyObjectVertex *vertex)
+    static SideEffectDescriptor Classify(InitializeObjectWithBufferVertex* vertex)
     {
         (void)vertex;
-        // Fast allocation and initialization cannot run user JS.
-        return SideEffectDescriptor{SideEffectKind::SAFE_CALL};
+        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+    }
+
+    static SideEffectDescriptor Classify(InitializeEmptyArrayVertex* vertex)
+    {
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+    }
+
+    static SideEffectDescriptor Classify(InitializeArrayWithBufferVertex* vertex)
+    {
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
     }
 
     static SideEffectDescriptor Classify(InitializeUnmappedArgumentsVertex *vertex)

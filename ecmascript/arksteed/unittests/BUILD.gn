@@ -127,6 +127,31 @@ if (ets_runtime_enable_ark_steed) {
     ]
   }
 
+  host_unittest_action("ArkSteedInitializationIntervalVerifierTest") {
+    module_out_path = module_output_path
+    sources = [ "initialization_interval_verifier_test.cpp" ]
+    deps = [
+      "$js_root:libark_jsruntime_test_set",
+      "$js_root/ecmascript/compiler:libark_jsoptimizer_set_with_maple",
+      "$js_root/ecmascript/compiler/codegen/maple/maple_be:libcg",
+    ]
+    external_deps = [
+      "runtime_core:libarkfile_static",
+      "zlib:libz",
+    ]
+  }
+
+  host_unittest_action("ArkSteedObjectLiteralTemplateTest") {
+    module_out_path = module_output_path
+    sources = [ "object_literal_template_test.cpp" ]
+    configs = [ "$js_root:ecma_test_config" ]
+    deps = [ "$js_root:libark_jsruntime_test_set" ]
+    external_deps = [
+      "runtime_core:libarkfile_static",
+      "zlib:libz",
+    ]
+  }
+
   host_unittest_action("ArkSteedPipelineStatisticsTest") {
     module_out_path = module_output_path
 
@@ -322,7 +347,9 @@ group("arksteed_host_unittest") {
       ":ArkSteedDeoptTranslationTestAction",
       ":ArkSteedDeoptAbiTestAction",
       ":ArkSteedWriteBarrierEmitterTestAction",
-      ":ArkSteedCompileInfoFactsTestAction"
+      ":ArkSteedCompileInfoFactsTestAction",
+      ":ArkSteedInitializationIntervalVerifierTestAction",
+      ":ArkSteedObjectLiteralTemplateTestAction",
     ]
   }
 }

@@ -15,16 +15,22 @@
 
 //! PARAMS --compiler-jit-hotness-threshold=60000
 //! METHOD makeEmptyObject
-//! COUNT CreateEmptyObject 1
+//! HAS_NOT BranchIfReferenceEqual
+//! CODEGEN_COUNT * CheckYoungAllocation * 0
+//! CODEGEN_COUNT * CheckAllocationSize * 0
+//! COUNT AllocateInYoung 1
+//! COUNT InitializeEmptyObject 1
 //! HAS HeapConstant
 //! HAS_NOT LoadTaggedField
 //! HAS_NOT LoadI64FromAddress
 //! HAS_NOT LoadTaggedFromAddress
-//! COUNT CallCommonStub NewJSObject 1
+//! HAS_NOT CallCommonStub NewJSObject
 //! COUNT Phi 1
+//! HAS_NOT BranchIfInt32Compare
 //! HAS_NOT CallRuntime CreateEmptyObject
-//! CODEGEN_COUNT CreateEmptyObject fast bump allocation 1
-//! CODEGEN_COUNT CreateEmptyObject fallback sentinel 1
+//! CODEGEN_COUNT AllocateInYoung bump allocation 1
+//! CODEGEN_COUNT * InitializeEmptyObject * 1
+//! CODEGEN_COUNT CreateEmptyObject fallback sentinel 0
 
 function makeEmptyObject() {
     return {};

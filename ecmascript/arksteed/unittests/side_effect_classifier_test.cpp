@@ -14,6 +14,8 @@
  */
 
 #include "ecmascript/arksteed/arksteed_side_effect_classifier.h"
+#include "ecmascript/js_array.h"
+#include "ecmascript/js_object.h"
 #include "ecmascript/mem/native_area_allocator.h"
 #include "ecmascript/tests/test_helper.h"
 
@@ -423,24 +425,40 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, CallCommonStubSafe)
     ExpectEffectWithoutLocation(Classifier::Classify(vertex), SideEffectKind::SAFE_CALL);
 }
 
-HWTEST_F_L0(ArkSteedSideEffectClassifierTest, AllocateJSArrayIsSafe)
+HWTEST_F_L0(ArkSteedSideEffectClassifierTest, AllocateInYoungHasNoSideEffect)
 {
-    auto *vertex =
-        Vertex::New<AllocateJSArrayVertex>(&chunk_, static_cast<size_t>(AllocateJSArrayVertex::NUM_INPUTS));
-    vertex->SetInput(AllocateJSArrayVertex::GLUE_INDEX, NewInt64());
-    vertex->SetInput(AllocateJSArrayVertex::GLOBAL_ENV_INDEX, NewTagged());
+    auto* vertex
+        = Vertex::New<AllocateInYoungVertex>(&chunk_, static_cast<size_t>(AllocateInYoungVertex::NUM_INPUTS));
+    vertex->SetInput(AllocateInYoungVertex::GLUE_INDEX, NewInt64());
+    vertex->SetInput(AllocateInYoungVertex::SIZE_INDEX, NewInt32());
+
+    ExpectEffectWithoutLocation(Classifier::Classify(vertex), SideEffectKind::NO_SIDE_EFFECT);
+}
+
+HWTEST_F_L0(ArkSteedSideEffectClassifierTest, InitializeEmptyArrayIsSafe)
+{
+    auto* vertex = Vertex::New<InitializeEmptyArrayVertex>(
+        &chunk_,
+        static_cast<size_t>(InitializeEmptyArrayVertex::NUM_INPUTS),
+        static_cast<uint32_t>(JSArray::SIZE + JSTaggedValue::TaggedTypeSize()));
+    vertex->SetInput(InitializeEmptyArrayVertex::ALLOCATION_INDEX, NewTagged());
+    vertex->SetInput(InitializeEmptyArrayVertex::GLUE_INDEX, NewInt64());
+    vertex->SetInput(InitializeEmptyArrayVertex::GLOBAL_ENV_INDEX, NewTagged());
 
     ExpectEffectWithoutLocation(Classifier::Classify(vertex), SideEffectKind::SAFE_CALL);
 }
 
-HWTEST_F_L0(ArkSteedSideEffectClassifierTest, CreateEmptyObjectIsSafe)
+HWTEST_F_L0(ArkSteedSideEffectClassifierTest, InitializeEmptyObjectIsSafe)
 {
-    auto *vertex = Vertex::New<CreateEmptyObjectVertex>(
-        &chunk_, static_cast<size_t>(CreateEmptyObjectVertex::NUM_INPUTS), static_cast<uint32_t>(16));
-    vertex->SetInput(CreateEmptyObjectVertex::GLUE_INDEX, NewInt64());
-    vertex->SetInput(CreateEmptyObjectVertex::HCLASS_INDEX, NewTagged());
+    auto* vertex
+        = Vertex::New<InitializeEmptyObjectVertex>(&chunk_,
+                                                   static_cast<size_t>(InitializeEmptyObjectVertex::NUM_INPUTS),
+                                                   static_cast<uint32_t>(JSObject::SIZE));
+    vertex->SetInput(InitializeEmptyObjectVertex::ALLOCATION_INDEX, NewTagged());
+    vertex->SetInput(InitializeEmptyObjectVertex::GLUE_INDEX, NewInt64());
+    vertex->SetInput(InitializeEmptyObjectVertex::HCLASS_INDEX, NewTagged());
+    vertex->SetInput(InitializeEmptyObjectVertex::SIZE_INDEX, NewInt32());
 
-    // Fast allocation and initialization cannot run user JS.
     ExpectEffectWithoutLocation(Classifier::Classify(vertex), SideEffectKind::SAFE_CALL);
 }
 

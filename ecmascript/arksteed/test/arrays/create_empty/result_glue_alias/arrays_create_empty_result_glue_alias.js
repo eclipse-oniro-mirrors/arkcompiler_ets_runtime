@@ -14,7 +14,8 @@
  */
 
 //! METHOD Index
-//! COUNT_GE AllocateJSArray 1
+//! COUNT_GE AllocateInYoung 1
+//! COUNT_GE InitializeEmptyArray 1
 
 function isRange(arg) {
     return false;
@@ -39,7 +40,8 @@ function _createImmutableMatrix(arg) {
 // Mirrors the mathjs `Index` constructor: the empty-array literal runs while the
 // arguments object, the loop counter and an inlined matrix probe stay live.
 // The bump allocator reads glue after writing the allocation result, so register
-// allocation must keep the result separate from the USED_AT_END glue input.
+// allocation must keep the fixed return register separate from its glue input.
+// Initialization then reuses the result while its restored glue/layout inputs remain live.
 // The count is a lower bound because the inlined matrix helpers create their own literals.
 function Index(ranges) {
     if (!(this instanceof Index)) {

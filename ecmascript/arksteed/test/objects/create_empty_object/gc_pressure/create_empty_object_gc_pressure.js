@@ -15,8 +15,9 @@
 
 //! PARAMS --compiler-jit-hotness-threshold=60000
 //! METHOD allocateWithPressure
-//! COUNT CreateEmptyObject 6
-//! COUNT CallCommonStub NewJSObject 6
+//! COUNT AllocateInYoung 6
+//! COUNT InitializeEmptyObject 6
+//! HAS_NOT CallCommonStub NewJSObject
 //! HAS_NOT CallRuntime CreateEmptyObject
 
 function allocateWithPressure(seed, count) {

@@ -240,13 +240,39 @@ void CallSelfVertex::SetValueLocationConstraints()
     UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
 }
 
-void AllocateJSArrayVertex::SetValueLocationConstraints()
+void CanAllocateInYoungVertex::SetValueLocationConstraints()
 {
-    DefineAsRegister(this);
-    // Saved HClass and dynamic object size; codegen also uses the architecture scratch.
-    SetTemporariesNeeded(2);
     UseRegister(Arg(GLUE_INDEX));
-    UseRegister(Arg(GLOBAL_ENV_INDEX));
+    UseRegister(Arg(SIZE_INDEX));
+    DefineAsRegister(this);
+    SetTemporariesNeeded(2);
+}
+
+void AllocateInYoungVertex::SetValueLocationConstraints()
+{
+    // The fast path uses ordinary result allocation, preserving all input registers.
+    DefineAsRegister(this);
+    UseRegister(Arg(GLUE_INDEX));
+    UseRegister(Arg(SIZE_INDEX));
+    SetTemporariesNeeded(1);
+}
+
+void InitializeEmptyArrayVertex::SetValueLocationConstraints()
+{
+    DefineSameAsFirst(this);
+    for (uint32_t index = 0; index < NUM_INPUTS; ++index) {
+        UseRegister(Arg(index));
+    }
+    SetTemporariesNeeded(2);
+}
+
+void InitializeArrayWithBufferVertex::SetValueLocationConstraints()
+{
+    DefineSameAsFirst(this);
+    for (uint32_t index = 0; index < NUM_INPUTS; ++index) {
+        UseRegister(Arg(index));
+    }
+    SetTemporariesNeeded(2);
 }
 
 void AllocateRawInYoungFastVertex::SetValueLocationConstraints()
@@ -618,13 +644,22 @@ void EnsurePropertiesCapacityVertex::SetValueLocationConstraints()
     UseLazyDeoptFrameSlots(this);
 }
 
-void CreateEmptyObjectVertex::SetValueLocationConstraints()
+void InitializeEmptyObjectVertex::SetValueLocationConstraints()
 {
-    DefineAsRegister(this);
-    SetTemporariesNeeded(2); // 2: allocation address and new top.
-    // Both inputs are still read after the allocation result is written.
-    UseRegister(Arg(GLUE_INDEX));
-    UseRegister(Arg(HCLASS_INDEX));
+    DefineSameAsFirst(this);
+    for (uint32_t index = 0; index < NUM_INPUTS; ++index) {
+        UseRegister(Arg(index));
+    }
+    SetTemporariesNeeded(1);
+}
+
+void InitializeObjectWithBufferVertex::SetValueLocationConstraints()
+{
+    DefineSameAsFirst(this);
+    for (uint32_t index = 0; index < NUM_INPUTS; ++index) {
+        UseRegister(Arg(index));
+    }
+    SetTemporariesNeeded(1);
 }
 
 void StoreInt32FieldVertex::SetValueLocationConstraints()
@@ -1386,7 +1421,7 @@ DUMP_EXTRA(EnsurePropertiesCapacity)
     out << "  fieldIndex = " << vertex->GetFieldIndex();
 }
 
-DUMP_EXTRA(CreateEmptyObject)
+DUMP_EXTRA(InitializeEmptyArray)
 {
     out << "  objectSize = " << vertex->GetObjectSize();
 }
@@ -1394,6 +1429,26 @@ DUMP_EXTRA(CreateEmptyObject)
 DUMP_EXTRA(I64ShiftLeft)
 {
     out << "  shift = " << vertex->GetShift();
+}
+
+DUMP_EXTRA(InitializeArrayWithBuffer)
+{
+    out << "  objectSize = " << vertex->GetObjectSize();
+}
+
+DUMP_EXTRA(InitializeEmptyObject)
+{
+    out << "  objectSize = " << vertex->GetObjectSize();
+}
+
+DUMP_EXTRA(InitializeObjectWithBuffer)
+{
+    const auto& info = vertex->GetInfo();
+    out << "  objectSize = " << info.objectSize << "  fieldCount = " << info.fieldCount << "  fieldConstants = [";
+    for (uint32_t i = 0; i < info.fieldCount; ++i) {
+        out << (i == 0 ? "" : ", ") << info.fieldValues[i];
+    }
+    out << "]";
 }
 
 DUMP_EXTRA(StoreTaggedFieldByHClass)

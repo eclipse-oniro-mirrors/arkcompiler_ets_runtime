@@ -1,0 +1,7 @@
+interpreted-warmup:true
+number-feedback:true
+tagged-feedback:true
+compiled:true
+literal-values:true
+cow-independence:true
+after-gc:true

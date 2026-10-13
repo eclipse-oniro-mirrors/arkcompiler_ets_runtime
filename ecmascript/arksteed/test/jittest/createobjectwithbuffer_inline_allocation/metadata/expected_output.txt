@@ -1,0 +1,9 @@
+interpreted:true
+compiled:true
+initial-clones:true
+type-isolation:true
+property-isolation:true
+descriptor-isolation:true
+prototype-isolation:true
+young-gc-isolation:true
+full-gc-isolation:true

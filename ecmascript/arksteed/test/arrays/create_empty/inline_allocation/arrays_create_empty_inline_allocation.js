@@ -13,21 +13,41 @@
  * limitations under the License.
  */
 
+// Keep one explicit compilation per factory, including after capacity deopt.
+//! PARAMS --compiler-jit-hotness-threshold=0 --compiler-jit-call-threshold=60000 --compiler-enable-baselinejit=false
+
 //! METHOD createEmptyArray
-//! COUNT AllocateJSArray 1
-//! COUNT CallCommonStub CreateEmptyArray 1
+//! HAS_NOT BranchIfReferenceEqual
+//! CODEGEN_COUNT * PrepareEmptyArray * 0
+//! HAS_NOT BranchIfTaggedHeapObject
+//! COUNT Phi 1
+//! HAS_NOT LoadTaggedField
+//! HAS_NOT LoadInt32Field
+//! HAS_NOT BranchIfInt32Compare
+//! CODEGEN_COUNT * CheckYoungAllocation * 0
+//! CODEGEN_COUNT * LoadObjectSize * 0
+//! CODEGEN_COUNT * CheckAllocationSize * 0
+//! CODEGEN_COUNT * CheckArrayInitialization * 0
+//! COUNT AllocateInYoung 1
+//! COUNT InitializeEmptyArray 1
+//! HAS_NOT CallCommonStub CreateEmptyArray
 
 //! METHOD createEmptyArrayWithPressure
+//! CODEGEN_COUNT * PrepareEmptyArray * 0
+//! COUNT AllocateInYoung 1
 //! BYTECODE_COUNT createemptyarray 0x3 1
-//! COUNT AllocateJSArray 1
-//! COUNT CallCommonStub CreateEmptyArray 1
-//! CODEGEN_COUNT AllocateJSArray inline success 1
-//! CODEGEN_COUNT AllocateJSArray fallback sentinel 1
+//! COUNT InitializeEmptyArray 1
+//! HAS_NOT CallCommonStub CreateEmptyArray
+//! CODEGEN_COUNT AllocateInYoung bump allocation 1
+//! CODEGEN_COUNT * InitializeEmptyArray * 1
+//! CODEGEN_COUNT AllocateJSArray fallback sentinel 0
 
 //! METHOD createEmptyArrayImm16
+//! CODEGEN_COUNT * PrepareEmptyArray * 0
+//! COUNT AllocateInYoung 1
 //! BYTECODE_COUNT createemptyarray 0x11a 1
-//! COUNT AllocateJSArray 1
-//! COUNT CallCommonStub CreateEmptyArray 1
+//! COUNT InitializeEmptyArray 1
+//! HAS_NOT CallCommonStub CreateEmptyArray
 
 function createEmptyArray() {
     return [];
@@ -161,6 +181,7 @@ let transitionOk = transitioned.length === 1025 && transitioned[0] === 7 && tran
 print("transitions:" + transitionOk);
 
 // Even with one in-object slot (56 bytes total), 8192 arrays exceed one 256 KB young allocation region.
+// Capacity failure may eagerly deopt; both pressure loops check semantics, not installed code.
 const pressureIterations = 8192;
 let pressured = null;
 let pressureOk = Array.isArray(pressureWarmup) && pressureWarmup.length === 0;
@@ -173,7 +194,6 @@ for (let i = 0; i < pressureIterations; i++) {
         break;
     }
 }
-pressureOk = pressureOk && ArkTools.arkSteedIsCompiled(createEmptyArrayWithPressure);
 print("register-pressure:" + pressureOk);
 
 // These allocations cross the 256 KB young allocation region repeatedly.
@@ -195,8 +215,7 @@ for (let i = 0; i < stressIterations; i++) {
     }
     previous = current;
 }
-stressOk = stressOk && survivors.length === stressIterations / survivorStride &&
-    ArkTools.arkSteedIsCompiled(createEmptyArray);
+stressOk = stressOk && survivors.length === stressIterations / survivorStride;
 print("buffer-exhaustion:" + stressOk);
 
 forceYoungGC();

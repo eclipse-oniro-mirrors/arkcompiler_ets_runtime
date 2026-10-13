@@ -13,6 +13,13 @@ Comments starting with `//!` in JS/TS files specify runtime options, CFG constra
 Besides the annotation constraints, the runner verifies the live range correctness of every dumped CFG: no value's live range may end before one of its uses starts, and every value used as an allocated Phi input must have a live range.
 An `ark_disasm` failure is diagnostic-only unless a bytecode constraint is present, in which case the test fails.
 
+## Literal Allocation Coverage
+
+* `jittest/empty_literal_capacity_gc` shares warmup, pressure, and explicit young/full GC between empty objects and arrays. Each creator is called directly and has its own METHOD, bytecode, CFG, and slow-path codegen constraints; force-GC remains enabled.
+* `jittest/createobjectwithbuffer_inline_allocation/basic` covers primitive values (including false/undefined), Map identity, independent external properties on two instances, deletion, preventExtensions, and derived reads.
+* `jittest/createobjectwithbuffer_inline_allocation/metadata` owns descriptor, prototype, and type-change isolation on separate clones, including tiny nonzero numbers and post-GC rechecks.
+* `jittest/allocate_initialize_split` and `jittest/allocation_slowpath` retain separate structural and allocation-pressure coverage. Native initialization-verifier and template tests remain separate from JS behavior tests.
+
 ## Test Case Runner
 
 Execute the command `python3 ./run_arksteed_tests.py [<args> ...]` to run all the test cases.

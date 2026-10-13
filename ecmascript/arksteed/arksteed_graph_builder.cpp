@@ -3386,86 +3386,89 @@ struct GraphBuilder::BytecodeVisitor {
 
     // -------- Category #9: Object/Array Creation --------
 
+    // Builds the shared fast/slow allocation structure for all four literal
+    // creations: check configuration and bump capacity, bump-allocate on the
+    // fast path or call the runtime allocator on the deferred slow path, then
+    // merge both raw addresses in a Phi for the following initializer.
+    ValueVertex* AllocateInYoung(ValueVertex* size)
+    {
+        CompileInfoFacts* entryFacts = compileInfoFacts_;
+        BB* fastBlock = self->NewBlock();
+        BB* slowBlock = self->NewBlock();
+        BB* doneBlock = self->NewBlock();
+        slowBlock->SetDeferred(true);
+        auto* canAllocate
+            = self->NewVertex<CanAllocateInYoungVertex>(compileInfoFacts_, currentBlock, {glue, size});
+        self->FinishBlockWithBranch<BranchIfTrueVertex>(currentBlock, {canAllocate}, fastBlock, slowBlock);
+
+        currentBlock = fastBlock;
+        compileInfoFacts_ = entryFacts->Clone();
+        auto* fastAllocation
+            = self->NewVertex<AllocateInYoungVertex>(compileInfoFacts_, currentBlock, {glue, size});
+        self->FinishBlockWithJump(currentBlock, doneBlock);
+        CompileInfoFacts* fastFacts = compileInfoFacts_;
+
+        currentBlock = slowBlock;
+        compileInfoFacts_ = entryFacts->Clone();
+        ASSERT(size->Is<Int32ConstantVertex>());
+        auto* taggedSize = TaggedConstantFromInt32(size->Cast<Int32ConstantVertex>()->GetValue());
+        // Raw storage is not a completed bytecode result: attach neither catch nor lazy-deopt state.
+        auto* slowAllocation = self->NewVertex<CallRuntimeVertex>(
+            compileInfoFacts_, currentBlock, {taggedSize}, RTSTUB_ID(AllocateInYoung));
+        self->FinishBlockWithJump(currentBlock, doneBlock);
+
+        currentBlock = doneBlock;
+        compileInfoFacts_->Merge(*fastFacts);
+        return self->NewPhiVertexWith(currentBlock, {fastAllocation, slowAllocation}, self->AccIndex());
+    }
+
     void LowerCreateEmptyObject()
     {
-        uint32_t objectSize;
-        ValueVertex* hclass;
+        uint32_t objectSize = 0;
+        ValueVertex* hclass = nullptr;
         {
-            auto scope = self->pgoContext_.CreateSerializingScope("GraphBuilder::LowerCreateEmptyObject");
-            JitCompilationEnv* env = self->preproc_->GetEnv();
-            auto initialHClassValue = env->GetGlobalEnv()->GetObjectFunctionClassWithBarrier();
-            JSHandle<JSHClass> initialHClass(initialHClassValue);
-            objectSize = initialHClass->GetObjectSize();
-            hclass = GetHeapConstant(ArkSteedHClassRef(initialHClassValue));
+            auto* broker = self->pgoContext_.GetBroker();
+            ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::LowerCreateEmptyObject");
+            ArkSteedHClassRef hclassRef;
+            if (broker->TryGetEmptyObjectLayout(&hclassRef, &objectSize)) {
+                hclass = GetHeapConstant(hclassRef);
+            }
         }
         if (hclass == nullptr) {
             auto* result = RuntimeCallToAccWithLazyDeopt({}, RTSTUB_ID(CreateEmptyObject));
             compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::OTHER_JS_RECEIVER);
             return;
         }
-
-        ValueVertex* fastObject =
-            self->NewVertex<CreateEmptyObjectVertex>(compileInfoFacts_, currentBlock, {glue, hclass}, objectSize);
-        ValueVertex *hole =
-            self->graph_->GetTaggedConstant(JSTaggedValue::VALUE_HOLE);
-
-        CompileInfoFacts *entryFacts = compileInfoFacts_;
-        BB *slowBlock = self->NewBlock();
-        BB *fastBlock = self->NewBlock();
-        BB *doneBlock = self->NewBlock();
-        slowBlock->SetDeferred(true);
-        self->FinishBlockWithBranch<BranchIfReferenceEqualVertex>(
-            currentBlock, {fastObject, hole}, slowBlock, fastBlock);
-
-        currentBlock = slowBlock;
-        compileInfoFacts_ = entryFacts->Clone();
-        ValueVertex* slowObject = CommonStubCallToAccWithLazyDeopt(
-            {glue, hclass, self->graph_->GetInt64Constant(objectSize)}, CommonStubID::NewJSObject);
-        self->FinishBlockWithJump(currentBlock, doneBlock);
-
-        currentBlock = fastBlock;
-        compileInfoFacts_ = entryFacts->Clone();
-        self->FinishBlockWithJump(currentBlock, doneBlock);
-
-        currentBlock = doneBlock;
-        compileInfoFacts_ = entryFacts;
-        compileInfoFacts_->OnSideEffect();
-        ValueVertex *object = self->NewPhiVertexWith(
-            currentBlock, {slowObject, fastObject}, self->AccIndex());
-        compileInfoFacts_->EnsureType(object,
-                                      NodeInfo::NodeType::OTHER_JS_RECEIVER);
+        ValueVertex* size = self->graph_->GetInt32Constant(static_cast<int32_t>(objectSize));
+        auto* allocation = AllocateInYoung(size);
+        auto* object = self->NewVertex<InitializeEmptyObjectVertex>(
+            compileInfoFacts_, currentBlock, {allocation, glue, hclass, size}, objectSize);
         frameState.SetAcc(object);
+        compileInfoFacts_->EnsureType(object, NodeInfo::NodeType::OTHER_JS_RECEIVER);
     }
 
     void LowerCreateEmptyArray(const BytecodeInfo *bcInfo)
     {
-        ValueVertex* globalEnv = GlobalEnv();
-        ValueVertex* fastArray
-            = self->NewVertex<AllocateJSArrayVertex>(compileInfoFacts_, currentBlock, {glue, globalEnv});
-        ValueVertex* hole = self->graph_->GetTaggedConstant(JSTaggedValue::VALUE_HOLE);
-
-        CompileInfoFacts* entryFacts = compileInfoFacts_;
-        BB* slowBlock = self->NewBlock();
-        BB* fastBlock = self->NewBlock();
-        BB* doneBlock = self->NewBlock();
-        slowBlock->SetDeferred(true);
-        self->FinishBlockWithBranch<BranchIfReferenceEqualVertex>(
-            currentBlock, {fastArray, hole}, slowBlock, fastBlock);
-
-        currentBlock = slowBlock;
-        compileInfoFacts_ = entryFacts->Clone();
-        ValueVertex* slowArray = CommonStubCallToAccWithLazyDeopt(
-            {glue, globalEnv}, CommonStubID::CreateEmptyArray, SideEffectKind::SAFE_CALL);
-        self->FinishBlockWithJump(currentBlock, doneBlock);
-
-        currentBlock = fastBlock;
-        compileInfoFacts_ = entryFacts->Clone();
-        self->FinishBlockWithJump(currentBlock, doneBlock);
-
-        currentBlock = doneBlock;
-        compileInfoFacts_ = entryFacts;
-        compileInfoFacts_->OnSideEffect();
-        ValueVertex* array = self->NewPhiVertexWith(currentBlock, {slowArray, fastArray}, self->AccIndex());
+        uint32_t objectSize = 0;
+        ValueVertex* globalEnv = nullptr;
+        {
+            auto* broker = self->pgoContext_.GetBroker();
+            ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::LowerCreateEmptyArray");
+            ArkSteedObjectRef envRef;
+            if (broker->TryGetEmptyArrayLayout(&envRef, &objectSize)) {
+                globalEnv = GetHeapConstant(envRef);
+            }
+        }
+        ValueVertex* array;
+        if (globalEnv == nullptr) {
+            array = CommonStubCallToAccWithLazyDeopt({glue, GlobalEnv()}, CommonStubID::CreateEmptyArray);
+        } else {
+            ValueVertex* size = self->graph_->GetInt32Constant(static_cast<int32_t>(objectSize));
+            auto* allocation = AllocateInYoung(size);
+            array = self->NewVertex<InitializeEmptyArrayVertex>(
+                compileInfoFacts_, currentBlock, {allocation, glue, globalEnv}, objectSize);
+        }
+        frameState.SetAcc(array);
         compileInfoFacts_->EnsureType(array, NodeInfo::NodeType::JS_ARRAY);
         ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
         ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::LowerCreateEmptyArray");
@@ -3486,10 +3489,34 @@ struct GraphBuilder::BytecodeVisitor {
 
     void LowerCreateObjectWithBuffer(const BytecodeInfo *bcInfo)
     {
-        ValueVertex *index = self->graph_->GetInt32Constant(GetConstDataId<int>(bcInfo, 0));
-        ValueVertex *obj = ObjectFromConstPool(index);
-        ValueVertex *lexEnv = LoadRegister(bcInfo, 1);
-        CommonStubCallToAccWithLazyDeopt({glue, obj, lexEnv}, CommonStubID::CreateObjectHavingMethod);
+        uint16_t cpIdx = GetConstDataId<uint16_t>(bcInfo, 0);
+        ValueVertex* literal = nullptr;
+        CreateObjectWithBufferInfo info;
+        ArkSteedHeapBroker* broker = self->pgoContext_.GetBroker();
+        // These GC modes require the complete creation stub, including its initialization barriers.
+        if (!g_isEnableCMCGC && !G_USE_CMS_GC && broker != nullptr) {
+            ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::LowerCreateObjectWithBuffer");
+            ArkSteedObjectRef literalRef;
+            if (broker->TryGetObjectLiteralFromConstantPool(cpIdx, self->chunk_, &literalRef, &info)) {
+                literal = GetHeapConstant(literalRef);
+            }
+        }
+        if (literal == nullptr) {
+            ValueVertex* index = self->graph_->GetInt32Constant(cpIdx);
+            ValueVertex* obj = ObjectFromConstPool(index);
+            ValueVertex* lexEnv = LoadRegister(bcInfo, 1);
+            ValueVertex* object = CommonStubCallToAccWithLazyDeopt(
+                {glue, obj, lexEnv}, CommonStubID::CreateObjectHavingMethod, SideEffectKind::SAFE_CALL);
+            compileInfoFacts_->EnsureType(object, NodeInfo::NodeType::OTHER_JS_RECEIVER);
+            return;
+        }
+
+        ValueVertex* size = self->graph_->GetInt32Constant(static_cast<int32_t>(info.objectSize));
+        auto* allocation = AllocateInYoung(size);
+        auto* object = self->NewVertex<InitializeObjectWithBufferVertex>(
+            compileInfoFacts_, currentBlock, {allocation, glue, literal}, info);
+        frameState.SetAcc(object);
+        compileInfoFacts_->EnsureType(object, NodeInfo::NodeType::OTHER_JS_RECEIVER);
     }
 
     void LowerCreateObjectWithExcludedKeys(const BytecodeInfo *bcInfo)
@@ -3504,15 +3531,41 @@ struct GraphBuilder::BytecodeVisitor {
 
     void LowerCreateArrayWithBuffer(const BytecodeInfo *bcInfo)
     {
-        ValueVertex *index = self->graph_->GetInt32Constant(GetConstDataId<int>(bcInfo, 0));
-        ValueVertex *jsFunc = LoadParam(CALL_TARGET_PARAM_INDEX);
+        uint16_t cpIdx = GetConstDataId<uint16_t>(bcInfo, 0);
         uint32_t rawSlotId = GetICSlotId<uint32_t>(bcInfo, 1);
-        ValueVertex *slotId = self->graph_->GetInt32Constant(static_cast<int32_t>(rawSlotId));
+        uint32_t objectSize = 0;
+        ValueVertex* literal = nullptr;
+        ArkSteedHeapBroker* broker = self->pgoContext_.GetBroker();
+        // These GC modes require the complete creation stub, including its initialization barriers.
+        if (!g_isEnableCMCGC && !G_USE_CMS_GC && broker != nullptr) {
+            ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::LowerCreateArrayWithBuffer");
+            ArkSteedObjectRef literalRef;
+            if (broker->TryGetArrayLiteralFromConstantPool(cpIdx, &literalRef, &objectSize)) {
+                literal = GetHeapConstant(literalRef);
+            }
+        }
+        ValueVertex* array;
+        if (literal == nullptr) {
+            ValueVertex* index = self->graph_->GetInt32Constant(cpIdx);
+            ValueVertex* jsFunc = LoadParam(CALL_TARGET_PARAM_INDEX);
+            ValueVertex* slotId = self->graph_->GetInt32Constant(static_cast<int32_t>(rawSlotId));
+            array = CommonStubCallToAccWithLazyDeopt({glue, index, jsFunc, slotId, GlobalEnv()},
+                                                     CommonStubID::CreateArrayWithBuffer);
+        } else {
+            ValueVertex* size = self->graph_->GetInt32Constant(static_cast<int32_t>(objectSize));
+            auto* allocation = AllocateInYoung(size);
+            array = self->NewVertex<InitializeArrayWithBufferVertex>(
+                compileInfoFacts_, currentBlock, {allocation, glue, literal}, objectSize);
+            frameState.SetAcc(array);
+            compileInfoFacts_->EnsureType(array, NodeInfo::NodeType::JS_ARRAY);
+        }
 
-        ValueVertex *array = CommonStubCallToAccWithLazyDeopt(
-            {glue, index, jsFunc, slotId, GlobalEnv()}, CommonStubID::CreateArrayWithBuffer);
+        // Creation feedback can widen without migrating the literal's numeric backing store.
+        // Preserve the actual HClass on both paths until element migration is supported here.
+        if (self->preproc_->GetEnv()->GetJSOptions().IsEnableMutantArray()) {
+            return;
+        }
 
-        ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
         ArkSteedHeapBroker::SerializingScope scope(broker, "GraphBuilder::LowerCreateArrayWithBuffer");
         ArkSteedHClassRef creatorHClassRef;
         if (!broker->TryGetArrayCreationHClass(rawSlotId, &creatorHClassRef)) {
@@ -4822,9 +4875,11 @@ struct GraphBuilder::BytecodeVisitor {
             // typeof is observable only through the input value category and does not mutate dependencies.
             case CommonStubID::TypeOf:
                 return true;
-            // These allocation/constant-pool helpers create or load values without observing receiver hooks.
-            case CommonStubID::CreateArrayWithBuffer:
+            // A capacity slow call may run a native finalizer that invalidates dependencies.
             case CommonStubID::CreateEmptyArray:
+            case CommonStubID::CreateArrayWithBuffer:
+                return false;
+            // These allocation/constant-pool helpers create or load values without observing receiver hooks.
             case CommonStubID::CreateObjectHavingMethod:
             case CommonStubID::Definefunc:
             case CommonStubID::GetObjectFromConstPool:

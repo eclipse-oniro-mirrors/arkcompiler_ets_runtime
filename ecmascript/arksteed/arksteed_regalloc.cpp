@@ -850,48 +850,6 @@ RegListBase<RegisterT> ArkSteedRegisterAllocator::GetReservedRegisters(Vertex *v
     return reserved;
 }
 
-template <typename RegisterT>
-RegisterT ArkSteedRegisterAllocator::PickRegisterToFree(RegListBase<RegisterT> reserved)
-{
-    RegisterSnapshot<RegisterT> &registers = GetRegisterSnapshot<RegisterT>();
-    int furthestUse = 0;
-    RegisterT best = RegisterT::Invalid();
-
-    for (RegisterT reg : (registers.Used() - reserved)) {
-        ValueVertex *value = registers.GetValue(reg);
-        auto *vertexInfo = value->GetRegallocInfo();
-
-        // The cheapest register to clear is a register containing a value that's
-        // contained in another register as well. Since we found the register while
-        // looping over unblocked registers, we can simply use this register.
-        if (vertexInfo->GetRegisterCount() > 1) {
-            best = reg;
-            break;
-        }
-
-        if (vertexInfo->HasNoMoreUses()) {
-            return reg;
-        }
-
-        int use = static_cast<int>(vertexInfo->CurrentNextUse());
-        if (use > furthestUse) {
-            furthestUse = use;
-            best = reg;
-        }
-    }
-
-    return best;
-}
-
-// The test target instantiates FreeUnblockedRegister (and therefore this helper)
-// in its own translation unit. Without an explicit definition here, LTO Release
-// links drop the unreferenced implicit instantiation and fail with an undefined
-// symbol for the concrete register types.
-template ArkSteedRegister
-ArkSteedRegisterAllocator::PickRegisterToFree(RegListBase<ArkSteedRegister> reserved);
-template ArkSteedDoubleRegister
-ArkSteedRegisterAllocator::PickRegisterToFree(RegListBase<ArkSteedDoubleRegister> reserved);
-
 void ArkSteedRegisterAllocator::Spill(ValueVertex *vertex)
 {
     if (vertex->GetRegallocInfo()->IsLoadable()) {

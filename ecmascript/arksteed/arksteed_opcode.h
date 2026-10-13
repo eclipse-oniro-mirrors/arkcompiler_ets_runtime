@@ -17,6 +17,7 @@
 #define ECMASCRIPT_ARKSTEED_OPCODE_H
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <type_traits>
 #include <utility>
@@ -32,6 +33,7 @@
 #include "ecmascript/compiler/deopt_type.h"
 #include "ecmascript/compiler/rt_call_signature.h"
 #include "ecmascript/js_hclass.h"
+#include "ecmascript/js_object.h"
 #include "ecmascript/mem/chunk_containers.h"
 #include "ecmascript/on_heap.h"
 
@@ -1466,30 +1468,27 @@ private:
     int32_t fieldIndex_ {0};
 };
 
-// Creates a fully initialized young object, or returns Hole without allocating.
-// Fast allocation and initialization cannot trigger GC; the CFG owns
-// the GC-capable allocation fallback.
-class CreateEmptyObjectVertex
-    : public FixedInputVertexMixin<ValueVertex, CreateEmptyObjectVertex> {
-  public:
+// The result aliases allocation and is the first complete, publishable object value.
+class InitializeEmptyObjectVertex : public FixedInputVertexMixin<ValueVertex, InitializeEmptyObjectVertex> {
+public:
     enum Indices : uint32_t {
-      GLUE_INDEX = 0,
-      HCLASS_INDEX = 1,
-      NUM_INPUTS = 2,
+        ALLOCATION_INDEX = 0,
+        GLUE_INDEX = 1,
+        HCLASS_INDEX = 2,
+        SIZE_INDEX = 3,
+        NUM_INPUTS = 4,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
         ValueRepresentation::INT_PTR,
         ValueRepresentation::TAGGED,
+        ValueRepresentation::INT32,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::CAN_WRITE |
-                                                     VertexPropertyFlag::CAN_ALLOCATE |
-                                                     VertexPropertyFlag::IS_NOT_IDEMPOTENT;
+    static constexpr VertexPropertyFlag PROPERTIES
+        = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::IS_NOT_IDEMPOTENT;
 
-    explicit CreateEmptyObjectVertex(uint32_t objectSize)
-        : FixedInputVertexMixin(), objectSize_(objectSize)
-    {
-    }
+    explicit InitializeEmptyObjectVertex(uint32_t objectSize): FixedInputVertexMixin(), objectSize_(objectSize) {}
 
     uint32_t GetObjectSize() const
     {
@@ -1500,6 +1499,54 @@ class CreateEmptyObjectVertex
 
 private:
     uint32_t objectSize_ {0};
+};
+
+// Only non-reference field bits survive serialization; the literal itself is a heap-constant input.
+struct CreateObjectWithBufferInfo {
+    uint32_t objectSize {0};
+    uint32_t fieldCount {0};
+    // The graph's Chunk owns tagged primitives or raw numeric bits, never unregistered heap references.
+    Span<const uint64_t> fieldValues {};
+};
+
+// Field snapshots contain no heap references. All dynamic references are explicit tagged inputs.
+class InitializeObjectWithBufferVertex
+    : public FixedInputVertexMixin<ValueVertex, InitializeObjectWithBufferVertex> {
+public:
+    enum Indices : uint32_t {
+        ALLOCATION_INDEX = 0,
+        GLUE_INDEX = 1,
+        LITERAL_INDEX = 2,
+        NUM_INPUTS = 3,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::INT_PTR,
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES
+        = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::IS_NOT_IDEMPOTENT;
+
+    explicit InitializeObjectWithBufferVertex(const CreateObjectWithBufferInfo& info)
+        : FixedInputVertexMixin(), info_(info)
+    {
+        ASSERT(info_.fieldValues.size() == info_.fieldCount);
+        ASSERT(info_.fieldCount == 0 || info_.fieldValues.data() != nullptr);
+        ASSERT(info_.objectSize >= JSObject::SIZE);
+        ASSERT(info_.objectSize % JSTaggedValue::TaggedTypeSize() == 0);
+        ASSERT(info_.fieldCount <= (info_.objectSize - JSObject::SIZE) / JSTaggedValue::TaggedTypeSize());
+    }
+
+    const CreateObjectWithBufferInfo& GetInfo() const
+    {
+        return info_;
+    }
+
+    void SetValueLocationConstraints();
+
+private:
+    CreateObjectWithBufferInfo info_;
 };
 
 class StoreInt32FieldVertex : public FixedInputVertexMixin<NonControlVertex, StoreInt32FieldVertex>,
@@ -1727,11 +1774,22 @@ public:
         return sideEffectKind_;
     }
 
+    // Only the single-size overload returns storage without an object header.
+    bool ReturnsRawAllocation() const
+    {
+        return GetRuntimeStubID() == RTSTUB_ID(AllocateInYoung) && GetArgCount() == 1;
+    }
+
     void SetValueLocationConstraints();
 
     void VerifyInputs() const
     {
-        ASSERT(GetArgCount() == GetInputCount());
+        if (ReturnsRawAllocation()) {
+            ASSERT(GetInput(0)->Is<TaggedConstantVertex>() && "Raw allocation requires a tagged constant size");
+            ASSERT(JSTaggedValue(GetInput(0)->Cast<TaggedConstantVertex>()->GetValue()).IsInt());
+            ASSERT(!HasLazyDeoptFrameState() && !HasCatchBlock() && !HasExceptionLazyDeopt()
+                   && "Raw allocation must proceed directly to initialization");
+        }
     }
 
 private:
@@ -1991,29 +2049,88 @@ public:
     void SetValueLocationConstraints();
 };
 
-/**
- * Allocates and fully initializes a local empty JSArray in young space without a call or safepoint.
- * Returns Hole without allocating when the fast path is unavailable or the allocation buffer is full.
- */
-class AllocateJSArrayVertex : public FixedInputVertexMixin<ValueVertex, AllocateJSArrayVertex> {
+// Reads the current allocation protocol and unsigned bump capacity, returning
+// tagged true or false without allocating. The result is a transient snapshot:
+// each allocation needs a fresh check, even when glue and size are unchanged.
+class CanAllocateInYoungVertex : public FixedInputVertexMixin<ValueVertex, CanAllocateInYoungVertex> {
 public:
-    enum Indices : uint32_t {
-        GLUE_INDEX = 0,
-        GLOBAL_ENV_INDEX = 1,
-        NUM_INPUTS = 2,
-    };
-
+    enum Indices : uint32_t { GLUE_INDEX = 0, SIZE_INDEX = 1, NUM_INPUTS = 2 };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::INT_PTR,
-        ValueRepresentation::TAGGED,
+        ValueRepresentation::INT32,
     };
     static constexpr VertexPropertyFlag PROPERTIES
-        = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::CAN_ALLOCATE;
+        = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::IS_NOT_IDEMPOTENT;
 
-    explicit AllocateJSArrayVertex(): FixedInputVertexMixin() {}
-
+    CanAllocateInYoungVertex() = default;
     void SetValueLocationConstraints();
+};
+
+// The fast allocation path performs the bump allocation on the true edge of
+// BranchIfTrue(CanAllocateInYoung). It cannot call, throw, or deopt; the
+// matching initializer follows the allocation merge Phi.
+class AllocateInYoungVertex : public FixedInputVertexMixin<ValueVertex, AllocateInYoungVertex> {
+public:
+    enum Indices : uint32_t { GLUE_INDEX = 0, SIZE_INDEX = 1, NUM_INPUTS = 2 };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT_PTR,
+        ValueRepresentation::INT32,
+    };
+    // The fast path has ordinary register constraints; the slow node carries the call ABI.
+    static constexpr VertexPropertyFlag PROPERTIES
+        = VertexPropertyFlag::CAN_ALLOCATE | VertexPropertyFlag::IS_NOT_IDEMPOTENT;
+
+    AllocateInYoungVertex() = default;
+    void SetValueLocationConstraints();
+};
+
+inline bool IsRawAllocation(const Vertex* vertex)
+{
+    auto* call = vertex->TryCast<CallRuntimeVertex>();
+    return vertex->Is<AllocateInYoungVertex>() || (call != nullptr && call->ReturnsRawAllocation());
+}
+
+// The realm is a protected input: glue's current environment need not belong to this function.
+class InitializeEmptyArrayVertex : public FixedInputVertexMixin<ValueVertex, InitializeEmptyArrayVertex> {
+public:
+    enum Indices : uint32_t { ALLOCATION_INDEX = 0, GLUE_INDEX = 1, GLOBAL_ENV_INDEX = 2, NUM_INPUTS = 3 };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES
+        = {ValueRepresentation::TAGGED, ValueRepresentation::INT_PTR, ValueRepresentation::TAGGED};
+    static constexpr VertexPropertyFlag PROPERTIES
+        = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::IS_NOT_IDEMPOTENT;
+
+    explicit InitializeEmptyArrayVertex(uint32_t objectSize): objectSize_(objectSize) {}
+    uint32_t GetObjectSize() const
+    {
+        return objectSize_;
+    }
+    void SetValueLocationConstraints();
+
+private:
+    uint32_t objectSize_;
+};
+
+class InitializeArrayWithBufferVertex : public FixedInputVertexMixin<ValueVertex, InitializeArrayWithBufferVertex> {
+public:
+    enum Indices : uint32_t { ALLOCATION_INDEX = 0, GLUE_INDEX = 1, LITERAL_INDEX = 2, NUM_INPUTS = 3 };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES
+        = {ValueRepresentation::TAGGED, ValueRepresentation::INT_PTR, ValueRepresentation::TAGGED};
+    static constexpr VertexPropertyFlag PROPERTIES
+        = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::IS_NOT_IDEMPOTENT;
+
+    explicit InitializeArrayWithBufferVertex(uint32_t objectSize): objectSize_(objectSize) {}
+    uint32_t GetObjectSize() const
+    {
+        return objectSize_;
+    }
+    void SetValueLocationConstraints();
+
+private:
+    uint32_t objectSize_;
 };
 
 /**

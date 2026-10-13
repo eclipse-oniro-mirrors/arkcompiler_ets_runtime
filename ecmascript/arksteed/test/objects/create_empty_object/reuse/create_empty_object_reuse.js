@@ -15,8 +15,9 @@
 
 //! PARAMS --compiler-jit-hotness-threshold=60000
 //! METHOD makeTwoEmptyObjects
-//! COUNT CreateEmptyObject 2
-//! COUNT CallCommonStub NewJSObject 2
+//! COUNT_GE AllocateInYoung 2
+//! COUNT InitializeEmptyObject 2
+//! HAS_NOT CallCommonStub NewJSObject
 //! HAS_NOT CallRuntime CreateEmptyObject
 
 function makeTwoEmptyObjects() {

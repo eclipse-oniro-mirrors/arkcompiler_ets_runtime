@@ -16,7 +16,10 @@
 #ifndef ECMASCRIPT_ARKSTEED_ASSEMBLER_INL_H
 #define ECMASCRIPT_ARKSTEED_ASSEMBLER_INL_H
 
+#include <limits>
+
 #include "ecmascript/arksteed/arksteed_assembler.h"
+#include "ecmascript/js_array.h"
 #include "ecmascript/js_hclass.h"
 #include "ecmascript/js_tagged_value.h"
 #include "ecmascript/js_thread.h"
@@ -60,6 +63,52 @@ inline void ArkSteedAssembler::Branch(Condition condition, Label *ifTrue, bool f
     }
 }
 
+inline void ArkSteedAssembler::InitializeObjectHeader(ArkSteedRegister glue,
+                                                       ArkSteedRegister object,
+                                                       ArkSteedRegister temp)
+{
+    Move(temp, static_cast<uint64_t>(JSTaggedValue::VALUE_ZERO));
+    StoreField(temp, object, static_cast<int32_t>(JSObject::HASH_OFFSET));
+    constexpr size_t emptyArrayOffset
+        = static_cast<size_t>(ConstantIndex::EMPTY_ARRAY_OBJECT_INDEX) * JSTaggedValue::TaggedTypeSize();
+    static_assert(emptyArrayOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+    LoadField(temp, glue, static_cast<int32_t>(JSThread::GlueData::GetGlobalConstOffset(false)));
+    LoadField(temp, temp, static_cast<int32_t>(emptyArrayOffset));
+    StoreField(temp, object, static_cast<int32_t>(JSObject::PROPERTIES_OFFSET));
+    StoreField(temp, object, static_cast<int32_t>(JSObject::ELEMENTS_OFFSET));
+}
+
+inline void ArkSteedAssembler::InitializeArrayFields(ArkSteedRegister glue,
+                                                      ArkSteedRegister object,
+                                                      uint32_t objectSize,
+                                                      ArkSteedRegister value)
+{
+    Move(value, static_cast<uint64_t>(JSTaggedValue::VALUE_UNDEFINED));
+    for (uint32_t offset = JSArray::SIZE; offset < objectSize; offset += JSTaggedValue::TaggedTypeSize()) {
+        StoreField(value, object, static_cast<int32_t>(offset));
+    }
+    StoreField(value, object, static_cast<int32_t>(JSArray::TRACK_INFO_OFFSET));
+    Move(value, 0);
+    StoreInt32Field(value, object, static_cast<int32_t>(JSArray::LENGTH_OFFSET));
+    StoreInt32Field(value, object, static_cast<int32_t>(JSArray::TRACE_INDEX_OFFSET));
+    InitializeObjectHeader(glue, object, value);
+    constexpr size_t lengthAccessorOffset
+        = static_cast<size_t>(ConstantIndex::ARRAY_LENGTH_ACCESSOR) * JSTaggedValue::TaggedTypeSize();
+    static_assert(lengthAccessorOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+    static_assert(JSArray::LENGTH_INLINE_PROPERTY_INDEX == 0);
+    LoadField(value, glue, static_cast<int32_t>(JSThread::GlueData::GetGlobalConstOffset(false)));
+    LoadField(value, value, static_cast<int32_t>(lengthAccessorOffset));
+    // The broker accepts only ordinary array layouts whose inline slots start at JSArray::SIZE.
+    StoreField(value, object, static_cast<int32_t>(JSArray::SIZE));
+}
+
+inline void ArkSteedAssembler::JumpIfCMSGCEnabled(Label* target)
+{
+    if constexpr (G_USE_CMS_GC) {
+        Jump(target);
+    }
+}
+
 inline void ArkSteedAssembler::JumpIfCMCGCEnabled(ArkSteedRegister glue, ArkSteedRegister temp, Label* target)
 {
     ASSERT(glue != temp);
@@ -74,56 +123,6 @@ inline void ArkSteedAssembler::JumpIfHeapSamplingActive(ArkSteedRegister glue, A
     LoadField(temp, glue, static_cast<int32_t>(JSThread::GlueData::GetIsStartHeapSamplingOffset(false)));
     Compare(temp, static_cast<int32_t>(JSTaggedValue::VALUE_TRUE));
     JumpIf(Condition::EQUAL, target);
-}
-
-inline void ArkSteedAssembler::LoadObjectSizeFromHClass(ArkSteedRegister hclass, ArkSteedRegister objectSize)
-{
-    ASSERT(hclass != objectSize);
-    static_assert(JSTaggedValue::TaggedTypeSize() == (1U << TAGGED_TYPE_SIZE_LOG));
-    constexpr int32_t objectSizeMask = static_cast<int32_t>((1U << JSHClass::ObjectSizeInWordsBits::SIZE) - 1U);
-
-    LoadInt32Field(objectSize, hclass, static_cast<int32_t>(JSHClass::BIT_FIELD1_OFFSET));
-    Lsr(objectSize, JSHClass::ObjectSizeInWordsBits::START_BIT);
-    And(objectSize, objectSizeMask);
-    ShiftLeft(objectSize, TAGGED_TYPE_SIZE_LOG);
-}
-
-inline void ArkSteedAssembler::LoadInlinedPropsStartFromHClass(ArkSteedRegister hclass, ArkSteedRegister offset)
-{
-    ASSERT(hclass != offset);
-    static_assert(JSTaggedValue::TaggedTypeSize() == (1U << TAGGED_TYPE_SIZE_LOG));
-    constexpr int32_t inlinedPropsStartMask
-        = static_cast<int32_t>((1U << JSHClass::InlinedPropsStartBits::SIZE) - 1U);
-
-    LoadInt32Field(offset, hclass, static_cast<int32_t>(JSHClass::BIT_FIELD1_OFFSET));
-    Lsr(offset, JSHClass::InlinedPropsStartBits::START_BIT);
-    And(offset, inlinedPropsStartMask);
-    ShiftLeft(offset, TAGGED_TYPE_SIZE_LOG);
-}
-
-inline void ArkSteedAssembler::TryAllocateInYoungSpace(
-    ArkSteedRegister glue, ArkSteedRegister size, ArkSteedRegister result, ArkSteedRegister temp, Label* failed)
-{
-    ASSERT(glue != size);
-    ASSERT(glue != result);
-    ASSERT(glue != temp);
-    ASSERT(size != result);
-    ASSERT(size != temp);
-    ASSERT(result != temp);
-
-    LoadField(result, glue, static_cast<int32_t>(JSThread::GlueData::GetNewSpaceAllocationTopAddressOffset(false)));
-    LoadField(result, result, 0);
-    LoadField(temp, glue, static_cast<int32_t>(JSThread::GlueData::GetNewSpaceAllocationEndAddressOffset(false)));
-    LoadField(temp, temp, 0);
-    // Match the interpreter allocator: the trusted regular-object size cannot overflow a valid heap address.
-    Add(result, size);
-    Compare(result, temp);
-    JumpIf(Condition::ABOVE, failed);
-
-    // Publishing top commits the allocation. No failure path is allowed after this store.
-    LoadField(temp, glue, static_cast<int32_t>(JSThread::GlueData::GetNewSpaceAllocationTopAddressOffset(false)));
-    StoreField(result, temp, 0);
-    Sub(result, size);
 }
 
 void ArkSteedAssembler::CallRuntime(kungfu::RuntimeStubCSigns::ID runtimeId)

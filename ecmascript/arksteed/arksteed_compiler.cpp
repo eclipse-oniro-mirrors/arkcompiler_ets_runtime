@@ -58,10 +58,10 @@ CString ParseMethodNameFromEnv(JitCompilationEnv *env)
 
 }  // namespace
 
-static void VerifyGraph(Graph *graph)
+static void VerifyGraph(Graph* graph, bool afterRegalloc = false)
 {
 #ifndef NDEBUG
-    GraphProcessor<ArkSteedGraphVerifier> verifier(graph->GetChunk());
+    GraphProcessor<ArkSteedGraphVerifier> verifier(graph->GetChunk(), afterRegalloc);
     verifier.Run(graph);
 #endif
 }
@@ -302,6 +302,12 @@ bool ArkSteedCompilerTask::Compile()
             arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedReuseStackSlots());
         ArkSteedRegisterAllocator registerAllocator(graph_);
     }
+
+#ifndef NDEBUG
+    // RA may insert only register moves/reloads between allocation and initialization.
+    // Recheck the final scheduled IR before code generation introduces machine instructions.
+    VerifyGraph(graph_, true);
+#endif
 
     // Code generation
     {

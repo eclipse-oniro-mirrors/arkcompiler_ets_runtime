@@ -32,6 +32,7 @@
 namespace panda::ecmascript::arksteed {
 
 class ArkSteedFeedbackReader;
+struct CreateObjectWithBufferInfo;
 
 enum class ArkSteedBrokerMode : uint8_t {
     DISABLED,
@@ -223,6 +224,15 @@ public:
         *method = MakeObjectRef(methodValue);
         return method->IsSafeForCompile();
     }
+
+    bool TryGetEmptyArrayLayout(ArkSteedObjectRef* globalEnv, uint32_t* objectSize) const;
+    bool TryGetEmptyObjectLayout(ArkSteedHClassRef* hclass, uint32_t* objectSize) const;
+    bool TryGetArrayLiteralFromConstantPool(uint16_t cpIdx, ArkSteedObjectRef* literal, uint32_t* objectSize) const;
+
+    bool TryGetObjectLiteralFromConstantPool(uint16_t cpIdx,
+                                             Chunk* chunk,
+                                             ArkSteedObjectRef* literal,
+                                             CreateObjectWithBufferInfo* info) const;
 
     bool TryRecordHeapConstant(const ArkSteedHeapRef &ref, uint32_t *handleIndex, JSTaggedValue *currentValue) const
     {
