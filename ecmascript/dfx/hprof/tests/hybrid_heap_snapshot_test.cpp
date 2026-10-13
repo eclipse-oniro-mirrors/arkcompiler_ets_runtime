@@ -745,7 +745,7 @@ HWTEST_F_L0(HybridHeapSnapshotTest, DynamicDumpPreservesExternallyOwnedProfiler)
 
 HWTEST_F_L0(HybridHeapSnapshotTest, DynamicDumpAcquireOutputByPath)
 {
-    char outputPath[] = "dynamic_dump_output_XXXXXX";
+    char outputPath[] = HPROF_DUMP_OUTPUT_DIR "dynamic_dump_output_XXXXXX";
     int outputFd = mkstemp(outputPath);
     ASSERT_GE(outputFd, 0);
     close(outputFd);
@@ -792,7 +792,7 @@ HWTEST_F_L0(HybridHeapSnapshotTest, DynamicDumpCreatesV1AndV2RawHeapDump)
 {
     Runtime *runtime = Runtime::GetInstance();
     RawHeapDumpCropLevel originalLevel = runtime->GetRawHeapDumpCropLevel();
-    char outputPath[] = "dynamic_rawheap_output_XXXXXX";
+    char outputPath[] = HPROF_DUMP_OUTPUT_DIR "dynamic_rawheap_output_XXXXXX";
     int outputFd = mkstemp(outputPath);
     ASSERT_GE(outputFd, 0);
     close(outputFd);
@@ -2078,8 +2078,11 @@ HWTEST_F_L0(HybridHeapSnapshotTest, BinaryDump_DynamicInterfaceUnavailable_Retur
             JSNApi::DestroyJSVM(vm);
         }
     });
-    while (!ready.load(std::memory_order_acquire)) {
-        std::this_thread::yield();
+    {
+        ThreadStateTransitionScope<JSThread, ThreadState::WAIT> waitScope(thread_);
+        while (!ready.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
     }
     Runtime::GetInstance()->SetHybridVm(true);
 
@@ -2091,7 +2094,10 @@ HWTEST_F_L0(HybridHeapSnapshotTest, BinaryDump_DynamicInterfaceUnavailable_Retur
         result = profiler.BinaryDump(vm, dumpOption);
     }
     release.store(true, std::memory_order_release);
-    worker.join();
+    {
+        ThreadStateTransitionScope<JSThread, ThreadState::WAIT> waitScope(thread_);
+        worker.join();
+    }
 
     ASSERT_NE(vm, nullptr);
     EXPECT_FALSE(result);
