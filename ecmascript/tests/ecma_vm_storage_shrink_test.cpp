@@ -48,6 +48,12 @@ constexpr size_t GROW_NODES_NO_SHRINK = 20;            // headroom * (prev+1) ==
 constexpr size_t GROW_NODES_HYSTERESIS_BELOW = 13;     // prev=4: frees 3 < max(3,4)=4 -> no shrink
 constexpr size_t GROW_NODES_HYSTERESIS_AT = 14;        // prev=4: frees 4 >= max(3,4)=4 -> shrink
 
+// Legacy (optimization disabled) shrink frees nodes back to MIN+1 only when the
+// active index has collapsed below MIN, mirroring the legacy behavior.
+constexpr size_t LEGACY_RETAINED_NODES = static_cast<size_t>(MIN_HANDLE_STORAGE_SIZE) + 1;
+// prevIndex that keeps active usage >= MIN so the legacy path must not shrink.
+constexpr int32_t PREV_INDEX_AT_MIN = 2;
+
 // Expected retained node count after a proportional shrink to 2x active usage.
 inline size_t ShrinkTargetNodes(int32_t prevIndex, int32_t minNodes)
 {
@@ -68,16 +74,18 @@ void GrowPrimitiveStorageTo(EcmaVM *vm, size_t target)
     }
 }
 
-// Collapse to a deterministic baseline of MIN nodes (index 0) regardless of
-// the non-deterministic node count left by VM initialization.
+// Collapse to a deterministic MIN baseline. The shrink is off by default, so the
+// helper enables it first, then collapses.
 void ResetHandleStorageToMin(EcmaVM *vm)
 {
+    vm->EnableHandleMemoryOptimization();
     GrowHandleStorageTo(vm, static_cast<size_t>(MIN_HANDLE_STORAGE_SIZE + RESET_GROW_MARGIN));
     vm->ShrinkHandleStorage(0);
 }
 
 void ResetPrimitiveStorageToMin(EcmaVM *vm)
 {
+    vm->EnableHandleMemoryOptimization();
     GrowPrimitiveStorageTo(vm, static_cast<size_t>(MIN_PRIMITIVE_STORAGE_SIZE + RESET_GROW_MARGIN));
     vm->ShrinkPrimitiveStorage(0);
 }
@@ -86,7 +94,7 @@ void ResetPrimitiveStorageToMin(EcmaVM *vm)
 class EcmaVMStorageShrinkTest : public BaseTestWithScope<false> {
 };
 
-// --- Handle storage ---
+// --- Handle storage (proportional shrink, optimization enabled) ---
 
 HWTEST_F_L0(EcmaVMStorageShrinkTest, HandleStorage_LowUsageShrinkToHeadroom)
 {
@@ -199,7 +207,7 @@ HWTEST_F_L0(EcmaVMStorageShrinkTest, HandleStorage_IndependentOfPrimitiveIndex)
     EXPECT_EQ(instance->GetCurrentHandleStorageIndex(), PREV_INDEX_PROPORTIONAL);
 }
 
-// --- Primitive storage ---
+// --- Primitive storage (proportional shrink, optimization enabled) ---
 
 HWTEST_F_L0(EcmaVMStorageShrinkTest, PrimitiveStorage_LowUsageShrinkToHeadroom)
 {
@@ -317,6 +325,126 @@ HWTEST_F_L0(EcmaVMStorageShrinkTest, PrimitiveStorage_UsesPrimitiveIndexNotHandl
     // Active primitive index must stay within the allocated node range.
     EXPECT_LT(instance->GetCurrentPrimitiveStorageIndex(),
               static_cast<int32_t>(instance->GetPrimitiveStorageNodesSize()));
+}
+
+// --- Default-off legacy shrink (optimization not opted in) ---
+
+HWTEST_F_L0(EcmaVMStorageShrinkTest, HandleStorage_DefaultOff_LegacyShrinkOnlyWhenBelowMin)
+{
+    // Off by default: usage below MIN collapses to MIN+1 (legacy behavior).
+    ASSERT_FALSE(instance->IsHandleMemoryOptimizationEnabled());
+    GrowHandleStorageTo(instance, GROW_NODES_LARGE);
+    ASSERT_EQ(instance->GetHandleStorageNodesSize(), GROW_NODES_LARGE);
+
+    instance->ShrinkHandleStorage(0);
+
+    EXPECT_EQ(instance->GetCurrentHandleStorageIndex(), 0);
+    EXPECT_EQ(instance->GetHandleStorageNodesSize(), LEGACY_RETAINED_NODES);
+    EXPECT_LT(instance->GetCurrentHandleStorageIndex(),
+              static_cast<int32_t>(instance->GetHandleStorageNodesSize()));
+}
+
+HWTEST_F_L0(EcmaVMStorageShrinkTest, HandleStorage_DefaultOff_NoShrinkWhenUsageAtOrAboveMin)
+{
+    // Usage >= MIN: no shrink under the legacy policy.
+    ASSERT_FALSE(instance->IsHandleMemoryOptimizationEnabled());
+    GrowHandleStorageTo(instance, GROW_NODES_LARGE);
+    ASSERT_EQ(instance->GetHandleStorageNodesSize(), GROW_NODES_LARGE);
+
+    instance->ShrinkHandleStorage(PREV_INDEX_AT_MIN);
+
+    EXPECT_EQ(instance->GetCurrentHandleStorageIndex(), PREV_INDEX_AT_MIN);
+    EXPECT_EQ(instance->GetHandleStorageNodesSize(), GROW_NODES_LARGE);
+}
+
+HWTEST_F_L0(EcmaVMStorageShrinkTest, PrimitiveStorage_DefaultOff_LegacyShrinkOnlyWhenBelowMin)
+{
+    ASSERT_FALSE(instance->IsHandleMemoryOptimizationEnabled());
+    GrowPrimitiveStorageTo(instance, GROW_NODES_LARGE);
+    ASSERT_EQ(instance->GetPrimitiveStorageNodesSize(), GROW_NODES_LARGE);
+
+    instance->ShrinkPrimitiveStorage(0);
+
+    EXPECT_EQ(instance->GetCurrentPrimitiveStorageIndex(), 0);
+    EXPECT_EQ(instance->GetPrimitiveStorageNodesSize(),
+              static_cast<size_t>(MIN_PRIMITIVE_STORAGE_SIZE) + 1);
+    EXPECT_LT(instance->GetCurrentPrimitiveStorageIndex(),
+              static_cast<int32_t>(instance->GetPrimitiveStorageNodesSize()));
+}
+
+HWTEST_F_L0(EcmaVMStorageShrinkTest, PrimitiveStorage_DefaultOff_NoShrinkWhenUsageAtOrAboveMin)
+{
+    ASSERT_FALSE(instance->IsHandleMemoryOptimizationEnabled());
+    GrowPrimitiveStorageTo(instance, GROW_NODES_LARGE);
+    ASSERT_EQ(instance->GetPrimitiveStorageNodesSize(), GROW_NODES_LARGE);
+
+    instance->ShrinkPrimitiveStorage(PREV_INDEX_AT_MIN);
+
+    EXPECT_EQ(instance->GetCurrentPrimitiveStorageIndex(), PREV_INDEX_AT_MIN);
+    EXPECT_EQ(instance->GetPrimitiveStorageNodesSize(), GROW_NODES_LARGE);
+}
+
+// --- One-way enable switch ---
+
+HWTEST_F_L0(EcmaVMStorageShrinkTest, HandleStorage_EnableIsOneWayAndActivatesProportionalShrink)
+{
+    // Off by default; enable is one-way and switches to proportional shrink.
+    ASSERT_FALSE(instance->IsHandleMemoryOptimizationEnabled());
+
+    GrowHandleStorageTo(instance, GROW_NODES_LARGE);
+    instance->ShrinkHandleStorage(0);
+    ASSERT_EQ(instance->GetHandleStorageNodesSize(), LEGACY_RETAINED_NODES);
+
+    instance->EnableHandleMemoryOptimization();
+    ASSERT_TRUE(instance->IsHandleMemoryOptimizationEnabled());
+    GrowHandleStorageTo(instance, GROW_NODES_LARGE);
+    instance->ShrinkHandleStorage(PREV_INDEX_PROPORTIONAL);
+    EXPECT_EQ(instance->GetHandleStorageNodesSize(),
+              ShrinkTargetNodes(PREV_INDEX_PROPORTIONAL, MIN_HANDLE_STORAGE_SIZE));
+    EXPECT_TRUE(instance->IsHandleMemoryOptimizationEnabled());
+}
+
+HWTEST_F_L0(EcmaVMStorageShrinkTest, HandleStorage_EnableIsIdempotent)
+{
+    instance->EnableHandleMemoryOptimization();
+    ASSERT_TRUE(instance->IsHandleMemoryOptimizationEnabled());
+    instance->EnableHandleMemoryOptimization();
+    EXPECT_TRUE(instance->IsHandleMemoryOptimizationEnabled());
+}
+
+// --- App-facing JSNApi entry point ---
+
+HWTEST_F_L0(EcmaVMStorageShrinkTest, JSNApi_EnableHandleMemoryOptimization_OptInOneWay)
+{
+    // Off by default; enablement is one-way (verified via the EcmaVM internal flag).
+    ASSERT_FALSE(instance->IsHandleMemoryOptimizationEnabled());
+    JSNApi::EnableHandleMemoryOptimization(instance);
+    EXPECT_TRUE(instance->IsHandleMemoryOptimizationEnabled());
+    JSNApi::EnableHandleMemoryOptimization(instance);
+    EXPECT_TRUE(instance->IsHandleMemoryOptimizationEnabled());
+}
+
+HWTEST_F_L0(EcmaVMStorageShrinkTest, JSNApi_EnableHandleMemoryOptimization_ActivatesProportionalShrink)
+{
+    ASSERT_FALSE(instance->IsHandleMemoryOptimizationEnabled());
+    GrowHandleStorageTo(instance, GROW_NODES_LARGE);
+    instance->ShrinkHandleStorage(0);
+    ASSERT_EQ(instance->GetHandleStorageNodesSize(), LEGACY_RETAINED_NODES);
+
+    JSNApi::EnableHandleMemoryOptimization(instance);
+    GrowHandleStorageTo(instance, GROW_NODES_LARGE);
+    instance->ShrinkHandleStorage(PREV_INDEX_PROPORTIONAL);
+    EXPECT_EQ(instance->GetHandleStorageNodesSize(),
+              ShrinkTargetNodes(PREV_INDEX_PROPORTIONAL, MIN_HANDLE_STORAGE_SIZE));
+}
+
+HWTEST_F_L0(EcmaVMStorageShrinkTest, JSNApi_EnableHandleMemoryOptimization_NullVmIsSafe)
+{
+    // A null vm must be a safe no-op: no crash, and it must not enable the flag
+    // on the real instance.
+    ASSERT_FALSE(instance->IsHandleMemoryOptimizationEnabled());
+    JSNApi::EnableHandleMemoryOptimization(nullptr);
+    EXPECT_FALSE(instance->IsHandleMemoryOptimizationEnabled());
 }
 
 }  // namespace panda::test

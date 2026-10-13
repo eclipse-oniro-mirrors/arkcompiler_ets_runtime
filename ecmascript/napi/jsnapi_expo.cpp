@@ -5471,6 +5471,16 @@ size_t JSNApi::GetEcmaVMExpectedMemoryReclamationSize(const EcmaVM *vm)
     return vm->GetHeap()->GetIdleGCTrigger()->GetExpectedMemoryReclamationSize();
 }
 
+void JSNApi::EnableHandleMemoryOptimization(EcmaVM *vm)
+{
+    if (vm == nullptr) {
+        LOG_ECMA(ERROR) << "EnableHandleMemoryOptimization but vm is nullptr";
+        return;
+    }
+    LOG_ECMA(INFO) << "JSNApi::EnableHandleMemoryOptimization";
+    vm->EnableHandleMemoryOptimization();
+}
+
 void JSNApi::SetStartIdleMonitorCallback(const StartIdleMonitorCallback& callback)
 {
     startIdleMonitorCallback_ = callback;

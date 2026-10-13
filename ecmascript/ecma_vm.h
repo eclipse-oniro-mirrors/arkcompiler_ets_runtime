@@ -531,6 +531,16 @@ public:
     uintptr_t *ExpandPrimitiveStorage();
     void ShrinkPrimitiveStorage(int prevIndex);
     void DeletePrimitiveStorage();
+    // One-way enable of the proportional handle/primitive storage shrink.
+    void EnableHandleMemoryOptimization()
+    {
+        enableHandleMemoryOptimization_ = true;
+    }
+
+    bool IsHandleMemoryOptimizationEnabled() const
+    {
+        return enableHandleMemoryOptimization_;
+    }
 
     size_t IterateHandle(RootVisitor &visitor);
     // Visit all roots, including STW-only and concurrent roots
@@ -1896,6 +1906,8 @@ private:
 
     // For runtime async stack trace recording
     bool enableRuntimeAsyncStack_ = false;
+    // Proportional handle/primitive storage shrink, off by default.
+    bool enableHandleMemoryOptimization_ {false};
     AsyncStackTraceManager *asyncStackTraceManager_ {nullptr};
 
     // isBundle means app compile mode is JSBundle
