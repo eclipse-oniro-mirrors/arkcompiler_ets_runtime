@@ -68,6 +68,7 @@
               "security_guard"
             ],
             "third_party": [
+              "cJSON"
             ]
         },
         "build": {
