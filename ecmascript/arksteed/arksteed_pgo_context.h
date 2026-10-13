@@ -56,6 +56,19 @@ public:
         return feedback;
     }
 
+    CallFeedback ReadCallFeedback(const kungfu::BytecodeInfo &bytecodeInfo)
+    {
+        CallFeedback feedback;
+        ArkSteedFeedbackReader reader(compilerThread_, bytecodeInfo, &broker_);
+        broker_.GetFeedbackForCall(reader, &feedback);
+        return feedback;
+    }
+
+    bool TargetsCurrentFunction(const CallFeedback &feedback) const
+    {
+        return feedback.IsMonomorphicJSFunction() && broker_.IsSameFunction(feedback.target);
+    }
+
 private:
     JSThread *compilerThread_ {nullptr};
     JitCompilationEnv *env_ {nullptr};

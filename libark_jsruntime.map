@@ -271,6 +271,7 @@
       panda::ecmascript::JSArray::ArrayCreate*;
       panda::ecmascript::JSArray::CheckAndCopyArray*;
       panda::ecmascript::JSFunction::GetOrCreateInitialJSHClass*;
+      panda::ecmascript::JSFunction::IsSharedFunction*;
       panda::ecmascript::JSMap::Set*;
       panda::ecmascript::JSObject::AddElementInternal*;
       panda::ecmascript::JSObject::CallSetter*;

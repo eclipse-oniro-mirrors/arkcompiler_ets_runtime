@@ -167,6 +167,72 @@ void CallVertex::SetValueLocationConstraints()
     UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
 }
 
+void CallKnownJSFunctionVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+    SetTemporariesNeeded(1);
+    UseAndClobberFixed(Arg(TARGET_INDEX), ArkSteedAssembler::CALLEE_TARGET_REGISTER);
+    UseAny(Arg(NEW_TARGET_INDEX));
+    UseAny(Arg(RECEIVER_INDEX));
+    UseAndClobberFixed(Arg(CONTEXT_INDEX), ArkSteedAssembler::CALLEE_CONTEXT_REGISTER);
+    for (uint32_t index = FIRST_ARG_INDEX; index < GetInputCount(); ++index) {
+        UseAny(Arg(index));
+    }
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
+
+uint32_t CallKnownBuiltinVertex::GetReservedCallSlotCount() const
+{
+    uint32_t logicalSlotCount = 0;
+    if (UsesFastStub()) {
+        constexpr uint32_t BUILTIN_ARG_COUNT = static_cast<uint32_t>(kungfu::BuiltinsArgs::NUM_OF_INPUTS);
+        uint32_t registerArgCount = static_cast<uint32_t>(ArkSteedAssembler::NUM_ARG_REGISTERS);
+        logicalSlotCount = BUILTIN_ARG_COUNT > registerArgCount ? BUILTIN_ARG_COUNT - registerArgCount : 0;
+    } else {
+        logicalSlotCount = actualArgc_ + NUM_MANDATORY_JSFUNC_ARGS + 2U;  // Glue and total argc.
+    }
+    return (logicalSlotCount + 1U) & ~1U;
+}
+
+void CallKnownBuiltinVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+    if (UsesFastStub()) {
+        UseAndClobberFixed(Arg(TARGET_INDEX), ArkSteedAssembler::GetParameterRegister(2));  // 2: builtin call target
+        UseAndClobberFixed(Arg(NEW_TARGET_INDEX), ArkSteedAssembler::GetParameterRegister(3));  // 3: builtin newTarget
+        UseAndClobberFixed(Arg(RECEIVER_INDEX), ArkSteedAssembler::GetParameterRegister(4));  // 4: builtin this value
+        constexpr uint32_t FIRST_USER_ARG_PARAMETER = static_cast<uint32_t>(kungfu::BuiltinsArgs::ARG0_OR_ARGV);
+        for (uint32_t index = 0; index < actualArgc_; index++) {
+            uint32_t parameterIndex = FIRST_USER_ARG_PARAMETER + index;
+            if (parameterIndex < static_cast<uint32_t>(ArkSteedAssembler::NUM_ARG_REGISTERS)) {
+                UseAndClobberFixed(Arg(FIRST_ARG_INDEX + index),
+                                   ArkSteedAssembler::GetParameterRegister(static_cast<int>(parameterIndex)));
+            } else {
+                UseAny(Arg(FIRST_ARG_INDEX + index));
+            }
+        }
+    } else {
+        UseRegister(Arg(TARGET_INDEX));
+        for (uint32_t index = NEW_TARGET_INDEX; index < GetInputCount(); index++) {
+            UseAny(Arg(index));
+        }
+    }
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
+
+void CallSelfVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+    UseAndClobberFixed(Arg(TARGET_INDEX), ArkSteedAssembler::CALLEE_TARGET_REGISTER);
+    UseAny(Arg(NEW_TARGET_INDEX));
+    UseAny(Arg(RECEIVER_INDEX));
+    UseAndClobberFixed(Arg(CONTEXT_INDEX), ArkSteedAssembler::CALLEE_CONTEXT_REGISTER);
+    for (uint32_t index = FIRST_ARG_INDEX; index < GetInputCount(); ++index) {
+        UseAny(Arg(index));
+    }
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
+
 void CallCommonStubVertex::SetValueLocationConstraints()
 {
     // Define return value in x0/rax (C calling convention)
@@ -183,6 +249,12 @@ void LineStringLoadElementVertex::SetValueLocationConstraints()
     UseRegister(Arg(STRING_INDEX));
     UseRegister(Arg(ELEMENT_INDEX));
     UseRegister(Arg(LENGTH_AND_FLAGS_INDEX));
+}
+
+void DeoptIfReferenceNotEqualVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
 }
 
 void DeoptIfHClassMismatchVertex::SetValueLocationConstraints()
@@ -1093,6 +1165,34 @@ DUMP_EXTRA(InitialValue)
 DUMP_EXTRA(Call)
 {
     out << "  actualArgc = " << vertex->GetActualArgc();
+}
+
+DUMP_EXTRA(CallKnownJSFunction)
+{
+    out << "  actualArgc = " << vertex->GetActualArgc()
+        << "  reservedCallSlotCount = " << vertex->GetReservedCallSlotCount()
+        << "  source = feedback";
+}
+
+DUMP_EXTRA(CallKnownBuiltin)
+{
+    out << "  actualArgc = " << vertex->GetActualArgc()
+        << "  builtin = " << kungfu::BuiltinsStubCSigns::GetBuiltinName(vertex->GetBuiltinId())
+        << "  entry = " << (vertex->UsesFastStub() ? "fast-stub" : "native-cpp")
+        << "  reservedCallSlotCount = " << vertex->GetReservedCallSlotCount()
+        << "  source = feedback";
+}
+
+DUMP_EXTRA(CallSelf)
+{
+    out << "  actualArgc = " << vertex->GetActualArgc()
+        << "  expectedParameterCount = " << vertex->GetExpectedParameterCount()
+        << "  reservedCallSlotCount = " << vertex->GetReservedCallSlotCount();
+}
+
+DUMP_EXTRA(DeoptIfReferenceNotEqual)
+{
+    out << "  type = " << static_cast<int>(vertex->GetDeoptType());
 }
 
 DUMP_EXTRA(DeoptIfHClassMismatch)

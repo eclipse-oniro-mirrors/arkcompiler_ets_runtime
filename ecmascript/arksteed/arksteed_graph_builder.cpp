@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cmath>
 #include <limits>
+#include <optional>
 
 #include "securec.h"
 
@@ -45,9 +46,12 @@
 #include "ecmascript/js_function.h"
 #include "ecmascript/js_array.h"
 #include "ecmascript/js_thread.h"
+#include "ecmascript/js_function_kind.h"
 #include "ecmascript/js_typed_array.h"
 #include "ecmascript/jspandafile/program_object.h"
 #include "ecmascript/lexical_env.h"
+#include "ecmascript/mem/machine_code.h"
+#include "ecmascript/method.h"
 #include "ecmascript/string/base_string.h"
 
 namespace panda::ecmascript::arksteed {
@@ -56,6 +60,95 @@ constexpr uint32_t CALL_ARG0 = 0;
 constexpr uint32_t CALL_ARG1 = 1;
 constexpr uint32_t CALL_ARG2 = CALL_ARG1 + 1;
 constexpr uint32_t CALL_ARG3 = CALL_ARG2 + 1;
+
+class KnownCallPlan {
+public:
+    static KnownCallPlan ForFeedback(uint32_t actualArgc, ValueVertex *expectedTargetConstant)
+    {
+        return KnownCallPlan(actualArgc, expectedTargetConstant);
+    }
+
+    uint32_t GetActualArgc() const
+    {
+        return actualArgc_;
+    }
+
+    ValueVertex *GetExpectedTargetConstant() const
+    {
+        return expectedTargetConstant_;
+    }
+
+    void Verify() const
+    {
+#ifndef NDEBUG
+        ASSERT(expectedTargetConstant_ != nullptr);
+        ASSERT(expectedTargetConstant_->Is<HeapConstantVertex>());
+        ASSERT(expectedTargetConstant_->Cast<HeapConstantVertex>()->GetStaticNodeType() ==
+               static_cast<uint16_t>(NodeInfo::NodeType::JS_FUNCTION));
+#endif
+    }
+
+private:
+    KnownCallPlan(uint32_t actualArgc, ValueVertex *expectedTargetConstant)
+        : actualArgc_(actualArgc),
+          expectedTargetConstant_(expectedTargetConstant)
+    {
+    }
+
+    uint32_t actualArgc_;
+    ValueVertex *expectedTargetConstant_;
+};
+
+class KnownBuiltinCallPlan {
+public:
+    KnownBuiltinCallPlan(uint32_t actualArgc, kungfu::BuiltinsStubCSigns::ID builtinId,
+                         uint32_t globalEnvFieldIndex, BuiltinCallEntryKind entryKind)
+        : actualArgc_(actualArgc), builtinId_(builtinId), globalEnvFieldIndex_(globalEnvFieldIndex),
+          entryKind_(entryKind)
+    {
+    }
+
+    KnownBuiltinCallPlan(uint32_t actualArgc, kungfu::BuiltinsStubCSigns::ID builtinId,
+                         uint32_t globalEnvFieldIndex, BuiltinCallEntryKind entryKind,
+                         ValueVertex *expectedMethodConstant)
+        : actualArgc_(actualArgc), builtinId_(builtinId), globalEnvFieldIndex_(globalEnvFieldIndex),
+          entryKind_(entryKind), expectedMethodConstant_(expectedMethodConstant)
+    {
+    }
+
+    uint32_t GetActualArgc() const
+    {
+        return actualArgc_;
+    }
+
+    kungfu::BuiltinsStubCSigns::ID GetBuiltinId() const
+    {
+        return builtinId_;
+    }
+
+    uint32_t GetGlobalEnvFieldIndex() const
+    {
+        return globalEnvFieldIndex_;
+    }
+
+    BuiltinCallEntryKind GetEntryKind() const
+    {
+        return entryKind_;
+    }
+
+    ValueVertex *GetExpectedMethodConstant() const
+    {
+        ASSERT(expectedMethodConstant_ != nullptr);
+        return expectedMethodConstant_;
+    }
+
+private:
+    uint32_t actualArgc_;
+    kungfu::BuiltinsStubCSigns::ID builtinId_;
+    uint32_t globalEnvFieldIndex_;
+    BuiltinCallEntryKind entryKind_;
+    ValueVertex *expectedMethodConstant_ {nullptr};
+};
 
 bool IsTaggedCallType(kungfu::VariableType type)
 {
@@ -520,7 +613,12 @@ void GraphBuilder::InitializeStartBlock(SharedBCFrameState frameState)
         auto *v = NewVertex<InitialValueVertex>(blocks_[0], {}, slotIndex);
         graph_->AddParameter(v);
         frameState.Set(VRegOfParam(numLocal_, i), v);
+        if (i == CALL_TARGET_PARAM_INDEX) {
+            ASSERT(slotIndex == CALL_TARGET_FP_SLOT_INDEX);
+            initialCallTarget_ = v;
+        }
     }
+    ASSERT(initialCallTarget_ != nullptr);
     actualArgc_ = NewVertex<ActualArgcVertex>(blocks_[0], {});
     taggedActualArgc_ = NewVertex<I32ToTaggedIntVertex>(blocks_[0], {actualArgc_});
 
@@ -1274,7 +1372,7 @@ struct GraphBuilder::BytecodeVisitor {
                 break;
             // -------- Category #8: Function Calls --------
             case kungfu::EcmaOpcode::CALLARG0_IMM8:
-                LowerCallArg0();
+                LowerCallArg0(bcInfo);
                 break;
             case kungfu::EcmaOpcode::CALLARG1_IMM8_V8:
                 LowerCallArg1(bcInfo);
@@ -2306,20 +2404,286 @@ struct GraphBuilder::BytecodeVisitor {
 
     // -------- Category #8: Function Calls --------
 
+    bool CanUseCallSelf() const
+    {
+        switch (self->preproc_->GetMethod()->GetFunctionKind()) {
+            case FunctionKind::NORMAL_FUNCTION:
+            case FunctionKind::ARROW_FUNCTION:
+            case FunctionKind::BASE_CONSTRUCTOR:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    std::optional<KnownCallPlan> TryCreateProfiledKnownCallPlan(const CallFeedback &feedback, uint32_t actualArgc)
+    {
+        if (!feedback.IsMonomorphicJSFunction()) {
+            return std::nullopt;
+        }
+
+        ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
+        auto serializingScope = self->pgoContext_.CreateSerializingScope(
+            "ArkSteedGraphBuilder::TryCreateProfiledKnownCallPlan");
+        JSThread *compilerThread = broker->GetCompilerThread();
+        JSTaggedValue target;
+        if (!broker->TryResolveRef(feedback.target, &target) || !target.IsJSFunction() || target.IsJSShared() ||
+            target.IsClassConstructor()) {
+            return std::nullopt;
+        }
+
+        auto *function = JSFunction::Cast(target.GetTaggedObject());
+        JSTaggedValue methodValue = function->GetMethod(compilerThread);
+        if (function->IsSharedFunction() || !methodValue.IsMethod()) {
+            return std::nullopt;
+        }
+        auto *method = Method::Cast(methodValue.GetTaggedObject());
+        if (method->IsNativeWithCallField()) {
+            return std::nullopt;
+        }
+
+        uint32_t expectedParameterCount = method->GetNumArgsWithCallField();
+        if (actualArgc != expectedParameterCount) {
+            return std::nullopt;
+        }
+        ValueVertex *expectedTargetConstant = GetHeapConstant(feedback.target);
+        if (expectedTargetConstant == nullptr) {
+            return std::nullopt;
+        }
+        auto plan = KnownCallPlan::ForFeedback(actualArgc, expectedTargetConstant);
+        plan.Verify();
+        return plan;
+    }
+
+    ValueVertex *TryGetCanonicalBuiltinMethodConstant(kungfu::BuiltinsStubCSigns::ID builtinId,
+                                                      uint32_t globalEnvFieldIndex)
+    {
+        ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
+        auto serializingScope = self->pgoContext_.CreateSerializingScope(
+            "ArkSteedGraphBuilder::TryGetCanonicalBuiltinMethodConstant");
+        JSThread *compilerThread = broker->GetCompilerThread();
+        auto globalEnv = self->preproc_->GetEnv()->GetGlobalEnv();
+        JSHandle<JSTaggedValue> canonicalTarget =
+            globalEnv->GetGlobalEnvObjectWithBarrierByIndex(globalEnvFieldIndex);
+        if (!canonicalTarget->IsJSFunction()) {
+            return nullptr;
+        }
+
+        auto *function = JSFunction::Cast(canonicalTarget->GetTaggedObject());
+        JSTaggedValue methodValue = function->GetMethod(compilerThread);
+        if (!methodValue.IsMethod()) {
+            return nullptr;
+        }
+        auto *method = Method::Cast(methodValue.GetTaggedObject());
+        if (!method->IsNativeWithCallField() || method->GetBuiltinId() != static_cast<uint16_t>(builtinId)) {
+            return nullptr;
+        }
+        return GetHeapConstant(broker->MakeObjectRef(methodValue));
+    }
+
+    std::optional<KnownBuiltinCallPlan> TryCreateProfiledKnownBuiltinCallPlan(
+        const CallFeedback &feedback, uint32_t actualArgc)
+    {
+        if (!feedback.IsMonomorphicBuiltin()) {
+            return std::nullopt;
+        }
+
+        auto builtinId = feedback.builtinId;
+        GlobalEnvField globalEnvField = kungfu::BuiltinsStubCSigns::GetGlobalEnvFieldIndex(builtinId);
+        if (globalEnvField == GlobalEnvField::INVALID) {
+            return std::nullopt;
+        }
+
+        bool usesFastStub = kungfu::BuiltinsStubCSigns::IsFastBuiltin(builtinId) &&
+                            builtinId < kungfu::BuiltinsStubCSigns::ID::BUILTINS_CONSTRUCTOR_STUB_FIRST &&
+                            actualArgc <= CALL_ARG3;
+        BuiltinCallEntryKind entryKind = usesFastStub
+            ? BuiltinCallEntryKind::FAST_STUB : BuiltinCallEntryKind::NATIVE_CPP;
+        uint32_t globalEnvFieldIndex = static_cast<uint32_t>(globalEnvField);
+        ValueVertex *expectedMethodConstant =
+            TryGetCanonicalBuiltinMethodConstant(builtinId, globalEnvFieldIndex);
+        if (expectedMethodConstant == nullptr) {
+            return std::nullopt;
+        }
+        return KnownBuiltinCallPlan(
+            actualArgc, builtinId, globalEnvFieldIndex, entryKind, expectedMethodConstant);
+    }
+
+    template <class InputRange, class Plan>
+    CallKnownJSFunctionVertex *BuildGuardedKnownCall(const InputRange &inputs, const Plan &plan)
+    {
+        ASSERT(std::size(inputs) == CallVertex::FIRST_ARG_INDEX + plan.GetActualArgc());
+
+        auto input = std::begin(inputs);
+        ValueVertex *target = *input++;
+        ValueVertex *newTarget = *input++;
+        ValueVertex *receiver = *input++;
+
+        ValueVertex *context = self->NewVertex<LoadTaggedFieldVertex>(
+            compileInfoFacts_, currentBlock, {target}, JSFunction::LEXICAL_ENV_OFFSET);
+        ChunkVector<ValueVertex *> knownInputs(self->chunk_);
+        knownInputs.reserve(CallKnownJSFunctionVertex::FIRST_ARG_INDEX + plan.GetActualArgc());
+        knownInputs.emplace_back(target);
+        knownInputs.emplace_back(newTarget);
+        knownInputs.emplace_back(receiver);
+        knownInputs.emplace_back(context);
+        for (uint32_t index = 0; index < plan.GetActualArgc(); index++) {
+            knownInputs.emplace_back(*input++);
+        }
+
+        auto *call = self->NewVertex<CallKnownJSFunctionVertex>(
+            compileInfoFacts_, currentBlock, knownInputs, plan.GetActualArgc());
+        UpdateCatchBlockData(call);
+        return call;
+    }
+
     template <class InputRange = std::initializer_list<ValueVertex *>>
-    CallVertex *BuildCallVertex(const InputRange &inputs, uint32_t actualArgc)
+    ValueVertex *BuildKnownCall(const InputRange &inputs, const KnownCallPlan &plan)
+    {
+        ASSERT(std::size(inputs) == CallVertex::FIRST_ARG_INDEX + plan.GetActualArgc());
+        ValueVertex *actualTarget = *std::begin(inputs);
+        BuildEagerDeoptIfReferenceNotEqual(actualTarget, plan.GetExpectedTargetConstant());
+        return BuildGuardedKnownCall(inputs, plan);
+    }
+
+    template <class InputRange = std::initializer_list<ValueVertex *>>
+    CallVertex *BuildGenericCallVertex(const InputRange &inputs, uint32_t actualArgc)
     {
         auto *call = self->NewVertex<CallVertex>(compileInfoFacts_, currentBlock, inputs, actualArgc);
         UpdateCatchBlockData(call);
         return call;
     }
 
-    void LowerCallArg0()
+    template <class InputRange = std::initializer_list<ValueVertex *>>
+    CallSelfVertex *BuildSelfCallVertex(const InputRange &inputs, uint32_t actualArgc)
+    {
+        ASSERT(std::size(inputs) == CallVertex::FIRST_ARG_INDEX + actualArgc);
+        auto input = std::begin(inputs);
+        input++;
+        ValueVertex *newTarget = *input++;
+        ValueVertex *receiver = *input++;
+        ChunkVector<ValueVertex *> selfInputs(self->chunk_);
+        selfInputs.reserve(CallSelfVertex::FIRST_ARG_INDEX + actualArgc);
+        selfInputs.emplace_back(self->initialCallTarget_);
+        selfInputs.emplace_back(newTarget);
+        selfInputs.emplace_back(receiver);
+        selfInputs.emplace_back(self->initialLexicalEnv_);
+        for (uint32_t index = 0; index < actualArgc; index++) {
+            selfInputs.emplace_back(*input++);
+        }
+
+        uint32_t expectedParameterCount = self->preproc_->GetMethod()->GetNumArgsWithCallField();
+        auto *call = self->NewVertex<CallSelfVertex>(
+            compileInfoFacts_, currentBlock, selfInputs, actualArgc, expectedParameterCount);
+        self->graph_->SetHasRecursiveCalls(true);
+        UpdateCatchBlockData(call);
+        return call;
+    }
+
+    template <class InputRange = std::initializer_list<ValueVertex *>>
+    ValueVertex *TryBuildPGOSelfCall(const CallFeedback &feedback, const InputRange &inputs, uint32_t actualArgc)
+    {
+        if (!self->pgoContext_.TargetsCurrentFunction(feedback)) {
+            return nullptr;
+        }
+        ValueVertex *actualTarget = *std::begin(inputs);
+        BuildEagerDeoptIfReferenceNotEqual(actualTarget, self->initialCallTarget_);
+        return BuildSelfCallVertex(inputs, actualArgc);
+    }
+
+    ValueVertex *LoadCanonicalBuiltinTarget(const KnownBuiltinCallPlan &plan)
+    {
+        int32_t fieldOffset = static_cast<int32_t>(
+            GlobalEnv::HEADER_SIZE + plan.GetGlobalEnvFieldIndex() * JSTaggedValue::TaggedTypeSize());
+        return self->NewVertex<LoadTaggedFieldVertex>(
+            compileInfoFacts_, currentBlock, {GlobalEnv()}, fieldOffset);
+    }
+
+    void BuildEagerDeoptIfReferenceNotEqual(ValueVertex *actual, ValueVertex *expected)
+    {
+        uint32_t bytecodeOffset = self->preproc_->GetBytecodeOffset(currentBcIndex);
+        auto *guard = self->NewVertex<DeoptIfReferenceNotEqualVertex>(
+            compileInfoFacts_, currentBlock, {actual, expected}, self->chunk_, bytecodeOffset,
+            kungfu::DeoptType::NOTCALLTGT1);
+        guard->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(currentBcIndex));
+    }
+
+    template <class InputRange>
+    CallKnownBuiltinVertex *BuildKnownBuiltinCallVertex(
+        const InputRange &inputs, const KnownBuiltinCallPlan &plan, ValueVertex *canonicalTarget)
+    {
+        ASSERT(std::size(inputs) == CallKnownBuiltinVertex::FIRST_ARG_INDEX + plan.GetActualArgc());
+        auto input = std::begin(inputs);
+        input++;
+        ValueVertex *newTarget = *input++;
+        ValueVertex *receiver = *input++;
+
+        ChunkVector<ValueVertex *> knownInputs(self->chunk_);
+        knownInputs.reserve(CallKnownBuiltinVertex::FIRST_ARG_INDEX + plan.GetActualArgc());
+        knownInputs.emplace_back(canonicalTarget);
+        knownInputs.emplace_back(newTarget);
+        knownInputs.emplace_back(receiver);
+        for (uint32_t index = 0; index < plan.GetActualArgc(); index++) {
+            knownInputs.emplace_back(*input++);
+        }
+
+        auto *call = self->NewVertex<CallKnownBuiltinVertex>(
+            compileInfoFacts_, currentBlock, knownInputs, plan.GetActualArgc(), plan.GetBuiltinId(),
+            plan.GetEntryKind());
+        UpdateCatchBlockData(call);
+        return call;
+    }
+
+    template <class InputRange = std::initializer_list<ValueVertex *>>
+    ValueVertex *BuildKnownBuiltinCall(const InputRange &inputs, const KnownBuiltinCallPlan &plan)
+    {
+        ASSERT(std::size(inputs) == CallKnownBuiltinVertex::FIRST_ARG_INDEX + plan.GetActualArgc());
+        ValueVertex *actualTarget = *std::begin(inputs);
+        ValueVertex *canonicalTarget = LoadCanonicalBuiltinTarget(plan);
+        BuildEagerDeoptIfReferenceNotEqual(actualTarget, canonicalTarget);
+        auto *currentMethod = self->NewVertex<LoadTaggedFieldVertex>(
+            compileInfoFacts_, currentBlock, {canonicalTarget}, JSFunctionBase::METHOD_OFFSET);
+        BuildEagerDeoptIfReferenceNotEqual(currentMethod, plan.GetExpectedMethodConstant());
+        return BuildKnownBuiltinCallVertex(inputs, plan, canonicalTarget);
+    }
+
+    template <class InputRange = std::initializer_list<ValueVertex *>>
+    ValueVertex *BuildCallVertex(const BytecodeInfo *bcInfo, const InputRange &inputs, uint32_t actualArgc)
+    {
+        ASSERT(bcInfo != nullptr);
+        ASSERT(std::size(inputs) == CallVertex::FIRST_ARG_INDEX + actualArgc);
+        ValueVertex *target = *std::begin(inputs);
+        bool canUseCallSelf = CanUseCallSelf();
+        if (canUseCallSelf && target == self->initialCallTarget_) {
+            return BuildSelfCallVertex(inputs, actualArgc);
+        }
+
+        CallFeedback feedback = self->pgoContext_.ReadCallFeedback(*bcInfo);
+        if (canUseCallSelf) {
+            if (ValueVertex *call = TryBuildPGOSelfCall(feedback, inputs, actualArgc); call != nullptr) {
+                return call;
+            }
+        }
+
+        std::optional<KnownCallPlan> knownCallPlan = TryCreateProfiledKnownCallPlan(feedback, actualArgc);
+        if (knownCallPlan.has_value()) {
+            return BuildKnownCall(inputs, knownCallPlan.value());
+        }
+
+        std::optional<KnownBuiltinCallPlan> knownBuiltinPlan =
+            TryCreateProfiledKnownBuiltinCallPlan(feedback, actualArgc);
+        if (knownBuiltinPlan.has_value()) {
+            return BuildKnownBuiltinCall(inputs, knownBuiltinPlan.value());
+        }
+        return BuildGenericCallVertex(inputs, actualArgc);
+    }
+
+    void LowerCallArg0(const BytecodeInfo *bcInfo)
     {
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *undefined = self->undefinedValue_;
 
-        CallVertex *call = BuildCallVertex({func, undefined, undefined}, CALL_ARG0);
+        ValueVertex *call = BuildCallVertex(bcInfo, {func, undefined, undefined}, CALL_ARG0);
         frameState.SetAcc(call);
         LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
     }
@@ -2330,7 +2694,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *undefined = self->undefinedValue_;
 
-        CallVertex *call = BuildCallVertex({func, undefined, undefined, a0Value}, CALL_ARG1);
+        ValueVertex *call = BuildCallVertex(bcInfo, {func, undefined, undefined, a0Value}, CALL_ARG1);
         frameState.SetAcc(call);
         LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
     }
@@ -2342,7 +2706,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *undefined = self->undefinedValue_;
 
-        CallVertex *call = BuildCallVertex({func, undefined, undefined, a0Value, a1Value}, CALL_ARG2);
+        ValueVertex *call = BuildCallVertex(bcInfo, {func, undefined, undefined, a0Value, a1Value}, CALL_ARG2);
         frameState.SetAcc(call);
         LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
     }
@@ -2355,7 +2719,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *undefined = self->undefinedValue_;
 
-        CallVertex *call = BuildCallVertex({func, undefined, undefined, a0Value, a1Value, a2Value}, CALL_ARG3);
+        ValueVertex *call = BuildCallVertex(bcInfo, {func, undefined, undefined, a0Value, a1Value, a2Value}, CALL_ARG3);
         frameState.SetAcc(call);
         LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
     }
@@ -2366,7 +2730,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *undefined = self->undefinedValue_;
 
-        CallVertex *call = BuildCallVertex({func, undefined, thisObj}, CALL_ARG0);
+        ValueVertex *call = BuildCallVertex(bcInfo, {func, undefined, thisObj}, CALL_ARG0);
         frameState.SetAcc(call);
         LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
     }
@@ -2377,7 +2741,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *undefined = self->undefinedValue_;
 
-        CallVertex *call = BuildCallVertex({func, undefined, thisObj}, CALL_ARG0);
+        CallVertex *call = BuildGenericCallVertex({func, undefined, thisObj}, CALL_ARG0);
         LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
     }
 
@@ -2388,7 +2752,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *undefined = self->undefinedValue_;
 
-        CallVertex *call = BuildCallVertex({func, undefined, thisObj, a0Value}, CALL_ARG1);
+        ValueVertex *call = BuildCallVertex(bcInfo, {func, undefined, thisObj, a0Value}, CALL_ARG1);
         frameState.SetAcc(call);
         LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
     }
@@ -2401,7 +2765,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *undefined = self->undefinedValue_;
 
-        CallVertex *call = BuildCallVertex({func, undefined, thisObj, a0Value, a1Value}, CALL_ARG2);
+        ValueVertex *call = BuildCallVertex(bcInfo, {func, undefined, thisObj, a0Value, a1Value}, CALL_ARG2);
         frameState.SetAcc(call);
         LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
     }
@@ -2415,7 +2779,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *undefined = self->undefinedValue_;
 
-        CallVertex *call = BuildCallVertex({func, undefined, thisObj, a0Value, a1Value, a2Value}, CALL_ARG3);
+        ValueVertex *call = BuildCallVertex(bcInfo, {func, undefined, thisObj, a0Value, a1Value, a2Value}, CALL_ARG3);
         frameState.SetAcc(call);
         LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
     }
@@ -2432,7 +2796,7 @@ struct GraphBuilder::BytecodeVisitor {
         for (uint32_t idx = 0; idx < inputSize; idx++) {
             args.push_back(LoadRegister(bcInfo, static_cast<int>(idx)));
         }
-        CallVertex *call = BuildCallVertex(args, inputSize);
+        ValueVertex *call = BuildCallVertex(bcInfo, args, inputSize);
         frameState.SetAcc(call);
         LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
     }
@@ -2451,7 +2815,7 @@ struct GraphBuilder::BytecodeVisitor {
         for (uint32_t idx = 0; idx < argc; idx++) {
             args.push_back(LoadRegister(bcInfo, static_cast<int>(idx + 1)));
         }
-        CallVertex *call = BuildCallVertex(args, argc);
+        ValueVertex *call = BuildCallVertex(bcInfo, args, argc);
         frameState.SetAcc(call);
         LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
     }
@@ -2489,7 +2853,7 @@ struct GraphBuilder::BytecodeVisitor {
         for (uint32_t idx = 0; idx < argc; idx++) {
             args.push_back(LoadRegister(bcInfo, static_cast<int>(idx + 1)));
         }
-        CallVertex *call = BuildCallVertex(args, argc);
+        CallVertex *call = BuildGenericCallVertex(args, argc);
         frameState.SetAcc(call);
         LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
     }
@@ -3886,7 +4250,8 @@ struct GraphBuilder::BytecodeVisitor {
         // E refers to exception lazy-deopt
         bool needsE = HasNeverExecutedCatchBlock();
         // D refers to dependency lazy-deopt.
-        bool needsD = vertex->Is<CallVertex>();
+        bool needsD = vertex->Is<CallVertex>() || vertex->Is<CallKnownJSFunctionVertex>() ||
+                      vertex->Is<CallKnownBuiltinVertex>() || vertex->Is<CallSelfVertex>();
         if (auto *call = vertex->TryCast<CallCommonStubVertex>()) {
             needsD = !IsDependencySafeCommonStubCall(call);
         } else if (auto *call = vertex->TryCast<CallRuntimeVertex>()) {
@@ -7050,8 +7415,8 @@ struct GraphBuilder::BytecodeVisitor {
 
         currentBlock = callSetterBlock;
         compileInfoFacts_ = setterFacts->Clone();
-        CallVertex *call =
-            BuildCallVertex(std::initializer_list<ValueVertex *> {setter, self->undefinedValue_, receiver, value}, 1);
+        CallVertex *call = BuildGenericCallVertex(
+            std::initializer_list<ValueVertex *> {setter, self->undefinedValue_, receiver, value}, 1);
         LoadLazyDeoptFrameStateForThrowableCall(bcIndex, call);
         self->FinishBlockWithJump(currentBlock, doneBlock);
 

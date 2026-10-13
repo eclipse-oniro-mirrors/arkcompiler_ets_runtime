@@ -92,6 +92,21 @@ void ArkSteedAssembler::CallTrampoline(kungfu::RuntimeStubCSigns::ID stubId)
     Call(scratch);
 }
 
+void ArkSteedAssembler::CallNativeBuiltinTrampoline(ArkSteedRegister nativeCode)
+{
+    TemporaryRegisterScope scope(this);
+    ASSERT(entryThread_ != nullptr);
+    Address address = entryThread_->GetRTInterface(RTSTUB_ID(PushCallArgsAndDispatchNative));
+    ArkSteedRegister scratch = scope.AcquireScratch();
+#if defined(PANDA_TARGET_AMD64)
+    Move(x64::rax, nativeCode);
+#elif defined(PANDA_TARGET_ARM64)
+    Move(aarch64::x0, nativeCode);
+#endif
+    Move(scratch, static_cast<uint64_t>(address));
+    Call(scratch);
+}
+
 void ArkSteedAssembler::CallNGCRuntime(kungfu::RuntimeStubCSigns::ID runtimeId)
 {
     TemporaryRegisterScope scope(this);
@@ -110,6 +125,14 @@ inline void ArkSteedAssembler::CallCommonStub(uint32_t stubId)
     auto scratch = scope.AcquireScratch();
     Move(scratch, static_cast<uint64_t>(address));
     Call(scratch);
+}
+
+inline void ArkSteedAssembler::LoadBuiltinStubEntry(ArkSteedRegister dst, ArkSteedRegister glue, uint32_t builtinId)
+{
+    constexpr uint32_t SLOT_SIZE = sizeof(uintptr_t);
+    uint32_t offset = static_cast<uint32_t>(JSThread::GlueData::GetBuiltinsStubEntriesOffset(false)) +
+                      builtinId * SLOT_SIZE;
+    LoadField(dst, glue, static_cast<int32_t>(offset));
 }
 
 inline void ArkSteedAssembler::CallDeoptHandler(kungfu::DeoptType deoptType)

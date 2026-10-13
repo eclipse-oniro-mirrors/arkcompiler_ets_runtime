@@ -129,6 +129,7 @@ private:
     InitialValueVertex *initialActualArgc_ = nullptr;
     ValueVertex *actualArgc_ = nullptr;
     ValueVertex *taggedActualArgc_ = nullptr;
+    InitialValueVertex *initialCallTarget_ = nullptr;
     InitialValueVertex *initialLexicalEnv_ = nullptr;
     LoadTaggedFieldVertex *lazyGlobalEnv_ = nullptr;
 

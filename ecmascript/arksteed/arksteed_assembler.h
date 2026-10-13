@@ -78,9 +78,13 @@ public:
 #if defined(PANDA_TARGET_AMD64)
     using MemoryOperand = x64::Operand;
     static constexpr int NUM_ARG_REGISTERS = 6;
+    static constexpr ArkSteedRegister CALLEE_TARGET_REGISTER = x64::r12;
+    static constexpr ArkSteedRegister CALLEE_CONTEXT_REGISTER = x64::rbx;
 #elif defined(PANDA_TARGET_ARM64)
     using MemoryOperand = aarch64::MemoryOperand;
     static constexpr int NUM_ARG_REGISTERS = 8;
+    static constexpr ArkSteedRegister CALLEE_TARGET_REGISTER = aarch64::x20;
+    static constexpr ArkSteedRegister CALLEE_CONTEXT_REGISTER = aarch64::x19;
 #endif
     static constexpr ArkSteedRegister GetParameterRegister(int i);
     inline void LoadGlue(ArkSteedRegister dst);
@@ -272,8 +276,10 @@ public:
     void Call(Label *target);
     inline void CallRuntime(kungfu::RuntimeStubCSigns::ID runtimeId);
     inline void CallTrampoline(kungfu::RuntimeStubCSigns::ID stubId);
+    inline void CallNativeBuiltinTrampoline(ArkSteedRegister nativeCode);
     inline void CallNGCRuntime(kungfu::RuntimeStubCSigns::ID runtimeId);
     inline void CallCommonStub(uint32_t stubId);
+    inline void LoadBuiltinStubEntry(ArkSteedRegister dst, ArkSteedRegister glue, uint32_t builtinId);
     void ReturnWithPendingException();
     void ReturnIfPendingException();
     // Branch to target if no pending exception exists in JSThread.

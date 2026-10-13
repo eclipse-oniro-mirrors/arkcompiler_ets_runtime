@@ -92,12 +92,19 @@ private:
     void LoadSteedExpectedArgc(ArkSteedRegister target, ArkSteedRegister expectedArgc);
     void ComputeSteedCallSlotCount(CallVertex *call, ArkSteedRegister slotCount);
     void PrepareArkSteedCall(CallVertex *call, ArkSteedRegister target, ArkSteedRegister scratch);
+    void PrepareArkSteedSelfCall(CallSelfVertex *call);
+    void PrepareKnownCall(CallKnownJSFunctionVertex *call);
     void FreeArkSteedCallFrame(CallVertex *call);
     void EmitCallArkSteed(CallVertex *call, ArkSteedRegister target, ArkSteedRegister scratch, Label *exit);
     void EmitCallGeneric(CallVertex *call, ArkSteedRegister scratch);
+    void EmitCallGeneric(CallKnownJSFunctionVertex *call, ArkSteedRegister scratch);
     void EmitReturnWithPendingException();
     void EmitReturnIfPendingException();
-    int PrepareTrampolineArguments(CallVertex *call, ArkSteedRegister scratch);
+    int PrepareTrampolineArguments(const Vertex *call, uint32_t actualArgc, uint32_t targetIndex,
+                                   uint32_t newTargetIndex, uint32_t receiverIndex, uint32_t firstArgIndex,
+                                   ArkSteedRegister scratch);
+    int PrepareKnownBuiltinStubArguments(CallKnownBuiltinVertex *call);
+    int PrepareKnownBuiltinNativeArguments(CallKnownBuiltinVertex *call);
 
     template <class VertexT>
     void VisitNonControlVertex(VertexT *vertex);
@@ -139,6 +146,7 @@ private:
     ArkSteedSafepointTableBuilder *safepointBuilder_;
     DeoptTranslationBuilder *translationBuilder_;
     DeoptLiteralTableBuilder *deoptLiteralTableBuilder_;
+    Label entryLabel_;
     ChunkVector<EagerDeoptTarget *> eagerDeoptTargetsById_;
     int currentBlockColorIndex_ = 0;
     BB *currentLayoutNextBlock_ = nullptr;

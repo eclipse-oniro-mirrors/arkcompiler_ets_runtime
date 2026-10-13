@@ -53,6 +53,58 @@ bool ArkSteedFeedbackReader::TryGetFeedbackSlotId(uint32_t *slotId) const
     return TryGetFeedbackSlotId(ACCESS_SLOT_INPUT, false, slotId);
 }
 
+bool ArkSteedFeedbackReader::ReadCallFeedback(CallFeedback *feedback) const
+{
+    if (feedback == nullptr) {
+        return false;
+    }
+    *feedback = {};
+
+    uint32_t slotId = 0;
+    if (!TryGetFeedbackSlotId(&slotId)) {
+        return false;
+    }
+
+    ProfileTypeInfo *profileTypeArray = nullptr;
+    if (!broker_->TryGetProfileTypeInfo(&profileTypeArray)) {
+        return false;
+    }
+    uint32_t slotLength = profileTypeArray->GetICSlotLength();
+    if (slotId >= slotLength || slotLength - slotId <= 1) {
+        return false;
+    }
+
+    feedback->slotId = slotId;
+    JSTaggedValue target = profileTypeArray->GetICSlot(compilerThread_, slotId);
+    if (target.IsUndefined()) {
+        return true;
+    }
+    if (target.IsInt()) {
+        int64_t rawTarget = static_cast<int64_t>(target.GetInt());
+        if (rawTarget < 0) {
+            int64_t rawBuiltinId = -rawTarget;
+            if (rawBuiltinId > kungfu::BuiltinsStubCSigns::NONE &&
+                rawBuiltinId < kungfu::BuiltinsStubCSigns::ID::NUM_OF_BUILTINS_ID) {
+                feedback->kind = CallFeedbackKind::MONOMORPHIC_BUILTIN;
+                feedback->builtinId = static_cast<kungfu::BuiltinsStubCSigns::ID>(rawBuiltinId);
+                return true;
+            }
+        }
+        return true;
+    }
+    if (!target.IsJSFunction()) {
+        return true;
+    }
+
+    feedback->target = broker_->MakeFunctionRef(target);
+    if (!feedback->target.IsSafeForCompile()) {
+        *feedback = {};
+        return false;
+    }
+    feedback->kind = CallFeedbackKind::MONOMORPHIC_JS_FUNCTION;
+    return true;
+}
+
 bool ArkSteedFeedbackReader::TryGetConstDataId(int index, uint16_t *constDataId) const
 {
     if (index < 0 || static_cast<size_t>(index) >= bytecodeInfo_.inputs.size()) {
