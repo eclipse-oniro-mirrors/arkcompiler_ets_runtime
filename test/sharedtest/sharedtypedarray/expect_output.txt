@@ -691,3 +691,14 @@ SubSendableArrayBuffer slicedSub[0]: 5
 SubSendableArrayBuffer SendableInt32Array isView: true
 SendableArrayBuffer Int8Array isView: false
 Reflect.apply slice success
+================Test Sendable Atomics================
+SendableInt8Array Atomics: true
+SendableUint8Array Atomics: true
+SendableInt16Array Atomics: true
+SendableUint16Array Atomics: true
+SendableInt32Array Atomics: true
+SendableUint32Array Atomics: true
+SendableFloat32Array Atomics rejection: true
+SendableUint8ClampedArray Atomics rejection: true
+SendableInt32Array wait not-equal: true
+SendableUint32Array wait rejection: true

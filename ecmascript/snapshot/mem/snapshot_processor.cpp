@@ -56,6 +56,7 @@
 #include "ecmascript/builtins/builtins_weak_ref.h"
 #include "ecmascript/builtins/builtins_weak_set.h"
 #include "ecmascript/containers/containers_arraylist.h"
+#include "ecmascript/containers/containers_bitvector.h"
 #include "ecmascript/containers/containers_deque.h"
 #include "ecmascript/containers/containers_hashmap.h"
 #include "ecmascript/containers/containers_hashset.h"
@@ -70,12 +71,12 @@
 #include "ecmascript/containers/containers_treemap.h"
 #include "ecmascript/containers/containers_treeset.h"
 #include "ecmascript/containers/containers_vector.h"
-#include "ecmascript/containers/containers_bitvector.h"
+#include "ecmascript/utils/collections_atomics.h"
 #if USE_CMS_GC
 #include "ecmascript/mem/cms_mem/slot_space-inl.h"
 #endif
-#include "ecmascript/runtime_lock.h"
 #include "ecmascript/ecma_string_table_optimization-inl.h"
+#include "ecmascript/runtime_lock.h"
 #ifdef ARK_SUPPORT_INTL
 #include "ecmascript/builtins/builtins_collator.h"
 #include "ecmascript/builtins/builtins_date_time_format.h"
@@ -86,9 +87,9 @@
 #include "ecmascript/builtins/builtins_number_format.h"
 #include "ecmascript/builtins/builtins_plural_rules.h"
 #include "ecmascript/builtins/builtins_relative_time_format.h"
+#include "ecmascript/builtins/builtins_segment_iterator.h"
 #include "ecmascript/builtins/builtins_segmenter.h"
 #include "ecmascript/builtins/builtins_segments.h"
-#include "ecmascript/builtins/builtins_segment_iterator.h"
 #endif
 
 namespace panda::ecmascript {
@@ -999,7 +1000,20 @@ static uintptr_t g_nativeTable[] = {
     reinterpret_cast<uintptr_t>(JSFunction::LengthGetter),
     reinterpret_cast<uintptr_t>(JSArray::LengthSetter),
     reinterpret_cast<uintptr_t>(JSArray::LengthGetter),
-    reinterpret_cast<uintptr_t>(JSPandaFileManager::GetInstance)
+    reinterpret_cast<uintptr_t>(JSPandaFileManager::GetInstance),
+
+    // Collections entries are appended to preserve existing native method indices.
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Add),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::And),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::CompareExchange),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Exchange),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Load),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Notify),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Or),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Store),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Sub),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Wait),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Xor),
 };
 
 void SnapshotProcessor::Initialize()
