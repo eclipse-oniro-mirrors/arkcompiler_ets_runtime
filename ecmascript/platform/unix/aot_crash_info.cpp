@@ -66,7 +66,7 @@ bool AotCrashInfo::IsAotEscapedOrCompiledOnce(AotCompilerPreprocessor &cPreproce
     }
     std::string pgoRealPath = cPreprocessor.GetMainPkgArgs()->GetPgoDir();
     pgoRealPath.append(ohos::OhosConstants::PATH_SEPARATOR);
-    pgoRealPath.append(ohos::OhosConstants::AOT_RUNTIME_INFO_NAME);
+    pgoRealPath.append(ohos::OhosConstants::COMPILER_ESCAPE_FILE_NAME);
     if (IsAotCompileSuccessOnce(pgoRealPath)) {
         ret = 0;
         LOG_ECMA(INFO) << "Aot has compile success once or escaped.";
@@ -104,7 +104,7 @@ bool AotCrashInfo::IsAotEscaped(const std::string &pgoRealPath)
     }
     std::string filePath = std::string(ohos::OhosConstants::SANDBOX_ARK_PROFILE_PATH)
         + std::string(ohos::OhosConstants::PATH_SEPARATOR)
-        + std::string(ohos::OhosConstants::AOT_RUNTIME_INFO_NAME);
+        + std::string(ohos::OhosConstants::COMPILER_ESCAPE_FILE_NAME);
     return FileExist(filePath.c_str());
 }
 
@@ -112,7 +112,7 @@ bool AotCrashInfo::IsJitEscape()
 {
     std::string filePath = std::string(ohos::OhosConstants::SANDBOX_ARK_PROFILE_PATH)
         + std::string(ohos::OhosConstants::PATH_SEPARATOR)
-        + std::string(ohos::OhosConstants::AOT_RUNTIME_INFO_NAME);
+        + std::string(ohos::OhosConstants::COMPILER_ESCAPE_FILE_NAME);
     return FileExist(filePath.c_str());
 }
 

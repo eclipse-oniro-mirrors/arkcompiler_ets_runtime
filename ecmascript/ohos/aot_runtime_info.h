@@ -283,7 +283,7 @@ public:
         if (strcat_s(realOutPath, NAME_MAX, OhosConstants::PATH_SEPARATOR) != 0) {
             return false;
         }
-        if (strcat_s(realOutPath, NAME_MAX, OhosConstants::AOT_RUNTIME_INFO_NAME) !=0) {
+        if (strcat_s(realOutPath, NAME_MAX, OhosConstants::COMPILER_ESCAPE_FILE_NAME) !=0) {
             return false;
         }
         return true;
