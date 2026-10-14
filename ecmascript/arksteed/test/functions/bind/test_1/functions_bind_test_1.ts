@@ -12,6 +12,28 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+// G11.6 (P0) additive call evidence for `functions/bind`. `this.run.bind(this)` fixes the
+// bound receiver and prefixes no bound argument, so the bound [[Call]] supplies the receiver
+// (ECMA-262 2021 10.4.1.1: bound arguments precede the supplied ones, of which there are
+// none here). The compiled caller invokes the bound function through its generic `Call`
+// vertex, because the call site carries no feedback when the method is installed before its
+// first execution; the underlying `run` target is compiled as well and entered through the
+// bound [[Call]]. `COMPILE_COUNT_GE`/`EXEC_COUNT_GE` name the two claimed methods and
+// `DEOPT_COUNT *Deoptimize* 0` rules out a silent deopt into the interpreter. The expected
+// output and the observed bound-receiver behavior are unchanged.
+
+//! PARAMS --compiler-jit-hotness-threshold=60000
+
+//! METHOD call_compiled_bind_expression_1
+//! HAS Call                        # the generic invocation of the bound function
+
+//! COMPILE_COUNT_GE *call_compiled_bind_expression_1* 1
+//! EXEC_COUNT_GE *call_compiled_bind_expression_1* 1
+//! COMPILE_COUNT_GE *run* 1
+//! EXEC_COUNT_GE *run* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 class BoundClosureTarget {
     value: number;
 

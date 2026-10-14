@@ -12,6 +12,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE switch_return_some_variant 1
+//! EXEC_COUNT_GE *switch_return_some_variant 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function switch_return_some_variant(x, a, b, c, d)
 {
     let base = a * 10;

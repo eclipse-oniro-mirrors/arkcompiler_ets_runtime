@@ -12,6 +12,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+//! METHOD Test
+//! HAS CallRuntime OptNewObjRange
+//! COMPILE_COUNT_GE *Test* 1
+//! EXEC_COUNT_GE *Test* 1
+//! DEOPT_COUNT *Deoptimize* 0
 
 class MyClass {}
 class MyClass2 {}

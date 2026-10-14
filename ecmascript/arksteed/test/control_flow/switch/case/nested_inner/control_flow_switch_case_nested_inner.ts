@@ -12,6 +12,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE switch_case_nested_inner 1
+//! EXEC_COUNT_GE *switch_case_nested_inner 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function switch_case_nested_inner(x, y, a, b, c, d)
 {
     let result = a;

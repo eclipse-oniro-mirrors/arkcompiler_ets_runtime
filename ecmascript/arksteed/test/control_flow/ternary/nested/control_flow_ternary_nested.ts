@@ -13,6 +13,10 @@
  * limitations under the License.
  */
 
+//! COMPILE_COUNT_GE ternary_nested 1
+//! EXEC_COUNT_GE *ternary_nested 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 declare function print(str: number):string;
 
 function ternary_nested(x: number): number {

@@ -12,6 +12,23 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// G11.6 additive evidence (S11/C1/C3/C4): the compiled invocation carrier
+// `callDefaultParamArraySum` performs this leaf's omitted-argument and
+// supplied-argument invocations, so its own dump carries the actual generic
+// `Call` form of those call sites instead of the callee-internal print call.
+// The original target keeps its own positive compile/entry evidence, the
+// probes and the output bytes are unchanged, and the normal path must not
+// deopt. The `_GE` lower bound allows the installation and recompilation
+// multiplicity of the same method.
+//! METHOD callDefaultParamArraySum
+//! HAS Call
+//! COMPILE_COUNT_GE callDefaultParamArraySum 1
+//! EXEC_COUNT_GE *callDefaultParamArraySum* 1
+//! METHOD default_param_array_sum
+//! COMPILE_COUNT_GE default_param_array_sum 1
+//! EXEC_COUNT_GE *default_param_array_sum* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function default_param_array_sum(values: number[] = [1, 2, 3], scale: number = 2) {
     let sum = 0;
     for (let i = 0; i < values.length; i++) {
@@ -20,8 +37,12 @@ function default_param_array_sum(values: number[] = [1, 2, 3], scale: number = 2
     print(sum);
 }
 
+function callDefaultParamArraySum(): void {
+    default_param_array_sum();
+    default_param_array_sum([4, 5], 3);
+}
+
 ArkTools.arkSteedCompileSync(default_param_array_sum);
+ArkTools.arkSteedCompileSync(callDefaultParamArraySum);
 
-
-default_param_array_sum();
-default_param_array_sum([4, 5], 3);
+callDefaultParamArraySum();

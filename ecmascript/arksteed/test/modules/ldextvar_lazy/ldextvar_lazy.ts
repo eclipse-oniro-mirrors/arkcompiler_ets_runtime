@@ -38,6 +38,11 @@ declare class ArkTools {
 //! HAS         CallRuntime      LdLazyExternalModuleVarByIndex
 //! HAS_NOT     CallRuntime      LdExternalModuleVarByIndexOnJSFunc
 //! HAS_NOT     LoadTaggedElement
+//! HAS         LoadTaggedField
+//! METHOD reader
+//! COMPILE_COUNT_GE *reader* 1
+//! EXEC_COUNT_GE *reader* 1
+//! DEOPT_COUNT *Deoptimize* 0
 
 import lazy { v as lazyVal } from './lazylib';
 import { w as eagerVal } from './lazylib';

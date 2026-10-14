@@ -12,6 +12,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_read_2* 1
+//! EXEC_COUNT_GE *array_read_2* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_read_2(arr: number[]): number
 {
     let a = arr[0];
@@ -23,6 +27,7 @@ function array_read_2(arr: number[]): number
 }
 
 ArkTools.arkSteedCompileSync(array_read_2);
+ArkTools.waitJitCompileFinish(array_read_2);
 
 
 print(array_read_2([10, 20, 30, 40, 50]));

@@ -13,6 +13,32 @@
  * limitations under the License.
  */
 
+// G11.6 (P0) additive call evidence for `functions/lambda`
+// (`arksteed-g116-call-closure-and-additive-evidence` C1/C3/C4; S11; V1/V2).
+// `call_compiled_lambda_12` compiles the multi-scope factory `factory` and
+// invokes it; the two returned `f1`/`f2` closures are anonymous methods, so no
+// attributable method pattern exists for them and only the named factory is
+// claimed. `factory` is installed by the pre-existing installation call before
+// its first invocation (bounded test-side preparation), so its call site lowers
+// to the generic `Call` vertex observed in the caller dump and its entry marker
+// is attributable. `COMPILE_COUNT_GE`/`EXEC_COUNT_GE` attribute compilation and
+// entry of each claimed method; `DEOPT_COUNT *Deoptimize* 0` rules out a silent
+// deopt into the interpreter. The pre-existing computed results and the
+// expectation are unchanged.
+
+//! PARAMS --compiler-jit-hotness-threshold=60000
+
+//! METHOD call_compiled_lambda_12
+//! HAS Call
+//! COMPILE_COUNT_GE *call_compiled_lambda_12* 1
+//! EXEC_COUNT_GE *call_compiled_lambda_12* 1
+
+//! METHOD factory
+//! COMPILE_COUNT_GE *factory* 1
+//! EXEC_COUNT_GE *factory* 1
+
+//! DEOPT_COUNT *Deoptimize* 0
+
 // Multi-scope closure factory: inner lambda captures from 2 outer scopes
 let compiled = false;
 
@@ -24,10 +50,16 @@ function call_compiled_lambda_12(w: number, x: number, y: number, z: number): nu
             return (baseVal + inc + v) * scale;
         };
     };
+    // Bounded test-side preparation: `factory` is installed before its first
+    // call, so every invocation of the compiled caller enters the installed code
+    // and emits the E1 entry marker. All three pre-existing installation calls
+    // and every computed result are preserved.
+    if (!compiled) {
+        ArkTools.arkSteedCompileSync(factory);
+    }
     const f1 = factory(x);
     const f2 = factory(y);
     if (!compiled) {
-        ArkTools.arkSteedCompileSync(factory);
         ArkTools.arkSteedCompileSync(f1);
         ArkTools.arkSteedCompileSync(f2);
         compiled = true;

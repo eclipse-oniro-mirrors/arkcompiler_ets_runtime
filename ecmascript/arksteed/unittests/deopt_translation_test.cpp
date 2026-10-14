@@ -1251,8 +1251,8 @@ HWTEST_F_L0(ArkSteedDeoptTranslationTest, Negative_InvalidStreamPrefixes)
 
 /**
  * @tc.name: Negative_TruncatedStreamIsRejectedAtEveryCut
- * @tc.desc: removing any suffix of the reference stream leaves the last body unreproducible and
- *           never reads outside the buffer
+ * @tc.desc: removing any suffix of the reference stream is rejected by the reader whenever the
+ *           surviving prefix is structurally valid; it never reads outside the buffer
  * @tc.type: FUNC
  */
 HWTEST_F_L0(ArkSteedDeoptTranslationTest, Negative_TruncatedStreamIsRejectedAtEveryCut)
@@ -1263,27 +1263,51 @@ HWTEST_F_L0(ArkSteedDeoptTranslationTest, Negative_TruncatedStreamIsRejectedAtEv
     };
     const DeoptTranslation lastBodyExpected {REFERENCE_BYTECODE_OFFSET1, lastBodyInputs};
 
+    // Sensitivity of the required criterion. The reference last body ends with the mandatory
+    // one-byte value operand 0x2A (constant 42); the body cannot be decoded without it. A
+    // successful decode of a truncated stream can nevertheless return a body whose content
+    // merely differs from the reference -- here the same operand substituted with 0x07 is
+    // accepted by the real reader and yields a different body. The historical "different
+    // content is acceptable" check tolerated exactly that outcome, so a decoder regression
+    // that substituted or dropped the removed operand would have passed it. Contract C9
+    // requires the opposite: every successful decode of a truncated stream is a failure.
+    {
+        std::vector<uint8_t> substituted = reference;
+        substituted[REFERENCE_STREAM_SIZE - 1U] = 0x07U;
+        DeoptTranslationReader substitutedReader(CopyToChunk(substituted), substituted.size());
+        ASSERT_TRUE(substitutedReader.IsValid());
+        DeoptTranslation substitutedBody;
+        ASSERT_TRUE(substitutedReader.GetBody(1, &substitutedBody));
+        EXPECT_FALSE(substitutedBody.BodyEquals(lastBodyExpected));
+    }
+
+    size_t validPrefixCuts = 0;
     for (size_t cut = 1; cut <= reference.size(); ++cut) {
         SCOPED_TRACE(cut);
         std::vector<uint8_t> truncated(reference.begin(), reference.end() - cut);
         const uint8_t *memory = CopyToChunk(truncated);
         DeoptTranslationReader reader(memory, truncated.size());
         if (!reader.IsValid()) {
+            // The surviving prefix is structurally incomplete: no translation is readable at
+            // all.
             EXPECT_EQ(reader.GetDeoptCount(), 0U);
             continue;
         }
+        ++validPrefixCuts;
+        // The surviving prefix still parses, but the last body's byte range ends at the
+        // truncated buffer end. The removed suffix contains operand bytes the decoder must
+        // consume, so rejection is required unconditionally: a successful decode -- even one
+        // whose content differs from the reference, as the substituted-operand control above
+        // demonstrates -- must fail this case.
         DeoptTranslation lastBody;
-        bool decoded = reader.GetBody(1, &lastBody);
-        if (decoded) {
-            // A truncated buffer can never reproduce the original last body: its byte range is
-            // bounded by the truncated end, so the decoder cannot consume the removed operand
-            // bytes and must either fail or produce different content.
-            EXPECT_FALSE(lastBody.BodyEquals(lastBodyExpected));
-        }
+        EXPECT_FALSE(reader.GetBody(1, &lastBody));
         // Body ids outside the surviving table stay rejected.
         DeoptTranslation body;
         EXPECT_FALSE(reader.GetBody(2, &body));
     }
+    // The sweep must actually exercise structurally valid truncated prefixes; otherwise the
+    // rejection assertions above would be vacuous.
+    EXPECT_GT(validPrefixCuts, 0U);
     // Positive control: the untruncated stream still decodes the last body.
     const uint8_t *memory = CopyToChunk(reference);
     DeoptTranslationReader reader(memory, reference.size());

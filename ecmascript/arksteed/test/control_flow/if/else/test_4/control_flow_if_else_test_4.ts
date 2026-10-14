@@ -13,6 +13,10 @@
  * limitations under the License.
  */
 
+//! COMPILE_COUNT_GE if_else_4 1
+//! EXEC_COUNT_GE *if_else_4 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 // 2-predecessor merge: one path does NOT set a vreg that the other sets.
 // Tests that the Phi for a predecessor without the vreg gets undefinedValue_,
 // not the value from another predecessor.

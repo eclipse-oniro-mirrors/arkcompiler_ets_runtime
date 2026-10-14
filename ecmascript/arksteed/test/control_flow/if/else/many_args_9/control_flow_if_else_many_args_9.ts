@@ -12,6 +12,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE if_else_many_args_9 1
+//! EXEC_COUNT_GE *if_else_many_args_9 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function if_else_many_args_9(x: number,
                              a: number,
                              b: number,

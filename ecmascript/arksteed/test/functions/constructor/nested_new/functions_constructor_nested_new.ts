@@ -12,6 +12,27 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+// G11.6 (P0) additive construction evidence for `functions/constructor`
+// (arksteed-g116-call-closure-and-additive-evidence#C1,#C3,#C4): the compiled
+// constructor targets (outer and inner) and the compiled caller keep their own
+// positive compilation and entry evidence, and the caller's own CFG dump
+// carries the `new` form of this leaf (ECMA-262 2021 10.2.2 [[Construct]],
+// 13.3.5.1.1 EvaluateNew). The counters are lower bounds because
+// `ArkTools.arkSteedCompileSync` returns true unconditionally and does not
+// report whether it installed code. No captured variable is written, so no
+// env-slot evidence is claimed. Program output and the existing probes are
+// unchanged.
+//! COMPILE_COUNT_GE *CallCompiledConstructorNestedNewOuter 1
+//! EXEC_COUNT_GE *CallCompiledConstructorNestedNewOuter 1
+//! COMPILE_COUNT_GE *CallCompiledConstructorNestedNewInner 1
+//! EXEC_COUNT_GE *CallCompiledConstructorNestedNewInner 1
+//! COMPILE_COUNT_GE *call_compiled_constructor_nested_new 1
+//! EXEC_COUNT_GE *call_compiled_constructor_nested_new 1
+//! DEOPT_COUNT *Deoptimize* 0
+//! METHOD call_compiled_constructor_nested_new
+//! HAS CallRuntime OptNewObjRange
+
 class CallCompiledConstructorNestedNewInner {
     value: number = 0;
 

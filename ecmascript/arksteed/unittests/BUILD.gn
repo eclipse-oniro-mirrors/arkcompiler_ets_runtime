@@ -312,6 +312,83 @@ if (ets_runtime_enable_ark_steed) {
 
     deps = [ "$js_root:libark_jsruntime_test" ]
   }
+  # Graph verifier (matrix row G3.5, contract C5): fixture A builds real IR vertices
+  # over a Chunk and drives GraphProcessor<ArkSteedGraphVerifier>. The Vertex::New
+  # factory and the verifier symbols come from the ArkSteed translation units of the
+  # optimizer source set (arksteed_vertex.cpp among them), so the target uses the
+  # heavy dependency pattern.
+  host_unittest_action("ArkSteedGraphVerifierTest") {
+    module_out_path = module_output_path
+    sources = [ "graph_verifier_test.cpp" ]
+    configs = [ "$js_root:ecma_test_config" ]
+    deps = [
+      "$js_root:libark_jsruntime_test_set",
+      "$js_root/ecmascript/compiler:libark_jsoptimizer_set_with_maple",
+      "$js_root/ecmascript/compiler/codegen/maple/maple_be:libcg",
+    ]
+    external_deps = [
+      "runtime_core:libarkfile_static",
+      "zlib:libz",
+    ]
+  }
+
+
+  # Feedback reader (matrix row G2.3u, contract C3): the production read path over the
+  # profile the bytecode fixture leaves on its methods. Its symbols come from the
+  # ArkSteed translation units of the optimizer source set, so the target uses the
+  # heavy dependency pattern; the fixture method data, the abc and its directory come
+  # from `:arksteed_bytecode_fixture`, which publishes the asset path and the entry
+  # point in its `public_configs`.
+  host_unittest_action("ArkSteedFeedbackReaderTest") {
+    module_out_path = module_output_path
+
+    sources = [
+      # test file
+      "feedback_reader_test.cpp",
+    ]
+
+    configs = [
+      "$js_root:ecma_test_config",
+    ]
+
+    deps = [
+      ":arksteed_bytecode_fixture",
+      "$js_root:libark_jsruntime_test_set",
+      "$js_root/ecmascript/compiler:libark_jsoptimizer_set_with_maple",
+      "$js_root/ecmascript/compiler/codegen/maple/maple_be:libcg",
+    ]
+
+    external_deps = [
+      "runtime_core:libarkfile_static",
+      "zlib:libz",
+    ]
+  }
+
+  # Deferred code (matrix row G7.4u, contract C11): the code generator emits the
+  # deferred records the visited vertices queue. Its symbols and the symbols of
+  # the register allocator and the register-allocator processors come from the
+  # ArkSteed translation units of the optimizer source set, so the target uses the
+  # heavy dependency pattern. The graph is built by hand from real IR vertices
+  # (fixture A), the assembler is the real one with comments enabled (fixture C),
+  # so the target declares no abc asset and no extra define.
+  host_unittest_action("ArkSteedDeferredCodeTest") {
+    module_out_path = module_output_path
+
+    sources = [
+      # test file
+      "deferred_code_test.cpp",
+    ]
+
+    deps = [
+      "$js_root:libark_jsruntime_test_set",
+      "$js_root/ecmascript/compiler:libark_jsoptimizer_set_with_maple",
+      "$js_root/ecmascript/compiler/codegen/maple/maple_be:libcg",
+    ]
+    external_deps = [
+      "runtime_core:libarkfile_static",
+      "zlib:libz",
+    ]
+  }
 }
 
 group("unittest") {
@@ -342,7 +419,6 @@ group("arksteed_host_unittest") {
       ":ArkSteedSafepointTableTestAction",
       ":ArkSteedSideEffectClassifierTestAction",
       ":ArkSteedWriteBarrierValueKindTestAction",
-      ":ArkSteedPipelineStatisticsTestAction",
       ":ArkSteedConstantFoldingTestAction",
       ":ArkSteedDeoptTranslationTestAction",
       ":ArkSteedDeoptAbiTestAction",
@@ -350,6 +426,9 @@ group("arksteed_host_unittest") {
       ":ArkSteedCompileInfoFactsTestAction",
       ":ArkSteedInitializationIntervalVerifierTestAction",
       ":ArkSteedObjectLiteralTemplateTestAction",
+      ":ArkSteedFeedbackReaderTestAction",
+      ":ArkSteedDeferredCodeTestAction",
+      ":ArkSteedGraphVerifierTestAction",
     ]
   }
 }

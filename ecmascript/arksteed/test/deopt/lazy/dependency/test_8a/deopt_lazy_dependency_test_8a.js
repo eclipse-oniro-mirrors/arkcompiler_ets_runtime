@@ -13,6 +13,13 @@
  * limitations under the License.
  */
 
+//! METHOD A
+//! HAS LoadTaggedField
+//! HAS DeoptIfHClassMismatch
+//! COMPILE_COUNT_GE A 1
+//! EXEC_COUNT_GE *A 1
+//! DEOPT_COUNT_GE Lazy Deoptimize* 1
+
 // Test dependency lazy-deopt while the optimized dependent function is still on stack.
 // A reads through the prototype chain, then A -> B -> C -> D -> E -> F.
 // F invalidates A's prototype dependency before control returns to A.

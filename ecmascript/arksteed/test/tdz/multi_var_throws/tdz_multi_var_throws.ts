@@ -12,6 +12,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+//! METHOD compute
+//! HAS LoadTaggedField
+//! COMPILE_COUNT_GE *compute* 1
+//! EXEC_COUNT_GE *compute* 1
+//! DEOPT_COUNT *Deoptimize* 0
 
 // Test: throw.undefinedifholewithname THROWS for multiple let variables accessed via closure before initialization.
 // The inner function compute() accesses a, b, c via lexical env.

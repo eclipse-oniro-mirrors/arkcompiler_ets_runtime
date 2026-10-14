@@ -70,6 +70,17 @@ declare_args() {
       true && !is_arkui_x &&
       (current_cpu == "amd64" || current_cpu == "x64" || current_cpu == "x86_64" || current_cpu == "arm64")
 
+  # Compile the translation units that carry the ArkSteed JIT compiler with
+  # clang coverage instrumentation (`--coverage`) and link the coverage runtime
+  # into the targets that consume them. Disabled by default, so a normal build
+  # compiles and links exactly as before; this is the measurement build used by
+  # the numeric C++ coverage of the ArkSteed JIT compiler
+  # (`ecmascript/arksteed/test/coverage/`, ISSUE-0059 and ISSUE-0011). It is a
+  # separate argument because `enable_coverage` below is a plain variable that
+  # several build files assign unconditionally and never declare through
+  # `declare_args()`, so `--gn-args=enable_coverage=true` has no effect and no
+  # coverage flag reaches the ArkSteed sources.
+  arksteed_coverage = false
 
   # Defaults for fort
   ets_runtime_support_jit_code_sign = false
@@ -397,6 +408,18 @@ template("libark_jsruntime_common_set") {
       configs += [ "$js_root:dfx_extra_config" ]
     }
 
+    if (arksteed_coverage) {
+      # Coverage measurement build (off by default). The ArkSteed runtime
+      # sources (arksteed_deopt_helper.cpp, arksteed_safepoint_table.cpp,
+      # arksteed_task.cpp) are compiled into this source set, so the compile
+      # config instruments every translation unit of the set and the published
+      # link config passes the coverage runtime to the targets that link those
+      # objects (`libark_jsruntime`) and flushes the profile on exit.
+      configs += [ "$js_root/ecmascript/compiler:arksteed_coverage_compile" ]
+      public_configs +=
+          [ "$js_root/ecmascript/compiler:arksteed_coverage_link" ]
+    }
+
     cflags_cc = []
     if (is_standard_system || target_os == "android" || target_os == "ios") {
       cflags_cc += [ "-fvisibility=hidden" ]
@@ -697,6 +720,15 @@ template("libark_jsruntime_shared_library_template") {
       ":ark_jsruntime_common_config",
       ":arkjs_runtime_lto_link_config",
     ]
+    if (arksteed_coverage) {
+      # Link the coverage runtime into the shared library that links the
+      # instrumented `libark_jsruntime_set` objects, so the profile is flushed
+      # on exit. The source set publishes this config to its direct dependents;
+      # this entry covers `libark_jsruntime` / `libark_jsruntime_dfx`, which
+      # depend on the static source set instead of on the set directly.
+      configs +=
+          [ "$js_root/ecmascript/compiler:arksteed_coverage_link" ]
+    }
     if (defined(ohos_indep_compiler_enable) && ohos_indep_compiler_enable) {
       external_deps += [
         "runtime_core:libarkbase_static",

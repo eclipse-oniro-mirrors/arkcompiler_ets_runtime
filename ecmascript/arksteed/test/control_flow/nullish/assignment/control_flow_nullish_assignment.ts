@@ -13,6 +13,12 @@
  * limitations under the License.
  */
 
+//! METHOD nullish_assignment
+//! HAS TaggedEqual
+//! COMPILE_COUNT_GE nullish_assignment 1
+//! EXEC_COUNT_GE *nullish_assignment 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 declare function print(str: number):string;
 
 function nullish_assignment(a: number | null | undefined, b: number | null | undefined): number {

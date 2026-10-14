@@ -13,6 +13,13 @@
  * limitations under the License.
  */
 
+//! METHOD Test
+//! HAS LoadTaggedField
+//! HAS DeoptIfHClassMismatch
+//! COMPILE_COUNT_GE Test 1
+//! EXEC_COUNT_GE *Test 1
+//! DEOPT_COUNT_GE Lazy Deoptimize* 1
+
 
 /*
  * Description:

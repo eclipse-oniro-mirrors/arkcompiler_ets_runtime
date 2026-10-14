@@ -12,6 +12,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+//! METHOD readShared
+//! HAS LoadTaggedField
+//! COMPILE_COUNT_GE *readShared* 1
+//! EXEC_COUNT_GE *readShared* 1
+//! METHOD writeShared
+//! HAS StoreEnvSlot
+//! COMPILE_COUNT_GE *writeShared* 1
+//! EXEC_COUNT_GE *writeShared* 1
+//! METHOD modifyShared
+//! HAS LoadTaggedField
+//! HAS StoreEnvSlot
+//! COMPILE_COUNT_GE *modifyShared* 1
+//! EXEC_COUNT_GE *modifyShared* 1
+//! DEOPT_COUNT *Deoptimize* 0
 
 declare function print(str: number):string;
 

@@ -12,6 +12,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! METHOD switch_true_1
+//! HAS TaggedNotEqual
+//! COMPILE_COUNT_GE switch_true_1 1
+//! EXEC_COUNT_GE *switch_true_1 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function switch_true_1(x)
 {
     let result = 0;

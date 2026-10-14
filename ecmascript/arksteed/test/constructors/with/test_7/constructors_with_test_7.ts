@@ -38,11 +38,39 @@ function constructor_with_return_7() {
     return p(100, 10);
 }
 
+// G11.6 additive evidence (arksteed-g116-call-closure-and-additive-evidence#C1,#C3):
+// every compiled target of this leaf (constructors and the compiled caller)
+// carries its own compile/entry counters, and the actual construction form
+// is annotated in the compiled caller's own dump. Output is unchanged.
+//! COMPILE_COUNT_GE PointBase 1
+//! EXEC_COUNT_GE *PointBase 1
+//! COMPILE_COUNT_GE innerProduct 1
+//! EXEC_COUNT_GE *innerProduct 1
+//! COMPILE_COUNT_GE Point 1
+//! EXEC_COUNT_GE *Point 1
+//! COMPILE_COUNT_GE innerProductImpl 1
+//! EXEC_COUNT_GE *innerProductImpl 1
+//! COMPILE_COUNT_GE constructor_with_return_7 1
+//! EXEC_COUNT_GE *constructor_with_return_7 1
+//! DEOPT_COUNT *Deoptimize* 0
+//! METHOD constructor_with_return_7
+//! HAS CallRuntime OptNewObjRange
+//! HAS Call
+//! METHOD Point
+//! HAS CallRuntime OptSuperCallForwardAllArgs
+//! METHOD PointBase
+//! HAS Call
+
 ArkTools.arkSteedCompileSync(PointBase);
+ArkTools.waitJitCompileFinish(PointBase);
 ArkTools.arkSteedCompileSync(PointBase.prototype.innerProduct);
+ArkTools.waitJitCompileFinish(PointBase.prototype.innerProduct);
 ArkTools.arkSteedCompileSync(Point);
+ArkTools.waitJitCompileFinish(Point);
 ArkTools.arkSteedCompileSync(Point.prototype.innerProductImpl);
+ArkTools.waitJitCompileFinish(Point.prototype.innerProductImpl);
 ArkTools.arkSteedCompileSync(constructor_with_return_7);
+ArkTools.waitJitCompileFinish(constructor_with_return_7);
 
 
 print(constructor_with_return_7());

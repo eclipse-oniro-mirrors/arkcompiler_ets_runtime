@@ -12,6 +12,23 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// G11.6 additive evidence (S11/C1/C3/C4): the compiled overloaded constructor
+// performs no JS call, so the actual construction form of this leaf is carried
+// by its own silent invocation carrier
+// `callDefaultParamsConstructorOverloadNoargs`, whose dump holds
+// `CallRuntime OptNewObjRange`. The original constructor keeps its own positive
+// compile/entry evidence, the probes and the output bytes are unchanged, and
+// the normal path must not deopt. The `_GE` lower bound allows the installation
+// and recompilation multiplicity of the same method.
+//! METHOD callDefaultParamsConstructorOverloadNoargs
+//! HAS CallRuntime OptNewObjRange
+//! COMPILE_COUNT_GE callDefaultParamsConstructorOverloadNoargs 1
+//! EXEC_COUNT_GE *callDefaultParamsConstructorOverloadNoargs* 1
+//! METHOD DefaultParamConstructorOverloadNoargs
+//! COMPILE_COUNT_GE DefaultParamConstructorOverloadNoargs 1
+//! EXEC_COUNT_GE *DefaultParamConstructorOverloadNoargs* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 class DefaultParamConstructorOverloadNoargs {
     width: number;
     height: number;
@@ -25,10 +42,16 @@ class DefaultParamConstructorOverloadNoargs {
     }
 }
 
+function callDefaultParamsConstructorOverloadNoargs(): DefaultParamConstructorOverloadNoargs {
+    return new DefaultParamConstructorOverloadNoargs();
+}
+
 ArkTools.arkSteedCompileSync(DefaultParamConstructorOverloadNoargs);
+ArkTools.arkSteedCompileSync(callDefaultParamsConstructorOverloadNoargs);
 
 
 let rect = new DefaultParamConstructorOverloadNoargs();
 print(rect.width);
 print(rect.height);
 print(rect.width * rect.height);
+callDefaultParamsConstructorOverloadNoargs();

@@ -12,6 +12,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *spread_args_multiple_helper* 1
+//! EXEC_COUNT_GE *spread_args_multiple_helper* 1
+//! COMPILE_COUNT_GE *spread_args_multiple_4* 1
+//! EXEC_COUNT_GE *spread_args_multiple_4 1
+//! DEOPT_COUNT *Deoptimize* 0
+
+//! METHOD spread_args_multiple_helper
+//! HAS CallRuntime OptCopyRestArgs
 function spread_args_multiple_helper(...args: number[]): number {
     let sum = 0;
     let base = 1;
@@ -22,6 +31,9 @@ function spread_args_multiple_helper(...args: number[]): number {
     return sum;
 }
 
+//! METHOD spread_args_multiple_4
+//! HAS CallRuntime CallSpread
+//! HAS CallRuntime StArraySpread
 function spread_args_multiple_4(): number {
     const first = [1, 2];
     const second = [4, 5, 6, 7, 8];

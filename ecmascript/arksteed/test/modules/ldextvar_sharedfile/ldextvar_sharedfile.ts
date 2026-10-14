@@ -30,6 +30,10 @@ declare class ArkTools {
 //! HAS_NOT     CallRuntime      LdExternalModuleVarByIndexOnJSFunc
 //! HAS         LoadTaggedField
 //! HAS         LoadTaggedElement
+//! METHOD normalReader
+//! COMPILE_COUNT_GE *normalReader* 1
+//! EXEC_COUNT_GE *normalReader* 1
+//! DEOPT_COUNT *Deoptimize* 0
 
 import { normalReader } from './sharedlib';
 

@@ -12,6 +12,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *Parent* 1
+//! EXEC_COUNT_GE *Parent* 1
+//! COMPILE_COUNT_GE *Child* 1
+//! EXEC_COUNT_GE *Child* 1
+//! COMPILE_COUNT_GE *spread_constructor_inheritance_2* 1
+//! EXEC_COUNT_GE *spread_constructor_inheritance_2 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 class Parent {
     a: number;
     b: number;
@@ -28,6 +37,10 @@ class Parent {
     }
 }
 
+//! METHOD Child
+//! HAS CallRuntime OptSuperCallSpread
+//! HAS CallRuntime StArraySpread
+//! HAS CallRuntime OptCopyRestArgs
 class Child extends Parent {
     d: number;
 
@@ -41,6 +54,10 @@ class Child extends Parent {
     }
 }
 
+//! METHOD spread_constructor_inheritance_2
+//! HAS CallRuntime NewObjApply
+//! HAS CallRuntime StArraySpread
+//! HAS Call
 function spread_constructor_inheritance_2(nums: number[]): number {
     const p = new Parent(...nums);
     const c = new Child(...nums);

@@ -13,6 +13,12 @@
  * limitations under the License.
  */
 
+//! METHOD LoadX
+//! HAS LoadTaggedField
+//! COMPILE_COUNT_GE *LoadX* 1
+//! EXEC_COUNT_GE *LoadX* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function LoadX(obj)
 {
     return obj.x;

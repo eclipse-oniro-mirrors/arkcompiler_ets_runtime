@@ -13,6 +13,18 @@
  * limitations under the License.
  */
 
+// G11.1 additive evidence: the same compiled poly-proto load site, followed by
+// a write that changes the shadowing prototype property. The prototype-chain
+// load registers a dependency on the holder, so the write invalidates it and
+// the next entry leaves the generated code through a lazy transition and the
+// interpreter resumes with the new value. This leaf therefore carries the
+// actual transition direction, not an arbitrary zero-deopt assertion (V1).
+//! METHOD LoadX
+//! HAS LoadTaggedField
+//! COMPILE_COUNT_GE *LoadX* 1
+//! EXEC_COUNT_GE *LoadX* 1
+//! DEOPT_COUNT_GE Lazy Deoptimize* 1
+
 function LoadX(obj)
 {
     return obj.x;

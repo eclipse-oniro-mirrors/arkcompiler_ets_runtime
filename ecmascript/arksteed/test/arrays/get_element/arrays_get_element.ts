@@ -12,12 +12,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_get_element* 1
+//! EXEC_COUNT_GE *array_get_element* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_get_element(arr: number[], index: number): number
 {
     return arr[index];
 }
 
 ArkTools.arkSteedCompileSync(array_get_element);
+ArkTools.waitJitCompileFinish(array_get_element);
 
 
 let arr: number[] = [10, 20, 30, 40, 50];

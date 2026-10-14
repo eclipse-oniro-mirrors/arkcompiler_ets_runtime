@@ -31,15 +31,58 @@ All generated artifacts (abc, disassembly, stdout/stderr captures) are
 written to a fresh /tmp/arksteed-<mode>-<timestamp>/ directory whose tree
 mirrors this test directory; nothing is written inside the source tree.
 
+With `--corpus` the runner selects the external corpus case class instead of
+the embedded one (design `arksteed-corpus-case-class-and-parity`, C1/C2): the
+corpus root comes from the `ARKSTEED_EXTERNAL_TESTS` environment variable, the
+corpus runner module is imported lazily as a read-only library and its case
+identifiers live in the `corpus/<suite>/<case>` namespace. Without the flag
+the corpus module is never imported and the run is unchanged. Every selected
+case also gets the mandatory reference execution of the module itself (design
+C7): the verdict the corpus runner produces for the case with its own
+defaults and its own budget is recorded per case and compared with the class
+base verdict as `matched`, `diverged` or `not-applicable`. The behavioural
+class defaults are derived from the loaded module (its `BASE_ARGS`, its
+`ALWAYS_ARGS` and its own CLI defaults, design C5) and are cross-checked
+against the reference namespace before the case loop; the optional per-case
+descriptor `test/corpus/<suite>/<case>.annotations` reuses the `//!` grammar
+and adds the class-specific `TIMEOUT <seconds> <justification>` and
+`NO_EXEC_MARKER <justification>` keys, whose problems are config errors of a
+red case and never a skip. Each selected case is then compiled with the
+module's own `compile_single`/`compile_with_file_info` and run by the
+class-specific streaming executor (design C4): stdout and stderr are read as
+streams, the compilation and execution markers are counted while the stream
+passes, the filtered program output is kept under the class limit and the
+marker-dominated component trace is never captured. The corpus program output
+is the result of exactly the same ordered substitution chain the embedded
+expected-output comparison applies (`case_filter_chain`, design
+`arksteed-corpus-filter-and-consumer-integration` S1-S5): the GC record, the
+deopt record, then one stage per ordered explicit and implied component name,
+executed by incremental transducers over the decoded stream. The raw
+observation branch counts the markers and named descriptor patterns before any
+deletion and writes the bounded retained component log. The program-output
+limit, the per-record-stage candidate limit and the retained-log limit are
+independent; exceeding one, or failing to read/filter/observe the stream, is a
+named sticky invalidity (`program_output_truncated`, `record_candidate_capped`,
+`program_output_error`) that a consumer must treat as red and never as a
+complete, comparable or empty result. The class-level
+JIT-activity invariant (`COMPILE_COUNT_GE * 1` and, unless a justified
+`NO_EXEC_MARKER` descriptor exempts it, `EXEC_COUNT_GE * 1`) is injected into
+every corpus case before the loop (design C3), and an overrun of a class
+limit is a red case with a named reason, never a skip.
+
 Exit status is 0 iff every selected case passes.
 """
 
 import argparse
 from builtins import str
+import codecs
 import collections
 import difflib
+import fnmatch
 from fnmatch import fnmatchcase
 import hashlib
+import importlib.util
+import inspect
 import json
 import os
 import platform
@@ -48,16 +91,25 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import ClassVar, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Callable, ClassVar, Dict, List, NamedTuple, Optional, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 TEST_DIR = SCRIPT_DIR
-ARK_ROOT = SCRIPT_DIR.parents[4]
+# The build tree of a plain runtime checkout is the directory four levels above
+# the test directory. A per-task checkout under `workdirs/<WD>` has no `out/`
+# there: the project verifier links and builds the checkout in the workspace's
+# `builds/<WD>` context instead. `ARKSTEED_ARK_ROOT` names that build context so
+# a recorded command can be executed verbatim from the test directory; when the
+# variable is unset the historical resolution above is unchanged.
+ARK_ROOT_ENV_VAR = "ARKSTEED_ARK_ROOT"
+_ENV_ARK_ROOT = os.environ.get(ARK_ROOT_ENV_VAR, "").strip()
+ARK_ROOT = Path(_ENV_ARK_ROOT) if _ENV_ARK_ROOT else SCRIPT_DIR.parents[4]
 OPCODE_LIST_HEADER = SCRIPT_DIR.parent / "arksteed_opcode_list.h"
 
 IS_MACOS = platform.system().lower() == "darwin"
@@ -164,6 +216,11 @@ def deopt_record_spellings(candidate: str) -> List[str]:
         return [candidate, f"{DEOPT_EAGER_PREFIX} {candidate}"]
     return [candidate]
 
+
+# GC record parser required by the selected ISSUE-0108 filter chain.
+GC_TRACE_LOG_RE = re.compile(
+    r"(?ms)^\[gc\][^\n]*GCReason:[^\n]*\n.*?^\[gc\] HandleStorage[^\n]*\n"
+)
 
 GRAPH_DUMP_START = "[compiler] ===== Starts Graph Dump ====="
 GRAPH_DUMP_END = "[compiler] ===== Finishes Graph Dump ====="
@@ -890,6 +947,148 @@ class AnnotationRecord:
 CASE_CLASS_EMBEDDED = "embedded"
 CASE_CLASS_CORPUS = "corpus"
 
+# External corpus class (`--corpus`). The corpus root is resolved from the
+# environment only (there is no implicit default), the corpus runner module is
+# a read-only library and its case identifiers live in the `corpus/<rel>`
+# namespace. Nothing in the corpus tree is written: the import runs with the
+# bytecode cache disabled and is restored afterwards.
+CORPUS_ROOT_ENV_VAR = "ARKSTEED_EXTERNAL_TESTS"
+CORPUS_NAMESPACE = CASE_CLASS_CORPUS
+CORPUS_RUNNER_FILENAME = "run_arksteed_external_tests.py"
+CORPUS_MODULE_NAME = "arksteed_external_corpus_runner"
+CORPUS_RECOMMENDED_ROOT = ("misc/src/arksteed_external_tests (relative to the "
+                           "project workspace)")
+
+# The API of the corpus runner module the corpus class reuses as a library.
+# A missing element is a usage error before any case runs, never a silent
+# skip: the adapter must not reimplement the corpus rules, and a renamed API
+# has to fail loudly instead of silently changing the verdict rule.
+CORPUS_REQUIRED_API = (
+    "discover_cases",
+    "compile_single",
+    "compile_with_file_info",
+    "run_case",
+    "parse_args",
+    "BuildConfig",
+    "TestCase",
+    "CaseKind",
+    "BASE_ARGS",
+    "ALWAYS_ARGS",
+    "EXECUTION_TIMEOUT",
+    "TEST_ROOT",
+    "detect_host_platform",
+    "is_crash",
+    "crash_signal_name",
+)
+
+# A selected corpus case is executed by the class-specific streaming executor
+# of the section below once its source is compiled by the corpus runner
+# module itself; the class base verdict, the JIT-activity invariant and the
+# parity are reported per case.
+
+# Base verdicts of a corpus case and the verdict-parity field (C3, C7, C10).
+# The values are the module's own `CaseStatus` values: parity is defined on the
+# base verdict, never on stdout.
+CORPUS_VERDICT_PASS = "PASS"
+CORPUS_VERDICT_FAIL = "FAIL"
+CORPUS_VERDICT_TIMEOUT = "TIMEOUT"
+CORPUS_PARITY_MATCHED = "matched"
+CORPUS_PARITY_DIVERGED = "diverged"
+# `not-applicable` is reserved for a case whose descriptor gave a config error:
+# such a case has no executions at all and is red by the descriptor itself.
+CORPUS_PARITY_NOT_APPLICABLE = "not-applicable"
+
+# The reference execution of the corpus runner module owns its own subtree of
+# the run artifacts (the module writes its abc, stdout and stderr captures of
+# one case under `<case.rel>/`), so it never shares a path with the class run.
+CORPUS_REFERENCE_ARTIFACTS_DIR = "corpus-reference"
+# The module's own reproducer of the reference execution, kept next to its
+# artifacts: a divergence reports it together with the class command (C7).
+CORPUS_REFERENCE_COMMAND_FILENAME = "reference.cmd.txt"
+
+# The optional per-case descriptor of the corpus class (C5). A corpus case is
+# `corpus/<suite>/<case>`; its descriptor is the file
+# `test/corpus/<suite>/<case>.annotations` in the runtime repository, in the
+# existing `//!` grammar plus the class-specific keywords below. The corpus
+# tree is read-only, so the descriptor is the only annotation channel of a
+# corpus case: the read-only corpus source is never scanned for `//!` lines.
+# The directory holds no JS/TS source and no `expected_output.txt`, so the
+# embedded discovery never selects anything from it.
+CORPUS_DESCRIPTOR_DIRNAME = CASE_CLASS_CORPUS
+CORPUS_DESCRIPTOR_SUFFIX = ".annotations"
+CORPUS_DESCRIPTOR_KEYWORDS = ("TIMEOUT", "NO_EXEC_MARKER")
+
+# Class execution and evidence collection of the corpus class (C4). The class
+# run is streamed: stdout and stderr are read as streams, the compilation and
+# execution markers are counted while the stream passes, the filtered program
+# output is kept (under the program-output limit), and the component log lines
+# *without* the execution markers go to a temporary log that lives only until
+# the evidence pass and is then deleted. The limits bound what the run may
+# hold: a case whose filtered program output exceeds the limit is red with the
+# named reason (`program output exceeds cap`), and a case whose descriptor
+# declares a method-scoped (IR/codegen) constraint and whose retained log
+# exceeds the class log limit reports that constraint evidence is unavailable
+# (`constraint evidence unavailable: compiler log exceeds cap`). A limit is
+# never a silent skip.
+CORPUS_PROGRAM_OUTPUT_CAP = 1024 * 1024
+# The retained component log is the CFG dump and the other component lines
+# without the marker-dominated execution trace (measured at hundreds of
+# megabytes per case for the markers alone); a single CFG dump is tens of
+# kilobytes, so this limit bounds memory while leaving thousands of
+# compilations of constraint evidence available.
+CORPUS_COMPILER_LOG_CAP = 64 * 1024 * 1024
+# The unresolved decoded text of each enabled record stage of the corpus
+# filter is separately bounded (S3/F4): a genuinely unresolved candidate is
+# charged, removable complete matches and safely emitted text are not, and an
+# earlier stage's limit never reduces a later stage's limit. The final program
+# output and the retained component log keep their own existing limits.
+CORPUS_RECORD_CANDIDATE_CAP = 4 * 1024 * 1024
+# The runner-managed observation option the injected execution requirement
+# implies for the case (E7): a corpus case never names it itself.
+CORPUS_EXEC_MARKER_OPTION = "--compiler-arksteed-print-method-name"
+# The artifact names of one class execution (C6).
+CORPUS_PROGRAM_OUTPUT_SUFFIX = ".program.txt"
+CORPUS_CLASS_COMMAND_SUFFIX = ".cmd.txt"
+CORPUS_LIVE_LOG_SUFFIX = ".compiler.log"
+# The interpreter twins of the differential evidence (TW1/TW2): the actual
+# class command with the value of its single `--compiler-enable-jit` token
+# replaced by `false`, run as two fresh sequential processes in the per-case
+# class budget. The twin's own temporary component logs are distinct files so
+# the three executions of one case never share a log sink (C4).
+CORPUS_JIT_OPTION = "--compiler-enable-jit"
+CORPUS_JIT_OFF_VALUE = "false"
+CORPUS_TWIN_LOG_SUFFIXES = (".twin1.compiler.log", ".twin2.compiler.log")
+# The two differential statuses the execution-eligibility gate of this slice
+# decides (TW2/TW3). The complete five-status vocabulary, the mask and the
+# class comparison belong to the classification change of the same epic; the
+# status of a launched twin pair is therefore left unset here.
+CORPUS_DIFFERENTIAL_NOT_COMPARABLE = "not-comparable"
+CORPUS_DIFFERENTIAL_SKIPPED_EMPTY = "skipped-empty-program-output"
+# The numeric-field grammar of the twin-only reproducibility mask (TW4): a
+# maximal left-to-right match of an optionally signed decimal integer or
+# fraction (including the leading-dot form `[0-9]+(?:\.[0-9]*)?|\.[0-9]+`) with
+# an optional exponent. A word character or a dot is forbidden on either side,
+# and the boundaries are Python's Unicode-aware `\w`, so digits inside
+# identifiers, hexadecimal spellings, `NaN` and `Infinity` stay exact text.
+NUMERIC_FIELD_RE = re.compile(
+    r"(?<![\w.])[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)"
+    r"(?:[eE][+-]?[0-9]+)?(?![\w.])"
+)
+
+# The injected class-level invariant of the JIT activity (C3): every corpus
+# case must show at least one compilation marker and, unless a descriptor
+# exempts the execution marker with a justification, at least one execution
+# marker. The wildcard pattern matches every method name. The injected
+# requirements are class-managed: a descriptor may add requirements, but it can
+# never remove, weaken or cancel them, and a zero compilation marker can never
+# be exempted.
+CORPUS_INVARIANT_PATTERN = "*"
+CORPUS_INVARIANT_MIN = 1
+# Invariant states the report carries (C10).
+CORPUS_INVARIANT_BOTH = "compile+exec"
+CORPUS_INVARIANT_COMPILE_ONLY = "compile-only"
+CORPUS_INVARIANT_NONE = "none"
+
 
 @dataclass
 class TestCase:
@@ -914,6 +1113,32 @@ class TestCase:
     annotations: List[AnnotationRecord] = field(default_factory=list)
     # Selected case class; only the embedded class is controlled (S1).
     case_class: str = CASE_CLASS_EMBEDDED
+    # Mode-local class-1 override of the control stage: the derived `jit-off`
+    # variant is a plain copy of the case whose VM command line carries
+    # `--compiler-enable-jit=false` *instead of* the runner default and of any
+    # value the case names itself. The flag is set only by the control stage's
+    # variant materialisation, so a run without `--sensitivity-controls`
+    # never builds such a command line (S1, acceptance criterion 6).
+    jit_off: bool = False
+    # External corpus case class: the `TestCase` object of the corpus runner
+    # module this selected case was discovered from (`None` for an embedded
+    # case). The corpus class reuses the module's own discovery, compilation
+    # and per-case path, so the adapter keeps the module's object instead of
+    # re-deriving the case shape.
+    corpus_case: Optional[Any] = None
+    # External corpus case class: the `test/corpus/<suite>/<case>.annotations`
+    # descriptor of this case when the file exists (C5). `None` for an
+    # embedded case and for a corpus case without a descriptor.
+    descriptor_path: Optional[Path] = None
+    # `TIMEOUT <seconds> <justification>` of that descriptor: the absolute
+    # class budget override of the case, with the justification the report
+    # carries (C5, C6).
+    corpus_timeout_seconds: Optional[int] = None
+    corpus_timeout_reason: Optional[str] = None
+    # `NO_EXEC_MARKER <justification>` of that descriptor: the justified
+    # exemption from the execution-marker half of the class invariant (C3,
+    # C5). The compilation marker can never be exempted.
+    corpus_no_exec_marker_reason: Optional[str] = None
 
     @property
     def entry(self) -> str:
@@ -926,9 +1151,27 @@ class CaseResult:
     reasons: List[str] = field(default_factory=list)
     duration: float = 0.0
     repro_cmd: Optional[str] = None
+    # Run-level usage error (TW1): the actual class command of this case
+    # carries no or more than one `--compiler-enable-jit` token, so no twin can
+    # be derived and `main` exits 2 instead of reporting a verdict.
+    usage_error: Optional[str] = None
     # Per-case runner messages (verbose cmd line, disasm warnings); printed
     # together with the verdict so parallel runs stay grouped per case.
     log: List[str] = field(default_factory=list)
+    # External corpus case class: the mandatory reference execution of the
+    # corpus runner module for this case (C7). `None` for an embedded case and
+    # for a corpus case whose descriptor gave a config error (no executions).
+    corpus_reference: Optional[Any] = None
+    # External corpus case class: the class execution of this case with the
+    # streamed evidence (C4). `None` for an embedded case, for a corpus case
+    # whose descriptor gave a config error and for a case whose compilation
+    # failed before any execution.
+    corpus_execution: Optional[Any] = None
+    # External corpus case class: the interpreter twin run of this case with
+    # both attempts, their full execution facts and the eligibility status
+    # (TW1/TW2). `None` for an embedded case and for a corpus case whose
+    # descriptor gave a config error (no executions at all).
+    corpus_twins: Optional[Any] = None
     # Raw captures of the case run; the control stage derives its base
     # observation from them (S2). The disassembly is kept only when the
     # control mode is on (it is read from the artifact file).
@@ -1033,16 +1276,106 @@ def load_opcode_names() -> Optional[set]:
 
 
 def parse_annotations(case: TestCase, valid_opcodes: Optional[set]) -> None:
-    """Fill case options and constraints; record problems in config_errors."""
+    """Fill case options and constraints from the source; record problems."""
 
-    compile_mode: Optional[str] = None
-    params: Optional[List[str]] = None
-    current_method: Optional[str] = None
     try:
         lines = case.source.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as e:
         case.config_errors.append(f"cannot read source file: {e}")
         return
+    _parse_annotation_lines(case, lines, valid_opcodes, corpus_class=False,
+                            class_option_names=frozenset())
+
+
+def corpus_case_relative(case: TestCase) -> str:
+    """`<suite>/<case>` path of a corpus case inside the corpus root."""
+    rel = getattr(case.corpus_case, "rel", None)
+    if rel:
+        return str(rel)
+    prefix = CORPUS_NAMESPACE + "/"
+    return case.rel[len(prefix):] if case.rel.startswith(prefix) else case.rel
+
+
+def corpus_descriptor_path(case: TestCase) -> Path:
+    """`test/corpus/<suite>/<case>.annotations` of a corpus case (C5)."""
+    return (TEST_DIR / CORPUS_DESCRIPTOR_DIRNAME
+            / f"{corpus_case_relative(case)}{CORPUS_DESCRIPTOR_SUFFIX}")
+
+
+def parse_corpus_descriptor(
+    case: TestCase, valid_opcodes: Optional[set], class_option_names,
+) -> None:
+    """Parse the optional corpus descriptor of a case (C5).
+
+    The descriptor is `test/corpus/<suite>/<case>.annotations` and is the only
+    annotation channel of a corpus case: the corpus source is never scanned
+    for `//!` lines, so a stray annotation in read-only corpus code cannot
+    create a configuration error. A missing descriptor is not an error; a
+    descriptor problem is a config error that makes the case red, never a
+    skip. `class_option_names` are the derived class defaults, which `PARAMS`
+    must not override.
+    """
+    path = corpus_descriptor_path(case)
+    if not path.is_file():
+        return
+    case.descriptor_path = path
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as e:
+        case.config_errors.append(f"cannot read descriptor file: {e}")
+        return
+    _parse_annotation_lines(case, lines, valid_opcodes, corpus_class=True,
+                            class_option_names=frozenset(class_option_names))
+
+
+def _parse_corpus_timeout(case: TestCase, tokens: List[str], err) -> None:
+    """`TIMEOUT <seconds> <justification>` of a corpus descriptor (C5).
+
+    The value is an absolute positive integer number of seconds and the
+    justification is mandatory: a budget override has to be explained and the
+    justification is reported with the case.
+    """
+    if len(tokens) < 3:
+        err("TIMEOUT expects '<seconds> <justification>'")
+        return
+    try:
+        seconds = int(tokens[1])
+    except ValueError:
+        err(f"TIMEOUT expects a positive integer number of seconds, got "
+            f"'{tokens[1]}'")
+        return
+    if seconds <= 0:
+        err(f"TIMEOUT expects a positive integer number of seconds, got "
+            f"'{tokens[1]}'")
+        return
+    if case.corpus_timeout_seconds is not None:
+        err("TIMEOUT may appear at most once")
+        return
+    case.corpus_timeout_seconds = seconds
+    case.corpus_timeout_reason = " ".join(tokens[2:])
+
+
+def _parse_corpus_no_exec_marker(case: TestCase, tokens: List[str], err) -> None:
+    """`NO_EXEC_MARKER <justification>` of a corpus descriptor (C3, C5)."""
+    reason = " ".join(tokens[1:]).strip()
+    if not reason:
+        err("NO_EXEC_MARKER expects a justification")
+        return
+    if case.corpus_no_exec_marker_reason is not None:
+        err("NO_EXEC_MARKER may appear at most once")
+        return
+    case.corpus_no_exec_marker_reason = reason
+
+
+def _parse_annotation_lines(
+    case: TestCase, lines: List[str], valid_opcodes: Optional[set],
+    corpus_class: bool, class_option_names: frozenset,
+) -> None:
+    """Fill case options and constraints; record problems in config_errors."""
+
+    compile_mode: Optional[str] = None
+    params: Optional[List[str]] = None
+    current_method: Optional[str] = None
 
     for lineno, raw in enumerate(lines, 1):
         stripped = raw.strip()
@@ -1082,6 +1415,12 @@ def parse_annotations(case: TestCase, valid_opcodes: Optional[set]) -> None:
                     if name in RUNNER_MANAGED_OPTIONS:
                         err(f"'{name}' is runner-managed and "
                             "cannot be set via PARAMS")
+                    elif corpus_class and name in class_option_names:
+                        # A class default is derived from the corpus module
+                        # configuration: overriding it through the descriptor
+                        # would silently break the invariant or the parity.
+                        err(f"'{name}' is a {CASE_CLASS_CORPUS} class default "
+                            "(class-managed) and cannot be set via PARAMS")
         elif keyword == "METHOD":
             if len(tokens) != 2:
                 err("METHOD expects exactly one function name")
@@ -1135,6 +1474,17 @@ def parse_annotations(case: TestCase, valid_opcodes: Optional[set]) -> None:
                     constraint, None))
             except ConstraintError as error:
                 err(str(error))
+        elif keyword in CORPUS_DESCRIPTOR_KEYWORDS:
+            if not corpus_class:
+                # The class-specific keys belong to the corpus descriptor
+                # only: an embedded case carrying one is a configuration
+                # error, not a silently ignored line.
+                err(f"'{keyword}' is a {CASE_CLASS_CORPUS} descriptor keyword "
+                    f"and cannot appear in an {CASE_CLASS_EMBEDDED} case")
+            elif keyword == "TIMEOUT":
+                _parse_corpus_timeout(case, tokens, err)
+            else:
+                _parse_corpus_no_exec_marker(case, tokens, err)
         else:
             err(f"unknown annotation keyword '{keyword}'")
     case.compile_mode = compile_mode if compile_mode is not None else "module"
@@ -1253,6 +1603,28 @@ def _collect_param_overrides(params: List[str]) -> set:
     return set(_iter_option_names(params))
 
 
+def _strip_option(tokens: List[str], name: str) -> List[str]:
+    """Drop every token that sets `name` from a token list (S1 class 1).
+
+    Covers both the `--opt=value` and the space-separated `--opt value` form,
+    so a suppressed option cannot leave its value behind as a stray positional
+    argument.
+    """
+    stripped: List[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if _option_name(token) == name:
+            index += 1
+            if "=" not in token and index < len(tokens) \
+                    and not tokens[index].startswith("--"):
+                index += 1  # the separate value of the suppressed option
+            continue
+        stripped.append(token)
+        index += 1
+    return stripped
+
+
 def _case_has_evidence(case: TestCase, *kinds) -> bool:
     """Whether the case carries any evidence annotation of the given kinds."""
     return any(isinstance(constraint, kinds) for constraint in case.evidence_constraints)
@@ -1321,7 +1693,20 @@ def build_vm_command(
     overridden = _collect_param_overrides(case.params)
     defaults = [d for d in defaults if _option_name(d) not in overridden]
 
-    cmd = cfg.command_prefix + [str(cfg.ark_js_vm)] + defaults + case.params
+    params = list(case.params)
+    if case.jit_off:
+        # Class 1 `JIT-off`: the runner substitutes the value of the derived
+        # variant rather than letting the case name it through `//! PARAMS`
+        # (S1). The case's own `--compiler-enable-jit`, should it carry one, is
+        # suppressed together with the runner default, so the variant command
+        # line names the option exactly once and carries no contradicting
+        # duplicate. The case source is never touched: only the command line of
+        # this one variant changes.
+        defaults = _strip_option(defaults, CONTROL_JIT_OPTION)
+        params = _strip_option(params, CONTROL_JIT_OPTION)
+        params.append(f"{CONTROL_JIT_OPTION}=false")
+
+    cmd = cfg.command_prefix + [str(cfg.ark_js_vm)] + defaults + params
     cmd.extend([f"--entry-point={case.entry}", str(abc_path)])
     return cmd
 
@@ -1378,10 +1763,147 @@ def crash_signal_name(returncode: Optional[int]) -> Optional[str]:
     return CRASH_SIGNALS.get(signal_number)
 
 
+class FilterConfigurationError(Exception):
+    """Named configuration error of the shared filter chain (S1).
+
+    It is raised instead of returning an empty substitution list: an
+    unsupported construction must become a named red configuration reason,
+    never a silently unfiltered comparison. `str()` always starts with
+    `filter configuration error: <detail>`, where `<detail>` names the
+    offending input.
+    """
+
+
+# ---------------------------------------------------------------------------
+# Shared filter chain of the built-in and corpus program-output paths (S1)
+# ---------------------------------------------------------------------------
+# The built-in expected-output comparison and the corpus streaming filter must
+# apply the *same* ordered substitution chain, so both obtain it from the single
+# constructor below: GC record (iff the case asserts GC evidence), deopt record
+# (iff the case needs a deopt trace), then one component pattern per ordered
+# explicit component name, then one per implied component name. Repetitions are
+# preserved and no deduplication happens: the input is the ordered list of
+# explicit names, not the command's effective observation set.
+
+
+def _filter_component_names(components) -> List[str]:
+    """Validated ordered explicit component names of one filter chain (S1)."""
+    if components is None:
+        raise FilterConfigurationError(
+            "filter configuration error: components is None; an ordered sequence "
+            "of explicit component names is required")
+    try:
+        names = list(components)
+    except TypeError as error:
+        raise FilterConfigurationError(
+            f"filter configuration error: components is not iterable: "
+            f"{type(components).__name__}") from error
+    for name in names:
+        if not isinstance(name, str) or not name:
+            raise FilterConfigurationError(
+                f"filter configuration error: component name {name!r} is not a "
+                f"non-empty string")
+    return names
+
+
+def _filter_case_names(case, components) -> List[str]:
+    """Explicit names plus the validated evidence collection of the case (S1)."""
+    names = _filter_component_names(components)
+    constraints = getattr(case, "evidence_constraints", None)
+    if constraints is None:
+        raise FilterConfigurationError(
+            f"filter configuration error: case {getattr(case, 'rel', case)!r} has "
+            f"no evidence constraint collection")
+    return names
+
+
+def case_filter_component_names(case, components) -> List[str]:
+    """Ordered explicit-then-implied component names of one chain (S1).
+
+    The explicit names come first in the given order with repetitions kept, the
+    implied names (annotation-derived, no deduplication) follow. This is the
+    name sequence the pattern list of `case_filter_chain` is built from, and
+    the streaming pipeline pairs its stage entries with it.
+    """
+    return _filter_case_names(case, components) + _implied_log_components(case)
+
+
+def _case_filter_spec(case, components) -> List[Tuple[str, Optional[str]]]:
+    """The exact ordered filter stages of one case (S1).
+
+    `('gc', None)` iff the case asserts GC evidence, then `('deopt', None)` iff
+    it needs a deopt trace, then one `('component', <name>)` entry for every
+    explicit name followed by every implied name, in that order and with
+    repetitions preserved.
+    """
+    spec: List[Tuple[str, Optional[str]]] = []
+    # Validate the case's annotation collection and the component names first:
+    # an unsupported construction must raise the named configuration error
+    # before any annotation predicate reads the case.
+    names = case_filter_component_names(case, components)
+    if _case_has_evidence(case, GcCountGeConstraint):
+        spec.append(("gc", None))
+    if _needs_deopt_trace(case):
+        spec.append(("deopt", None))
+    for name in names:
+        spec.append(("component", name))
+    return spec
+
+
+def _component_filter_literal(component: str) -> str:
+    """The literal a component substitution pattern matches (`[<c>] `)."""
+    return f"[{component}] "
+
+
+def _component_pattern(component: str) -> re.Pattern:
+    """The per-component substitution pattern of one chain entry (S1)."""
+    return re.compile(r"\[%s\] [^\n]*\n?" % re.escape(component))
+
+
+def _filter_pattern(kind: str, component: Optional[str]) -> re.Pattern:
+    if kind == "gc":
+        return GC_TRACE_LOG_RE
+    if kind == "deopt":
+        return DEOPT_TRACE_LOG_RE
+    assert component is not None
+    return _component_pattern(component)
+
+
+def case_filter_chain(case, components) -> List[re.Pattern]:
+    r"""The exact ordered substitution chain of one case (S1).
+
+    Output: the GC record pattern iff the case asserts GC evidence, then the
+    deopt record pattern iff the case needs a deopt trace, then one
+    ``re.compile(r'\[<component>\] [^\n]*\n?')`` per element of `components` in
+    the given order, then one per element of `_implied_log_components(case)`. The
+    function is pure: no I/O, no retries, no timeouts and no mutation of `case`
+    or `components`; equal inputs yield equivalent pattern/flag lists.
+
+    An unsupported construction is a named `FilterConfigurationError` whose
+    text starts with `filter configuration error:`, never an empty substitute
+    list. An empty chain is correct only for a valid case without any stage.
+    """
+    return [_filter_pattern(kind, component)
+            for kind, component in _case_filter_spec(case, components)]
+
+
 def compare_output(
-    stdout: str, expected_file: Path, log_fragment_res: List[re.Pattern]
+    stdout: str, expected_file: Path, case, components
 ) -> Optional[str]:
-    """Return None on match (or skipped comparison), otherwise a unified diff."""
+    """Return None on match (or skipped comparison), otherwise a unified diff.
+
+    The substitution chain is obtained from `case_filter_chain` only; the
+    remaining behaviour (expected-file UTF-8 replacement, unreadable-file
+    diagnostic, empty-expectation skip, successive substitution, `splitlines`
+    with `rstrip` and the unified diff) is the existing behaviour and is not
+    part of the filter.
+    """
+    try:
+        chain = case_filter_chain(case, components)
+    except FilterConfigurationError as error:
+        # A filter configuration error is never a match: it is reported as a
+        # diagnostic so the caller turns the case red.
+        return str(error)
     try:
         expected = expected_file.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
@@ -1391,7 +1913,7 @@ def compare_output(
         return None
 
     filtered = stdout
-    for fragment_re in log_fragment_res:
+    for fragment_re in chain:
         filtered = fragment_re.sub("", filtered)
     actual_lines = [line.rstrip() for line in filtered.splitlines()]
     expected_lines = [line.rstrip() for line in expected.splitlines()]
@@ -2394,7 +2916,9 @@ def build_control_instances(
             expected_class=CONTROL_EXPECTED_CLASS[CONTROL_CLASS_JIT_OFF],
             anchor=witness.label(),
             assertion=witness,
-            mutation=f"{CONTROL_JIT_OPTION}=false for the derived variant",
+            mutation=(f"the runner substitutes {CONTROL_JIT_OPTION}=false "
+                      f"into the derived variant's command line (the case "
+                      f"never names the option through //! PARAMS)"),
         ))
 
     if applicability[CONTROL_CLASS_EXPECTATION].applicable:
@@ -2504,6 +3028,14 @@ class ControlInstanceResult:
     # with the sentinel, or the violation line of the mutated assertion). It is
     # the audit record of what the control actually observed (S7).
     evidence: Optional[str] = None
+    # Recorded observation of the executed variant: its own captured stdout.
+    # The class-1 effectiveness rule is decided on the variant's stdout and not
+    # on the base observation, so that text is what the report records for the
+    # command-line-only class (S6). `stdout_bytes` and `stdout_path` name the
+    # full capture that stays next to the variant in the run artifacts.
+    observed_stdout: Optional[str] = None
+    stdout_bytes: Optional[int] = None
+    stdout_path: Optional[str] = None
 
     @property
     def class_token(self) -> str:
@@ -2764,7 +3296,13 @@ def materialize_variant(case: TestCase, instance: ControlInstance,
                         artifacts_root) -> TestCase:
     """Materialise one derived variant under the artifact root (S5)."""
     variant = materialize_case_copy(case, artifacts_root, instance.variant_id)
-    if instance.class_token == CONTROL_CLASS_EXPECTATION:
+    if instance.class_token == CONTROL_CLASS_JIT_OFF:
+        # Class 1 varies the VM command line only (S1/S5): the variant source
+        # stays a byte-identical copy of the case and the runner substitutes
+        # `--compiler-enable-jit=false` into the command it builds for this
+        # variant. Nothing in the source tree is opened for writing.
+        variant.jit_off = True
+    elif instance.class_token == CONTROL_CLASS_EXPECTATION:
         append_control_sentinel(variant.expected)
     elif instance.class_token in (CONTROL_CLASS_COUNT, CONTROL_CLASS_ADDRESS):
         if instance.mutant_line is None:
@@ -2806,6 +3344,20 @@ def _md_cell(value: object) -> str:
     if value is None:
         return ""
     return " ".join(str(value).split()).replace("|", "\\|")
+
+
+def _recorded_observation(result: "ControlInstanceResult") -> Optional[str]:
+    """Recorded observation of one instance (S7).
+
+    The class-1 variant has no count-shaped measurement: its observation is the
+    stdout of the derived variant, on which the effectiveness of the JIT-off
+    override is decided. Every other class records the observed count of the
+    mutated measurement.
+    """
+    if result.class_token == CONTROL_CLASS_JIT_OFF \
+            and result.observed_stdout is not None:
+        return f"stdout: {result.observed_stdout}"
+    return result.instance.observation
 
 
 @dataclass(frozen=True)
@@ -2864,7 +3416,8 @@ def render_controls_md(report: ControlsReport) -> str:
                 instance = result.instance
                 lines.append(
                     f"| {instance.class_token} | {instance.variant_id} | "
-                    f"{_md_cell(instance.target)} | {_md_cell(instance.observation)} | "
+                    f"{_md_cell(instance.target)} | "
+                    f"{_md_cell(_recorded_observation(result))} | "
                     f"{_md_cell(instance.mutation)} | {instance.expected_class} | "
                     f"{_md_cell(sorted(result.actual_classes))} | {result.verdict} | "
                     f"{_md_cell(result.evidence)} | {_md_cell(result.reason)} |")
@@ -2930,7 +3483,7 @@ def render_controls_json(report: ControlsReport) -> str:
                     "class": result.instance.class_token,
                     "variant": result.instance.variant_id,
                     "target": result.instance.target,
-                    "observation": result.instance.observation,
+                    "observation": _recorded_observation(result),
                     "derived": result.instance.derived,
                     "substitute": result.instance.substitute,
                     "candidate_rule": result.instance.candidate_rule,
@@ -2940,6 +3493,9 @@ def render_controls_json(report: ControlsReport) -> str:
                     "verdict": result.verdict,
                     "evidence": result.evidence,
                     "reason": result.reason,
+                    "observed_stdout": result.observed_stdout,
+                    "stdout_bytes": result.stdout_bytes,
+                    "stdout_path": result.stdout_path,
                 }
                 for result in case.instance_results
             ],
@@ -3006,27 +3562,31 @@ def render_summary_controls_section(report: ControlsReport) -> str:
 #
 # The VM-free core above is the class model, the construction and the report.
 # This section drives it: the flag surface, the usage errors, the base run plus
-# one variant run per class-2/3/4 instance, the per-case verdict, the report
-# artifacts and the exit codes. Class 1 (`JIT-off`) is a command-line override
-# owned by the following leaf (T3); the model already reports it applicable for
-# a case with positive JIT evidence, so this stage reports the unmet obligation
-# instead of silently skipping the class or running an unmutated command.
-
-CONTROL_JIT_OFF_UNBUILT = (
-    "class JIT-off is not built in this stage: its command override "
-    "(--compiler-enable-jit=false on the derived variant) is the following "
-    "leaf's obligation, so the applicable class-1 control is reported unmet")
-
-
-def control_stage_blocker(instance: ControlInstance) -> Optional[str]:
-    """Why this stage cannot execute an instance, or None when it can."""
-    if instance.class_token == CONTROL_CLASS_JIT_OFF:
-        return CONTROL_JIT_OFF_UNBUILT
-    return None
-
+# one variant run per instance of every applicable class (the class-1 `JIT-off`
+# variant included), the per-case verdict, the report artifacts and the exit
+# codes. Every class is executed by the same per-case pipeline and reported in
+# the same `controls.md`/`controls.json` record.
 
 # One report cell is one line: the recorded failure evidence is truncated.
 CONTROL_EVIDENCE_LIMIT = 300
+
+# The class-1 observation is the variant's own captured stdout. The report
+# records a bounded prefix of it and, next to the variant, the size and the
+# artifact-relative path of the full capture (`<entry>.stdout.txt`), so the
+# effectiveness evidence stays auditable without bloating the report (S6/S7).
+CONTROL_STDOUT_OBSERVATION_LIMIT = 500
+
+
+def control_stdout_observation(stdout: str) -> str:
+    """Bounded record of a variant's own captured stdout (S7, class 1)."""
+    if len(stdout) <= CONTROL_STDOUT_OBSERVATION_LIMIT:
+        return stdout
+    return stdout[:CONTROL_STDOUT_OBSERVATION_LIMIT] + " ... [truncated]"
+
+
+def control_stdout_path(variant: TestCase) -> str:
+    """Artifact-relative path of a variant's captured stdout."""
+    return f"{variant.rel}/{variant.entry}.stdout.txt"
 
 
 def control_instance_evidence(
@@ -3108,18 +3668,19 @@ def run_case_controls(
     cfg: BuildConfig,
     args: argparse.Namespace,
     artifacts_root: Path,
-    log_fragment_res: List[re.Pattern],
+    filter_components: List[str],
     valid_opcodes: Optional[set],
     opcode_order: Optional[List[str]],
 ) -> Tuple[CaseControlResult, float]:
     """Execute every derived variant of one case and return its verdict (S2).
 
     The base observation is built from the base run of the same case; every
-    variant is an independent case run in its own `controls/<case>/<variant>/`
-    directory under the artifact root and uses the existing per-case pipeline
-    and budget. The input digests are taken before the first variant and after
-    the last one, so a violated isolation makes the case red (S5). The return
-    value carries the control time separately from the case timing (S7).
+    variant - the class-1 command-line variant included - is an independent
+    case run in its own `controls/<case>/<variant>/` directory under the
+    artifact root and uses the existing per-case pipeline and budget. The input
+    digests are taken before the first variant and after the last one, so a
+    violated isolation makes the case red (S5). The return value carries the
+    control time separately from the case timing (S7).
     """
     start = time.time()
     observation = observe_case(
@@ -3132,11 +3693,6 @@ def run_case_controls(
     digests_before = digest_case_inputs(case)
     results: List[ControlInstanceResult] = []
     for instance in instances:
-        blocker = control_stage_blocker(instance)
-        if blocker is not None:
-            results.append(ControlInstanceResult(
-                instance, CONTROL_VERDICT_INVALID, reason=blocker))
-            continue
         if not base_result.passed or instance.inapplicable_reason is not None \
                 or instance.construction_error is not None:
             # No variant run without a passing base case and without a usable
@@ -3148,18 +3704,24 @@ def run_case_controls(
             variant = materialize_variant(case, instance, artifacts_root)
             parse_annotations(variant, valid_opcodes)
             variant_result = run_case(
-                variant, cfg, args, artifacts_root, log_fragment_res, valid_opcodes)
+                variant, cfg, args, artifacts_root, filter_components, valid_opcodes)
         except (OSError, ValueError) as error:
             results.append(ControlInstanceResult(
                 instance, CONTROL_VERDICT_INVALID,
                 reason=f"variant materialisation failed: {error}"))
             continue
+        # The recorded observation is the variant's own stdout: the class-1
+        # effectiveness rule and the class-2 mismatch diff are both read from
+        # it, never from the base run.
         results.append(replace(
             evaluate_control_instance(
                 instance, base_result.passed, list(variant_result.reasons),
                 variant_result.stdout),
             evidence=control_instance_evidence(
-                instance, list(variant_result.reasons))))
+                instance, list(variant_result.reasons)),
+            observed_stdout=control_stdout_observation(variant_result.stdout),
+            stdout_bytes=len(variant_result.stdout.encode("utf-8", "replace")),
+            stdout_path=control_stdout_path(variant)))
     digests_after = digest_case_inputs(case)
     unchanged = case_tree_unchanged(digests_before, digests_after)
     return (evaluate_case_control(case, base_result.passed, results, unchanged),
@@ -3184,7 +3746,7 @@ def run_case(
     cfg: BuildConfig,
     args: argparse.Namespace,
     artifacts_root: Path,
-    log_fragment_res: List[re.Pattern],
+    filter_components: List[str],
     valid_opcodes: Optional[set],
 ) -> CaseResult:
     result = CaseResult(case.rel)
@@ -3194,6 +3756,19 @@ def run_case(
 
     if case.config_errors:
         result.reasons.extend(case.config_errors)
+        result.duration = time.time() - start
+        return result
+
+    # The shared filter chain is built before the comparison evidence is
+    # collected: an unsupported construction is a named red configuration
+    # reason of the case, never an empty substitute. A valid case without any
+    # stage yields the exact empty chain and an identical comparison.
+    try:
+        # Validation only: `compare_output` builds the same chain again at the
+        # comparison boundary, so the built-in path cannot drift from it.
+        case_filter_chain(case, filter_components)
+    except FilterConfigurationError as error:
+        result.reasons.append(str(error))
         result.duration = time.time() - start
         return result
 
@@ -3247,19 +3822,11 @@ def run_case(
         elif returncode != 0:
             result.reasons.append(f"ark_js_vm exited with return code {returncode}")
 
-    # Evidence annotations imply extra log components (E7: GC_COUNT_GE -> gc),
-    # so those component lines must also be filtered out of the expected-output
-    # comparison for this case. The deopt traces implied by DEOPT_COUNT* are
-    # multi-line log messages (event line, stack-trace frames, message
-    # newline): they are removed as one record first, before the plain
-    # per-component filter cuts only their first line.
-    case_fragment_res = list(log_fragment_res)
-    if _needs_deopt_trace(case):
-        case_fragment_res.insert(0, DEOPT_TRACE_LOG_RE)
-    for component in _implied_log_components(case):
-        case_fragment_res.append(
-            re.compile(r"\[%s\] [^\n]*\n?" % re.escape(component)))
-    diff = compare_output(stdout, case.expected, case_fragment_res)
+    # The chain built above is the exact ordered chain of this case: the GC
+    # record, the deopt record, then every explicit and implied component
+    # pattern. `compare_output` obtains the same chain from the same
+    # constructor; the expected-output comparison itself is unchanged.
+    diff = compare_output(stdout, case.expected, case, filter_components)
     if diff is not None:
         result.reasons.append(f"stdout mismatch:\n{diff}")
 
@@ -3400,7 +3967,8 @@ def detect_git_head() -> Optional[str]:
     return result.stdout.strip() or None
 
 
-def write_run_meta(path: Path, args: argparse.Namespace, cfg: BuildConfig) -> None:
+def write_run_meta(path: Path, args: argparse.Namespace, cfg: BuildConfig,
+                   corpus_meta: Optional[Dict[str, Any]] = None) -> None:
     git_head = detect_git_head()
     meta = {
         "argv": sys.argv,
@@ -3411,7 +3979,3807 @@ def write_run_meta(path: Path, args: argparse.Namespace, cfg: BuildConfig) -> No
         "es2abc": str(cfg.es2abc),
         "ark_disasm": str(cfg.ark_disasm),
     }
+    if corpus_meta is not None:
+        # The corpus class fixes its resolved root, its revision and the number
+        # of cases it selected; a run without the flag never adds this field.
+        meta["corpus"] = corpus_meta
     path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# External corpus case class: `--corpus` selection and root resolution
+# ---------------------------------------------------------------------------
+# The corpus class is a separate selection of the same runner (design C1/C2):
+# the root comes from the environment only, the corpus runner module is a
+# read-only library, and the class never shares its cases with the embedded
+# tree. Every failure of this layer is a usage error (exit code 2) that names
+# the variable, element or reason; a case is never silently skipped.
+
+
+def resolve_corpus_root() -> Tuple[Optional[Path], Optional[str]]:
+    """Resolve the corpus root from `ARKSTEED_EXTERNAL_TESTS` (C1).
+
+    There is no implicit value: an unset, empty or unusable variable is a
+    usage error naming the variable and the required layout. This runs before
+    the build stage and before the tool checks.
+    """
+    raw = os.environ.get(CORPUS_ROOT_ENV_VAR)
+    if raw is None:
+        return None, (
+            f"--corpus needs the external corpus root in the {CORPUS_ROOT_ENV_VAR} "
+            f"environment variable, but it is not set; expected layout: a directory "
+            f"with {CORPUS_RUNNER_FILENAME} in it (recommended value: "
+            f"{CORPUS_RECOMMENDED_ROOT})")
+    if not raw.strip():
+        return None, (
+            f"--corpus needs the external corpus root in the {CORPUS_ROOT_ENV_VAR} "
+            f"environment variable, but it is set to an empty value; expected "
+            f"layout: a directory with {CORPUS_RUNNER_FILENAME} in it (recommended "
+            f"value: {CORPUS_RECOMMENDED_ROOT})")
+    # The probe is fallible: `expanduser()` raises `RuntimeError` for a `~`
+    # prefix naming an unknown user, and `is_dir()`/`resolve()` can raise
+    # `OSError` (permission denied, unreadable parent, symlink loop). Those
+    # values are unresolvable and must be the named usage error, not a
+    # traceback (C1).
+    try:
+        root = Path(raw).expanduser()
+        is_dir = root.is_dir()
+    except (RuntimeError, OSError) as e:
+        return None, (
+            f"--corpus: {CORPUS_ROOT_ENV_VAR} does not resolve to a directory: "
+            f"{raw}; expected layout: a directory with {CORPUS_RUNNER_FILENAME} "
+            f"in it (recommended value: {CORPUS_RECOMMENDED_ROOT}) "
+            f"(resolution failed: {e})")
+    if not is_dir:
+        return None, (
+            f"--corpus: {CORPUS_ROOT_ENV_VAR} does not resolve to a directory: "
+            f"{root}; expected layout: a directory with {CORPUS_RUNNER_FILENAME} "
+            f"in it (recommended value: {CORPUS_RECOMMENDED_ROOT})")
+    try:
+        resolved_root = root.resolve()
+    except OSError as e:
+        return None, (
+            f"--corpus: {CORPUS_ROOT_ENV_VAR} does not resolve to a directory: "
+            f"{root}; expected layout: a directory with {CORPUS_RUNNER_FILENAME} "
+            f"in it (recommended value: {CORPUS_RECOMMENDED_ROOT}) "
+            f"(resolution failed: {e})")
+    return resolved_root, None
+
+
+def load_corpus_module(root: Path) -> Tuple[Optional[Any], Optional[str]]:
+    """Import the corpus runner module lazily as a read-only library (C2).
+
+    The import is lazy (it happens only for `--corpus`), runs with the
+    bytecode cache disabled and restores it afterwards, so no `__pycache__`
+    appears in the corpus tree, and it checks the mandatory API and that the
+    module's own `TEST_ROOT` is the resolved root. Every failure is a usage
+    error naming the missing item, never a silent skip.
+    """
+    module_path = root / CORPUS_RUNNER_FILENAME
+    if not module_path.is_file():
+        return None, (
+            f"--corpus needs {CORPUS_RUNNER_FILENAME} in the corpus root {root} "
+            f"({CORPUS_ROOT_ENV_VAR}); the module was not found")
+    spec = importlib.util.spec_from_file_location(CORPUS_MODULE_NAME, module_path)
+    if spec is None or spec.loader is None:
+        return None, f"--corpus cannot load the corpus runner module {module_path}"
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[CORPUS_MODULE_NAME] = module
+    saved_dont_write_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(module)
+    except Exception as e:  # noqa: BLE001 - report any import failure as usage
+        sys.modules.pop(CORPUS_MODULE_NAME, None)
+        return None, f"--corpus cannot import the corpus runner module {module_path}: {e}"
+    finally:
+        sys.dont_write_bytecode = saved_dont_write_bytecode
+    missing = [name for name in CORPUS_REQUIRED_API if not hasattr(module, name)]
+    if missing:
+        return None, (
+            f"--corpus: the corpus runner module {module_path} does not provide the "
+            f"required API element {missing[0]!r}"
+            + (f" (also missing: {', '.join(missing[1:])})" if len(missing) > 1 else ""))
+    build_config_fields = getattr(module.BuildConfig, "__dataclass_fields__", None)
+    has_ark_root = ("ark_root" in build_config_fields
+                    if build_config_fields is not None else False)
+    if not has_ark_root:
+        try:
+            has_ark_root = "ark_root" in inspect.signature(module.BuildConfig).parameters
+        except (TypeError, ValueError):
+            has_ark_root = False
+    if not has_ark_root:
+        return None, (
+            f"--corpus: the corpus runner module {module_path} does not provide the "
+            f"required API element 'BuildConfig.ark_root'")
+    module_test_root = Path(module.TEST_ROOT).resolve()
+    if module_test_root != root:
+        return None, (
+            f"--corpus: the corpus runner module {module_path} reports TEST_ROOT="
+            f"{module_test_root}, which is not the resolved corpus root {root}")
+    return module, None
+
+
+def _corpus_namespace_pattern(pattern: str) -> bool:
+    """Whether a filter pattern names the `corpus/<suite>/<case>` namespace."""
+    stripped = pattern.rstrip("/")
+    return stripped == CORPUS_NAMESPACE or stripped.startswith(CORPUS_NAMESPACE + "/")
+
+
+def corpus_filter_usage_error(
+    includes: List[str], excludes: List[str], corpus_flag: bool,
+) -> Optional[str]:
+    """Usage error of the `-I`/`-X` patterns for the selected class (C1).
+
+    With the flag the patterns must live in the `corpus/<rel>` namespace;
+    without it a pattern naming that namespace is rejected with the missing
+    flag, so a corpus selection can never be requested by accident and then
+    silently run nothing.
+    """
+    for pattern in list(includes) + list(excludes):
+        in_namespace = _corpus_namespace_pattern(pattern)
+        if corpus_flag and not in_namespace:
+            return (
+                f"--corpus selects the {CORPUS_NAMESPACE}/<suite>/<case> namespace: "
+                f"the filter pattern '{pattern}' has no leading "
+                f"'{CORPUS_NAMESPACE}' segment")
+        if not corpus_flag and in_namespace:
+            return (
+                f"the filter pattern '{pattern}' selects the "
+                f"{CASE_CLASS_CORPUS} case class ({CORPUS_NAMESPACE}/<suite>/<case>), "
+                f"but --corpus was not given: pass --corpus to run the external "
+                f"corpus class")
+    return None
+
+
+def corpus_selection_usage_error(args: argparse.Namespace) -> Optional[str]:
+    """Usage error of the `--corpus` selection itself (C1, S1).
+
+    The sensitivity-control mode is defined for the embedded class only, so
+    the two flags cannot be combined. The guard reads the control flag with
+    `getattr`, so it stays correct when the control surface is not part of the
+    parsed options.
+    """
+    if getattr(args, "sensitivity_controls", False):
+        return (
+            f"--corpus selects the {CASE_CLASS_CORPUS} case class, whose controls "
+            f"are its class invariant (JIT activity) and the differential "
+            f"interpreter/JIT comparison; --sensitivity-controls is defined for "
+            f"the {CASE_CLASS_EMBEDDED} class only, so the two flags cannot be "
+            f"combined")
+    return corpus_filter_usage_error(args.include, args.exclude, True)
+
+
+def corpus_relative_patterns(patterns: List[str]) -> List[str]:
+    """Drop the `corpus` namespace segment from filter patterns (C1).
+
+    The corpus discovery knows nothing about the `corpus/` namespace, so it
+    receives corpus-relative patterns; the class root pattern (`corpus` itself)
+    selects the whole class, which an empty pattern list expresses.
+    """
+    mapped: List[str] = []
+    for pattern in patterns:
+        stripped = pattern.rstrip("/")
+        if stripped == CORPUS_NAMESPACE:
+            continue
+        mapped.append(stripped[len(CORPUS_NAMESPACE) + 1:])
+    return mapped
+
+
+def discover_corpus_cases(
+    module: Any, root: Path, includes: List[str], excludes: List[str],
+    verbose: bool = False,
+) -> List[TestCase]:
+    """Select the corpus class with one call to the module's discovery (C1).
+
+    The selected set is the result of exactly one `discover_cases` call on the
+    resolved root; the corpus-relative patterns are passed to that call, and
+    the full `corpus/<rel>` identifiers are then matched with this runner's
+    `_pattern_matches`, so both mechanisms apply the same selection semantics.
+    Each selected case keeps the module's own `TestCase` object for the
+    class-specific stages.
+    """
+    selected: List[TestCase] = []
+    for corpus_case in module.discover_cases(
+            corpus_relative_patterns(includes),
+            corpus_relative_patterns(excludes), verbose):
+        rel = f"{CORPUS_NAMESPACE}/{corpus_case.rel}"
+        if includes and not _pattern_matches(rel, includes):
+            continue
+        if excludes and _pattern_matches(rel, excludes):
+            continue
+        case_dir = Path(getattr(corpus_case, "case_dir", root / corpus_case.rel))
+        source = getattr(corpus_case, "source", None) or case_dir
+        selected.append(TestCase(
+            rel, Path(source), case_dir / EXPECTED_OUTPUT_NAME,
+            case_class=CASE_CLASS_CORPUS, corpus_case=corpus_case,
+        ))
+    return selected
+
+
+def corpus_tools_error(module: Any, cfg: BuildConfig) -> Optional[str]:
+    """Check the tools of both build configurations (C2).
+
+    The corpus class runs its own `BuildConfig` (with `ark_root`); the tools it
+    resolves must be the very paths this runner resolves, and they must exist.
+    The check runs after the runner's build stage and before the case loop, so
+    a missing tool is reported after the build that produces it, not before.
+    """
+    corpus_cfg = build_reference_config(module, cfg)
+    for option in ("ark_js_vm", "es2abc"):
+        ours = Path(getattr(cfg, option))
+        theirs = Path(getattr(corpus_cfg, option))
+        if theirs != ours:
+            return (
+                f"--corpus: the corpus runner's BuildConfig resolves {option} to "
+                f"{theirs}, but this runner resolves it to {ours}; the two build "
+                f"configurations must name the same tool")
+        if not theirs.exists():
+            return f"--corpus: {theirs} does not exist"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# External corpus case class: the reference verdict and the verdict parity
+# ---------------------------------------------------------------------------
+# The corpus runner module is the source of the per-case reference verdict
+# (design C7): its own `parse_args` supplies the run namespace, the fields its
+# `main` derives are reproduced, the runner's platform and mode are injected
+# after parsing, and its `run_case` performs the reference execution with its
+# own `BuildConfig`, its own defaults and its own budget. The reference
+# execution is mandatory and has no switch: it runs for every selected case,
+# including the cases the class already considers red, so a divergence is
+# observed instead of being assumed away. The class base verdict is compared
+# with it on the verdict alone (the module stores stdout as a reproducer and
+# never compares it); a divergence is a red case reported with both
+# reproducing commands.
+
+
+def corpus_revision(root: Path) -> Optional[str]:
+    """Revision of the corpus the run report fixes (C7).
+
+    The corpus is a read-only dependency, so its revision is read from its own
+    git metadata only; a root without git metadata reports no revision instead
+    of failing the run.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True, text=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def build_reference_config(module: Any, cfg: BuildConfig) -> Any:
+    """The corpus runner's own `BuildConfig` for the reference run (C2, C7).
+
+    The class is the module's own and is built from the parameters this runner
+    resolved (`ARK_ROOT`, platform and mode), so the reference execution runs
+    the very binaries under test and `ark_root` is filled in. The mode comes
+    from the runner and not from the module CLI, so `fastverify` is reachable.
+    """
+    return module.BuildConfig(cfg.mode, cfg.platform, ARK_ROOT)
+
+
+def build_reference_namespace(module: Any, cfg: BuildConfig) -> argparse.Namespace:
+    """The corpus runner's own run namespace for the reference run (C7).
+
+    The module's own CLI supplies its own defaults. It is called with an
+    explicit empty argv, so the runner's command line is never parsed by the
+    module and the module's own `debug|release` choices cannot constrain the
+    run. The fields its `main` derives are reproduced (`log_components_value`
+    when `--log-components` is not given, the host platform when `-p` is not
+    given) and the runner's platform and mode are injected after parsing: the
+    injected mode survives parsing because it is not re-parsed, so
+    `fastverify` is reachable. The namespace carries the module's own budget
+    (`EXECUTION_TIMEOUT`, without the cross-build multiplier of the class: the
+    reference budget is the module's own and is not overridable).
+    """
+    reference_args = module.parse_args([])
+    if getattr(reference_args, "log_components", None):
+        # The VM parses --log-components as a colon-separated list; commas on
+        # the command line are normalized exactly as the module's `main` does.
+        parts = [c for c in re.split(r"[,:]", reference_args.log_components) if c]
+        reference_args.log_components_value = ":".join(parts)
+    else:
+        reference_args.log_components_value = None
+    if getattr(reference_args, "platform", None) is None:
+        reference_args.platform = module.detect_host_platform()
+    reference_args.platform = cfg.platform
+    reference_args.mode = cfg.mode
+    return reference_args
+
+
+def _option_token_parts(token: str) -> Optional[Tuple[str, str]]:
+    """`--name=value` token as `(name, value)`; `--flag` becomes `(name, 'true')`."""
+    name = _option_name(token)
+    if name is None:
+        return None
+    if "=" in token:
+        return name, token.split("=", 1)[1]
+    return name, "true"
+
+
+def corpus_behavioural_options(
+    module: Any, args: argparse.Namespace,
+) -> "collections.OrderedDict[str, str]":
+    """Behavioural options of the module's own run configuration (C5).
+
+    The set is derived from the loaded corpus module and never from a literal
+    list: its `BASE_ARGS` and `ALWAYS_ARGS`, plus the values its own CLI
+    defaults give `--compiler-jit-hotness-threshold`, `--enable-heap-verify`
+    and `--compiler-enable-jit-lazy-deopt`. A change of a module constant or
+    of one of its CLI defaults therefore changes the class command line.
+    """
+    options: "collections.OrderedDict[str, str]" = collections.OrderedDict()
+    for token in list(module.BASE_ARGS) + list(module.ALWAYS_ARGS):
+        parts = _option_token_parts(token)
+        if parts is None:
+            continue
+        options[parts[0]] = parts[1]
+    options["--compiler-jit-hotness-threshold"] = str(
+        getattr(args, "hotness_threshold", None))
+    if not getattr(args, "disable_heap_verify", False):
+        options["--enable-heap-verify"] = "true"
+    options["--compiler-enable-jit-lazy-deopt"] = str(
+        not getattr(args, "disable_lazy_deopt", False)).lower()
+    return options
+
+
+def corpus_class_defaults(module: Any) -> "collections.OrderedDict[str, str]":
+    """Class defaults: the module's behavioural options minus observation (C5).
+
+    The runner-managed options (the observation and the environment paths) are
+    not behavioural class defaults: the class supplies its own observation
+    (the JIT-activity invariant) and the environment paths come from the run
+    configuration. The values come from the module's own CLI defaults, so no
+    literal copy of the corpus configuration lives in this repository.
+    """
+    options = corpus_behavioural_options(module, module.parse_args([]))
+    return collections.OrderedDict(
+        (name, value) for name, value in options.items()
+        if name not in RUNNER_MANAGED_OPTIONS)
+
+
+def corpus_class_command_options(module: Any) -> List[str]:
+    """Class command tokens of the derived class defaults (C5, C6).
+
+    Only the class branch builds them, so an embedded case never gains a
+    corpus option and the derived set changes with the module constants.
+    """
+    return [f"{name}={value}"
+            for name, value in corpus_class_defaults(module).items()]
+
+
+def corpus_defaults_usage_error(
+    module: Any, reference_args: argparse.Namespace,
+    class_defaults: "collections.OrderedDict[str, str]",
+) -> Optional[str]:
+    """Cross-check the class defaults against the reference namespace (C5).
+
+    The behavioural options of the reference run must equal the class defaults
+    name by name; only the runner-managed options (observation and environment
+    paths) may differ, because the class replaces the observation with its own
+    invariant. A difference is a usage error naming the option, never a silent
+    divergence of verdicts.
+    """
+    reference = corpus_behavioural_options(module, reference_args)
+    names = list(dict.fromkeys(
+        list(reference) + [name for name in class_defaults if name not in reference]))
+    for name in names:
+        if name in RUNNER_MANAGED_OPTIONS:
+            continue
+        if reference.get(name) != class_defaults.get(name):
+            return (
+                f"--corpus: the class defaults do not match the reference run "
+                f"behavioural options: '{name}' is "
+                f"{class_defaults.get(name)!r} in the class defaults and "
+                f"{reference.get(name)!r} in the reference namespace; only the "
+                f"runner-managed options may differ "
+                f"({', '.join(RUNNER_MANAGED_OPTIONS)})")
+    return None
+
+
+def _status_value(status: Any) -> str:
+    """Plain verdict of a corpus module status value (or of a string)."""
+    return str(getattr(status, "value", status))
+
+
+@dataclass
+class CorpusReferenceResult:
+    """Outcome of the mandatory reference execution of one corpus case (C7)."""
+
+    verdict: str
+    reason: Optional[str] = None
+    # The module's own reproducer of the reference execution (C10).
+    command: Optional[str] = None
+    duration: float = 0.0
+    artifacts: Optional[Path] = None
+
+
+def run_reference_case(
+    module: Any, case: TestCase, cfg: Any, reference_args: argparse.Namespace,
+    artifacts_root: Path,
+) -> CorpusReferenceResult:
+    """Run one corpus case with the corpus runner's own per-case path (C7).
+
+    The module compiles and executes the case itself (its own compilation
+    rules, its `BASE_ARGS`/`ALWAYS_ARGS`, its own defaults and its own budget)
+    and its own classification of that outcome is the reference verdict. Its
+    stdout capture stays in its own artifacts subtree next to the reproducer
+    it produces. The reference run takes no descriptor, no case requirement
+    and no class budget, so no class-side override can reach it.
+    """
+    reference_root = artifacts_root / CORPUS_REFERENCE_ARTIFACTS_DIR
+    case_rel = getattr(case.corpus_case, "rel", case.rel)
+    start = time.time()
+    try:
+        result = module.run_case(case.corpus_case, cfg, reference_args,
+                                 reference_root)
+    except Exception as e:  # noqa: BLE001 - a failed reference is a red verdict
+        return CorpusReferenceResult(
+            CORPUS_VERDICT_FAIL, f"reference run failed: {e}", None,
+            time.time() - start, reference_root / case_rel)
+    verdict = _status_value(getattr(result, "status", CORPUS_VERDICT_FAIL))
+    reasons = [str(reason) for reason in getattr(result, "reasons", []) or []]
+    command = getattr(result, "repro_cmd", None)
+    duration = float(getattr(result, "duration", 0.0) or 0.0)
+    case_artifacts = reference_root / case_rel
+    if command:
+        try:
+            case_artifacts.mkdir(parents=True, exist_ok=True)
+            (case_artifacts / CORPUS_REFERENCE_COMMAND_FILENAME).write_text(
+                command + "\n", encoding="utf-8")
+        except OSError:
+            pass
+    return CorpusReferenceResult(verdict, "; ".join(reasons) or None, command,
+                                 duration, case_artifacts)
+
+
+def classify_corpus_base_verdict(
+    module: Any, *, compile_ok: bool, compile_timed_out: bool,
+    returncode: Optional[int], timed_out: bool,
+) -> Tuple[str, Optional[str]]:
+    """Base verdict of a class execution by the module's own rule (C3, C7).
+
+    The branch order mirrors the module's own `run_case`: a failed compilation
+    is a TIMEOUT when it timed out and a FAIL otherwise; an execution timeout
+    is a TIMEOUT; an unstartable VM, a crash (classified with the module's own
+    `is_crash`/`crash_signal_name`) and any other nonzero exit code are FAIL;
+    everything else is PASS.
+    """
+    if not compile_ok:
+        if compile_timed_out:
+            return CORPUS_VERDICT_TIMEOUT, "compilation timed out"
+        return CORPUS_VERDICT_FAIL, "compilation failed"
+    if timed_out:
+        return CORPUS_VERDICT_TIMEOUT, "execution timed out"
+    if returncode is None:
+        return CORPUS_VERDICT_FAIL, "ark_js_vm could not be executed"
+    if module.is_crash(returncode):
+        return (CORPUS_VERDICT_FAIL,
+                f"ark_js_vm crashed with {module.crash_signal_name(returncode)} "
+                f"(return code {returncode})")
+    if returncode != 0:
+        return CORPUS_VERDICT_FAIL, f"ark_js_vm exited with return code {returncode}"
+    return CORPUS_VERDICT_PASS, None
+
+
+def classify_parity(
+    base_verdict: str, reference_verdict: str, config_error: bool = False,
+) -> str:
+    """Parity of the class base verdict with the reference verdict (C7).
+
+    The comparison is on the base verdict only: the corpus runner stores the
+    case stdout as a reproducer and never compares it, so stdout is not the
+    oracle of the parity. A descriptor config error means the case has no
+    executions at all and is red by the descriptor itself, so the parity is
+    `not-applicable`; otherwise equal verdicts are `matched` and any
+    difference is `diverged`.
+    """
+    if config_error:
+        return CORPUS_PARITY_NOT_APPLICABLE
+    if base_verdict == reference_verdict:
+        return CORPUS_PARITY_MATCHED
+    return CORPUS_PARITY_DIVERGED
+
+
+def parity_reasons(
+    base_verdict: str, class_command: Optional[str], reference_verdict: str,
+    reference_command: Optional[str],
+) -> List[str]:
+    """Reasons of a `diverged` parity: both verdicts and both reproducers.
+
+    A divergence is an adapter defect, so the class command and the reference
+    command are reported together (C7, C10); the class run records its command
+    in the case artifacts and the reference command is the module's own
+    reproducer.
+    """
+    return [
+        f"parity divergence: class={base_verdict} reference={reference_verdict}",
+        f"class command: {class_command or 'not recorded'}",
+        f"reference command: {reference_command or 'not recorded'}",
+    ]
+
+
+@dataclass
+class CorpusContext:
+    """Per-run corpus class state built once before the case loop (C2, C7)."""
+
+    module: Any
+    root: Path
+    revision: Optional[str]
+    # The module's own build configuration and its own run namespace; every
+    # reference execution of the run reuses them, so the reference verdict of
+    # a case is produced from the module's defaults and its own budget.
+    build_config: Any
+    reference_args: argparse.Namespace
+    # The behavioural class defaults derived from the loaded module (C5): the
+    # class command line is built from them, they are checked against the
+    # reference namespace before the case loop and no embedded case ever sees
+    # them.
+    class_defaults: "collections.OrderedDict[str, str]" = field(
+        default_factory=collections.OrderedDict)
+    # The IR opcode names the descriptor constraints are validated against
+    # (`None` when the authoritative header is unavailable); the class
+    # execution reuses the run-level value and never reloads the header.
+    valid_opcodes: Optional[set] = None
+    # The prepared `(command, components)` of every selected corpus case, built
+    # and validated on the actual per-case inputs before the case loop (TW1).
+    # The class execution of a case reuses its prepared command, so the
+    # validated command and the executed command are the same subject and an
+    # absent or duplicated `--compiler-enable-jit` token can never launch a
+    # process. A case whose command the pre-flight could not construct keeps no
+    # entry and is handled by the ordinary per-case configuration path.
+    class_commands: Dict[str, Tuple[List[str], List[str]]] = field(
+        default_factory=dict)
+
+
+def corpus_run_meta(context: Optional[CorpusContext],
+                    case_count: int) -> Optional[Dict[str, Any]]:
+    """Run metadata of the corpus class the report fixes (C7, C10).
+
+    The number of cases (the single discovery call), the resolved root and the
+    revision of the corpus are recorded for the report header.
+    """
+    if context is None:
+        return None
+    return {
+        "case_class": CASE_CLASS_CORPUS,
+        "root": str(context.root),
+        "revision": context.revision,
+        "cases": case_count,
+    }
+
+
+# ---------------------------------------------------------------------------
+# External corpus case class: the class execution and the JIT-activity
+# invariant
+# ---------------------------------------------------------------------------
+# The class execution compiles the case with the corpus runner module's own
+# functions and runs the produced abc with a class-specific streaming executor
+# (design C2/C3/C4): the compilation and execution markers are counted while
+# the stream passes, the filtered program output is kept under the class limit
+# and the component log lines without the execution markers go to a temporary
+# log that is deleted after the evidence pass. The class-level invariant is
+# injected into the case requirements before the case loop, so every corpus
+# case must show a compilation marker and, unless a justified descriptor
+# exempts it, an execution marker.
+
+
+def corpus_case_stem(case: TestCase) -> str:
+    """Base name of the class artifacts of a corpus case."""
+    corpus_case = case.corpus_case
+    stem = getattr(corpus_case, "stem", None)
+    if stem:
+        return str(stem)
+    case_dir = getattr(corpus_case, "case_dir", None)
+    if case_dir is not None:
+        return Path(case_dir).name
+    return Path(case.rel).name
+
+
+def corpus_case_entry(case: TestCase) -> str:
+    """VM `--entry-point` of a corpus case."""
+    entry = getattr(case.corpus_case, "entry", None)
+    if entry:
+        return str(entry)
+    return corpus_case_stem(case)
+
+
+def corpus_case_is_file_info(module: Any, case: TestCase) -> bool:
+    """Whether a corpus case is a fileInfo package (the module's own kind)."""
+    kind = getattr(case.corpus_case, "case_kind", None)
+    if kind is None:
+        return False
+    if getattr(kind, "name", None) == "FILE_INFO":
+        return True
+    return str(getattr(kind, "value", kind)) == "file_info"
+
+
+def corpus_invariant_constraints(case: TestCase) -> List[EvidenceConstraint]:
+    """The injected class-level JIT-activity requirements of a case (C3).
+
+    A zero compilation marker can never be exempted, so the compilation
+    requirement is always injected; the execution requirement is injected
+    unless the descriptor declared the justified `NO_EXEC_MARKER` exemption.
+    """
+    constraints: List[EvidenceConstraint] = [
+        CompileCountGeConstraint(CORPUS_INVARIANT_PATTERN, CORPUS_INVARIANT_MIN)]
+    if not case.corpus_no_exec_marker_reason:
+        constraints.append(
+            ExecCountGeConstraint(CORPUS_INVARIANT_PATTERN, CORPUS_INVARIANT_MIN))
+    return constraints
+
+
+def inject_corpus_invariant(case: TestCase) -> None:
+    """Add the class-level requirements to a corpus case (C3).
+
+    The injected requirements live next to the descriptor requirements, so
+    both are evaluated and reported: a descriptor can add requirements but
+    never remove or weaken the injected ones.
+    """
+    case.evidence_constraints.extend(corpus_invariant_constraints(case))
+
+
+def corpus_invariant_state(case: TestCase, compile_markers: int,
+                           exec_markers: int) -> str:
+    """Reported state of the class invariant of one case (C3, C10).
+
+    `compile-only` without a declared exemption is red: the injected execution
+    requirement is then violated and reported with its actual count.
+    """
+    if compile_markers < CORPUS_INVARIANT_MIN:
+        return CORPUS_INVARIANT_NONE
+    if case.corpus_no_exec_marker_reason:
+        return (f"{CORPUS_INVARIANT_COMPILE_ONLY} "
+                f"(exempt: {case.corpus_no_exec_marker_reason})")
+    if exec_markers < CORPUS_INVARIANT_MIN:
+        return CORPUS_INVARIANT_COMPILE_ONLY
+    return CORPUS_INVARIANT_BOTH
+
+
+def corpus_class_budget(module: Any, case: TestCase,
+                        cfg: BuildConfig) -> Tuple[int, Optional[str]]:
+    """Class budget of one corpus case; `(seconds, override justification)` (C6).
+
+    The default is the corpus runner module's own budget (`EXECUTION_TIMEOUT`,
+    1800 s on the pinned revision) with the embedded runner's cross-build
+    multiplier; the descriptor's `TIMEOUT <seconds> <justification>` replaces
+    it with an absolute value. The reference budget is untouched: the override
+    never reaches the module's own run.
+    """
+    budget = int(module.EXECUTION_TIMEOUT)
+    if cfg.is_cross_build:
+        budget *= QEMU_TIMEOUT_FACTOR
+    if case.corpus_timeout_seconds is not None:
+        return int(case.corpus_timeout_seconds), case.corpus_timeout_reason
+    return budget, None
+
+
+@dataclass
+class CorpusStreamEvidence:
+    """Streamed evidence of one corpus class execution (C4).
+
+    The pass counts the markers and keeps only what a verdict needs: the
+    filtered program output (bounded), the byte volume of the retained
+    component log and the counts of the descriptor evidence patterns that name
+    methods. The marker-dominated component trace is never captured.
+    """
+
+    compile_markers: int = 0
+    exec_markers: int = 0
+    deopt_markers: int = 0
+    gc_markers: int = 0
+    program_output: str = ""
+    program_output_bytes: int = 0
+    program_output_truncated: bool = False
+    compiler_log_bytes: int = 0
+    compiler_log_capped: bool = False
+    # Additive invalidity fields of the completed collection result (S3/S5):
+    # an unresolved record candidate exceeded its own limit, or the collection
+    # could not be completed at all (read/filter/observation/log-sink failure).
+    # Both are sticky and make the output unusable for comparison and for an
+    # emptiness decision, even when the retained prefix is empty.
+    record_candidate_capped: bool = False
+    program_output_error: Optional[str] = None
+    # Counts of the descriptor evidence constraints whose pattern is not the
+    # wildcard of the injected invariant (the wildcard is answered by totals).
+    named_counts: Dict[EvidenceConstraint, int] = field(default_factory=dict)
+
+
+def corpus_program_output_usable(evidence: CorpusStreamEvidence) -> bool:
+    """Whether a *completed* collection result certifies program output (S5).
+
+    This is a predicate on a completed collection result, never permission to
+    compare a live accumulator: a caller may decide emptiness/comparability
+    only when the output is complete and neither invalidity flag nor the
+    collection error is set.
+    """
+    return (not evidence.program_output_truncated
+            and not evidence.record_candidate_capped
+            and evidence.program_output_error is None)
+
+
+def _corpus_collection_error(operation: str, error: BaseException) -> str:
+    """Named collection failure of one operation (S5)."""
+    return (f"program output collection failed: {operation}: "
+            f"{type(error).__name__}: {error}")
+
+
+def _record_corpus_collection_error(evidence: CorpusStreamEvidence,
+                                    operation: str, error: BaseException) -> None:
+    """Record the first named collection failure without overwriting a later one."""
+    if evidence.program_output_error is None:
+        evidence.program_output_error = _corpus_collection_error(operation, error)
+
+
+def _evidence_matches(constraint: EvidenceConstraint, candidate: str) -> bool:
+    """Whether a streamed candidate matches a descriptor evidence pattern."""
+    return any(fnmatchcase(spelling, constraint.pattern)
+               for spelling in constraint.spellings(candidate))
+
+
+def _partial_literal_suffix(text: str, literal: str) -> int:
+    """Longest suffix of `text` that is a proper prefix of `literal`.
+
+    The retained suffix is the only text of a literal stage whose match
+    decision is still unresolved across a chunk boundary.
+    """
+    limit = min(len(literal) - 1, len(text))
+    for keep in range(limit, 0, -1):
+        if text.endswith(literal[:keep]):
+            return keep
+    return 0
+
+
+def _match_prefix_candidates(
+    text: str, candidates: List[str], final: bool = False,
+) -> Tuple[Optional[int], bool]:
+    """The first still-decided candidate `text` starts with, if any.
+
+    Candidates are ordered by priority. While the text can still grow, a later
+    candidate is committed only once every higher-priority candidate is ruled
+    out, so the recognized identity of a line is a pure function of its
+    characters and does not depend on how those characters arrived: a longer,
+    lower-priority supplied prefix can never shadow a higher-priority fixed
+    marker identity in one chunk and lose to it character by character (S5).
+    `done == False` means `text` is still a proper prefix of a higher-priority
+    candidate, so more characters may change the answer.
+
+    `final=True` marks the end of the growable text (a line end): no candidate
+    can grow any further, so the first complete match is the answer even when a
+    higher-priority candidate is still an unterminated prefix of it.
+    """
+    for index, candidate in enumerate(candidates):
+        if text.startswith(candidate):
+            return index, True
+        if not final and candidate.startswith(text):
+            return None, False
+    return None, True
+
+
+def _glob_tokens(pattern: str) -> List[Tuple[str, Any]]:
+    """Token stream of one shell-style wildcard pattern (S5).
+
+    The scanning rules and the character-class construction mirror
+    `fnmatch.translate`, so the streamed matcher below accepts exactly the
+    strings `fnmatchcase` accepts. Class bodies are compiled with
+    `fnmatch.translate` itself, which keeps the class semantics exact.
+    """
+    tokens: List[Tuple[str, Any]] = []
+    index = 0
+    length = len(pattern)
+    while index < length:
+        char = pattern[index]
+        index += 1
+        if char == "*":
+            tokens.append(("*", None))
+        elif char == "?":
+            tokens.append(("?", None))
+        elif char == "[":
+            closing = index
+            if closing < length and pattern[closing] == "!":
+                closing += 1
+            if closing < length and pattern[closing] == "]":
+                closing += 1
+            while closing < length and pattern[closing] != "]":
+                closing += 1
+            if closing >= length:
+                tokens.append(("c", "["))
+            else:
+                body = pattern[index - 1:closing + 1]
+                tokens.append(("[", re.compile(fnmatch.translate(body))))
+                index = closing + 1
+        else:
+            tokens.append(("c", char))
+    return tokens
+
+
+class _GlobStreamMatcher:
+    """Streaming equivalent of `fnmatchcase(payload, pattern)` (S5).
+
+    The payload of a marker line can be arbitrarily long, so a named evidence
+    count cannot buffer it. The matcher keeps a set of pattern positions - the
+    state is descriptor-sized and independent of the payload length - and
+    consumes one character at a time; `matched()` is meaningful once the
+    payload ended.
+    """
+
+    def __init__(self, pattern: str):
+        self._tokens = _glob_tokens(pattern)
+        self._states = self._closure({0})
+
+    def reset(self) -> None:
+        self._states = self._closure({0})
+
+    def feed(self, text: str) -> None:
+        if not text:
+            return
+        for char in text:
+            following: set = set()
+            for position in self._states:
+                if position >= len(self._tokens):
+                    continue
+                kind, value = self._tokens[position]
+                if kind == "*":
+                    following.add(position)
+                elif kind == "?":
+                    following.add(position + 1)
+                elif kind == "[":
+                    if value.match(char):
+                        following.add(position + 1)
+                elif value == char:
+                    following.add(position + 1)
+            self._states = self._closure(following)
+            if not self._states:
+                return
+
+    def matched(self) -> bool:
+        return len(self._tokens) in self._states
+
+    def snapshot(self):
+        return frozenset(self._states)
+
+    def restore(self, snapshot) -> None:
+        self._states = set(snapshot)
+
+    def _closure(self, states) -> set:
+        closed: set = set()
+        stack = list(states)
+        while stack:
+            position = stack.pop()
+            if position in closed:
+                continue
+            closed.add(position)
+            if position < len(self._tokens) and self._tokens[position][0] == "*" \
+                    and position + 1 not in closed:
+                stack.append(position + 1)
+        return closed
+
+
+class _NamedMatchers:
+    """Streaming named-evidence matchers of one evidence kind (S5).
+
+    The matcher set is descriptor-sized. The deopt records carry an alternative
+    spelling (`Deoptimize <record>`) for the eager path that skips the
+    GC-capable stack trace, so every deopt entry keeps a second matcher that is
+    fed the constant spelling prefix first; a record is counted once when any
+    of its spellings matches, exactly as `_evidence_matches` does.
+    """
+
+    def __init__(self, constraints, kind: str):
+        self._entries = []
+        for constraint in constraints:
+            if constraint.EVIDENCE_KEY != kind:
+                continue
+            if constraint.pattern == CORPUS_INVARIANT_PATTERN:
+                # The wildcard totals are answered by the marker counters of
+                # `corpus_evidence_actual`; no per-payload matcher is needed.
+                continue
+            plain = _GlobStreamMatcher(constraint.pattern)
+            alternative = _GlobStreamMatcher(constraint.pattern) \
+                if kind == "deopt" else None
+            self._entries.append((constraint, plain, alternative))
+
+    @property
+    def active(self) -> bool:
+        """Whether any named payload of this kind has to be matched at all."""
+        return bool(self._entries)
+
+    def reset(self) -> None:
+        for _, plain, alternative in self._entries:
+            plain.reset()
+            if alternative is not None:
+                alternative.reset()
+                alternative.feed(DEOPT_EAGER_PREFIX + " ")
+
+    def feed(self, text: str) -> None:
+        for _, plain, alternative in self._entries:
+            plain.feed(text)
+            if alternative is not None:
+                alternative.feed(text)
+
+    def matched(self, eager_spelling: bool = False) -> List[EvidenceConstraint]:
+        return [constraint for constraint, plain, alternative in self._entries
+                if plain.matched()
+                or (eager_spelling and alternative is not None
+                    and alternative.matched())]
+
+    def snapshot(self):
+        return [(plain.snapshot(),
+                 None if alternative is None else alternative.snapshot())
+                for _, plain, alternative in self._entries]
+
+    def restore(self, snapshot) -> None:
+        for (_, plain, alternative), (plain_state, alternative_state) \
+                in zip(self._entries, snapshot):
+            plain.restore(plain_state)
+            if alternative is not None:
+                alternative.restore(alternative_state)
+
+
+class _CorpusDiscardSink:
+    """Write-free log sink used when the retained log cannot be opened (S5).
+
+    `error` carries the retained-log failure that made this sink necessary (the
+    open failure). The collector consults it before it consumes any input, so
+    the committed diagnostic prefix is frozen at the failure boundary and the
+    first named collection error survives a later read failure.
+    """
+
+    def __init__(self, error: Optional[BaseException] = None):
+        self.error = error
+
+    def write(self, data) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def _utf8_bytes(text: str) -> int:
+    """UTF-8 byte volume of decoded text (ASCII is the fast path)."""
+    return len(text) if text.isascii() else len(text.encode("utf-8"))
+
+
+class _TextWindow:
+    """Segmented unresolved-text window of one incremental stage (S2/S3).
+
+    The live text is the concatenation of the stored segments minus the
+    consumed prefix of the first one. Appending never copies the stored text:
+    a supplied chunk becomes a segment of its own, and a run of short appends
+    is joined into a single segment only once that run reached `_FLUSH_MIN`
+    characters. Appending therefore costs a constant amortized amount even
+    when a growing candidate arrives one character at a time, instead of
+    copying the whole unresolved window per chunk. Literal searches and
+    indexed reads resume from the last visited segment, so scanning the same
+    growing window at every symbol transition stays bounded work too.
+
+    The window is a drop-in replacement for the previous immutable-string
+    accumulator: it supports `len()`, integer and slice indexing, `find`,
+    `endswith` and consuming a prefix.
+    """
+
+    __slots__ = ("_segments", "_head", "_flush_index", "_flush_length",
+                 "_length", "_bytes", "_memo_index", "_memo_segment",
+                 "_memo_offset")
+
+    # A run of appends is joined into one segment when it reaches this many
+    # characters or this many parts, whichever comes first: the short-chunk
+    # partition then costs linear total work instead of per-character object
+    # copying, while the segment count and the number of segments a search has
+    # to walk stay bounded.
+    _FLUSH_MIN = 512
+    _FLUSH_PARTS = 16
+
+    def __init__(self) -> None:
+        self._segments: List[str] = []
+        self._head = 0
+        self._flush_index = 0
+        self._flush_length = 0
+        self._length = 0
+        self._bytes = 0
+        self._memo_index = -1
+        self._memo_segment = 0
+        self._memo_offset = 0
+
+    def __len__(self) -> int:
+        return self._length
+
+    @property
+    def bytes(self) -> int:
+        """UTF-8 byte volume of the live unresolved text."""
+        return self._bytes
+
+    def clear(self) -> None:
+        self._segments = []
+        self._head = 0
+        self._flush_index = 0
+        self._flush_length = 0
+        self._length = 0
+        self._bytes = 0
+        self._memo_index = -1
+        self._memo_segment = 0
+        self._memo_offset = 0
+
+    def append(self, text: str) -> None:
+        if not text:
+            return
+        self._segments.append(text)
+        self._flush_length += len(text)
+        self._length += len(text)
+        self._bytes += _utf8_bytes(text)
+        if self._flush_length >= self._FLUSH_MIN \
+                or len(self._segments) - self._flush_index >= self._FLUSH_PARTS:
+            self._join_run()
+
+    def _join_run(self) -> None:
+        """Join the unflushed run into one segment, keeping the memo valid."""
+        segments = self._segments
+        first = self._flush_index
+        if self._memo_index >= 0 and self._memo_segment >= first:
+            base = 0
+            for index in range(first, self._memo_segment):
+                base += len(segments[index])
+            self._memo_segment = first
+            self._memo_offset = base + self._memo_offset
+        segments[first:] = ["".join(segments[first:])]
+        self._flush_index = len(segments)
+        self._flush_length = 0
+
+    def consume(self, count: int) -> str:
+        """Remove and return the first `count` characters of the window."""
+        if count <= 0:
+            return ""
+        if count > self._length:
+            count = self._length
+        segments = self._segments
+        head = self._head
+        remaining = count
+        first = 0
+        while first < len(segments):
+            available = len(segments[first]) - head
+            if available > remaining:
+                break
+            remaining -= available
+            first += 1
+            head = 0
+        parts: List[str] = []
+        for index in range(first):
+            parts.append(segments[index][self._head if index == 0 else 0:])
+        if remaining:
+            parts.append(segments[first][head:head + remaining])
+            self._head = head + remaining
+        else:
+            self._head = 0
+        if first:
+            del segments[:first]
+            if first <= self._flush_index:
+                self._flush_index -= first
+            else:
+                self._flush_index = 0
+                self._flush_length = self._length - count
+        text = "".join(parts)
+        self._length -= count
+        self._bytes -= _utf8_bytes(text)
+        self._memo_index = -1
+        return text
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            start, stop, step = index.indices(self._length)
+            if step == 1:
+                return self._slice(start, stop)
+            return "".join(self[position]
+                           for position in range(start, stop, step))
+        if index < 0:
+            index += self._length
+        if index < 0 or index >= self._length:
+            raise IndexError(index)
+        segment, offset = self._seek(index)
+        return self._segments[segment][offset]
+
+    def find(self, sub: str, start: int = 0) -> int:
+        """`str.find` over the live text, resumed from the last visit (S2).
+
+        The scan walks the remaining segments in bounded batches, so a search
+        over a window that grew in many small chunks costs one string search
+        per batch instead of one per appended chunk, and a match spanning a
+        segment boundary is still recognized. Every batch is truncated to the
+        batch size (at least the needle length), so a single large supplied
+        chunk is never copied whole during the search.
+        """
+        needle = len(sub)
+        if start < 0:
+            start = 0
+        if needle == 0:
+            return min(start, self._length)
+        if start > self._length:
+            return -1
+        segments = self._segments
+        total = len(segments)
+        # A match may start a little before `start` and cross a segment
+        # boundary, so the walk begins early.
+        scan = start - (needle - 1)
+        if scan < 0:
+            scan = 0
+        segment, offset = self._seek(scan)
+        # A batch must be able to hold a complete needle, otherwise a match
+        # crossing the batch boundary would be missed; the overlap step below
+        # is then at least one character.
+        minimum = _TextWindow._FLUSH_MIN
+        if needle > minimum:
+            minimum = needle
+        while segment < total:
+            parts: List[str] = []
+            length = 0
+            cursor = segment
+            position = offset
+            while cursor < total and length < minimum:
+                raw = segments[cursor]
+                take = minimum - length
+                available = len(raw) - position
+                if available > take:
+                    raw = raw[position:position + take]
+                elif position:
+                    raw = raw[position:]
+                position = 0
+                parts.append(raw)
+                length += len(raw)
+                cursor += 1
+            haystack = parts[0] if len(parts) == 1 else "".join(parts)
+            difference = start - scan
+            found = haystack.find(sub, difference if difference > 0 else 0)
+            if found != -1:
+                return scan + found
+            if scan + length >= self._length:
+                # The batch covered the whole remaining window.
+                return -1
+            # Overlap the next batch by the longest possible partial match, so
+            # no admissible start position is skipped.
+            step = length - (needle - 1)
+            if step <= 0:
+                step = 1
+            scan += step
+            segment, offset = self._seek(scan)
+        return -1
+
+    def endswith(self, suffix: str) -> bool:
+        size = len(suffix)
+        if size == 0:
+            return True
+        if size > self._length:
+            return False
+        return self._slice(self._length - size, self._length) == suffix
+
+    def startswith(self, prefix: str) -> bool:
+        size = len(prefix)
+        if size == 0:
+            return True
+        if size > self._length:
+            return False
+        return self._slice(0, size) == prefix
+
+    # -- internals --------------------------------------------------------
+    def _slice(self, start: int, stop: int) -> str:
+        if stop <= start:
+            return ""
+        segments = self._segments
+        segment, offset = self._seek(start)
+        parts: List[str] = []
+        remaining = stop - start
+        while remaining > 0 and segment < len(segments):
+            piece = segments[segment][offset:offset + remaining]
+            parts.append(piece)
+            remaining -= len(piece)
+            segment += 1
+            offset = 0
+        return "".join(parts)
+
+    def _seek(self, index: int) -> Tuple[int, int]:
+        """Segment index and scalar offset of the live character `index`."""
+        if self._memo_index >= 0:
+            if index >= self._memo_index:
+                segment, offset = self._advance(
+                    self._memo_segment, self._memo_offset,
+                    index - self._memo_index)
+            else:
+                # Interleaved searches (a literal scan and the charged-prefix
+                # measurement) move around one position, so the walk resumes
+                # backwards instead of restarting at the window head.
+                segment, offset = self._retreat(
+                    self._memo_segment, self._memo_offset,
+                    self._memo_index - index)
+        else:
+            segment, offset = self._advance(0, self._head, index)
+        self._memo_index = index
+        self._memo_segment = segment
+        self._memo_offset = offset
+        return segment, offset
+
+    def _advance(self, segment: int, offset: int, steps: int) -> Tuple[int, int]:
+        segments = self._segments
+        while steps > 0 and segment < len(segments):
+            available = len(segments[segment]) - offset
+            if steps < available:
+                return segment, offset + steps
+            steps -= available
+            segment += 1
+            offset = 0
+        return segment, offset
+
+    def _retreat(self, segment: int, offset: int, steps: int) -> Tuple[int, int]:
+        segments = self._segments
+        while True:
+            floor = self._head if segment == 0 else 0
+            available = offset - floor
+            if steps <= available:
+                return segment, offset - steps
+            steps -= available
+            if segment == 0:
+                return 0, floor
+            segment -= 1
+            offset = len(segments[segment])
+
+
+class _StreamStage:
+    """Common bounded text state of one incremental substitution stage (S2).
+
+    The pending text is exactly the part whose emission/deletion decision is
+    unresolved, so the byte volume of a record stage is also the value charged
+    to its record-candidate limit.
+    """
+
+    def __init__(self, sink):
+        self._sink = sink
+        self._pending = _TextWindow()
+        self._line_start = True
+        # Per-record-stage unresolved-window limit (S3). The pipeline sets it
+        # on the record stages only. Every symbol transition charges the still
+        # unresolved window, so the first excess is independent of the read
+        # partition and immediately halts the stage.
+        self.record_cap: Optional[int] = None
+        self._on_record_cap = None
+        self._halted = False
+        # Prefix of the window whose emission/deletion decision this stage has
+        # already examined, in characters and in UTF-8 bytes. Both are
+        # maintained incrementally, so charging a growing window never rescans
+        # it (S3).
+        self._charged_chars = 0
+        self._charged_bytes = 0
+        # Highest UTF-8 byte volume of an unresolved window this stage has
+        # examined so far (S3). Charging is a running maximum, not a live value:
+        # a chunk has to be charged exactly as its symbols would have been, so
+        # an intermediate partial prefix that a later symbol of the same chunk
+        # resolves is still counted at the moment it existed. That is what makes
+        # the cap decision independent of the read partition.
+        self._peak_bytes = 0
+        # Length of the still unresolved examined prefix of the pending window.
+        # A record stage sets it at every recognition transition, before any
+        # later transition can release that text (S3).
+        self._examined = 0
+
+    def feed(self, text: str) -> None:
+        raise NotImplementedError
+
+    def finish(self) -> None:
+        raise NotImplementedError
+
+    def free(self) -> None:
+        self._pending.clear()
+        self._charged_chars = 0
+        self._charged_bytes = 0
+        self._peak_bytes = 0
+        self._examined = 0
+        self._halted = True
+
+    def unresolved_bytes(self) -> int:
+        """Highest unresolved window charged to this stage's limit so far (S3)."""
+        return self._peak_bytes
+
+    def _frontier(self) -> int:
+        """Leading window characters whose decision this stage examined (S3).
+
+        A record stage reports its own examined prefix: text beyond it is the
+        unread tail of a caller-supplied chunk and is never charged, while a
+        complete match that is recognized and deleted leaves nothing
+        unresolved. The base implementation is used by stages without a
+        record-candidate limit.
+        """
+        return len(self._pending)
+
+    def _charge_record_cap(self) -> bool:
+        """Charge the still-unresolved window after one symbol transition (S3).
+
+        The charge counts only text the stage has actually examined and whose
+        emission/deletion is still undecided: safely emitted text, immediately
+        deleted matches and the unread tail of a supplied chunk are not
+        charged, while every symbol transition is charged, so the first excess
+        is independent of the read partition. Returns True when the stage must
+        stop: either the pipeline already disabled every stage, or this stage's
+        own window exceeded its limit. The first excess halts this stage and
+        asks the pipeline to free every candidate window and disable output
+        certification.
+        """
+        if self._halted:
+            return True
+        if self.record_cap is None:
+            return False
+        return self.note_unresolved(self._frontier())
+
+    def _halt(self) -> None:
+        """Free this stage's windows and fire the pipeline's first-excess hook.
+
+        The limit is enforced at the symbol transition that produced the
+        excess, before that transition or any later one can emit or delete
+        more text, so the frozen output prefix cannot depend on the read
+        partition (S3). The pending window is released immediately and the
+        pipeline disables output certification for the whole execution.
+        """
+        self._halted = True
+        self._pending.clear()
+        self._charged_chars = 0
+        self._charged_bytes = 0
+        self._examined = 0
+        if self._on_record_cap is not None:
+            self._on_record_cap()
+
+    def note_unresolved(self, frontier: int) -> bool:
+        """Charge the unresolved window after one symbol transition (S3).
+
+        The window is `pending[:frontier]`; the running maximum is what the
+        limit is compared against, so a transition whose prefix a later symbol
+        of the same chunk resolves still counts. Returns True when the limit
+        was exceeded: the stage is halted and the caller must not emit or
+        delete anything else.
+        """
+        if self.record_cap is None:
+            return False
+        value = self._prefix_bytes(frontier)
+        if value > self._peak_bytes:
+            self._peak_bytes = value
+        if self._peak_bytes > self.record_cap:
+            self._halt()
+            return True
+        return False
+
+    def note_partial(self, length: int) -> bool:
+        """Charge an unresolved proper literal prefix of `length` characters (S3).
+
+        A record opener is only viable at a line start, so the unresolved
+        window of such a partial is the literal prefix itself: the text before
+        its line start is safe and is not charged. The record literals are
+        ASCII, so their UTF-8 byte volume is their character length. Returns
+        True when the limit was exceeded (the stage is halted).
+        """
+        if self.record_cap is None:
+            return False
+        if length > self._peak_bytes:
+            self._peak_bytes = length
+        if self._peak_bytes > self.record_cap:
+            self._halt()
+            return True
+        return False
+
+    def _prefix_bytes(self, frontier: int) -> int:
+        """UTF-8 bytes of `pending[:frontier]`, kept incrementally (S3)."""
+        if frontier >= len(self._pending):
+            # The whole window has been examined, so its own byte counter is
+            # the charged value: no slice is built to measure it.
+            self._charged_chars = len(self._pending)
+            self._charged_bytes = self._pending.bytes
+            return self._charged_bytes
+        if frontier > self._charged_chars:
+            self._charged_bytes += _utf8_bytes(
+                self._pending[self._charged_chars:frontier])
+        elif frontier < self._charged_chars:
+            # The window was consumed from the front or a new candidate
+            # started: the charged prefix is no longer the same text.
+            self._charged_bytes = _utf8_bytes(self._pending[:frontier])
+        self._charged_chars = frontier
+        return self._charged_bytes
+
+    def _partial_excess_start(self, literal: str) -> Optional[int]:
+        """Leftmost line-start partial opener that already exceeds the limit (S3).
+
+        A record opener is only viable at a line start and its partial grows
+        one character per symbol, so the first excess of a character-wise feed
+        is the leftmost line-start position where `literal[:cap + 1]` occurs.
+        The text before that position is what that feed would already have
+        emitted, so the caller emits it before the stage halts and the frozen
+        prefix stays identical under every chunk partition. No partial can
+        exceed the limit when the limit is at least the literal length, so the
+        scan is skipped there.
+        """
+        cap = self.record_cap
+        if cap is None or cap < 0 or cap >= len(literal):
+            return None
+        needle = literal[:cap + 1]
+        pending = self._pending
+        index = pending.find(needle)
+        while index != -1:
+            if self._is_line_start(index):
+                return index
+            index = pending.find(needle, index + 1)
+        return None
+
+    def _max_partial_at_line_start(self, literal: str) -> int:
+        """Longest viable partial opener prefix present at a line start (S3).
+
+        A chunk has to be charged as if its symbols were fed one at a time, so
+        a partial opener that a later character of the same chunk breaks still
+        counts while it existed. Every proper prefix is only viable at a line
+        start; longer prefixes imply shorter ones, so the search stops at the
+        first missing prefix. The check is skipped when the limit cannot be
+        reached by an opener partial at all (at most `len(literal) - 1`).
+        """
+        cap = self.record_cap
+        if cap is None or cap >= len(literal):
+            return 0
+        pending = self._pending
+        for keep in range(len(literal) - 1, 0, -1):
+            prefix = literal[:keep]
+            if pending.find("\n" + prefix) != -1:
+                return keep
+            if self._line_start and pending.startswith(prefix):
+                return keep
+        return 0
+
+    def _append(self, text: str) -> None:
+        self._pending.append(text)
+
+    def _consume(self, count: int) -> str:
+        text = self._pending.consume(count)
+        if len(text) >= self._charged_chars:
+            self._charged_chars = 0
+            self._charged_bytes = 0
+        elif text:
+            self._charged_chars -= len(text)
+            self._charged_bytes -= _utf8_bytes(text)
+        return text
+
+    def _emit(self, count: int) -> None:
+        text = self._consume(count)
+        if text:
+            self._line_start = text.endswith("\n")
+            self._sink(text)
+
+    def _delete(self, count: int) -> None:
+        text = self._consume(count)
+        if text:
+            self._line_start = text.endswith("\n")
+
+    def _emit_all(self) -> None:
+        self._emit(len(self._pending))
+
+    def _is_line_start(self, index: int) -> bool:
+        if index == 0:
+            return self._line_start
+        return self._pending[index - 1] == "\n"
+
+    def _keep_partial(self, literal: str, require_line_start: bool) -> int:
+        """Retained suffix: a proper literal prefix, optionally at a line start."""
+        limit = min(len(literal) - 1, len(self._pending))
+        for keep in range(limit, 0, -1):
+            if not self._pending.endswith(literal[:keep]):
+                continue
+            if require_line_start \
+                    and not self._is_line_start(len(self._pending) - keep):
+                continue
+            return keep
+        return 0
+
+
+class _ComponentStage(_StreamStage):
+    """One independent component substitution stage (S2/F3).
+
+    Semantics are exactly Python `re.sub('', text)` with
+    `\\[<component>\\] [^\\n]*\\n?`: the literal is recognized anywhere, the
+    suffix through its optional LF is discarded without retaining its payload,
+    and text before the literal is forwarded without inventing a terminator.
+    """
+
+    def __init__(self, literal: str, sink):
+        super().__init__(sink)
+        self._literal = literal
+        # The proper literal prefixes a still-unresolved suffix may be, longest
+        # first, so no candidate string is built while recognizing a chunk.
+        self._tail_prefixes = tuple(
+            literal[:keep] for keep in range(len(literal) - 1, 0, -1))
+        self._tail_characters = frozenset(
+            prefix[-1] for prefix in self._tail_prefixes)
+        self._discarding = False
+
+    def feed(self, text: str) -> None:
+        self._append(text)
+        self._run(False)
+
+    def finish(self) -> None:
+        self._run(True)
+
+    def free(self) -> None:
+        super().free()
+        self._discarding = False
+
+    def _run(self, eof: bool) -> None:
+        # Each loop iteration is one symbol transition of this stage; the
+        # still-unresolved window is charged after every one of them, so a
+        # caller-supplied chunk boundary cannot change the verdict (S3).
+        while True:
+            if self._halted:
+                return
+            if self._discarding:
+                newline = self._pending.find("\n")
+                if newline == -1:
+                    # The match extends to the current end of the stream; its
+                    # payload is discarded, so nothing is retained.
+                    self._consume(len(self._pending))
+                    break
+                self._consume(newline + 1)
+                self._discarding = False
+                continue
+            found = self._pending.find(self._literal)
+            if found == -1:
+                # A partial literal is only a possible future match while the
+                # stream continues; at EOF it is plain unmatched text.
+                keep = 0 if eof else self._keep_partial_literal()
+                self._emit(len(self._pending) - keep)
+                break
+            self._emit(found)
+            self._consume(len(self._literal))
+            self._discarding = True
+        self._charge_record_cap()
+
+    def _keep_partial_literal(self) -> int:
+        """Length of the retained suffix that may still complete the literal."""
+        pending = self._pending
+        if not pending or pending[-1] not in self._tail_characters:
+            return 0
+        for prefix in self._tail_prefixes:
+            if pending.endswith(prefix):
+                return len(prefix)
+        return 0
+
+
+_GC_OPENER = "[gc]"
+_GC_REASON_MARKER = "GCReason:"
+_GC_CLOSER = "[gc] HandleStorage"
+
+
+class _GcStage(_StreamStage):
+    """Incremental equivalent of the GC record substitution (S2/F2).
+
+    Semantics are exactly Python `GC_TRACE_LOG_RE.sub('', text)`: leftmost
+    non-overlapping complete matches, arbitrary intervening lines, and the
+    mandatory closing LF of the `[gc] HandleStorage` record. A rejected opener
+    releases only the safe prefix and the remaining suffix is reconsidered in
+    this same stage.
+
+    Every transition advances one recognition step and reports the still
+    unresolved examined prefix through `_examined`, so a text that a later
+    transition releases is charged before that release and the verdict does not
+    depend on the read partition (S3): a partial opener, the headline line, the
+    closer line suffix and an unterminated closer are all charged while their
+    decision is undecided.
+    """
+
+    def __init__(self, sink):
+        super().__init__(sink)
+        self._mode = "idle"
+        self._cursor = 0
+        self._opener_lf = 0
+        self._closer_cursor = 0
+        self._closer_lf = 0
+
+    def feed(self, text: str) -> None:
+        self._append(text)
+        self._run(False)
+
+    def finish(self) -> None:
+        self._run(True)
+
+    def free(self) -> None:
+        super().free()
+        self._mode = "idle"
+        self._cursor = 0
+        self._opener_lf = 0
+        self._closer_cursor = 0
+        self._closer_lf = 0
+
+    def _frontier(self) -> int:
+        # The still unresolved examined prefix of the record candidate; text
+        # beyond it is the unread tail of a supplied chunk.
+        return self._examined
+
+    def _run(self, eof: bool) -> None:
+        # Each loop iteration is one symbol transition of this record stage;
+        # the still-unresolved window is charged after every one of them, so a
+        # caller-supplied chunk boundary cannot change the verdict (S3). The
+        # charge counts only text this stage has actually examined: safely
+        # emitted text, immediately deleted matches and the unread tail of a
+        # supplied chunk are not charged.
+        while True:
+            if self._halted:
+                return
+            progress = self._step(eof)
+            if self._charge_record_cap():
+                return
+            if not progress:
+                break
+
+    def _step(self, eof: bool) -> bool:
+        mode = self._mode
+        if mode == "idle":
+            return self._idle_step(eof)
+        if mode == "opener_lf":
+            return self._opener_lf_step(eof)
+        if mode == "opener_check":
+            return self._opener_check_step()
+        if mode == "closer_seek":
+            return self._closer_seek_step(eof)
+        if mode == "closer_lf":
+            return self._closer_lf_step(eof)
+        return self._closer_ready_step()
+
+    def _idle_step(self, eof: bool) -> bool:
+        found = self._pending.find(_GC_OPENER, self._cursor)
+        while found != -1 and not self._is_line_start(found):
+            self._cursor = found + 1
+            found = self._pending.find(_GC_OPENER, self._cursor)
+        # A proper opener prefix is retained (it may complete later); every
+        # character before it is safely emitted and therefore not charged. A
+        # partial that a character-wise feed held unresolved is charged while
+        # it existed (S3): the leftmost line-start partial whose growth already
+        # exceeds the limit is the first excess, and it wins when it starts
+        # before the next complete opener. The text before it is safe, so it is
+        # emitted before the stage halts.
+        excess = self._partial_excess_start(_GC_OPENER)
+        if excess is not None and (found == -1 or excess < found):
+            self._emit(excess)
+            self._halt()
+            return False
+        if found != -1:
+            # A partial opener before this complete one is at most
+            # `len(_GC_OPENER) - 1` characters, so the candidate that opens
+            # here charges at least as much and no separate note is needed.
+            self._emit(found)
+            self._mode = "opener_lf"
+            self._opener_lf = len(_GC_OPENER)
+            self._examined = self._opener_lf
+            return True
+        if eof:
+            self._emit_all()
+            self._examined = 0
+            return False
+        peak = self._max_partial_at_line_start(_GC_OPENER)
+        keep = self._keep_partial(_GC_OPENER, True)
+        self._emit(len(self._pending) - keep)
+        self.note_partial(peak)
+        self._cursor = 0
+        self._examined = len(self._pending)
+        return False
+
+    def _opener_lf_step(self, eof: bool) -> bool:
+        newline = self._pending.find("\n", self._opener_lf)
+        if newline == -1:
+            if eof:
+                # No LF follows, so no later line start exists: the whole
+                # remainder is unmatched text.
+                self._emit_all()
+                self._mode = "idle"
+                self._cursor = 0
+                self._examined = 0
+                return False
+            self._opener_lf = len(self._pending)
+            self._examined = len(self._pending)
+            return False
+        # The LF ends the headline line; the line content is still undecided
+        # until the next transition checks the reason marker, so it is charged
+        # before that transition can release it (S3).
+        self._opener_lf = newline + 1
+        self._examined = newline
+        self._mode = "opener_check"
+        return True
+
+    def _opener_check_step(self) -> bool:
+        newline = self._opener_lf - 1
+        line = self._pending[len(_GC_OPENER):newline]
+        if _GC_REASON_MARKER in line:
+            self._mode = "closer_seek"
+            self._closer_cursor = self._opener_lf
+            self._examined = self._opener_lf
+            return True
+        # Not a GC headline record: release the line and keep searching in this
+        # same stage (a later opener may start on a later line).
+        self._emit(self._opener_lf)
+        self._mode = "idle"
+        self._cursor = 0
+        self._examined = 0
+        return True
+
+    def _closer_seek_step(self, eof: bool) -> bool:
+        found = self._pending.find(_GC_CLOSER, self._closer_cursor)
+        while found != -1:
+            if self._is_line_start(found):
+                # The closer literal is recognized, but its mandatory line
+                # suffix and LF are not resolved yet, so they stay charged.
+                self._mode = "closer_lf"
+                self._closer_lf = found + len(_GC_CLOSER)
+                self._examined = self._closer_lf
+                return True
+            self._closer_cursor = found + 1
+            found = self._pending.find(_GC_CLOSER, self._closer_cursor)
+        if eof:
+            # No complete closer exists in the remainder: neither this opener
+            # nor any later one can match, so the remainder is unmatched text.
+            self._emit_all()
+            self._mode = "idle"
+            self._cursor = 0
+            self._examined = 0
+            return False
+        self._closer_cursor = max(
+            self._closer_cursor, len(self._pending) - len(_GC_CLOSER) + 1)
+        self._examined = len(self._pending)
+        return False
+
+    def _closer_lf_step(self, eof: bool) -> bool:
+        newline = self._pending.find("\n", self._closer_lf)
+        if newline == -1:
+            if eof:
+                # The candidate closer line never ends, so it cannot close the
+                # record and no later line start exists.
+                self._emit_all()
+                self._mode = "idle"
+                self._cursor = 0
+                self._examined = 0
+                return False
+            self._closer_lf = len(self._pending)
+            self._examined = len(self._pending)
+            return False
+        # The mandatory LF settles the deletion, so the closer suffix is
+        # charged before the next transition deletes the complete match (S3).
+        self._closer_lf = newline + 1
+        self._examined = newline
+        self._mode = "closer_ready"
+        return True
+
+    def _closer_ready_step(self) -> bool:
+        self._delete(self._closer_lf)
+        self._mode = "idle"
+        self._cursor = 0
+        self._examined = 0
+        return True
+
+
+_DEOPT_HEAD = "[compiler] "
+# The frame literal includes its mandatory trailing space: `(?:    at [^\n]*\n)*`
+# requires a space after `at`, so `    atX` is not a frame line.
+_DEOPT_FRAME = "    at "
+
+
+class _DeoptStage(_StreamStage):
+    """Incremental equivalent of the deopt record substitution (S2/F2).
+
+    Semantics are exactly Python
+    `(?m)^\\[compiler\\] (?:Lazy )?Deoptimize\\s+at [^\\n]*\\n(?:    at [^\\n]*\\n)*\\n`:
+    the lazy form, Python's Unicode whitespace class (which may cross LF), zero
+    or more four-space frame lines, and the blank closing LF. A rejected start
+    releases only text that cannot participate in a later match and the suffix
+    is reconsidered in this same stage.
+    """
+
+    def __init__(self, sink):
+        super().__init__(sink)
+        self._mode = "idle"
+        self._cursor = 0
+        self._phase = "name"
+        self._pos = 0
+        self._expect: Optional[str] = None
+        self._expect_at = 0
+        self._spaces = 0
+
+    def feed(self, text: str) -> None:
+        self._append(text)
+        self._run(False)
+
+    def finish(self) -> None:
+        self._run(True)
+
+    def free(self) -> None:
+        super().free()
+        self._mode = "idle"
+        self._cursor = 0
+        self._phase = "name"
+        self._pos = 0
+        self._expect = None
+        self._expect_at = 0
+        self._spaces = 0
+
+    def _frontier(self) -> int:
+        # The still unresolved examined prefix: the candidate scan position in
+        # candidate mode, the retained partial opener in idle mode. Text beyond
+        # it is an unread chunk tail and is never charged.
+        return self._examined
+
+    def _run(self, eof: bool) -> None:
+        # Each loop iteration is one symbol transition of this record stage;
+        # the still-unresolved window is charged after every one of them, so a
+        # caller-supplied chunk boundary cannot change the verdict (S3).
+        while True:
+            if self._halted:
+                return
+            if self._mode == "idle":
+                progress = self._open(eof)
+                # A retained partial opener is still undecided and is charged;
+                # the safely emitted prefix before it is not.
+                self._examined = self._pos if self._mode == "candidate" \
+                    else len(self._pending)
+            else:
+                progress = self._advance(eof)
+                # A rejection or a completed deletion releases the examined
+                # text, so only the new candidate position stays charged.
+                self._examined = self._pos if self._mode == "candidate" else 0
+            if self._charge_record_cap():
+                return
+            if not progress:
+                break
+
+    def _open(self, eof: bool) -> bool:
+        found = self._pending.find(_DEOPT_HEAD, self._cursor)
+        while found != -1 and not self._is_line_start(found):
+            self._cursor = found + 1
+            found = self._pending.find(_DEOPT_HEAD, self._cursor)
+        # The leftmost line-start partial head whose growth already exceeds the
+        # limit is the first excess of a character-wise feed, and it wins when
+        # it starts before the next complete head: the text before it is safe,
+        # so it is emitted before the stage halts (S3).
+        excess = self._partial_excess_start(_DEOPT_HEAD)
+        if excess is not None and (found == -1 or excess < found):
+            self._emit(excess)
+            self._halt()
+            return False
+        if found != -1:
+            # A partial head before this complete one is at most
+            # `len(_DEOPT_HEAD) - 1` characters, so the candidate that opens
+            # here charges at least as much and no separate note is needed.
+            self._emit(found)
+            self._mode = "candidate"
+            self._phase = "name"
+            self._pos = len(_DEOPT_HEAD)
+            self._expect = None
+            self._expect_at = self._pos
+            self._spaces = 0
+            return True
+        if eof:
+            self._emit_all()
+            return False
+        peak = self._max_partial_at_line_start(_DEOPT_HEAD)
+        keep = self._keep_partial(_DEOPT_HEAD, True)
+        self._emit(len(self._pending) - keep)
+        self.note_partial(peak)
+        self._cursor = 0
+        return False
+
+    def _match(self, expect: str) -> str:
+        """Streaming literal match that remembers its own progress (S2)."""
+        if self._expect != expect:
+            self._expect = expect
+            self._expect_at = self._pos
+        consumed = self._pos - self._expect_at
+        if consumed >= len(expect):
+            return "ok"
+        available = len(self._pending) - self._pos
+        count = min(available, len(expect) - consumed)
+        if count and self._pending[self._pos:self._pos + count] \
+                != expect[consumed:consumed + count]:
+            # Every literal character that did match leaves the candidate
+            # unresolved, so it is charged while it is still viable: a chunk
+            # whose later symbol already mismatches must not hide the prefix a
+            # character-wise feed would have charged (S3).
+            matched = 0
+            while matched < count and self._pending[self._pos + matched] \
+                    == expect[consumed + matched]:
+                matched += 1
+            if self.note_unresolved(self._pos + matched):
+                # The limit was reached while the candidate was still
+                # unresolved: the stage is halted and the candidate must not
+                # be released downstream (S3).
+                return "capped"
+            return "fail"
+        self._pos += count
+        return "ok" if consumed + count == len(expect) else "partial"
+
+    def _reject(self) -> bool:
+        """Release only text that cannot take part in a later match (S2/F2)."""
+        newline = self._pending.find("\n")
+        if newline == -1:
+            # Without an LF no later line start exists in the pending text, so
+            # the whole remainder is unmatched.
+            self._emit_all()
+        else:
+            self._emit(newline + 1)
+        self._mode = "idle"
+        self._phase = "name"
+        self._pos = 0
+        self._expect = None
+        self._spaces = 0
+        self._cursor = 0
+        return True
+
+    def _advance(self, eof: bool) -> bool:
+        """One symbol transition of the deopt candidate (S2).
+
+        Exactly one phase step per call, so the still-unresolved window is
+        charged at every transition of the candidate and the verdict cannot
+        depend on the read partition (S3). `True` means the candidate moved on,
+        `False` that it needs more input; a rejection releases the text that
+        cannot take part in a later match in this same stage.
+        """
+        if self._halted:
+            return False
+        phase = self._phase
+        if phase == "name":
+            if self._pos >= len(self._pending):
+                if eof:
+                    return self._reject()
+                return False
+            char = self._pending[self._pos]
+            if char == "L":
+                self._phase = "lazy"
+                self._pos += 1
+            elif char == "D":
+                self._phase = "eager"
+                self._pos += 1
+            else:
+                return self._reject()
+            return True
+        if phase in ("lazy", "eager"):
+            expect = ("azy " + DEOPT_EAGER_PREFIX) if phase == "lazy" \
+                else DEOPT_EAGER_PREFIX[1:]
+            status = self._match(expect)
+            if status == "capped":
+                return False
+            if status == "fail":
+                return self._reject()
+            if status == "partial":
+                if eof:
+                    return self._reject()
+                return False
+            self._spaces = 0
+            self._phase = "space"
+            return True
+        if phase == "space":
+            index = self._pos
+            limit = len(self._pending)
+            while index < limit and self._pending[index].isspace():
+                index += 1
+            self._spaces += index - self._pos
+            self._pos = index
+            if index == limit:
+                if eof:
+                    return self._reject()
+                return False
+            if self._spaces == 0:
+                return self._reject()
+            self._phase = "at"
+            return True
+        if phase == "at":
+            status = self._match("at ")
+            if status == "capped":
+                return False
+            if status == "fail":
+                return self._reject()
+            if status == "partial":
+                if eof:
+                    return self._reject()
+                return False
+            self._phase = "line"
+            return True
+        if phase == "line":
+            newline = self._pending.find("\n", self._pos)
+            if newline == -1:
+                self._pos = len(self._pending)
+                if eof:
+                    return self._reject()
+                return False
+            self._pos = newline + 1
+            self._phase = "frames"
+            return True
+        if phase == "frame_line":
+            newline = self._pending.find("\n", self._pos)
+            if newline == -1:
+                self._pos = len(self._pending)
+                if eof:
+                    return self._reject()
+                return False
+            self._pos = newline + 1
+            self._phase = "frames"
+            return True
+        # "frames": the blank closing LF or another four-space frame line.
+        limit = len(self._pending)
+        if self._pos >= limit:
+            if eof:
+                return self._reject()
+            return False
+        if self._pending[self._pos] == "\n":
+            self._delete(self._pos + 1)
+            self._mode = "idle"
+            self._phase = "name"
+            self._pos = 0
+            self._expect = None
+            self._cursor = 0
+            return True
+        count = min(limit - self._pos, len(_DEOPT_FRAME))
+        piece = self._pending[self._pos:self._pos + count]
+        if piece != _DEOPT_FRAME[:count]:
+            # The frame characters that did match kept the candidate viable, so
+            # they are charged before the rejection releases the candidate (S3).
+            matched = 0
+            while matched < count and piece[matched] == _DEOPT_FRAME[matched]:
+                matched += 1
+            if self.note_unresolved(self._pos + matched):
+                return False
+            return self._reject()
+        if count < len(_DEOPT_FRAME):
+            # A retained partial frame literal is still unresolved, so it is
+            # charged exactly like a character-wise feed would charge it (S3).
+            if self.note_unresolved(self._pos + count):
+                return False
+            if eof:
+                return self._reject()
+            return False
+        self._pos += len(_DEOPT_FRAME)
+        self._phase = "frame_line"
+        return True
+
+
+class _CorpusProgramSink:
+    """Bounded final program-output sink of one pipeline (S3/F4).
+
+    Only text committed after all substitutions is charged. The retained value
+    is the longest contiguous character prefix that fits the cap; on the first
+    excess `truncated` becomes permanently true and every later final chunk is
+    dropped, so a later small chunk can never restore validity.
+    """
+
+    def __init__(self, cap: int):
+        self._cap = cap
+        self._parts: List[str] = []
+        self._bytes = 0
+        self._truncated = False
+
+    def feed(self, text: str) -> None:
+        if not text or self._truncated:
+            return
+        size = len(text.encode("utf-8"))
+        if self._bytes + size <= self._cap:
+            self._parts.append(text)
+            self._bytes += size
+            return
+        low, high = 0, len(text)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if self._bytes + len(text[:middle].encode("utf-8")) <= self._cap:
+                low = middle
+            else:
+                high = middle - 1
+        if low:
+            self._parts.append(text[:low])
+            self._bytes += len(text[:low].encode("utf-8"))
+        self._truncated = True
+
+    @property
+    def text(self) -> str:
+        return "".join(self._parts)
+
+    @property
+    def bytes(self) -> int:
+        return self._bytes
+
+    @property
+    def truncated(self) -> bool:
+        return self._truncated
+
+
+class _CorpusFilterPipeline:
+    """Ordered streaming substitution pipeline of one case (S2/S3).
+
+    One stage per chain entry, chained in order; the final stage feeds the
+    bounded program-output sink. Each enabled record stage has its own
+    unresolved-text limit, and an overrun frees every candidate window and
+    permanently disables output certification while the caller keeps draining
+    and observing the stream.
+    """
+
+    def __init__(self, entries: List[Tuple[str, Optional[str]]], program_cap: int,
+                 record_candidate_cap: int):
+        self._record_candidate_cap = record_candidate_cap
+        self._sink = _CorpusProgramSink(program_cap)
+        stages: List[_StreamStage] = []
+        kinds: List[str] = []
+        downstream = self._sink.feed
+        for kind, component in reversed(entries):
+            if kind == "gc":
+                stage: _StreamStage = _GcStage(downstream)
+            elif kind == "deopt":
+                stage = _DeoptStage(downstream)
+            else:
+                assert component is not None
+                stage = _ComponentStage(_component_filter_literal(component),
+                                        downstream)
+            stages.insert(0, stage)
+            kinds.insert(0, kind if kind != "component"
+                         else f"component:{component}")
+            downstream = stage.feed
+        self._stages = stages
+        # The ordered stage sequence actually built, in chain order.
+        self.stage_kinds = kinds
+        self._feed = downstream
+        self._record_stages = [stage for stage, entry in zip(stages, entries)
+                               if entry[0] in ("gc", "deopt")]
+        self._candidate_capped = False
+        self._disabled = False
+        for stage in self._record_stages:
+            stage.record_cap = record_candidate_cap
+            stage._on_record_cap = self._record_cap_exceeded
+
+    @classmethod
+    def from_chain(cls, chain: List[re.Pattern], names: List[str],
+                   program_cap: int, record_candidate_cap: int):
+        """Build the pipeline from the canonical `case_filter_chain` (S1).
+
+        Every stage is derived from an element of the chain returned by
+        `case_filter_chain`, and the component names are paired with the
+        component patterns in chain order, so the streaming substitutions are
+        exactly the built-in path's substitutions and an unexpected chain
+        raises the named configuration error.
+        """
+        entries: List[Tuple[str, Optional[str]]] = []
+        remaining = list(names)
+        for pattern in chain:
+            if pattern is GC_TRACE_LOG_RE:
+                entries.append(("gc", None))
+            elif pattern is DEOPT_TRACE_LOG_RE:
+                entries.append(("deopt", None))
+            else:
+                if not remaining:
+                    raise FilterConfigurationError(
+                        "filter configuration error: chain pattern "
+                        f"{pattern.pattern!r} has no component name")
+                name = remaining.pop(0)
+                if pattern.pattern != _component_pattern(name).pattern:
+                    raise FilterConfigurationError(
+                        f"filter configuration error: chain pattern "
+                        f"{pattern.pattern!r} does not match component {name!r}")
+                entries.append(("component", name))
+        if remaining:
+            raise FilterConfigurationError(
+                f"filter configuration error: component names {remaining!r} "
+                f"have no chain pattern")
+        return cls(entries, program_cap, record_candidate_cap)
+
+    @property
+    def output_text(self) -> str:
+        return self._sink.text
+
+    @property
+    def output_bytes(self) -> int:
+        return self._sink.bytes
+
+    @property
+    def truncated(self) -> bool:
+        return self._sink.truncated
+
+    @property
+    def candidate_capped(self) -> bool:
+        return self._candidate_capped
+
+    def feed(self, text: str) -> None:
+        if self._disabled:
+            return
+        self._feed(text)
+        self._check_candidates()
+
+    def finish(self) -> None:
+        if self._disabled:
+            return
+        # Ordered finalization: flushing an earlier stage feeds every later one
+        # before that later stage is closed. A limit reached while flushing
+        # disables (and frees) the whole pipeline, so the loop stops there.
+        for stage in self._stages:
+            if self._disabled:
+                break
+            stage.finish()
+        self._check_candidates()
+
+    def disable(self) -> None:
+        if self._disabled:
+            return
+        self._disabled = True
+        for stage in self._stages:
+            stage.free()
+
+    def _record_cap_exceeded(self) -> None:
+        """First record-stage excess: freeze output and free every window."""
+        if self._candidate_capped:
+            return
+        self._candidate_capped = True
+        self.disable()
+
+    def _check_candidates(self) -> None:
+        if self._candidate_capped:
+            return
+        for stage in self._record_stages:
+            if stage.unresolved_bytes() > self._record_candidate_cap:
+                self._record_cap_exceeded()
+                return
+
+
+CORPUS_DECODE_CHUNK = 64 * 1024
+CORPUS_COMPILE_MARKER_PREFIX = "======== ArkSteedCompilerTask: Starts compiling:"
+CORPUS_COMPILE_MARKER_SUFFIX = " ========"
+CORPUS_EXEC_MARKER_PREFIX = ">>> Running method: "
+# Components whose marker identities are recognized independently of the
+# retention component list (S5): the compiler component carries the compile,
+# execution and deopt markers, the gc component carries the GC markers.
+CORPUS_MARKER_COMPONENTS = ("compiler", "gc")
+
+
+class _CorpusObserver:
+    """Raw observation branch of one corpus execution (S5).
+
+    The branch sees the original decoded characters *before* any deletion. It
+    counts the compilation, execution, deopt and GC markers and the named
+    descriptor patterns, and it writes the component log lines (without the
+    execution-marker payloads) to the bounded retained-log sink. It never
+    decides the filtered program output; that is the separate transformation
+    branch. Marker identities, one-count-per-event semantics and the named
+    pattern semantics are those of `collect_evidence`/`_evidence_matches` with
+    `fnmatchcase`, but payloads are recognized and matched incrementally, so a
+    long payload is never retained.
+    """
+
+    def __init__(self, case, components, log_file, log_cap: int):
+        self.evidence = CorpusStreamEvidence()
+        self._log = log_file
+        self._log_cap = log_cap
+        # First retained-log sink failure of this execution (S5). The sink is
+        # replaced by a discard sink and observation continues: only the sink
+        # failed, so the raw counts must keep their values.
+        self.log_error: Optional[BaseException] = None
+        self._log_broken = False
+        self._named = {
+            kind: _NamedMatchers(case.evidence_constraints, kind)
+            for kind in ("compile", "exec", "deopt", "gc")
+        }
+        self._components = corpus_observation_components(case, components)
+        # Marker identities and the retained-component admission are separate
+        # (S5): the compile, exec and deopt markers are `[compiler]`-prefixed
+        # and the GC markers are `[gc]`-prefixed, so those two component
+        # prefixes are always recognized and counted, while only a component
+        # of the effective observation list is eligible for the retained log.
+        # A component list of `[]` is valid and must not lose raw evidence.
+        # The fixed marker identities have priority over every supplied name:
+        # a longer supplied prefix that extends `[compiler] ` or `[gc] ` would
+        # otherwise shadow the marker identity in one chunk and lose to it
+        # character by character, making the raw counts partition-dependent.
+        self._recognized: List[str] = []
+        for name in CORPUS_MARKER_COMPONENTS:
+            if name not in self._recognized:
+                self._recognized.append(name)
+        for name in self._components:
+            if name not in self._recognized:
+                self._recognized.append(name)
+        self._retained = frozenset(self._components)
+        self._prefixes = tuple(f"[{name}] " for name in self._recognized)
+        self._kind_prefixes = (
+            CORPUS_COMPILE_MARKER_PREFIX, CORPUS_EXEC_MARKER_PREFIX
+        ) + tuple(DEOPT_EVENT_PREFIXES)
+        self._reset_line()
+
+    # -- line state -------------------------------------------------------
+    def _reset_line(self) -> None:
+        self._head = ""
+        self._touched = False
+        self._state = "head"
+        self._line_prefix = ""
+        self._component = None
+        self._type = None
+        self._decided = False
+        self._retain = False
+        self._log_chunks: List[bytes] = []
+        self._eager = False
+        self._exec_leading = True
+        self._exec_pending = False
+        self._exec_snapshot = None
+        self._c_phase = None
+        self._c_pos = 0
+        self._c_first9 = ""
+        self._c_j = 0
+        self._c_k: Optional[int] = None
+        self._c_suffix = ""
+        self._c_name_fed = False
+
+    # -- streaming --------------------------------------------------------
+    def feed(self, text: str) -> Optional[int]:
+        """Observe one chunk; report the offset reached by a failing sink write.
+
+        The retained-log sink is written once per observed line. The failing
+        operation is the write of that line, and it runs *after* the whole line
+        (including its LF) has been observed, so the returned offset is the
+        position right after the failing line's LF. The caller then feeds
+        exactly the text up to and including that failing line to the
+        transformation branch and freezes the committed program prefix there:
+        which read chunk carried the failure no longer changes the collected
+        text, the invalidity fields or the candidate charge, because a
+        character-wise delivery feeds the same characters before the failing
+        write (S3/S5). `None` means the whole chunk was observed without a new
+        sink failure. Observation of the whole chunk continues regardless: only
+        the sink failed, so the later markers of the same chunk still count.
+        """
+        broken = self._log_broken
+        failure_offset: Optional[int] = None
+        start = 0
+        while True:
+            newline = text.find("\n", start)
+            if newline == -1:
+                self._add_part(text[start:])
+                return failure_offset
+            self._add_part(text[start:newline])
+            self._end_line("\n")
+            if failure_offset is None and self._log_broken and not broken:
+                failure_offset = newline + 1
+            start = newline + 1
+
+    def finish(self) -> None:
+        if self._touched:
+            self._end_line("")
+
+    def _add_part(self, part: str) -> None:
+        if not part:
+            return
+        self._touched = True
+        if self._state == "head":
+            self._head += part
+            self._advance_head(False)
+        elif self._state == "payload":
+            if self._decided:
+                if self._retain:
+                    self._log_text(part)
+                self._dispatch(part)
+            else:
+                self._head += part
+                self._advance_payload(False)
+        # state "program": the line is not a component line; nothing to observe.
+
+    def _advance_head(self, force: bool) -> None:
+        if self._component is None:
+            index, done = _match_prefix_candidates(
+                self._head, self._prefixes, force)
+            if not done and not force:
+                return
+            if index is None:
+                self._state = "program"
+                self._head = ""
+                return
+            self._line_prefix = self._prefixes[index]
+            self._component = self._recognized[index]
+            self._head = self._head[len(self._line_prefix):]
+            self._state = "payload"
+        self._advance_payload(force)
+
+    def _kind_candidates(self) -> List[str]:
+        if self._component == "compiler":
+            return self._kind_prefixes
+        return ()
+
+    def _advance_payload(self, force: bool) -> None:
+        head = self._head
+        if not self._decided:
+            if self._component == "gc":
+                self._decided = True
+                self._type = "gc"
+            elif self._component == "compiler":
+                candidates = self._kind_candidates()
+                index, done = _match_prefix_candidates(head, candidates, force)
+                if not done and not force:
+                    return
+                self._decided = True
+                if index == 0:
+                    self._type = "compile"
+                elif index == 1:
+                    self._type = "exec"
+                elif index is not None:
+                    self._type = "deopt"
+                    self._eager = candidates[index] \
+                        == DEOPT_EAGER_NO_STACK_TRACE_PREFIX
+                else:
+                    self._type = "plain"
+            else:
+                self._decided = True
+                self._type = "plain"
+            if self._type == "exec":
+                # The marker-dominated execution trace is counted, never
+                # retained (S5/C4).
+                self._retain = False
+                self._log_chunks = []
+            else:
+                self._retain = self._component in self._retained
+                if self._retain:
+                    self._log_text(self._line_prefix)
+            if self._type in ("compile", "exec", "deopt", "gc"):
+                # Every candidate payload is matched independently, exactly as
+                # `_evidence_matches` matches one candidate at a time.
+                self._named[self._type].reset()
+        if head:
+            self._head = ""
+            if self._retain:
+                self._log_text(head)
+            if self._type == "compile":
+                self._dispatch_compile(head[len(CORPUS_COMPILE_MARKER_PREFIX):]
+                                       if head.startswith(CORPUS_COMPILE_MARKER_PREFIX)
+                                       else "")
+            elif self._type == "exec":
+                self._dispatch_exec(head[len(CORPUS_EXEC_MARKER_PREFIX):]
+                                    if head.startswith(CORPUS_EXEC_MARKER_PREFIX)
+                                    else "")
+            elif self._type == "deopt":
+                self._dispatch_deopt(head)
+            elif self._type == "gc":
+                self._dispatch_gc(head)
+
+    def _dispatch(self, text: str) -> None:
+        if self._type == "compile":
+            self._dispatch_compile(text)
+        elif self._type == "exec":
+            self._dispatch_exec(text)
+        elif self._type == "deopt":
+            self._dispatch_deopt(text)
+        elif self._type == "gc":
+            self._dispatch_gc(text)
+
+    def _dispatch_exec(self, text: str) -> None:
+        if not self._named["exec"].active:
+            return
+        for char in text:
+            if char.isspace():
+                if not self._exec_leading:
+                    if not self._exec_pending:
+                        self._exec_pending = True
+                        self._exec_snapshot = self._named["exec"].snapshot()
+                    self._named["exec"].feed(char)
+                continue
+            self._exec_leading = False
+            self._exec_pending = False
+            self._named["exec"].feed(char)
+
+    def _dispatch_deopt(self, text: str) -> None:
+        if self._named["deopt"].active:
+            self._named["deopt"].feed(text)
+
+    def _dispatch_gc(self, text: str) -> None:
+        if self._named["gc"].active:
+            self._named["gc"].feed(text)
+
+    def _dispatch_compile(self, text: str) -> None:
+        if self._c_phase == "done":
+            return
+        for char in text:
+            self._compile_char(char)
+            if self._c_phase == "done":
+                return
+
+    def _compile_char(self, char: str) -> None:
+        index = self._c_pos
+        self._c_pos += 1
+        if index < len(CORPUS_COMPILE_MARKER_SUFFIX):
+            self._c_first9 += char
+        if index == 0:
+            self._c_j = 1 if char == " " else 0
+        if self._c_phase == "suffix":
+            if len(self._c_suffix) < len(CORPUS_COMPILE_MARKER_SUFFIX):
+                self._c_suffix += char
+                if len(self._c_suffix) == len(CORPUS_COMPILE_MARKER_SUFFIX):
+                    self._end_compile()
+            return
+        if index < self._c_j:
+            return
+        if char.isspace():
+            # The whitespace that ends the `\S*` name is the first character
+            # of the mandatory ` ========` suffix.
+            self._c_k = index
+            self._c_phase = "suffix"
+            self._c_suffix = char
+            if len(self._c_suffix) == len(CORPUS_COMPILE_MARKER_SUFFIX):
+                self._end_compile()
+            return
+        self._c_name_fed = True
+        if self._named["compile"].active:
+            self._named["compile"].feed(char)
+
+    def _compile_decision(self) -> str:
+        """`streamed`, `empty` or `plain` for the buffered compile candidate."""
+        suffix_ok = (self._c_k is not None
+                     and self._c_suffix == CORPUS_COMPILE_MARKER_SUFFIX)
+        if self._c_j == 1:
+            if suffix_ok:
+                return "streamed"
+            if self._c_first9 == CORPUS_COMPILE_MARKER_SUFFIX:
+                return "empty"
+            return "plain"
+        return "streamed" if suffix_ok else "plain"
+
+    def _end_compile(self) -> None:
+        if self._c_phase == "done":
+            return
+        self._c_phase = "done"
+        decision = self._compile_decision()
+        if decision == "plain":
+            return
+        self.evidence.compile_markers += 1
+        if decision == "empty" or not self._c_name_fed:
+            # An empty `(\S*)` group is the module's `(anonymous)` name.
+            self._named["compile"].reset()
+            self._named["compile"].feed("(anonymous)")
+        for constraint in self._named["compile"].matched(False):
+            self.evidence.named_counts[constraint] = \
+                self.evidence.named_counts.get(constraint, 0) + 1
+
+    # -- line end ---------------------------------------------------------
+    def _end_line(self, terminator: str) -> None:
+        if self._state == "head":
+            self._advance_head(True)
+        if self._state == "payload":
+            if not self._decided:
+                self._advance_payload(True)
+            self._end_payload()
+        if self._retain and terminator:
+            self._log_bytes(terminator.encode("utf-8"))
+        self._flush_line()
+        self._reset_line()
+
+    def _end_payload(self) -> None:
+        if self._type == "exec":
+            if self._exec_pending:
+                # `.strip()` drops this trailing whitespace run.
+                self._named["exec"].restore(self._exec_snapshot)
+            self.evidence.exec_markers += 1
+            for constraint in self._named["exec"].matched(False):
+                self.evidence.named_counts[constraint] = \
+                    self.evidence.named_counts.get(constraint, 0) + 1
+        elif self._type == "compile":
+            self._end_compile()
+        elif self._type == "deopt":
+            self.evidence.deopt_markers += 1
+            for constraint in self._named["deopt"].matched(self._eager):
+                self.evidence.named_counts[constraint] = \
+                    self.evidence.named_counts.get(constraint, 0) + 1
+        elif self._type == "gc":
+            self.evidence.gc_markers += 1
+            for constraint in self._named["gc"].matched(False):
+                self.evidence.named_counts[constraint] = \
+                    self.evidence.named_counts.get(constraint, 0) + 1
+
+    def _log_text(self, text: str) -> None:
+        if text:
+            self._log_bytes(text.encode("utf-8"))
+
+    def _log_bytes(self, data: bytes) -> None:
+        if not data:
+            return
+        self.evidence.compiler_log_bytes += len(data)
+        if self.evidence.compiler_log_capped:
+            return
+        if self.evidence.compiler_log_bytes > self._log_cap:
+            self.evidence.compiler_log_capped = True
+            self._log_chunks = []
+            return
+        self._log_chunks.append(data)
+
+    def _flush_line(self) -> None:
+        chunks, self._log_chunks = self._log_chunks, []
+        if not self._retain or not chunks or self._log_broken:
+            return
+        try:
+            self._log.write(b"".join(chunks))
+        except Exception as error:  # noqa: BLE001 - handled at the observation boundary
+            # A sink failure is recoverable for observation: name it once, keep
+            # the line's evidence and continue with the same and every later
+            # chunk. The caller disables output certification for this
+            # execution.
+            self._log_broken = True
+            self._log = _CorpusDiscardSink()
+            if self.log_error is None:
+                self.log_error = error
+
+
+def corpus_observation_components(case: TestCase,
+                                  components: List[str]) -> List[str]:
+    """Effective log components of a corpus class command (C4/C5).
+
+    The class command logs the explicit components plus the annotation-implied
+    ones, deduplicated in command order; the raw observation branch recognizes
+    exactly these prefixes, so the collector and the command cannot disagree.
+    """
+    effective = [component for component in components if component]
+    for component in _implied_log_components(case):
+        if component not in effective:
+            effective.append(component)
+    return effective
+
+
+def _iter_decoded_chunks(stream, chunk_size: int = CORPUS_DECODE_CHUNK):
+    """Yield exact decoded text chunks of a binary pipe (S5).
+
+    Fixed-size byte reads through a private incremental UTF-8 decoder with
+    replacement, so a long line is consumed incrementally and the decoded text
+    equals `whole_stream_bytes.decode('utf-8', errors='replace')` for every
+    byte partition. A read failure propagates and is never a clean EOF, and the
+    final decoder flush happens only on clean EOF.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    while True:
+        data = stream.read(chunk_size)
+        if not data:
+            break
+        text = decoder.decode(data)
+        if text:
+            yield text
+    tail = decoder.decode(b"", True)
+    if tail:
+        yield tail
+
+
+def consume_corpus_stdout(
+    chunks, case, components, log_file, *,
+    program_cap: int = CORPUS_PROGRAM_OUTPUT_CAP,
+    log_cap: int = CORPUS_COMPILER_LOG_CAP,
+    record_candidate_cap: int = CORPUS_RECORD_CANDIDATE_CAP,
+    external_failure: Optional[Callable[[], Optional[str]]] = None,
+) -> CorpusStreamEvidence:
+    """Consume one corpus stdout stream and collect its evidence (C4/S2-S5).
+
+    `chunks` is an iterable of exact decoded strings with their original LF
+    (line-sized or arbitrarily partitioned). `case` supplies the annotations
+    and the annotation predicates; `components` supplies the ordered *explicit*
+    component names (not the command's deduplicated observation list). The
+    transformation branch is the exact ordered substitution chain of
+    `case_filter_chain`; the raw observation branch counts the markers and the
+    named descriptor patterns and writes the bounded retained log. A limit or a
+    failure is a named sticky field of the returned evidence, never a silent
+    pass and never a certified empty result.
+
+    `external_failure`, when given, is polled at every chunk boundary of the
+    same execution: it returns the named failure of the parallel drain (the
+    stderr pipe of the class executor), or `None`. Polling it here keeps the
+    failure boundary, the first named error and the frozen committed prefix of
+    both pipes consistent: once the other drain has failed, no later readable
+    stdout text is transformed or committed, while raw observation and bounded
+    draining continue (S3/S5).
+    """
+    # The canonical input is an ordered sequence of explicit component names
+    # and may be a one-shot iterable, so it is materialized and validated once
+    # here: chain construction, name pairing and raw observation then all use
+    # the same stable ordered snapshot with its repetitions preserved (S1).
+    explicit = _filter_component_names(components)
+    chain = case_filter_chain(case, explicit)
+    names = case_filter_component_names(case, explicit)
+    pipeline = _CorpusFilterPipeline.from_chain(
+        chain, names, program_cap, record_candidate_cap)
+    observer = _CorpusObserver(case, explicit, log_file, log_cap)
+    evidence = observer.evidence
+    observer_failed = False
+    log_error_recorded = False
+    clean_eof = True
+    # A retained-log sink that could not even be opened is a collection failure
+    # known before any input. It is recorded here, at the failure boundary, and
+    # the transformation branch is disabled immediately: the committed program
+    # prefix stays the empty state of the failure (no later readable text of
+    # the stream can become a certified prefix or set the output cap), while the
+    # raw observation still runs on the discard sink (S3/S5).
+    initial_log_error = getattr(log_file, "error", None)
+    if initial_log_error is not None:
+        _record_corpus_collection_error(evidence, "retained log", initial_log_error)
+        log_error_recorded = True
+        pipeline.disable()
+    external_recorded = False
+
+    def note_external_failure() -> None:
+        """Record a parallel-drain failure at its boundary, once (S3/S5).
+
+        The stderr drain of the class executor runs in its own thread; when it
+        fails, the transformation branch is disabled *here*, at the chunk
+        boundary where the collector observes the failure, so the committed
+        prefix is frozen at that boundary and the first named error is the
+        stderr failure rather than a later stdout read failure. Raw observation
+        and draining continue (the loop keeps consuming the iterator).
+        """
+        nonlocal external_recorded
+        if external_recorded or external_failure is None:
+            return
+        message = external_failure()
+        if message is None:
+            return
+        external_recorded = True
+        if evidence.program_output_error is None:
+            evidence.program_output_error = message
+        pipeline.disable()
+
+    iterator = None
+    try:
+        iterator = iter(chunks)
+    except TypeError as error:
+        # A genuinely non-iterable input is unsupported configuration, not a
+        # read failure: it keeps the named configuration error.
+        raise FilterConfigurationError(
+            f"filter configuration error: chunks is not iterable: "
+            f"{type(chunks).__name__}") from error
+    except Exception as error:  # noqa: BLE001 - an initialization failure is a read failure
+        # An operational failure while *initializing* the iterator is a read
+        # failure exactly like a failure of `next` below: it becomes named
+        # evidence instead of escaping the collector or appearing as clean EOF,
+        # and the output is never certified (S5).
+        _record_corpus_collection_error(evidence, "read", error)
+        clean_eof = False
+    while iterator is not None:
+        try:
+            chunk = next(iterator)
+        except StopIteration:
+            note_external_failure()
+            break
+        except Exception as error:  # noqa: BLE001 - a read failure is named
+            # A failure of the other drain that is already observable is the
+            # first named error of this execution; a read failure observed
+            # before it is named otherwise, preserving whichever came first.
+            note_external_failure()
+            _record_corpus_collection_error(evidence, "read", error)
+            clean_eof = False
+            break
+        # The stderr drain may have failed before this chunk existed: disable
+        # transformation before any of it can be committed, and keep observing
+        # and draining the readable stream (S3/S5).
+        note_external_failure()
+        if not isinstance(chunk, str):
+            _record_corpus_collection_error(
+                evidence, "filter",
+                TypeError(f"chunk is {type(chunk).__name__}, expected str"))
+            pipeline.disable()
+            continue
+        observed = len(chunk)
+        if not observer_failed:
+            try:
+                offset = observer.feed(chunk)
+            except Exception as error:  # noqa: BLE001 - observation failures are named
+                # A raw observation failure invalidates the collection: the
+                # pipeline is disabled right here, so neither this chunk nor
+                # any later one is transformed, and the already committed
+                # bounded prefix stays frozen. Draining and counting are
+                # finished by the caller's loop (S3/S5).
+                _record_corpus_collection_error(evidence, "observe", error)
+                observer_failed = True
+                pipeline.disable()
+                continue
+            else:
+                # A retained-log sink failure is recoverable for the raw
+                # observation (the observer already switched to a discard sink
+                # and kept counting), but it makes the collected output
+                # unusable. Only the text that precedes the failing line was
+                # committed before that event, so it is fed to the
+                # transformation branch first and the output is frozen right
+                # there: the same stream then yields the same text and flags
+                # under every read partition (S3/S5).
+                if offset is not None:
+                    observed = offset
+        if observer.log_error is not None and not log_error_recorded:
+            _record_corpus_collection_error(evidence, "retained log",
+                                            observer.log_error)
+            log_error_recorded = True
+            if observed:
+                try:
+                    pipeline.feed(chunk[:observed])
+                except Exception as error:  # noqa: BLE001
+                    _record_corpus_collection_error(evidence, "filter", error)
+            pipeline.disable()
+            continue
+        try:
+            pipeline.feed(chunk)
+        except Exception as error:  # noqa: BLE001 - filtering failures are named
+            _record_corpus_collection_error(evidence, "filter", error)
+            pipeline.disable()
+    if clean_eof:
+        # Completion needs a clean input EOF, the decoder flush (performed by
+        # the chunk producer) and the ordered stage finalization below.
+        try:
+            pipeline.finish()
+        except Exception as error:  # noqa: BLE001
+            _record_corpus_collection_error(evidence, "filter", error)
+            pipeline.disable()
+        if not observer_failed:
+            try:
+                observer.finish()
+            except Exception as error:  # noqa: BLE001
+                _record_corpus_collection_error(evidence, "observe", error)
+        if observer.log_error is not None and not log_error_recorded:
+            _record_corpus_collection_error(evidence, "retained log",
+                                            observer.log_error)
+            log_error_recorded = True
+            pipeline.disable()
+    evidence.program_output = pipeline.output_text
+    evidence.program_output_bytes = pipeline.output_bytes
+    evidence.program_output_truncated = pipeline.truncated
+    if pipeline.candidate_capped:
+        evidence.record_candidate_capped = True
+    return evidence
+
+
+def corpus_explicit_components(args: argparse.Namespace) -> List[str]:
+    """Ordered *explicit* log component names of one corpus run (S1).
+
+    These are the names the shared chain is built from, not the command's
+    effective observation list: the annotation-implied components are appended
+    once by `case_filter_chain` itself, so this list must not contain them.
+    """
+    return [c for c in args.log_components_value.split(":") if c]
+
+
+def build_corpus_vm_command(
+    case: TestCase, abc_path: Path, cfg: BuildConfig, args: argparse.Namespace,
+    module: Any,
+) -> Tuple[List[str], List[str]]:
+    """Assemble the class command line of one corpus case (C4, C5).
+
+    The behavioural defaults are derived from the loaded module (C5), the
+    descriptor options come from the parsed case (`PARAMS`), and the
+    observation is the class's own: the compiler log, the CFG dump and the
+    execution marker the injected execution requirement implies. The embedded
+    command builder and the embedded execution path are untouched; this
+    builder is reached only for a case tagged with the corpus class.
+    """
+    components = corpus_observation_components(
+        case, corpus_explicit_components(args))
+    # The execution marker is implied by the injected execution requirement and
+    # is also what makes the `NO_EXEC_MARKER` exemption checkable: an exempt
+    # case is still observed, so a declaration contradicting the observation
+    # stays red instead of being silently unverifiable.
+    needs_exec_marker = _case_has_evidence(
+        case, ExecCountConstraint, ExecCountGeConstraint)
+    if case.corpus_no_exec_marker_reason is not None:
+        needs_exec_marker = True
+    observation = [
+        f"--log-level={'debug' if args.log_debug else 'info'}",
+        f"--log-components={':'.join(components)}",
+        "--compiler-arksteed-print-graph=true",
+        f"{CORPUS_EXEC_MARKER_OPTION}={'true' if needs_exec_marker else 'false'}",
+    ]
+    if _needs_deopt_trace(case):
+        observation.append("--compiler-trace-deopt=true")
+        observation.append("--compiler-enable-lazy-deopt-trace=true")
+    if args.print_asm_code or any(case.codegen_constraints.values()):
+        observation.append("--compiler-arksteed-print-code=true")
+        observation.append("--compiler-arksteed-enable-code-comment=true")
+    if args.fully_colored:
+        observation.append("--compiler-arksteed-print-with-colors=true")
+    overridden = _collect_param_overrides(case.params)
+    defaults = [token for token in corpus_class_command_options(module)
+                if _option_name(token) not in overridden]
+    cmd = (cfg.command_prefix + [str(cfg.ark_js_vm)] + observation + defaults
+           + list(case.params))
+    cmd.extend([f"--entry-point={corpus_case_entry(case)}", str(abc_path)])
+    return cmd, components
+
+
+def compile_corpus_case(
+    module: Any, case: TestCase, abc_path: Path, cfg: BuildConfig,
+    verbose: bool, log: List[str],
+) -> Tuple[bool, str, bool, List[str]]:
+    """Compile a corpus case with the module's own functions (C2).
+
+    The adapter owns no compilation rule: `compile_single` rewrites the bare
+    imports, the assert shim and the core-js side-effect imports into a
+    temporary copy outside the corpus root (created and removed by the module
+    itself), while `compile_with_file_info` drives the module's fileInfo
+    batch. Both apply the module's own timeouts (30 s / 60 s). A failure of
+    the module call is a compilation failure of the case, never a skip.
+    """
+    compile_log: List[str] = []
+    try:
+        if corpus_case_is_file_info(module, case):
+            ok, message, timed_out = module.compile_with_file_info(
+                case.corpus_case, abc_path, cfg, compile_log, verbose)
+        else:
+            ok, message, timed_out = module.compile_single(
+                case.corpus_case, abc_path, cfg, compile_log, verbose)
+    except Exception as e:  # noqa: BLE001 - a module failure is a compile failure
+        log.extend(compile_log)
+        return False, f"{type(e).__name__}: {e}", False, compile_log
+    log.extend(compile_log)
+    return bool(ok), str(message), bool(timed_out), compile_log
+
+
+@dataclass
+class CorpusClassExecution:
+    """Outcome of the class streaming execution of one corpus case (C4)."""
+
+    command: List[str] = field(default_factory=list)
+    components: List[str] = field(default_factory=list)
+    returncode: Optional[int] = None
+    timed_out: bool = False
+    started: bool = True
+    start_error: Optional[str] = None
+    # Named run-level usage error of a command whose JIT token cannot identify
+    # an interpreter twin (TW1): zero or more than one
+    # `--compiler-enable-jit` token. Such a command is never launched, so the
+    # case is a usage error (`main` exits 2) instead of a red execution.
+    command_error: Optional[str] = None
+    evidence: CorpusStreamEvidence = field(default_factory=CorpusStreamEvidence)
+    compiler_log_path: Optional[Path] = None
+    duration: float = 0.0
+
+
+def corpus_execution_environment(cfg: BuildConfig) -> Dict[str, str]:
+    """Environment of one corpus execution (TW1, C4).
+
+    Both the class execution and each interpreter twin use this exact
+    environment: the library search path and, on a cross build, the QEMU
+    loader prefix. Rebuilding it in more than one place would let a twin drift
+    from the class command it must reproduce.
+    """
+    env = os.environ.copy()
+    env[LIB_PATH_ENV_VAR] = ":".join(str(p) for p in cfg.lib_paths)
+    if cfg.qemu_ld_prefix is not None:
+        env["QEMU_LD_PREFIX"] = str(cfg.qemu_ld_prefix)
+    return env
+
+
+def run_corpus_stream_execution(
+    command: List[str], components: List[str], case: TestCase,
+    explicit_components: List[str], budget: int, env: Dict[str, str],
+    log_path: Path,
+) -> CorpusClassExecution:
+    """Execute one prepared corpus command with the streaming consumer (C4/S5).
+
+    This is the single reusable execution entry point of the corpus class: it
+    receives the prepared command, the command's observation components, the
+    ordered *explicit* component names of the shared filter chain, the case
+    (its annotations), the environment and the per-execution class budget, and
+    it returns the full `CorpusClassExecution` with the complete
+    `CorpusStreamEvidence`. The class execution and each interpreter twin go
+    through it, so a twin result can never be a narrower shape that drops
+    `program_output_truncated`, `record_candidate_capped` or
+    `program_output_error` before the classifier.
+
+    stdout and stderr are read as streams (a separate process, output through
+    pipes; stderr is drained in parallel so a large stderr cannot block the
+    child), the markers are counted while the stream passes and the raw log is
+    never captured. The budget covers the draining and the filtering of the
+    whole execution: the timer kills the child with the class executor's
+    existing convention and sets `timed_out`. There are no retries: a second
+    run of the same command could change the reproducibility evidence.
+    """
+    start = time.time()
+    try:
+        proc = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    except OSError as e:
+        return CorpusClassExecution(
+            command=list(command), components=list(components), started=False,
+            start_error=str(e), duration=time.time() - start)
+    timeout_state = {"timed_out": False}
+
+    def on_timeout() -> None:
+        timeout_state["timed_out"] = True
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+    timer = threading.Timer(budget, on_timeout)
+    timer.daemon = True
+    timer.start()
+
+    stream_errors: List[str] = []
+
+    def drain_stderr() -> None:
+        # Bounded byte reads so a large stderr cannot block the child; a drain
+        # failure is collected explicitly instead of being swallowed.
+        try:
+            while True:
+                if not proc.stderr.read(CORPUS_DECODE_CHUNK):
+                    return
+        except (OSError, ValueError) as error:
+            stream_errors.append(_corpus_collection_error("stderr", error))
+
+    def stderr_failure() -> Optional[str]:
+        # The stdout collector polls this at every chunk boundary so a stderr
+        # failure disables transformation at the failure boundary and stays the
+        # first named error of the execution (S3/S5). Appending to and reading
+        # this list are atomic, so the parallel drain needs no further lock.
+        return stream_errors[0] if stream_errors else None
+
+    stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+    stderr_thread.start()
+    log_file = None
+    log_open_error: Optional[BaseException] = None
+    log_close_error: Optional[BaseException] = None
+    evidence = CorpusStreamEvidence()
+    drain_state = {"exhausted": False}
+    try:
+        try:
+            log_file = open(log_path, "wb")
+        except OSError as error:
+            # The observation still runs and drains on the discard sink, but the
+            # failure is handed to the collector so the committed prefix is
+            # frozen at the failure boundary and this first named error survives
+            # a later read failure (S3/S5).
+            log_file = _CorpusDiscardSink(error)
+            log_open_error = error
+
+        def decoded_chunks():
+            for chunk in _iter_decoded_chunks(proc.stdout):
+                yield chunk
+            drain_state["exhausted"] = True
+
+        try:
+            evidence = consume_corpus_stdout(
+                decoded_chunks(), case, explicit_components, log_file,
+                external_failure=stderr_failure)
+        except FilterConfigurationError as error:
+            evidence = CorpusStreamEvidence(program_output_error=str(error))
+        except Exception as error:  # noqa: BLE001 - the read is drained by the caller
+            evidence = CorpusStreamEvidence(
+                program_output_error=_corpus_collection_error("read", error))
+    finally:
+        if log_file is not None:
+            try:
+                log_file.close()
+            except Exception as error:  # noqa: BLE001 - reported below if first
+                log_close_error = error
+    if not drain_state["exhausted"]:
+        # The stdout drain could not reach a clean EOF, so the child may still
+        # block on a full pipe: terminate it (the timeout path uses the same
+        # convention) before waiting, without claiming a timeout.
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    returncode = proc.wait()
+    timer.cancel()
+    stderr_thread.join(timeout=5.0)
+    for stream in (proc.stdout, proc.stderr):
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+    if log_open_error is not None and evidence.program_output_error is None:
+        evidence.program_output_error = _corpus_collection_error(
+            "retained log", log_open_error)
+    if log_close_error is not None and evidence.program_output_error is None:
+        # A delayed buffered-write failure on close is a named collection
+        # failure like any other retained-log failure, never a silent success.
+        evidence.program_output_error = _corpus_collection_error(
+            "retained log", log_close_error)
+    if stream_errors and evidence.program_output_error is None:
+        evidence.program_output_error = stream_errors[0]
+    return CorpusClassExecution(
+        command=list(command), components=list(components),
+        returncode=returncode, timed_out=timeout_state["timed_out"],
+        started=True, evidence=evidence, compiler_log_path=log_path,
+        duration=time.time() - start)
+
+
+def run_corpus_class_execution(
+    case: TestCase, abc_path: Path, cfg: BuildConfig, args: argparse.Namespace,
+    context: CorpusContext, budget: int, art_dir: Path, log: List[str],
+    prepared_command: Optional[Tuple[List[str], List[str]]] = None,
+) -> CorpusClassExecution:
+    """Run one corpus case with the class streaming executor (C4).
+
+    The class command and its environment are built once here; the execution
+    itself is the shared streaming entry point, which the interpreter twins
+    reuse with the derived command. The filtered program output is kept under
+    the class limit and the component lines without the execution markers go to
+    a temporary log that is deleted after the evidence pass (or kept where it
+    is the evidence of a declared constraint, C4). `prepared_command` is the
+    `(command, components)` the run-level pre-flight already built and
+    validated from this case's actual inputs; it is reused verbatim so the
+    validated command is the executed one.
+    """
+    # The streaming filter chain is built from the ordered *explicit* names; the
+    # command's observation list also carries the annotation-implied components
+    # and must not be used as the chain input (S1). The canonical chain is
+    # constructed *first*, before any corpus command predicate reads the case
+    # annotations: an unsupported construction (a missing evidence collection, a
+    # non-iterable or ill-typed component list) is a named configuration failure
+    # of this case, reported consistently here instead of escaping as a raw
+    # TypeError from a predicate (S1/S4).
+    explicit_components = corpus_explicit_components(args)
+    try:
+        case_filter_chain(case, explicit_components)
+    except FilterConfigurationError as error:
+        return CorpusClassExecution(
+            components=explicit_components, started=False,
+            start_error=str(error),
+            evidence=CorpusStreamEvidence(program_output_error=str(error)),
+            duration=0.0)
+    if prepared_command is not None:
+        cmd = list(prepared_command[0])
+        components = list(prepared_command[1])
+    else:
+        cmd, components = build_corpus_vm_command(
+            case, abc_path, cfg, args, context.module)
+    # The command that is about to be launched must carry exactly one
+    # `--compiler-enable-jit` token (TW1). The run-level pre-flight in `main`
+    # turns the same condition into usage code 2 before the case loop; this
+    # guard on the constructed actual command keeps an invalid experiment from
+    # running when the entry point is reached directly, and refuses to launch
+    # rather than reporting a green run for a command no twin can be derived
+    # from.
+    command_error = corpus_twin_command_usage_error(cmd)
+    if command_error is not None:
+        return CorpusClassExecution(
+            command=list(cmd), components=list(components), started=False,
+            command_error=command_error,
+            evidence=CorpusStreamEvidence(program_output_error=command_error),
+            duration=0.0)
+    if args.verbose:
+        log.append(f"class cmd: {' '.join(cmd)}")
+    log_path = art_dir / f"{corpus_case_stem(case)}{CORPUS_LIVE_LOG_SUFFIX}"
+    return run_corpus_stream_execution(
+        cmd, components, case, explicit_components, budget,
+        corpus_execution_environment(cfg), log_path)
+
+
+class CorpusTwinCommandError(ValueError):
+    """A class command whose JIT token cannot identify an interpreter twin (TW1)."""
+
+
+def corpus_twin_command_usage_error(class_command: List[str]) -> Optional[str]:
+    """Named usage error of a class command that cannot yield a twin (TW1).
+
+    The interpreter twin is the actual class command with the value of its
+    single `--compiler-enable-jit` token replaced by `false`. Exactly one such
+    token is required: its absence means the class command never enables the
+    JIT explicitly (nothing can be turned off), and a duplicate makes the twin's
+    JIT state ambiguous. The check reads the option *name*, so the neighbouring
+    `--compiler-enable-jit-lazy-deopt` is never mistaken for the JIT switch.
+    """
+    positions = [index for index, token in enumerate(class_command)
+                 if _option_name(token) == CORPUS_JIT_OPTION]
+    if len(positions) == 1:
+        return None
+    if not positions:
+        return (f"the class command line has no '{CORPUS_JIT_OPTION}' token; "
+                "the interpreter twin is derived from exactly one")
+    return (f"the class command line has {len(positions)} "
+            f"'{CORPUS_JIT_OPTION}' tokens; exactly one is required to derive "
+            "the interpreter twin")
+
+
+def derive_corpus_twin_command(class_command: List[str]) -> List[str]:
+    """Interpreter twin command of an actual class command (TW1).
+
+    Every other token, the abc, the entry point, the observation, the
+    descriptor `PARAMS` and the derived class defaults are preserved; only the
+    value of the single `--compiler-enable-jit` token becomes `false`. A
+    validated class command is required; an unidentifiable JIT token raises
+    `CorpusTwinCommandError` instead of silently running something other than
+    the twin.
+    """
+    error = corpus_twin_command_usage_error(class_command)
+    if error is not None:
+        raise CorpusTwinCommandError(error)
+    twin = list(class_command)
+    index = next(index for index, token in enumerate(twin)
+                 if _option_name(token) == CORPUS_JIT_OPTION)
+    token = twin[index]
+    if "=" in token:
+        twin[index] = f"{CORPUS_JIT_OPTION}={CORPUS_JIT_OFF_VALUE}"
+    elif index + 1 < len(twin) and not twin[index + 1].startswith("--"):
+        # The space-separated form: the value is the following token.
+        twin[index + 1] = CORPUS_JIT_OFF_VALUE
+    else:
+        # A bare flag means `true`; the only way to turn the JIT off is to name
+        # the value explicitly.
+        twin[index] = f"{CORPUS_JIT_OPTION}={CORPUS_JIT_OFF_VALUE}"
+    return twin
+
+
+def split_numeric_fields(line: str) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+    """Numeric spellings of one line and the exact segments between them (TW4).
+
+    The line is scanned with `NUMERIC_FIELD_RE`; the returned segments are the
+    exact text before, between and after the spellings, so
+    `len(segments) == len(fields) + 1` and the whole line is preserved verbatim.
+    No normalisation happens here: `rstrip` and whitespace folding are
+    deliberately absent, because the reproducibility evidence must not treat
+    two different skeletons as one. Equal segment sequences and an equal field
+    count define an aligned skeleton.
+    """
+    fields: List[str] = []
+    segments: List[str] = []
+    position = 0
+    for match in NUMERIC_FIELD_RE.finditer(line):
+        segments.append(line[position:match.start()])
+        fields.append(match.group(0))
+        position = match.end()
+    segments.append(line[position:])
+    return tuple(fields), tuple(segments)
+
+
+@dataclass(frozen=True)
+class CorpusMaskPosition:
+    """One 1-based volatile numeric-field position of the two twins (TW4)."""
+
+    line: int
+    field: int
+    twin1: str
+    twin2: str
+
+    def label(self) -> str:
+        """Human-readable position with both numeric spellings."""
+        return (f"line {self.line} field {self.field}: "
+                f"{self.twin1!r} != {self.twin2!r}")
+
+
+@dataclass(frozen=True)
+class CorpusReproducibilityMask:
+    """Result of the twin-only mask inference (TW4/TW5).
+
+    `positions` is the complete ordered list of the volatile numeric fields; it
+    is empty whenever `reason` names an alignment failure, because a failed
+    inference never certifies a partial mask. `available` is true exactly for a
+    successful inference, including the zero-position one of two identical
+    twins.
+    """
+
+    positions: Tuple[CorpusMaskPosition, ...] = ()
+    reason: Optional[str] = None
+
+    @property
+    def available(self) -> bool:
+        return self.reason is None
+
+    @property
+    def count(self) -> int:
+        return len(self.positions)
+
+
+def derive_corpus_reproducibility_mask(
+    twin1_text: str, twin2_text: str,
+) -> CorpusReproducibilityMask:
+    """Infer the reproducibility mask from the two interpreter twins only (TW4).
+
+    The function takes nothing but the two complete twin outputs: no class
+    execution, no descriptor and no case is an input, so neither the class run
+    nor the case author can extend the mask over the difference being checked.
+    Lines are split with `str.splitlines()`, exactly as the embedded comparison
+    does, without `rstrip` or any whitespace normalisation; the spellings and
+    their exact separating segments come from `split_numeric_fields`. A mask
+    position is a 1-based `(line, numeric field)` pair whose numeric spelling
+    differs between the aligned twins.
+
+    A line-count, field-count or segment mismatch is an alignment failure: it
+    is a divergence rather than additional masked fields, and the failure keeps
+    `positions` empty instead of publishing a partial mask. There is no float
+    conversion and no tolerance, so two textually different spellings of the
+    same value remain a volatile position. The function is pure and
+    deterministic: no I/O, no timeout and no retry, and equal inputs give the
+    same result.
+    """
+    twin1_lines = twin1_text.splitlines()
+    twin2_lines = twin2_text.splitlines()
+    if len(twin1_lines) != len(twin2_lines):
+        return CorpusReproducibilityMask(reason=(
+            "twin alignment failed: line counts differ "
+            f"({len(twin1_lines)} vs {len(twin2_lines)})"))
+    positions: List[CorpusMaskPosition] = []
+    for line_number, (line1, line2) in enumerate(
+            zip(twin1_lines, twin2_lines), start=1):
+        fields1, segments1 = split_numeric_fields(line1)
+        fields2, segments2 = split_numeric_fields(line2)
+        if len(fields1) != len(fields2):
+            return CorpusReproducibilityMask(reason=(
+                f"twin alignment failed: line {line_number} has "
+                f"{len(fields1)} numeric field(s) in twin 1 and "
+                f"{len(fields2)} in twin 2"))
+        if segments1 != segments2:
+            return CorpusReproducibilityMask(reason=(
+                f"twin alignment failed: line {line_number} has a different "
+                "non-numeric skeleton"))
+        for field_number, (value1, value2) in enumerate(
+                zip(fields1, fields2), start=1):
+            if value1 != value2:
+                positions.append(CorpusMaskPosition(
+                    line_number, field_number, value1, value2))
+    return CorpusReproducibilityMask(tuple(positions))
+
+
+@dataclass
+class CorpusTwinRun:
+    """Outcome of the two interpreter twins of one corpus case (TW1/TW2).
+
+    `status` holds the eligibility status when the twins were not launched
+    (`not-comparable` for an absent, unstarted or unusable class output;
+    `skipped-empty-program-output` for a complete empty one). It is `None` once
+    both attempts were made, because the differential verdict is produced from
+    the complete execution facts by the classification change of this epic.
+    `executions` holds both attempts in order, including an attempt that failed
+    to start, and each one keeps the full `CorpusClassExecution` evidence: a
+    narrowing conversion that copies only part of it would drop
+    `program_output_truncated`, `record_candidate_capped` or
+    `program_output_error` before the classifier.
+    """
+
+    status: Optional[str] = None
+    reasons: List[str] = field(default_factory=list)
+    executions: List[CorpusClassExecution] = field(default_factory=list)
+
+    @property
+    def commands(self) -> List[List[str]]:
+        """Commands of both attempts, in order, whatever the outcome."""
+        return [list(execution.command) for execution in self.executions]
+
+
+def corpus_twin_eligibility(
+    class_execution: Optional[CorpusClassExecution],
+) -> Optional[Tuple[str, str]]:
+    """`(status, reason)` when the class output admits no twin run (TW2).
+
+    The class execution must have started and its collected program output must
+    be complete, usable and nonempty. An unusable output is decided before the
+    emptiness question, so a truncated output, an over-limit record candidate
+    or a failed collection is never reported as a skip; a complete empty output
+    is the only skipped branch. Other red class reasons (the JIT-activity
+    invariant, the parity, a descriptor requirement, an ordinary nonzero exit,
+    the independent retained-log limit) do not suppress the twins, because they
+    do not make the collected output unusable.
+    """
+    if class_execution is None or not class_execution.started:
+        return (CORPUS_DIFFERENTIAL_NOT_COMPARABLE,
+                "differential not comparable: the class execution did not "
+                "start")
+    evidence = class_execution.evidence
+    if not corpus_program_output_usable(evidence):
+        return (CORPUS_DIFFERENTIAL_NOT_COMPARABLE,
+                "differential not comparable: the class program output is not "
+                "usable (" + _corpus_program_invalidity_labels(evidence) + ")")
+    if evidence.program_output == "":
+        return (CORPUS_DIFFERENTIAL_SKIPPED_EMPTY,
+                "differential skipped-empty-program-output: the class program "
+                "output is complete and empty")
+    return None
+
+
+def _finalize_corpus_twin_logs(run: CorpusTwinRun) -> None:
+    """Delete the temporary component logs of both twin executions (C4).
+
+    The twin evidence is the streamed counts, the filtered program output and
+    the named invalidity flags; the marker-dominated component log has no
+    consumer on the twin side, so it is bounded by its own cap and removed
+    after the evidence pass. The recorded path stays a fact of the execution.
+    """
+    for execution in run.executions:
+        if execution.compiler_log_path is None:
+            continue
+        try:
+            execution.compiler_log_path.unlink()
+        except OSError:
+            pass
+
+
+def run_corpus_twin_execution(
+    case: TestCase, cfg: BuildConfig, args: argparse.Namespace, budget: int,
+    class_execution: Optional[CorpusClassExecution], art_dir: Path,
+    log: List[str],
+) -> CorpusTwinRun:
+    """Run the two interpreter twins of one corpus case (TW1/TW2).
+
+    Both twins are the actual class command with the value of its single
+    `--compiler-enable-jit` token replaced by `false`, run as two fresh
+    sequential processes, each with the whole per-case class budget and the
+    class command's environment, observation and abc. There are no retries and
+    no state or buffer is shared between the processes: a second run of the
+    same command could change the reproducibility evidence. A failure of the
+    first twin does not suppress the second, so both commands and both outcomes
+    stay observable exactly where a reviewer needs them.
+    """
+    run = CorpusTwinRun()
+    ineligibility = corpus_twin_eligibility(class_execution)
+    if ineligibility is not None:
+        run.status, reason = ineligibility
+        run.reasons.append(reason)
+        return run
+    assert class_execution is not None
+    error = corpus_twin_command_usage_error(class_execution.command)
+    if error is not None:
+        # The run-level check rejects such a class command before any execution;
+        # this defensive branch keeps the twins from being derived from an
+        # ambiguous command when the entry point is reached directly.
+        run.status = CORPUS_DIFFERENTIAL_NOT_COMPARABLE
+        run.reasons.append(f"differential not comparable: {error}")
+        return run
+    twin_command = derive_corpus_twin_command(class_execution.command)
+    explicit_components = corpus_explicit_components(args)
+    env = corpus_execution_environment(cfg)
+    stem = corpus_case_stem(case)
+    for attempt, suffix in enumerate(CORPUS_TWIN_LOG_SUFFIXES):
+        log_path = art_dir / f"{stem}{suffix}"
+        if args.verbose:
+            log.append(f"twin{attempt + 1} cmd: {' '.join(twin_command)}")
+        run.executions.append(run_corpus_stream_execution(
+            twin_command, class_execution.components, case,
+            explicit_components, budget, env, log_path))
+    _finalize_corpus_twin_logs(run)
+    return run
+
+
+def _evidence_constraint_satisfied(constraint: EvidenceConstraint,
+                                   actual: int) -> bool:
+    """The verdict of `EvidenceConstraint.violated`, from a streamed count."""
+    if isinstance(constraint, (CompileCountGeConstraint, ExecCountGeConstraint,
+                               DeoptCountGeConstraint, GcCountGeConstraint)):
+        return actual >= constraint.count
+    return actual == constraint.count
+
+
+def corpus_evidence_actual(constraint: EvidenceConstraint,
+                           evidence: CorpusStreamEvidence) -> int:
+    """Actual count of one evidence requirement over the streamed evidence.
+
+    The wildcard of the injected invariant is answered by the totals of the
+    streamed pass; a descriptor pattern that names methods is counted in the
+    same pass, so no marker list is ever captured.
+    """
+    if constraint.pattern == CORPUS_INVARIANT_PATTERN:
+        return {
+            "compile": evidence.compile_markers,
+            "exec": evidence.exec_markers,
+            "deopt": evidence.deopt_markers,
+            "gc": evidence.gc_markers,
+        }[constraint.EVIDENCE_KEY]
+    return evidence.named_counts.get(constraint, 0)
+
+
+def corpus_log_constraint_reasons(
+    case: TestCase, execution: CorpusClassExecution,
+    valid_opcodes: Optional[set],
+) -> List[str]:
+    """Evaluate the descriptor constraints that need the retained log (C4).
+
+    A method-scoped (IR/codegen) constraint is evaluated against the component
+    lines without the execution markers. If that retained log exceeded the
+    class limit, the evidence is unavailable and the case is red with the
+    named reason: a truncated log is never a passed check.
+
+    A collection failure (read, filter, observation or retained-log I/O)
+    leaves the retained component log incomplete as well. An incomplete graph
+    is not a complete one: `iter_graph_dumps` treats EOF as the end of the
+    open dump, so the missing remainder of a compilation would be read as
+    proof that an opcode is absent and turn unavailable IR evidence into a
+    false constraint result. Any `program_output_error` therefore makes the
+    constraint evidence unavailable with a named reason *before* parsing.
+    Only the independent program-output and candidate caps leave a complete
+    retained log usable: they do not interrupt observation, so they are not
+    treated here (S3/S5).
+    """
+    if not (case.constraints or case.codegen_constraints):
+        return []
+    if execution.evidence.compiler_log_capped:
+        return ["constraint evidence unavailable: compiler log exceeds cap"]
+    if execution.evidence.program_output_error is not None:
+        return ["constraint evidence unavailable: "
+                + execution.evidence.program_output_error]
+    log_path = execution.compiler_log_path
+    if log_path is None or not Path(log_path).is_file():
+        return ["constraint evidence unavailable: compiler log is missing"]
+    try:
+        log_text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return [f"constraint evidence unavailable: {e}"]
+    reasons: List[str] = []
+    reasons.extend(check_constraints(
+        case.constraints, collect_opcode_counts(log_text, valid_opcodes)))
+    reasons.extend(check_codegen_constraints(
+        case.codegen_constraints, collect_codegen_comments(log_text)))
+    return reasons
+
+
+def corpus_bytecode_constraint_reasons(
+    case: TestCase, abc_path: Path, cfg: BuildConfig, art_dir: Path,
+    stem: str, log: List[str],
+) -> List[str]:
+    """Evaluate the bytecode constraints of a corpus descriptor (C4, C5).
+
+    `BYTECODE_COUNT` is part of the descriptor grammar, so it is evaluated
+    against the disassembly of the class abc; an unavailable disassembly is a
+    named red reason, never a silently skipped requirement.
+    """
+    if not case.bytecode_constraints:
+        return []
+    disasm_path = art_dir / f"{stem}.disasm.txt"
+    disasm_error = disassemble_case(case, abc_path, disasm_path, cfg, log)
+    if disasm_error is not None:
+        return [f"bytecode constraints unavailable: {disasm_error}"]
+    return check_bytecode_constraints(disasm_path, case.bytecode_constraints)
+
+
+@dataclass
+class CorpusClassVerdict:
+    """Base verdict, invariant and parity of one class execution (C3, C4)."""
+
+    base_verdict: str = CORPUS_VERDICT_FAIL
+    reasons: List[str] = field(default_factory=list)
+    invariant_state: str = CORPUS_INVARIANT_NONE
+    parity: str = CORPUS_PARITY_NOT_APPLICABLE
+    log: List[str] = field(default_factory=list)
+
+    @property
+    def passed(self) -> bool:
+        return not self.reasons
+
+
+def evaluate_corpus_class_run(
+    case: TestCase, module: Any, *,
+    compile_ok: bool, compile_message: str, compile_timed_out: bool,
+    execution: Optional[CorpusClassExecution], reference_verdict: str,
+    valid_opcodes: Optional[set],
+) -> CorpusClassVerdict:
+    """Verdict of one class execution before the differential twin exists.
+
+    The base verdict is the module's own rule over the class execution inputs
+    (compilation status, return code, crash, timeout); the class-level
+    invariant and every descriptor requirement are evaluated over the streamed
+    counts; the parity compared with the reference verdict is the parity of the
+    base verdict alone.
+    """
+    verdict = CorpusClassVerdict()
+    log = verdict.log
+    if not compile_ok:
+        verdict.base_verdict, _ = classify_corpus_base_verdict(
+            module, compile_ok=False, compile_timed_out=compile_timed_out,
+            returncode=None, timed_out=False)
+        verdict.reasons.append(f"compilation failed: {compile_message}")
+    else:
+        assert execution is not None
+        evidence = execution.evidence
+        base_verdict, base_reason = classify_corpus_base_verdict(
+            module, compile_ok=True, compile_timed_out=False,
+            returncode=execution.returncode, timed_out=execution.timed_out)
+        verdict.base_verdict = base_verdict
+        if execution.returncode is None and execution.start_error is not None:
+            verdict.reasons.append(
+                f"ark_js_vm could not be executed: {execution.start_error}")
+        elif base_reason is not None:
+            verdict.reasons.append(base_reason)
+        log.append(f"markers: compile={evidence.compile_markers} "
+                   f"exec={evidence.exec_markers}")
+        verdict.invariant_state = corpus_invariant_state(
+            case, evidence.compile_markers, evidence.exec_markers)
+        log.append(f"invariant: {verdict.invariant_state}")
+        # Every output invalidity is reported as its own named red reason
+        # *before* any emptiness/comparison decision, even when the retained
+        # prefix is empty and the class invariant is satisfied (S3/S5). The
+        # base verdict parity below is independent of this: a `matched` parity
+        # denotes base-verdict parity only and never certifies output validity.
+        if evidence.program_output_truncated:
+            verdict.reasons.append("program output exceeds cap")
+        if evidence.record_candidate_capped:
+            verdict.reasons.append("record candidate exceeds cap")
+        if evidence.program_output_error is not None:
+            verdict.reasons.append(evidence.program_output_error)
+        for constraint in case.evidence_constraints:
+            actual = corpus_evidence_actual(constraint, evidence)
+            if not _evidence_constraint_satisfied(constraint, actual):
+                verdict.reasons.append(
+                    f'"{constraint.label()}" violated, found {actual}')
+        if case.corpus_no_exec_marker_reason and evidence.exec_markers > 0:
+            verdict.reasons.append(
+                f"NO_EXEC_MARKER declared, but {evidence.exec_markers} "
+                f"execution marker(s) observed")
+        verdict.reasons.extend(
+            corpus_log_constraint_reasons(case, execution, valid_opcodes))
+    verdict.parity = classify_parity(verdict.base_verdict, reference_verdict)
+    log.append(f"parity: {verdict.parity}")
+    log.append(f"base verdict: {verdict.base_verdict}")
+    return verdict
+
+
+def _write_corpus_artifact(path: Path, text: str) -> Optional[str]:
+    """Write one required class artifact; a write failure is a named reason (S5).
+
+    The bounded program prefix and the reproducing command are the auditable
+    evidence of a case, so an unwritable artifact is reported at the case
+    boundary and reaches the verdict, summary and console; it is never silently
+    discarded while the case advertises a delivered result.
+    """
+    try:
+        path.write_text(text, encoding="utf-8")
+    except OSError as error:
+        return f"cannot write case artifact {path.name}: {error}"
+    return None
+
+
+def _corpus_program_invalidity_labels(evidence: CorpusStreamEvidence) -> str:
+    """Named labels of every output invalidity of one evidence object (S5)."""
+    labels: List[str] = []
+    if evidence.program_output_truncated:
+        labels.append("program output exceeds cap")
+    if evidence.record_candidate_capped:
+        labels.append("record candidate exceeds cap")
+    if evidence.program_output_error is not None:
+        labels.append(evidence.program_output_error)
+    return ", ".join(labels) if labels else "none"
+
+
+def _corpus_program_artifact(evidence: CorpusStreamEvidence) -> str:
+    """Bounded program artifact of one class execution (S3/S5).
+
+    A usable output is written as-is. An unusable one is the bounded retained
+    diagnostic prefix, explicitly labelled incomplete and naming the flags or
+    the collection error that make it unusable.
+    """
+    if corpus_program_output_usable(evidence):
+        return evidence.program_output
+    return ("# incomplete program output prefix (diagnostic only): "
+            + _corpus_program_invalidity_labels(evidence) + "\n"
+            + evidence.program_output)
+
+
+def _finalize_corpus_live_log(case: TestCase, execution: Optional[CorpusClassExecution],
+                              passed: bool, verbose: bool) -> None:
+    """Keep the retained component log only where it is declared evidence (C4).
+
+    The temporary log lives only until the evidence pass: it is kept when a
+    descriptor declares a method-scoped constraint (its evidence) or when the
+    case is red and `-v` asks for it, and deleted otherwise.
+    """
+    if execution is None or execution.compiler_log_path is None:
+        return
+    needed = bool(case.constraints or case.codegen_constraints)
+    if needed or (not passed and verbose):
+        return
+    try:
+        execution.compiler_log_path.unlink()
+    except OSError:
+        pass
+    execution.compiler_log_path = None
+
+
+def run_corpus_case(
+    case: TestCase, cfg: BuildConfig, args: argparse.Namespace,
+    artifacts_root: Path, context: CorpusContext,
+) -> CaseResult:
+    """Verdict of a selected corpus case (C3, C4, C7).
+
+    The reference execution of the module comes first and is mandatory (C7):
+    it is performed for every selected case, including the cases the class
+    already considers red, so the parity is observed rather than derived. The
+    only exception is a case whose descriptor gave a config error (C5): such a
+    case has no executions at all, is red by the descriptor itself and its
+    parity field is `not-applicable`, never a silent skip. The case is then
+    compiled with the module's own functions and run by the class streaming
+    executor, and its verdict is the base verdict, the JIT-activity invariant,
+    the descriptor requirements and the parity of the base verdict with the
+    module's own verdict. The differential twin is delivered by the following
+    change of the same epic.
+    """
+    if case.config_errors:
+        return CaseResult(
+            case.rel, reasons=list(case.config_errors),
+            log=[f"parity: {CORPUS_PARITY_NOT_APPLICABLE}"])
+    # The canonical filter chain is validated at the case boundary before the
+    # mandatory reference execution and before any corpus command predicate
+    # reads the case annotations (S1/S4): an unsupported construction (a missing
+    # evidence collection, a non-iterable or ill-typed component list) is a red
+    # case configuration result, never an escaped raw exception.
+    try:
+        case_filter_chain(case, corpus_explicit_components(args))
+    except FilterConfigurationError as error:
+        return CaseResult(
+            case.rel, reasons=[str(error)],
+            log=[f"parity: {CORPUS_PARITY_NOT_APPLICABLE}"])
+    module = context.module
+    start = time.time()
+    log: List[str] = []
+
+    reference = run_reference_case(module, case, context.build_config,
+                                   context.reference_args, artifacts_root)
+    log.append(f"reference verdict: {reference.verdict}")
+    if reference.reason:
+        log.append(f"reference reason: {reference.reason}")
+    if reference.command:
+        log.append(f"reference command: {reference.command}")
+
+    result = CaseResult(case.rel)
+    result.corpus_reference = reference
+    art_dir = artifacts_root / case.rel
+    try:
+        art_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        result.reasons.append(f"cannot create case artifacts: {e}")
+        result.duration = time.time() - start
+        result.log = log
+        return result
+    stem = corpus_case_stem(case)
+    abc_path = art_dir / f"{stem}.abc"
+
+    compile_ok, compile_message, compile_timed_out, _ = compile_corpus_case(
+        module, case, abc_path, cfg, args.verbose, log)
+
+    budget, budget_reason = corpus_class_budget(module, case, cfg)
+    if budget_reason:
+        log.append(f"class budget: {budget}s "
+                   f"(descriptor TIMEOUT: {budget_reason})")
+    else:
+        log.append(f"class budget: {budget}s")
+
+    execution: Optional[CorpusClassExecution] = None
+    class_command: Optional[str] = None
+    if compile_ok:
+        execution = run_corpus_class_execution(
+            case, abc_path, cfg, args, context, budget, art_dir, log,
+            prepared_command=context.class_commands.get(case.rel))
+        if execution.command_error is not None:
+            # The actual class command of this case cannot identify an
+            # interpreter twin; the command was never launched and the run is
+            # a usage error (`main` exits 2), never a red-but-green experiment.
+            result.usage_error = execution.command_error
+        class_command = build_repro_command(execution.command, cfg)
+        for artifact_suffix, artifact_text in (
+                (CORPUS_CLASS_COMMAND_SUFFIX,
+                 "\n".join(execution.command) + "\n"),
+                # The program artifact is the bounded retained prefix. When the
+                # output is not usable it is labelled as an incomplete
+                # diagnostic prefix that names the flags/error: a truncated
+                # prefix is never advertised as the complete program output
+                # (S3/S5).
+                (CORPUS_PROGRAM_OUTPUT_SUFFIX,
+                 _corpus_program_artifact(execution.evidence))):
+            artifact_error = _write_corpus_artifact(
+                art_dir / f"{stem}{artifact_suffix}", artifact_text)
+            if artifact_error is not None:
+                # A required artifact that cannot be recorded is a named red
+                # reason of this case; every other invalidity reason below is
+                # preserved unchanged.
+                result.reasons.append(artifact_error)
+        if not corpus_program_output_usable(execution.evidence):
+            log.append(
+                "program output not usable: retained prefix is incomplete "
+                "(diagnostic only): "
+                + _corpus_program_invalidity_labels(execution.evidence))
+    result.corpus_execution = execution
+    # The interpreter twins are executed from the collected class output (TW2):
+    # the eligibility gate decides before a process exists, the twins reuse the
+    # actual class command, its environment, its observations and the per-case
+    # class budget, and both attempts and their full execution facts are kept
+    # on the result for the differential classification (a later change of this
+    # epic). This call is reached only for a case tagged with the corpus class,
+    # so an embedded case never runs a twin and never gains the field.
+    result.corpus_twins = run_corpus_twin_execution(
+        case, cfg, args, budget, execution, art_dir, log)
+
+    verdict = evaluate_corpus_class_run(
+        case, module, compile_ok=compile_ok, compile_message=compile_message,
+        compile_timed_out=compile_timed_out, execution=execution,
+        reference_verdict=reference.verdict, valid_opcodes=context.valid_opcodes)
+    log.extend(verdict.log)
+    result.reasons.extend(verdict.reasons)
+    if compile_ok:
+        result.reasons.extend(corpus_bytecode_constraint_reasons(
+            case, abc_path, cfg, art_dir, stem, log))
+    if verdict.parity == CORPUS_PARITY_DIVERGED:
+        result.reasons.extend(parity_reasons(
+            verdict.base_verdict, class_command, reference.verdict,
+            reference.command))
+    result.duration = time.time() - start
+    result.log = log
+    _finalize_corpus_live_log(case, execution, result.passed, args.verbose)
+    return result
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -3452,6 +7820,23 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("-s", "--stops-on-error", action="store_true",
                         help="Stop the runner as soon as any test case fails.")
     parser.add_argument(
+        "--corpus", action="store_true", default=False,
+        help="Select the external corpus case class instead of the embedded one. "
+             "The corpus root is taken from the ARKSTEED_EXTERNAL_TESTS "
+             "environment variable and must hold run_arksteed_external_tests.py "
+             f"(recommended value: {CORPUS_RECOMMENDED_ROOT}). Case identifiers "
+             f"are {CORPUS_NAMESPACE}/<suite>/<case>, and -I/-X patterns are "
+             "matched against those identifiers. The optional per-case "
+             "descriptor test/corpus/<suite>/<case>.annotations adds the "
+             "class-specific TIMEOUT <seconds> <justification> and "
+             "NO_EXEC_MARKER <justification> keys to the //! grammar. Every "
+             "case is compiled with the corpus runner module's own functions "
+             "and executed by a streaming class executor that requires a JIT "
+             "compilation marker and (unless the descriptor exempts it) a "
+             "JIT execution marker. Off by "
+             "default; the corpus class is not part of the default set, and a "
+             "run without the flag does not import the corpus module.")
+    parser.add_argument(
         "--sensitivity-controls", action="store_true", default=False,
         help="Control mode: turn every selected case into a mandatory set of "
              "derived, knowingly wrong variants (classes JIT-off, expectation "
@@ -3459,9 +7844,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
              "base case plus one variant per instance under the run artifacts "
              "and report the failure class, the verdict and the reason per case "
              "and per class (controls.md/controls.json plus the summary "
-             "section). Off by default; not part of the default set and not "
-             "hooked into the project verifier. Class JIT-off is not built in "
-             "this stage.")
+             "section). The class-1 variant keeps its own VM command line: the "
+             "runner substitutes --compiler-enable-jit=false for it instead of "
+             "the case naming the option through //! PARAMS, and its recorded "
+             "observation is the variant's own stdout. Off by default; not part "
+             "of the default set and not hooked into the project verifier.")
     parser.add_argument("-j", "--num-workers", type=int, default=1, metavar="N",
                         help="Number of parallel workers (default: 1, serial).")
     parser.add_argument("-v", "--verbose", action="store_true",
@@ -3485,14 +7872,43 @@ def main(argv: Optional[List[str]] = None) -> int:
     # the value becomes one unknown component name and silences ALL logs.
     args.log_components_value = ":".join(components)
     # Each enabled component logs lines prefixed with "[<component>] "; those
-    # fragments are cut out of the raw stdout before comparison (wherever they
-    # occur - see compare_output).
-    log_fragment_res = [re.compile(r"\[%s\] [^\n]*\n?" % re.escape(c)) for c in components]
+    # fragments are the ordered explicit component names of the shared filter
+    # chain (`case_filter_chain`), which cuts them out of the raw stdout before
+    # comparison. The GC/deopt record stages and the implied components are
+    # added by that single constructor, so the built-in and the corpus paths
+    # cannot drift apart.
 
     # Resolve lazily so an explicit -p works even on an unsupported machine.
     if args.platform is None:
         args.platform = detect_host_platform()
     cfg = BuildConfig(args.mode, args.platform)
+
+    # The corpus class is resolved before the build stage and before the tool
+    # checks (C1/C2): the flag combination, the namespace of the filter
+    # patterns, the root from the environment, the lazy read-only module import
+    # and its mandatory API. Every failure is a usage error that names the
+    # variable, element or reason, and the build stage is not run.
+    corpus_module: Optional[Any] = None
+    corpus_root: Optional[Path] = None
+    if args.corpus:
+        usage_error = corpus_selection_usage_error(args)
+        if usage_error is not None:
+            print(f"Error: {usage_error}", file=sys.stderr)
+            return 2
+        corpus_root, root_error = resolve_corpus_root()
+        if root_error is not None:
+            print(f"Error: {root_error}", file=sys.stderr)
+            return 2
+        corpus_module, module_error = load_corpus_module(corpus_root)
+        if module_error is not None:
+            print(f"Error: {module_error}", file=sys.stderr)
+            return 2
+    else:
+        usage_error = corpus_filter_usage_error(args.include, args.exclude, False)
+        if usage_error is not None:
+            print(f"Error: {usage_error}", file=sys.stderr)
+            return 2
+
     if cfg.is_cross_build and cfg.platform == "arm64" \
             and not shutil.which("qemu-aarch64-static") \
             and not shutil.which("qemu-aarch64"):
@@ -3510,29 +7926,132 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"Error: {binary} does not exist", file=sys.stderr)
             return 2
 
-    if args.sensitivity_controls:
-        # The address-substitution class needs the header's own declaration
-        # order as the candidate order; the header is read once.
-        opcode_order = load_opcode_order()
-        valid_opcodes = None if opcode_order is None else set(opcode_order)
-    else:
+    if args.corpus:
+        # The corpus class resolves its own tools through its own BuildConfig;
+        # the two configurations must name the same existing tools. This check
+        # belongs after the runner's build stage and before the case loop.
+        tools_error = corpus_tools_error(corpus_module, cfg)
+        if tools_error is not None:
+            print(f"Error: {tools_error}", file=sys.stderr)
+            return 2
+
+    corpus_context: Optional[CorpusContext] = None
+    if args.corpus:
         opcode_order = None
         valid_opcodes = load_opcode_names()
-    cases = discover_cases(args.include, args.exclude, args.verbose)
-    if not cases:
-        print("No test case selected", file=sys.stderr)
-        return 2
-    for case in cases:
-        parse_annotations(case, valid_opcodes)
-    if args.sensitivity_controls:
-        usage_error = control_usage_error(cases, opcode_order)
-        if usage_error is not None:
-            print(f"Error: {usage_error}", file=sys.stderr)
+        # The class defaults are derived from the loaded module before the
+        # case loop (C5): they are the behavioural option set of the class
+        # command line and they are cross-checked against the reference
+        # namespace below. A discrepancy is a usage error, never a silent
+        # divergence of verdicts.
+        class_defaults = corpus_class_defaults(corpus_module)
+        cases = discover_corpus_cases(
+            corpus_module, corpus_root, args.include, args.exclude, args.verbose)
+        # The class state is built once, after the tools check and after the
+        # single discovery call: the module's own build configuration and its
+        # own run namespace, together with the root and the revision the
+        # report fixes. The reference execution of every case reuses them.
+        corpus_context = CorpusContext(
+            module=corpus_module,
+            root=corpus_root,
+            revision=corpus_revision(corpus_root),
+            build_config=build_reference_config(corpus_module, cfg),
+            reference_args=build_reference_namespace(corpus_module, cfg),
+            class_defaults=class_defaults,
+            valid_opcodes=valid_opcodes,
+        )
+        defaults_error = corpus_defaults_usage_error(
+            corpus_module, corpus_context.reference_args, class_defaults)
+        if defaults_error is not None:
+            print(f"Error: {defaults_error}", file=sys.stderr)
             return 2
-    print(f"Collected {len(cases)} test case(s) for {cfg.platform}.{cfg.mode}\n")
+        # The descriptor is the only annotation channel of a corpus case: the
+        # read-only corpus source is never scanned for `//!` lines. Descriptor
+        # problems are config errors that make the case red, and the injected
+        # class-level JIT-activity requirements are added to every case before
+        # the loop (C3): a descriptor may add requirements, never remove them.
+        for case in cases:
+            parse_corpus_descriptor(case, valid_opcodes, class_defaults)
+            inject_corpus_invariant(case)
+        # The interpreter twin is derived from the actual class command, whose
+        # `--compiler-enable-jit` token can only come from the derived class
+        # defaults (the observation carries no such option and the descriptor
+        # cannot set a class-managed one, C5). This cheap guard on the derived
+        # defaults runs before the case loop; the actual per-case command is
+        # additionally constructed and validated after the run artifacts root
+        # exists, which is the authoritative pre-flight (TW1).
+        twin_error = corpus_twin_command_usage_error(
+            corpus_class_command_options(corpus_module))
+        if twin_error is not None:
+            print(f"Error: {twin_error}", file=sys.stderr)
+            return 2
+    else:
+        if args.sensitivity_controls:
+            # The address-substitution class needs the header's own declaration
+            # order as the candidate order; the header is read once.
+            opcode_order = load_opcode_order()
+            valid_opcodes = None if opcode_order is None else set(opcode_order)
+        else:
+            opcode_order = None
+            valid_opcodes = load_opcode_names()
+        cases = discover_cases(args.include, args.exclude, args.verbose)
+        for case in cases:
+            parse_annotations(case, valid_opcodes)
+        if args.sensitivity_controls:
+            usage_error = control_usage_error(cases, opcode_order)
+            if usage_error is not None:
+                print(f"Error: {usage_error}", file=sys.stderr)
+                return 2
+    if not cases:
+        class_suffix = (f" in the {CASE_CLASS_CORPUS} case class (--corpus)"
+                        if args.corpus else "")
+        print(f"No test case selected{class_suffix}", file=sys.stderr)
+        return 2
+    if args.corpus:
+        print(f"Collected {len(cases)} {CASE_CLASS_CORPUS} test case(s) for "
+              f"{cfg.platform}.{cfg.mode}")
+        print(f"  corpus root: {corpus_context.root}")
+        print(f"  corpus revision: {corpus_context.revision or 'unknown'}\n")
+    else:
+        print(f"Collected {len(cases)} test case(s) for {cfg.platform}.{cfg.mode}\n")
 
     artifacts_root = make_artifacts_root(cfg.platform, args.mode)
-    write_run_meta(artifacts_root / "run.meta.json", args, cfg)
+    if args.corpus:
+        # Authoritative pre-flight of the interpreter twins (TW1): the actual
+        # class command of every *executable* selected case is constructed
+        # from the same per-case inputs the case loop uses, and a command whose
+        # single `--compiler-enable-jit` token is absent or duplicated is
+        # rejected with a named usage error before any class or twin process
+        # exists. The validated command is kept on the run context and reused
+        # verbatim by the case loop, so the validated command is the executed
+        # one. A case whose command cannot be constructed at all (an
+        # unsupported evidence collection) is left to the ordinary per-case
+        # configuration path, which names it as a red case; the same guard
+        # inside the class executor refuses to launch such a command in any
+        # case.
+        for case in cases:
+            if case.config_errors:
+                # A descriptor configuration error makes the case red with no
+                # executions at all (C5), and its diagnostic is the required
+                # per-case report. Such a case never runs a class or twin
+                # process, so it is not part of the twin pre-flight: replacing
+                # its diagnostic with a run-level usage error would abort the
+                # whole run before `run_corpus_case` reports it and before the
+                # other selected cases execute.
+                continue
+            abc_path = artifacts_root / case.rel / f"{corpus_case_stem(case)}.abc"
+            try:
+                command, components = build_corpus_vm_command(
+                    case, abc_path, cfg, args, corpus_module)
+            except Exception:  # noqa: BLE001 - the per-case path names it
+                continue
+            twin_error = corpus_twin_command_usage_error(command)
+            if twin_error is not None:
+                print(f"Error: {twin_error}", file=sys.stderr)
+                return 2
+            corpus_context.class_commands[case.rel] = (command, components)
+    write_run_meta(artifacts_root / "run.meta.json", args, cfg,
+                   corpus_run_meta(corpus_context, len(cases)))
 
     results: List[CaseResult] = []
     stopped_early = False
@@ -3562,12 +8081,17 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     def run_one(case: TestCase
                 ) -> Tuple[CaseResult, Optional[CaseControlResult], float]:
+        if case.case_class == CASE_CLASS_CORPUS:
+            # Class dispatch by the case tag: an embedded case keeps the
+            # existing path, a corpus case goes through its own class branch.
+            return run_corpus_case(case, cfg, args, artifacts_root,
+                                   corpus_context), None, 0.0
         result = run_case(
-            case, cfg, args, artifacts_root, log_fragment_res, valid_opcodes)
+            case, cfg, args, artifacts_root, components, valid_opcodes)
         if not args.sensitivity_controls:
             return result, None, 0.0
         case_control, duration = run_case_controls(
-            case, result, cfg, args, artifacts_root, log_fragment_res,
+            case, result, cfg, args, artifacts_root, components,
             valid_opcodes, opcode_order)
         return result, case_control, duration
 
@@ -3604,6 +8128,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                 break
 
     failed = [r for r in results if not r.passed]
+    usage_errors = [result.usage_error for result in results
+                    if result.usage_error]
+    if usage_errors:
+        # The actual class command of a case cannot identify an interpreter
+        # twin (TW1). The pre-flight rejects such a run before the case loop;
+        # this fallback keeps a run that reached a case anyway a named usage
+        # error instead of a verdict. No such command was ever launched.
+        print(f"Error: {usage_errors[0]}", file=sys.stderr)
+        return 2
     elapsed = sum(r.duration for r in results)
     wall = time.time() - wall_start
     if args.sensitivity_controls:

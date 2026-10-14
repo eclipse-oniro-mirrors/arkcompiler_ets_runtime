@@ -12,6 +12,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_iterate_last* 1
+//! EXEC_COUNT_GE *array_iterate_last* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_iterate_last(arr: number[]): number
 {
     let sum = 0;
@@ -22,6 +26,7 @@ function array_iterate_last(arr: number[]): number
 }
 
 ArkTools.arkSteedCompileSync(array_iterate_last);
+ArkTools.waitJitCompileFinish(array_iterate_last);
 
 
 let arr: number[] = [10, 20, 30, 40, 50];

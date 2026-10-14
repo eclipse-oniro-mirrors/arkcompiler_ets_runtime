@@ -40,6 +40,16 @@ for (let i = 0; i < 20; i++) {
 }
 
 print(ArkTools.arkSteedCompileSync(LoadX));
+
+// G11.2 additive change candidate: the site is warmed with the two receiver
+// shapes, installed while that set is valid, and then supplied with a third
+// receiver outside the recorded set. The poly assumption is invalidated and the
+// eager transition restores interpreter execution, which returns the value of
+// the cold receiver.
+//! COMPILE_COUNT_GE *LoadX* 1
+//! EXEC_COUNT_GE *LoadX* 1
+//! DEOPT_COUNT_GE *Deoptimize* 1
+
 print(warmup);
 print(LoadX(obj));
 print(LoadX(obj2));

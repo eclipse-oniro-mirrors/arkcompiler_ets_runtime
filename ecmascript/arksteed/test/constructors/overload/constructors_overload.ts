@@ -29,7 +29,27 @@ class Rectangle {
     }
 }
 
+// G11.6 additive evidence (arksteed-g116-call-closure-and-additive-evidence#C1,#C3):
+// the original target `Rectangle` keeps its own compilation and entry evidence,
+// and the silent same-domain caller `probeOverloadConstruction` carries the
+// actual construction form of all three overload sites. Output is unchanged.
+//! COMPILE_COUNT_GE Rectangle 1
+//! EXEC_COUNT_GE *Rectangle 1
+//! COMPILE_COUNT_GE probeOverloadConstruction 1
+//! EXEC_COUNT_GE *probeOverloadConstruction 1
+//! DEOPT_COUNT *Deoptimize* 0
+//! METHOD probeOverloadConstruction
+//! HAS CallRuntime OptNewObjRange
+
 ArkTools.arkSteedCompileSync(Rectangle);
+ArkTools.waitJitCompileFinish(Rectangle);
+
+
+function probeOverloadConstruction() {
+    return [new Rectangle(), new Rectangle(5), new Rectangle(4, 6)];
+}
+ArkTools.arkSteedCompileSync(probeOverloadConstruction);
+ArkTools.waitJitCompileFinish(probeOverloadConstruction);
 
 
 let rect1 = new Rectangle();
@@ -46,3 +66,7 @@ let rect3 = new Rectangle(4, 6);
 print(rect3.width);
 print(rect3.height);
 print(rect3.area());
+
+// Bounded silent preparation: the three overload construction forms through the
+// compiled caller. It prints nothing and changes no earlier observation.
+probeOverloadConstruction();

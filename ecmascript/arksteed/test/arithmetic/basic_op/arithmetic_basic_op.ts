@@ -12,6 +12,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// G10.1 additive evidence (A2, no weakened assertion): G7.1j shares this
+// case, so only the entry marker of the compiled method and the absence of a
+// silent deopt are added here; its existing assertions and output stay
+// unchanged.
+
+//! EXEC_COUNT_GE *basic_op* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function basic_op()
 {
     // unary op

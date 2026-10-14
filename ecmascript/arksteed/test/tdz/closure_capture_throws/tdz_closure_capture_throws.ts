@@ -12,6 +12,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+//! METHOD add
+//! HAS LoadTaggedField
+//! HAS StoreEnvSlot
+//! COMPILE_COUNT_GE *add* 1
+//! EXEC_COUNT_GE *add* 1
+//! DEOPT_COUNT *Deoptimize* 0
 
 // Test: throw.undefinedifholewithname THROWS for closure-captured let accessed before initialization.
 // The inner function add() accesses sum via lexical env.

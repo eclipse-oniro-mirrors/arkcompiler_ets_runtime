@@ -13,6 +13,13 @@
  * limitations under the License.
  */
 
+//! METHOD f
+//! HAS LoadTaggedField
+//! HAS DeoptIfHClassMismatch
+//! COMPILE_COUNT_GE f 1
+//! EXEC_COUNT_GE *f 1
+//! DEOPT_COUNT_GE Lazy Deoptimize* 1
+
 /*
  * Description:
  * 1. This code tests the lazy deoptimization that occurs in ldobjbyname.

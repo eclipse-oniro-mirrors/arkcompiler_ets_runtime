@@ -13,6 +13,10 @@
  * limitations under the License.
  */
 
+//! COMPILE_COUNT_GE ternary_multiple 1
+//! EXEC_COUNT_GE *ternary_multiple 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 declare function print(str: number):string;
 
 function ternary_multiple(a: number, b: number, c: number): number {

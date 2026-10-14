@@ -37,11 +37,37 @@ class Derived extends Base {
     }
 }
 
-ArkTools.arkSteedCompileSync(Derived);
+// G11.6 additive evidence (arksteed-g116-call-closure-and-additive-evidence#C1,#C3):
+// every compiled target of this leaf keeps its own compile/entry counters;
+// the super-call form is annotated in the derived constructor's own dump and
+// the actual construction form in the compiled same-domain caller's dump.
+// The deliberately compiled class roles and all printed output are unchanged.
+//! COMPILE_COUNT_GE Derived 1
+//! EXEC_COUNT_GE *Derived 1
+//! COMPILE_COUNT_GE probeInheritanceConstruction 1
+//! EXEC_COUNT_GE *probeInheritanceConstruction 1
+//! DEOPT_COUNT *Deoptimize* 0
+//! METHOD Derived
+//! HAS CallRuntime OptSuperCall
+//! METHOD probeInheritanceConstruction
+//! HAS CallRuntime OptNewObjRange
 
+ArkTools.arkSteedCompileSync(Derived);
+ArkTools.waitJitCompileFinish(Derived);
+
+
+function probeInheritanceConstruction() {
+    return [new Base(11), new Derived(22, 33)];
+}
+ArkTools.arkSteedCompileSync(probeInheritanceConstruction);
+ArkTools.waitJitCompileFinish(probeInheritanceConstruction);
 
 const b = new Base(11);
 print(b.value());
 
 const d = new Derived(22, 33);
 print(d.value());
+
+// Bounded silent preparation: the leaf's construction(s) once more through the
+// compiled same-domain caller. It prints nothing and changes no earlier observation.
+probeInheritanceConstruction();

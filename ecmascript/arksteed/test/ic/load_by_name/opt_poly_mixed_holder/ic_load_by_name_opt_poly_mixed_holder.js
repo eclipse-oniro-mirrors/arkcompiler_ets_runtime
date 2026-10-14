@@ -14,10 +14,14 @@
  */
 
 //! METHOD LoadScore
+//! HAS LoadTaggedField
 //! HAS BranchIfHClassIn
 //! HAS LoadHClassAddress
 //! HAS HeapConstant
 //! HAS_NOT DeoptIfHClassNotIn
+//! COMPILE_COUNT_GE *LoadScore* 1
+//! EXEC_COUNT_GE *LoadScore* 1
+//! DEOPT_COUNT *Deoptimize* 0
 
 function LoadScore(obj)
 {

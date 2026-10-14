@@ -13,6 +13,13 @@
  * limitations under the License.
  */
 
+//! METHOD A
+//! HAS LoadTaggedField
+//! HAS DeoptIfHClassMismatch
+//! COMPILE_COUNT_GE A 1
+//! EXEC_COUNT_GE *A 1
+//! DEOPT_COUNT_GE Lazy Deoptimize* 1
+
 // A keeps several live locals across A -> B -> C -> D -> E -> F.
 // F invalidates A's dependency; A must resume with correct locals after lazy-deopt.
 

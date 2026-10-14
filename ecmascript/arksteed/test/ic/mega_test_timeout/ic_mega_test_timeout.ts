@@ -28,6 +28,16 @@ for (var i = 0; i < REP; ++i) {
     test();
 }
 ArkTools.arkSteedCompileSync(test);
+
+// G11.2 MEGA precondition: the named load of `foo` on the freshly created
+// instance misses every property. The site is warmed while the raised hotness
+// threshold keeps the warm-up interpreted, then installed; the installed code
+// of `test` runs the second warm-up loop with the same miss and produces no
+// deopt event.
+//! COMPILE_COUNT_GE *test* 1
+//! EXEC_COUNT_GE *test* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 for (var i = 0; i < REP; ++i) {
     test();
 }

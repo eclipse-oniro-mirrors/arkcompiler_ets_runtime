@@ -13,6 +13,10 @@
  * limitations under the License.
  */
 
+//! COMPILE_COUNT_GE constant_folding_comparison_1 1
+//! EXEC_COUNT_GE *constant_folding_comparison_1 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function constant_folding_comparison_1(x: number)
 {
     const A = 10;

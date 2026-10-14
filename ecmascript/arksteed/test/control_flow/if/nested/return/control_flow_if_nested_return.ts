@@ -12,6 +12,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE if_nested_return 1
+//! EXEC_COUNT_GE *if_nested_return 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function if_nested_return(x)
 {
     let result = 0;

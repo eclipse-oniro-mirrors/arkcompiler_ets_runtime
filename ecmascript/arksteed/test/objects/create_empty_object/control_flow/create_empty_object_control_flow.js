@@ -15,6 +15,9 @@
 
 //! PARAMS --compiler-jit-hotness-threshold=60000
 //! METHOD allocateInControlFlow
+//! COMPILE_COUNT_GE *allocateInControlFlow* 1
+//! EXEC_COUNT_GE *allocateInControlFlow* 1
+//! DEOPT_COUNT *Deoptimize* 0
 //! COUNT AllocateInYoung 7
 //! COUNT InitializeEmptyObject 7
 //! HAS_NOT CallCommonStub NewJSObject

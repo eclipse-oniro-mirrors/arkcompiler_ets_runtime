@@ -12,6 +12,22 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// G11.6 additive evidence (S11/C1/C3/C4): the compiled constructor itself
+// performs no JS call, so the actual construction form of this leaf is carried
+// by its own silent invocation carrier `callDefaultParamsConstructorNoargs`,
+// whose dump holds `CallRuntime OptNewObjRange`. The original constructor keeps
+// its own positive compile/entry evidence, the probes and the output bytes are
+// unchanged, and the normal path must not deopt. The `_GE` lower bound allows
+// the installation and recompilation multiplicity of the same method.
+//! METHOD callDefaultParamsConstructorNoargs
+//! HAS CallRuntime OptNewObjRange
+//! COMPILE_COUNT_GE callDefaultParamsConstructorNoargs 1
+//! EXEC_COUNT_GE *callDefaultParamsConstructorNoargs* 1
+//! METHOD DefaultParamConstructorNoargs
+//! COMPILE_COUNT_GE DefaultParamConstructorNoargs 1
+//! EXEC_COUNT_GE *DefaultParamConstructorNoargs* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 class DefaultParamConstructorNoargs {
     make: string;
     model: string;
@@ -24,10 +40,16 @@ class DefaultParamConstructorNoargs {
     }
 }
 
+function callDefaultParamsConstructorNoargs(): DefaultParamConstructorNoargs {
+    return new DefaultParamConstructorNoargs();
+}
+
 ArkTools.arkSteedCompileSync(DefaultParamConstructorNoargs);
+ArkTools.arkSteedCompileSync(callDefaultParamsConstructorNoargs);
 
 
 let car = new DefaultParamConstructorNoargs();
 print(car.make);
 print(car.model);
 print(car.year);
+callDefaultParamsConstructorNoargs();

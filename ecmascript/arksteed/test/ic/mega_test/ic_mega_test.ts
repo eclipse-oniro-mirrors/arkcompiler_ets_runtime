@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+//! PARAMS --compiler-jit-hotness-threshold=60000
+
 class Modifier {
 }
 class A extends Modifier {
@@ -76,4 +78,20 @@ function main(){
 }
 main()
 ArkTools.arkSteedCompileSync(visit);
+
+// G11.2 MEGA precondition: the named-access site is warmed with five receiver
+// shapes. The delivered named IC holds at most four poly cases (the slot array
+// is CACHE_MAX_LEN = 8 elements in two-element cases), so the fifth shape takes
+// the overflow branch of `AddHandlerWithKey`/`AddWithoutKeyPoly`/`SetAsMega`:
+// the slot pair becomes the MEGA state with Hole in the first slot instead of
+// producing a five-element poly snapshot. The reader rejects that pair in its
+// own state check (`TryGetICPolySnapshot` requires a non-weak TaggedArray in the
+// first slot), so no poly feedback is recorded and the defensive
+// `caseCount > MAX_NAMED_IC_POLY_CASES` guard is not the failure point. The
+// method still compiles and runs; its named loads take the generic property
+// path, whose values stay specified and produce no deopt event.
+//! COMPILE_COUNT_GE *visit* 1
+//! EXEC_COUNT_GE *visit* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 main()

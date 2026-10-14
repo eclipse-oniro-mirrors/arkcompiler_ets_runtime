@@ -28,6 +28,10 @@ declare class ArkTools {
 //! HAS_NOT     CallRuntime      LdExternalModuleVarByIndexOnJSFunc
 //! HAS         LoadTaggedField
 //! HAS         LoadTaggedElement
+//! METHOD reader
+//! COMPILE_COUNT_GE *reader* 1
+//! EXEC_COUNT_GE *reader* 1
+//! DEOPT_COUNT *Deoptimize* 0
 
 import { inum as a, dblnum as b, strv as c, nilv as d, undv as e,
          flagv as f, nanv as g } from './ldextvar_types.ts';

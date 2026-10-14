@@ -15,11 +15,13 @@
 
 #include "ecmascript/arksteed/unittests/fixtures/bytecode_fixture.h"
 
+#include "common_components/taskpool/task.h"
 #include "ecmascript/arksteed/arksteed_vreg.h"
 #include "ecmascript/base_env.h"
 #include "ecmascript/checkpoint/thread_state_transition.h"
 #include "ecmascript/ecma_string.h"
 #include "ecmascript/global_env.h"
+#include "ecmascript/ic/property_box.h"
 #include "ecmascript/jit/jit.h"
 #include "ecmascript/jit/jit_task.h"
 #include "ecmascript/jit/jit_thread.h"
@@ -28,9 +30,19 @@
 #include "ecmascript/napi/include/jsnapi.h"
 #include "ecmascript/object_factory.h"
 #include "ecmascript/pgo_profiler/pgo_profiler.h"
+#include "ecmascript/pgo_profiler/types/pgo_profiler_type.h"
+#include "ecmascript/tagged_array.h"
 #include "ecmascript/tests/test_helper.h"
 
+#include <chrono>
+#include <condition_variable>
+#include <cstdio>
 #include <fstream>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <variant>
+#include <vector>
 
 namespace panda::ecmascript::arksteed {
 
@@ -123,32 +135,263 @@ const char *ObservedValueName(JSTaggedValue value)
     return "other";
 }
 
+// Text of an observed profile slot value for a diagnostic. The weak and the
+// heap-object cases are named explicitly, so a mismatch between a required IC
+// state and the observed one is readable without a debugger.
+std::string ObservedSlotName(JSTaggedValue value)
+{
+    if (value.IsHole()) {
+        return "hole";
+    }
+    if (value.IsWeak()) {
+        return value.GetWeakReferentUnChecked() == nullptr ? "cleared weak reference" : "weak reference";
+    }
+    if (value.IsPropertyBox()) {
+        return "PropertyBox";
+    }
+    if (value.IsProfileTypeInfo()) {
+        return "ProfileTypeInfo";
+    }
+    if (value.IsTaggedArray()) {
+        return "tagged array of length " + std::to_string(TaggedArray::Cast(value.GetTaggedObject())->GetLength());
+    }
+    if (value.IsInt()) {
+        return "int " + std::to_string(value.GetInt());
+    }
+    return ObservedValueName(value);
+}
+
+// Access bytecode of a profile kind: the bytecode whose first operand is the IC
+// slot observed for that kind. Every one of these kinds carries exactly one
+// such site.
+bool TryGetProfileAccessOpcode(FixtureMethodKind kind, kungfu::EcmaOpcode *opcode)
+{
+    switch (kind) {
+        case FixtureMethodKind::NAMED_MONO:
+        case FixtureMethodKind::NAMED_POLY_LIMIT:
+        case FixtureMethodKind::NAMED_MEGA:
+        case FixtureMethodKind::NAMED_POLY_OVERFLOW:
+        case FixtureMethodKind::EMPTY_SLOT:
+            *opcode = kungfu::EcmaOpcode::LDOBJBYNAME_IMM8_ID16;
+            return true;
+        case FixtureMethodKind::ELEMENT_MONO:
+        case FixtureMethodKind::ELEMENT_POLY_LIMIT:
+            *opcode = kungfu::EcmaOpcode::LDOBJBYVALUE_IMM8_V8;
+            return true;
+        case FixtureMethodKind::GLOBAL_ACCESS:
+            *opcode = kungfu::EcmaOpcode::LDGLOBALVAR_IMM16_ID16;
+            return true;
+        case FixtureMethodKind::CALL_JS:
+        case FixtureMethodKind::CALL_BUILTIN:
+            *opcode = kungfu::EcmaOpcode::CALLARG1_IMM8_V8;
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool IsProfileKind(FixtureMethodKind kind)
+{
+    if (kind == FixtureMethodKind::OPERATION) {
+        return true;
+    }
+    kungfu::EcmaOpcode opcode = kungfu::EcmaOpcode::NOP;
+    return TryGetProfileAccessOpcode(kind, &opcode);
+}
+
+// IC slot of one decoded bytecode, following the production convention of
+// `BytecodeInfo` and of `ArkSteedFeedbackReader::TryGetFeedbackSlotId`: the
+// named, element and call bytecodes carry the slot in `slotId`, the global
+// bytecodes carry it as their first `ICSlotId` input.
+bool TryGetIcSlotId(const kungfu::BytecodeInfo &info, uint32_t *slotId)
+{
+    if (info.slotId.GetId() != kungfu::ICSlotId::INVALID_ID) {
+        *slotId = static_cast<uint32_t>(info.slotId.GetId());
+        return true;
+    }
+    for (const auto &input : info.inputs) {
+        if (std::holds_alternative<kungfu::ICSlotId>(input)) {
+            *slotId = static_cast<uint32_t>(std::get<kungfu::ICSlotId>(input).GetId());
+            return true;
+        }
+    }
+    return false;
+}
+
+// Every value of `ArkSteedOperationHint`, in declaration order.
+constexpr ArkSteedOperationHint kOperationHints[] = {
+    ArkSteedOperationHint::NONE,
+    ArkSteedOperationHint::INT,
+    ArkSteedOperationHint::NUMBER,
+    ArkSteedOperationHint::STRING,
+    ArkSteedOperationHint::NUMBER_OR_STRING,
+    ArkSteedOperationHint::ANY,
+    ArkSteedOperationHint::BOOLEAN,
+    ArkSteedOperationHint::UNDEFINED_OR_NULL,
+    ArkSteedOperationHint::BIG_INT,
+};
+
+// Hint published for a raw sampled type. `ArkSteedFeedbackReader` publishes
+// `OperationFeedback::hint` with this mapping of the `pgo::PGOSampleType` value
+// it reads from the slot; the fixture states the mapping here because the
+// production read path itself runs on the JIT thread.
+ArkSteedOperationHint HintOfRawSample(uint32_t raw)
+{
+    using Type = pgo::PGOSampleType::Type;
+    switch (pgo::PGOSampleType(raw).GetPrimitiveType()) {
+        case Type::NONE:
+            return ArkSteedOperationHint::NONE;
+        case Type::INT:
+            return ArkSteedOperationHint::INT;
+        case Type::INT_OVERFLOW:
+        case Type::DOUBLE:
+        case Type::NUMBER:
+        case Type::NUMBER1:
+            return ArkSteedOperationHint::NUMBER;
+        case Type::STRING:
+            return ArkSteedOperationHint::STRING;
+        case Type::NUMBER_OR_STRING:
+            return ArkSteedOperationHint::NUMBER_OR_STRING;
+        case Type::BOOLEAN:
+            return ArkSteedOperationHint::BOOLEAN;
+        case Type::UNDEFINED_OR_NULL:
+            return ArkSteedOperationHint::UNDEFINED_OR_NULL;
+        case Type::BIG_INT:
+            return ArkSteedOperationHint::BIG_INT;
+        default:
+            return ArkSteedOperationHint::ANY;
+    }
+}
+
+// Raw sample type written for a hint that natural sampling does not produce.
+// The values are the `pgo::PGOSampleType` constants `HintOfRawSample` maps back
+// to that hint.
+uint32_t RawSampleOfHint(ArkSteedOperationHint hint)
+{
+    using Type = pgo::PGOSampleType::Type;
+    switch (hint) {
+        case ArkSteedOperationHint::NONE:
+            return static_cast<uint32_t>(Type::NONE);
+        case ArkSteedOperationHint::INT:
+            return static_cast<uint32_t>(Type::INT);
+        case ArkSteedOperationHint::NUMBER:
+            return static_cast<uint32_t>(Type::NUMBER);
+        case ArkSteedOperationHint::STRING:
+            return static_cast<uint32_t>(Type::STRING);
+        case ArkSteedOperationHint::NUMBER_OR_STRING:
+            return static_cast<uint32_t>(Type::NUMBER_OR_STRING);
+        case ArkSteedOperationHint::ANY:
+            return static_cast<uint32_t>(Type::ANY);
+        case ArkSteedOperationHint::BOOLEAN:
+            return static_cast<uint32_t>(Type::BOOLEAN);
+        case ArkSteedOperationHint::UNDEFINED_OR_NULL:
+            return static_cast<uint32_t>(Type::UNDEFINED_OR_NULL);
+        case ArkSteedOperationHint::BIG_INT:
+            return static_cast<uint32_t>(Type::BIG_INT);
+    }
+    return static_cast<uint32_t>(Type::ANY);
+}
+
+// The handler a mono case or a polymorphic case pair carries in its second
+// slot: the IC writes a packed handler word (a primitive) for a fast field or
+// element, or a handler object for a prototype or transition case. It is never
+// hole (that second slot belongs to a polymorphic case), never undefined (the
+// uninitialized state of the slot) and never a weak reference.
+bool IsHandlerValue(JSTaggedValue value)
+{
+    return !value.IsHole() && !value.IsUndefined() && !value.IsWeak();
+}
+
+// Slot id of the single access site of `kind` in `method`. The site is the
+// bytecode whose profile slot carries the state of that kind.
+bool TryFindAccessSlot(const FixtureMethod &method, FixtureMethodKind kind, uint32_t *slotId)
+{
+    kungfu::EcmaOpcode opcode = kungfu::EcmaOpcode::NOP;
+    if (!TryGetProfileAccessOpcode(kind, &opcode)) {
+        return false;
+    }
+    const kungfu::BytecodeInfo *info = method.FindBytecode(opcode);
+    return info != nullptr && TryGetIcSlotId(*info, slotId);
+}
+
+// Names of the stages of `FixtureStage` in the declaration order of the
+// enumeration. It is a table rather than a switch on purpose: every nonzero
+// enumerator is named exactly once in this translation unit, inside the emitter
+// of the link that produces it, and this table only renders the name of an
+// already recorded failure.
+constexpr uint8_t kFixtureStageCount = 10;
+constexpr const char *kFixtureStageNames[kFixtureStageCount] = {
+    "NONE",
+    "ABC_EXECUTION",
+    "FUNCTION_LOOKUP",
+    "METHOD_METADATA",
+    "PROFILE",
+    "COMPILER_VM",
+    "COMPILE_TRIGGERED",
+    "JIT_THREAD_CONTEXT",
+    "COMPILATION_ENV",
+    "BYTECODE_DECODE",
+};
+
+// Scope of a diagnostic of a link that runs before the method table exists.
+constexpr const char *kCaseScope = "case";
+
+// Printed form of an observed pointer, for a diagnostic that reports what a
+// link saw instead of substituting a value for it.
+std::string PointerText(const void *pointer)
+{
+    char buffer[32] = {0};
+    std::snprintf(buffer, sizeof(buffer), "%p", pointer);
+    return std::string(buffer);
+}
+
+// `true`/`false` of an observed condition, for the same reason.
+const char *BoolText(bool value)
+{
+    return value ? "true" : "false";
+}
+
+// Synchronization of one lifecycle handshake.
+struct JitWorkerHandshake {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool ran {false};
+};
+
+// Test-only task of the lifecycle handshake. It observes only its own execution
+// on the JIT worker and touches no VM state. The pool runs the prologue hook of
+// the current worker -- the hook that publishes the compiler VM -- before it
+// pops any task, so this task having run proves that the compiler VM pointer
+// read afterwards belongs to the current worker and not to a destroyed one.
+class JitWorkerReadyTask final : public common::Task {
+public:
+    explicit JitWorkerReadyTask(std::shared_ptr<JitWorkerHandshake> handshake)
+        : common::Task(common::GLOBAL_TASK_ID), handshake_(std::move(handshake))
+    {
+    }
+
+    bool Run([[maybe_unused]] uint32_t threadIndex) override
+    {
+        std::lock_guard<std::mutex> guard(handshake_->mutex);
+        handshake_->ran = true;
+        handshake_->cv.notify_all();
+        return true;
+    }
+
+private:
+    std::shared_ptr<JitWorkerHandshake> handshake_;
+};
+
 }  // namespace
 
 const char *FixtureStageName(FixtureStage stage)
 {
-    switch (stage) {
-        case FixtureStage::NONE:
-            return "NONE";
-        case FixtureStage::ABC_EXECUTION:
-            return "ABC_EXECUTION";
-        case FixtureStage::FUNCTION_LOOKUP:
-            return "FUNCTION_LOOKUP";
-        case FixtureStage::METHOD_METADATA:
-            return "METHOD_METADATA";
-        case FixtureStage::PROFILE:
-            return "PROFILE";
-        case FixtureStage::COMPILER_VM:
-            return "COMPILER_VM";
-        case FixtureStage::COMPILE_TRIGGERED:
-            return "COMPILE_TRIGGERED";
-        case FixtureStage::JIT_THREAD_CONTEXT:
-            return "JIT_THREAD_CONTEXT";
-        case FixtureStage::COMPILATION_ENV:
-            return "COMPILATION_ENV";
-        case FixtureStage::BYTECODE_DECODE:
-            return "BYTECODE_DECODE";
+    auto index = static_cast<uint8_t>(stage);
+    if (index < kFixtureStageCount) {
+        return kFixtureStageNames[index];
     }
+    // A value outside the enumeration is reported as such instead of being
+    // mapped onto a stage that exists.
     return "UNKNOWN";
 }
 
@@ -182,15 +425,79 @@ const char *ArkSteedBytecodeFixture::FailureDiagnostic() const
     return failureDiagnostic_.c_str();
 }
 
-void ArkSteedBytecodeFixture::Fail(FixtureStage stage, const std::string &diagnostic)
+bool ArkSteedBytecodeFixture::RecordFailure(FixtureStage stage, const std::string &scope,
+                                            const std::string &reason, const std::string &observed)
 {
     // The first failed link is kept for the rest of the case: a later failure
-    // must not replace the cause that stopped the initialization.
-    if (failedStage_ != FixtureStage::NONE) {
-        return;
+    // neither replaces it nor is cleared, and the diagnostic always names the
+    // stage, the affected method (or the scope `case`) and the value the link
+    // observed.
+    if (failedStage_ == FixtureStage::NONE) {
+        failedStage_ = stage;
+        failureDiagnostic_ = std::string(FixtureStageName(stage)) + ": method=" + scope + ": " + reason +
+                             "; observed: " + observed;
     }
-    failedStage_ = stage;
-    failureDiagnostic_ = std::string(FixtureStageName(stage)) + ": " + diagnostic;
+    return false;
+}
+
+bool ArkSteedBytecodeFixture::FailAbcExecution(const std::string &reason, const std::string &observed)
+{
+    return RecordFailure(FixtureStage::ABC_EXECUTION, kCaseScope, reason, observed);
+}
+
+bool ArkSteedBytecodeFixture::FailFunctionLookup(const std::string &scope, const std::string &reason,
+                                                 const std::string &observed)
+{
+    return RecordFailure(FixtureStage::FUNCTION_LOOKUP, scope, reason, observed);
+}
+
+bool ArkSteedBytecodeFixture::FailMethodMetadata(const std::string &scope, const std::string &reason,
+                                                 const std::string &observed)
+{
+    return RecordFailure(FixtureStage::METHOD_METADATA, scope, reason, observed);
+}
+
+bool ArkSteedBytecodeFixture::FailBytecodeDecode(const std::string &scope, const std::string &reason,
+                                                 const std::string &observed)
+{
+    return RecordFailure(FixtureStage::BYTECODE_DECODE, scope, reason, observed);
+}
+
+bool ArkSteedBytecodeFixture::FailProfile(const std::string &scope, const std::string &reason,
+                                          const std::string &observed)
+{
+    return RecordFailure(FixtureStage::PROFILE, scope, reason, observed);
+}
+
+bool ArkSteedBytecodeFixture::FailCompilerVm(const std::string &reason, const std::string &observed)
+{
+    return RecordFailure(FixtureStage::COMPILER_VM, kCaseScope, reason, observed);
+}
+
+bool ArkSteedBytecodeFixture::FailCompileTriggered(const std::string &scope, const std::string &reason,
+                                                   const std::string &observed)
+{
+    return RecordFailure(FixtureStage::COMPILE_TRIGGERED, scope, reason, observed);
+}
+
+bool ArkSteedBytecodeFixture::FailJitThreadContext(const std::string &scope, const std::string &reason,
+                                                   const std::string &observed)
+{
+    return RecordFailure(FixtureStage::JIT_THREAD_CONTEXT, scope, reason, observed);
+}
+
+bool ArkSteedBytecodeFixture::FailCompilationEnv(const std::string &scope, const std::string &reason,
+                                                 const std::string &observed)
+{
+    return RecordFailure(FixtureStage::COMPILATION_ENV, scope, reason, observed);
+}
+
+const FixtureMethod &ArkSteedBytecodeFixture::EmptyMethod()
+{
+    // The empty value every accessor publishes once a link has failed. No field
+    // of it is ever filled, so no data is substituted for a failed link.
+    static const FixtureMethod empty;
+    return empty;
 }
 
 EcmaVM *ArkSteedBytecodeFixture::HostVm() const
@@ -208,14 +515,22 @@ JSThread *ArkSteedBytecodeFixture::CompilerThread() const
     return environmentReady_ ? compilerThread_ : nullptr;
 }
 
+JitTask *ArkSteedBytecodeFixture::PoolTask() const
+{
+    // `jitTask_` is created by the first `GetMethod` request of the case
+    // (`EnsureJitThreadContext`) and deleted by `TearDown` after every dispatch
+    // the case waited for has left the taskpool.
+    return environmentReady_ ? jitTask_ : nullptr;
+}
+
 const FixtureMethod &ArkSteedBytecodeFixture::GetMethod(FixtureMethodKind kind)
 {
     // The method table is filled by `SetUp`. On a fixture whose initialization
-    // stopped at any link no entry is published: the accessor returns an empty
-    // structure instead of a partially filled or substituted one.
-    if (!environmentReady_) {
-        static const FixtureMethod empty;
-        return empty;
+    // stopped at any link no entry is published: the accessor returns the empty
+    // structure instead of a partially filled or substituted one, for every
+    // kind and for the rest of the case.
+    if (!environmentReady_ || failedStage_ != FixtureStage::NONE) {
+        return EmptyMethod();
     }
     FixtureMethod &method = methods_[kind];
     if (method.env != nullptr) {
@@ -227,12 +542,13 @@ const FixtureMethod &ArkSteedBytecodeFixture::GetMethod(FixtureMethodKind kind)
         }
         return method;
     }
-    // A link failed earlier in this case: no object is published for the kind,
-    // and no later request re-runs the initialization.
-    if (failedStage_ != FixtureStage::NONE) {
-        return method;
+    // The objects the fixture owns for this kind are created on the first
+    // request and cached; a failure of this request is recorded by the link
+    // itself and makes the accessor report the empty structure, so a consumer
+    // that ignores the failure cannot read a half-built environment.
+    if (!PrepareCompilationEnv(kind, method)) {
+        return EmptyMethod();
     }
-    PrepareCompilationEnv(kind, method);
     return method;
 }
 
@@ -243,13 +559,15 @@ bool ArkSteedBytecodeFixture::EnsureJitThreadContext(FixtureMethodKind kind, Fix
     }
     const char *name = FixtureMethodKindName(kind);
     if (method.function.IsEmpty()) {
-        Fail(FixtureStage::JIT_THREAD_CONTEXT, std::string(name) + ": the method has no JSFunction");
-        return false;
+        return FailJitThreadContext(name, "the method has no JSFunction", "function handle is empty");
     }
     if (compilerVm_ == nullptr || compilerThread_ == nullptr || !compilerThread_->IsJitThread() ||
         hostVm_ == nullptr || hostThread_ == nullptr) {
-        Fail(FixtureStage::JIT_THREAD_CONTEXT, "the JIT compiler VM or the host VM is not ready");
-        return false;
+        return FailJitThreadContext(name, "the JIT compiler VM or the host VM is not ready",
+                                    "compilerVm=" + PointerText(compilerVm_) +
+                                        ", compilerThread=" + PointerText(compilerThread_) +
+                                        ", hostVm=" + PointerText(hostVm_) +
+                                        ", hostThread=" + PointerText(hostThread_));
     }
 
     // The public constructor is the production constructor for the compilation
@@ -267,11 +585,20 @@ bool ArkSteedBytecodeFixture::EnsureJitThreadContext(FixtureMethodKind kind, Fix
     // for every `env_->NewJSHandle`.
     static_cast<JitVM *>(compilerVm_)->SetHostVM(hostThread_);
     static_cast<JitThread *>(compilerThread_)->SetCurrentTask(jitTask_);
+    // Recorded before the verification below, so a binding that fails its
+    // verification is still unbound by `TearDown` without a second dereference
+    // of an unverified context.
+    jitContextBound_ = true;
 
     if (static_cast<JitThread *>(compilerThread_)->GetHostThread() != hostThread_ ||
         static_cast<JitThread *>(compilerThread_)->GetCurrentTask() != jitTask_) {
-        Fail(FixtureStage::JIT_THREAD_CONTEXT, "the compiler VM did not accept the host VM binding");
-        return false;
+        return FailJitThreadContext(name, "the compiler VM did not accept the host VM binding",
+                                    "JitThread::GetHostThread()=" +
+                                        PointerText(static_cast<JitThread *>(compilerThread_)->GetHostThread()) +
+                                        ", JitThread::GetCurrentTask()=" +
+                                        PointerText(static_cast<JitThread *>(compilerThread_)->GetCurrentTask()) +
+                                        ", expected hostThread=" + PointerText(hostThread_) +
+                                        ", jitTask=" + PointerText(jitTask_));
     }
     return true;
 }
@@ -285,25 +612,23 @@ bool ArkSteedBytecodeFixture::PrepareCompilationEnv(FixtureMethodKind kind, Fixt
 
     // Preconditions of the production `JitCompilationEnv` constructor. Each one
     // is checked before the constructor runs, so a violated precondition is
-    // reported as COMPILATION_ENV instead of tripping a production `ASSERT`
-    // whose message carries no stage.
+    // reported as COMPILATION_ENV instead of tripping an assertion inside the
+    // production constructor, whose message would carry no stage.
     if (method.methodLiteral == nullptr || method.bytecodeStart == nullptr || method.bytecodeSize == 0) {
-        Fail(FixtureStage::COMPILATION_ENV, std::string(name) + ": the method has no complete metadata");
-        return false;
+        return FailCompilationEnv(name, "the method has no complete metadata",
+                                  "methodLiteral=" + PointerText(method.methodLiteral) +
+                                      ", bytecodeStart=" + PointerText(method.bytecodeStart) +
+                                      ", bytecodeSize=" + std::to_string(method.bytecodeSize));
     }
     JSTaggedValue lexicalEnv = method.function->GetLexicalEnv(hostThread_);
     if (!(lexicalEnv.IsLexicalEnv() || lexicalEnv.IsJSGlobalEnv() || lexicalEnv.IsSFunctionEnv())) {
-        Fail(FixtureStage::COMPILATION_ENV,
-             std::string(name) + ": the lexical environment of the function is not a base env (observed: " +
-                 ObservedValueName(lexicalEnv) + ")");
-        return false;
+        return FailCompilationEnv(name, "the lexical environment of the function is not a base env",
+                                  ObservedValueName(lexicalEnv));
     }
     JSTaggedValue globalEnvValue = BaseEnv::Cast(lexicalEnv.GetTaggedObject())->GetGlobalEnv(hostThread_);
     if (!globalEnvValue.IsJSGlobalEnv()) {
-        Fail(FixtureStage::COMPILATION_ENV,
-             std::string(name) + ": the lexical environment does not resolve to a JSGlobalEnv (observed: " +
-                 ObservedValueName(globalEnvValue) + ")");
-        return false;
+        return FailCompilationEnv(name, "the lexical environment does not resolve to a JSGlobalEnv",
+                                  ObservedValueName(globalEnvValue));
     }
 
     // Production creates exactly these two objects per compilation task; the
@@ -313,13 +638,18 @@ bool ArkSteedBytecodeFixture::PrepareCompilationEnv(FixtureMethodKind kind, Fixt
     method.dependencies = new kungfu::LazyDeoptAllDependencies();
     method.env = new JitCompilationEnv(compilerVm_, hostVm_, method.function, method.dependencies);
     if (method.env->GetHostThread() != hostThread_ || method.env->GetJSThread() != compilerThread_) {
-        Fail(FixtureStage::COMPILATION_ENV,
-             std::string(name) + ": the compilation environment is bound to another host VM or thread");
+        const std::string observedEnv = "JitCompilationEnv::GetHostThread()=" +
+                                        PointerText(method.env->GetHostThread()) +
+                                        ", JitCompilationEnv::GetJSThread()=" +
+                                        PointerText(method.env->GetJSThread()) +
+                                        ", expected hostThread=" + PointerText(hostThread_) +
+                                        ", compilerThread=" + PointerText(compilerThread_);
         delete method.env;
         method.env = nullptr;
         delete method.dependencies;
         method.dependencies = nullptr;
-        return false;
+        return FailCompilationEnv(name, "the compilation environment is bound to another host VM or thread",
+                                  observedEnv);
     }
 
     // The profile of the kind is supplied by the profile leaf. Until it exists
@@ -334,10 +664,300 @@ bool ArkSteedBytecodeFixture::PrepareCompilationEnv(FixtureMethodKind kind, Fixt
     return true;
 }
 
-const kungfu::BytecodeInfo *ArkSteedBytecodeFixture::FindOperationSite(ArkSteedOperationHint) const
+bool ArkSteedBytecodeFixture::LoadProfile(FixtureMethodKind kind, FixtureMethod &method)
 {
-    // The operation sites belong to the profile leaf of the domain.
-    return nullptr;
+    const char *name = FixtureMethodKindName(kind);
+    if (method.function.IsEmpty()) {
+        return FailProfile(name, "the method has no JSFunction", "function handle is empty");
+    }
+    // The interpreter creates the profile of a method once the hotness counter
+    // of its function crossed zero (`RuntimeNotifyInlineCache`) and publishes it
+    // on the function. The fixture only reads that object; it never creates or
+    // substitutes one.
+    JSHandle<JSTaggedValue> profileValue(hostThread_, method.function->GetProfileTypeInfo(hostThread_));
+    if (!profileValue->IsProfileTypeInfo()) {
+        return FailProfile(name, "the warm-up left no ProfileTypeInfo on the function",
+                           ObservedValueName(profileValue.GetTaggedValue()));
+    }
+    method.profile = JSHandle<ProfileTypeInfo>::Cast(profileValue);
+    return true;
+}
+
+bool ArkSteedBytecodeFixture::ConstructProfileStates()
+{
+    if (!ConstructNamedPolyOverflow()) {
+        return false;
+    }
+    return ConstructOperationSites();
+}
+
+bool ArkSteedBytecodeFixture::ConstructNamedPolyOverflow()
+{
+    constexpr FixtureMethodKind kKind = FixtureMethodKind::NAMED_POLY_OVERFLOW;
+    constexpr FixtureMethodKind kSourceKind = FixtureMethodKind::NAMED_POLY_LIMIT;
+    constexpr uint32_t kLimit = MAX_NAMED_IC_POLY_CASES;
+    const char *name = FixtureMethodKindName(kKind);
+    FixtureMethod &target = methods_[kKind];
+    FixtureMethod &source = methods_[kSourceKind];
+
+    uint32_t targetSlot = 0;
+    uint32_t sourceSlot = 0;
+    if (!TryFindAccessSlot(target, kKind, &targetSlot)) {
+        return FailProfile(name, "the method has no named access site",
+                           "decoded bytecodes=" + std::to_string(target.bytecodes_.size()));
+    }
+    if (!TryFindAccessSlot(source, kSourceKind, &sourceSlot)) {
+        return FailProfile(FixtureMethodKindName(kSourceKind), "the method has no named access site",
+                           "decoded bytecodes=" + std::to_string(source.bytecodes_.size()));
+    }
+    if (source.profile.IsEmpty() || target.profile.IsEmpty()) {
+        return FailProfile(name, "the source or the target kind has no profile",
+                           std::string("source profile empty=") + BoolText(source.profile.IsEmpty()) +
+                               ", target profile empty=" + BoolText(target.profile.IsEmpty()));
+    }
+    if (sourceSlot >= source.profile->GetICSlotLength() ||
+        targetSlot + 1 >= target.profile->GetICSlotLength()) {
+        return FailProfile(name, "the access site leaves no room for a case pair",
+                           "sourceSlot=" + std::to_string(sourceSlot) + " of " +
+                               std::to_string(source.profile->GetICSlotLength()) + ", targetSlot=" +
+                               std::to_string(targetSlot) + " of " +
+                               std::to_string(target.profile->GetICSlotLength()));
+    }
+
+    // The real case pairs of the method whose polymorphic array stops exactly at
+    // the IC limit. They are the only source of the constructed array; no pair
+    // is fabricated. The handle keeps the array valid across the allocation of
+    // the constructed array below.
+    JSTaggedValue sourceFirst = source.profile->GetICSlot(hostThread_, sourceSlot);
+    if (!sourceFirst.IsTaggedArray()) {
+        return FailProfile(FixtureMethodKindName(kSourceKind), "the access slot is not a polymorphic array",
+                           ObservedSlotName(sourceFirst));
+    }
+    JSHandle<TaggedArray> sourceArray(hostThread_, sourceFirst.GetTaggedObject());
+    if (sourceArray->GetLength() != kLimit * 2) {
+        return FailProfile(FixtureMethodKindName(kSourceKind),
+                           "the polymorphic array does not hold " + std::to_string(kLimit) + " case pairs",
+                           "case pairs=" + std::to_string(sourceArray->GetLength() / 2));
+    }
+
+    // The constructed array carries the real pairs plus one duplicate of the
+    // first pair, which puts the case count above the ArkSteed limit: that state
+    // is unreachable through IC, which stops at the limit.
+    JSHandle<TaggedArray> constructed = hostVm_->GetFactory()->NewTaggedArray((kLimit + 1) * 2);
+    for (uint32_t index = 0; index < kLimit; ++index) {
+        constructed->Set(hostThread_, index * 2, sourceArray->Get(hostThread_, index * 2));
+        constructed->Set(hostThread_, index * 2 + 1, sourceArray->Get(hostThread_, index * 2 + 1));
+    }
+    constructed->Set(hostThread_, kLimit * 2, sourceArray->Get(hostThread_, 0));
+    constructed->Set(hostThread_, kLimit * 2 + 1, sourceArray->Get(hostThread_, 1));
+
+    target.profile->SetICSlot(hostThread_, targetSlot, constructed);
+    target.profile->SetICSlot(hostThread_, targetSlot + 1, JSTaggedValue::Hole());
+    return true;
+}
+
+bool ArkSteedBytecodeFixture::ConstructOperationSites()
+{
+    constexpr FixtureMethodKind kKind = FixtureMethodKind::OPERATION;
+    const char *name = FixtureMethodKindName(kKind);
+    FixtureMethod &method = methods_[kKind];
+    if (method.profile.IsEmpty()) {
+        return FailProfile(name, "the method has no profile", "profile handle is empty");
+    }
+
+    // Candidate sites: every decoded bytecode of the method that carries an IC
+    // slot, in increasing offset order.
+    std::vector<const kungfu::BytecodeInfo *> candidates {};
+    std::vector<uint32_t> slots {};
+    for (const kungfu::BytecodeInfo &info : method.bytecodes_) {
+        uint32_t slotId = 0;
+        if (TryGetIcSlotId(info, &slotId)) {
+            candidates.push_back(&info);
+            slots.push_back(slotId);
+        }
+    }
+    if (candidates.empty()) {
+        return FailProfile(name, "the method carries no operation site",
+                           "decoded bytecodes=" + std::to_string(method.bytecodes_.size()) +
+                               ", sites with an IC slot=0");
+    }
+
+    // A slot the warm-up filled holds a sampled `pgo::PGOSampleType`; the hint
+    // it publishes is the first site of that hint. A slot the warm-up left
+    // uninitialized is a construction slot of the second pass.
+    std::vector<bool> taken(candidates.size(), false);
+    for (size_t index = 0; index < candidates.size(); ++index) {
+        if (slots[index] >= method.profile->GetICSlotLength()) {
+            continue;
+        }
+        JSTaggedValue value = method.profile->GetICSlot(hostThread_, slots[index]);
+        if (!value.IsInt()) {
+            continue;
+        }
+        ArkSteedOperationHint hint = HintOfRawSample(static_cast<uint32_t>(value.GetInt()));
+        if (operationSites_.find(hint) != operationSites_.end()) {
+            continue;
+        }
+        operationSites_[hint] = candidates[index];
+        taken[index] = true;
+    }
+
+    // Hints the warm-up cannot sample get the raw `pgo::PGOSampleType` value of
+    // the hint in an uninitialized site. No other slot is written.
+    for (ArkSteedOperationHint hint : kOperationHints) {
+        if (operationSites_.find(hint) != operationSites_.end()) {
+            continue;
+        }
+        bool written = false;
+        for (size_t index = 0; index < candidates.size() && !written; ++index) {
+            if (taken[index] || slots[index] >= method.profile->GetICSlotLength()) {
+                continue;
+            }
+            JSTaggedValue value = method.profile->GetICSlot(hostThread_, slots[index]);
+            if (value.IsInt()) {
+                continue;
+            }
+            method.profile->SetICSlot(hostThread_, slots[index],
+                                      JSTaggedValue(static_cast<int32_t>(RawSampleOfHint(hint))));
+            operationSites_[hint] = candidates[index];
+            taken[index] = true;
+            written = true;
+        }
+        if (!written) {
+            return FailProfile(name,
+                               "no uninitialized operation site is left for hint " +
+                                   std::to_string(static_cast<int>(hint)),
+                               "candidate sites=" + std::to_string(candidates.size()));
+        }
+    }
+    return true;
+}
+
+bool ArkSteedBytecodeFixture::CheckProfileState(FixtureMethodKind kind, FixtureMethod &method)
+{
+    const char *name = FixtureMethodKindName(kind);
+    if (method.profile.IsEmpty()) {
+        return FailProfile(name, "the method has no profile", "profile handle is empty");
+    }
+    if (kind == FixtureMethodKind::OPERATION) {
+        for (ArkSteedOperationHint hint : kOperationHints) {
+            if (operationSites_.find(hint) == operationSites_.end()) {
+                return FailProfile(name,
+                                   "no site carries hint " + std::to_string(static_cast<int>(hint)),
+                                   "operation sites=" + std::to_string(operationSites_.size()));
+            }
+        }
+        return true;
+    }
+
+    uint32_t slotId = 0;
+    if (!TryFindAccessSlot(method, kind, &slotId)) {
+        return FailProfile(name, "the method has no access site",
+                           "decoded bytecodes=" + std::to_string(method.bytecodes_.size()));
+    }
+    const uint32_t length = method.profile->GetICSlotLength();
+    if (slotId >= length) {
+        return FailProfile(name, "the access site is outside the profile",
+                           "access slot=" + std::to_string(slotId) + ", profile slots=" +
+                               std::to_string(length));
+    }
+    JSTaggedValue first = method.profile->GetICSlot(hostThread_, slotId);
+    JSTaggedValue second = slotId + 1 < length ? method.profile->GetICSlot(hostThread_, slotId + 1)
+                                               : JSTaggedValue::Undefined();
+    const std::string observed = ObservedSlotName(first) + " / " + ObservedSlotName(second);
+
+    // A polymorphic array of exactly `expectedPairs` case pairs of a weak HClass
+    // reference and a handler.
+    auto checkPolyArray = [&](uint32_t expectedPairs) -> bool {
+        if (first.IsWeak() || !first.IsTaggedArray()) {
+            return false;
+        }
+        auto *array = TaggedArray::Cast(first.GetTaggedObject());
+        if (array->GetLength() != expectedPairs * 2) {
+            return false;
+        }
+        for (uint32_t index = 0; index < array->GetLength(); index += 2) {
+            if (!array->Get(hostThread_, index).IsWeak() ||
+                !IsHandlerValue(array->Get(hostThread_, index + 1))) {
+                return false;
+            }
+        }
+        return second.IsHole();
+    };
+
+    switch (kind) {
+        case FixtureMethodKind::NAMED_MONO:
+        case FixtureMethodKind::ELEMENT_MONO:
+            if (!first.IsWeak() || !IsHandlerValue(second)) {
+                return FailProfile(name, "the access slot is not a mono case", observed);
+            }
+            return true;
+        case FixtureMethodKind::NAMED_POLY_LIMIT:
+        case FixtureMethodKind::ELEMENT_POLY_LIMIT:
+            if (!checkPolyArray(MAX_NAMED_IC_POLY_CASES)) {
+                return FailProfile(name,
+                                   "the access slot is not a poly array of exactly " +
+                                       std::to_string(MAX_NAMED_IC_POLY_CASES) + " case pairs",
+                                   observed);
+            }
+            return true;
+        case FixtureMethodKind::NAMED_MEGA:
+            if (!first.IsHole() || !second.IsHole()) {
+                return FailProfile(name, "the access slot is not mega", observed);
+            }
+            return true;
+        case FixtureMethodKind::NAMED_POLY_OVERFLOW:
+            if (!checkPolyArray(MAX_NAMED_IC_POLY_CASES + 1)) {
+                return FailProfile(name,
+                                   "the constructed access slot is not a poly array of exactly " +
+                                       std::to_string(MAX_NAMED_IC_POLY_CASES + 1) + " case pairs",
+                                   observed);
+            }
+            return true;
+        case FixtureMethodKind::GLOBAL_ACCESS: {
+            if (!first.IsPropertyBox()) {
+                return FailProfile(name, "the access slot is not a PropertyBox", observed);
+            }
+            auto *box = PropertyBox::Cast(first.GetTaggedObject());
+            if (box->IsInvalid(hostThread_) || box->GetValue(hostThread_).IsAccessorData()) {
+                return FailProfile(name, "the PropertyBox is invalid", observed);
+            }
+            return true;
+        }
+        case FixtureMethodKind::CALL_JS:
+            if (!first.IsJSFunction()) {
+                return FailProfile(name, "the call slot is not a JSFunction", observed);
+            }
+            return true;
+        case FixtureMethodKind::CALL_BUILTIN:
+            if (!first.IsInt() || first.GetInt() >= 0) {
+                return FailProfile(name, "the call slot is not a negative builtin id", observed);
+            }
+            return true;
+        case FixtureMethodKind::EMPTY_SLOT:
+            if (!first.IsUndefined()) {
+                return FailProfile(name, "the unexecuted access slot is not undefined", observed);
+            }
+            return true;
+        default:
+            return FailProfile(name, "the kind has no required profile state", observed);
+    }
+}
+
+const kungfu::BytecodeInfo *ArkSteedBytecodeFixture::FindOperationSite(ArkSteedOperationHint hint) const
+{
+    // A fixture whose initialization failed publishes no site: the map is only
+    // reachable when every link of `SetUp` succeeded and no later request
+    // failed, so a consumer that ignores the failure gets `nullptr` instead of
+    // a site of a broken case.
+    if (!environmentReady_ || failedStage_ != FixtureStage::NONE) {
+        return nullptr;
+    }
+    auto entry = operationSites_.find(hint);
+    if (entry == operationSites_.end()) {
+        return nullptr;
+    }
+    return entry->second;
 }
 
 bool ArkSteedBytecodeFixture::ExecuteFixtureScript(JSHandle<JSTaggedValue> &fixtures)
@@ -354,33 +974,36 @@ bool ArkSteedBytecodeFixture::ExecuteFixtureScript(JSHandle<JSTaggedValue> &fixt
     // link with a stage, instead of a crash that carries no stage.
     std::ifstream abcStream(abcFile, std::ios::binary);
     if (!abcStream.is_open()) {
-        Fail(FixtureStage::ABC_EXECUTION, "cannot open the fixture abc '" + abcFile + "'");
-        return false;
+        return FailAbcExecution("cannot open the fixture abc", "'" + abcFile + "'");
     }
     abcStream.close();
 
+    // The entry point belongs to the same link: the file name of the abc is
+    // derived from both published macros, so a stem that does not name the
+    // generated asset is already caught by the asset check above. The execution
+    // itself reports a failure (a damaged asset, a throw at the top of the
+    // script) through its return value, and that value is observed instead of
+    // being swallowed.
     if (!JSNApi::Execute(hostVm_, abcFile, ARKSTEED_FIXTURE_ENTRY_POINT)) {
-        Fail(FixtureStage::ABC_EXECUTION,
-             "cannot execute '" + abcFile + "' with entry '" + ARKSTEED_FIXTURE_ENTRY_POINT + "'");
-        return false;
+        return FailAbcExecution("the fixture abc did not execute",
+                                "JSNApi::Execute('" + abcFile + "', entry '" +
+                                    ARKSTEED_FIXTURE_ENTRY_POINT + "') returned false");
     }
 
     // The script publishes its functions on the global object; the lookup goes
     // through the same global env the running script wrote to.
     JSHandle<GlobalEnv> globalEnv = hostVm_->GetGlobalEnv();
     if (globalEnv->GetGlobalObject().IsUndefined()) {
-        Fail(FixtureStage::FUNCTION_LOOKUP, "the host VM has no global object after executing the script");
-        return false;
+        return FailFunctionLookup(kCaseScope, "the host VM has no global object after executing the script",
+                                  "GlobalEnv::GetGlobalObject() is undefined");
     }
     JSHandle<EcmaString> keyString = hostVm_->GetFactory()->NewFromUtf8(kFixturesObjectName);
     JSHandle<JSTaggedValue> key(keyString);
     OperationResult result = JSObject::GetPropertyFromGlobal(hostThread_, key);
     JSHandle<JSTaggedValue> value = result.GetValue();
     if (!value->IsJSObject()) {
-        Fail(FixtureStage::FUNCTION_LOOKUP,
-             std::string("global ") + kFixturesObjectName + " is not an object (observed: " +
-                 ObservedValueName(value.GetTaggedValue()) + ")");
-        return false;
+        return FailFunctionLookup(kCaseScope, std::string("global ") + kFixturesObjectName + " is not an object",
+                                  ObservedValueName(value.GetTaggedValue()));
     }
     fixtures = value;
     return true;
@@ -395,10 +1018,8 @@ bool ArkSteedBytecodeFixture::LoadMethod(FixtureMethodKind kind, const JSHandle<
     OperationResult result = JSObject::GetProperty(hostThread_, fixtures, key);
     JSHandle<JSTaggedValue> value = result.GetValue();
     if (!value->IsJSFunction()) {
-        Fail(FixtureStage::FUNCTION_LOOKUP,
-             std::string(name) + ": the published property is not a JSFunction (observed: " +
-                 ObservedValueName(value.GetTaggedValue()) + ")");
-        return false;
+        return FailFunctionLookup(name, "the published property is not a JSFunction",
+                                  ObservedValueName(value.GetTaggedValue()));
     }
 
     FixtureMethod &method = methods_[kind];
@@ -406,44 +1027,39 @@ bool ArkSteedBytecodeFixture::LoadMethod(FixtureMethodKind kind, const JSHandle<
 
     // F-4: the fixture methods stay below the JIT hotness threshold, so none of
     // them may be compiling or compiled after the script ran. A triggered
-    // compilation keeps this method invalid instead of hiding it.
+    // compilation is reported instead of being hidden, so a case whose warm-up
+    // crossed the threshold cannot look like a healthy fixture.
     if (method.function->IsJitCompiling()) {
-        Fail(FixtureStage::COMPILE_TRIGGERED, std::string(name) + ": JIT compilation is in progress");
-        return false;
+        return FailCompileTriggered(name, "JIT compilation is in progress",
+                                    "JSFunction::IsJitCompiling()=true");
     }
     if (method.function->IsCompiledCode()) {
-        Fail(FixtureStage::COMPILE_TRIGGERED, std::string(name) + ": the method is already compiled");
-        return false;
+        return FailCompileTriggered(name, "the method is already compiled",
+                                    "JSFunction::IsCompiledCode()=true");
     }
 
     JSTaggedValue methodValue = method.function->GetMethod(hostThread_);
     if (!methodValue.IsMethod()) {
-        Fail(FixtureStage::METHOD_METADATA,
-             std::string(name) + ": the function carries no Method (observed: " +
-                 ObservedValueName(methodValue) + ")");
-        return false;
+        return FailMethodMetadata(name, "the function carries no Method", ObservedValueName(methodValue));
     }
     Method *methodObject = Method::Cast(methodValue.GetTaggedObject());
     method.pandaFile = const_cast<JSPandaFile *>(methodObject->GetJSPandaFile(hostThread_));
     method.methodLiteral = methodObject->GetMethodLiteral(hostThread_);
     method.bytecodeStart = methodObject->GetBytecodeArray();
     if (method.pandaFile == nullptr) {
-        Fail(FixtureStage::METHOD_METADATA, std::string(name) + ": the method has no JSPandaFile");
-        return false;
+        return FailMethodMetadata(name, "the method has no JSPandaFile", "Method::GetJSPandaFile()=nullptr");
     }
     if (method.methodLiteral == nullptr) {
-        Fail(FixtureStage::METHOD_METADATA, std::string(name) + ": the method has no MethodLiteral");
-        return false;
+        return FailMethodMetadata(name, "the method has no MethodLiteral", "Method::GetMethodLiteral()=nullptr");
     }
     if (method.bytecodeStart == nullptr) {
-        Fail(FixtureStage::METHOD_METADATA, std::string(name) + ": the method has no bytecode array");
-        return false;
+        return FailMethodMetadata(name, "the method has no bytecode array",
+                                  "Method::GetBytecodeArray()=nullptr");
     }
     // Same code size as the production preprocessor takes for `bcSizeBytes_`.
     method.bytecodeSize = MethodLiteral::GetCodeSize(method.pandaFile, method.methodLiteral->GetMethodId());
     if (method.bytecodeSize == 0) {
-        Fail(FixtureStage::METHOD_METADATA, std::string(name) + ": the method has empty bytecode");
-        return false;
+        return FailMethodMetadata(name, "the method has empty bytecode", "MethodLiteral::GetCodeSize()=0");
     }
     return DecodeBytecode(kind, method);
 }
@@ -474,10 +1090,10 @@ bool ArkSteedBytecodeFixture::DecodeBytecode(FixtureMethodKind kind, FixtureMeth
         const size_t instructionSize = info.GetSize();
         if (instructionSize == 0 || instructionSize > bytecodeSize - offset) {
             method.bytecodes_.clear();
-            Fail(FixtureStage::BYTECODE_DECODE,
-                 std::string(name) + ": instruction at offset " + std::to_string(offset) + " has size " +
-                     std::to_string(instructionSize) + ", remaining " + std::to_string(bytecodeSize - offset));
-            return false;
+            return FailBytecodeDecode(name, "the instruction does not fit the bytecode",
+                                      "offset=" + std::to_string(offset) + ", size=" +
+                                          std::to_string(instructionSize) + ", remaining=" +
+                                          std::to_string(bytecodeSize - offset));
         }
         // Jump instructions carry only metadata in production as well; their
         // target is resolved by the preprocessor.
@@ -490,12 +1106,77 @@ bool ArkSteedBytecodeFixture::DecodeBytecode(FixtureMethodKind kind, FixtureMeth
     }
     if (offset != bytecodeSize) {
         method.bytecodes_.clear();
-        Fail(FixtureStage::BYTECODE_DECODE,
-             std::string(name) + ": decoded " + std::to_string(offset) + " of " + std::to_string(bytecodeSize) +
-                 " bytecode bytes");
-        return false;
+        return FailBytecodeDecode(name, "the decoded instructions do not cover the bytecode",
+                                  "decoded=" + std::to_string(offset) + " of " +
+                                      std::to_string(bytecodeSize) + " bytes");
     }
     return true;
+}
+
+bool ArkSteedBytecodeFixture::AwaitCurrentJitWorker()
+{
+    auto handshake = std::make_shared<JitWorkerHandshake>();
+    common::Task *handshakeTask = nullptr;
+    {
+        auto task = std::make_unique<JitWorkerReadyTask>(handshake);
+        handshakeTask = task.get();
+        JitTaskpool::GetCurrentTaskpool()->PostTask(std::move(task));
+    }
+
+    // (1) The current worker has executed the handshake task. `Runner::Run`
+    // calls the prologue hook of the pool -- which publishes the compiler VM --
+    // before it pops any task, so a task that has run proves that
+    // `GetCompilerVm()` now names the VM of the current worker. A task that
+    // never runs is a failure of the pool, not a reason to read the pointer.
+    // A zero budget establishes nothing (it is the deterministic failure input
+    // of the fixture-lifecycle case) and still leaves the task queued exactly
+    // as a real timeout does, so both reach the same failure path below.
+    bool ran = false;
+    if (readinessBudget_.count() > 0) {
+        std::unique_lock<std::mutex> lock(handshake->mutex);
+        ran = handshake->cv.wait_for(lock, readinessBudget_, [&handshake] { return handshake->ran; });
+    }
+
+    // (2) The worker has retired the handshake task. `Jit::ClearTaskWithVm`
+    // casts every task it finds in the pool to `JitTask::AsyncTask`, so a task
+    // of the fixture must be neither queued nor running when the case destroys
+    // its host VM. A task that has run stays in `runningTask_` until the worker
+    // retires it, so its absence from `ForEachTask` is the retirement proof.
+    if (ran) {
+        const auto deadline = std::chrono::steady_clock::now() + readinessBudget_;
+        do {
+            bool retained = false;
+            JitTaskpool::GetCurrentTaskpool()->ForEachTask(
+                [&retained, handshakeTask](common::Task *task) { retained = retained || task == handshakeTask; });
+            if (!retained) {
+                return true;
+            }
+            std::this_thread::yield();
+        } while (std::chrono::steady_clock::now() < deadline);
+    }
+
+    // The handshake did not prove that the compiler VM belongs to the current
+    // worker, so `SetUp` fails and the case goes red. The handshake task may
+    // still be queued or running; `Jit::ClearTaskWithVm`, reached from
+    // `~EcmaVM` when the host VM is destroyed, casts every task it finds in the
+    // pool to `JitTask::AsyncTask`, which a plain `common::Task` is not, so an
+    // outstanding task would crash the consumer process instead of releasing
+    // its resources.
+    //
+    // The pool is therefore stopped before it can be read by VM teardown.
+    // `Taskpool::Destroy` brings the pool's initialization count to zero --
+    // from which `ForEachTask`, the only pool reader that
+    // `Jit::ClearTaskWithVm` drives, returns without touching a task -- and
+    // `Runner::TerminateThread` joins the worker, whose pop loop returns every
+    // queued task before it honours the termination flag. The task is thus
+    // drained and retired in the same call, and host-VM destruction is left
+    // with no incompatible task to cast. The drain is deliberately not
+    // asserted here: the fixture contains no assertion and never aborts a
+    // case, its failures are reported through `FixtureStage` and
+    // `FailureDiagnostic()` (F-8), and the `COMPILER_VM` failure recorded by
+    // `SetUp` already makes this path observable to the consumer.
+    JitTaskpool::GetCurrentTaskpool()->Destroy();
+    return false;
 }
 
 void ArkSteedBytecodeFixture::SetUp()
@@ -524,41 +1205,68 @@ void ArkSteedBytecodeFixture::SetUp()
     options.SetCompilerEnableLiteCG(true);
     options.SetJitHotnessThreshold(JIT_HOTNESS_THRESHOLD);
 
-    // Readiness of the compiler VM. `WaitForJitTaskPoolReady()` has no timeout,
-    // so it is only awaited after the fast-JIT flag proves that `InitJitEnv`
-    // already ran: without fast JIT the wait is skipped and the environment
-    // stays unusable, instead of hanging the run on a pool that never becomes
-    // ready.
+    // Readiness of the compiler VM. `Jit::IsEnableFastJit()` is checked first
+    // because its truth proves that `JitResources::InitJitEnv` already ran for
+    // this case. The pointer itself cannot be used as readiness proof: the JIT
+    // taskpool is a process-lifetime singleton whose `compilerVm_` is not
+    // cleared when the worker destroys the compiler VM, so after the previous
+    // case a bare `WaitForJitTaskPoolReady()` returns immediately on the stale
+    // pointer and the fixture would dereference a destroyed VM. Readiness of
+    // the current worker is established by the lifecycle handshake instead, and
+    // the pointer is published only after it passed every check below.
     if (!Jit::GetInstance()->IsEnableFastJit()) {
-        Fail(FixtureStage::COMPILER_VM, "fast JIT is not enabled for the fixture VM");
+        FailCompilerVm("fast JIT is not enabled for the fixture VM", "Jit::IsEnableFastJit()=false");
         return;
     }
+    bool workerReady = false;
+    EcmaVM *currentCompilerVm = nullptr;
     {
         ThreadNativeScope nativeScope(hostThread_);
-        JitTaskpool::GetCurrentTaskpool()->WaitForJitTaskPoolReady();
-        compilerVm_ = JitTaskpool::GetCurrentTaskpool()->GetCompilerVm();
+        workerReady = AwaitCurrentJitWorker();
+        if (workerReady) {
+            currentCompilerVm = JitTaskpool::GetCurrentTaskpool()->GetCompilerVm();
+        }
     }
-    if (compilerVm_ == nullptr) {
-        Fail(FixtureStage::COMPILER_VM, "the JIT taskpool has no compiler VM");
+    if (!workerReady) {
+        FailCompilerVm("the JIT worker did not complete the readiness handshake",
+                       "the handshake task did not run and retire within " +
+                           std::to_string(readinessBudget_.count()) + "ms; the JIT taskpool was stopped "
+                           "before host-VM teardown, so no handshake task can reach it");
         return;
     }
-    compilerThread_ = compilerVm_->GetJSThread();
-    if (compilerThread_ == nullptr || !compilerThread_->IsJitThread()) {
-        Fail(FixtureStage::COMPILER_VM, "the compiler VM has no JIT thread");
-        compilerThread_ = nullptr;
+    if (currentCompilerVm == nullptr) {
+        FailCompilerVm("the JIT taskpool has no compiler VM",
+                       "JitTaskpool::GetCurrentTaskpool()->GetCompilerVm()=nullptr");
         return;
     }
+    JSThread *currentCompilerThread = currentCompilerVm->GetJSThread();
+    if (currentCompilerThread == nullptr || !currentCompilerThread->IsJitThread()) {
+        const std::string observed = "compilerThread=" + PointerText(currentCompilerThread) +
+                                     ", compilerThread->IsJitThread()=" +
+                                     BoolText(currentCompilerThread != nullptr &&
+                                              currentCompilerThread->IsJitThread());
+        FailCompilerVm("the compiler VM has no JIT thread", observed);
+        return;
+    }
+    // Published only now, after the handshake and every check passed: `TearDown`
+    // dereferences these members, so a stale or half-validated VM is never left
+    // reachable from the fixture.
+    compilerVm_ = currentCompilerVm;
+    compilerThread_ = currentCompilerThread;
 
     // Contract point (1) of the parent page: the host VM carries a profile, and
     // the JIT profile read by `JitCompilationEnv::GetPGOProfiler()` exists.
     // Neither is substituted when it is missing.
     auto pgoProfiler = hostVm_->GetPGOProfiler();
     if (pgoProfiler == nullptr || pgoProfiler->GetJITProfile() == nullptr) {
-        Fail(FixtureStage::COMPILER_VM, "the fixture VM has no JIT profile");
+        FailCompilerVm("the fixture VM has no JIT profile",
+                       "EcmaVM::GetPGOProfiler()=" + PointerText(pgoProfiler.get()) +
+                           ", PGOProfiler::GetJITProfile()=nullptr");
         return;
     }
 
-    // Data of the fixture methods. The script is executed exactly once, then
+    // Data of the fixture methods. The script is executed exactly once (the
+    // warm-up it carries leaves the profile of every profile kind behind), then
     // every published function is resolved together with its method metadata
     // and its decoded bytecode. A failure of any link leaves the whole table
     // unpublished.
@@ -568,6 +1276,27 @@ void ArkSteedBytecodeFixture::SetUp()
     }
     for (uint8_t index = 0; index < kFixtureMethodKindCount; index++) {
         if (!LoadMethod(static_cast<FixtureMethodKind>(index), fixtures)) {
+            return;
+        }
+    }
+
+    // Profile of the fixture methods. The profile object of every profile kind
+    // comes from the interpreter through the warm-up; the fixture publishes it,
+    // writes the two states IC cannot reach, then verifies the required state of
+    // each kind. A mismatch stops the initialization at PROFILE with the
+    // observed slot values, and no slot is substituted.
+    for (uint8_t index = 0; index < kFixtureMethodKindCount; index++) {
+        FixtureMethodKind kind = static_cast<FixtureMethodKind>(index);
+        if (IsProfileKind(kind) && !LoadProfile(kind, methods_[kind])) {
+            return;
+        }
+    }
+    if (!ConstructProfileStates()) {
+        return;
+    }
+    for (uint8_t index = 0; index < kFixtureMethodKindCount; index++) {
+        FixtureMethodKind kind = static_cast<FixtureMethodKind>(index);
+        if (IsProfileKind(kind) && !CheckProfileState(kind, methods_[kind])) {
             return;
         }
     }
@@ -592,16 +1321,22 @@ void ArkSteedBytecodeFixture::TearDown()
         entry.second.dependencies = nullptr;
     }
     methods_.clear();
+    // The hint-to-site map holds pointers into the decoded bytecode tables of
+    // the method table that was just cleared.
+    operationSites_.clear();
 
-    // (2) The JIT thread context: the current task of the JIT thread.
-    if (compilerThread_ != nullptr) {
+    // (2) The JIT thread context: the current task of the JIT thread. Only a
+    // context this case actually bound is unbound; `TearDown` never dereferences
+    // a VM or a thread that `SetUp` did not validate.
+    if (jitContextBound_ && compilerThread_ != nullptr) {
         static_cast<JitThread *>(compilerThread_)->SetCurrentTask(nullptr);
     }
 
     // (3) The back pointer of the compiler VM to the host VM.
-    if (compilerVm_ != nullptr) {
+    if (jitContextBound_ && compilerVm_ != nullptr) {
         static_cast<JitVM *>(compilerVm_)->ReSetHostVM();
     }
+    jitContextBound_ = false;
 
     // (4) The task owns the sustaining handles registered in the host VM, so it
     // must not outlive it.

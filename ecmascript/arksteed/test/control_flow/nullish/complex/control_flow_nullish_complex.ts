@@ -13,6 +13,12 @@
  * limitations under the License.
  */
 
+//! METHOD processConfig
+//! HAS TaggedEqual
+//! COMPILE_COUNT_GE processConfig 1
+//! EXEC_COUNT_GE *processConfig 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 declare function print(str: number):string;
 
 function getDefault(): number {

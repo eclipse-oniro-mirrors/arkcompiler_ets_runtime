@@ -33,6 +33,10 @@ declare class ArkTools {
 //! HAS_NOT     CallRuntime      LdExternalModuleVarByIndexOnJSFunc
 //! HAS         LoadTaggedField
 //! HAS         LoadTaggedElement
+//! METHOD reader
+//! COMPILE_COUNT_GE *reader* 1
+//! EXEC_COUNT_GE *reader* 1
+//! DEOPT_COUNT *Deoptimize* 0
 
 import { late as l, early as e } from './ldextvar_hole.ts';
 

@@ -12,6 +12,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_read_write_mixed* 1
+//! EXEC_COUNT_GE *array_read_write_mixed* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_read_write_mixed(arr: number[]): number
 {
     let a = arr[0];
@@ -26,6 +30,7 @@ function array_read_write_mixed(arr: number[]): number
 }
 
 ArkTools.arkSteedCompileSync(array_read_write_mixed);
+ArkTools.waitJitCompileFinish(array_read_write_mixed);
 
 
 print(array_read_write_mixed([1, 2, 3, 4, 5]));

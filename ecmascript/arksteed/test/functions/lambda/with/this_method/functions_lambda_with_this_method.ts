@@ -12,6 +12,34 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+// G11.6 (P0) additive call evidence for `functions/lambda`
+// (`arksteed-g116-call-closure-and-additive-evidence` C1/C3/C4; S11; V1/V2).
+// `call_compiled_lambda_with_this_method` compiles and invokes the method
+// `buildAdder`, which compiles and returns the lexical-`this` closure `foo`; the
+// caller then invokes `foo`. All three are installed before their first
+// invocation, so the call sites lower to the generic `Call` vertices observed in
+// the caller dump. `COMPILE_COUNT_GE`/`EXEC_COUNT_GE` attribute compilation and
+// entry of each claimed method; `DEOPT_COUNT *Deoptimize* 0` rules out a silent
+// deopt into the interpreter. The pre-existing computed results and the
+// expectation are unchanged.
+
+//! PARAMS --compiler-jit-hotness-threshold=60000
+
+//! METHOD call_compiled_lambda_with_this_method
+//! HAS Call
+//! COMPILE_COUNT_GE *call_compiled_lambda_with_this_method* 1
+//! EXEC_COUNT_GE *call_compiled_lambda_with_this_method* 1
+
+//! METHOD buildAdder
+//! COMPILE_COUNT_GE *buildAdder* 1
+//! EXEC_COUNT_GE *buildAdder* 1
+
+//! METHOD foo
+//! COMPILE_COUNT_GE *foo* 1
+//! EXEC_COUNT_GE *foo* 1
+
+//! DEOPT_COUNT *Deoptimize* 0
 let call_compiled_lambda_with_this_method_compiled = false;
 
 class CallCompiledLambdaWithThisMethodBox {

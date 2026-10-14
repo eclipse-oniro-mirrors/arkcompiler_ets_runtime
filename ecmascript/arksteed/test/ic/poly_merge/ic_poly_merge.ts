@@ -30,6 +30,15 @@ for (var i = 0; i < 10; i++) {
 }
 
 ArkTools.arkSteedCompileSync(read);
+
+// G11.2 auxiliary poly candidate: the site is warmed with the two receiver
+// shapes and installed while both are still valid. After the installation the
+// site is entered with the same two receivers, so the recorded set of HClasses
+// is unchanged and the target produces no deopt event.
+//! COMPILE_COUNT_GE *read* 1
+//! EXEC_COUNT_GE *read* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 var ret = true;
 print(ret);
 print(read(a));

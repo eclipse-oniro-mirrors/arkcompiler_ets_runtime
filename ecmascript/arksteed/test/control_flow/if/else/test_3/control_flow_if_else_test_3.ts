@@ -13,6 +13,10 @@
  * limitations under the License.
  */
 
+//! COMPILE_COUNT_GE if_else_3 1
+//! EXEC_COUNT_GE *if_else_3 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 // Basic 2-predecessor merge: both paths set the same set of vregs.
 // Tests that a simple if-else with all vregs set on both sides produces
 // correct Phis at the merge point.

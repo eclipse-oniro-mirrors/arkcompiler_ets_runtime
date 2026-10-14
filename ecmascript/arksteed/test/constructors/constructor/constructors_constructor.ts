@@ -43,6 +43,17 @@ function Test() {
 }
 
 Test();
+// G11.6 additive evidence (arksteed-g116-call-closure-and-additive-evidence#C1,#C3):
+// the compiled caller `Test` constructs Base/Derived/Derived1 through its own
+// dump, so its new-object form is the address evidence of this leaf. Program
+// output is unchanged.
+//! COMPILE_COUNT_GE Test 1
+//! EXEC_COUNT_GE *Test 1
+//! DEOPT_COUNT *Deoptimize* 0
+//! METHOD Test
+//! HAS CallRuntime OptNewObjRange
+
 ArkTools.arkSteedCompileSync(Test);
+ArkTools.waitJitCompileFinish(Test);
 print(true);
 Test();

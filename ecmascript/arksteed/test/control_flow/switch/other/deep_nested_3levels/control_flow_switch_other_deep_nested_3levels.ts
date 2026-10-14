@@ -12,6 +12,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE switch_deep_nested_3levels 1
+//! EXEC_COUNT_GE *switch_deep_nested_3levels 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function switch_deep_nested_3levels(x, y, z, a, b, c, d)
 {
     let result = 0;

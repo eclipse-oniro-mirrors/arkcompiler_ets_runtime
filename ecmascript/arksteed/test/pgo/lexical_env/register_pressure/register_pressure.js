@@ -19,6 +19,9 @@
 //! HAS StoreEnvSlot
 //! HAS SetValueWithBarrier
 //! HAS_NOT CallCommonStub GetPropertyByValue
+//! COMPILE_COUNT_GE *pressure* 1
+//! EXEC_COUNT_GE *pressure* 1
+//! DEOPT_COUNT *Deoptimize* 0
 
 function createPressure()
 {

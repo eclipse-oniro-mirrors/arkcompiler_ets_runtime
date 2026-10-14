@@ -12,6 +12,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *spread_string_5* 1
+//! EXEC_COUNT_GE *spread_string_5* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
+//! METHOD spread_string_5
+//! HAS CallRuntime NewObjApply
+//! HAS CallRuntime StArraySpread
 function spread_string_5(): number {
     const arr = new Array(...("abc"));
     return arr.length;

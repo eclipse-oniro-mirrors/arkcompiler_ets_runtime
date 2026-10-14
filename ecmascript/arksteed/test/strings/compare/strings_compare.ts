@@ -12,6 +12,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE string_compare 1
+//! EXEC_COUNT_GE *string_compare 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 declare function print(arg: number): string;
 
 function string_compare(str1: string, str2: string): number {

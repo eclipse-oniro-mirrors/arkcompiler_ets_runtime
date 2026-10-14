@@ -12,6 +12,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_loop_max* 1
+//! EXEC_COUNT_GE *array_loop_max* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_loop_max(arr: number[]): number
 {
     let max = arr[0];
@@ -27,6 +31,7 @@ function array_loop_max(arr: number[]): number
 }
 
 ArkTools.arkSteedCompileSync(array_loop_max);
+ArkTools.waitJitCompileFinish(array_loop_max);
 
 
 let arr: number[] = [5, 3, 9, 1, 7];

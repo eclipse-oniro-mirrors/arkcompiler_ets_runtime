@@ -12,6 +12,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_create_reverse* 1
+//! EXEC_COUNT_GE *array_create_reverse* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_create_reverse(src: number[]): number[]
 {
     let len = src.length;
@@ -23,6 +27,7 @@ function array_create_reverse(src: number[]): number[]
 }
 
 ArkTools.arkSteedCompileSync(array_create_reverse);
+ArkTools.waitJitCompileFinish(array_create_reverse);
 
 
 let arr = array_create_reverse([1, 2, 3, 4, 5]);

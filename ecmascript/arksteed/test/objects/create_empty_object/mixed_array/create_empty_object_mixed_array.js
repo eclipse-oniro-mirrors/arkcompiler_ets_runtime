@@ -15,6 +15,9 @@
 
 //! PARAMS --compiler-jit-hotness-threshold=60000 --enable-force-gc=true
 //! METHOD makeObjectAndArray
+//! COMPILE_COUNT_GE *makeObjectAndArray* 1
+//! EXEC_COUNT_GE *makeObjectAndArray* 1
+//! DEOPT_COUNT *Deoptimize* 0
 //! COUNT AllocateInYoung 2
 //! COUNT InitializeEmptyObject 1
 //! HAS_NOT CallCommonStub NewJSObject

@@ -66,13 +66,52 @@ class Combined extends Left {
     }
 }
 
-ArkTools.arkSteedCompileSync(Base);
-ArkTools.arkSteedCompileSync(Left);
-ArkTools.arkSteedCompileSync(Right);
-ArkTools.arkSteedCompileSync(Combined);
+// G11.6 additive evidence (arksteed-g116-call-closure-and-additive-evidence#C1,#C3):
+// every compiled target of this leaf keeps its own compile/entry counters;
+// the super-call form is annotated in the derived constructor's own dump and
+// the actual construction form in the compiled same-domain caller's dump.
+// The deliberately compiled class roles and all printed output are unchanged.
+//! COMPILE_COUNT_GE Base 1
+//! EXEC_COUNT_GE *Base 1
+//! COMPILE_COUNT_GE Left 1
+//! EXEC_COUNT_GE *Left 1
+//! COMPILE_COUNT_GE Right 1
+//! EXEC_COUNT_GE *Right 1
+//! COMPILE_COUNT_GE Combined 1
+//! EXEC_COUNT_GE *Combined 1
+//! COMPILE_COUNT_GE probeInheritanceConstruction 1
+//! EXEC_COUNT_GE *probeInheritanceConstruction 1
+//! DEOPT_COUNT *Deoptimize* 0
+//! METHOD Left
+//! HAS CallRuntime OptSuperCall
+//! METHOD Right
+//! HAS CallRuntime OptSuperCall
+//! METHOD Combined
+//! HAS CallRuntime OptSuperCall
+//! METHOD probeInheritanceConstruction
+//! HAS CallRuntime OptNewObjRange
 
+ArkTools.arkSteedCompileSync(Base);
+ArkTools.waitJitCompileFinish(Base);
+ArkTools.arkSteedCompileSync(Left);
+ArkTools.waitJitCompileFinish(Left);
+ArkTools.arkSteedCompileSync(Right);
+ArkTools.waitJitCompileFinish(Right);
+ArkTools.arkSteedCompileSync(Combined);
+ArkTools.waitJitCompileFinish(Combined);
+
+
+function probeInheritanceConstruction() {
+    return [new Left(1, 2), new Right(1, 3), new Combined(1, 2, 3, 4)];
+}
+ArkTools.arkSteedCompileSync(probeInheritanceConstruction);
+ArkTools.waitJitCompileFinish(probeInheritanceConstruction);
 
 let obj = new Combined(1, 2, 3, 4);
 print(obj.getValue());
 print(obj.getAB());
 print(obj.getABCD());
+
+// Bounded silent preparation: the leaf's construction(s) once more through the
+// compiled same-domain caller. It prints nothing and changes no earlier observation.
+probeInheritanceConstruction();

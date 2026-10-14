@@ -12,6 +12,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+//! METHOD tdz_module_let_throws
+//! HAS LoadTaggedField
+//! HAS StoreEnvSlot
+//! COMPILE_COUNT_GE *tdz_module_let_throws* 1
+//! EXEC_COUNT_GE *tdz_module_let_throws* 1
+//! DEOPT_COUNT *Deoptimize* 0
 
 // Test: throw.undefinedifholewithname THROWS for module-level let accessed before initialization.
 // The function tdz_module_let_throws accesses module-scoped counter via lexical env.

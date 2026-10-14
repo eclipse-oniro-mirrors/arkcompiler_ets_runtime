@@ -17,6 +17,9 @@
 //! METHOD set
 //! HAS StoreEnvSlot
 //! HAS_NOT SetValueWithBarrier
+//! COMPILE_COUNT_GE *set* 1
+//! EXEC_COUNT_GE *set* 1
+//! DEOPT_COUNT *Deoptimize* 0
 
 function outer()
 {

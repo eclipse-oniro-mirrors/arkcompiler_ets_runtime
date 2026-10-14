@@ -12,6 +12,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! METHOD switch_true_multi_conditions
+//! HAS TaggedNotEqual
+//! COMPILE_COUNT_GE switch_true_multi_conditions 1
+//! EXEC_COUNT_GE *switch_true_multi_conditions 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function switch_true_multi_conditions(x, a, b, c, d)
 {
     let result = a;

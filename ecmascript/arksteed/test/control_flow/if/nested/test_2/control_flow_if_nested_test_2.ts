@@ -13,6 +13,12 @@
  * limitations under the License.
  */
 
+//! METHOD if_nested_2
+//! HAS I32ConditionCheck
+//! COMPILE_COUNT_GE if_nested_2 1
+//! EXEC_COUNT_GE *if_nested_2 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 // Directly mimics 3d-cube drawQube's CFG pattern:
 //   Loop → first if (edge-split, early RPO) → deep nested if chains (later RPO)
 //          → merge block combining all paths.

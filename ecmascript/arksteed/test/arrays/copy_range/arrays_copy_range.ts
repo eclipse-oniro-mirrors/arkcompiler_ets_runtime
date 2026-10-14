@@ -12,6 +12,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_copy_range* 1
+//! EXEC_COUNT_GE *array_copy_range* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_copy_range(src: number[], dest: number[], start: number, end: number): void
 {
     let idx = 0;
@@ -22,6 +26,7 @@ function array_copy_range(src: number[], dest: number[], start: number, end: num
 }
 
 ArkTools.arkSteedCompileSync(array_copy_range);
+ArkTools.waitJitCompileFinish(array_copy_range);
 
 
 let src: number[] = [1, 2, 3, 4, 5];

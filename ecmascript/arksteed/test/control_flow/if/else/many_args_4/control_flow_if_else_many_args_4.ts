@@ -12,6 +12,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE if_else_many_args_4 1
+//! EXEC_COUNT_GE *if_else_many_args_4 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function makeOutput4(v1: number,
                       v2: number,
                       v3: number,

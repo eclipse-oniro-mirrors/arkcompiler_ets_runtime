@@ -12,6 +12,31 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+// G11.6 (P0) additive call evidence for `functions/bind`. `this.add.bind(this, x)` and
+// `this.multiply.bind(this, y)` fix the bound receiver and prefix one bound argument each, so the
+// supplied argument 10 becomes the second (remaining) argument of both bound calls:
+// `add(base = 5, n = 10) = 15` plus `multiply(base = 3, n = 10) = 30` prints 45 (ECMA-262 2021
+// 10.4.1.1: bound arguments precede the supplied ones). The compiled caller invokes both bound
+// functions through its generic `Call` vertices, because the call sites carry no feedback when
+// the methods are installed before their first execution; the compiled `add` and `multiply`
+// targets are entered through the bound [[Call]]. `COMPILE_COUNT_GE`/`EXEC_COUNT_GE` name the
+// three claimed methods and `DEOPT_COUNT *Deoptimize* 0` rules out a silent deopt into the
+// interpreter. The expected output and the observed argument order are unchanged.
+
+//! PARAMS --compiler-jit-hotness-threshold=60000
+
+//! METHOD call_compiled_bind_expression_with_args_5
+//! HAS Call                        # the two generic invocations of the bound functions
+
+//! COMPILE_COUNT_GE *call_compiled_bind_expression_with_args_5* 1
+//! EXEC_COUNT_GE *call_compiled_bind_expression_with_args_5* 1
+//! COMPILE_COUNT_GE *add* 1
+//! EXEC_COUNT_GE *add* 1
+//! COMPILE_COUNT_GE *multiply* 1
+//! EXEC_COUNT_GE *multiply* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 class MultiBoundTarget {
     fn1: (a: number, b: number) => number;
     fn2: (a: number, b: number) => number;

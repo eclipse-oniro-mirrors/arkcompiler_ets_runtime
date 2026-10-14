@@ -12,11 +12,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *spread_args_multiple_helper* 1
+//! EXEC_COUNT_GE *spread_args_multiple_helper* 1
+//! COMPILE_COUNT_GE *spread_args_multiple_1* 1
+//! EXEC_COUNT_GE *spread_args_multiple_1 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function spread_args_multiple_helper(
     x: number, y: number, z: number, u: number, v: number): number {
     return x + y * 10 + z * 100 + u * 1000 + v * 10000;
 }
 
+//! METHOD spread_args_multiple_1
+//! HAS CallRuntime CallSpread
+//! HAS CallRuntime StArraySpread
 function spread_args_multiple_1(
     first: [number, number], second: [number, number]): number {
     return spread_args_multiple_helper(...first, 3, ...second);

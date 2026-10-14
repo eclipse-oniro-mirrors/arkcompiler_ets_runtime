@@ -12,6 +12,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! METHOD switch_true_deep_nested
+//! HAS TaggedNotEqual
+//! COMPILE_COUNT_GE switch_true_deep_nested 1
+//! EXEC_COUNT_GE *switch_true_deep_nested 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function switch_true_deep_nested(x, y, z, a, b, c, d)
 {
     let result = 0;

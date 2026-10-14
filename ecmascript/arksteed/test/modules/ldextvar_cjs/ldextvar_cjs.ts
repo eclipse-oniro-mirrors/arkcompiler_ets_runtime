@@ -31,6 +31,11 @@ declare class ArkTools {
 //! METHOD      reader
 //! HAS         CallRuntime      LdExternalModuleVarByIndexOnJSFunc
 //! HAS_NOT     LoadTaggedElement
+//! HAS         LoadTaggedField
+//! METHOD reader
+//! COMPILE_COUNT_GE *reader* 1
+//! EXEC_COUNT_GE *reader* 1
+//! DEOPT_COUNT *Deoptimize* 0
 
 import { val as cv } from './cjslib';
 

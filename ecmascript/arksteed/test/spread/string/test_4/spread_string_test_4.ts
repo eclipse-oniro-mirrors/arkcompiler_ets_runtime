@@ -12,10 +12,22 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *spread_string_helper* 1
+//! EXEC_COUNT_GE *spread_string_helper* 1
+//! COMPILE_COUNT_GE *spread_string_4* 1
+//! EXEC_COUNT_GE *spread_string_4* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
+//! METHOD spread_string_helper
+//! HAS CallRuntime OptCopyRestArgs
 function spread_string_helper(...chars: string[]): number {
     return chars.length;
 }
 
+//! METHOD spread_string_4
+//! HAS CallRuntime CallSpread
+//! HAS CallRuntime StArraySpread
 function spread_string_4(s: string): number {
     return spread_string_helper(...s);
 }

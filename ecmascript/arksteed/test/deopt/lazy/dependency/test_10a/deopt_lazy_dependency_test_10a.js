@@ -13,6 +13,13 @@
  * limitations under the License.
  */
 
+//! METHOD A
+//! HAS LoadTaggedField
+//! HAS DeoptIfHClassMismatch
+//! COMPILE_COUNT_GE A 1
+//! EXEC_COUNT_GE *A 1
+//! DEOPT_COUNT_GE Lazy Deoptimize* 1
+
 // F invalidates A after branch and loop work in the deep callee.
 // This stresses lazy-deopt through a non-trivial JIT call chain.
 

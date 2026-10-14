@@ -15,6 +15,9 @@
 
 //! PARAMS --compiler-jit-hotness-threshold=60000
 //! METHOD makeEmptyObject
+//! COMPILE_COUNT_GE *makeEmptyObject* 1
+//! EXEC_COUNT_GE *makeEmptyObject* 1
+//! DEOPT_COUNT *Deoptimize* 0
 //! HAS_NOT BranchIfReferenceEqual
 //! CODEGEN_COUNT * CheckYoungAllocation * 0
 //! CODEGEN_COUNT * CheckAllocationSize * 0

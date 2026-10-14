@@ -14,6 +14,7 @@
  */
 
 // @ts-nocheck
+//! PARAMS --compiler-jit-hotness-threshold=60000
 declare function print(arg: any): string;
 
 let a = true;
@@ -28,6 +29,17 @@ for (let i = 0; i < 1000; i++) {
     visit(a);
 }
 ArkTools.arkSteedCompileSync(visit);
+
+// G11.2 auxiliary poly candidate: the site is warmed with the boolean
+// primitive and installed before the prototype property is deleted and
+// rebound. The named load of this case is served by the generic property stub
+// rather than a resolved HClass set, so the prototype change after
+// installation produces no deopt event; the compilation/entry counters still
+// prove that the installed code of the target ran.
+//! COMPILE_COUNT_GE *visit* 1
+//! EXEC_COUNT_GE *visit* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 print(true);
 print(visit(a));
 

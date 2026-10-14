@@ -13,6 +13,16 @@
  * limitations under the License.
  */
 
+//! COMPILE_COUNT_GE *makeFloat* 1
+//! COMPILE_COUNT_GE *startFunction* 1
+//! COMPILE_COUNT_GE *endFunction* 1
+//! COMPILE_COUNT_GE *makeTestCase* 1
+//! EXEC_COUNT_GE *makeFloat* 1
+//! EXEC_COUNT_GE *startFunction* 1
+//! EXEC_COUNT_GE *endFunction* 1
+//! EXEC_COUNT_GE *makeTestCase* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 var binaryOperators = ["%", ">>", ">>>", "<<", "|"];
 
 var interestingTop16bits = [0x8000, 0xffff,];
@@ -54,9 +64,13 @@ function makeTestCase(op, val1, val2)
 
 
 ArkTools.arkSteedCompileSync(makeFloat);
+ArkTools.waitJitCompileFinish(makeFloat);
 ArkTools.arkSteedCompileSync(startFunction);
+ArkTools.waitJitCompileFinish(startFunction);
 ArkTools.arkSteedCompileSync(endFunction);
+ArkTools.waitJitCompileFinish(endFunction);
 ArkTools.arkSteedCompileSync(makeTestCase);
+ArkTools.waitJitCompileFinish(makeTestCase);
 
 var fnc = 0;
 for(var val1 in interestingTop16bits)

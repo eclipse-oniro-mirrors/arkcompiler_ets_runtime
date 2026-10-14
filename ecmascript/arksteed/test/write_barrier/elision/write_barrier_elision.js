@@ -13,6 +13,51 @@
  * limitations under the License.
  */
 
+//! PARAMS --gc-long-paused-time=0 --compiler-jit-hotness-threshold=60000
+
+// G4.3j: the write-barrier value-kind pass rewrites the retained stores of this
+// leaf and skips the barrier for a known NonHeap value. The address bounds are
+// per target method, and the compile/entry counters are method-specific and
+// exact (`COMPILE_COUNT`/`EXEC_COUNT`, not lower bounds), because the
+// construction fixes their multiplicity: the hotness threshold 60000 prevents
+// premature compilation, each target method is installed by exactly one
+// synchronous `ArkTools.arkSteedCompileSync`, and the post-install calls are
+// fixed at one per method. Each store is a rewritten `StoreTaggedField` without
+// `StoreTaggedFieldWithBarrier`/`SetValueWithBarrier`, each of the four target
+// methods (`storeSmi`, `storeRoot`, `storePhiSmi`, `storeLoopPhiSmi`, the last
+// one retaining a tagged Phi of two int32 constants) carries its own barrier
+// assertions, is installed and entered in machine code exactly once, the normal
+// path does not deopt, and the bounded collection window (exactly two forced
+// full collections after the compiled stores, with `--gc-long-paused-time=0`
+// making every collection report a `gc`-component headline record) keeps the
+// stored values intact.
+//! METHOD storeSmi
+//! HAS StoreTaggedField
+//! HAS_NOT StoreTaggedFieldWithBarrier
+//! HAS_NOT SetValueWithBarrier
+//! METHOD storeRoot
+//! HAS StoreTaggedField
+//! HAS_NOT StoreTaggedFieldWithBarrier
+//! HAS_NOT SetValueWithBarrier
+//! METHOD storePhiSmi
+//! HAS StoreTaggedField
+//! HAS_NOT StoreTaggedFieldWithBarrier
+//! HAS_NOT SetValueWithBarrier
+//! METHOD storeLoopPhiSmi
+//! HAS StoreTaggedField
+//! HAS_NOT StoreTaggedFieldWithBarrier
+//! HAS_NOT SetValueWithBarrier
+//! COMPILE_COUNT storeSmi 1
+//! EXEC_COUNT *storeSmi 1
+//! COMPILE_COUNT storeRoot 1
+//! EXEC_COUNT *storeRoot 1
+//! COMPILE_COUNT storePhiSmi 1
+//! EXEC_COUNT *storePhiSmi 1
+//! COMPILE_COUNT storeLoopPhiSmi 1
+//! EXEC_COUNT *storeLoopPhiSmi 1
+//! DEOPT_COUNT *Deoptimize* 0
+//! GC_COUNT_GE *CompressGC*Trigger by JS* 1
+
 class Holder {
     constructor() {
         this.value = 0;
@@ -70,6 +115,13 @@ storeSmi(holder);
 storeRoot(holder);
 storePhiSmi(holder, true);
 ok = ok && storeLoopPhiSmi(holder, 3) === 2;
+
+// Bounded collection window: exactly two forced full collections after the
+// compiled stores. Both profiles must report the collections and must keep the
+// stored values (the leaf store is an int32, the other one is the root `null`).
+ArkTools.forceFullGC();
+ArkTools.forceFullGC();
+
 ok = ok && holder.value === 2 && holder.other === null;
 
 print(ok ? "PASS" : "FAIL");

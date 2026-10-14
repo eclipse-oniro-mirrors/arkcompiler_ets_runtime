@@ -12,12 +12,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_set_element* 1
+//! EXEC_COUNT_GE *array_set_element* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_set_element(arr: number[], index: number, value: number): void
 {
     arr[index] = value;
 }
 
 ArkTools.arkSteedCompileSync(array_set_element);
+ArkTools.waitJitCompileFinish(array_set_element);
 
 
 let arr: number[] = [10, 20, 30, 40, 50];

@@ -13,6 +13,17 @@
  * limitations under the License.
  */
 
+// G10.1 additive evidence (A2, no weakened assertion): the compiled `f`
+// contains the checked `x++`, and the post-installation call with an
+// out-of-int32 operand leaves the generated code instead of silently
+// continuing in the interpreter.
+
+//! METHOD f
+//! HAS I32IncWithOverflow
+//! COMPILE_COUNT_GE *f* 1
+//! EXEC_COUNT_GE *f* 1
+//! DEOPT_COUNT_GE *Deoptimize* 1
+
 function f(x) {
     if (x++ < -1) {
         x++;

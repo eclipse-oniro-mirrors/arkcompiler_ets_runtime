@@ -16,6 +16,11 @@
 //! METHOD      compute
 //! COUNT       BranchIfReferenceEqual  1
 //! COUNT       CallCommonStub   GetStringFromConstPool  1
+//! METHOD compute
+//! HAS LoadTaggedField
+//! COMPILE_COUNT_GE *compute* 1
+//! EXEC_COUNT_GE *compute* 1
+//! DEOPT_COUNT *Deoptimize* 0
 // Test: throw.undefinedifholewithname on the SAME value twice, accessed BEFORE initialization.
 // compute() is compiled while x is still the hole:
 //   - if the lexical slot is const-folded to the hole constant, the guard folds to an

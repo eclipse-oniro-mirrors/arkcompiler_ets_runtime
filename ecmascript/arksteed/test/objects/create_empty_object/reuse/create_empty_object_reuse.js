@@ -15,6 +15,9 @@
 
 //! PARAMS --compiler-jit-hotness-threshold=60000
 //! METHOD makeTwoEmptyObjects
+//! COMPILE_COUNT_GE *makeTwoEmptyObjects* 1
+//! EXEC_COUNT_GE *makeTwoEmptyObjects* 1
+//! DEOPT_COUNT *Deoptimize* 0
 //! COUNT_GE AllocateInYoung 2
 //! COUNT InitializeEmptyObject 2
 //! HAS_NOT CallCommonStub NewJSObject

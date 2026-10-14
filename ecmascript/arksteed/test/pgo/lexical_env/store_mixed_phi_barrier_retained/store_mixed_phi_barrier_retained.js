@@ -17,6 +17,9 @@
 //! METHOD update
 //! HAS StoreEnvSlot
 //! HAS SetValueWithBarrier
+//! COMPILE_COUNT_GE *update* 1
+//! EXEC_COUNT_GE *update* 1
+//! DEOPT_COUNT *Deoptimize* 0
 
 function createMixedStore()
 {

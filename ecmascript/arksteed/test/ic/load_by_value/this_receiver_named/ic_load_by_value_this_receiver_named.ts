@@ -20,6 +20,13 @@
 //! HAS DeoptIfHClassMismatch
 //! HAS LoadTaggedField
 //! HAS_NOT CallCommonStub GetPropertyByValue
+// G11.1 additive evidence: the compiled `this[key]` site is specialized for the
+// first warmed key and the second observed key leaves the generated code
+// through an eager transition before the interpreter resumes (V1), so the
+// actual direction is asserted instead of a zero-deopt bound.
+//! COMPILE_COUNT_GE *load* 1
+//! EXEC_COUNT_GE *load* 1
+//! DEOPT_COUNT_GE *Deoptimize* 1
 declare function print(arg: any): string;
 
 class Box {

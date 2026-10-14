@@ -28,7 +28,27 @@ class Car {
     }
 }
 
+// G11.6 additive evidence (arksteed-g116-call-closure-and-additive-evidence#C1,#C3):
+// the original target `Car` keeps its own compilation and entry evidence, and
+// the silent same-domain caller `probeDefaultConstruction` carries the actual
+// construction form of this leaf. Program output is unchanged.
+//! COMPILE_COUNT_GE Car 1
+//! EXEC_COUNT_GE *Car 1
+//! COMPILE_COUNT_GE probeDefaultConstruction 1
+//! EXEC_COUNT_GE *probeDefaultConstruction 1
+//! DEOPT_COUNT *Deoptimize* 0
+//! METHOD probeDefaultConstruction
+//! HAS CallRuntime OptNewObjRange
+
 ArkTools.arkSteedCompileSync(Car);
+ArkTools.waitJitCompileFinish(Car);
+
+
+function probeDefaultConstruction() {
+    return [new Car(), new Car("Toyota"), new Car("Honda", "Civic"), new Car("Ford", "Mustang", 2023)];
+}
+ArkTools.arkSteedCompileSync(probeDefaultConstruction);
+ArkTools.waitJitCompileFinish(probeDefaultConstruction);
 
 
 let car1 = new Car();
@@ -54,3 +74,7 @@ print(car4.make);
 print(car4.model);
 print(car4.year);
 print(car4.getDescription());
+
+// Bounded silent preparation: the same four construction forms through the
+// compiled caller. It prints nothing and changes no earlier observation.
+probeDefaultConstruction();

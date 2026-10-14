@@ -16,6 +16,11 @@
 //! METHOD      compute
 //! COUNT       BranchIfReferenceEqual  2
 //! COUNT       CallCommonStub   GetStringFromConstPool  2
+//! METHOD compute
+//! HAS LoadTaggedField
+//! COMPILE_COUNT_GE *compute* 1
+//! EXEC_COUNT_GE *compute* 1
+//! DEOPT_COUNT *Deoptimize* 0
 // Test: non-hole fact survives the loop back-edge (CloneForLoopHeader facts).
 // The hole guards sit inside a loop body; the RecordNonHole fact recorded in the first
 // iteration's blocks must remain valid for the loop header clone, and the guards in

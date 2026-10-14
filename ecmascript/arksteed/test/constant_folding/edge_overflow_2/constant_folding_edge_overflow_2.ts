@@ -13,6 +13,17 @@
  * limitations under the License.
  */
 
+// G10.1 additive evidence (A2, no weakened assertion): the out-of-int32
+// constant `MIN - 1` is not folded into an int32 operation; the compiled
+// method keeps it as a double constant and adds it through the generic stub,
+// so the whole scenario stays on the normal path without a deopt.
+
+//! METHOD constant_folding_edge_overflow_2
+//! HAS CallCommonStub Add
+//! COMPILE_COUNT_GE *constant_folding_edge_overflow_2* 1
+//! EXEC_COUNT_GE *constant_folding_edge_overflow_2* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function constant_folding_edge_overflow_2(x: number)
 {
     const MIN: number = -2147483648;

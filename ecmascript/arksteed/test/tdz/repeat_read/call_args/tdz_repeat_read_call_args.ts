@@ -16,6 +16,11 @@
 //! METHOD      compute
 //! COUNT       BranchIfReferenceEqual  1
 //! COUNT       CallCommonStub   GetStringFromConstPool  1
+//! METHOD compute
+//! HAS LoadTaggedField
+//! COMPILE_COUNT_GE *compute* 1
+//! EXEC_COUNT_GE *compute* 1
+//! DEOPT_COUNT *Deoptimize* 0
 // Loading the error-name string preserves the cached lexical value. All three
 // argument reads reuse the first non-hole check before the JS call.
 

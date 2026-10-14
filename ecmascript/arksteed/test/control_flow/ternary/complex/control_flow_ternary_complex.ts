@@ -13,6 +13,12 @@
  * limitations under the License.
  */
 
+//! COMPILE_COUNT_GE classifyScore 1
+//! EXEC_COUNT_GE *classifyScore 1
+//! COMPILE_COUNT_GE calculateBonus 1
+//! EXEC_COUNT_GE *calculateBonus 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 declare function print(str: number):string;
 
 function classifyScore(score: number): number {

@@ -13,6 +13,33 @@
  * limitations under the License.
  */
 
+// G4.1j (P0) additive evidence (arksteed-jsts-p0-pipeline-fact-rows#C6): the
+// semantics and the expected output of this case are unchanged; the added
+// assertions only show that the ArkSteed graph builder folds the constant
+// unary negation, bitwise-not and the constant additions and subtractions of
+// this method and that the compiled code is entered without a deopt. The
+// frontend keeps every operation in the bytecode (`neg 0x0`, `not 0x1`,
+// `add2 0x2, v0`, `sub2 0x3, v0` on the method's own disassembly), while the
+// compiled CFG of the same method has no checked unary or arithmetic vertex
+// for those removed operations. The case synchronously compiles the target once
+// and calls it twice, so the compile and entry counters below are exact for
+// this construction.
+
+//! METHOD constant_folding_unary_1
+//! BYTECODE_COUNT neg 0x0 1
+//! BYTECODE_COUNT not 0x1 1
+//! BYTECODE_COUNT add2 0x2, v0 1
+//! BYTECODE_COUNT sub2 0x3, v0 1
+//! HAS_NOT I32NegWithOverflow
+//! HAS_NOT I32BNot
+//! HAS_NOT I32AddWithOverflow
+//! HAS_NOT I32SubWithOverflow
+//! COMPILE_COUNT *constant_folding_unary_1* 1
+//! COMPILE_COUNT_GE *constant_folding_unary_1* 1
+//! EXEC_COUNT *constant_folding_unary_1* 2
+//! EXEC_COUNT_GE *constant_folding_unary_1* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function constant_folding_unary_1(x: number)
 {
     const A = 10;

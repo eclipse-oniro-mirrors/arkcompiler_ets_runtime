@@ -12,6 +12,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! METHOD switch_true_fallthrough
+//! HAS TaggedNotEqual
+//! COMPILE_COUNT_GE switch_true_fallthrough 1
+//! EXEC_COUNT_GE *switch_true_fallthrough 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function switch_true_fallthrough(x, a, b, c, d)
 {
     let count = 0;

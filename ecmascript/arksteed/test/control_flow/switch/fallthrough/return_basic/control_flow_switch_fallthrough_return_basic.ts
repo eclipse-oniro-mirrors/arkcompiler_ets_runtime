@@ -12,6 +12,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE switch_fallthrough_return_basic 1
+//! EXEC_COUNT_GE *switch_fallthrough_return_basic 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function switch_fallthrough_return_basic(x, a, b, c, d)
 {
     let base = a;

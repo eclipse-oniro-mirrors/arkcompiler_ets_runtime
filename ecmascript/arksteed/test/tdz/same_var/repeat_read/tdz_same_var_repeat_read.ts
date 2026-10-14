@@ -16,6 +16,11 @@
 //! METHOD      compute
 //! COUNT       BranchIfReferenceEqual  2
 //! COUNT       CallCommonStub   GetStringFromConstPool  2
+//! METHOD compute
+//! HAS LoadTaggedField
+//! COMPILE_COUNT_GE *compute* 1
+//! EXEC_COUNT_GE *compute* 1
+//! DEOPT_COUNT *Deoptimize* 0
 // The first two reads share a non-hole check. Generic Add still invalidates
 // lexical-slot facts, so the third read needs another check after that call.
 

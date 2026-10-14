@@ -12,6 +12,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *spread_args_nested_helper* 1
+//! EXEC_COUNT_GE *spread_args_nested_helper* 1
+//! COMPILE_COUNT_GE *spread_args_nested_2* 1
+//! EXEC_COUNT_GE *spread_args_nested_2 1
+//! DEOPT_COUNT *Deoptimize* 0
+
+//! METHOD spread_args_nested_helper
+//! HAS CallRuntime OptCopyRestArgs
 function spread_args_nested_helper(...args: number[]): number {
     let sum = 0;
     let base = 1;
@@ -22,6 +31,9 @@ function spread_args_nested_helper(...args: number[]): number {
     return sum;
 }
 
+//! METHOD spread_args_nested_2
+//! HAS CallRuntime CallSpread
+//! HAS CallRuntime StArraySpread
 function spread_args_nested_2(): number {
     const inner = [3, 4];
     const outer = [1, 2, ...inner];

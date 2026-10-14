@@ -12,12 +12,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_read_1* 1
+//! EXEC_COUNT_GE *array_read_1* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_read_1(arr: number[]): number
 {
     return arr[0];
 }
 
 ArkTools.arkSteedCompileSync(array_read_1);
+ArkTools.waitJitCompileFinish(array_read_1);
 
 
 print(array_read_1([42]));

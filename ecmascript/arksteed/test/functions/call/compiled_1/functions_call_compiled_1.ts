@@ -13,6 +13,25 @@
  * limitations under the License.
  */
 
+// G1.1 (P0): entry into the ArkSteed-compiled code of the target method, not
+// only the installation of its machine code. `ArkTools.arkSteedCompileSync`
+// remains the existing installation path of this case; the evidence
+// annotations confirm the compilation of the target method and its entry into
+// generated code through the E1 marker `>>> Running method: <record>.<method>`
+// (E1/E2). The address constraint confirms the marker vertex in the CFG of
+// this ordinary (non-OSR) compilation, and `DEOPT_COUNT *Deoptimize* 0` rules
+// out a silent deopt into the interpreter after the entry. The interpreter
+// twin of this case is `functions/call/compiled_1_interp_twin`; the result here
+// must agree with that twin and with the hand-computed constants.
+
+//! PARAMS --compiler-jit-hotness-threshold=60000
+
+//! METHOD call_compiled_function_1
+//! HAS CallRuntime PrintMethodName
+//! COMPILE_COUNT_GE *call_compiled_function_1* 1
+//! EXEC_COUNT_GE *call_compiled_function_1* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function foo(x: number): number {
     return x * x;
 }

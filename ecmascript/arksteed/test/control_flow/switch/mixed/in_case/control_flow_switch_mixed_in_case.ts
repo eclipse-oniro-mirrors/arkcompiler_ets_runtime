@@ -12,6 +12,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE switch_mixed_nested_in_case 1
+//! EXEC_COUNT_GE *switch_mixed_nested_in_case 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function switch_mixed_nested_in_case(x, y, a, b, c, d)
 {
     let result = a;

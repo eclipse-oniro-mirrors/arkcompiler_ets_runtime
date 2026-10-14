@@ -15,6 +15,11 @@
 
 //! METHOD      compute
 //! COUNT       BranchIfReferenceEqual  3   # one guard per branch + one after the merge
+//! METHOD compute
+//! HAS LoadTaggedField
+//! COMPILE_COUNT_GE *compute* 1
+//! EXEC_COUNT_GE *compute* 1
+//! DEOPT_COUNT *Deoptimize* 0
 // Test: non-hole fact survives a control-flow merge (NodeInfo::MergeWith intersection).
 // Each branch reads x (guard fires per branch); after the join a third guard reads x again.
 // The merged facts keep nonHole only when BOTH branches verified it, which holds here,

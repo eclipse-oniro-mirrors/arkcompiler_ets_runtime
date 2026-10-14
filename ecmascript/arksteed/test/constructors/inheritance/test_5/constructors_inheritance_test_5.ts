@@ -37,9 +37,34 @@ class Dog extends Animal {
     }
 }
 
-ArkTools.arkSteedCompileSync(Animal);
-ArkTools.arkSteedCompileSync(Dog);
+// G11.6 additive evidence (arksteed-g116-call-closure-and-additive-evidence#C1,#C3):
+// every compiled target of this leaf keeps its own compile/entry counters;
+// the super-call form is annotated in the derived constructor's own dump and
+// the actual construction form in the compiled same-domain caller's dump.
+// The deliberately compiled class roles and all printed output are unchanged.
+//! COMPILE_COUNT_GE Animal 1
+//! EXEC_COUNT_GE *Animal 1
+//! COMPILE_COUNT_GE Dog 1
+//! EXEC_COUNT_GE *Dog 1
+//! COMPILE_COUNT_GE probeInheritanceConstruction 1
+//! EXEC_COUNT_GE *probeInheritanceConstruction 1
+//! DEOPT_COUNT *Deoptimize* 0
+//! METHOD Dog
+//! HAS CallRuntime OptSuperCall
+//! METHOD probeInheritanceConstruction
+//! HAS CallRuntime OptNewObjRange
 
+ArkTools.arkSteedCompileSync(Animal);
+ArkTools.waitJitCompileFinish(Animal);
+ArkTools.arkSteedCompileSync(Dog);
+ArkTools.waitJitCompileFinish(Dog);
+
+
+function probeInheritanceConstruction() {
+    return [new Animal("Generic Animal"), new Dog("Buddy", "Golden Retriever")];
+}
+ArkTools.arkSteedCompileSync(probeInheritanceConstruction);
+ArkTools.waitJitCompileFinish(probeInheritanceConstruction);
 
 let animal = new Animal("Generic Animal");
 print(animal.name);
@@ -49,3 +74,7 @@ let dog = new Dog("Buddy", "Golden Retriever");
 print(dog.name);
 print(dog.breed);
 print(dog.makeSound());
+
+// Bounded silent preparation: the leaf's construction(s) once more through the
+// compiled same-domain caller. It prints nothing and changes no earlier observation.
+probeInheritanceConstruction();

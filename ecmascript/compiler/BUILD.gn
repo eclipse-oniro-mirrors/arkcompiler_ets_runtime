@@ -41,6 +41,25 @@ config("include_maple") {
   cflags_cc = [ "-Wno-gnu-zero-variadic-macro-arguments" ]
 }
 
+# Numeric C++ coverage measurement of the ArkSteed JIT compiler. Both configs
+# are inert unless `arksteed_coverage` (js_runtime_config.gni) is true. The
+# compile config instruments the translation units of
+# `libark_jsoptimizer_set_with_maple`, which is where the ArkSteed compiler
+# sources (`arksteed_jit_sources`) are compiled, and of `libark_jsruntime_set`
+# (js_runtime_config.gni), which is where the ArkSteed runtime sources
+# (`arksteed_deopt_helper.cpp`, `arksteed_safepoint_table.cpp`,
+# `arksteed_task.cpp`) are compiled; together these cover every production
+# translation unit of `ecmascript/arksteed`. The link config is published as a
+# public config so every target that links those objects also links the
+# coverage runtime and flushes the profile on exit.
+config("arksteed_coverage_compile") {
+  cflags_cc = [ "--coverage" ]
+}
+
+config("arksteed_coverage_link") {
+  ldflags = [ "--coverage" ]
+}
+
 libark_jsoptimizer_sources = [
   "access_object_stub_builder.cpp",
   "aot_compilation_env.cpp",
@@ -391,6 +410,15 @@ ohos_source_set("libark_jsoptimizer_set_with_maple") {
     ":libark_jsoptimizer_set_config",
     ":enable_maple_config",
   ]
+
+  if (arksteed_coverage) {
+    # Coverage measurement build (off by default): instrument every translation
+    # unit of this source set, including the ArkSteed production files
+    # (`arksteed_jit_sources`), and publish the link flag to the targets that
+    # link them.
+    configs = [ ":arksteed_coverage_compile" ]
+    public_configs += [ ":arksteed_coverage_link" ]
+  }
 
   defines = []
 

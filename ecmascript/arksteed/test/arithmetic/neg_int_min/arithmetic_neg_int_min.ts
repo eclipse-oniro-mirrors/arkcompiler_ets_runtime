@@ -16,6 +16,17 @@
 // @ts-nocheck
 declare function print(arg: any): string;
 
+// G10.1 additive evidence (A2, no weakened assertion): the compiled loop
+// contains the checked int32 negation and decrement, and the negative-zero
+// boundary of `INT_MIN` observed after installation leaves the generated code
+// through the eager overflow exit.
+
+//! METHOD NegValue
+//! HAS I32NegWithOverflow
+//! COMPILE_COUNT_GE *NegValue* 1
+//! EXEC_COUNT_GE *NegValue* 1
+//! DEOPT_COUNT_GE *Deoptimize* 1
+
 function NegValue(value1, value2) {
     for (var i = value1; i >= -37908; --i) {
         var value = ((i * 991002474) & value2);

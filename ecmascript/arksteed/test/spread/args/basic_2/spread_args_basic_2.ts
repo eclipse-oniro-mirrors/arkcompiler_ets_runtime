@@ -12,10 +12,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *spread_args_basic_helper* 1
+//! EXEC_COUNT_GE *spread_args_basic_helper* 1
+//! COMPILE_COUNT_GE *spread_args_basic_2* 1
+//! EXEC_COUNT_GE *spread_args_basic_2 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function spread_args_basic_helper(x: number, y: number, z: number): number {
     return x + y + z;
 }
 
+//! METHOD spread_args_basic_2
+//! HAS CallRuntime CallSpread
+//! HAS CallRuntime StArraySpread
 function spread_args_basic_2(): number {
     const arr: [number, number, number] = [10, 20, 30];
     return spread_args_basic_helper(...arr);
