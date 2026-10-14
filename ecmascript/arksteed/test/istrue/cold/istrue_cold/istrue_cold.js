@@ -15,19 +15,23 @@
 
 //! PARAMS --compiler-jit-hotness-threshold=2000 --enable-pgo-profiler=true
 
+// Double negation converts once, then negates the known Boolean result.
 //! METHOD coldBool
-//! HAS CallCommonStub ToBooleanTrue
+//! COUNT CallCommonStub ToBooleanFalse 1
+//! COUNT TaggedNotEqual 1
 //! HAS_NOT DeoptIfNotBoolean
 //! HAS_NOT DeoptIfNotNumber
 //! HAS_NOT DeoptIfNotUndefinedOrNull
 
 //! METHOD coldNumber
-//! HAS CallCommonStub ToBooleanTrue
+//! COUNT CallCommonStub ToBooleanFalse 1
+//! COUNT TaggedNotEqual 1
 //! HAS_NOT DeoptIfNotNumber
 //! HAS_NOT DeoptIfNotBoolean
 
 //! METHOD coldNull
-//! HAS CallCommonStub ToBooleanTrue
+//! COUNT CallCommonStub ToBooleanFalse 1
+//! COUNT TaggedNotEqual 1
 //! HAS_NOT DeoptIfNotUndefinedOrNull
 //! HAS_NOT DeoptIfNotBoolean
 

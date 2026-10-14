@@ -53,7 +53,12 @@ protected:
         uint64_t field = JSTaggedValue::Undefined().GetRawData();
 
         explicit Fixture(uint32_t bytes = JSArray::SIZE + JSTaggedValue::TaggedTypeSize())
-            : size(graph.GetInt32Constant(static_cast<int32_t>(bytes))), objectSize(bytes)
+            : size(graph.GetInt64Constant(bytes)), objectSize(bytes)
+        {
+            Allocate();
+        }
+
+        void Allocate()
         {
             for (BB* block: {entry, fastBlock, slowBlock, merge}) {
                 graph.Add(block);
@@ -68,7 +73,7 @@ protected:
             fastBlock->SetControlVertex(New<JumpVertex>({}, merge));
             merge->AddPredecessor(fastBlock);
             slowAllocation = New<CallRuntimeVertex>(
-                {graph.GetTaggedConstant(JSTaggedValue(static_cast<int32_t>(bytes)).GetRawData())},
+                {graph.GetTaggedConstant(static_cast<uint64_t>(objectSize) | JSTaggedValue::TAG_INT)},
                 RTSTUB_ID(AllocateInYoung));
             slowBlock->AddVertex(slowAllocation);
             slowBlock->SetControlVertex(New<JumpVertex>({}, merge));
@@ -80,6 +85,19 @@ protected:
         explicit Fixture(Initializer kind): Fixture()
         {
             Initialize(kind);
+        }
+
+        void SetSlowAllocationArguments(std::initializer_list<ValueVertex*> arguments)
+        {
+            slowAllocation = New<CallRuntimeVertex>(arguments, RTSTUB_ID(AllocateInYoung));
+            slowBlock->GetVertices().clear();
+            slowBlock->AddVertex(slowAllocation);
+            phi->SetInput(1, slowAllocation);
+        }
+
+        void AddSlowAllocationHClass()
+        {
+            SetSlowAllocationArguments({slowAllocation->GetInput(0), hclass});
         }
 
         template<typename VertexT, typename... Args>
@@ -114,17 +132,94 @@ protected:
                     result = New<InitializeEmptyObjectVertex>({phi, glue, hclass, size}, objectSize);
                     break;
                 case OBJECT_WITH_BUFFER:
-                    result = New<InitializeObjectWithBufferVertex>({phi, glue, hclass}, Snapshot());
+                    result = New<InitializeObjectWithBufferVertex>({phi, glue, hclass, hclass}, Snapshot());
                     break;
                 case EMPTY_ARRAY:
-                    result = New<InitializeEmptyArrayVertex>({phi, glue, hclass}, objectSize);
+                    result = New<InitializeEmptyArrayVertex>({phi, glue, hclass, hclass}, objectSize);
                     break;
                 case ARRAY_WITH_BUFFER:
-                    result = New<InitializeArrayWithBufferVertex>({phi, glue, hclass}, objectSize);
+                    result = New<InitializeArrayWithBufferVertex>({phi, glue, hclass, hclass}, objectSize);
                     break;
                 default:
                     UNREACHABLE();
             }
+            merge->AddVertex(result);
+            return result;
+        }
+
+        void BeforeCheck(NonControlVertex* vertex)
+        {
+            entry->GetVertices().insert(entry->GetVertices().end() - 1, vertex);
+        }
+
+        RawI64ToTaggedVertex* EncodeSize(ValueVertex* bytes)
+        {
+            auto* bits = New<I64BitwiseBinaryVertex>(
+                {bytes, graph.GetInt64Constant(static_cast<int64_t>(JSTaggedValue::TAG_INT))},
+                IntBitwiseKind::BITWISE_OR);
+            auto* tagged = New<RawI64ToTaggedVertex>({bits});
+            BeforeCheck(bits);
+            BeforeCheck(tagged);
+            return tagged;
+        }
+
+        void SetSize(ValueVertex* bytes)
+        {
+            size = bytes;
+            canAllocate->SetInput(CanAllocateInYoungVertex::SIZE_INDEX, size);
+            fastAllocation->SetInput(AllocateInYoungVertex::SIZE_INDEX, size);
+            if (auto* constant = bytes->TryCast<Int64ConstantVertex>()) {
+                slowAllocation->SetInput(
+                    0,
+                    graph.GetTaggedConstant(static_cast<uint64_t>(constant->GetValue()) | JSTaggedValue::TAG_INT));
+            } else {
+                slowAllocation->SetInput(0, EncodeSize(bytes));
+            }
+        }
+
+        ValueVertex* ArgumentsSize(ValueVertex* argc)
+        {
+            auto* count = New<I64SubVertex>({argc, graph.GetInt64Constant(NUM_MANDATORY_JSFUNC_ARGS)});
+            auto* dataSize = New<I64ShiftLeftVertex>({count}, TAGGED_TYPE_SIZE_LOG);
+            auto* bytes = New<I64AddVertex>({dataSize, graph.GetInt64Constant(TaggedArray::DATA_OFFSET)});
+            BeforeCheck(count);
+            BeforeCheck(dataSize);
+            BeforeCheck(bytes);
+            return bytes;
+        }
+
+        ActualArgcVertex* ActualArgc()
+        {
+            auto* argc = New<ActualArgcVertex>({});
+            BeforeCheck(argc);
+            return argc;
+        }
+
+        InitializeUnmappedArgumentsElementsVertex* InitializeElements(ValueVertex* argc)
+        {
+            auto* result = New<InitializeUnmappedArgumentsElementsVertex>({argc, phi, hclass});
+            merge->AddVertex(result);
+            return result;
+        }
+
+        InitializeUnmappedArgumentsVertex* InitializeArguments(ValueVertex* argc)
+        {
+            // Model allocation/header contracts only. The production lowering
+            // fills all elements in a safepoint-free loop before this allocation;
+            // JS tests cover that loop and survival across the following GC.
+            auto* elements = InitializeElements(argc);
+            auto* previous = merge;
+            entry = BB::New(&chunk);
+            fastBlock = BB::New(&chunk);
+            slowBlock = BB::New(&chunk);
+            merge = BB::New(&chunk);
+            previous->SetControlVertex(New<JumpVertex>({}, entry));
+            entry->AddPredecessor(previous);
+            objectSize = JSArguments::GetInlinedPropertyOffset(JSArguments::LENGTH_OF_INLINE_PROPERTIES);
+            size = graph.GetInt64Constant(objectSize);
+            Allocate();
+            AddSlowAllocationHClass();
+            auto* result = New<InitializeUnmappedArgumentsVertex>({glue, argc, phi, elements, hclass, hclass});
             merge->AddVertex(result);
             return result;
         }
@@ -160,6 +255,29 @@ protected:
                 SCOPED_TRACE(afterRegalloc);
                 EXPECT_DEATH(Verify(afterRegalloc), message);
             }
+        }
+
+        void ExpectAllocationRecoveryMetadataRejected()
+        {
+            auto* frame = LazyFrame(hclass);
+            EXPECT_DEATH(
+                {
+                    slowAllocation->SetLazyDeoptFrameState(frame, 0);
+                    Verify();
+                },
+                "Allocation must proceed directly");
+            EXPECT_DEATH(
+                {
+                    slowAllocation->LoadCatchBlock(merge, 0);
+                    Verify();
+                },
+                "Allocation must proceed directly");
+            EXPECT_DEATH(
+                {
+                    slowAllocation->MarkExceptionLazyDeopt();
+                    Verify();
+                },
+                "Allocation must proceed directly");
         }
 
         void AddEagerFrame(ValueVertex* value)
@@ -205,40 +323,28 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, AcceptsAllFourInitializersAnd
     }
 }
 
-TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsRawAllocationRecoveryMetadata)
+TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsUninitializedAllocationRecoveryMetadata)
 {
-    Fixture f(EMPTY_OBJECT);
-    auto* frame = f.LazyFrame(f.hclass);
-    EXPECT_DEATH(
-        {
-            f.slowAllocation->SetLazyDeoptFrameState(frame, 0);
-            f.Verify();
-        },
-        "Raw allocation must proceed directly");
-    EXPECT_DEATH(
-        {
-            f.slowAllocation->LoadCatchBlock(f.merge, 0);
-            f.Verify();
-        },
-        "Raw allocation must proceed directly");
-    EXPECT_DEATH(
-        {
-            f.slowAllocation->MarkExceptionLazyDeopt();
-            f.Verify();
-        },
-        "Raw allocation must proceed directly");
+    for (bool withHClass: {false, true}) {
+        SCOPED_TRACE(withHClass);
+        Fixture f(EMPTY_OBJECT);
+        if (withHClass) {
+            f.AddSlowAllocationHClass();
+        }
+        f.ExpectAllocationRecoveryMetadataRejected();
+    }
 }
 
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsUntaggedRuntimeAllocationSize)
 {
     Fixture f(EMPTY_OBJECT);
     f.slowAllocation->SetInput(0, f.size);
-    EXPECT_DEATH(f.Verify(), "Raw allocation requires a tagged constant size");
+    EXPECT_DEATH(f.Verify(), "Allocation requires a tagged size");
     f.slowAllocation->SetInput(0, f.graph.GetTaggedConstant(JSTaggedValue::Undefined().GetRawData()));
     EXPECT_DEATH(f.Verify(), "IsInt");
 }
 
-TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsOrdinaryRuntimeCallAsRawAllocation)
+TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsOrdinaryRuntimeCallAsUninitializedAllocation)
 {
     Fixture f(EMPTY_OBJECT);
     auto* call = f.Call();
@@ -248,15 +354,54 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsOrdinaryRuntimeCallAsR
     EXPECT_DEATH(f.Verify(), "Allocation merge Phi requires one fast and one slow allocation");
 }
 
-TEST_F(ArkSteedInitializationIntervalVerifierTest, DistinguishesInitializedRuntimeOverload)
+TEST_F(ArkSteedInitializationIntervalVerifierTest, AcceptsAllocationWithHClassBeforeInitialization)
 {
-    Fixture f;
-    auto* call = f.New<CallRuntimeVertex>({f.slowAllocation->GetInput(0), f.hclass}, RTSTUB_ID(AllocateInYoung));
-    EXPECT_FALSE(call->ReturnsRawAllocation());
-    EXPECT_FALSE(IsRawAllocation(call));
-    auto* frame = f.LazyFrame(f.hclass);
-    call->SetLazyDeoptFrameState(frame, 0);
-    call->VerifyInputs();
+    for (auto kind: INITIALIZERS) {
+        SCOPED_TRACE(kind);
+        Fixture f(kind);
+        f.AddSlowAllocationHClass();
+        EXPECT_TRUE(f.slowAllocation->ReturnsUninitializedAllocation());
+        EXPECT_TRUE(IsUninitializedAllocation(f.slowAllocation));
+        EXPECT_TRUE(f.slowAllocation->IsCall());
+        EXPECT_TRUE(f.slowAllocation->CanAllocate());
+        f.Verify();
+        f.Verify(true);
+        auto* initializer = f.merge->GetVertices().back();
+        f.merge->GetVertices().clear();
+        f.AddMoves();
+        f.merge->AddVertex(initializer);
+        f.Verify(true);
+    }
+}
+
+TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsInvalidAllocationArgumentCount)
+{
+    Fixture f(EMPTY_OBJECT);
+    auto* size = f.slowAllocation->GetInput(0);
+    f.SetSlowAllocationArguments({});
+    EXPECT_TRUE(f.slowAllocation->ReturnsUninitializedAllocation());
+    f.ExpectRejectedInBothPhases("Allocation requires size and an optional HClass");
+    f.SetSlowAllocationArguments({size, f.hclass, f.hclass});
+    EXPECT_TRUE(f.slowAllocation->ReturnsUninitializedAllocation());
+    f.ExpectRejectedInBothPhases("Allocation requires size and an optional HClass");
+}
+
+TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsUntaggedAllocationHClass)
+{
+    Fixture f(EMPTY_OBJECT);
+    f.AddSlowAllocationHClass();
+    f.slowAllocation->SetInput(1, f.size);
+    f.ExpectRejectedInBothPhases("Allocation requires a tagged HClass");
+}
+
+TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsInvalidSizeWithHClass)
+{
+    Fixture f(EMPTY_OBJECT);
+    f.AddSlowAllocationHClass();
+    f.slowAllocation->SetInput(0, f.size);
+    f.ExpectRejectedInBothPhases("Allocation requires a tagged size");
+    f.slowAllocation->SetInput(0, f.graph.GetTaggedConstant(JSTaggedValue::Undefined().GetRawData()));
+    f.ExpectRejectedInBothPhases("IsInt");
 }
 
 TEST_F(ArkSteedInitializationIntervalVerifierTest, AcceptsCompletedValuesInFramesAndPhi)
@@ -301,15 +446,21 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsPhiEscape)
 
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsFrameEscapeWithoutInputUse)
 {
-    Fixture f(EMPTY_OBJECT);
-    EXPECT_DEATH(
-        {
-            f.AddLazyFrame(f.fastAllocation, f.merge);
-            f.Verify();
-        },
-        "Allocation escapes into frame state");
-    f.AddEagerFrame(f.slowAllocation);
-    EXPECT_DEATH(f.Verify(), "Allocation escapes into frame state");
+    for (bool withHClass: {false, true}) {
+        SCOPED_TRACE(withHClass);
+        Fixture f(EMPTY_OBJECT);
+        if (withHClass) {
+            f.AddSlowAllocationHClass();
+        }
+        EXPECT_DEATH(
+            {
+                f.AddLazyFrame(f.slowAllocation, f.merge);
+                f.Verify();
+            },
+            "Allocation escapes into frame state");
+        f.AddEagerFrame(f.slowAllocation);
+        f.ExpectRejectedInBothPhases("Allocation escapes into frame state");
+    }
 }
 
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsFrameEscapeInEarlierTraversalBlock)
@@ -380,13 +531,22 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsWrongInputRepresentati
 
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsCallsAndSecondAllocation)
 {
-    Fixture f;
-    f.merge->AddVertex(f.Call());
-    f.Initialize();
-    f.ExpectRejectedInBothPhases("Illegal operation");
-    f.merge->GetVertices().erase(f.merge->GetVertices().begin());
-    f.fastBlock->AddVertex(f.New<AllocateInYoungVertex>({f.glue, f.size}));
-    EXPECT_DEATH(f.Verify(), "Second allocation");
+    for (bool withHClass: {false, true}) {
+        SCOPED_TRACE(withHClass);
+        Fixture f;
+        if (withHClass) {
+            f.AddSlowAllocationHClass();
+        }
+        f.merge->AddVertex(f.Call());
+        f.Initialize();
+        f.ExpectRejectedInBothPhases("Illegal operation");
+        f.merge->GetVertices().erase(f.merge->GetVertices().begin());
+        f.slowBlock->AddVertex(f.Call());
+        f.ExpectRejectedInBothPhases("Illegal operation");
+        f.slowBlock->GetVertices().pop_back();
+        f.fastBlock->AddVertex(f.New<AllocateInYoungVertex>({f.glue, f.size}));
+        EXPECT_DEATH(f.Verify(), "Second allocation");
+    }
 }
 
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsOrdinaryLoadsEvenAfterRegalloc)
@@ -399,13 +559,19 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsOrdinaryLoadsEvenAfter
 
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsDeoptAndBranchInsideInterval)
 {
-    Fixture f;
-    f.AddEagerFrame(f.hclass);
-    EXPECT_DEATH(f.Verify(), "Illegal operation");
-    auto* target = BB::New(&f.chunk);
-    f.graph.Add(target);
-    f.merge->SetControlVertex(f.New<JumpVertex>({}, target));
-    EXPECT_DEATH(f.Verify(), "Illegal operation");
+    for (bool withHClass: {false, true}) {
+        SCOPED_TRACE(withHClass);
+        Fixture f;
+        if (withHClass) {
+            f.AddSlowAllocationHClass();
+        }
+        f.AddEagerFrame(f.hclass);
+        f.ExpectRejectedInBothPhases("Illegal operation");
+        auto* target = BB::New(&f.chunk);
+        f.graph.Add(target);
+        f.merge->SetControlVertex(f.New<JumpVertex>({}, target));
+        f.ExpectRejectedInBothPhases("Illegal operation");
+    }
 }
 
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsIncompleteAndCrossBlockIntervals)
@@ -506,13 +672,16 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsInvalidSnapshotAtConst
     Fixture f;
     auto info = f.Snapshot();
     info.fieldCount = 2;
-    EXPECT_DEATH(f.New<InitializeObjectWithBufferVertex>({f.phi, f.glue, f.hclass}, info), "fieldValues.size");
+    EXPECT_DEATH(f.New<InitializeObjectWithBufferVertex>({f.phi, f.glue, f.hclass, f.hclass}, info),
+                 "fieldValues.size");
     info.fieldCount = 1;
     info.fieldValues = Span<const uint64_t>(nullptr, 1);
-    EXPECT_DEATH(f.New<InitializeObjectWithBufferVertex>({f.phi, f.glue, f.hclass}, info), "fieldValues.data");
+    EXPECT_DEATH(f.New<InitializeObjectWithBufferVertex>({f.phi, f.glue, f.hclass, f.hclass}, info),
+                 "fieldValues.data");
     info.fieldValues = Span<const uint64_t>(&f.field, 1);
     info.objectSize = JSObject::SIZE;
-    EXPECT_DEATH(f.New<InitializeObjectWithBufferVertex>({f.phi, f.glue, f.hclass}, info), "fieldCount <=");
+    EXPECT_DEATH(f.New<InitializeObjectWithBufferVertex>({f.phi, f.glue, f.hclass, f.hclass}, info),
+                 "fieldCount <=");
 }
 
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsWrongFixedInputCountAtConstruction)
@@ -526,15 +695,236 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsWrongFixedInputCountAt
     EXPECT_DEATH(f.New<InitializeArrayWithBufferVertex>({f.phi, f.glue}, f.objectSize), "GetInputCount");
 }
 
-TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsDynamicAllocationSize)
+TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsDynamicLiteralAllocationSize)
+{
+    for (auto kind: INITIALIZERS) {
+        Fixture f;
+        auto* argc = f.ActualArgc();
+        f.SetSize(f.ArgumentsSize(argc));
+        f.Initialize(kind);
+        f.ExpectRejectedInBothPhases("Literal allocation requires its static size");
+    }
+}
+
+TEST_F(ArkSteedInitializationIntervalVerifierTest, AcceptsDynamicArgumentsAndNonGCInitializationBarriers)
+{
+    for (bool object: {false, true}) {
+        Fixture f;
+        f.AddSlowAllocationHClass();
+        auto* argc = f.ActualArgc();
+        f.SetSize(f.ArgumentsSize(argc));
+        auto* elementsAllocation = f.slowAllocation;
+        ValueVertex* result = object ? static_cast<ValueVertex*>(f.InitializeArguments(argc))
+                                     : static_cast<ValueVertex*>(f.InitializeElements(argc));
+        ASSERT_EQ(elementsAllocation->GetInputCount(), 2U);
+        EXPECT_EQ(elementsAllocation->GetInput(1), f.hclass);
+        ASSERT_EQ(f.slowAllocation->GetInputCount(), 2U);
+        EXPECT_EQ(f.slowAllocation->GetInput(1), f.hclass);
+        if (object) {
+            EXPECT_NE(elementsAllocation, f.slowAllocation);
+        }
+        f.merge->SetControlVertex(f.New<ReturnVertex>({result}));
+        f.Verify();
+        f.Verify(true);
+        f.merge->GetVertices().clear();
+        f.AddMoves();
+        f.merge->AddVertex(result);
+        EXPECT_DEATH(f.Verify(), "Illegal operation");
+        f.Verify(true);
+    }
+}
+
+TEST_F(ArkSteedInitializationIntervalVerifierTest, AcceptsConstantArgumentsSizesIncludingHugeAndFullWidth)
+{
+    for (int64_t count: {int64_t {0},
+                         int64_t {1},
+                         static_cast<int64_t>(MAX_REGULAR_HEAP_OBJECT_SIZE / 8),
+                         int64_t {1} << 29,
+                         static_cast<int64_t>(INT32_MAX)}) {
+        SCOPED_TRACE(count);
+        Fixture f;
+        f.AddSlowAllocationHClass();
+        auto* argc = f.graph.GetInt64Constant(count + NUM_MANDATORY_JSFUNC_ARGS);
+        int64_t bytes = count * JSTaggedValue::TaggedTypeSize() + TaggedArray::DATA_OFFSET;
+        f.SetSize(f.graph.GetInt64Constant(bytes));
+        f.InitializeElements(argc);
+        EXPECT_EQ(
+            JSTaggedValue(f.slowAllocation->GetInput(0)->Cast<TaggedConstantVertex>()->GetValue()).GetLargeUInt(),
+            static_cast<uint64_t>(bytes));
+        f.Verify();
+        f.Verify(true);
+
+        auto* tagged = f.EncodeSize(f.size);
+        f.slowAllocation->SetInput(0, tagged);
+        f.Verify();
+        tagged->SetInput(
+            0,
+            f.graph.GetInt64Constant(static_cast<int64_t>(static_cast<uint64_t>(bytes) | JSTaggedValue::TAG_INT)));
+        f.Verify();
+        f.Verify(true);
+    }
+}
+
+TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsFullWidthSizeTruncation)
 {
     Fixture f;
-    auto* size = f.New<LoadInt32FieldVertex>({f.hclass}, JSHClass::BIT_FIELD1_OFFSET);
-    f.entry->GetVertices().insert(f.entry->GetVertices().begin(), size);
-    f.canAllocate->SetInput(CanAllocateInYoungVertex::SIZE_INDEX, size);
-    f.fastAllocation->SetInput(AllocateInYoungVertex::SIZE_INDEX, size);
-    f.Initialize(EMPTY_ARRAY);
-    EXPECT_DEATH(f.Verify(), "Is<T>");
+    constexpr int64_t count = int64_t {1} << 29;
+    constexpr int64_t bytes = count * JSTaggedValue::TaggedTypeSize() + TaggedArray::DATA_OFFSET;
+    f.SetSize(f.graph.GetInt64Constant(bytes));
+    f.InitializeElements(f.graph.GetInt64Constant(count + NUM_MANDATORY_JSFUNC_ARGS));
+    f.slowAllocation->SetInput(0, f.graph.GetTaggedConstant(static_cast<uint32_t>(bytes) | JSTaggedValue::TAG_INT));
+    f.ExpectRejectedInBothPhases("Allocation must match the checked size");
+    f.SetSize(f.graph.GetInt64Constant(static_cast<uint32_t>(bytes)));
+    f.ExpectRejectedInBothPhases("Arguments elements size must match the count");
+}
+
+TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsNarrowedDynamicSlowSize)
+{
+    Fixture f;
+    auto* argc = f.ActualArgc();
+    f.SetSize(f.ArgumentsSize(argc));
+    f.InitializeElements(argc);
+    auto* narrowed = f.New<I64BitwiseBinaryVertex>({f.size, f.graph.GetInt64Constant(UINT32_MAX)},
+                                                   IntBitwiseKind::BITWISE_AND);
+    f.BeforeCheck(narrowed);
+    f.slowAllocation->SetInput(0, f.EncodeSize(narrowed));
+    f.ExpectRejectedInBothPhases("Allocation must match the checked size");
+}
+
+TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsMismatchedDynamicSlowSizeAndTag)
+{
+    Fixture f;
+    auto* argc = f.ActualArgc();
+    f.SetSize(f.ArgumentsSize(argc));
+    f.InitializeElements(argc);
+    auto* tagged = f.slowAllocation->GetInput(0)->Cast<RawI64ToTaggedVertex>();
+    auto* encoding = tagged->GetInput(0)->Cast<I64BitwiseBinaryVertex>();
+    encoding->SetInput(I64BitwiseBinaryVertex::LEFT_INDEX, argc);
+    f.ExpectRejectedInBothPhases("Allocation must match the checked size");
+    encoding->SetInput(I64BitwiseBinaryVertex::LEFT_INDEX, f.size);
+    encoding->SetInput(I64BitwiseBinaryVertex::RIGHT_INDEX, f.graph.GetInt64Constant(0));
+    f.ExpectRejectedInBothPhases("IsInt64Constant");
+    f.slowAllocation->SetInput(0, f.New<InitialValueVertex>({}, 0));
+    f.ExpectRejectedInBothPhases("Is<T>");
+}
+
+TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsMismatchedArgumentsInitializationCount)
+{
+    for (bool object: {false, true}) {
+        Fixture f;
+        auto* argc = f.ActualArgc();
+        f.SetSize(f.ArgumentsSize(argc));
+        if (object) {
+            auto* init = f.InitializeArguments(argc);
+            init->SetInput(InitializeUnmappedArgumentsVertex::NUM_ARGS_INDEX, f.ActualArgc());
+            f.ExpectRejectedInBothPhases("Arguments object and elements must use the same count");
+        } else {
+            auto* init = f.InitializeElements(argc);
+            init->SetInput(InitializeUnmappedArgumentsElementsVertex::NUM_ARGS_INDEX, f.ActualArgc());
+            f.ExpectRejectedInBothPhases("Arguments elements size must match the count");
+        }
+    }
+}
+
+TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsWrongArgumentsSizeFormula)
+{
+    enum class SizeFormulaPart { ARGUMENT_COUNT, ELEMENT_SIZE, HEADER_SIZE };
+    for (auto part:
+         {SizeFormulaPart::ARGUMENT_COUNT, SizeFormulaPart::ELEMENT_SIZE, SizeFormulaPart::HEADER_SIZE}) {
+        SCOPED_TRACE(static_cast<int>(part));
+        Fixture f;
+        auto* argc = f.ActualArgc();
+        auto* count
+            = f.New<I64SubVertex>({argc,
+                                   f.graph.GetInt64Constant(NUM_MANDATORY_JSFUNC_ARGS
+                                                            + (part == SizeFormulaPart::ARGUMENT_COUNT ? 1 : 0))});
+        auto* shift = f.New<I64ShiftLeftVertex>(
+            {count}, TAGGED_TYPE_SIZE_LOG + (part == SizeFormulaPart::ELEMENT_SIZE ? 1 : 0));
+        auto* size = f.New<I64AddVertex>(
+            {shift,
+             f.graph.GetInt64Constant(TaggedArray::DATA_OFFSET + (part == SizeFormulaPart::HEADER_SIZE ? 8 : 0))});
+        f.BeforeCheck(count);
+        f.BeforeCheck(shift);
+        f.BeforeCheck(size);
+        f.SetSize(size);
+        f.InitializeElements(argc);
+        f.ExpectRejectedInBothPhases("");
+    }
+}
+
+TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsInvalidConstantArgumentsCount)
+{
+    for (int64_t argc: {int64_t {NUM_MANDATORY_JSFUNC_ARGS - 1},
+                        static_cast<int64_t>(INT32_MAX) + NUM_MANDATORY_JSFUNC_ARGS + 1}) {
+        Fixture f;
+        f.SetSize(f.graph.GetInt64Constant(TaggedArray::DATA_OFFSET));
+        f.InitializeElements(f.graph.GetInt64Constant(argc));
+        f.ExpectRejectedInBothPhases("");
+    }
+}
+
+TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsWrongArgumentsObjectSize)
+{
+    Fixture f;
+    auto* argc = f.ActualArgc();
+    f.SetSize(f.ArgumentsSize(argc));
+    f.InitializeArguments(argc);
+    f.SetSize(f.graph.GetInt64Constant(f.objectSize + JSTaggedValue::TaggedTypeSize()));
+    f.ExpectRejectedInBothPhases("Arguments object requires its static layout size");
+    f.SetSize(f.ArgumentsSize(argc));
+    f.ExpectRejectedInBothPhases("Arguments object requires its static layout size");
+}
+
+TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsUnsafeOperationsDuringArgumentsInitialization)
+{
+    for (bool object: {false, true}) {
+        Fixture f;
+        auto* argc = f.ActualArgc();
+        f.SetSize(f.ArgumentsSize(argc));
+        ValueVertex* init = object ? static_cast<ValueVertex*>(f.InitializeArguments(argc))
+                                   : static_cast<ValueVertex*>(f.InitializeElements(argc));
+        for (NonControlVertex* operation:
+             {static_cast<NonControlVertex*>(f.Call()),
+              static_cast<NonControlVertex*>(f.New<LoadTaggedFieldVertex>({f.hclass}, TaggedObject::HCLASS_OFFSET)),
+              static_cast<NonControlVertex*>(f.New<I64AddVertex>({f.size, f.size}))}) {
+            f.merge->GetVertices().clear();
+            f.merge->AddVertex(operation);
+            f.merge->AddVertex(init);
+            f.ExpectRejectedInBothPhases("Illegal operation");
+        }
+        f.merge->GetVertices().clear();
+        f.merge->AddVertex(init);
+        f.AddLazyFrame(f.phi, f.merge);
+        f.ExpectRejectedInBothPhases("Allocation escapes into frame state");
+    }
+}
+
+TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsSizeConversionBetweenCheckAndAllocation)
+{
+    Fixture f;
+    auto* argc = f.ActualArgc();
+    f.SetSize(f.ArgumentsSize(argc));
+    f.InitializeElements(argc);
+    auto* tagged = f.slowAllocation->GetInput(0)->Cast<RawI64ToTaggedVertex>();
+    auto* bits = tagged->GetInput(0)->Cast<I64BitwiseBinaryVertex>();
+    auto& scheduled = f.entry->GetVertices();
+    scheduled.erase(std::find(scheduled.begin(), scheduled.end(), tagged));
+    scheduled.erase(std::find(scheduled.begin(), scheduled.end(), bits));
+    f.slowBlock->GetVertices().clear();
+    f.slowBlock->AddVertex(bits);
+    f.slowBlock->AddVertex(tagged);
+    f.slowBlock->AddVertex(f.slowAllocation);
+    f.ExpectRejectedInBothPhases("Only register moves may separate the check and allocation");
+}
+
+TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsDynamicAllocationRecoveryMetadata)
+{
+    Fixture f;
+    f.AddSlowAllocationHClass();
+    auto* argc = f.ActualArgc();
+    f.SetSize(f.ArgumentsSize(argc));
+    f.InitializeElements(argc);
+    f.ExpectAllocationRecoveryMetadataRejected();
 }
 
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsSecondMergePhiInInterval)
@@ -567,6 +957,8 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, CapacityPredicateHasReadOnlyT
         EXPECT_FALSE(input.IsUsedAtStart());
     }
     EXPECT_EQ(check->GetValueRepresentation(), ValueRepresentation::TAGGED);
+    EXPECT_EQ(CanAllocateInYoungVertex::INPUT_TYPES[CanAllocateInYoungVertex::SIZE_INDEX],
+              ValueRepresentation::INT64);
     EXPECT_EQ(check->GetNumTemporariesNeeded<ArkSteedRegister>(), 2U);
     EXPECT_TRUE(check->CanRead());
     EXPECT_TRUE(check->IsNotIdempotent());
@@ -608,7 +1000,7 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsOperationsBetweenPredi
     for (NonControlVertex* operation:
          {static_cast<NonControlVertex*>(f.Call()),
           static_cast<NonControlVertex*>(f.New<StoreI64ToAddressVertex>({f.glue, f.glue}, 0)),
-          static_cast<NonControlVertex*>(f.New<I32AddVertex>({f.size, f.size}))}) {
+          static_cast<NonControlVertex*>(f.New<I64AddVertex>({f.size, f.size}))}) {
         f.entry->AddVertex(operation);
         f.ExpectRejectedInBothPhases("Only register moves may separate the capacity predicate and branch");
         f.entry->GetVertices().pop_back();
@@ -642,8 +1034,7 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsChangedGlueAndSizeAfte
     f.canAllocate->SetInput(CanAllocateInYoungVertex::GLUE_INDEX, f.graph.GetIntPtrConstant(1));
     EXPECT_DEATH(f.Verify(), "Allocation must match the checked glue and size");
     f.canAllocate->SetInput(CanAllocateInYoungVertex::GLUE_INDEX, f.glue);
-    f.canAllocate->SetInput(CanAllocateInYoungVertex::SIZE_INDEX,
-                            f.graph.GetInt32Constant(static_cast<int32_t>(f.objectSize + 8)));
+    f.canAllocate->SetInput(CanAllocateInYoungVertex::SIZE_INDEX, f.graph.GetInt64Constant(f.objectSize + 8));
     EXPECT_DEATH(f.Verify(), "Allocation must match the checked glue and size");
 }
 

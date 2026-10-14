@@ -95,7 +95,7 @@ public:
     static SideEffectDescriptor Classify(AllocateInYoungVertex* vertex)
     {
         (void)vertex;
-        // Allocation is effect-free under the literal allocation contract.
+        // The checked bump allocation does not invalidate compile-time facts.
         return SideEffectDescriptor {SideEffectKind::NO_SIDE_EFFECT};
     }
 
@@ -130,12 +130,6 @@ public:
     }
 
     static SideEffectDescriptor Classify(InitializeUnmappedArgumentsElementsVertex *vertex)
-    {
-        (void)vertex;
-        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
-    }
-
-    static SideEffectDescriptor Classify(AllocateRawInYoungFastVertex *vertex)
     {
         (void)vertex;
         return SideEffectDescriptor {SideEffectKind::SAFE_CALL};

@@ -16,7 +16,8 @@
 //! PARAMS --compiler-jit-hotness-threshold=2000 --enable-pgo-profiler=true
 
 //! METHOD boolDoubleBang
-//! COUNT DeoptIfNotBoolean 2
+//! COUNT DeoptIfNotBoolean 1
+//! COUNT TaggedNotEqual 2
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD boolNegate
@@ -26,14 +27,16 @@
 //! METHOD intDoubleBang
 //! COUNT CheckedTaggedIntToI32 1
 //! COUNT I32ConditionCheck 1
-//! COUNT DeoptIfNotBoolean 1
+//! HAS_NOT DeoptIfNotBoolean
+//! COUNT TaggedNotEqual 1
 //! HAS_NOT TaggedNumberToBoolean
 //! HAS_NOT BranchIfFloat64Compare
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD doubleDoubleBang
 //! COUNT TaggedDoubleToBoolean 1
-//! COUNT DeoptIfNotBoolean 1
+//! HAS_NOT DeoptIfNotBoolean
+//! COUNT TaggedNotEqual 1
 //! HAS_NOT TaggedNumberToBoolean
 //! HAS_NOT BranchIfFloat64Compare
 //! HAS_NOT CallCommonStub ToBoolean*
@@ -51,13 +54,15 @@
 //! HAS Float64ToBoolean
 //! HAS_NOT BranchIfFloat64Compare
 //! HAS_NOT DeoptIfNotNumber
-//! COUNT DeoptIfNotBoolean 1
+//! HAS_NOT DeoptIfNotBoolean
+//! COUNT TaggedNotEqual 1
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD staticInt
 //! HAS I32ConditionCheck
 //! HAS_NOT DeoptIfNotNumber
-//! COUNT DeoptIfNotBoolean 1
+//! HAS_NOT DeoptIfNotBoolean
+//! COUNT TaggedNotEqual 1
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD receiverTruthy
@@ -70,7 +75,8 @@
 
 //! METHOD specTruthy
 //! COUNT TaggedDoubleToBoolean 1
-//! COUNT DeoptIfNotBoolean 1
+//! HAS_NOT DeoptIfNotBoolean
+//! COUNT TaggedNotEqual 1
 //! HAS_NOT TaggedNumberToBoolean
 //! HAS_NOT BranchIfFloat64Compare
 //! HAS_NOT CallCommonStub ToBoolean*
@@ -159,9 +165,9 @@ print(receiverTruthy(monoObj));
 print(receiverTruthy([]));
 print(constFold());
 
-// Spec matrix: IsTrue/IsFalse for every falsy/truthy input class. The number
-// rows run on the specialized branchless path; the later rows re-execute in
-// the interpreter after the eager deopt and must agree with it.
+// Spec matrix: IsTrue/IsFalse for every falsy/truthy input class. The first
+// undefined input exits the double-specialized path; subsequent rows check
+// behavior after deoptimization rather than specialized-code execution.
 print(specTruthy(undefined) + " " + specFalsy(undefined));
 print(specTruthy(null) + " " + specFalsy(null));
 print(specTruthy(false) + " " + specFalsy(false));

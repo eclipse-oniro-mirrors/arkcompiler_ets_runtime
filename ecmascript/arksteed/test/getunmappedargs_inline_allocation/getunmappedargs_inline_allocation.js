@@ -13,9 +13,17 @@
  * limitations under the License.
  */
 
+//! COMPILE_COUNT_GE *captureArguments* 1
+// 4 basic/fresh calls + 8 varying-argc calls + 30000 stress calls after compilation.
+//! EXEC_COUNT_GE *captureArguments* 30012
+//! DEOPT_COUNT * 0
 //! METHOD captureArguments
 //! BYTECODE_COUNT getunmappedargs 1
-//! COUNT AllocateRawInYoungFast 2
+//! COUNT CanAllocateInYoung 2
+//! COUNT AllocateInYoung 2
+//! COUNT BranchIfTrue 2
+//! COUNT RawI64ToTagged 1
+//! COUNT I64BitwiseBinary 1
 //! COUNT InitializeUnmappedArgumentsElements 1
 //! COUNT InitializeUnmappedArguments 1
 //! COUNT I64Sub 1
@@ -31,8 +39,9 @@
 //! HAS_NOT I32ConditionCheck
 //! HAS_NOT CallCommonStub GetUnmappedArgs
 //! COUNT CallRuntime AllocateInYoung 2
-//! CODEGEN_COUNT AllocateRawInYoungFast inline attempt 2
-//! CODEGEN_COUNT AllocateRawInYoungFast fallback sentinel 2
+//! CODEGEN_COUNT CanAllocateInYoung capacity predicate 2
+//! CODEGEN_COUNT AllocateInYoung bump allocation 2
+//! CODEGEN_COUNT *CallRuntime*RTStub_AllocateInYoung* 2
 //! CODEGEN_COUNT InitializeUnmappedArgumentsElements 1
 //! CODEGEN_COUNT InitializeUnmappedArgumentsObject 1
 
@@ -55,36 +64,6 @@ function forceFullGC() {
     }
 }
 
-function registerPressure(seed, object0, object1, object2, object3) {
-    let i0 = seed + 1;
-    let i1 = seed + 2;
-    let i2 = seed + 3;
-    let i3 = seed + 4;
-    let d0 = seed * 1.125 + 0.25;
-    let d1 = seed * 1.25 + 0.5;
-    let d2 = seed * 1.375 + 0.75;
-    let d3 = seed * 1.5 + 1.0;
-    let d4 = seed * 1.625 + 1.25;
-    let d5 = seed * 1.75 + 1.5;
-    let d6 = seed * 1.875 + 1.75;
-    let d7 = seed * 2.0 + 2.0;
-    let args = arguments;
-    if (args.length !== 5 || args[0] !== seed || args[1] !== object0 || args[2] !== object1 ||
-        args[3] !== object2 || args[4] !== object3) {
-        return -1;
-    }
-    return i0 + i1 + i2 + i3 + object0.marker + object1.marker + object2.marker + object3.marker +
-        d0 + d1 + d2 + d3 + d4 + d5 + d6 + d7;
-}
-
-function expectedPressure(seed, object0, object1, object2, object3) {
-    return seed + 1 + seed + 2 + seed + 3 + seed + 4 +
-        object0.marker + object1.marker + object2.marker + object3.marker +
-        (seed * 1.125 + 0.25) + (seed * 1.25 + 0.5) + (seed * 1.375 + 0.75) +
-        (seed * 1.5 + 1.0) + (seed * 1.625 + 1.25) + (seed * 1.75 + 1.5) +
-        (seed * 1.875 + 1.75) + (seed * 2.0 + 2.0);
-}
-
 let interpreted = captureArguments("interpreter", 1);
 ArkTools.arkSteedCompileSync(captureArguments);
 ArkTools.waitJitCompileFinish(captureArguments);
@@ -105,19 +84,25 @@ let second = captureArguments("second");
 first[0] = "changed";
 print("fresh:" + (first !== second && first[0] === "changed" && second[0] === "second"));
 
-ArkTools.arkSteedCompileSync(registerPressure);
-ArkTools.waitJitCompileFinish(registerPressure);
-let pressureOk = ArkTools.arkSteedIsCompiled(registerPressure);
-for (let i = 0; i < 256 && pressureOk; i++) {
-    let seed = i + 0.125;
-    let object0 = { marker: i + 10 };
-    let object1 = { marker: i + 20 };
-    let object2 = { marker: i + 30 };
-    let object3 = { marker: i + 40 };
-    pressureOk = Math.abs(registerPressure(seed, object0, object1, object2, object3) -
-        expectedPressure(seed, object0, object1, object2, object3)) < 1e-9;
+// Reuse the same compiled function with zero, small, threshold and huge counts.
+// 21843/21844 straddle the regular-object limit for a 256 KiB heap region.
+let varyingOk = true;
+let largeSurvivors = [];
+for (let count of [0, 1, 7, 21843, 21844, 32768, 2, 0]) {
+    let input = [];
+    for (let i = 0; i < count; i++) {
+        input.push(i % 2 === 0 ? objectValue : i + 0.5);
+    }
+    let current = captureArguments.apply(undefined, input);
+    varyingOk = varyingOk && current.length === count && ArkTools.arkSteedIsCompiled(captureArguments);
+    for (let i = 0; i < count; i++) {
+        varyingOk = varyingOk && current[i] === input[i];
+    }
+    if (count >= 21843) {
+        largeSurvivors.push(current);
+    }
 }
-print("register-pressure:" + pressureOk);
+print("varying-argc:" + varyingOk);
 
 const stressIterations = 30000;
 const survivorStride = 1500;
@@ -137,8 +122,20 @@ for (let i = 0; i < stressIterations; i++) {
 print("buffer-exhaustion:" + stressOk);
 
 function checkSurvivors() {
-    if (survivors.length !== stressIterations / survivorStride) {
+    if (survivors.length !== stressIterations / survivorStride || largeSurvivors.length !== 3) {
         return false;
+    }
+    let lengths = [21843, 21844, 32768];
+    for (let i = 0; i < largeSurvivors.length; i++) {
+        if (largeSurvivors[i].length !== lengths[i]) {
+            return false;
+        }
+        for (let j = 0; j < lengths[i]; j++) {
+            let expected = j % 2 === 0 ? objectValue : j + 0.5;
+            if (largeSurvivors[i][j] !== expected) {
+                return false;
+            }
+        }
     }
     for (let i = 0; i < survivors.length; i++) {
         let expected = i * survivorStride;

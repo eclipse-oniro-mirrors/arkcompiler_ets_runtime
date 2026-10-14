@@ -294,7 +294,7 @@ protected:
     }
 
     template<typename Allocation>
-    static void CheckAllocationRegisters()
+    static void CheckAllocationRegisters(bool dynamicSize = false, bool withHClass = false)
     {
         NativeAreaAllocator native;
         Chunk chunk {&native};
@@ -302,7 +302,8 @@ protected:
         ArkSteedRegisterAllocator allocator {&graph};
         auto* allocation = [&]() {
             if constexpr (std::is_same_v<Allocation, CallRuntimeVertex>) {
-                return Vertex::New<Allocation>(&chunk, static_cast<size_t>(1), RTSTUB_ID(AllocateInYoung));
+                return Vertex::New<Allocation>(
+                    &chunk, static_cast<size_t>(withHClass ? 2 : 1), RTSTUB_ID(AllocateInYoung));
             } else {
                 return Vertex::New<Allocation>(&chunk, static_cast<size_t>(Allocation::NUM_INPUTS));
             }
@@ -315,18 +316,43 @@ protected:
         initInfo(allocation);
         allocation->SetId(CURRENT_ID);
         auto* glue = graph.GetIntPtrConstant(0);
-        auto* size = graph.GetInt32Constant(JSObject::SIZE);
+        auto* size = graph.GetInt64Constant(JSObject::SIZE);
         initInfo(glue);
         initInfo(size);
+        ValueVertex* hclassInput = nullptr;
         if constexpr (std::is_same_v<Allocation, CallRuntimeVertex>) {
             auto* taggedSize
                 = graph.GetTaggedConstant(JSTaggedValue(static_cast<int32_t>(JSObject::SIZE)).GetRawData());
             initInfo(taggedSize);
             allocation->SetInput(0, taggedSize);
+            if (withHClass) {
+                hclassInput = Vertex::New<InitialValueVertex>(&chunk, static_cast<size_t>(0), 0);
+                initInfo(hclassInput);
+                allocation->SetInput(1, hclassInput);
+            }
             allocation->VerifyInputs();
         } else {
             allocation->SetInput(Allocation::GLUE_INDEX, glue);
             allocation->SetInput(Allocation::SIZE_INDEX, size);
+        }
+        ValueVertex* dynamicInput = nullptr;
+        if (dynamicSize) {
+            if constexpr (std::is_same_v<Allocation, CallRuntimeVertex>) {
+                auto* bits = graph.GetInt64Constant(
+                    static_cast<int64_t>((uint64_t {1} << 32) | JSTaggedValue::TAG_INT | JSObject::SIZE));
+                initInfo(bits);
+                dynamicInput
+                    = Vertex::New<RawI64ToTaggedVertex>(&chunk, std::initializer_list<ValueVertex*> {bits});
+                allocation->SetInput(0, dynamicInput);
+            } else {
+                auto* highBits = graph.GetInt64Constant(int64_t {1} << 32);
+                initInfo(highBits);
+                dynamicInput
+                    = Vertex::New<I64AddVertex>(&chunk, std::initializer_list<ValueVertex*> {size, highBits});
+                allocation->SetInput(Allocation::SIZE_INDEX, dynamicInput);
+            }
+            initInfo(dynamicInput);
+            allocation->VerifyInputs();
         }
         allocator.SetupConstantLocations();
         for (uint32_t i = 0; i < allocation->GetInputCount(); ++i) {
@@ -335,8 +361,15 @@ protected:
         ChunkVector<ValueVertex*> roots(&chunk);
         auto& registers = allocator.GetRegisterSnapshot<ArkSteedRegister>();
         for (auto reg: GetAllocatableList<ArkSteedRegister>()) {
-            auto* value = Vertex::New<InitialValueVertex>(&chunk, static_cast<size_t>(0), 0);
-            initInfo(value);
+            ValueVertex* value = dynamicInput != nullptr && roots.empty()
+                                     ? dynamicInput
+                                     : Vertex::New<InitialValueVertex>(&chunk, static_cast<size_t>(0), 0);
+            if (hclassInput != nullptr && roots.size() == 1) {
+                value = hclassInput;
+            }
+            if (value != dynamicInput && value != hclassInput) {
+                initInfo(value);
+            }
             value->GetRegallocInfo()->RecordUse(LATER_ID, chunk.New<InputLocation>());
             registers.RemoveFromFree(reg);
             registers.SetValue(reg, value);
@@ -410,8 +443,9 @@ protected:
         EXPECT_EQ(VertexT::INPUT_TYPES[VertexT::ALLOCATION_INDEX], ValueRepresentation::TAGGED);
         EXPECT_EQ(VertexT::INPUT_TYPES[VertexT::GLUE_INDEX], ValueRepresentation::INT_PTR);
         EXPECT_EQ(VertexT::INPUT_TYPES[2], ValueRepresentation::TAGGED);
+        EXPECT_EQ(VertexT::INPUT_TYPES[VertexT::HCLASS_INDEX], ValueRepresentation::TAGGED);
         if constexpr (std::is_same_v<VertexT, InitializeEmptyObjectVertex>) {
-            EXPECT_EQ(VertexT::INPUT_TYPES[VertexT::SIZE_INDEX], ValueRepresentation::INT32);
+            EXPECT_EQ(VertexT::INPUT_TYPES[VertexT::SIZE_INDEX], ValueRepresentation::INT64);
         }
         for (unsigned i = 0; i < vertex->GetInputCount(); ++i) {
             auto operand = UnallocatedState::Cast(vertex->GetInputLocation(i)->GetOperand());
@@ -429,10 +463,10 @@ protected:
         unsigned index = 0;
         for (auto reg: GetAllocatableList<ArkSteedRegister>()) {
             ValueVertex* value;
-            if (index < VertexT::NUM_INPUTS && VertexT::INPUT_TYPES[index] == ValueRepresentation::INT32) {
-                value = Vertex::New<Int32ConstantVertex>(&chunk, static_cast<size_t>(0), 64);
-            } else if (index == VertexT::GLUE_INDEX) {
+            if (index == VertexT::GLUE_INDEX) {
                 value = Vertex::New<IntPtrConstantVertex>(&chunk, static_cast<size_t>(0), 0);
+            } else if (index < VertexT::NUM_INPUTS && VertexT::INPUT_TYPES[index] == ValueRepresentation::INT64) {
+                value = Vertex::New<Int64ConstantVertex>(&chunk, static_cast<size_t>(0), 64);
             } else {
                 value = Vertex::New<InitialValueVertex>(&chunk, static_cast<size_t>(0), 0);
             }
@@ -847,7 +881,7 @@ HWTEST_F_L0(ArkSteedRegisterAllocatorTest, YoungAllocationConstraints)
     auto* allocation
         = Vertex::New<AllocateInYoungVertex>(&chunk, static_cast<size_t>(AllocateInYoungVertex::NUM_INPUTS));
     allocation->SetInput(AllocateInYoungVertex::GLUE_INDEX, graph.GetIntPtrConstant(0));
-    allocation->SetInput(AllocateInYoungVertex::SIZE_INDEX, graph.GetInt32Constant(JSObject::SIZE));
+    allocation->SetInput(AllocateInYoungVertex::SIZE_INDEX, graph.GetInt64Constant(JSObject::SIZE));
     allocation->SetRegallocInfo(chunk.New<RegallocValueVertexInfo>(
         &chunk, allocation->GetInputCount(), allocation->GetMachineRepresentation()));
     for (uint32_t i = 0; i < allocation->GetInputCount(); ++i) {
@@ -865,7 +899,7 @@ HWTEST_F_L0(ArkSteedRegisterAllocatorTest, YoungAllocationConstraints)
         EXPECT_EQ(allocation->GetInput(i)->GetValueRepresentation(), AllocateInYoungVertex::INPUT_TYPES[i]);
     }
     EXPECT_EQ(AllocateInYoungVertex::INPUT_TYPES[AllocateInYoungVertex::GLUE_INDEX], ValueRepresentation::INT_PTR);
-    EXPECT_EQ(AllocateInYoungVertex::INPUT_TYPES[AllocateInYoungVertex::SIZE_INDEX], ValueRepresentation::INT32);
+    EXPECT_EQ(AllocateInYoungVertex::INPUT_TYPES[AllocateInYoungVertex::SIZE_INDEX], ValueRepresentation::INT64);
     EXPECT_EQ(allocation->GetValueRepresentation(), ValueRepresentation::TAGGED);
     EXPECT_EQ(allocation->GetNumTemporariesNeeded<ArkSteedRegister>(), 1U);
     EXPECT_TRUE(allocation->GetRegallocInfo()->GetRequiredSpecificTemporaries<ArkSteedRegister>().IsEmpty());
@@ -884,11 +918,15 @@ HWTEST_F_L0(ArkSteedRegisterAllocatorTest, YoungAllocationConstraints)
 HWTEST_F_L0(ArkSteedRegisterAllocatorTest, AllocationCallPreservesLiveValues)
 {
     CheckAllocationRegisters<CallRuntimeVertex>();
+    CheckAllocationRegisters<CallRuntimeVertex>(true);
+    CheckAllocationRegisters<CallRuntimeVertex>(false, true);
+    CheckAllocationRegisters<CallRuntimeVertex>(true, true);
 }
 
 HWTEST_F_L0(ArkSteedRegisterAllocatorTest, FastAllocationPreservesLiveRegisters)
 {
     CheckAllocationRegisters<AllocateInYoungVertex>();
+    CheckAllocationRegisters<AllocateInYoungVertex>(true);
 }
 
 HWTEST_F_L0(ArkSteedRegisterAllocatorTest, YoungAllocationRuntimeSlots)
@@ -922,11 +960,11 @@ HWTEST_F_L0(ArkSteedRegisterAllocatorTest, YoungAllocationRuntimeSlots)
     EXPECT_EQ(graph.GetMaxCallStackArgs(), slow->GetInputCount());
     EXPECT_TRUE(slow->IsCall());
     EXPECT_TRUE(slow->CanAllocate());
-    // Generic flags are conservative; raw allocation has no recovery metadata.
+    // Generic flags are conservative; uninitialized allocation has no recovery metadata.
     EXPECT_TRUE(slow->CanThrow());
     EXPECT_FALSE(slow->CanEagerDeopt());
     EXPECT_TRUE(slow->CanLazyDeopt());
-    EXPECT_TRUE(slow->ReturnsRawAllocation());
+    EXPECT_TRUE(slow->ReturnsUninitializedAllocation());
     EXPECT_FALSE(slow->HasLazyDeoptFrameState());
     EXPECT_FALSE(slow->HasCatchBlock());
     EXPECT_FALSE(slow->HasExceptionLazyDeopt());
@@ -1022,7 +1060,7 @@ HWTEST_F_L0(ArkSteedRegisterAllocatorTest, EmptyArrayConstraints)
         &chunk,
         static_cast<size_t>(InitializeEmptyArrayVertex::NUM_INPUTS),
         static_cast<uint32_t>(JSArray::SIZE + JSTaggedValue::TaggedTypeSize()));
-    CheckInitializationConstraints(array, chunk, 2);
+    CheckInitializationConstraints(array, chunk, 1);
 }
 
 HWTEST_F_L0(ArkSteedRegisterAllocatorTest, BufferedArrayConstraints)
@@ -1033,10 +1071,10 @@ HWTEST_F_L0(ArkSteedRegisterAllocatorTest, BufferedArrayConstraints)
         &chunk,
         static_cast<size_t>(InitializeArrayWithBufferVertex::NUM_INPUTS),
         static_cast<uint32_t>(JSArray::SIZE + JSTaggedValue::TaggedTypeSize()));
-    CheckInitializationConstraints(array, chunk, 2);
+    CheckInitializationConstraints(array, chunk, 1);
     EXPECT_EQ(InitializeArrayWithBufferVertex::INPUT_TYPES[InitializeArrayWithBufferVertex::LITERAL_INDEX],
               ValueRepresentation::TAGGED);
-    EXPECT_EQ(array->GetInputCount(), 3U);
+    EXPECT_EQ(array->GetInputCount(), 4U);
     EXPECT_EQ(array->GetObjectSize(), JSArray::SIZE + JSTaggedValue::TaggedTypeSize());
 }
 
@@ -1073,16 +1111,6 @@ HWTEST_F_L0(ArkSteedRegisterAllocatorTest, SpillSlotsReuseStackSlotsOption)
 HWTEST_F_L0(ArkSteedRegisterAllocatorTest, SpillSlotsNegativeControlShiftsFreedPosition)
 {
     RunSpillSlotNegativeControl();
-}
-
-HWTEST_F_L0(ArkSteedRegisterAllocatorTest, RawYoungAllocationFastConstraints)
-{
-    NativeAreaAllocator native;
-    Chunk chunk {&native};
-    auto *allocation = Vertex::New<AllocateRawInYoungFastVertex>(
-        &chunk, static_cast<size_t>(AllocateRawInYoungFastVertex::NUM_INPUTS));
-    CheckAllocationConstraints(allocation, chunk, 1);
-    EXPECT_FALSE(allocation->IsCall()) << "inline allocation attempt unexpectedly became a call";
 }
 
 HWTEST_F_L0(ArkSteedRegisterAllocatorTest, InitializeUnmappedArgumentsElementsConstraints)

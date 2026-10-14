@@ -21,7 +21,7 @@
 //! CODEGEN_COUNT * PrepareEmptyArray * 0
 //! HAS_NOT BranchIfTaggedHeapObject
 //! COUNT Phi 1
-//! HAS_NOT LoadTaggedField
+//! COUNT LoadTaggedField 2
 //! HAS_NOT LoadInt32Field
 //! HAS_NOT BranchIfInt32Compare
 //! CODEGEN_COUNT * CheckYoungAllocation * 0

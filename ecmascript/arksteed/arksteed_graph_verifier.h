@@ -19,13 +19,14 @@
 #include "ecmascript/arksteed/arksteed_graph.h"
 #include "ecmascript/arksteed/arksteed_graph_processor.h"
 #include "ecmascript/arksteed/arksteed_vertex.h"
+#include "ecmascript/js_arguments.h"
 #include "ecmascript/js_array.h"
 #include "ecmascript/mem/chunk_containers.h"
 #include "ecmascript/mem/mem.h"
 
 namespace panda::ecmascript::arksteed {
 
-// The literal allocation contract is a checked allocation diamond:
+// The uninitialized allocation contract is a checked allocation diamond:
 //
 //   entry: CanAllocateInYoung --BranchIfTrue--> fastBlock
 //       \____________________________--> slowBlock (deferred)
@@ -33,10 +34,11 @@ namespace panda::ecmascript::arksteed {
 //   slowBlock: CallRuntime AllocateInYoung --> Jump(mergeBlock)
 //   mergeBlock: Phi(fast, slow) --> InitializeXXX --> rest
 //
-// The raw allocation may only feed the merge Phi, the merge Phi may only feed
-// the matching initializer, and no call, safepoint, deopt or exception exit may
-// sit between raw storage and the completed initialization. Gap moves inserted
-// by register allocation are the only permitted interruption.
+// The uninitialized allocation may only feed the merge Phi, the merge Phi may only feed
+// the matching initializer, and no GC-capable call, safepoint, deopt or exception
+// exit may sit between raw storage and initialization. Gap moves inserted by
+// register allocation are the only permitted intervening vertices. The arguments
+// object initializer internally permits only non-GC write-barrier calls.
 class ArkSteedGraphVerifier {
 public:
     explicit ArkSteedGraphVerifier(Chunk* chunk, bool afterRegalloc = false)
@@ -58,7 +60,7 @@ public:
 
     void PostProcessBlock(BB* block)
     {
-        if (pendingAllocation_ != nullptr && IsRawAllocation(pendingAllocation_)) {
+        if (pendingAllocation_ != nullptr && IsUninitializedAllocation(pendingAllocation_)) {
             // Allocation blocks must hand their raw storage to the merge block.
             ASSERT(block->GetControlVertex() != nullptr
                    && "Allocation block must end with a jump to the merge block");
@@ -93,7 +95,7 @@ public:
     // 2. Other vertex-specific checks include:
     //    - CallVertex: Validates FIRST_ARG_INDEX + actualArgc_ inputs
     //      (target, new target, this and arguments)
-    //    - CallRuntimeVertex: For raw allocation, validates the tagged integer
+    //    - CallRuntimeVertex: For uninitialized allocation, validates the tagged integer
     //      size and absence of recovery metadata; glue comes from the call ABI
     //    - CallCommonStubVertex: Validates GetInputCount() >= 1 (minimum glue
     //      parameter required for common stubs)
@@ -117,7 +119,8 @@ public:
             for (uint32_t i = 0; i < vertex->GetDeoptFrameValueCount(); ++i) {
                 auto* value = vertex->GetDeoptFrameValue(i);
                 ASSERT(value != nullptr);
-                ASSERT(!IsRawAllocation(value) && !IsAllocationPhi(value) && "Allocation escapes into frame state");
+                ASSERT(!IsUninitializedAllocation(value) && !IsAllocationPhi(value)
+                       && "Allocation escapes into frame state");
             }
         }
         // Verify all inputs have valid opcodes
@@ -127,7 +130,7 @@ public:
             VertexOpcode opcode = input->GetOpcode();
             ASSERT(opcode >= FIRST_OPCODE);
             ASSERT(opcode <= LAST_OPCODE);
-            if (IsRawAllocation(input)) {
+            if (IsUninitializedAllocation(input)) {
                 // Raw storage may only be consumed by the merge Phi; the Phi is
                 // validated by TryRegisterAllocationPhi below.
                 ASSERT((std::is_same_v<VertexT, PhiVertex>)&&"Allocation escapes initialization");
@@ -155,7 +158,7 @@ private:
         if (auto* phi = value->TryCast<PhiVertex>()) {
             for (uint32_t i = 0; i < phi->GetInputCount(); ++i) {
                 auto* input = phi->GetInput(i);
-                if (input != nullptr && IsRawAllocation(input)) {
+                if (input != nullptr && IsUninitializedAllocation(input)) {
                     return true;
                 }
             }
@@ -169,14 +172,81 @@ private:
         return std::is_same_v<VertexT, InitializeEmptyObjectVertex>
                || std::is_same_v<VertexT, InitializeObjectWithBufferVertex>
                || std::is_same_v<VertexT, InitializeEmptyArrayVertex>
-               || std::is_same_v<VertexT, InitializeArrayWithBufferVertex>;
+               || std::is_same_v<VertexT, InitializeArrayWithBufferVertex>
+               || std::is_same_v<VertexT, InitializeUnmappedArgumentsElementsVertex>
+               || std::is_same_v<VertexT, InitializeUnmappedArgumentsVertex>;
     }
 
-    static void VerifyStaticSize(uint32_t size, uint32_t minimumSize)
+    static void VerifyStaticSize(uint64_t size, uint32_t minimumSize)
     {
         ASSERT(size >= minimumSize);
         ASSERT(size <= MAX_REGULAR_HEAP_OBJECT_SIZE);
         ASSERT(size % JSTaggedValue::TaggedTypeSize() == 0);
+    }
+
+    static bool IsInt64Constant(ValueVertex* value, int64_t expected)
+    {
+        auto* constant = value->TryCast<Int64ConstantVertex>();
+        return constant != nullptr && constant->GetValue() == expected;
+    }
+
+    static void VerifyArgumentCount(ValueVertex* argc)
+    {
+        if (auto* constant = argc->TryCast<Int64ConstantVertex>()) {
+            ASSERT(constant->GetValue() >= NUM_MANDATORY_JSFUNC_ARGS);
+            ASSERT(constant->GetValue() - NUM_MANDATORY_JSFUNC_ARGS <= INT32_MAX);
+        } else {
+            // Only the frame ABI supplies a nonnegative, INT32 user count.
+            ASSERT(argc->Is<ActualArgcVertex>() && "Arguments require the actual frame count");
+        }
+    }
+
+    static void VerifyArgumentsElementsSize(ValueVertex* size, ValueVertex* argc)
+    {
+        VerifyArgumentCount(argc);
+        if (auto* constant = size->TryCast<Int64ConstantVertex>()) {
+            auto* count = argc->Cast<Int64ConstantVertex>();
+            int64_t expected = (count->GetValue() - NUM_MANDATORY_JSFUNC_ARGS) * JSTaggedValue::TaggedTypeSize()
+                               + TaggedArray::DATA_OFFSET;
+            ASSERT(constant->GetValue() == expected && "Arguments elements size must match the count");
+            return;
+        }
+        // Match the full-width formula, not a narrowed copy of either the count
+        // or the size: ((argc - mandatory) << slotShift) + dataOffset.
+        auto* add = size->Cast<I64AddVertex>();
+        ASSERT(IsInt64Constant(add->GetInput(I64AddVertex::RIGHT_INDEX), TaggedArray::DATA_OFFSET));
+        auto* shift = add->GetInput(I64AddVertex::LEFT_INDEX)->Cast<I64ShiftLeftVertex>();
+        ASSERT(shift->GetShift() == TAGGED_TYPE_SIZE_LOG);
+        auto* subtract = shift->GetInput(I64ShiftLeftVertex::INPUT_INDEX)->Cast<I64SubVertex>();
+        ASSERT(subtract->GetInput(I64SubVertex::LEFT_INDEX) == argc
+               && "Arguments elements size must match the count");
+        ASSERT(IsInt64Constant(subtract->GetInput(I64SubVertex::RIGHT_INDEX), NUM_MANDATORY_JSFUNC_ARGS));
+    }
+
+    static void VerifyTaggedSize(ValueVertex* taggedSize, ValueVertex* size)
+    {
+        if (auto* constant = taggedSize->TryCast<TaggedConstantVertex>()) {
+            auto* bytes = size->Cast<Int64ConstantVertex>();
+            ASSERT(JSTaggedValue(constant->GetValue()).GetLargeUInt() == static_cast<uint64_t>(bytes->GetValue())
+                   && "Allocation must match the checked size");
+            return;
+        }
+        auto* raw = taggedSize->Cast<RawI64ToTaggedVertex>();
+        auto* bits = raw->GetInput(RawI64ToTaggedVertex::INPUT_INDEX);
+        if (auto* constant = bits->TryCast<Int64ConstantVertex>()) {
+            // Keep the proof valid if the size/tag OR has been constant-folded.
+            auto* bytes = size->Cast<Int64ConstantVertex>();
+            ASSERT(static_cast<uint64_t>(constant->GetValue())
+                       == (static_cast<uint64_t>(bytes->GetValue()) | JSTaggedValue::TAG_INT)
+                   && "Allocation must match the checked size");
+            return;
+        }
+        auto* encoding = bits->Cast<I64BitwiseBinaryVertex>();
+        ASSERT(encoding->GetKind() == IntBitwiseKind::BITWISE_OR);
+        ASSERT(encoding->GetInput(I64BitwiseBinaryVertex::LEFT_INDEX) == size
+               && "Allocation must match the checked size");
+        ASSERT(IsInt64Constant(encoding->GetInput(I64BitwiseBinaryVertex::RIGHT_INDEX),
+                               static_cast<int64_t>(JSTaggedValue::TAG_INT)));
     }
 
     // Records the merge Phi of the fast and slow allocation blocks and makes it
@@ -193,7 +263,7 @@ private:
             fast = phi->GetInput(1)->TryCast<AllocateInYoungVertex>();
             slow = phi->GetInput(0)->TryCast<CallRuntimeVertex>();
         }
-        ASSERT(fast != nullptr && slow != nullptr && slow->ReturnsRawAllocation()
+        ASSERT(fast != nullptr && slow != nullptr && slow->ReturnsUninitializedAllocation()
                && "Allocation merge Phi requires one fast and one slow allocation");
         ASSERT(allocationBlocks_.count(fast) != 0 && allocationBlocks_.count(slow) != 0);
         BB* mergeBlock = state.GetBlock();
@@ -217,9 +287,13 @@ private:
     template<typename VertexT>
     void VerifyInitializer(VertexT* vertex)
     {
-        static_assert(!IsCall(VertexT::PROPERTIES) && !IsDeferredCall(VertexT::PROPERTIES)
-                      && !CanAllocate(VertexT::PROPERTIES) && !CanDeopt(VertexT::PROPERTIES)
-                      && !CanThrow(VertexT::PROPERTIES));
+        static_assert(!IsCall(VertexT::PROPERTIES) && !CanAllocate(VertexT::PROPERTIES)
+                      && !CanDeopt(VertexT::PROPERTIES) && !CanThrow(VertexT::PROPERTIES));
+        // The arguments object uses only non-GC write-barrier calls. Its emitter
+        // preserves the working registers and has no safepoint or recovery exit.
+        // This exception is local to that initializer, not all deferred calls.
+        static_assert(!IsDeferredCall(VertexT::PROPERTIES)
+                      || std::is_same_v<VertexT, InitializeUnmappedArgumentsVertex>);
         ASSERT(pendingAllocation_ != nullptr && "Initializer without allocation in this block");
         ASSERT(vertex->GetInput(VertexT::ALLOCATION_INDEX) == pendingAllocation_);
         // The pending Phi has already passed TryRegisterAllocationPhi.
@@ -228,8 +302,35 @@ private:
         if (fast == nullptr) {
             fast = phi->GetInput(1)->Cast<AllocateInYoungVertex>();
         }
-        ASSERT(vertex->GetInput(VertexT::GLUE_INDEX) == fast->GetInput(AllocateInYoungVertex::GLUE_INDEX));
+        if constexpr (!std::is_same_v<VertexT, InitializeUnmappedArgumentsElementsVertex>) {
+            ASSERT(vertex->GetInput(VertexT::GLUE_INDEX) == fast->GetInput(AllocateInYoungVertex::GLUE_INDEX));
+        }
         auto* size = fast->GetInput(AllocateInYoungVertex::SIZE_INDEX);
+        if constexpr (std::is_same_v<VertexT, InitializeUnmappedArgumentsElementsVertex>) {
+            // This installs the array header. LowerGetUnmappedArgs then fills
+            // every element in its safepoint-free copy loop before allocating
+            // the arguments object; the loop's barriers are non-GC calls.
+            VerifyArgumentsElementsSize(size, vertex->GetInput(VertexT::NUM_ARGS_INDEX));
+        } else if constexpr (std::is_same_v<VertexT, InitializeUnmappedArgumentsVertex>) {
+            auto* argc = vertex->GetInput(VertexT::NUM_ARGS_INDEX);
+            VerifyArgumentCount(argc);
+            auto* elements = vertex->GetInput(VertexT::ELEMENTS_INDEX)
+                                 ->template Cast<InitializeUnmappedArgumentsElementsVertex>();
+            ASSERT(elements->GetInput(InitializeUnmappedArgumentsElementsVertex::NUM_ARGS_INDEX) == argc
+                   && "Arguments object and elements must use the same count");
+            constexpr uint32_t objectSize
+                = JSArguments::GetInlinedPropertyOffset(JSArguments::LENGTH_OF_INLINE_PROPERTIES);
+            static_assert(JSHClass::DEFAULT_CAPACITY_OF_IN_OBJECTS == JSArguments::LENGTH_OF_INLINE_PROPERTIES);
+            ASSERT(IsInt64Constant(size, objectSize) && "Arguments object requires its static layout size");
+        } else {
+            VerifyLiteralInitializer(vertex, size);
+        }
+        pendingAllocation_ = nullptr;
+    }
+
+    template<typename VertexT>
+    static void VerifyLiteralInitializer(VertexT* vertex, ValueVertex* size)
+    {
         uint32_t objectSize;
         uint32_t rootIndex;
         if constexpr (std::is_same_v<VertexT, InitializeObjectWithBufferVertex>) {
@@ -243,6 +344,7 @@ private:
             if constexpr (std::is_same_v<VertexT, InitializeEmptyObjectVertex>) {
                 rootIndex = VertexT::HCLASS_INDEX;
                 VerifyStaticSize(objectSize, JSObject::SIZE);
+                ASSERT(vertex->GetInput(VertexT::SIZE_INDEX) == size);
             } else {
                 VerifyStaticSize(objectSize, JSArray::SIZE + JSTaggedValue::TaggedTypeSize());
                 if constexpr (std::is_same_v<VertexT, InitializeEmptyArrayVertex>) {
@@ -252,11 +354,10 @@ private:
                 }
             }
         }
-        ASSERT(size->template Cast<Int32ConstantVertex>()->GetValue() == static_cast<int32_t>(objectSize));
+        ASSERT(IsInt64Constant(size, objectSize) && "Literal allocation requires its static size");
         // These inputs are broker-protected heap constants, not raw pointers hidden in metadata.
         ASSERT(vertex->GetInput(rootIndex)->template Is<HeapConstantVertex>()
                && "Initializer requires a rooted constant");
-        pendingAllocation_ = nullptr;
     }
 
     template<typename VertexT>
@@ -264,8 +365,8 @@ private:
     {
         if constexpr (std::is_same_v<VertexT, AllocateInYoungVertex>
                       || std::is_same_v<VertexT, CallRuntimeVertex>) {
-            if (IsRawAllocation(vertex)) {
-                VerifyRawAllocation(vertex, state);
+            if (IsUninitializedAllocation(vertex)) {
+                VerifyUninitializedAllocation(vertex, state);
                 pendingAllocation_ = vertex;
                 return;
             }
@@ -294,14 +395,14 @@ private:
                 constexpr bool isPhiType = std::is_same_v<VertexT, PhiVertex>;
                 bool isRegisteredPhi = isPhiType && pendingAllocation_ == static_cast<Vertex*>(vertex);
                 ASSERT((isRegisteredPhi || (afterRegalloc_ && isMove)
-                        || (isMergeJump && IsRawAllocation(pendingAllocation_)))
+                        || (isMergeJump && IsUninitializedAllocation(pendingAllocation_)))
                        && "Illegal operation in initialization interval");
             }
         }
     }
 
     template<typename VertexT>
-    void VerifyRawAllocation(VertexT* vertex, const ArkSteedState& state)
+    void VerifyUninitializedAllocation(VertexT* vertex, const ArkSteedState& state)
     {
         static_assert(!IsDeferredCall(VertexT::PROPERTIES) && !CanEagerDeopt(VertexT::PROPERTIES));
         auto* block = state.GetBlock();
@@ -328,8 +429,14 @@ private:
         }
         ASSERT(foundCheck && "Capacity predicate must be scheduled in the checking block");
         auto* size = check->GetInput(CanAllocateInYoungVertex::SIZE_INDEX);
-        auto bytes = size->template Cast<Int32ConstantVertex>()->GetValue();
-        VerifyStaticSize(static_cast<uint32_t>(bytes), JSObject::SIZE);
+        ASSERT(size->GetValueRepresentation() == ValueRepresentation::INT64);
+        if (auto* constant = size->template TryCast<Int64ConstantVertex>()) {
+            auto bytes = static_cast<uint64_t>(constant->GetValue());
+            ASSERT(bytes >= TaggedArray::DATA_OFFSET && (bytes & JSTaggedValue::TAG_MARK) == 0);
+            ASSERT(bytes % JSTaggedValue::TaggedTypeSize() == 0);
+        }
+        // The matching initializer proves the size's source and layout. Literal
+        // sizes remain regular constants; argument elements may be huge.
         if constexpr (std::is_same_v<VertexT, AllocateInYoungVertex>) {
             static_assert(!IsCall(VertexT::PROPERTIES) && !CanDeopt(VertexT::PROPERTIES)
                           && !CanThrow(VertexT::PROPERTIES) && CanAllocate(VertexT::PROPERTIES));
@@ -339,10 +446,8 @@ private:
             ASSERT(branch->IfTrue() == block && "Fast allocation requires the successful check edge");
         } else {
             static_assert(IsCall(VertexT::PROPERTIES) && CanAllocate(VertexT::PROPERTIES));
-            // Runtime argv contains only tagged size; glue comes from the call ABI.
-            auto* taggedSize = vertex->GetInput(0)->template Cast<TaggedConstantVertex>();
-            ASSERT(JSTaggedValue(taggedSize->GetValue()).GetInt() == bytes
-                   && "Allocation must match the checked size");
+            // Runtime argv starts with tagged size and may include HClass; glue comes from the call ABI.
+            VerifyTaggedSize(vertex->GetInput(0), size);
             ASSERT(branch->IfFalse() == block && "Slow allocation requires the failed check edge");
         }
         ASSERT(!block->HasPhi() && "Allocation block must preserve checked inputs");

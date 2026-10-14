@@ -430,9 +430,37 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, AllocateInYoungHasNoSideEffect)
     auto* vertex
         = Vertex::New<AllocateInYoungVertex>(&chunk_, static_cast<size_t>(AllocateInYoungVertex::NUM_INPUTS));
     vertex->SetInput(AllocateInYoungVertex::GLUE_INDEX, NewInt64());
-    vertex->SetInput(AllocateInYoungVertex::SIZE_INDEX, NewInt32());
+    vertex->SetInput(AllocateInYoungVertex::SIZE_INDEX, NewInt64());
 
     ExpectEffectWithoutLocation(Classifier::Classify(vertex), SideEffectKind::NO_SIDE_EFFECT);
+}
+
+HWTEST_F_L0(ArkSteedSideEffectClassifierTest, UninitializedAllocationRuntimeInvalidatesFacts)
+{
+    auto* size = NewTagged();
+    auto* hclass = NewTagged();
+    auto* sizeOnly = Vertex::New<CallRuntimeVertex>(
+        &chunk_, std::initializer_list<ValueVertex*> {size}, RTSTUB_ID(AllocateInYoung));
+    auto* withHClass = Vertex::New<CallRuntimeVertex>(
+        &chunk_, std::initializer_list<ValueVertex*> {size, hclass}, RTSTUB_ID(AllocateInYoung));
+    for (auto* vertex: {sizeOnly, withHClass}) {
+        EXPECT_TRUE(vertex->ReturnsUninitializedAllocation());
+        EXPECT_TRUE(vertex->IsCall());
+        EXPECT_TRUE(vertex->CanAllocate());
+        EXPECT_TRUE(vertex->CanThrow());
+        EXPECT_TRUE(vertex->CanLazyDeopt());
+        ExpectEffectWithoutLocation(Classifier::Classify(vertex), SideEffectKind::UNKNOWN_CALL);
+    }
+}
+
+HWTEST_F_L0(ArkSteedSideEffectClassifierTest, ArgumentsInitializersAreSafe)
+{
+    auto* elements = Vertex::New<InitializeUnmappedArgumentsElementsVertex>(
+        &chunk_, static_cast<size_t>(InitializeUnmappedArgumentsElementsVertex::NUM_INPUTS));
+    auto* arguments = Vertex::New<InitializeUnmappedArgumentsVertex>(
+        &chunk_, static_cast<size_t>(InitializeUnmappedArgumentsVertex::NUM_INPUTS));
+    ExpectEffectWithoutLocation(Classifier::Classify(elements), SideEffectKind::SAFE_CALL);
+    ExpectEffectWithoutLocation(Classifier::Classify(arguments), SideEffectKind::SAFE_CALL);
 }
 
 HWTEST_F_L0(ArkSteedSideEffectClassifierTest, InitializeEmptyArrayIsSafe)
@@ -444,6 +472,7 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, InitializeEmptyArrayIsSafe)
     vertex->SetInput(InitializeEmptyArrayVertex::ALLOCATION_INDEX, NewTagged());
     vertex->SetInput(InitializeEmptyArrayVertex::GLUE_INDEX, NewInt64());
     vertex->SetInput(InitializeEmptyArrayVertex::GLOBAL_ENV_INDEX, NewTagged());
+    vertex->SetInput(InitializeEmptyArrayVertex::HCLASS_INDEX, NewTagged());
 
     ExpectEffectWithoutLocation(Classifier::Classify(vertex), SideEffectKind::SAFE_CALL);
 }
@@ -457,7 +486,7 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, InitializeEmptyObjectIsSafe)
     vertex->SetInput(InitializeEmptyObjectVertex::ALLOCATION_INDEX, NewTagged());
     vertex->SetInput(InitializeEmptyObjectVertex::GLUE_INDEX, NewInt64());
     vertex->SetInput(InitializeEmptyObjectVertex::HCLASS_INDEX, NewTagged());
-    vertex->SetInput(InitializeEmptyObjectVertex::SIZE_INDEX, NewInt32());
+    vertex->SetInput(InitializeEmptyObjectVertex::SIZE_INDEX, NewInt64());
 
     ExpectEffectWithoutLocation(Classifier::Classify(vertex), SideEffectKind::SAFE_CALL);
 }

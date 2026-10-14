@@ -16,34 +16,38 @@
 //! PARAMS --compiler-jit-hotness-threshold=2000 --enable-pgo-profiler=true
 
 //! METHOD strDoubleBang
-//! HAS CallCommonStub ToBooleanTrue
-//! COUNT DeoptIfNotBoolean 1
+//! COUNT CallCommonStub ToBooleanFalse 1
+//! COUNT TaggedNotEqual 1
+//! HAS_NOT DeoptIfNotBoolean
 //! HAS_NOT DeoptIfNotNumber
 //! HAS_NOT DeoptIfNotUndefinedOrNull
 
 //! METHOD objDoubleBang
-//! HAS CallCommonStub ToBooleanTrue
-//! COUNT DeoptIfNotBoolean 1
+//! COUNT CallCommonStub ToBooleanFalse 1
+//! COUNT TaggedNotEqual 1
+//! HAS_NOT DeoptIfNotBoolean
 //! HAS_NOT DeoptIfNotNumber
 //! HAS_NOT DeoptIfNotUndefinedOrNull
 
 //! METHOD bigintDoubleBang
-//! HAS CallCommonStub ToBooleanTrue
-//! COUNT DeoptIfNotBoolean 1
+//! COUNT CallCommonStub ToBooleanFalse 1
+//! COUNT TaggedNotEqual 1
+//! HAS_NOT DeoptIfNotBoolean
 //! HAS_NOT DeoptIfNotNumber
 
 //! METHOD mixedDoubleBang
-//! HAS CallCommonStub ToBooleanTrue
-//! COUNT DeoptIfNotBoolean 1
+//! COUNT CallCommonStub ToBooleanFalse 1
+//! COUNT TaggedNotEqual 1
+//! HAS_NOT DeoptIfNotBoolean
 //! HAS_NOT DeoptIfNotNumber
 
 //! METHOD strNegate
-//! HAS CallCommonStub ToBooleanTrue
+//! COUNT CallCommonStub ToBooleanFalse 1
 //! HAS_NOT DeoptIfNotNumber
 //! HAS_NOT DeoptIfNotUndefinedOrNull
 
 //! METHOD objNegate
-//! HAS CallCommonStub ToBooleanTrue
+//! COUNT CallCommonStub ToBooleanFalse 1
 //! HAS_NOT DeoptIfNotNumber
 //! HAS_NOT DeoptIfNotUndefinedOrNull
 

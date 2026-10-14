@@ -263,7 +263,7 @@ void InitializeEmptyArrayVertex::SetValueLocationConstraints()
     for (uint32_t index = 0; index < NUM_INPUTS; ++index) {
         UseRegister(Arg(index));
     }
-    SetTemporariesNeeded(2);
+    SetTemporariesNeeded(1);
 }
 
 void InitializeArrayWithBufferVertex::SetValueLocationConstraints()
@@ -272,15 +272,7 @@ void InitializeArrayWithBufferVertex::SetValueLocationConstraints()
     for (uint32_t index = 0; index < NUM_INPUTS; ++index) {
         UseRegister(Arg(index));
     }
-    SetTemporariesNeeded(2);
-}
-
-void AllocateRawInYoungFastVertex::SetValueLocationConstraints()
-{
-    DefineAsRegister(this);
     SetTemporariesNeeded(1);
-    UseRegister(Arg(GLUE_INDEX));
-    UseRegister(Arg(SIZE_INDEX));
 }
 
 void InitializeUnmappedArgumentsElementsVertex::SetValueLocationConstraints()
@@ -288,7 +280,7 @@ void InitializeUnmappedArgumentsElementsVertex::SetValueLocationConstraints()
     DefineAsRegister(this);
     SetTemporariesNeeded(1);
     UseRegister(Arg(NUM_ARGS_INDEX));
-    UseRegister(Arg(RAW_ADDRESS_INDEX));
+    UseRegister(Arg(ALLOCATION_INDEX));
     UseRegister(Arg(HCLASS_INDEX));
 }
 
@@ -298,7 +290,7 @@ void InitializeUnmappedArgumentsVertex::SetValueLocationConstraints()
     SetTemporariesNeeded(3);  // value and two internally acquired write-barrier region scratches
     UseRegister(Arg(GLUE_INDEX));
     UseRegister(Arg(NUM_ARGS_INDEX));
-    UseRegister(Arg(RAW_ADDRESS_INDEX));
+    UseRegister(Arg(ALLOCATION_INDEX));
     UseRegister(Arg(ELEMENTS_INDEX));
     UseRegister(Arg(GLOBAL_ENV_INDEX));
     UseRegister(Arg(HCLASS_INDEX));

@@ -36,6 +36,7 @@
 #include "ecmascript/js_object.h"
 #include "ecmascript/mem/chunk_containers.h"
 #include "ecmascript/on_heap.h"
+#include "ecmascript/tagged_array.h"
 
 namespace panda::ecmascript::arksteed {
 using CommonStubID = kungfu::CommonStubCSigns::ID;
@@ -1483,7 +1484,7 @@ public:
         ValueRepresentation::TAGGED,
         ValueRepresentation::INT_PTR,
         ValueRepresentation::TAGGED,
-        ValueRepresentation::INT32,
+        ValueRepresentation::INT64,
     };
     static constexpr VertexPropertyFlag PROPERTIES
         = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::IS_NOT_IDEMPOTENT;
@@ -1517,12 +1518,14 @@ public:
         ALLOCATION_INDEX = 0,
         GLUE_INDEX = 1,
         LITERAL_INDEX = 2,
-        NUM_INPUTS = 3,
+        HCLASS_INDEX = 3,
+        NUM_INPUTS = 4,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::TAGGED,
         ValueRepresentation::INT_PTR,
+        ValueRepresentation::TAGGED,
         ValueRepresentation::TAGGED,
     };
     static constexpr VertexPropertyFlag PROPERTIES
@@ -1774,21 +1777,34 @@ public:
         return sideEffectKind_;
     }
 
-    // Only the single-size overload returns storage without an object header.
-    bool ReturnsRawAllocation() const
+    // Installing an HClass does not initialize the remaining object fields.
+    bool ReturnsUninitializedAllocation() const
     {
-        return GetRuntimeStubID() == RTSTUB_ID(AllocateInYoung) && GetArgCount() == 1;
+        return GetRuntimeStubID() == RTSTUB_ID(AllocateInYoung);
     }
 
     void SetValueLocationConstraints();
 
     void VerifyInputs() const
     {
-        if (ReturnsRawAllocation()) {
-            ASSERT(GetInput(0)->Is<TaggedConstantVertex>() && "Raw allocation requires a tagged constant size");
-            ASSERT(JSTaggedValue(GetInput(0)->Cast<TaggedConstantVertex>()->GetValue()).IsInt());
+        if (ReturnsUninitializedAllocation()) {
+            ASSERT((GetArgCount() == 1 || GetArgCount() == 2) && "Allocation requires size and an optional HClass");
+            ASSERT(GetInput(0)->GetValueRepresentation() == ValueRepresentation::TAGGED
+                   && "Allocation requires a tagged size");
+            if (GetArgCount() == 2) {
+                ASSERT(GetInput(1)->GetValueRepresentation() == ValueRepresentation::TAGGED
+                       && "Allocation requires a tagged HClass");
+            }
+            if (auto* constant = GetInput(0)->TryCast<TaggedConstantVertex>()) {
+                auto size = JSTaggedValue(constant->GetValue());
+                ASSERT(size.IsInt());
+                ASSERT(size.GetLargeUInt() >= TaggedArray::DATA_OFFSET
+                       && size.GetLargeUInt() % JSTaggedValue::TaggedTypeSize() == 0);
+            }
+            // The graph verifier proves that the tagged payload is the exact
+            // checked INT64 size, including the dynamic encoding chain.
             ASSERT(!HasLazyDeoptFrameState() && !HasCatchBlock() && !HasExceptionLazyDeopt()
-                   && "Raw allocation must proceed directly to initialization");
+                   && "Allocation must proceed directly to initialization");
         }
     }
 
@@ -2020,35 +2036,6 @@ private:
     uint32_t expectedParameterCount_;
 };
 
-/**
- * Performs only the inline young-space allocation attempt. The graph builder
- * must route Hole to the GC-capable runtime allocator before exposing the
- * allocation result to an object initializer.
- */
-class AllocateRawInYoungFastVertex
-    : public FixedInputVertexMixin<ValueVertex, AllocateRawInYoungFastVertex> {
-public:
-    enum Indices : uint32_t {
-        GLUE_INDEX = 0,
-        SIZE_INDEX = 1,
-        NUM_INPUTS = 2,
-    };
-
-    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
-    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
-        ValueRepresentation::INT_PTR,
-        ValueRepresentation::INT64,
-    };
-    static constexpr VertexPropertyFlag PROPERTIES =
-        VertexPropertyFlag::CAN_READ |
-        VertexPropertyFlag::CAN_WRITE |
-        VertexPropertyFlag::CAN_ALLOCATE;
-
-    explicit AllocateRawInYoungFastVertex() : FixedInputVertexMixin() {}
-
-    void SetValueLocationConstraints();
-};
-
 // Reads the current allocation protocol and unsigned bump capacity, returning
 // tagged true or false without allocating. The result is a transient snapshot:
 // each allocation needs a fresh check, even when glue and size are unchanged.
@@ -2058,7 +2045,7 @@ public:
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::INT_PTR,
-        ValueRepresentation::INT32,
+        ValueRepresentation::INT64,
     };
     static constexpr VertexPropertyFlag PROPERTIES
         = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::IS_NOT_IDEMPOTENT;
@@ -2076,7 +2063,7 @@ public:
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::INT_PTR,
-        ValueRepresentation::INT32,
+        ValueRepresentation::INT64,
     };
     // The fast path has ordinary register constraints; the slow node carries the call ABI.
     static constexpr VertexPropertyFlag PROPERTIES
@@ -2086,19 +2073,27 @@ public:
     void SetValueLocationConstraints();
 };
 
-inline bool IsRawAllocation(const Vertex* vertex)
+inline bool IsUninitializedAllocation(const Vertex* vertex)
 {
     auto* call = vertex->TryCast<CallRuntimeVertex>();
-    return vertex->Is<AllocateInYoungVertex>() || (call != nullptr && call->ReturnsRawAllocation());
+    return vertex->Is<AllocateInYoungVertex>() || (call != nullptr && call->ReturnsUninitializedAllocation());
 }
 
 // The realm is a protected input: glue's current environment need not belong to this function.
 class InitializeEmptyArrayVertex : public FixedInputVertexMixin<ValueVertex, InitializeEmptyArrayVertex> {
 public:
-    enum Indices : uint32_t { ALLOCATION_INDEX = 0, GLUE_INDEX = 1, GLOBAL_ENV_INDEX = 2, NUM_INPUTS = 3 };
+    enum Indices : uint32_t {
+        ALLOCATION_INDEX = 0,
+        GLUE_INDEX = 1,
+        GLOBAL_ENV_INDEX = 2,
+        HCLASS_INDEX = 3,
+        NUM_INPUTS = 4
+    };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
-    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES
-        = {ValueRepresentation::TAGGED, ValueRepresentation::INT_PTR, ValueRepresentation::TAGGED};
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {ValueRepresentation::TAGGED,
+                                                                         ValueRepresentation::INT_PTR,
+                                                                         ValueRepresentation::TAGGED,
+                                                                         ValueRepresentation::TAGGED};
     static constexpr VertexPropertyFlag PROPERTIES
         = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::IS_NOT_IDEMPOTENT;
 
@@ -2115,10 +2110,18 @@ private:
 
 class InitializeArrayWithBufferVertex : public FixedInputVertexMixin<ValueVertex, InitializeArrayWithBufferVertex> {
 public:
-    enum Indices : uint32_t { ALLOCATION_INDEX = 0, GLUE_INDEX = 1, LITERAL_INDEX = 2, NUM_INPUTS = 3 };
+    enum Indices : uint32_t {
+        ALLOCATION_INDEX = 0,
+        GLUE_INDEX = 1,
+        LITERAL_INDEX = 2,
+        HCLASS_INDEX = 3,
+        NUM_INPUTS = 4
+    };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
-    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES
-        = {ValueRepresentation::TAGGED, ValueRepresentation::INT_PTR, ValueRepresentation::TAGGED};
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {ValueRepresentation::TAGGED,
+                                                                         ValueRepresentation::INT_PTR,
+                                                                         ValueRepresentation::TAGGED,
+                                                                         ValueRepresentation::TAGGED};
     static constexpr VertexPropertyFlag PROPERTIES
         = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::IS_NOT_IDEMPOTENT;
 
@@ -2142,7 +2145,7 @@ class InitializeUnmappedArgumentsElementsVertex
 public:
     enum Indices : uint32_t {
         NUM_ARGS_INDEX = 0,
-        RAW_ADDRESS_INDEX = 1,
+        ALLOCATION_INDEX = 1,
         HCLASS_INDEX = 2,
         NUM_INPUTS = 3,
     };
@@ -2174,7 +2177,7 @@ public:
     enum Indices : uint32_t {
         GLUE_INDEX = 0,
         NUM_ARGS_INDEX = 1,
-        RAW_ADDRESS_INDEX = 2,
+        ALLOCATION_INDEX = 2,
         ELEMENTS_INDEX = 3,
         GLOBAL_ENV_INDEX = 4,
         HCLASS_INDEX = 5,

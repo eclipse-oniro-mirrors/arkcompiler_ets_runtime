@@ -22,7 +22,7 @@
 //! COUNT CallRuntime AllocateInYoung 1
 //! COUNT CanAllocateInYoung 1
 //! COUNT BranchIfTrue 1
-//! HAS_NOT LoadTaggedField
+//! COUNT LoadTaggedField 1 # Load the literal HClass before allocation.
 //! HAS_NOT LoadInt32Field
 //! HAS_NOT CallRuntime CreateObjectWithBuffer
 //! COUNT AllocateInYoung 1

@@ -3386,12 +3386,25 @@ struct GraphBuilder::BytecodeVisitor {
 
     // -------- Category #9: Object/Array Creation --------
 
-    // Builds the shared fast/slow allocation structure for all four literal
-    // creations: check configuration and bump capacity, bump-allocate on the
+    // Builds the shared fast/slow allocation structure for constant and runtime
+    // sizes: check configuration and bump capacity, bump-allocate on the
     // fast path or call the runtime allocator on the deferred slow path, then
     // merge both raw addresses in a Phi for the following initializer.
-    ValueVertex* AllocateInYoung(ValueVertex* size)
+    ValueVertex* AllocateInYoung(ValueVertex* size, ValueVertex* hclass)
     {
+        ASSERT(size->GetValueRepresentation() == ValueRepresentation::INT64);
+        ValueVertex* taggedSize;
+        if (auto* constant = size->TryCast<Int64ConstantVertex>()) {
+            taggedSize = self->graph_->GetTaggedConstant(static_cast<uint64_t>(constant->GetValue())
+                                                         | JSTaggedValue::TAG_INT);
+        } else {
+            auto* tag = self->graph_->GetInt64Constant(static_cast<int64_t>(JSTaggedValue::TAG_INT));
+            auto* bits = self->NewVertex<I64BitwiseBinaryVertex>(
+                compileInfoFacts_, currentBlock, {size, tag}, IntBitwiseKind::BITWISE_OR);
+            taggedSize = self->NewVertex<RawI64ToTaggedVertex>(compileInfoFacts_, currentBlock, {bits});
+        }
+        // Encode the full size before the capacity check, keeping both allocation
+        // edges and the raw-storage initialization interval free of conversions.
         CompileInfoFacts* entryFacts = compileInfoFacts_;
         BB* fastBlock = self->NewBlock();
         BB* slowBlock = self->NewBlock();
@@ -3410,11 +3423,9 @@ struct GraphBuilder::BytecodeVisitor {
 
         currentBlock = slowBlock;
         compileInfoFacts_ = entryFacts->Clone();
-        ASSERT(size->Is<Int32ConstantVertex>());
-        auto* taggedSize = TaggedConstantFromInt32(size->Cast<Int32ConstantVertex>()->GetValue());
-        // Raw storage is not a completed bytecode result: attach neither catch nor lazy-deopt state.
+        // The HClass alone does not complete initialization: attach no catch or lazy-deopt state.
         auto* slowAllocation = self->NewVertex<CallRuntimeVertex>(
-            compileInfoFacts_, currentBlock, {taggedSize}, RTSTUB_ID(AllocateInYoung));
+            compileInfoFacts_, currentBlock, {taggedSize, hclass}, RTSTUB_ID(AllocateInYoung));
         self->FinishBlockWithJump(currentBlock, doneBlock);
 
         currentBlock = doneBlock;
@@ -3439,8 +3450,8 @@ struct GraphBuilder::BytecodeVisitor {
             compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::OTHER_JS_RECEIVER);
             return;
         }
-        ValueVertex* size = self->graph_->GetInt32Constant(static_cast<int32_t>(objectSize));
-        auto* allocation = AllocateInYoung(size);
+        ValueVertex* size = self->graph_->GetInt64Constant(static_cast<int64_t>(objectSize));
+        auto* allocation = AllocateInYoung(size, hclass);
         auto* object = self->NewVertex<InitializeEmptyObjectVertex>(
             compileInfoFacts_, currentBlock, {allocation, glue, hclass, size}, objectSize);
         frameState.SetAcc(object);
@@ -3463,10 +3474,16 @@ struct GraphBuilder::BytecodeVisitor {
         if (globalEnv == nullptr) {
             array = CommonStubCallToAccWithLazyDeopt({glue, GlobalEnv()}, CommonStubID::CreateEmptyArray);
         } else {
-            ValueVertex* size = self->graph_->GetInt32Constant(static_cast<int32_t>(objectSize));
-            auto* allocation = AllocateInYoung(size);
+            constexpr int32_t arrayFunctionOffset
+                = GlobalEnv::HEADER_SIZE + GlobalEnv::ARRAY_FUNCTION_INDEX * JSTaggedValue::TaggedTypeSize();
+            auto* arrayFunction = self->NewVertex<LoadTaggedFieldVertex>(
+                compileInfoFacts_, currentBlock, {globalEnv}, arrayFunctionOffset);
+            auto* hclass = self->NewVertex<LoadTaggedFieldVertex>(
+                compileInfoFacts_, currentBlock, {arrayFunction}, JSFunction::PROTO_OR_DYNCLASS_OFFSET);
+            ValueVertex* size = self->graph_->GetInt64Constant(static_cast<int64_t>(objectSize));
+            auto* allocation = AllocateInYoung(size, hclass);
             array = self->NewVertex<InitializeEmptyArrayVertex>(
-                compileInfoFacts_, currentBlock, {allocation, glue, globalEnv}, objectSize);
+                compileInfoFacts_, currentBlock, {allocation, glue, globalEnv, hclass}, objectSize);
         }
         frameState.SetAcc(array);
         compileInfoFacts_->EnsureType(array, NodeInfo::NodeType::JS_ARRAY);
@@ -3511,10 +3528,12 @@ struct GraphBuilder::BytecodeVisitor {
             return;
         }
 
-        ValueVertex* size = self->graph_->GetInt32Constant(static_cast<int32_t>(info.objectSize));
-        auto* allocation = AllocateInYoung(size);
+        auto* hclass = self->NewVertex<LoadTaggedFieldVertex>(
+            compileInfoFacts_, currentBlock, {literal}, TaggedObject::HCLASS_OFFSET);
+        ValueVertex* size = self->graph_->GetInt64Constant(static_cast<int64_t>(info.objectSize));
+        auto* allocation = AllocateInYoung(size, hclass);
         auto* object = self->NewVertex<InitializeObjectWithBufferVertex>(
-            compileInfoFacts_, currentBlock, {allocation, glue, literal}, info);
+            compileInfoFacts_, currentBlock, {allocation, glue, literal, hclass}, info);
         frameState.SetAcc(object);
         compileInfoFacts_->EnsureType(object, NodeInfo::NodeType::OTHER_JS_RECEIVER);
     }
@@ -3552,10 +3571,12 @@ struct GraphBuilder::BytecodeVisitor {
             array = CommonStubCallToAccWithLazyDeopt({glue, index, jsFunc, slotId, GlobalEnv()},
                                                      CommonStubID::CreateArrayWithBuffer);
         } else {
-            ValueVertex* size = self->graph_->GetInt32Constant(static_cast<int32_t>(objectSize));
-            auto* allocation = AllocateInYoung(size);
+            auto* hclass = self->NewVertex<LoadTaggedFieldVertex>(
+                compileInfoFacts_, currentBlock, {literal}, TaggedObject::HCLASS_OFFSET);
+            ValueVertex* size = self->graph_->GetInt64Constant(static_cast<int64_t>(objectSize));
+            auto* allocation = AllocateInYoung(size, hclass);
             array = self->NewVertex<InitializeArrayWithBufferVertex>(
-                compileInfoFacts_, currentBlock, {allocation, glue, literal}, objectSize);
+                compileInfoFacts_, currentBlock, {allocation, glue, literal, hclass}, objectSize);
             frameState.SetAcc(array);
             compileInfoFacts_->EnsureType(array, NodeInfo::NodeType::JS_ARRAY);
         }
@@ -4155,7 +4176,6 @@ struct GraphBuilder::BytecodeVisitor {
             compileInfoFacts_, currentBlock,
             {numArgs, self->graph_->GetInt64Constant(static_cast<int64_t>(mandatoryArgc))});
 
-        CompileInfoFacts *entryFacts = compileInfoFacts_;
         BB *loopHeader = self->NewBlock();
         BB *loopBody = self->NewBlock();
         BB *loopExit = self->NewBlock();
@@ -4172,7 +4192,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *elementsSize = self->NewVertex<I64AddVertex>(
             compileInfoFacts_, currentBlock,
             {elementsDataSize, self->graph_->GetInt64Constant(static_cast<int64_t>(TaggedArray::DATA_OFFSET))});
-        ValueVertex *rawElements = AllocateRawInYoung(elementsSize, elementsHClass);
+        ValueVertex* rawElements = AllocateInYoung(elementsSize, elementsHClass);
         ValueVertex *elements = self->NewVertex<InitializeUnmappedArgumentsElementsVertex>(
             compileInfoFacts_, currentBlock, {numArgs, rawElements, elementsHClass});
 
@@ -4182,6 +4202,10 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *argumentCount = self->NewVertex<LoadInt32FieldVertex>(
             compileInfoFacts_, currentBlock, {elements}, static_cast<int32_t>(TaggedArray::LENGTH_OFFSET));
         JumpVertex *entryJump = self->FinishBlockWithJump(currentBlock, loopHeader);
+        // Preserve the runtime allocation's invalidation. Loop writes also
+        // invalidate facts, including on the exit reached after any iteration.
+        compileInfoFacts_->OnSideEffect();
+        CompileInfoFacts* entryFacts = compileInfoFacts_;
 
         currentBlock = loopHeader;
         compileInfoFacts_ = entryFacts->Clone();
@@ -4220,55 +4244,13 @@ struct GraphBuilder::BytecodeVisitor {
             compileInfoFacts_, currentBlock, {globalEnv}, static_cast<int32_t>(argumentsClassOffset));
         ValueVertex *argumentsSize =
             self->graph_->GetInt64Constant(static_cast<int64_t>(argumentsObjectSize));
-        ValueVertex *rawArguments = AllocateRawInYoung(argumentsSize, argumentsHClass);
+        ValueVertex* rawArguments = AllocateInYoung(argumentsSize, argumentsHClass);
         ValueVertex *arguments = self->NewVertex<InitializeUnmappedArgumentsVertex>(
             compileInfoFacts_, currentBlock,
             {glue, numArgs, rawArguments, elements, globalEnv, argumentsHClass});
         compileInfoFacts_->OnSideEffect();
         compileInfoFacts_->EnsureType(arguments, NodeInfo::NodeType::OTHER_JS_RECEIVER);
         frameState.SetAcc(arguments);
-    }
-
-    ValueVertex *AllocateRawInYoung(ValueVertex *size, ValueVertex *hclass)
-    {
-        ASSERT(size->GetValueRepresentation() == ValueRepresentation::INT64);
-        ASSERT(hclass != nullptr);
-        ASSERT(hclass->GetValueRepresentation() == ValueRepresentation::TAGGED);
-        ValueVertex *fastAddress = self->NewVertex<AllocateRawInYoungFastVertex>(
-            compileInfoFacts_, currentBlock, {glue, size});
-        ValueVertex *hole = self->graph_->GetTaggedConstant(JSTaggedValue::VALUE_HOLE);
-
-        CompileInfoFacts *entryFacts = compileInfoFacts_;
-        BB *slowBlock = self->NewBlock();
-        BB *fastBlock = self->NewBlock();
-        BB *doneBlock = self->NewBlock();
-        slowBlock->SetDeferred(true);
-        self->FinishBlockWithBranch<BranchIfReferenceEqualVertex>(
-            currentBlock, {fastAddress, hole}, slowBlock, fastBlock);
-
-        currentBlock = slowBlock;
-        compileInfoFacts_ = entryFacts->Clone();
-        ValueVertex *tagMask = self->graph_->GetInt64Constant(
-            static_cast<int64_t>(JSTaggedValue::TAG_INT));
-        ValueVertex *taggedSizeBits = self->NewVertex<I64BitwiseBinaryVertex>(
-            compileInfoFacts_, currentBlock, {size, tagMask}, IntBitwiseKind::BITWISE_OR);
-        ValueVertex *taggedSize = self->NewVertex<RawI64ToTaggedVertex>(
-            compileInfoFacts_, currentBlock, {taggedSizeBits});
-        ValueVertex *slowAddress = RuntimeCall({taggedSize, hclass}, RTSTUB_ID(AllocateInYoung),
-                                               SideEffectKind::SAFE_CALL);
-        JumpVertex *slowJump = self->FinishBlockWithJump(currentBlock, doneBlock);
-
-        currentBlock = fastBlock;
-        compileInfoFacts_ = entryFacts->Clone();
-        JumpVertex *fastJump = self->FinishBlockWithJump(currentBlock, doneBlock);
-
-        currentBlock = doneBlock;
-        compileInfoFacts_ = entryFacts;
-        compileInfoFacts_->OnSideEffect();
-        PhiVertex *address = self->NewPhiVertex(currentBlock, 2, self->AccIndex());
-        address->SetPredecessor(slowJump->GetPredecessorId(), slowAddress);
-        address->SetPredecessor(fastJump->GetPredecessorId(), fastAddress);
-        return address;
     }
 
     void LowerCopyRestArgs(const BytecodeInfo *bcInfo)

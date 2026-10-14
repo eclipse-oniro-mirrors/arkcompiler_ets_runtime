@@ -1417,6 +1417,11 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CanAllocateInYoungVertex>(CanA
 #ifdef ECMASCRIPT_SUPPORT_HEAPSAMPLING
     __ JumpIfHeapSamplingActive(glue, top, &done);
 #endif
+    // Bound the full INT64 size before adding it to a heap address. Huge
+    // objects use the runtime allocator even when the bump region has space.
+    static_assert(MAX_REGULAR_HEAP_OBJECT_SIZE <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+    __ Compare(size, static_cast<int32_t>(MAX_REGULAR_HEAP_OBJECT_SIZE));
+    __ JumpIf(Condition::ABOVE, &done);
     __ LoadField(top, glue, static_cast<int32_t>(JSThread::GlueData::GetNewSpaceAllocationTopAddressOffset(false)));
     __ LoadField(top, top, 0);
     __ LoadField(end, glue, static_cast<int32_t>(JSThread::GlueData::GetNewSpaceAllocationEndAddressOffset(false)));
@@ -1481,7 +1486,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeObjectWithBufferVert
     InitializeObjectWithBufferVertex* vertex)
 {
     ArkSteedRegister glue = GetInputRegister(vertex, InitializeObjectWithBufferVertex::GLUE_INDEX);
-    ArkSteedRegister literal = GetInputRegister(vertex, InitializeObjectWithBufferVertex::LITERAL_INDEX);
+    ArkSteedRegister hclass = GetInputRegister(vertex, InitializeObjectWithBufferVertex::HCLASS_INDEX);
     ArkSteedRegister result = GetResultRegister(vertex);
     ASSERT(result == GetInputRegister(vertex, InitializeObjectWithBufferVertex::ALLOCATION_INDEX));
     const auto& info = vertex->GetInfo();
@@ -1498,9 +1503,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeObjectWithBufferVert
         __ Move(temp, info.fieldValues[i]);
         __ StoreField(temp, result, static_cast<int32_t>(JSObject::SIZE + i * JSTaggedValue::TaggedTypeSize()));
     }
-    // No call or deopt can separate this read from publishing the initialized object.
-    __ LoadField(temp, literal, TaggedObject::HCLASS_OFFSET);
-    __ StoreHeaderRelease(temp, result);
+    __ StoreHeaderRelease(hclass, result);
 }
 
 template<>
@@ -1509,13 +1512,8 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeEmptyArrayVertex>(In
     ArkSteedRegister result = GetResultRegister(vertex);
     ASSERT(result == GetInputRegister(vertex, InitializeEmptyArrayVertex::ALLOCATION_INDEX));
     TemporaryRegisterScope scope(assembler_);
-    ArkSteedRegister hclass = scope.Acquire();
+    ArkSteedRegister hclass = GetInputRegister(vertex, InitializeEmptyArrayVertex::HCLASS_INDEX);
     ArkSteedRegister value = scope.Acquire();
-    constexpr int32_t arrayFunctionOffset
-        = GlobalEnv::HEADER_SIZE + GlobalEnv::ARRAY_FUNCTION_INDEX * JSTaggedValue::TaggedTypeSize();
-    __ LoadField(
-        hclass, GetInputRegister(vertex, InitializeEmptyArrayVertex::GLOBAL_ENV_INDEX), arrayFunctionOffset);
-    __ LoadField(hclass, hclass, JSFunction::PROTO_OR_DYNCLASS_OFFSET);
     __ InitializeArrayFields(
         GetInputRegister(vertex, InitializeEmptyArrayVertex::GLUE_INDEX), result, vertex->GetObjectSize(), value);
     __ StoreHeaderRelease(hclass, result);
@@ -1529,9 +1527,8 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeArrayWithBufferVerte
     ArkSteedRegister literal = GetInputRegister(vertex, InitializeArrayWithBufferVertex::LITERAL_INDEX);
     ASSERT(result == GetInputRegister(vertex, InitializeArrayWithBufferVertex::ALLOCATION_INDEX));
     TemporaryRegisterScope scope(assembler_);
-    ArkSteedRegister hclass = scope.Acquire();
+    ArkSteedRegister hclass = GetInputRegister(vertex, InitializeArrayWithBufferVertex::HCLASS_INDEX);
     ArkSteedRegister value = scope.Acquire();
-    __ LoadField(hclass, literal, TaggedObject::HCLASS_OFFSET);
     __ InitializeArrayFields(GetInputRegister(vertex, InitializeArrayWithBufferVertex::GLUE_INDEX),
                               result,
                               vertex->GetObjectSize(),
@@ -1541,52 +1538,6 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeArrayWithBufferVerte
     __ LoadInt32Field(value, literal, JSArray::LENGTH_OFFSET);
     __ StoreInt32Field(value, result, static_cast<int32_t>(JSArray::LENGTH_OFFSET));
     __ StoreHeaderRelease(hclass, result);
-}
-
-template<>
-void ArkSteedCodeGenerator::VisitNonControlVertex<AllocateRawInYoungFastVertex>(
-    AllocateRawInYoungFastVertex *allocate)
-{
-    ArkSteedRegister result = GetResultRegister(allocate);
-    Label failed;
-    Label done;
-
-#if defined(ARK_ASAN_ON)
-    __ Jump(&failed);
-#else
-    if constexpr (G_USE_CMS_GC) {
-        __ Jump(&failed);
-    } else {
-        ArkSteedRegister glue = GetInputRegister(allocate, AllocateRawInYoungFastVertex::GLUE_INDEX);
-        ArkSteedRegister size = GetInputRegister(allocate, AllocateRawInYoungFastVertex::SIZE_INDEX);
-        TemporaryRegisterScope scope(assembler_);
-        ArkSteedRegister scratch = scope.Acquire();
-
-        ASSERT(result != glue);
-        ASSERT(result != size);
-        ASSERT(result != scratch);
-        ASSERT(glue != size);
-        ASSERT(glue != scratch);
-        ASSERT(size != scratch);
-        static_assert(MAX_REGULAR_HEAP_OBJECT_SIZE <=
-                      static_cast<size_t>(std::numeric_limits<int32_t>::max()));
-
-        __ JumpIfCMCGCEnabled(glue, scratch, &failed);
-#ifdef ECMASCRIPT_SUPPORT_HEAPSAMPLING
-        __ JumpIfHeapSamplingActive(glue, scratch, &failed);
-#endif
-        __ Compare(size, static_cast<int32_t>(MAX_REGULAR_HEAP_OBJECT_SIZE));
-        __ JumpIf(Condition::ABOVE, &failed);
-        RecordComment("AllocateRawInYoungFast inline attempt");
-        __ TryAllocateInYoungSpace(glue, size, result, scratch, &failed);
-        __ Jump(&done);
-    }
-#endif
-
-    __ Bind(&failed);
-    RecordComment("AllocateRawInYoungFast fallback sentinel");
-    __ Move(result, static_cast<uint64_t>(JSTaggedValue::VALUE_HOLE));
-    __ Bind(&done);
 }
 
 template<>
@@ -1600,8 +1551,8 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeUnmappedArgumentsEle
     ArkSteedRegister result = GetResultRegister(initialize);
     ArkSteedRegister argc =
         GetInputRegister(initialize, InitializeUnmappedArgumentsElementsVertex::NUM_ARGS_INDEX);
-    ArkSteedRegister rawAddress =
-        GetInputRegister(initialize, InitializeUnmappedArgumentsElementsVertex::RAW_ADDRESS_INDEX);
+    ArkSteedRegister rawAddress
+        = GetInputRegister(initialize, InitializeUnmappedArgumentsElementsVertex::ALLOCATION_INDEX);
     ArkSteedRegister hclass =
         GetInputRegister(initialize, InitializeUnmappedArgumentsElementsVertex::HCLASS_INDEX);
 
@@ -1688,8 +1639,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeUnmappedArgumentsVer
         GetInputRegister(initialize, InitializeUnmappedArgumentsVertex::GLUE_INDEX);
     ArkSteedRegister argc =
         GetInputRegister(initialize, InitializeUnmappedArgumentsVertex::NUM_ARGS_INDEX);
-    ArkSteedRegister rawAddress =
-        GetInputRegister(initialize, InitializeUnmappedArgumentsVertex::RAW_ADDRESS_INDEX);
+    ArkSteedRegister rawAddress = GetInputRegister(initialize, InitializeUnmappedArgumentsVertex::ALLOCATION_INDEX);
     ArkSteedRegister elements =
         GetInputRegister(initialize, InitializeUnmappedArgumentsVertex::ELEMENTS_INDEX);
     ArkSteedRegister globalEnv =
@@ -4614,9 +4564,9 @@ void ArkSteedCodeGenerator::ProcessNonControlVertex(NonControlVertex *vertex)
         ProcessValueVertex(valueVertex);
     }
 
-    // Allocation returns raw storage, not a bytecode result. Do not add an exit
-    // between it and its initializer; reentry recovery is handled outside this contract.
-    if ((vertex->CanThrow() || vertex->IsCall()) && !IsRawAllocation(vertex)) {
+    // Allocation returns an uninitialized object, even when its HClass is installed.
+    // Do not add an exit before initialization; reentry recovery is outside this contract.
+    if ((vertex->CanThrow() || vertex->IsCall()) && !IsUninitializedAllocation(vertex)) {
         if (HasExceptionLazyDeopt(vertex)) {
             ASSERT(CatchBlockOf(vertex) == nullptr);
             if (__ GetPcOffset() > pcBefore) {

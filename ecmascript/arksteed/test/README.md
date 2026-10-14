@@ -15,10 +15,10 @@ An `ark_disasm` failure is diagnostic-only unless a bytecode constraint is prese
 
 ## Literal Allocation Coverage
 
-* `jittest/empty_literal_capacity_gc` shares warmup, pressure, and explicit young/full GC between empty objects and arrays. Each creator is called directly and has its own METHOD, bytecode, CFG, and slow-path codegen constraints; force-GC remains enabled.
-* `jittest/createobjectwithbuffer_inline_allocation/basic` covers primitive values (including false/undefined), Map identity, independent external properties on two instances, deletion, preventExtensions, and derived reads.
-* `jittest/createobjectwithbuffer_inline_allocation/metadata` owns descriptor, prototype, and type-change isolation on separate clones, including tiny nonzero numbers and post-GC rechecks.
-* `jittest/allocate_initialize_split` and `jittest/allocation_slowpath` retain separate structural and allocation-pressure coverage. Native initialization-verifier and template tests remain separate from JS behavior tests.
+* `empty_literal_capacity_gc` shares warmup, pressure, and explicit young/full GC between empty objects and arrays. Each creator is called directly and has its own METHOD, bytecode, CFG, and slow-path codegen constraints; force-GC remains enabled.
+* `createobjectwithbuffer_inline_allocation/basic` covers primitive values (including false/undefined), Map identity, independent external properties on two instances, deletion, preventExtensions, and derived reads.
+* `createobjectwithbuffer_inline_allocation/metadata` owns descriptor, prototype, and type-change isolation on separate clones, including tiny nonzero numbers and post-GC rechecks.
+* `allocate_initialize_split` and `allocation_slowpath` retain separate structural and allocation-pressure coverage. Native initialization-verifier and template tests remain separate from JS behavior tests.
 
 ## Test Case Runner
 

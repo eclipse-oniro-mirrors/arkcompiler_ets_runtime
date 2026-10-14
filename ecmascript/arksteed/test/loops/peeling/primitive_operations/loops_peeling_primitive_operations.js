@@ -15,7 +15,8 @@
 
 //! PARAMS --compiler-jit-hotness-threshold=60000
 //! METHOD truthFacts
-//! HAS CallCommonStub ToBooleanTrue
+//! COUNT CallCommonStub ToBooleanFalse 1
+//! COUNT TaggedNotEqual 1
 //! COUNT LoadTaggedField 3 # holder.value once, packing function and its environment.
 //! METHOD falseFacts
 //! HAS CallCommonStub ToBooleanFalse
