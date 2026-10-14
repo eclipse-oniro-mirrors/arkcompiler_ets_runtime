@@ -16,6 +16,7 @@
 #ifndef ECMASCRIPT_MODULE_JS_MODULE_MANAGER_H
 #define ECMASCRIPT_MODULE_JS_MODULE_MANAGER_H
 
+#include "ecmascript/base/config.h"
 #include "ecmascript/js_tagged_value_wrapper-inl.h"
 #include "ecmascript/jspandafile/js_pandafile.h"
 #include "ecmascript/module/js_module_source_text.h"
@@ -70,6 +71,12 @@ public:
     JSHandle<JSTaggedValue> TryGetSendableModule(const CString& referencing);
     void Iterate(RootVisitor &v);
     void ProcessPendingRemovalLocalModules(const WeakRootVisitor &visitor);
+    void BeginConcurrentRootScan();
+    uint32_t PrepareConcurrentRootScan(uint32_t maxTaskCount);
+    void ProcessConcurrentRootScan(uint32_t threadIndex, uint32_t taskCount,
+                                     const ModuleRootVisitor &visitor);
+    void ProcessConcurrentSendableRootScan(uint32_t threadIndex, const ModuleRootVisitor &visitor);
+    void FinishConcurrentRootScan();
 
     ModuleExecuteMode GetExecuteMode() const
     {

@@ -16,8 +16,11 @@
 #ifndef ECMASCRIPT_MEM_HEAP_H
 #define ECMASCRIPT_MEM_HEAP_H
 
-#include "common_components/taskpool/task.h"
 #include "ecmascript/base/config.h"
+
+#include <array>
+
+#include "common_components/taskpool/task.h"
 #include "ecmascript/cross_vm/heap_hybrid.h"
 #include "ecmascript/daemon/daemon_thread.h"
 #include "ecmascript/frames.h"
@@ -31,6 +34,7 @@
 #include "ecmascript/mem/linear_space.h"
 #include "ecmascript/mem/machine_code.h"
 #include "ecmascript/mem/mark_stack.h"
+#include "ecmascript/mem/local_cmc/local_cc_native_pointer_callback.h"
 #include "ecmascript/mem/shared_heap/shared_memory_reallocator.h"
 #include "ecmascript/mem/shared_heap/shared_space.h"
 #include "ecmascript/mem/sparse_space.h"
@@ -48,6 +52,7 @@ class HeapTestHelper;
 
 namespace panda::ecmascript {
 class ConcurrentCopyGC;
+class CCEvacuator;
 class ConcurrentMarker;
 class ConcurrentSweeper;
 class EcmaVM;
@@ -2002,10 +2007,12 @@ public:
 
     inline void ProcessNativeDelete(const WeakRootVisitor& visitor);
     inline void ProcessReferences(const WeakRootVisitor& visitor);
+    void ProcessReferencesForLocalCC(const WeakRootVisitor &visitor);
     inline void PushToNativePointerList(JSNativePointer* pointer, bool isConcurrent);
     inline void RemoveFromNativePointerList(const JSNativePointer* pointer);
     inline void ClearNativePointerList();
     inline void IteratorNativePointerList(WeakVisitor &vistor);
+    void WaitLocalCCNativePointerCallbacks();
 
     size_t GetNativePointerListSize() const
     {
@@ -2047,6 +2054,8 @@ private:
     void ThresholdReachedDump();
 #endif
     void CleanCallback();
+    void ProcessLocalCCGCCallback();
+    std::unique_ptr<common::Task> PrepareLocalCCCallback();
     void IncreasePendingAsyncNativeCallbackSize(size_t bindingSize)
     {
         pendingAsyncNativeCallbackSize_ += bindingSize;
@@ -2134,6 +2143,63 @@ private:
     private:
         std::vector<NativePointerCallbackData> nativePointerCallbacks_ {};
     };
+
+    class LocalCCDeleteCallbackTask : public common::Task {
+    public:
+        LocalCCDeleteCallbackTask(int32_t id, Heap *heap,
+                                  std::vector<LocalCCNativePointerCallbackBucket> &callbackBuckets, void *env)
+            : common::Task(id), heap_(heap), env_(env)
+        {
+            std::swap(callbackBuckets, nativePointerCallbackBuckets_);
+        }
+        ~LocalCCDeleteCallbackTask() override;
+        bool Run(uint32_t threadIndex) override;
+
+        NO_COPY_SEMANTIC(LocalCCDeleteCallbackTask);
+        NO_MOVE_SEMANTIC(LocalCCDeleteCallbackTask);
+
+    private:
+        Heap *heap_ {nullptr};
+        std::vector<LocalCCNativePointerCallbackBucket> nativePointerCallbackBuckets_ {};
+        void *env_ {nullptr};
+    };
+
+    static constexpr size_t NATIVE_FLAG_COUNT = static_cast<size_t>(NativeFlag::WRAPPER_DATA) + 1;
+
+    struct ProcessNativePointerTaskResult {
+        size_t liveBindingSize {0};
+        std::vector<size_t> deadIndexes {};
+        std::vector<JSNativePointer *> deadObjects {};
+        std::array<size_t, NATIVE_FLAG_COUNT> deadNativeSizeByFlag {};
+    };
+
+    size_t ProcessNativePointerListSerial(NativePointerList &list, const WeakRootVisitor &visitor);
+    uint32_t PrepareConcurrentNativePointerTasksForLocalCC();
+    void ProcessConcurrentNativePointerTaskForLocalCC(ConcurrentCopyGC *localCCGC, uint32_t threadIndex,
+                                                      uint32_t taskIndex);
+    void MergeConcurrentNativePointerTaskResultsForLocalCC(uint32_t threadIndex);
+    void FinalizeConcurrentNativePointerListForLocalCC();
+    void NotifyLocalCCNativePointerCallbacksFinished();
+    static void AddDeadNativeSize(ProcessNativePointerTaskResult &result, size_t bindingSize, NativeFlag nativeFlag);
+    static void ProcessNativePointerRange(NativePointerList &list, size_t begin, size_t end,
+                                          const WeakRootVisitor &visitor, ProcessNativePointerTaskResult &result);
+    static void ProcessNativePointerBlocks(NativePointerList &list, std::atomic<size_t> &nextIndex, size_t listSize,
+                                           size_t blockSize, const WeakRootVisitor &visitor,
+                                           ProcessNativePointerTaskResult &result);
+    static void BuildDeadNativePointerCallbacks(const ProcessNativePointerTaskResult &result,
+                                                LocalCCNativePointerCallbackBucket &bucket);
+    static void CollectDeadIndexes(const std::vector<ProcessNativePointerTaskResult> &results, size_t deadCount,
+                                   std::vector<size_t> &deadIndexes);
+    static void MarkDeadIndexes(const std::vector<ProcessNativePointerTaskResult> &results,
+                                std::vector<uint8_t> &deadFlags);
+    static void CompactNativePointerListInOrder(NativePointerList &list, const std::vector<uint8_t> &deadFlags);
+    static void CompactNativePointerListUnordered(NativePointerList &list, const std::vector<size_t> &deadIndexes);
+    static void CompactNativePointerList(NativePointerList &list,
+                                         const std::vector<ProcessNativePointerTaskResult> &results,
+                                         size_t deadCount);
+    static void ApplyDeadNativeSizeStats(NativeAreaAllocator *allocator,
+                                         const std::array<size_t, NATIVE_FLAG_COUNT> &deadNativeSizeByFlag);
+    uint32_t CalculateProcessReferencesTaskCount(size_t itemCount) const;
 
     struct MainLocalHeapSmartGCStats {
         /**
@@ -2275,6 +2341,9 @@ private:
     bool nearGCInSensitive_ {false};
 
     size_t pendingAsyncNativeCallbackSize_ {0};
+    size_t runningLocalCCNativePointerCallbackTasks_ {0};
+    Mutex localCCNativePointerCallbackMutex_;
+    ConditionVariable localCCNativePointerCallbackCV_;
     MemGrowingType memGrowingtype_ {MemGrowingType::HIGH_THROUGHPUT};
 
     // parallel evacuator task number.
@@ -2306,6 +2375,17 @@ private:
 
     NativePointerList nativePointerList_;
     NativePointerList concurrentNativePointerList_;
+    NativePointerList localCCConcurrentNativePointerList_;
+    size_t localCCNativePointerLiveBindingSize_ {0};
+    size_t localCCConcurrentNativePointerLiveBindingSize_ {0};
+    size_t localCCNativeBindingSizeBeforeGC_ {0};
+    std::array<size_t, NATIVE_FLAG_COUNT> localCCDeadNativeSizeByFlag_ {};
+    void *localCCNativePointerCallbackEnv_ {nullptr};
+    bool localCCConcurrentNativePointerProcessing_ {false};
+    std::vector<ProcessNativePointerTaskResult> localCCConcurrentNativePointerTaskResults_ {};
+    std::atomic<size_t> localCCConcurrentNativePointerNextIndex_ {0};
+    size_t localCCConcurrentNativePointerSnapshotSize_ {0};
+    size_t localCCConcurrentNativePointerBlockSize_ {0};
     HEAP_PRIVATE_HYBRID_EXTENSION();
 #if ECMASCRIPT_ENABLE_ARK_STEED
     EmbeddedCodeRefSet embeddedCodeRefSet_;

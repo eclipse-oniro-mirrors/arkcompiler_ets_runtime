@@ -16,6 +16,7 @@
 #ifndef ECMASCRIPT_MEM_BARRIERS_H
 #define ECMASCRIPT_MEM_BARRIERS_H
 
+#include "ecmascript/base/config.h"
 #include "ecmascript/common.h"
 #include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/mem/mark_word.h"
@@ -99,6 +100,8 @@ public:
     static TemporaryJSTaggedValue ReadBarrierForCompressedForObject(const JSThread *thread, uintptr_t slotAddress,
                                                                     TemporaryJSTaggedValue temporaryValue);
     static JSTaggedType ReadBarrierForStringTableSlot(JSTaggedType value, const JSThread *thread);
+    static JSTaggedType ReadBarrierForGCRoot(const JSThread *thread, uintptr_t slotAddress);
+    static JSTaggedType NormalizeGCRoot(const JSThread *thread, JSTaggedType value);
 
     static TaggedObject* GetTaggedObject(const JSThread *thread, const void* obj, size_t offset);
     static JSTaggedType GetTaggedValue(const JSThread *thread, const void *obj, size_t offset);

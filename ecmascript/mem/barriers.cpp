@@ -22,6 +22,51 @@
 #include "ecmascript/runtime.h"
 
 namespace panda::ecmascript {
+namespace {
+JSTaggedType ForwardGCRootValue(const JSThread *thread, JSTaggedType rawValue)
+{
+    JSTaggedValue value(rawValue);
+    if (!value.IsHeapObject()) {
+        return rawValue;
+    }
+
+    TaggedObject *object = value.GetHeapObject();
+    Region *objectRegion = Region::ObjectAddressToRange(object);
+    if (objectRegion->InSharedHeap() || !objectRegion->IsFromRegion()) {
+        return rawValue;
+    }
+
+    MarkWord markWord(object, RELAXED_LOAD);
+    TaggedObject *toObject = nullptr;
+    if (markWord.IsForwardingAddress()) {
+        toObject = markWord.ToForwardingAddress();
+    } else {
+        toObject = thread->GetLocalCCEvacuator()->Copy(object, markWord);
+    }
+
+    JSTaggedValue forwarded(toObject);
+    return forwarded.GetRawData();
+}
+}  // namespace
+
+JSTaggedType Barriers::ReadBarrierForGCRoot(const JSThread *thread, uintptr_t slotAddress)
+{
+    ASSERT(thread != nullptr && thread->NeedReadBarrier());
+    auto field = reinterpret_cast<volatile std::atomic<JSTaggedType> *>(slotAddress);
+    JSTaggedType current = field->load(std::memory_order_relaxed);
+    JSTaggedType forwarded = ForwardGCRootValue(thread, current);
+    if (forwarded != current) {
+        field->store(forwarded, std::memory_order_relaxed);
+    }
+    return forwarded;
+}
+
+JSTaggedType Barriers::NormalizeGCRoot(const JSThread *thread, JSTaggedType value)
+{
+    ASSERT(thread != nullptr && thread->NeedReadBarrier());
+    return ForwardGCRootValue(thread, value);
+}
+
 template <ReferenceType refType>
 void Barriers::Update(const JSThread *thread, uintptr_t slotAddr, Region *objectRegion, TaggedObject *value,
                       Region *valueRegion, WriteBarrierType writeType)

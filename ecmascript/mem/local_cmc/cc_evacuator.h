@@ -16,7 +16,9 @@
 #ifndef ECMASCRIPT_MEM_LOCAL_CMC_CC_EVACUATOR_H
 #define ECMASCRIPT_MEM_LOCAL_CMC_CC_EVACUATOR_H
 
+#include "ecmascript/base/config.h"
 #include "ecmascript/mem/heap.h"
+#include "ecmascript/mem/gc_root.h"
 
 namespace panda {
 namespace ecmascript {
@@ -78,6 +80,17 @@ public:
 private:
     inline void HandleSlot(ObjectSlot slot);
 
+    CCEvacuator *evacuator_ {nullptr};
+};
+
+class CCConcurrentUpdateRootVisitor final {
+public:
+    inline explicit CCConcurrentUpdateRootVisitor(CCEvacuator *evacuator) : evacuator_(evacuator) {}
+    ~CCConcurrentUpdateRootVisitor() = default;
+
+    inline void VisitRoot(GCRoot &root);
+
+private:
     CCEvacuator *evacuator_ {nullptr};
 };
 

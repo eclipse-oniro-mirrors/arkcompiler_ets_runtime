@@ -42,8 +42,10 @@
 #include "ecmascript/mem/gc_key_stats.h"
 #include "ecmascript/mem/gc_stats.h"
 #include "ecmascript/mem/heap_region_allocator.h"
+#include "ecmascript/mem/local_cmc/local_cc_native_pointer_callback.h"
 #include "common_components/taskpool/task.h"
 #include "ecmascript/js_tagged_value_wrapper.h"
+#include "ecmascript/module/module_manager_map.h"
 #include "ecmascript/napi/include/dfx_jsnapi.h"
 #include "ecmascript/patch/patch_loader.h"
 #include "ecmascript/stackmap/ark_stackmap.h"
@@ -60,6 +62,8 @@ class File;
 }  // namespace panda_file
 
 namespace ecmascript {
+class ConcurrentCopyGC;
+class CCEvacuator;
 class GlobalEnv;
 class ObjectFactory;
 class RegExpParserCache;
@@ -565,6 +569,12 @@ public:
     void IterateSTWRoots(RootVisitor &v);
     // Concurrent roots supports being visited while GC is ongoing
     void IterateConcurrentRoots(RootVisitor &v);
+    void BeginConcurrentRootScan();
+    uint32_t PrepareConcurrentRootScan(uint32_t maxTaskCount);
+    void ProcessConcurrentRootScan(uint32_t threadIndex, uint32_t taskCount,
+                                     const ModuleRootVisitor &visitor);
+    void ProcessConcurrentSendableRootScan(uint32_t threadIndex, const ModuleRootVisitor &visitor);
+    void FinishConcurrentRootScan();
     void IterateWeakGlobalEnvList(WeakVisitor &visitor);
     void IterateWeakGlobalEnvList(WeakRootVisitor &visitor);
     void IterateGlobalEnvField(RootVisitor &visitor);
@@ -596,6 +606,7 @@ public:
     }
     void ProcessNativeDelete(const WeakRootVisitor &visitor);
     void ProcessReferences(const WeakRootVisitor &visitor);
+    void ProcessReferencesForLocalCC(const WeakRootVisitor &visitor);
     void ProcessSnapShotEnv(const WeakRootVisitor& visitor);
     void ProcessPendingRemovalLocalModules(const WeakRootVisitor &visitor);
     void IteratorSnapShotEnv(WeakVisitor& visitor);
@@ -1142,6 +1153,11 @@ public:
     std::vector<NativePointerCallbackData> &GetConcurrentNativePointerCallbacks()
     {
         return concurrentNativeCallbacks_;
+    }
+
+    std::vector<LocalCCNativePointerCallbackBucket> &GetLocalCCConcurrentNativePointerCallbacks()
+    {
+        return localCCConcurrentNativeCallbacks_;
     }
 
     AsyncNativeCallbacksPack &GetAsyncNativePointerCallbacksPack()
@@ -1913,6 +1929,7 @@ private:
     ObjectFactory *factory_ {nullptr};
 
     std::vector<NativePointerCallbackData> concurrentNativeCallbacks_ {};
+    std::vector<LocalCCNativePointerCallbackBucket> localCCConcurrentNativeCallbacks_ {};
     AsyncNativeCallbacksPack asyncNativeCallbacksPack_ {};
     // VM execution states.
     JSThread *thread_ {nullptr};
@@ -2143,11 +2160,22 @@ private:
     // store multi-context module manager
     class ModuleManagers {
         Mutex CMCGCMutex_;
+        ConditionVariable concurrentRootScanCV_;
+        bool concurrentRootScanActive_ {false};
+        std::atomic<bool> concurrentRootScanCheckRequired_ {false};
         std::vector<ModuleManager *> moduleManagersVec_ {};
+
+        void WaitForConcurrentRootScanCheckRequired();
 
     public:
         void Iterate(RootVisitor &v);
         void ProcessPendingRemovalLocalModules(const WeakRootVisitor &visitor);
+        void BeginConcurrentRootScan();
+        uint32_t PrepareConcurrentRootScan(uint32_t maxTaskCount);
+        void ProcessConcurrentRootScan(uint32_t threadIndex, uint32_t taskCount,
+                                         const ModuleRootVisitor &visitor);
+        void ProcessConcurrentSendableRootScan(uint32_t threadIndex, const ModuleRootVisitor &visitor);
+        void FinishConcurrentRootScan();
 
         template <typename T>
         void PushBack(T moduleManager);

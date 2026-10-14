@@ -29,6 +29,36 @@
 #include "ecmascript/runtime_lock.h"
 
 namespace panda::ecmascript {
+namespace {
+TaggedObject *UpdateWeakRoot(CCEvacuator *evacuator, TaggedObject *object)
+{
+    Region *objectRegion = Region::ObjectAddressToRange(object);
+    ASSERT(objectRegion != nullptr);
+    if (objectRegion->InSharedHeap()) {
+        return object;
+    }
+    if (!objectRegion->Test(object)) {
+        return nullptr;
+    }
+    if (objectRegion->IsFromRegion()) {
+        MarkWord markWord(object, RELAXED_LOAD);
+        if (markWord.IsForwardingAddress()) {
+            return markWord.ToForwardingAddress();
+        }
+        return evacuator->Copy(object, markWord);
+    }
+    return object;
+}
+
+}  // namespace
+
+WeakRootVisitor ConcurrentCopyGC::CreateUpdateWeakVisitor(CCEvacuator *evacuator)
+{
+    return [evacuator](TaggedObject *object) -> TaggedObject* {
+        return UpdateWeakRoot(evacuator, object);
+    };
+}
+
 ConcurrentCopyGC::ConcurrentCopyGC(Heap *heap) : heap_(heap), thread_(heap->GetJSThread())
 {
     for (uint32_t i = 0; i < common::MAX_TASKPOOL_THREAD_NUM + 1; i++) {
@@ -92,7 +122,9 @@ void ConcurrentCopyGC::RunPhase()
     ProcessWeakReference();
     Sweep();
     UpdateRoot();
+#if !ENABLE_LOCALCC_OPTIMIZATION
     ConcurrentCopy();
+#endif  // !ENABLE_LOCALCC_OPTIMIZATION
 }
 
 void ConcurrentCopyGC::PreGC()
@@ -117,17 +149,40 @@ void ConcurrentCopyGC::ProcessWeakReference()
 {
     TRACE_GC(GCStats::Scope::ScopeId::UpdateWeekRef, heap_->GetEcmaVM()->GetEcmaGCStats());
     ASSERT(heap_->IsParallelGCEnabled());
+#if ENABLE_LOCALCC_OPTIMIZATION
+    uint32_t totalThreadCount = common::Taskpool::GetCurrentTaskpool()->GetTotalThreadNum() + 1; // 1 : mainthread
+    ProcessRecordWeakReferenceInParallel(totalThreadCount);
+#else
     uint32_t totalThreadCount =
         totalThreadCount = common::Taskpool::GetCurrentTaskpool()->GetTotalThreadNum() + 1; // 1 : mainthread
     for (uint32_t i = 0; i < totalThreadCount; i++) {
         UpdateRecordWeakReference(i);
     }
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
     for (uint32_t i = 0; i < totalThreadCount; i++) {
         UpdateRecordWeakLinkedHashMap(i);
     }
     if (UNLIKELY(heap_->ShouldVerifyHeap())) {
         Verification(heap_, VerifyKind::VERIFY_WEAK_REF).VerifyAll();
     }
+}
+
+void ConcurrentCopyGC::ProcessRecordWeakReferenceInParallel(uint32_t totalThreadCount)
+{
+    if (totalThreadCount <= 1) {
+        UpdateRecordWeakReference(MAIN_THREAD_INDEX);
+        return;
+    }
+
+    uint32_t workerCount = totalThreadCount - 1;
+    common::TaskPackMonitor monitor(static_cast<int>(workerCount), static_cast<int>(workerCount));
+    for (uint32_t threadIndex = 1; threadIndex < totalThreadCount; threadIndex++) {
+        common::Taskpool::GetCurrentTaskpool()->PostTask(std::make_unique<ConcurrentCopyUpdateWeakReferenceTask>(
+            thread_->GetThreadId(), this, threadIndex, &monitor));
+    }
+
+    UpdateRecordWeakReference(MAIN_THREAD_INDEX);
+    monitor.WaitAllFinished();
 }
 
 void ConcurrentCopyGC::Sweep()
@@ -139,6 +194,42 @@ void ConcurrentCopyGC::Sweep()
     heap_->GetConcurrentMarker()->Reset(false);
 }
 
+#if ENABLE_LOCALCC_OPTIMIZATION
+void ConcurrentCopyGC::UpdateRoot()
+{
+    ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "ConcurrentCopyGC::UpdateRoot", "");
+    TRACE_GC(GCStats::Scope::ScopeId::UpdateRoot, heap_->GetEcmaVM()->GetEcmaGCStats());
+    InitializeCopyPhase();
+    CCEvacuator *mainEvacuator = thread_->GetLocalCCEvacuator();
+    WeakRootVisitor weakVisitor = CreateUpdateWeakVisitor(mainEvacuator);
+    bool enableParallel = heap_->IsParallelGCEnabled() &&
+        common::Taskpool::GetCurrentTaskpool()->GetTotalThreadNum() > 0;
+    if (enableParallel) {
+        heap_->GetEcmaVM()->ProcessReferencesForLocalCC(weakVisitor);
+    } else {
+        heap_->GetEcmaVM()->ProcessReferences(weakVisitor);
+    }
+    heap_->GetEcmaVM()->ProcessPendingRemovalLocalModules(weakVisitor);
+    if (!enableParallel) {
+        heap_->GetSweeper()->PostTask(TriggerGCType::LOCAL_CC);
+    }
+    heap_->GetEcmaVM()->GetJSThread()->IterateWeakRoots(weakVisitor);
+    heap_->GetEcmaVM()->GetJSThread()->IterateWeakEcmaGlobalStorage(weakVisitor);
+    heap_->GetEcmaVM()->ProcessSnapShotEnv(weakVisitor);
+    heap_->GetEcmaVM()->GetJSThread()->UpdateJitCodeMapReference(weakVisitor);
+    heap_->GetEcmaVM()->IterateWeakGlobalEnvList(weakVisitor);
+    CCUpdateRootVisitor updateRoot(mainEvacuator);
+    ObjectXRay::VisitSTWVMRoots(heap_->GetEcmaVM(), updateRoot);
+    heap_->GetEcmaVM()->IterateGlobalEnvField(updateRoot);
+    heap_->GetEcmaVM()->BeginConcurrentRootScan();
+    if (enableParallel) {
+        PostUpdateConcurrentRootsTask();
+        return;
+    }
+    UpdateConcurrentRoots(MAIN_THREAD_INDEX);
+    ConcurrentCopy();
+}
+#else
 void ConcurrentCopyGC::UpdateRoot()
 {
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "ConcurrentCopyGC::UpdateRoot", "");
@@ -176,6 +267,132 @@ void ConcurrentCopyGC::UpdateRoot()
     ObjectXRay::VisitVMRoots(heap_->GetEcmaVM(), updateRoot);
     heap_->GetEcmaVM()->IterateGlobalEnvField(updateRoot);
 }
+#endif
+
+void ConcurrentCopyGC::PostUpdateConcurrentRootsTask()
+{
+    common::Taskpool::GetCurrentTaskpool()->PostTask(std::make_unique<ConcurrentCopyUpdateConcurrentRootsTask>(
+        thread_->GetThreadId(), this));
+}
+
+void ConcurrentCopyGC::StartConcurrentNativePointerTasks(uint32_t coordinatorThreadIndex)
+{
+    ASSERT(coordinatorThreadIndex != MAIN_THREAD_INDEX);
+    ASSERT(runningNativePointerTaskCount_ == 0);
+    uint32_t taskCount = heap_->PrepareConcurrentNativePointerTasksForLocalCC();
+    runningNativePointerTaskCount_.store(taskCount, std::memory_order_seq_cst);
+    for (uint32_t taskIndex = 1; taskIndex < taskCount; taskIndex++) {
+        common::Taskpool::GetCurrentTaskpool()->PostTask(std::make_unique<ConcurrentCopyNativePointerTask>(
+            thread_->GetThreadId(), this, taskIndex));
+    }
+    ProcessConcurrentNativePointerTask(coordinatorThreadIndex, 0);
+}
+
+void ConcurrentCopyGC::ProcessConcurrentNativePointerTask(uint32_t threadIndex, uint32_t taskIndex)
+{
+    heap_->ProcessConcurrentNativePointerTaskForLocalCC(this, threadIndex, taskIndex);
+    HandleConcurrentNativePointerTaskFinished(threadIndex);
+}
+
+void ConcurrentCopyGC::HandleConcurrentNativePointerTaskFinished(uint32_t threadIndex)
+{
+    if (runningNativePointerTaskCount_.fetch_sub(1, std::memory_order_seq_cst) != 1) {
+        return;
+    }
+    heap_->MergeConcurrentNativePointerTaskResultsForLocalCC(threadIndex);
+    heap_->GetSweeper()->PostTask(TriggerGCType::LOCAL_CC);
+    StartConcurrentRootTasks(threadIndex);
+}
+
+void ConcurrentCopyGC::StartConcurrentRootTasks(uint32_t coordinatorThreadIndex)
+{
+    ASSERT(coordinatorThreadIndex != MAIN_THREAD_INDEX);
+    ASSERT(runningConcurrentRootTaskCount_ == 0);
+    ASSERT(localCCCallbackTask_ == nullptr);
+    localCCCallbackTask_ = heap_->PrepareLocalCCCallback();
+    concurrentRootTaskCount_ = heap_->GetEcmaVM()->PrepareConcurrentRootScan(CalculateConcurrentRootTaskCount());
+    if (concurrentRootTaskCount_ == 0) {
+        heap_->GetEcmaVM()->FinishConcurrentRootScan();
+        ConcurrentCopy();
+        PostLocalCCCallback();
+        return;
+    }
+
+    runningConcurrentRootTaskCount_.store(concurrentRootTaskCount_, std::memory_order_seq_cst);
+    for (uint32_t taskIndex = 1; taskIndex < concurrentRootTaskCount_; taskIndex++) {
+        common::Taskpool::GetCurrentTaskpool()->PostTask(std::make_unique<ConcurrentCopyModuleRootTask>(
+            thread_->GetThreadId(), this));
+    }
+    ProcessConcurrentRootTask(coordinatorThreadIndex);
+}
+
+void ConcurrentCopyGC::ProcessConcurrentRootTask(uint32_t threadIndex)
+{
+    ASSERT(threadIndex != MAIN_THREAD_INDEX);
+    auto allocator = GetTlabAllocator(threadIndex);
+    allocator->Initialize();
+    {
+        CCEvacuator evacuator(heap_, allocator);
+        CCConcurrentUpdateRootVisitor visitor(&evacuator);
+        auto rootVisitor = [&visitor](GCRoot &root) {
+            visitor.VisitRoot(root);
+        };
+        ModuleRootVisitor moduleRootVisitor(rootVisitor);
+        heap_->GetEcmaVM()->ProcessConcurrentRootScan(threadIndex, concurrentRootTaskCount_, moduleRootVisitor);
+    }
+    allocator->Finalize();
+    HandleConcurrentRootTaskFinished(threadIndex);
+}
+
+void ConcurrentCopyGC::HandleConcurrentRootTaskFinished(uint32_t threadIndex)
+{
+    if (runningConcurrentRootTaskCount_.fetch_sub(1, std::memory_order_seq_cst) != 1) {
+        return;
+    }
+    auto allocator = GetTlabAllocator(threadIndex);
+    allocator->Initialize();
+    {
+        CCEvacuator evacuator(heap_, allocator);
+        CCConcurrentUpdateRootVisitor visitor(&evacuator);
+        auto rootVisitor = [&visitor](GCRoot &root) {
+            visitor.VisitRoot(root);
+        };
+        ModuleRootVisitor moduleRootVisitor(rootVisitor);
+        heap_->GetEcmaVM()->ProcessConcurrentSendableRootScan(threadIndex, moduleRootVisitor);
+    }
+    allocator->Finalize();
+    heap_->GetEcmaVM()->FinishConcurrentRootScan();
+    concurrentRootTaskCount_ = 0;
+    ConcurrentCopy();
+    PostLocalCCCallback();
+}
+
+void ConcurrentCopyGC::PostLocalCCCallback()
+{
+    if (localCCCallbackTask_ == nullptr) {
+        return;
+    }
+    common::Taskpool::GetCurrentTaskpool()->PostTask(std::move(localCCCallbackTask_));
+}
+
+void ConcurrentCopyGC::UpdateConcurrentRoots(uint32_t coordinatorThreadIndex)
+{
+    ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK,
+                      "ConcurrentCopyGC::UpdateConcurrentRoots", "");
+
+    ASSERT(coordinatorThreadIndex == MAIN_THREAD_INDEX);
+    uint32_t taskCount = heap_->GetEcmaVM()->PrepareConcurrentRootScan(1);
+    if (taskCount != 0) {
+        CCConcurrentUpdateRootVisitor visitor(thread_->GetLocalCCEvacuator());
+        auto rootVisitor = [&visitor](GCRoot &root) {
+            visitor.VisitRoot(root);
+        };
+        ModuleRootVisitor moduleRootVisitor(rootVisitor);
+        heap_->GetEcmaVM()->ProcessConcurrentRootScan(MAIN_THREAD_INDEX, taskCount, moduleRootVisitor);
+        heap_->GetEcmaVM()->ProcessConcurrentSendableRootScan(MAIN_THREAD_INDEX, moduleRootVisitor);
+    }
+    heap_->GetEcmaVM()->FinishConcurrentRootScan();
+}
 
 void ConcurrentCopyGC::ConcurrentCopy()
 {
@@ -199,6 +416,31 @@ void ConcurrentCopyGC::InitializeCopyPhase()
     heap_->SelectFromSpace();
     ccUpdateFinished_ = false;
     GetTlabAllocator(MAIN_THREAD_INDEX)->Initialize();
+}
+
+uint32_t ConcurrentCopyGC::CalculateConcurrentRootTaskCount() const
+{
+    uint32_t taskpoolThreadCount = common::Taskpool::GetCurrentTaskpool()->GetTotalThreadNum();
+    uint32_t maxWorkerCount = std::min(heap_->GetMaxEvacuateTaskCount(), taskpoolThreadCount);
+    return std::max(1U, maxWorkerCount);
+}
+
+bool ConcurrentCopyUpdateConcurrentRootsTask::Run(uint32_t threadIndex)
+{
+    cc_->StartConcurrentNativePointerTasks(threadIndex);
+    return true;
+}
+
+bool ConcurrentCopyNativePointerTask::Run(uint32_t threadIndex)
+{
+    cc_->ProcessConcurrentNativePointerTask(threadIndex, taskIndex_);
+    return true;
+}
+
+bool ConcurrentCopyModuleRootTask::Run(uint32_t threadIndex)
+{
+    cc_->ProcessConcurrentRootTask(threadIndex);
+    return true;
 }
 
 bool ConcurrentCopyTask::Run(uint32_t threadIndex)
@@ -226,6 +468,13 @@ bool ConcurrentCopyTask::Run(uint32_t threadIndex)
     if (runningTaskCount_.fetch_sub(1, std::memory_order_seq_cst) == 1) {
         cc_->RunUpdatePhase();
     }
+    return true;
+}
+
+bool ConcurrentCopyUpdateWeakReferenceTask::Run([[maybe_unused]] uint32_t threadIndex)
+{
+    cc_->UpdateRecordWeakReference(weakReferenceThreadIndex_);
+    monitor_->NotifyFinishOne();
     return true;
 }
 
@@ -334,7 +583,9 @@ void ConcurrentCopyGC::RunUpdatePhase()
     std::atomic_thread_fence(std::memory_order_seq_cst);
     {
         LockHolder waitLock(waitMutex_);
+#if !ENABLE_LOCALCC_OPTIMIZATION
         heap_->SetGCState(false);
+#endif  // !ENABLE_LOCALCC_OPTIMIZATION
         thread_->SetCCStatus(CCStatus::COPY_FINISHED);
         thread_->SetCheckSafePointStatus();
         ccUpdateFinished_ = true;
@@ -366,6 +617,9 @@ void ConcurrentCopyGC::HandleUpdateFinished()
     ASSERT(thread_->NeedReadBarrier());
     Finish();
     PostGC();
+#if ENABLE_LOCALCC_OPTIMIZATION
+    heap_->SetGCState(false);
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
 }
 
 void ConcurrentCopyGC::Finish()
@@ -377,6 +631,11 @@ void ConcurrentCopyGC::Finish()
     } else {
         heap_->GetSlotSpace()->MergeToRegions();
     }
+#if ENABLE_LOCALCC_OPTIMIZATION
+    heap_->FinalizeConcurrentNativePointerListForLocalCC();
+    GCStats *gcStats = heap_->GetEcmaVM()->GetEcmaGCStats();
+    gcStats->RefreshLongGCNativeStatsAfterConcurrentGC();
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
     if (UNLIKELY(heap_->ShouldVerifyHeap())) {
         Verification::VerifyCC(heap_);
     }

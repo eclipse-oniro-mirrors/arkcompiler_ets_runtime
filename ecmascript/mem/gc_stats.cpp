@@ -845,11 +845,27 @@ void GCStats::RecordStatisticAfterGC()
     RecordGCStatisticEnd();
 }
 
+void GCStats::RefreshLongGCNativeStatsAfterConcurrentGC()
+{
+    if (!currentGCIsLong_) {
+        return;
+    }
+    longGCStats_->SetAfterGCNativeBindingSize(heap_->GetNativeBindingSize());
+    longGCStats_->SetAfterGCNativeLimit(heap_->GetGlobalSpaceNativeLimit());
+    currentGCIsLong_ = false;
+}
+
 void GCStats::ProcessAfterLongGCStats()
 {
     LongGCStats *longGCStats = GetLongGCStats();
     float gcTotalTime = GetScopeDuration(GCStats::Scope::ScopeId::TotalGC);
+#if ENABLE_LOCALCC_OPTIMIZATION
+    currentGCIsLong_ =
+        IsLongGC(gcReason_, heap_->InSensitiveStatus(), Runtime::GetInstance()->IsInBackground(), gcTotalTime);
+    if (currentGCIsLong_) {
+#else
     if (IsLongGC(gcReason_, heap_->InSensitiveStatus(), Runtime::GetInstance()->IsInBackground(), gcTotalTime)) {
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
         longGCStats->SetGCType(static_cast<int>(gcType_));
         longGCStats->SetGCReason(static_cast<int>(gcReason_));
         longGCStats->SetMarkReason(static_cast<int>(markReason_));

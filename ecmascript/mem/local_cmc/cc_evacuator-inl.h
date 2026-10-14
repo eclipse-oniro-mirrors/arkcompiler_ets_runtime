@@ -16,6 +16,7 @@
 #ifndef ECMASCRIPT_MEM_LOCAL_CMC_CC_EVACUATOR_INL_H
 #define ECMASCRIPT_MEM_LOCAL_CMC_CC_EVACUATOR_INL_H
 
+#include "ecmascript/base/config.h"
 #include "ecmascript/mem/local_cmc/cc_evacuator.h"
 
 #include "ecmascript/mem/object_xray.h"
@@ -62,6 +63,26 @@ void CCUpdateRootVisitor::HandleSlot(ObjectSlot slot)
         TaggedObject *ref = evacuator_->Copy(object, markWord);
         slot.Update(ref);
     }
+}
+
+void CCConcurrentUpdateRootVisitor::VisitRoot(GCRoot &root)
+{
+    JSTaggedValue value = root.AtomicLoad();
+    if (!value.IsHeapObject()) {
+        return;
+    }
+    ASSERT(!value.IsWeak());
+    TaggedObject *object = value.GetHeapObject();
+    Region *objectRegion = Region::ObjectAddressToRange(object);
+    if (objectRegion->InSharedHeap() || !objectRegion->IsFromRegion()) {
+        return;
+    }
+
+    MarkWord markWord(object, RELAXED_LOAD);
+    TaggedObject *toObject = markWord.IsForwardingAddress() ? markWord.ToForwardingAddress() :
+        evacuator_->Copy(object, markWord);
+    JSTaggedValue forwarded(toObject);
+    root.AtomicStore(forwarded);
 }
 
 template<bool needUpdateLocalToShare>
