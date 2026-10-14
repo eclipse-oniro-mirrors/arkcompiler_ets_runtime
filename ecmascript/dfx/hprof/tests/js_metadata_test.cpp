@@ -368,9 +368,15 @@ public:
             {JSType::NATIVE_MODULE_FAILURE_INFO, {"ArkNativeModuleFailureInfo", "NATIVE_MODULE_FAILURE_INFO"}},
             {JSType::PENDING_JOB, {"Job", "Arguments", "PENDING_JOB"}},
             {JSType::PROFILE_TYPE_INFO, {"Length", "Method", "ExtraInfoMap", "JitOsr", "Data", "PROFILE_TYPE_INFO"}},
+#ifndef REMOVE_PGO_HANDLE
             {JSType::PROFILE_TYPE_INFO_CELL_0, {"Value", "MachineCode", "Handle", "PROFILE_TYPE_INFO_CELL_0"}},
             {JSType::PROFILE_TYPE_INFO_CELL_1, {"Value", "MachineCode", "Handle", "PROFILE_TYPE_INFO_CELL_1"}},
             {JSType::PROFILE_TYPE_INFO_CELL_N, {"Value", "MachineCode", "Handle", "PROFILE_TYPE_INFO_CELL_N"}},
+#else
+            {JSType::PROFILE_TYPE_INFO_CELL_0, {"Value", "MachineCode", "PROFILE_TYPE_INFO_CELL_0"}},
+            {JSType::PROFILE_TYPE_INFO_CELL_1, {"Value", "MachineCode", "PROFILE_TYPE_INFO_CELL_1"}},
+            {JSType::PROFILE_TYPE_INFO_CELL_N, {"Value", "MachineCode", "PROFILE_TYPE_INFO_CELL_N"}},
+#endif
             {JSType::PROGRAM, {"MainFunction", "PROGRAM"}},
             {JSType::PROMISE_CAPABILITY, {"Promise", "Resolve", "Reject", "PROMISE_CAPABILITY"}},
             {JSType::PROMISE_ITERATOR_RECORD, {"Iterator", "PROMISE_ITERATOR_RECORD"}},
@@ -945,6 +951,7 @@ public:
                 ProfileTypeInfo::JIT_OSR_OFFSET,
                 ProfileTypeInfo::DATA_OFFSET,
                 ProfileTypeInfo::SIZE - ProfileTypeInfo::SIZE}},
+#ifndef REMOVE_PGO_HANDLE
             {JSType::PROFILE_TYPE_INFO_CELL_0, {
                 ProfileTypeInfoCell::VALUE_OFFSET,
                 ProfileTypeInfoCell::MACHINE_CODE_OFFSET,
@@ -960,6 +967,20 @@ public:
                 ProfileTypeInfoCell::MACHINE_CODE_OFFSET,
                 ProfileTypeInfoCell::HANDLE_OFFSET,
                 ProfileTypeInfoCell::LAST_OFFSET - ProfileTypeInfoCell::VALUE_OFFSET}},
+#else
+            {JSType::PROFILE_TYPE_INFO_CELL_0, {
+                ProfileTypeInfoCell::VALUE_OFFSET,
+                ProfileTypeInfoCell::MACHINE_CODE_OFFSET,
+                ProfileTypeInfoCell::LAST_OFFSET - ProfileTypeInfoCell::VALUE_OFFSET}},
+            {JSType::PROFILE_TYPE_INFO_CELL_1, {
+                ProfileTypeInfoCell::VALUE_OFFSET,
+                ProfileTypeInfoCell::MACHINE_CODE_OFFSET,
+                ProfileTypeInfoCell::LAST_OFFSET - ProfileTypeInfoCell::VALUE_OFFSET}},
+            {JSType::PROFILE_TYPE_INFO_CELL_N, {
+                ProfileTypeInfoCell::VALUE_OFFSET,
+                ProfileTypeInfoCell::MACHINE_CODE_OFFSET,
+                ProfileTypeInfoCell::LAST_OFFSET - ProfileTypeInfoCell::VALUE_OFFSET}},
+#endif
             {JSType::PROGRAM, {Program::MAIN_FUNCTION_OFFSET, Program::SIZE - Program::MAIN_FUNCTION_OFFSET}},
             {JSType::PROMISE_CAPABILITY, {PromiseCapability::PROMISE_OFFSET, PromiseCapability::RESOLVE_OFFSET,
                                           PromiseCapability::REJECT_OFFSET,
@@ -1694,6 +1715,7 @@ public:
                 ProfileTypeInfo::JIT_OSR_OFFSET - ProfileTypeInfo::EXTRA_INFO_MAP_OFFSET,
                 ProfileTypeInfo::SIZE - ProfileTypeInfo::JIT_OSR_OFFSET,
                 JSTaggedValue::TaggedTypeSize()}},
+#ifndef REMOVE_PGO_HANDLE
             {JSType::PROFILE_TYPE_INFO_CELL_0, {
                 ProfileTypeInfoCell::MACHINE_CODE_OFFSET - ProfileTypeInfoCell::VALUE_OFFSET,
                 ProfileTypeInfoCell::HANDLE_OFFSET - ProfileTypeInfoCell::MACHINE_CODE_OFFSET,
@@ -1706,6 +1728,17 @@ public:
                 ProfileTypeInfoCell::MACHINE_CODE_OFFSET - ProfileTypeInfoCell::VALUE_OFFSET,
                 ProfileTypeInfoCell::HANDLE_OFFSET - ProfileTypeInfoCell::MACHINE_CODE_OFFSET,
                 ProfileTypeInfoCell::LAST_OFFSET - ProfileTypeInfoCell::HANDLE_OFFSET}},
+#else
+            {JSType::PROFILE_TYPE_INFO_CELL_0, {
+                ProfileTypeInfoCell::MACHINE_CODE_OFFSET - ProfileTypeInfoCell::VALUE_OFFSET,
+                ProfileTypeInfoCell::LAST_OFFSET - ProfileTypeInfoCell::MACHINE_CODE_OFFSET}},
+            {JSType::PROFILE_TYPE_INFO_CELL_1, {
+                ProfileTypeInfoCell::MACHINE_CODE_OFFSET - ProfileTypeInfoCell::VALUE_OFFSET,
+                ProfileTypeInfoCell::LAST_OFFSET - ProfileTypeInfoCell::MACHINE_CODE_OFFSET}},
+            {JSType::PROFILE_TYPE_INFO_CELL_N, {
+                ProfileTypeInfoCell::MACHINE_CODE_OFFSET - ProfileTypeInfoCell::VALUE_OFFSET,
+                ProfileTypeInfoCell::LAST_OFFSET - ProfileTypeInfoCell::MACHINE_CODE_OFFSET}},
+#endif
             {JSType::PROGRAM, {Program::SIZE - Program::MAIN_FUNCTION_OFFSET}},
             {JSType::PROMISE_CAPABILITY, {
                 PromiseCapability::RESOLVE_OFFSET - PromiseCapability::PROMISE_OFFSET,

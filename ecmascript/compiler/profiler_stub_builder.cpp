@@ -150,6 +150,7 @@ void ProfilerStubBuilder::ProfileDefineClass(
         Bind(&isHeapObject);
         Branch(IsProfileTypeInfoCell0(glue, slotValue), &isProfileTypeInfoCell0, &exit);
         Bind(&isProfileTypeInfoCell0);
+#ifndef REMOVE_PGO_HANDLE
         GateRef handleOffset = IntPtr(ProfileTypeInfoCell::HANDLE_OFFSET);
         GateRef handle = Load(VariableType::JS_ANY(), glue, slotValue, handleOffset);
         BRANCH(TaggedIsUndefined(handle), &updateSlot, &exit);
@@ -157,6 +158,7 @@ void ProfilerStubBuilder::ProfileDefineClass(
         auto weakCtor = env->GetBuilder()->CreateWeakRef(constructor);
         Store(VariableType::JS_POINTER(), glue, slotValue, handleOffset, weakCtor);
         TryPreDumpInner(glue, func, profileTypeInfo);
+#endif
         Jump(&exit);
     }
     Bind(&exit);

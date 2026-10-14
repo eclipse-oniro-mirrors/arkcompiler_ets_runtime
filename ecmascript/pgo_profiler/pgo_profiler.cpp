@@ -1336,6 +1336,7 @@ void PGOProfiler::DumpDefineClass(ApEntityId abcId, const CString &recordName, E
     if (!slotValue.IsProfileTypeInfoCell0()) {
         return;
     }
+#ifndef REMOVE_PGO_HANDLE
     JSTaggedValue handle = ProfileTypeInfoCell::Cast(slotValue)->GetHandle(thread);
     if (!handle.IsHeapObject() || !handle.IsWeak()) {
         return;
@@ -1393,6 +1394,7 @@ void PGOProfiler::DumpDefineClass(ApEntityId abcId, const CString &recordName, E
         ProfileType recordType = GetRecordProfileType(abcId, recordName);
         recordInfos_->AddDefine(recordType, methodId, bcOffset, objDefType);
     }
+#endif
 }
 
 void PGOProfiler::DumpCreateObject(ApEntityId abcId, const CString &recordName, EntityId methodId, int32_t bcOffset,
