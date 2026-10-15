@@ -35,13 +35,13 @@ using namespace panda::ecmascript;
 
 namespace panda::test {
 
-using ChainedHashMapType = DisableCMCGCNormalTrait::ChainedHashMapType;
-using ChainedHashMapTypeNormal = DisableCMCGCNormalTrait::ChainedHashMapType;
-using ChainedHashMapInUseScopeType = DisableCMCGCNormalTrait::ChainedHashMapInUseScopeType;
-using ChainedHashMapInUseScopeTypeNormal = DisableCMCGCNormalTrait::ChainedHashMapInUseScopeType;
-using ChainedHashMapOperationNormalType = DisableCMCGCNormalTrait::ChainedHashMapOperationType;
+using ChainedHashMapType = ChainedHashMap;
+using ChainedHashMapTypeNormal = ChainedHashMap;
+using ChainedHashMapInUseScopeType = ChainedHashMapInUseScope;
+using ChainedHashMapInUseScopeTypeNormal = ChainedHashMapInUseScope;
+using ChainedHashMapOperationNormalType = ChainedHashMapOperation<ChainedHashMapConfig::NoSlotBarrier>;
 using ChainedHashMapOperationConcurrentSweepType =
-    ChainedHashMapOperation<EcmaStringTableMutex, JSThread, ChainedHashMapConfig::NeedSlotBarrier>;
+    ChainedHashMapOperation<ChainedHashMapConfig::NeedSlotBarrier>;
 
 class EcmaStringTableSweepingTest : public BaseTestWithScope<false> {
 public:
@@ -1468,7 +1468,7 @@ HWTEST_F_L0(EcmaStringTableSweepingTest, ChainedHashMap_RootBucketStateTest)
 /**
  * @tc.name: ChainedHashMap_ClearNodeFromGC_NormalInsertUtf8
  * @tc.desc: Test ClearNodeFromGC with Normal mode insertion for UTF8 strings. Use Normal mode
- *           (NoSlotBarrierDynamic) ChainedHashMapOperation to insert UTF8 strings via LoadOrStore,
+ *           (NoSlotBarrier) ChainedHashMapOperation to insert UTF8 strings via LoadOrStore,
  *           these entries have no ToSpace tag. Then use ConcurrentSweep mode (NeedSlotBarrier)
  *           ChainedHashMapOperation to call ClearNodeFromGC.
  * @tc.type: FUNC
@@ -1552,7 +1552,7 @@ HWTEST_F_L0(EcmaStringTableSweepingTest, ChainedHashMap_ClearNodeFromGC_Concurre
 
 /**
  * @tc.name: ChainedHashMap_ClearNodeFromGC_MixedInsertUtf8
- * @tc.desc: Test dynamic insertion for UTF8 strings. First use NoSlotBarrierDynamic to insert entries
+ * @tc.desc: Test dynamic insertion for UTF8 strings. First use NoSlotBarrier to insert entries
  *           without ToSpace tag, then start sweeping and reuse the same operation to insert entries
  *           with ToSpace tag.
  *           Finally sweep entries with a keep-all visitor and clear their to-space tags.
@@ -1617,7 +1617,7 @@ HWTEST_F_L0(EcmaStringTableSweepingTest, ChainedHashMap_ClearNodeFromGC_MixedIns
 /**
  * @tc.name: ChainedHashMap_ClearNodeFromGC_NormalInsertUtf16
  * @tc.desc: Test ClearNodeFromGC with Normal mode insertion for UTF16 strings. Use Normal mode
- *           (NoSlotBarrierDynamic) ChainedHashMapOperation to insert UTF16 strings via LoadOrStore,
+ *           (NoSlotBarrier) ChainedHashMapOperation to insert UTF16 strings via LoadOrStore,
  *           these entries have no ToSpace tag. Then use ConcurrentSweep mode (NeedSlotBarrier)
  *           ChainedHashMapOperation to call ClearNodeFromGC.
  * @tc.type: FUNC
@@ -1679,7 +1679,7 @@ HWTEST_F_L0(EcmaStringTableSweepingTest, ChainedHashMap_ClearNodeFromGC_Concurre
 
 /**
  * @tc.name: ChainedHashMap_ClearNodeFromGC_MixedInsertUtf16
- * @tc.desc: Test dynamic insertion for UTF16 strings. First use NoSlotBarrierDynamic to insert entries
+ * @tc.desc: Test dynamic insertion for UTF16 strings. First use NoSlotBarrier to insert entries
  *           without ToSpace tag, then start sweeping and reuse the same operation to insert entries
  *           with ToSpace tag.
  *           Finally sweep entries with a keep-all visitor and clear their to-space tags.
@@ -1721,7 +1721,7 @@ HWTEST_F_L0(EcmaStringTableSweepingTest, ChainedHashMap_ClearNodeFromGC_MixedIns
 
 /**
  * @tc.name: ChainedHashMap_ClearNodeFromGC_NoAtomicMarkUtf8
- * @tc.desc: Test ClearNodeFromGC without AtomicMark for UTF8 strings. Use Normal mode (NoSlotBarrierDynamic)
+ * @tc.desc: Test ClearNodeFromGC without AtomicMark for UTF8 strings. Use Normal mode (NoSlotBarrier)
  *           ChainedHashMapOperation to insert UTF8 strings via LoadOrStore without calling AtomicMark
  *           on the string objects. The visitor returns nullptr to simulate unmarked objects
  *           being cleared during GC.
@@ -1762,7 +1762,7 @@ HWTEST_F_L0(EcmaStringTableSweepingTest, ChainedHashMap_ClearNodeFromGC_NoAtomic
 /**
  * @tc.name: ChainedHashMap_ClearNodeFromGC_AllAtomicMarkUtf8
  * @tc.desc: Test ClearNodeFromGC with all entries AtomicMarked for UTF8 strings. Use Normal mode
- *           (NoSlotBarrierDynamic) ChainedHashMapOperation to insert UTF8 strings via LoadOrStore,
+ *           (NoSlotBarrier) ChainedHashMapOperation to insert UTF8 strings via LoadOrStore,
  *           and call AtomicMark on all string objects. The visitor checks the mark bit and returns
  *           the object if marked, simulating all objects surviving during GC.
  * @tc.type: FUNC
@@ -1805,7 +1805,7 @@ HWTEST_F_L0(EcmaStringTableSweepingTest, ChainedHashMap_ClearNodeFromGC_AllAtomi
 /**
  * @tc.name: ChainedHashMap_ClearNodeFromGC_PartialAtomicMarkUtf8
  * @tc.desc: Test ClearNodeFromGC with partial entries AtomicMarked for UTF8 strings. Use Normal mode
- *           (NoSlotBarrierDynamic) ChainedHashMapOperation to insert UTF8 strings via LoadOrStore.
+ *           (NoSlotBarrier) ChainedHashMapOperation to insert UTF8 strings via LoadOrStore.
  *           Half of the entries are AtomicMarked and half are not. The visitor checks the mark bit,
  *           simulating partial objects surviving during GC while others are cleared.
  * @tc.type: FUNC
@@ -1867,7 +1867,7 @@ HWTEST_F_L0(EcmaStringTableSweepingTest, ChainedHashMap_ClearNodeFromGC_PartialA
 
 /**
  * @tc.name: ChainedHashMap_ClearNodeFromGC_NoAtomicMarkUtf16
- * @tc.desc: Test ClearNodeFromGC without AtomicMark for UTF16 strings. Use Normal mode (NoSlotBarrierDynamic)
+ * @tc.desc: Test ClearNodeFromGC without AtomicMark for UTF16 strings. Use Normal mode (NoSlotBarrier)
  *           ChainedHashMapOperation to insert UTF16 strings via LoadOrStore without calling AtomicMark
  *           on the string objects. The visitor returns nullptr to simulate unmarked objects
  *           being cleared during GC.
@@ -1897,7 +1897,7 @@ HWTEST_F_L0(EcmaStringTableSweepingTest, ChainedHashMap_ClearNodeFromGC_NoAtomic
 /**
  * @tc.name: ChainedHashMap_ClearNodeFromGC_AllAtomicMarkUtf16
  * @tc.desc: Test ClearNodeFromGC with all entries AtomicMarked for UTF16 strings. Use Normal mode
- *           (NoSlotBarrierDynamic) ChainedHashMapOperation to insert UTF16 strings via LoadOrStore,
+ *           (NoSlotBarrier) ChainedHashMapOperation to insert UTF16 strings via LoadOrStore,
  *           and call AtomicMark on all string objects. The visitor checks the mark bit and returns
  *           the object if marked, simulating all objects surviving during GC.
  * @tc.type: FUNC
@@ -1929,7 +1929,7 @@ HWTEST_F_L0(EcmaStringTableSweepingTest, ChainedHashMap_ClearNodeFromGC_AllAtomi
 /**
  * @tc.name: ChainedHashMap_ClearNodeFromGC_PartialAtomicMarkUtf16
  * @tc.desc: Test ClearNodeFromGC with partial entries AtomicMarked for UTF16 strings. Use Normal mode
- *           (NoSlotBarrierDynamic) ChainedHashMapOperation to insert UTF16 strings via LoadOrStore.
+ *           (NoSlotBarrier) ChainedHashMapOperation to insert UTF16 strings via LoadOrStore.
  *           Half of the entries are AtomicMarked and half are not. The visitor checks the mark bit,
  *           simulating partial objects surviving during GC while others are cleared.
  * @tc.type: FUNC

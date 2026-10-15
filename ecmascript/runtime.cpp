@@ -35,7 +35,6 @@
 #include "ecmascript/mem/slots.h"
 #include "ecmascript/module/js_module_source_text.h"
 #include "ecmascript/platform/parameters.h"
-#include "ecmascript/string/string_table_internal.h"
 
 namespace panda::ecmascript {
 using PGOProfilerManager = pgo::PGOProfilerManager;
@@ -73,11 +72,6 @@ Runtime::~Runtime()
             baseClassRoots_->Fini();
             delete baseClassRoots_;
             baseClassRoots_ = nullptr;
-        }
-        if (baseStringTable_ != nullptr) {
-            baseStringTable_->Fini();
-            delete baseStringTable_;
-            baseStringTable_ = nullptr;
         }
     }
     DestroySendableGlobalStorage();
@@ -182,37 +176,9 @@ void Runtime::PreInitialization(const EcmaVM *vm)
     nativeAreaAllocator_ = std::make_unique<NativeAreaAllocator>();
     heapRegionAllocator_ = std::make_unique<HeapRegionAllocator>();
 
-    if (g_isEnableCMCGC) {
-        baseStringTable_ = new (std::nothrow) BaseStringTableImpl();
-        if (baseStringTable_ == nullptr) {
-            LOG_ECMA(FATAL) << "create baseStringTable_ failed";
-            UNREACHABLE();
-        }
-        baseStringTable_->Init();
-        auto& baseStringTable = *baseStringTable_;
-        common::BaseRuntime::GetInstance()->SetStringTableCleanUpCallback([] {
-            auto& stringTable = reinterpret_cast<BaseStringTableImpl&>(Runtime::GetInstance()->GetBaseStringTable());
-            stringTable.GetInternalTable()->GetCleaner()->CleanUp();
-        });
-        common::BaseRuntime::GetInstance()->SetStringTableProcessCallback([](const WeakRefFieldVisitor& visitor) {
-            auto& stringTable = reinterpret_cast<BaseStringTableImpl&>(Runtime::GetInstance()->GetBaseStringTable());
-            auto stringTableCleaner = stringTable.GetInternalTable()->GetCleaner();
-            stringTableCleaner->PostSweepWeakRefTask(visitor);
-            stringTableCleaner->JoinAndWaitSweepWeakRefTask(visitor);
-        });
-        baseClassRoots_ = new (std::nothrow) BaseClassRoots();
-        if (baseClassRoots_ == nullptr) {
-            LOG_ECMA(FATAL) << "create baseClassRoots_ failed";
-            UNREACHABLE();
-        }
-        stringTable_ = std::make_unique<EcmaStringTable>(true, &baseStringTable,
-                                                         &static_cast<BaseStringTableImpl*>(&baseStringTable)->
-                                                          GetInternalTable()->GetChainedHashMap());
-    } else {
-        stringTable_ = std::make_unique<EcmaStringTable>(false);
-        stringTable_->GetCleaner()->SetEnableConcurrentSweep(
-            const_cast<EcmaVM*>(vm)->GetJSOptions().EnableStringTableConcurrentSweep());
-    }
+    stringTable_ = std::make_unique<EcmaStringTable>();
+    stringTable_->GetCleaner()->SetEnableConcurrentSweep(
+        const_cast<EcmaVM*>(vm)->GetJSOptions().EnableStringTableConcurrentSweep());
 
     SharedHeap::GetInstance()->Initialize(nativeAreaAllocator_.get(), heapRegionAllocator_.get(),
         const_cast<EcmaVM*>(vm)->GetJSOptions(), DaemonThread::GetInstance());
@@ -306,7 +272,7 @@ void Runtime::RegisterThread(JSThread* newThread)
             return;
         }
     }
-    
+
     ThreadHolder* threadHolder = newThread->GetThreadHolder();
     threadHolder->BindMutator();
     newThread->SetMutator(reinterpret_cast<common::Mutator*>(threadHolder->GetMutator()));

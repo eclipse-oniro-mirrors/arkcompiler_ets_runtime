@@ -880,8 +880,7 @@ void SharedCC::FinishConcurrentStringTableSweep()
 
 void SharedCC::SetStringTableCopyOrSweeping(bool enabled)
 {
-    auto *chainedHashMap = reinterpret_cast<DisableCMCGCNormalTrait::ChainedHashMapType*>(
-        Runtime::GetInstance()->GetEcmaStringTable()->GetChainedHashMap());
+    auto *chainedHashMap = Runtime::GetInstance()->GetEcmaStringTable()->GetChainedHashMap();
     if (enabled) {
         chainedHashMap->StartSweeping();
     } else {

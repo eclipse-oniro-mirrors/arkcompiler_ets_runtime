@@ -302,7 +302,6 @@ host_unittest_action("ECMA_StringTable_Test") {
   sources = [
     # test file
     "ecma_string_table_test.cpp",
-    "base_string_table_test.cpp",
   ]
 
   configs = [
@@ -2997,7 +2996,7 @@ host_unittest_action("MethodLiteralIDMap_Test") {
   deps = [ "../../:libark_jsruntime_test" ]
 
   # hiviewdfx libraries
-  
+
   external_deps = hiviewdfx_ext_deps
   external_deps += [
     "icu:shared_icui18n",

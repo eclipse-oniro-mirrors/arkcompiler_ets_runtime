@@ -29,6 +29,7 @@
 
 namespace panda::ecmascript {
 class TaggedObject;
+class JSThread;
 class ChainedHashMapConfig {
 public:
     static constexpr uint32_t SWEEP_PARTITION_BIT = 11U;
@@ -41,7 +42,7 @@ public:
     static constexpr uint32_t DEFAULT_MAP_BIT = 16U;
     static constexpr uint32_t MIN_MAP_BIT = SWEEP_PARTITION_BIT;
     static constexpr uint32_t MAX_MAP_BIT = 24U;
-    enum SlotBarrier { NeedSlotBarrier, NeedSlotBarrierCMC, NoSlotBarrier, NoSlotBarrierDynamic };
+    enum SlotBarrier { NeedSlotBarrier, NoSlotBarrier };
 };
 
 // Defined in chained_hash_map.cpp to keep the OHOS parameter dependency out of
@@ -83,16 +84,11 @@ public:
     BaseString* Value() const
     {
         uint64_t value = Pointer::Decode(bitField_);
-        if constexpr (SlotBarrier == ChainedHashMapConfig::NoSlotBarrier ||
-                      SlotBarrier == ChainedHashMapConfig::NoSlotBarrierDynamic) {
+        if constexpr (SlotBarrier == ChainedHashMapConfig::NoSlotBarrier) {
             return reinterpret_cast<BaseString*>(static_cast<uintptr_t>(value));
         }
-        if constexpr (SlotBarrier == ChainedHashMapConfig::NeedSlotBarrier) {
-            return reinterpret_cast<BaseString*>(
-                static_cast<uintptr_t>(Barriers::ReadBarrierForStringTableSlot(value, JSThread::GetCurrent())));
-        }
-        return reinterpret_cast<BaseString*>(common::Heap::GetBarrier().ReadStringTableStaticRef(
-            *reinterpret_cast<common::RefField<false>*>((void*)(&value))));
+        return reinterpret_cast<BaseString*>(
+            static_cast<uintptr_t>(Barriers::ReadBarrierForStringTableSlot(value, JSThread::GetCurrent())));
     }
 
     void SetValue(BaseString* v)
@@ -126,7 +122,6 @@ private:
     std::atomic<ChainedHashMapEntry*> overflow_;
 };
 
-template<typename Mutex>
 class ChainedHashMap {
 public:
     using Entry = ChainedHashMapEntry;
@@ -223,19 +218,6 @@ public:
         return mu_;
     }
 
-    void AddWaitFreeEntry(Entry* entry)
-    {
-        waitFreeEntries_.push_back(entry);
-    }
-
-    void CleanUp()
-    {
-        for (const ChainedHashMapEntry* entry: waitFreeEntries_) {
-            delete entry;
-        }
-        waitFreeEntries_.clear();
-    }
-
     void CheckAndFreeHeadEntries(uint32_t partitionId)
     {
         ForEachBucketHeadInPartition(partitionId, [this](ChainedHashMapEntry* bucketHead, uint32_t index) {
@@ -268,24 +250,12 @@ public:
 
     void StartSweeping()
     {
-        if (g_isEnableCMCGC) {
-            GetMutex().Lock();
-            isSweeping_ = true;
-            GetMutex().Unlock();
-        } else {
-            isSweeping_ = true;
-        }
+        isSweeping_ = true;
     }
 
     void FinishSweeping()
     {
-        if (g_isEnableCMCGC) {
-            GetMutex().Lock();
-            isSweeping_ = false;
-            GetMutex().Unlock();
-        } else {
-            isSweeping_ = false;
-        }
+        isSweeping_ = false;
     }
 
 private:
@@ -307,20 +277,17 @@ private:
     }
 
     Mutex mu_;
-    std::vector<Entry*> waitFreeEntries_ {};
-    // CMC GC only: can be removed after CMC GC is adapted.
     std::vector<Entry*> waitClearToSpaceTagEntries_ {};
     std::atomic<uint32_t> inuseCount_ {0};
     bool isSweeping_ {false};
 };
 
-template<typename Mutex, typename ThreadHolder, ChainedHashMapConfig::SlotBarrier SlotBarrier>
+template<ChainedHashMapConfig::SlotBarrier SlotBarrier>
 class ChainedHashMapOperation {
 public:
-    using WeakRefFieldVisitor = std::function<bool(common::RefField<>&)>;
     using WeakRootVisitor = std::function<panda::ecmascript::TaggedObject*(panda::ecmascript::TaggedObject* p)>;
     using Entry = ChainedHashMapEntry;
-    explicit ChainedHashMapOperation(ChainedHashMap<Mutex>* chainedHashMap): chainedHashMap_(chainedHashMap) { }
+    explicit ChainedHashMapOperation(ChainedHashMap* chainedHashMap): chainedHashMap_(chainedHashMap) { }
 
     ~ChainedHashMapOperation() { }
 
@@ -401,8 +368,8 @@ public:
     template<typename ReadBarrier>
     BaseString* Load(ReadBarrier&& readBarrier, uint32_t key, BaseString* value);
 
-    template<bool threadState = true, typename ReadBarrier, typename HandleType>
-    BaseString* StoreOrLoad(ThreadHolder* holder, ReadBarrier&& readBarrier, uint32_t key, HandleType str);
+    template <bool threadState = true, typename ReadBarrier, typename HandleType>
+    BaseString* StoreOrLoad(JSThread* holder, ReadBarrier&& readBarrier, uint32_t key, HandleType str);
 
     template<typename ReadBarrier>
     BaseString* Load(ReadBarrier&& readBarrier,
@@ -411,25 +378,19 @@ public:
                      uint32_t offset,
                      uint32_t utf8Len);
 
-    template<typename LoaderCallback, typename EqualsCallback>
-    BaseString* StoreOrLoad(ThreadHolder* holder,
-                            uint32_t key,
-                            LoaderCallback loaderCallback,
+    template <typename LoaderCallback, typename EqualsCallback>
+    BaseString* StoreOrLoad(JSThread* holder, uint32_t key, LoaderCallback loaderCallback,
                             EqualsCallback equalsCallback);
 
     template<bool IsCheck, typename ReadBarrier>
     BaseString* Load(ReadBarrier&& readBarrier, uint32_t key, BaseString* value);
 
-    template<bool IsLock, typename LoaderCallback, typename EqualsCallback>
-    BaseString* LoadOrStore(ThreadHolder* holder,
-                            uint32_t key,
-                            LoaderCallback loaderCallback,
+    template <bool IsLock, typename LoaderCallback, typename EqualsCallback>
+    BaseString* LoadOrStore(JSThread* holder, uint32_t key, LoaderCallback loaderCallback,
                             EqualsCallback equalsCallback);
 
-    template<typename LoaderCallback, typename EqualsCallback>
-    BaseString* LoadOrStoreForJit(ThreadHolder* holder,
-                                  uint32_t key,
-                                  LoaderCallback loaderCallback,
+    template <typename LoaderCallback, typename EqualsCallback>
+    BaseString* LoadOrStoreForJit(JSThread* holder, uint32_t key, LoaderCallback loaderCallback,
                                   EqualsCallback equalsCallback);
 
     static constexpr uint32_t ID_SHIFT_RIGHT = 11;
@@ -447,28 +408,13 @@ public:
         return chainedHashMap_->GetBucket(mapIndex).load(std::memory_order_acquire);
     }
 
-    // All other threads have stopped due to the gc and Clear phases.
-    // Therefore, the operations related to atoms in ClearNodeFromGc and Clear use std::memory_order_relaxed,
-    // which ensures atomicity but does not guarantee memory order
-    template<ChainedHashMapConfig::SlotBarrier Barrier = SlotBarrier,
-             std::enable_if_t<Barrier == ChainedHashMapConfig::NeedSlotBarrierCMC, int> = 0>
-    bool ClearNodeFromGC(Entry* parent, const WeakRefFieldVisitor& visitor, std::vector<Entry*>& waitDeleteEntries);
-
-    template<ChainedHashMapConfig::SlotBarrier Barrier = SlotBarrier,
-             std::enable_if_t<Barrier == ChainedHashMapConfig::NoSlotBarrier, int> = 0>
-    bool ClearNodeFromGC(Entry* parent, uint32_t index, const WeakRefFieldVisitor& visitor);
-
-    template<ChainedHashMapConfig::SlotBarrier Barrier = SlotBarrier,
-             std::enable_if_t<Barrier == ChainedHashMapConfig::NeedSlotBarrier, int> = 0>
-    bool ClearNodeFromGC(Entry* parent,
-                         uint32_t index,
-                         const WeakRootVisitor& visitor,
+    template <ChainedHashMapConfig::SlotBarrier Barrier = SlotBarrier,
+              std::enable_if_t<Barrier == ChainedHashMapConfig::NeedSlotBarrier, int> = 0>
+    bool ClearNodeFromGC(Entry* parent, uint32_t index, const WeakRootVisitor& visitor,
                          std::vector<Entry*>& waitDeleteEntries);
 
-    template<ChainedHashMapConfig::SlotBarrier Barrier = SlotBarrier,
-             std::enable_if_t<Barrier == ChainedHashMapConfig::NoSlotBarrier ||
-                                  Barrier == ChainedHashMapConfig::NoSlotBarrierDynamic,
-                              int> = 0>
+    template <ChainedHashMapConfig::SlotBarrier Barrier = SlotBarrier,
+              std::enable_if_t<Barrier == ChainedHashMapConfig::NoSlotBarrier, int> = 0>
     bool ClearNodeFromGC(Entry* parent, uint32_t index, const WeakRootVisitor& visitor);
 
     // Iterator
@@ -497,7 +443,7 @@ public:
     }
 
 private:
-    ChainedHashMap<Mutex>* chainedHashMap_ {nullptr};
+    ChainedHashMap* chainedHashMap_ {nullptr};
 
     // Walks the bucket chain from head, calling pred on every live entry whose
     // hash equals key; returns the first entry pred accepts, or nullptr.
@@ -513,12 +459,7 @@ private:
 
     bool Iter(Entry* node, std::function<bool(Entry*)>& iter);
 
-    template<ChainedHashMapConfig::SlotBarrier Barrier = SlotBarrier,
-             std::enable_if_t<Barrier != ChainedHashMapConfig::NeedSlotBarrier, int> = 0>
-    bool CheckWeakRef(const WeakRefFieldVisitor& visitor, Entry* entry);
-
-    template<ChainedHashMapConfig::SlotBarrier Barrier = SlotBarrier,
-             std::enable_if_t<Barrier != ChainedHashMapConfig::NeedSlotBarrierCMC, int> = 0>
+    template<ChainedHashMapConfig::SlotBarrier Barrier = SlotBarrier>
     bool CheckWeakRef(const WeakRootVisitor& visitor, Entry* entry);
 
     template<typename ReadBarrier>
@@ -526,27 +467,19 @@ private:
 
     BaseString* GetValue(Entry* entry, bool sweeping) const
     {
-        if constexpr (SlotBarrier == ChainedHashMapConfig::NeedSlotBarrier ||
-                      SlotBarrier == ChainedHashMapConfig::NoSlotBarrierDynamic) {
-            if (!sweeping) {
-                return entry->Value<ChainedHashMapConfig::NoSlotBarrier>();
-            }
-            // Fresh entries inserted during concurrent sweep are already to-space tagged.
-            // Read them without a slot barrier until sweep finalization clears the tag.
-            if (entry->IsToSpaceObject()) {
-                return entry->Value<ChainedHashMapConfig::NoSlotBarrier>();
-            }
-            return entry->Value<ChainedHashMapConfig::NeedSlotBarrier>();
+        if (!sweeping) {
+            return entry->Value<ChainedHashMapConfig::NoSlotBarrier>();
         }
-        return entry->Value<SlotBarrier>();
+        // Fresh entries inserted during concurrent sweep are already to-space tagged.
+        // Read them without a slot barrier until sweep finalization clears the tag.
+        if (entry->IsToSpaceObject()) {
+            return entry->Value<ChainedHashMapConfig::NoSlotBarrier>();
+        }
+        return entry->Value<ChainedHashMapConfig::NeedSlotBarrier>();
     }
 
     Entry* NewEntry(BaseString* value)
     {
-        if constexpr (SlotBarrier != ChainedHashMapConfig::NeedSlotBarrier &&
-                      SlotBarrier != ChainedHashMapConfig::NoSlotBarrierDynamic) {
-            return new Entry(value);
-        }
         if (!chainedHashMap_->IsSweeping()) {
             return new Entry(value);
         }
@@ -559,35 +492,13 @@ private:
 
     constexpr static bool IsNull(BaseString* value)
     {
-        if constexpr (SlotBarrier == ChainedHashMapConfig::NoSlotBarrier) {
-            return false;
-        }
         return value == nullptr;
-    }
-
-    constexpr Entry* PruneHead(Entry* entry)
-    {
-        if constexpr (SlotBarrier != ChainedHashMapConfig::NeedSlotBarrierCMC) {
-            return entry;
-        }
-        if (chainedHashMap_->IsSweeping()) {
-            return entry;
-        }
-        if (entry == nullptr) {
-            return entry;
-        }
-        if (entry->Value<SlotBarrier>() == nullptr) {
-            chainedHashMap_->AddWaitFreeEntry(entry);
-            return entry->Overflow().load(std::memory_order_acquire);
-        }
-        return entry;
     }
 };
 
-template<typename Mutex>
 class ChainedHashMapInUseScope {
 public:
-    ChainedHashMapInUseScope(ChainedHashMap<Mutex>* chainedHashMap): chainedHashMap_(chainedHashMap)
+    ChainedHashMapInUseScope(ChainedHashMap* chainedHashMap): chainedHashMap_(chainedHashMap)
     {
         chainedHashMap_->IncreaseInuseCount();
     }
@@ -601,7 +512,7 @@ public:
     NO_MOVE_SEMANTIC_CC(ChainedHashMapInUseScope);
 
 private:
-    ChainedHashMap<Mutex>* chainedHashMap_;
+    ChainedHashMap* chainedHashMap_;
 };
 }
 #endif //ECMASCRIPT_STRING_TABLE_CHAINED_HASH_MAP_H

@@ -26,10 +26,8 @@
 #include "ecmascript/mem/visitor.h"
 #include "ecmascript/platform/mutex.h"
 #include "ecmascript/tagged_array.h"
-#include "ecmascript/string/base_string_table.h"
 #include "ecmascript/string/base_string.h"
 #include "ecmascript/string/chained_hash_map.h"
-#include "ecmascript/string/string_table_internal.h"
 
 namespace panda::ecmascript {
 class EcmaString;
@@ -79,6 +77,7 @@ private:
     void SuspendAllAndFinishSweeping(JSThread *thread);
     void SuspendAllAndFinishSweepingByDaemonThread(DaemonThread *dThread);
     void ProcessCheckAndFreeHeadEntries();
+    void FinishSweepingInternal();
 
     static inline uint32_t GetNextIndexId(IteratorPtr &iter)
     {
@@ -144,118 +143,38 @@ private:
     ConditionVariable sweepWeakRefCV_;
 };
 
-class EcmaStringTableMutex {
-public:
-    explicit EcmaStringTableMutex(bool is_init = true) : mtx_(is_init)
-    {
-    }
-
-    void LockWithThreadState(JSThread* thread);
-
-    void Lock()
-    {
-        return mtx_.Lock();
-    }
-
-    void Unlock()
-    {
-        return mtx_.Unlock();
-    }
-
-private:
-    Mutex mtx_;
-};
-
-struct EnableCMCGCTrait {
-    using StringTableInterface = BaseStringTableInterface<BaseStringTableImpl>;
-    using ChainedHashMapType = ChainedHashMap<BaseStringTableMutex>;
-    using ChainedHashMapInUseScopeType = ChainedHashMapInUseScope<BaseStringTableMutex>;
-#ifndef GC_STW_STRINGTABLE
-    using ChainedHashMapOperationType = ChainedHashMapOperation<BaseStringTableMutex, common::ThreadHolder,
-                                                          ChainedHashMapConfig::NeedSlotBarrierCMC>;
-    static constexpr bool ConcurrentSweep = true;
-#else
-    using ChainedHashMapOperationType = ChainedHashMapOperation<BaseStringTableMutex, common::ThreadHolder,
-                                                          ChainedHashMapConfig::NoSlotBarrier>;
-    static constexpr bool ConcurrentSweep = false;
-#endif
-    using ThreadType = common::ThreadHolder;
-    static constexpr bool EnableCMCGC = true;
-    static common::ReadOnlyHandle<BaseString> CreateHandle(ThreadType* holder, BaseString* string)
-    {
-        return JSHandle<EcmaString>(holder->GetJSThread(), EcmaString::FromBaseString(string));
-    }
-};
-
-struct DisableCMCGCNormalTrait {
-    struct DummyStringTableInterface {}; // placeholder for consistent type
-    using StringTableInterface = DummyStringTableInterface;
-    using ChainedHashMapType = ChainedHashMap<EcmaStringTableMutex>;
-    using ChainedHashMapInUseScopeType = ChainedHashMapInUseScope<EcmaStringTableMutex>;
-    using ChainedHashMapOperationType = ChainedHashMapOperation<EcmaStringTableMutex, JSThread,
-                                                          ChainedHashMapConfig::NoSlotBarrierDynamic>;
-    using ThreadType = JSThread;
-    static constexpr bool EnableCMCGC = false;
-    static constexpr bool ConcurrentSweep = false;
-    static common::ReadOnlyHandle<BaseString> CreateHandle(ThreadType* holder, BaseString* string)
-    {
-        return JSHandle<EcmaString>(holder, EcmaString::FromBaseString(string));
-    }
-};
-
 class EcmaStringTableImpl final {
 public:
     EcmaStringTableImpl() {}
 
-#ifdef USE_CMC_GC
-    void Initialize(void* chainedHashMap, void* itf)
-    {
-        chainedHashMap_ = chainedHashMap;
-        stringTableItf_ = itf;
-    }
-#endif
-
-    template <typename Traits>
     EcmaString *GetOrInternFlattenString(EcmaVM *vm, EcmaString *string);
-    template <typename Traits>
     EcmaString *GetOrInternFlattenStringNoGC(EcmaVM *vm, EcmaString *string);
-    template <typename Traits>
     EcmaString *GetOrInternStringFromCompressedSubString(EcmaVM *vm, const JSHandle<EcmaString> &string,
                                                          uint32_t offset, uint32_t utf8Len);
-    template <typename Traits>
     EcmaString *GetOrInternString(EcmaVM *vm, EcmaString *string);
 
-    template <typename Traits, typename LoaderCallback, typename EqualsCallback>
+    template <typename LoaderCallback, typename EqualsCallback>
     EcmaString *GetOrInternString(EcmaVM *vm, uint32_t hashcode, LoaderCallback loaderCallback,
                                   EqualsCallback equalsCallback);
-    template <typename Traits>
     EcmaString *GetOrInternString(EcmaVM *vm, const JSHandle<EcmaString> &firstString,
                                   const JSHandle<EcmaString> &secondString);
-    template <typename Traits>
     EcmaString *GetOrInternString(EcmaVM *vm, const uint8_t *utf8Data, uint32_t utf8Len, bool canBeCompress,
                                   MemSpaceType type = MemSpaceType::SHARED_OLD_SPACE);
-    template <typename Traits>
     EcmaString *GetOrInternString(EcmaVM *vm, const uint8_t *utf8Data, uint32_t utf16Len, MemSpaceType type);
-    template <typename Traits>
     EcmaString *GetOrInternString(EcmaVM *vm, const uint16_t *utf16Data, uint32_t utf16Len, bool canBeCompress);
     // This is ONLY for JIT Thread, since JIT could not create JSHandle so need to allocate String with holding
     // lock_ --- need to support JSHandle
-    template <typename Traits>
     EcmaString *GetOrInternStringWithoutJSHandleForJit(EcmaVM *vm, const uint8_t *utf8Data, uint32_t utf16Len,
                                                        MemSpaceType type);
-    template <typename Traits>
     EcmaString *GetOrInternStringWithoutJSHandleForJit(EcmaVM *vm, const uint8_t *utf8Data, uint32_t utf8Len,
                                                        bool canBeCompress, MemSpaceType type);
-    template <typename Traits>
     EcmaString *TryGetInternString(JSThread *thread, const JSHandle<EcmaString> &string);
 
-    template <typename Traits, std::enable_if_t<!Traits::ConcurrentSweep, int> = 0>
     void SweepWeakRef(const WeakRootVisitor &visitor, uint32_t partitionID);
 
     void ConcurrentSweepWeakRef(const WeakRootVisitor &visitor, uint32_t partitionID,
                                 std::vector<ChainedHashMapEntry*>& waitDeleteEntries);
 
-    template <typename Traits>
     bool CheckStringTableValidity(JSThread *thread);
 
     NO_COPY_SEMANTIC(EcmaStringTableImpl);
@@ -267,58 +186,26 @@ public:
      *
      */
     // This should only call in Debugger Signal, and need to fix and remove
-    template <typename Traits>
     EcmaString *GetOrInternStringThreadUnsafe(EcmaVM *vm, const JSHandle<EcmaString> firstString,
                                               const JSHandle<EcmaString> secondString);
     // This should only call in Debugger Signal, and need to fix and remove
-    template <typename Traits>
     EcmaString* GetOrInternStringThreadUnsafe(EcmaVM* vm, const uint8_t* utf8Data, uint32_t utf8Len,
                                               bool canBeCompress);
 
-#ifdef USE_CMC_GC
-    void *GetChainedHashMap() const
+    ChainedHashMap *GetChainedHashMap() const
     {
-        return chainedHashMap_;
+        return const_cast<ChainedHashMap *>(&chainedHashMap_);
     }
-#else
-    DisableCMCGCNormalTrait::ChainedHashMapType *GetChainedHashMap() const
-    {
-        return const_cast<DisableCMCGCNormalTrait::ChainedHashMapType *>(&chainedHashMap_);
-    }
-#endif
 private:
-    template <typename Traits>
-    typename Traits::ThreadType* GetThreadHolder(JSThread* thread);
-
-#ifdef USE_CMC_GC
-    void* chainedHashMap_ = nullptr;
-    [[maybe_unused]] void* stringTableItf_ = nullptr;
-#else
-    DisableCMCGCNormalTrait::ChainedHashMapType chainedHashMap_;
-#endif
+    ChainedHashMap chainedHashMap_;
 };
 
 
 class EcmaStringTable final {
 public:
-    EcmaStringTable(bool enableCMC, [[maybe_unused]] void* itf = nullptr, [[maybe_unused]] void* map = nullptr)
-        : enableCMCGC_(enableCMC)
+    EcmaStringTable()
     {
-#ifdef USE_CMC_GC
-        if (enableCMC) {
-            ASSERT(map != nullptr);
-            impl_.Initialize(map, itf);
-        } else {
-            if (map == nullptr) {
-                map = new DisableCMCGCNormalTrait::ChainedHashMapType();
-                needDeleteChainedHashMap_ = true;
-            }
-            impl_.Initialize(map, nullptr);
-            cleaner_ = new EcmaStringTableCleaner(this);
-        }
-#else
         cleaner_ = new EcmaStringTableCleaner(this);
-#endif
     }
 
     ~EcmaStringTable()
@@ -327,12 +214,6 @@ public:
             delete cleaner_;
             cleaner_ = nullptr;
         }
-#ifdef USE_CMC_GC
-        if (needDeleteChainedHashMap_) {
-            ASSERT(!enableCMCGC_);
-            delete reinterpret_cast<DisableCMCGCNormalTrait::ChainedHashMapType *>(impl_.GetChainedHashMap());
-        }
-#endif
     }
 
     EcmaString *GetOrInternFlattenString(EcmaVM *vm, EcmaString *string);
@@ -366,17 +247,11 @@ public:
 
     EcmaStringTableCleaner *GetCleaner()
     {
-        ASSERT(!enableCMCGC_ && "EcmaStringTableCleaner should not be used when cmcgc enabled");
         return cleaner_;
     }
 
     void WaitSweepWeakRefTaskFinished()
     {
-#ifdef USE_CMC_GC
-        if (enableCMCGC_) {
-            return;
-        }
-#endif
         cleaner_->WaitSweepWeakRefTaskFinished();
     }
 
@@ -392,28 +267,15 @@ public:
 
     bool IsSweeping() const
     {
-#ifdef USE_CMC_GC
-        if (enableCMCGC_) {
-            return reinterpret_cast<EnableCMCGCTrait::ChainedHashMapType*>(impl_.GetChainedHashMap())->IsSweeping();
-        }
-#endif
-        return reinterpret_cast<DisableCMCGCNormalTrait::ChainedHashMapType*>(impl_.GetChainedHashMap())
-            ->IsSweeping();
+        return impl_.GetChainedHashMap()->IsSweeping();
     }
 
     bool IsInUse() const
     {
-#ifdef USE_CMC_GC
-        if (enableCMCGC_) {
-            return reinterpret_cast<EnableCMCGCTrait::ChainedHashMapType*>(impl_.GetChainedHashMap())
-                       ->GetInuseCount() > 0;
-        }
-#endif
-        return reinterpret_cast<DisableCMCGCNormalTrait::ChainedHashMapType*>(impl_.GetChainedHashMap())
-                   ->GetInuseCount() > 0;
+        return impl_.GetChainedHashMap()->GetInuseCount() > 0;
     }
 
-    void *GetChainedHashMap() const
+    ChainedHashMap *GetChainedHashMap() const
     {
         return impl_.GetChainedHashMap();
     }
@@ -437,10 +299,6 @@ private:
     EcmaStringTableImpl impl_;
 
     EcmaStringTableCleaner *cleaner_ = nullptr;
-    bool enableCMCGC_ = false;
-#ifdef USE_CMC_GC
-    bool needDeleteChainedHashMap_ = false;
-#endif
     friend class SnapshotProcessor;
     friend class BaseDeserializer;
 };

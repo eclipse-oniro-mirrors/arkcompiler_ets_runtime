@@ -933,7 +933,6 @@ ecma_source = [
   "ecmascript/base/string_helper.cpp",
   "ecmascript/base/typed_array_helper.cpp",
   "ecmascript/base/bit_helper.cpp",
-  "ecmascript/string/base_string_table.cpp",
   "ecmascript/string/chained_hash_map.cpp",
   "ecmascript/string/base_string.cpp",
   "ecmascript/string/composite_base_class.cpp",
@@ -1056,7 +1055,6 @@ ecma_source = [
   "ecmascript/dump.cpp",
   "ecmascript/ecma_handle_scope.cpp",
   "ecmascript/ecma_string.cpp",
-  "ecmascript/ecma_string_table.cpp",
   "ecmascript/ecma_string_table_optimization.cpp",
   "ecmascript/ecma_vm.cpp",
   "ecmascript/element_accessor.cpp",
@@ -2006,7 +2004,7 @@ ohos_shared_library("libark_jsruntime_test") {
       "zlib:libz",
     ]
   }
-  
+
   if (enable_hilog) {
     external_deps += [ "hilog:libhilog" ]
   }

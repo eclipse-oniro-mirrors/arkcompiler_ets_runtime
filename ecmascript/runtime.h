@@ -167,11 +167,6 @@ public:
         return stringTable_.get();
     }
 
-    BaseStringTableInterface<BaseStringTableImpl> &GetBaseStringTable() const
-    {
-        return *baseStringTable_;
-    }
-
     BaseClassRoots &GetBaseClassRoots() const
     {
         return *baseClassRoots_;
@@ -570,7 +565,6 @@ private:
     std::unique_ptr<HeapRegionAllocator> heapRegionAllocator_;
     // for stringTable.
     std::unique_ptr<EcmaStringTable> stringTable_;
-    BaseStringTableInterface<BaseStringTableImpl>* baseStringTable_ = nullptr;
     BaseClassRoots* baseClassRoots_ = nullptr;
     std::unordered_map<uint32_t, std::unique_ptr<SerializationChunk>> serializeRootMap_;
     std::vector<uint32_t> serializeDataIndexVector_;

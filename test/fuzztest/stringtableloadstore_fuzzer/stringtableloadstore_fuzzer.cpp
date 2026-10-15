@@ -115,8 +115,8 @@ void StringTableLoadStoreFuzzTest(const uint8_t* data, size_t size)
     std::vector<uint8_t> utf8Data = CreateValidUtf8(seedData.data(), seedData.size());
     JSHandle<EcmaString> value(thread,
                                EcmaStringAccessor::CreateFromUtf8(vm, utf8Data.data(), utf8Data.size(), true));
-    auto* map = new ChainedHashMap<EcmaStringTableMutex>();
-    ChainedHashMapOperation<EcmaStringTableMutex, JSThread, ChainedHashMapConfig::NeedSlotBarrier>
+    auto* map = new ChainedHashMap();
+    ChainedHashMapOperation<ChainedHashMapConfig::NeedSlotBarrier>
         chainedHashMapOperation(map);
     chainedHashMapOperation.template Load<false>([](const void*, size_t) { return nullptr; }, key, nullptr);
     chainedHashMapOperation.template LoadOrStore<true>(
