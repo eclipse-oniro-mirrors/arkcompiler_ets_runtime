@@ -662,7 +662,9 @@ DEF_RUNTIME_STUBS(UpdateHClassForElementsKind)
     JSTaggedValue trackInfoVal = JSHandle<JSArray>(receiver)->GetTrackInfo(thread);
     if (trackInfoVal.IsHeapObject()) {
         TrackInfo *trackInfo = TrackInfo::Cast(trackInfoVal.GetTaggedObject());
+#ifndef EXCLUDE_PGO
         thread->GetEcmaVM()->GetPGOProfiler()->UpdateTrackInfo(JSTaggedValue(trackInfo));
+#endif
     }
     return JSTaggedValue::Hole().GetRawData();
 }
@@ -1726,7 +1728,9 @@ DEF_RUNTIME_STUBS(PGODump)
 {
     RUNTIME_STUBS_HEADER(PGODump);
     JSHandle<JSFunction> thisFunc = GetHArg<JSFunction>(argv, argc, 0);  // 0: means the zeroth parameter
+#ifndef EXCLUDE_PGO
     thread->GetEcmaVM()->GetPGOProfiler()->PGODump(thisFunc.GetTaggedType());
+#endif
     return JSTaggedValue::Undefined().GetRawData();
 }
 
@@ -1734,7 +1738,9 @@ DEF_RUNTIME_STUBS(PGOPreDump)
 {
     RUNTIME_STUBS_HEADER(PGOPreDump);
     JSHandle<JSFunction> thisFunc = GetHArg<JSFunction>(argv, argc, 0);  // 0: means the zeroth parameter
+#ifndef EXCLUDE_PGO
     thread->GetEcmaVM()->GetPGOProfiler()->PGOPreDump(thisFunc.GetTaggedType());
+#endif
     return JSTaggedValue::Undefined().GetRawData();
 }
 
@@ -1757,7 +1763,9 @@ DEF_RUNTIME_STUBS(JitCompile)
     RUNTIME_STUBS_HEADER(JitCompile);
     JSHandle<JSFunction> thisFunc = GetHArg<JSFunction>(argv, argc, 0);  // 0: means the zeroth parameter
     JSTaggedValue offset = GetArg(argv, argc, 1);  // 1: means the first parameter
+#ifndef EXCLUDE_JIT
     Jit::Compile(thread->GetEcmaVM(), thisFunc, CompilerTier::Tier::FAST, offset.GetInt(), JitCompileMode::Mode::ASYNC);
+#endif
     return JSTaggedValue::Undefined().GetRawData();
 }
 
@@ -1765,8 +1773,10 @@ DEF_RUNTIME_STUBS(BaselineJitCompile)
 {
     RUNTIME_STUBS_HEADER(BaselineJitCompile);
     JSHandle<JSFunction> thisFunc = GetHArg<JSFunction>(argv, argc, 0);  // 0: means the zeroth parameter
+#ifndef EXCLUDE_JIT
     Jit::Compile(thread->GetEcmaVM(), thisFunc, CompilerTier::Tier::BASELINE,
                  MachineCode::INVALID_OSR_OFFSET, JitCompileMode::Mode::ASYNC);
+#endif
     return JSTaggedValue::Undefined().GetRawData();
 }
 
@@ -1776,8 +1786,10 @@ DEF_RUNTIME_STUBS(ArkSteedCompile)
     RUNTIME_STUBS_HEADER(ArkSteedCompile);
     JSHandle<JSFunction> thisFunc = GetHArg<JSFunction>(argv, argc, 0);  // 0: means the zeroth parameter
     JSTaggedValue offset = GetArg(argv, argc, 1);  // 1: means the first parameter
+#ifndef EXCLUDE_JIT
     Jit::CompileArkSteed(thread->GetEcmaVM(), thisFunc, CompilerTier::Tier::ARKSTEED,
                          offset.GetInt(), JitCompileMode::Mode::ASYNC);
+#endif
 
     return JSTaggedValue::Undefined().GetRawData();
 }
@@ -1787,7 +1799,9 @@ DEF_RUNTIME_STUBS(CountInterpExecFuncs)
 {
     RUNTIME_STUBS_HEADER(CountInterpExecFuncs);
     JSHandle thisFunc = GetHArg<JSFunction>(argv, argc, 0); // 0: means the zeroth parameter
+#ifndef EXCLUDE_JIT
     Jit::CountInterpExecFuncs(thread, thisFunc);
+#endif
     return JSTaggedValue::Undefined().GetRawData();
 }
 
@@ -4717,9 +4731,14 @@ DEF_RUNTIME_STUBS(TraceCallDetail)
             Method *calleeMethod = Method::Cast(callee->GetMethod());
             auto methodName = calleeMethod->GetMethodName();
             auto calleeMethodId = static_cast<int>(calleeMethod->GetMethodId().GetOffset());
+#ifndef EXCLUDE_PGO
             auto calleeAbcId = PGOProfiler::GetMethodAbcId(callee);
+#endif
             msg += std::string("[js function] id: ") + std::to_string(calleeMethodId) +
-                   " abc id: " + std::to_string(calleeAbcId) + " method name: " + methodName;
+#ifndef EXCLUDE_PGO
+                   " abc id: " + std::to_string(calleeAbcId) +
+#endif
+                   " method name: " + methodName;
         } else {
             msg += "[unknown]";
         }

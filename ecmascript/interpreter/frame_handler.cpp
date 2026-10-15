@@ -164,6 +164,7 @@ std::string FrameHandler::GetFileName() const
 
 uint32_t FrameHandler::GetAbcId() const
 {
+#ifndef EXCLUDE_PGO
     std::string abcName = GetFileName();
     pgo::PGOProfilerManager* pm = pgo::PGOProfilerManager::GetInstance();
     uint32_t abcId;
@@ -171,6 +172,9 @@ uint32_t FrameHandler::GetAbcId() const
         LOG_ECMA(ERROR) << "Get method abc id failed. abcName: " << abcName;
     }
     return abcId;
+#else
+    return 0;
+#endif
 }
 
 uint32_t FrameHandler::GetMethodId() const

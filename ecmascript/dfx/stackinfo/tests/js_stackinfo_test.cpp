@@ -1840,6 +1840,7 @@ HWTEST_F_L0(JsStackInfoTest, TestBuildJsStackInfo3)
     thread_->SetCrossThreadExecution(false);
 }
 
+#ifndef EXCLUDE_JIT
 HWTEST_F_L0(JsStackInfoTest, TestArkWriteJitCode)
 {
     std::vector<uint8_t> codeVec1 = {0x01, 0x02, 0x03, 0x04};
@@ -1870,6 +1871,7 @@ HWTEST_F_L0(JsStackInfoTest, TestArkWriteJitCode)
     JsStackInfo::machineCodeMap.clear();
     JsStackInfo::nameMap.clear();
 }
+#endif
 
 // Helper: build a pandasm source with a function whose name has the given length.
 static std::string BuildLongNameSource(size_t nameLen)

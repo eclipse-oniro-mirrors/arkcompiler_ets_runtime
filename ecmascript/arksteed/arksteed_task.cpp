@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 
+#ifndef EXCLUDE_JIT
 #include "ecmascript/arksteed/arksteed_task.h"
 
 #include <limits>
@@ -269,3 +270,4 @@ bool ArkSteedTask::AsyncTask::Run(uint32_t threadIndex)
 }
 
 }  // namespace panda::ecmascript::arksteed
+#endif  // EXCLUDE_JIT

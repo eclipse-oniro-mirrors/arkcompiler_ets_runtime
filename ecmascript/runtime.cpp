@@ -109,8 +109,10 @@ void Runtime::CreateIfFirstVm(const JSRuntimeOptions &options)
         if (options.IsEnableHoleMemory()) {
             HoleMemory::Initialize();
         }
+#ifndef EXCLUDE_PGO
         PGOProfilerManager::GetInstance()->Initialize(options.GetPGOProfilerPath(),
                                                       options.GetPGOHotnessThreshold());
+#endif
         ASSERT(instance_ == nullptr);
         instance_ = new Runtime();
         instance_->SetEnableLargeHeap(options.GetLargeHeap());
@@ -156,7 +158,9 @@ void Runtime::InitializeIfFirstVm(EcmaVM *vm)
             bool isEnableFastJit = vm->GetJSOptions().IsEnableJIT() && vm->GetJSOptions().GetEnableAsmInterpreter();
             bool isEnableBaselineJit =
                 vm->GetJSOptions().IsEnableBaselineJIT() && vm->GetJSOptions().GetEnableAsmInterpreter();
+#ifndef EXCLUDE_JIT
             Jit::GetInstance()->SetEnableOrDisable(vm->GetJSOptions(), isEnableFastJit, isEnableBaselineJit);
+#endif
             vm->Initialize();
             PostInitialization(vm);
         }
@@ -260,7 +264,9 @@ void Runtime::DestroyIfLastVm()
 {
     LockHolder lock(*vmCreationLock_);
     if (--vmCount_ <= 0) {
+#ifndef EXCLUDE_JIT
         Jit::GetInstance()->Destroy();
+#endif
         SharedModuleManager::GetInstance()->SharedNativeObjDestroy();
         SharedHeap::GetInstance()->WaitAllTasksFinishedAfterAllJSThreadEliminated();
         DaemonThread::DestroyInstance();
@@ -273,7 +279,9 @@ void Runtime::DestroyIfLastVm()
         MemMapAllocator::GetInstance()->Finalize();
         // After the heap is gone: closes the template fd and logs the totals.
         HoleMemory::Destroy();
+#ifndef EXCLUDE_PGO
         PGOProfilerManager::GetInstance()->Destroy();
+#endif
         SharedModuleManager::GetInstance()->Destroy();
         if (g_isEnableCMCGC) {
             // Destroy common::BaseRuntime after daemon thread because it will unregister mutator

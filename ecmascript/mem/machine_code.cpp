@@ -27,9 +27,31 @@
 
 namespace panda::ecmascript {
 
+#ifndef EXCLUDE_JIT
+static bool IsJitFortEnabled()
+{
+    return Jit::GetInstance()->IsEnableJitFort();
+}
+
+static bool IsAsyncCopyToFortEnabled()
+{
+    return Jit::GetInstance()->IsEnableAsyncCopyToFort();
+}
+#else
+static bool IsJitFortEnabled()
+{
+    return false;
+}
+
+static bool IsAsyncCopyToFortEnabled()
+{
+    return false;
+}
+#endif
+
 static bool SetPageProtect(uint8_t *textStart, size_t dataSize)
 {
-    if (!Jit::GetInstance()->IsEnableJitFort()) {
+    if (!IsJitFortEnabled()) {
         constexpr size_t pageSize = 4096;
         uintptr_t startPage = AlignDown(reinterpret_cast<uintptr_t>(textStart), pageSize);
         uintptr_t endPage = AlignUp(reinterpret_cast<uintptr_t>(textStart) + dataSize, pageSize);
@@ -87,7 +109,7 @@ bool MachineCode::SetText(const MachineCodeDesc &desc)
         }
         pText += desc.rodataSizeBeforeTextAlign;
     }
-    if (!Jit::GetInstance()->IsEnableJitFort() || !Jit::GetInstance()->IsEnableAsyncCopyToFort() ||
+    if (!IsJitFortEnabled() || !IsAsyncCopyToFortEnabled() ||
         !desc.isAsyncCompileMode) {
         if (MachineCodeCopyToCache(desc, pText) == false) {
             return false;
@@ -169,7 +191,7 @@ bool MachineCode::SetData(JSThread *thread, const MachineCodeDesc &desc, JSHandl
     SetHeapConstantTableSize(desc.heapConstantTableSizeAlign);
     SetHeapConstantTableAddr(reinterpret_cast<uint64_t>(GetHeapConstantTableAddress()));
     SetPayLoadSizeInBytes(dataSize);
-    if (Jit::GetInstance()->IsEnableJitFort()) {
+    if (IsJitFortEnabled()) {
         SetInstructionsAddr(desc.instructionsAddr);
         ASSERT(desc.instructionsAddr != 0);
         ASSERT(dataSize == (desc.funcEntryDesSizeAlign + desc.stackMapSizeAlign + desc.heapConstantTableSizeAlign) ||
@@ -204,7 +226,7 @@ bool MachineCode::SetBaselineCodeData(JSThread *thread, const MachineCodeDesc &d
     SetInstructionsSize(instrSizeAlign);
 
     SetStackMapOrOffsetTableSize(desc.stackMapSizeAlign);
-    if (Jit::GetInstance()->IsEnableJitFort()) {
+    if (IsJitFortEnabled()) {
         ASSERT(desc.instructionsAddr != 0);
         ASSERT(dataSize == (desc.stackMapSizeAlign) ||  // reg. obj
                dataSize == (instrSizeAlign + desc.stackMapSizeAlign)); // huge obj
@@ -215,7 +237,7 @@ bool MachineCode::SetBaselineCodeData(JSThread *thread, const MachineCodeDesc &d
     SetPayLoadSizeInBytes(dataSize);
 
     uint8_t *textStart = reinterpret_cast<uint8_t*>(GetText());
-    if (Jit::GetInstance()->IsEnableJitFort()) {
+    if (IsJitFortEnabled()) {
         // relax assert for now until machine code padding for JitFort resolved
         ASSERT(IsAligned(reinterpret_cast<uintptr_t>(textStart), TEXT_ALIGN) ||
             IsAligned(reinterpret_cast<uintptr_t>(textStart), DATA_ALIGN));
@@ -224,7 +246,7 @@ bool MachineCode::SetBaselineCodeData(JSThread *thread, const MachineCodeDesc &d
     }
     uint8_t *pText = textStart;
 
-    if (!Jit::GetInstance()->IsEnableJitFort() || !Jit::GetInstance()->IsEnableAsyncCopyToFort() ||
+    if (!IsJitFortEnabled() || !IsAsyncCopyToFortEnabled() ||
         !desc.isAsyncCompileMode) {
         if (MachineCodeCopyToCache(desc, pText) == false) {
             return false;
@@ -274,7 +296,7 @@ bool MachineCode::SetArkSteedData(JSThread *thread, const MachineCodeDesc &desc,
     SetHeapConstantTableAddr(reinterpret_cast<uint64_t>(GetHeapConstantTableAddress()));
     SetPayLoadSizeInBytes(dataSize);
 
-    if (Jit::GetInstance()->IsEnableJitFort()) {
+    if (IsJitFortEnabled()) {
         SetInstructionsAddr(desc.instructionsAddr);
     }
 
@@ -282,7 +304,7 @@ bool MachineCode::SetArkSteedData(JSThread *thread, const MachineCodeDesc &desc,
     uint8_t *pText = textStart;
 
     // Copy code to text area (skipped if async copy to JitFort already done)
-    if (!Jit::GetInstance()->IsEnableJitFort() || !Jit::GetInstance()->IsEnableAsyncCopyToFort() ||
+    if (!IsJitFortEnabled() || !IsAsyncCopyToFortEnabled() ||
         !desc.isAsyncCompileMode) {
         if (MachineCodeCopyToCache(desc, pText) == false) {
             return false;
@@ -394,7 +416,7 @@ std::tuple<uint64_t, uint8_t*, int, kungfu::CalleeRegAndOffsetVec> MachineCode::
 
 uintptr_t MachineCode::GetText() const
 {
-    if (Jit::GetInstance()->IsEnableJitFort()) {
+    if (IsJitFortEnabled()) {
         return GetInstructionsAddr();
     } else {
         return GetNonTextAddress();
@@ -403,7 +425,7 @@ uintptr_t MachineCode::GetText() const
 
 uint8_t *MachineCode::GetStackMapOrOffsetTableAddress() const
 {
-    if (Jit::GetInstance()->IsEnableJitFort()) {
+    if (IsJitFortEnabled()) {
         // stackmap immediately follows MachineCode NonText area
         return reinterpret_cast<uint8_t*>(GetNonTextAddress());
     } else {

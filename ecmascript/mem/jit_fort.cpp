@@ -30,6 +30,28 @@
 
 namespace panda::ecmascript {
 
+#ifndef EXCLUDE_JIT
+static bool IsDisableCodeSign()
+{
+    return Jit::GetInstance()->IsDisableCodeSign();
+}
+
+static bool IsEnableJitFort()
+{
+    return Jit::GetInstance()->IsEnableJitFort();
+}
+#else
+static bool IsDisableCodeSign()
+{
+    return true;
+}
+
+static bool IsEnableJitFort()
+{
+    return false;
+}
+#endif
+
 template <>
 FreeListAllocator<MemDesc>::FreeListAllocator(BaseHeap *heap, MemDescPool *pool, JitFort *fort)
     : memDescPool_(pool), heap_(heap)
@@ -40,7 +62,7 @@ FreeListAllocator<MemDesc>::FreeListAllocator(BaseHeap *heap, MemDescPool *pool,
 JitFort::JitFort()
 {
     jitFortMem_ = PageMap(JIT_FORT_REG_SPACE_MAX,
-                          PageProtectProt(Jit::GetInstance()->IsDisableCodeSign() || !IsResourceAvailable()),
+                          PageProtectProt(IsDisableCodeSign() || !IsResourceAvailable()),
                           DEFAULT_REGION_SIZE, nullptr, MAP_JITFORT, true);
     jitFortBegin_ = reinterpret_cast<uintptr_t>(jitFortMem_.GetMem());
     jitFortSize_ = JIT_FORT_REG_SPACE_MAX;
@@ -57,7 +79,7 @@ void JitFort::InitHugeRegion()
     if (hugeInUse_)
         return;
     hugeJitFortMem_ = PageMap(HUGE_JITFORT_REGION_SIZE,
-                              PageProtectProt(Jit::GetInstance()->IsDisableCodeSign() || !IsResourceAvailable()),
+                              PageProtectProt(IsDisableCodeSign() || !IsResourceAvailable()),
                               HUGE_JITFORT_REGION_SIZE, nullptr, MAP_JITFORT, true);
 
     hugeJitFortBegin_ = reinterpret_cast<uintptr_t>(hugeJitFortMem_.GetMem());
@@ -268,7 +290,7 @@ uint32_t JitFort::AddrToFortRegionIdx(uint64_t addr)
  */
 void JitFort::UpdateFreeSpace(bool inHuge)
 {
-    if (!Jit::GetInstance()->IsEnableJitFort()) {
+    if (!IsEnableJitFort()) {
         return;
     }
 

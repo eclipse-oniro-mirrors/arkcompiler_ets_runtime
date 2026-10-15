@@ -830,10 +830,12 @@ SharedHeap::SharedGCScope::SharedGCScope()
     Runtime::GetInstance()->GCIterateThreadList([](JSThread *thread) {
         auto heap = thread->GetEcmaVM()->GetHeap();
         heap->WaitAndHandleCCFinished();
+#ifndef EXCLUDE_PGO
         std::shared_ptr<pgo::PGOProfiler> pgoProfiler =  thread->GetEcmaVM()->GetPGOProfiler();
         if (pgoProfiler != nullptr) {
             pgoProfiler->SuspendByGC();
         }
+#endif
 #if defined(ECMASCRIPT_SUPPORT_CPUPROFILER)
         thread->SetGcState(true);
 #endif
@@ -846,10 +848,12 @@ SharedHeap::SharedGCScope::~SharedGCScope()
         ASSERT(thread->IsSuspended() || thread->HasLaunchedSuspendAll() ||
                os::thread::GetCurrentThreadId() == DaemonThread::GetInstance()->GetThreadId());
         const_cast<Heap *>(thread->GetEcmaVM()->GetHeap())->ProcessGCListeners();
+#ifndef EXCLUDE_PGO
         std::shared_ptr<pgo::PGOProfiler> pgoProfiler =  thread->GetEcmaVM()->GetPGOProfiler();
         if (pgoProfiler != nullptr) {
             pgoProfiler->ResumeByGC();
         }
+#endif
 #if defined(ECMASCRIPT_SUPPORT_CPUPROFILER)
         thread->SetGcState(false);
 #endif
@@ -1845,7 +1849,9 @@ void Heap::CollectGarbageImpl(TriggerGCType gcType, GCReason reason)
         }
     }
     ASSERT("CollectGarbageImpl should not be called" && !g_isEnableCMCGC);
+#ifndef EXCLUDE_JIT
     Jit::JitGCLockHolder lock(GetEcmaVM()->GetJSThread());
+#endif
     {
 #if ECMASCRIPT_ENABLE_THREAD_STATE_CHECK
         if (UNLIKELY(!thread_->IsInRunningStateOrProfiling())) { // LOCV_EXCL_BR_LINE
@@ -1908,8 +1914,10 @@ void Heap::CollectGarbageImpl(TriggerGCType gcType, GCReason reason)
         memController_->StartCalculationBeforeGC();
         StatisticHeapObject(gcType);
         gcType_ = gcType;
+#ifndef EXCLUDE_PGO
         {
             pgo::PGODumpPauseScope pscope(GetEcmaVM()->GetPGOProfiler());
+#endif
             switch (gcType) {
                 case TriggerGCType::YOUNG_GC:
                     oldSpace_->AdjustOvershootSize();
@@ -1985,7 +1993,9 @@ void Heap::CollectGarbageImpl(TriggerGCType gcType, GCReason reason)
                     break;
             }
             ASSERT(thread_->IsPropertyCacheCleared());
+#ifndef EXCLUDE_PGO
         }
+#endif
         UpdateHeapStatsAfterGC(gcType_);
         // Adjust the old space capacity and global limit for the first partial GC with full mark.
         // Trigger full mark next time if the current survival rate is much less than half the average survival rates.
@@ -2077,7 +2087,9 @@ void Heap::CollectGarbageImpl(TriggerGCType gcType, GCReason reason)
         // check machine code space if enough
         int remainSize = static_cast<int>(config_.GetDefaultMachineCodeSpaceSize()) -
             static_cast<int>(GetMachineCodeSpace()->GetHeapObjectSize());
+#ifndef EXCLUDE_JIT
         Jit::GetInstance()->CheckMechineCodeSpaceMemory(GetEcmaVM()->GetJSThread(), remainSize);
+#endif
     }
 }
 

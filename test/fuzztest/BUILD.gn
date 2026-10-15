@@ -11,6 +11,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import("//arkcompiler/ets_runtime/js_runtime_config.gni")
+
 group("fuzztest") {
   testonly = true
   deps = []
@@ -398,4 +400,14 @@ group("fuzztest") {
     "commoncomplog_fuzzer:fuzztest",
     "commoncompbaseutf_fuzzer:fuzztest",
   ]
+
+  if (ets_runtime_test_enable_dfx) {
+    deps -= [
+      "binarytotext_fuzzer:fuzztest",
+      "loadapbinaryfile_fuzzer:fuzztest",
+      "mergeapfiles_fuzzer:fuzztest",
+      "mergeapfilesformerger_fuzzer:fuzztest",
+      "mergewithexistprofile_fuzzer:fuzztest",
+    ]
+  }
 }

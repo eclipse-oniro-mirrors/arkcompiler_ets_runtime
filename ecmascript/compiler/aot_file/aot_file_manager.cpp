@@ -28,19 +28,6 @@ using CommonStubCSigns = kungfu::CommonStubCSigns;
 using BytecodeStubCSigns = kungfu::BytecodeStubCSigns;
 using SnapshotGlobalData = kungfu::SnapshotGlobalData;
 
-void AOTLiteralInfo::InitializeWithSpecialValue(JSTaggedValue initValue, uint32_t capacity, uint32_t extraLength)
-{
-    TaggedArray::InitializeWithSpecialValue(initValue, capacity + RESERVED_LENGTH, extraLength);
-    SetIhcPrimitive(JSTaggedValue::Undefined());
-    SetChcPrimitive(JSTaggedValue::Undefined());
-    SetLiteralType(JSTaggedValue(INVALID_LITERAL_TYPE));
-}
-
-void AOTLiteralInfo::SetObjectToCache(JSThread *thread, uint32_t index, JSTaggedValue value)
-{
-    Set(thread, index, value);
-}
-
 void AOTFileManager::Iterate(RootVisitor &v)
 {
     for (auto &iter : aiDatum_) {

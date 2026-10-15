@@ -85,7 +85,9 @@ void ConcurrentCopyGC::RunPhase()
         + ";ObjSizeBeforeSensitive" + std::to_string(heap_->GetRecordHeapObjectSizeBeforeSensitive())).c_str(), "");
     TRACE_GC(GCStats::Scope::ScopeId::TotalGC, gcStats);
     MEM_ALLOCATE_AND_GC_TRACE(heap_->GetEcmaVM(), PartialGC_RunPhases);
+#ifndef EXCLUDE_JIT
     Jit::JitGCLockHolder lock(thread_);
+#endif
     PreGC();
     ProcessWeakReference();
     Sweep();
@@ -95,10 +97,12 @@ void ConcurrentCopyGC::RunPhase()
 
 void ConcurrentCopyGC::PreGC()
 {
+#ifndef EXCLUDE_PGO
     std::shared_ptr<pgo::PGOProfiler> pgoProfiler =  thread_->GetEcmaVM()->GetPGOProfiler();
     if (pgoProfiler != nullptr) {
         pgoProfiler->SuspendByGC();
     }
+#endif
     heap_->SetGCState(true);
     {
         TRACE_GC(GCStats::Scope::ScopeId::ProcessSharedGCRSetWorkList, heap_->GetEcmaVM()->GetEcmaGCStats());
@@ -389,10 +393,12 @@ void ConcurrentCopyGC::PostGC()
 {
     if (thread_->TryRestoreNormalStubs()) {
         ASSERT(!thread_->NeedReadBarrier());
+#ifndef EXCLUDE_PGO
         std::shared_ptr<pgo::PGOProfiler> pgoProfiler = thread_->GetEcmaVM()->GetPGOProfiler();
         if (pgoProfiler != nullptr) {
             pgoProfiler->ResumeByGC();
         }
+#endif
     }
 }
 }  // namespace panda::ecmascript

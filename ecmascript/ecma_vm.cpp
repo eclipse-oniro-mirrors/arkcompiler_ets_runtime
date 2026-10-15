@@ -269,7 +269,9 @@ void EcmaVM::PreFork()
     SetPreForked(true);
     SetPostForked(false);
     Runtime::GetInstance()->SetPostForked(false);
+#ifndef EXCLUDE_JIT
     Jit::GetInstance()->PreFork();
+#endif
 }
 
 void EcmaVM::PostFork(const JSRuntimeOptions &option)
@@ -300,13 +302,18 @@ void EcmaVM::PostFork(const JSRuntimeOptions &option)
 
     LOG_ECMA(INFO) << "multi-thread check enabled: " << GetThreadCheckStatus();
     options_.SetPgoForceDump(false);
+#ifndef EXCLUDE_PGO
     std::string bundleName = PGOProfilerManager::GetInstance()->GetBundleName();
     pgo::PGOTrace::GetInstance()->SetEnable(ohos::AotTools::GetPgoTraceEnable());
     AotCrashInfo::GetInstance().SetOptionPGOProfiler(&options_, bundleName);
     ResetPGOProfiler();
     processStartRealtime_ = InitializeStartRealTime();
-
+#ifndef EXCLUDE_JIT
     Jit::GetInstance()->SetJitEnablePostFork(this, bundleName);
+#endif
+#else
+    processStartRealtime_ = InitializeStartRealTime();
+#endif
 #if defined(PANDA_TARGET_OHOS) && !defined(STANDALONE_MODE)
     int64_t arkProperties = OHOS::system::GetIntParameter<int64_t>("persist.ark.properties", -1);
     GetJSOptions().SetArkProperties(arkProperties);
@@ -371,6 +378,7 @@ void EcmaVM::InitializeForJit(JitThread *jitThread)
 
 void EcmaVM::InitializePGOProfiler()
 {
+#ifndef EXCLUDE_PGO
     LOG_PGO(INFO) << "initializing pgo profiler, pgo is " << (IsEnablePGOProfiler() ? "enabled" : "disabled")
                   << ", worker is " << (options_.IsWorker() ? "enabled" : "disabled")
                   << ", profiler: " << pgoProfiler_;
@@ -385,16 +393,19 @@ void EcmaVM::InitializePGOProfiler()
     }
     pgo::PGOTrace::GetInstance()->SetEnable(options_.GetPGOTrace() || ohos::AotTools::GetPgoTraceEnable());
     thread_->SetPGOProfilerEnable(isEnablePGOProfiler);
+#endif
 }
 
 void EcmaVM::ResetPGOProfiler()
 {
+#ifndef EXCLUDE_PGO
     if (pgoProfiler_ != nullptr) {
         bool isEnablePGOProfiler = IsEnablePGOProfiler();
         PGOProfilerManager::GetInstance()->Reset(pgoProfiler_, isEnablePGOProfiler);
         thread_->SetPGOProfilerEnable(isEnablePGOProfiler);
         thread_->CheckOrSwitchPGOStubs();
     }
+#endif
 }
 
 void EcmaVM::DisablePGOProfilerWithAOTFile(const std::string &aotFileName)
@@ -403,7 +414,9 @@ void EcmaVM::DisablePGOProfilerWithAOTFile(const std::string &aotFileName)
         AOTFileManager::AOTFileExist(aotFileName, AOTFileManager::FILE_EXTENSION_AI)) {
         LOG_PGO(INFO) << "disable pgo profiler due to aot file exist: " << aotFileName;
         options_.SetEnablePGOProfiler(false);
+#ifndef EXCLUDE_PGO
         PGOProfilerManager::GetInstance()->SetDisablePGO(true);
+#endif
         ResetPGOProfiler();
     }
 }
@@ -411,7 +424,11 @@ void EcmaVM::DisablePGOProfilerWithAOTFile(const std::string &aotFileName)
 bool EcmaVM::IsEnablePGOProfiler() const
 {
     if (options_.IsWorker()) {
+#ifndef EXCLUDE_PGO
         return PGOProfilerManager::GetInstance()->IsEnable();
+#else
+        return false;
+#endif
     }
     return options_.GetEnableAsmInterpreter() && options_.IsEnablePGOProfiler();
 }
@@ -433,12 +450,20 @@ bool EcmaVM::IsEnableElementsKind() const
 
 bool EcmaVM::IsEnableFastJit() const
 {
+#ifndef EXCLUDE_JIT
     return GetJit()->IsEnableFastJit();
+#else
+    return false;
+#endif
 }
 
 bool EcmaVM::IsEnableBaselineJit() const
 {
+#ifndef EXCLUDE_JIT
     return GetJit()->IsEnableBaselineJit();
+#else
+    return false;
+#endif
 }
 
 uint32_t EcmaVM::GetTid() const
@@ -448,7 +473,11 @@ uint32_t EcmaVM::GetTid() const
 
 Jit *EcmaVM::GetJit() const
 {
+#ifndef EXCLUDE_JIT
     return Jit::GetInstance();
+#else
+    return nullptr;
+#endif
 }
 
 bool EcmaVM::Initialize()
@@ -496,7 +525,9 @@ bool EcmaVM::Initialize()
     thread_->SetEnableLazyBuiltins(builtinsLazyEnabled);
     JSHandle<GlobalEnv> globalEnv = factory_->NewGlobalEnv(builtinsLazyEnabled);
     thread_->SetGlueGlobalEnv(globalEnv.GetTaggedValue());
+#ifndef EXCLUDE_PGO
     ptManager_ = new kungfu::PGOTypeManager(this);
+#endif
     optCodeProfiler_ = new OptCodeProfiler();
     if (options_.GetTypedOpProfiler()) {
         typedOpProfiler_ = new TypedOpProfiler();
@@ -521,7 +552,9 @@ bool EcmaVM::Initialize()
     SetRegisterSymbols(SymbolTable::Create(thread_).GetTaggedValue());
     microJobQueue_ = factory_->NewMicroJobQueue().GetTaggedValue();
     if (IsEnableFastJit() || IsEnableBaselineJit()) {
+#ifndef EXCLUDE_JIT
         Jit::GetInstance()->ConfigJit(this);
+#endif
     }
     sustainingJSHandleList_ = new SustainingJSHandleList();
     initialized_ = true;
@@ -575,11 +608,15 @@ EcmaVM::~EcmaVM()
     DeleteHeapProfile();
 #endif
     if (IsEnableFastJit() || IsEnableBaselineJit()) {
+#ifndef EXCLUDE_JIT
         GetJit()->ClearTaskWithVm(this);
+#endif
     }
     // Destroy pgoProfiler should add after JIT::ClearTaskWithVm, and before ClearBufferData
     if (pgoProfiler_ != nullptr) {
+#ifndef EXCLUDE_PGO
         PGOProfilerManager::GetInstance()->Destroy(thread_, pgoProfiler_);
+#endif
         pgoProfiler_ = nullptr;
     }
     ClearBufferData();
@@ -747,7 +784,9 @@ EcmaVM::~EcmaVM()
     }
 
     if (ptManager_ != nullptr) {
+#ifndef EXCLUDE_PGO
         delete ptManager_;
+#endif
         ptManager_ = nullptr;
     }
 
@@ -997,7 +1036,9 @@ void EcmaVM::ProcessNativeDelete(const WeakRootVisitor& visitor)
 void EcmaVM::ProcessReferences(const WeakRootVisitor& visitor)
 {
     heap_->ProcessReferences(visitor);
+#ifndef EXCLUDE_PGO
     GetPGOProfiler()->ProcessReferences(visitor);
+#endif
 }
 
 void EcmaVM::ProcessSnapShotEnv(const WeakRootVisitor& visitor)
@@ -1091,7 +1132,9 @@ void EcmaVM::IterateSTWRoots(RootVisitor &v)
             ObjectSlot(ToUintPtr(&internalNativeMethods_.back()) + JSTaggedValue::TaggedTypeSize()));
     }
     if (pgoProfiler_ != nullptr) {
+#ifndef EXCLUDE_PGO
         pgoProfiler_->Iterate(v);
+#endif
     }
     if (aotFileManager_) {
         aotFileManager_->Iterate(v);
@@ -1136,7 +1179,9 @@ void EcmaVM::IterateSTWRoots(RootVisitor &v)
     }
 
     if (ptManager_) {
+#ifndef EXCLUDE_PGO
         ptManager_->Iterate(v);
+#endif
     }
 #ifdef ARK_USE_SATB_BARRIER
     auto iterator = cachedSharedConstpools_.begin();
@@ -1377,10 +1422,12 @@ void EcmaVM::LoadStubFile()
 bool EcmaVM::LoadAOTFilesInternal(const std::string& aotFileName)
 {
 #ifdef ENABLE_OHOS_PARAMETER
+#ifndef EXCLUDE_PGO
     std::string bundleName = pgo::PGOProfilerManager::GetInstance()->GetBundleName();
     if (AotCrashInfo::GetInstance().IsAotEscapedOrNotInEnableList(this, bundleName)) {
         return false;
     }
+#endif
 #endif
     std::string anFile = aotFileName + AOTFileManager::FILE_EXTENSION_AN;
     if (!aotFileManager_->LoadAnFile(anFile)) {
@@ -2543,12 +2590,14 @@ Expected<JSTaggedValue, bool> EcmaVM::CommonInvokeEcmaEntrypoint(const JSPandaFi
     ASSERT(thread_->IsInManagedState());
     JSHandle<JSTaggedValue> global = GetGlobalEnv()->GetJSGlobalObject();
     JSHandle<JSTaggedValue> undefined = thread_->GlobalConstants()->GetHandledUndefined();
+#ifndef EXCLUDE_PGO
     if (IsEnablePGOProfiler() && IsPgoNapi()) {
         JSHandle<JSFunction> objectFunction(GetGlobalEnv()->GetObjectFunction());
         JSHandle<JSHClass> protoOrHClass(GetGlobalEnv()->GetObjectFunctionNapiClass());
         GetPGOProfiler()->ProfileNapiRootHClass(
             objectFunction.GetTaggedType(), protoOrHClass.GetTaggedType(), pgo::ProfileType::Kind::NapiId);
     }
+#endif
     JSRecordInfo *recordInfo = jsPandaFile->CheckAndGetRecordInfo(entryPoint);
     if (recordInfo == nullptr) {
         CString msg = "Cannot find module '" + entryPoint + "' , which is application Entry Point";
@@ -2584,7 +2633,9 @@ Expected<JSTaggedValue, bool> EcmaVM::CommonInvokeEcmaEntrypoint(const JSPandaFi
         if (aotFileManager_->IsLoadMain(jsPandaFile, entryPoint) && thread_->HasSwitchedToStwStub()) {
             EcmaRuntimeStatScope runtimeStatScope(this);
             result = InvokeEcmaAotEntrypoint(func, global, jsPandaFile, entryPoint);
-        } else if (GetJSOptions().IsEnableForceJitCompileMain() && thread_->HasSwitchedToStwStub()) {
+        } else
+#ifndef EXCLUDE_JIT
+        if (GetJSOptions().IsEnableForceJitCompileMain() && thread_->HasSwitchedToStwStub()) {
             Jit::Compile(this, func, CompilerTier::Tier::FAST);
             EcmaRuntimeStatScope runtimeStatScope(this);
             result = JSFunction::InvokeOptimizedEntrypoint(thread_, func, global, nullptr);
@@ -2594,7 +2645,9 @@ Expected<JSTaggedValue, bool> EcmaVM::CommonInvokeEcmaEntrypoint(const JSPandaFi
                 EcmaInterpreter::NewRuntimeCallInfo(thread_, JSHandle<JSTaggedValue>(func), global, undefined, 0);
             EcmaRuntimeStatScope runtimeStatScope(this);
             result = EcmaInterpreter::Execute(info);
-        } else {
+        } else
+#endif
+        {
             EcmaRuntimeCallInfo *info =
                 EcmaInterpreter::NewRuntimeCallInfo(thread_, JSHandle<JSTaggedValue>(func), global, undefined, 0);
             EcmaRuntimeStatScope runtimeStatScope(this);

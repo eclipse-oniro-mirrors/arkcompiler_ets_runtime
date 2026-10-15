@@ -685,7 +685,9 @@ void JSHClass::OptimizePrototypeForIC(const JSThread *thread, const JSHandle<Glo
             NotifyHClassNotPrototypeChanged(const_cast<JSThread *>(thread), newProtoClass);
             // still dump for class in this path now
             if (!isChangeProto) {
+#ifndef EXCLUDE_PGO
                 thread->GetEcmaVM()->GetPGOProfiler()->UpdateRootProfileTypeSafe(*hclass, *newProtoClass);
+#endif
             }
         } else {
             // There is no sharing in AOT hclass. Therefore, it is not necessary or possible to clone here.
@@ -870,7 +872,9 @@ bool JSHClass::TransitToElementsKind(const JSThread *thread, const JSHandle<JSOb
     JSTaggedValue trackInfoVal = JSHandle<JSArray>(object)->GetTrackInfo(thread);
     if (trackInfoVal.IsHeapObject() && trackInfoVal.IsWeak()) {
         TrackInfo *trackInfo = TrackInfo::Cast(trackInfoVal.GetWeakReferentUnChecked());
+#ifndef EXCLUDE_PGO
         thread->GetEcmaVM()->GetPGOProfiler()->UpdateTrackInfo(JSTaggedValue(trackInfo));
+#endif
     }
     return true;
 }
@@ -1446,6 +1450,7 @@ PropertyLookupResult JSHClass::LookupPropertyInBuiltinPrototypeHClass(const JSTh
     return result;
 }
 
+#ifndef EXCLUDE_PGO
 JSHandle<JSTaggedValue> JSHClass::ParseKeyFromPGOCString(ObjectFactory* factory,
                                                          const CString& cstring,
                                                          const PGOHandler& handler)
@@ -1467,6 +1472,7 @@ JSHandle<JSTaggedValue> JSHClass::ParseKeyFromPGOCString(ObjectFactory* factory,
         return JSHandle<JSTaggedValue>(factory->NewFromStdString(std::string(cstring)));
     }
 }
+#endif
 
 CString JSHClass::GetJSTypeDesc(JSType type)
 {
@@ -1480,6 +1486,7 @@ CString JSHClass::GetJSTypeDesc(JSType type)
     return JSTYPE_METADATA[int(type)];
 }
 
+#ifndef EXCLUDE_PGO
 JSHandle<JSHClass> JSHClass::CreateRootHClassFromPGO(const JSThread* thread,
                                                      const HClassLayoutDesc* desc,
                                                      uint32_t maxNum)
@@ -1657,6 +1664,7 @@ bool JSHClass::UpdateRootLayoutDescByPGO(const JSThread *thread, const JSHClass 
     }
     return true;
 }
+#endif
 
 std::pair<bool, CString> JSHClass::DumpToString(const JSThread *thread, JSTaggedType hclassVal)
 {

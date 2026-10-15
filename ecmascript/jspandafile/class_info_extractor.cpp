@@ -470,7 +470,9 @@ JSHandle<JSFunction> ClassHelper::DefineClassFromExtractor(JSThread *thread, con
     constructor->SetHomeObject(thread, prototype);
     constructor->SetProtoOrHClass(thread, prototype);
     if (thread->GetEcmaVM()->IsEnablePGOProfiler()) {
+#ifndef EXCLUDE_PGO
         thread->GetEcmaVM()->GetPGOProfiler()->ProfileDefineClass(constructor.GetTaggedType());
+#endif
     }
     return constructor;
 }
@@ -584,7 +586,9 @@ JSHandle<JSFunction> ClassHelper::DefineClassWithIHClass(JSThread *thread, const
     constructor->SetProtoOrHClass(thread, prototypeOrHClass);
 
     if (thread->GetEcmaVM()->IsEnablePGOProfiler()) {
+#ifndef EXCLUDE_PGO
         thread->GetEcmaVM()->GetPGOProfiler()->ProfileDefineClass(constructor.GetTaggedType());
+#endif
     }
     return constructor;
 }

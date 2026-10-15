@@ -921,7 +921,9 @@ void DFXJSNApi::NotifyApplicationState(EcmaVM *vm, bool inBackground)
 {
     ecmascript::ThreadManagedScope managedScope(vm->GetJSThread());
     const_cast<ecmascript::Heap *>(vm->GetHeap())->ChangeGCParams(inBackground);
+#ifndef EXCLUDE_JIT
     ecmascript::Jit::GetInstance()->ChangeTaskPoolState(inBackground);
+#endif
     ecmascript::Runtime::GetInstance()->SetInBackground(inBackground);
 }
 

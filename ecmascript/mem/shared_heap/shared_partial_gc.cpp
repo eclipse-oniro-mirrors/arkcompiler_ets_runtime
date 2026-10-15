@@ -276,10 +276,12 @@ void SharedPartialGC::PreProcessLocalThread()
         auto heap = const_cast<Heap*>(thread->GetEcmaVM()->GetHeap());
         heap->WaitAndHandleCCFinished();
         heap->ResetTlab();
+#ifndef EXCLUDE_PGO
         std::shared_ptr<pgo::PGOProfiler> pgoProfiler =  thread->GetEcmaVM()->GetPGOProfiler();
         if (pgoProfiler != nullptr) {
             pgoProfiler->SuspendByGC();
         }
+#endif
 #if defined(ECMASCRIPT_SUPPORT_CPUPROFILER)
         thread->SetGcState(true);
 #endif
@@ -312,10 +314,12 @@ void SharedPartialGC::PostProcessLocalThread()
         }
         thread->ReleaseReadBarrier(ReadBarrierOwner::SHARED_PARTIAL_GC);
         thread->TryRestoreNormalStubs();
+#ifndef EXCLUDE_PGO
         std::shared_ptr<pgo::PGOProfiler> pgoProfiler =  thread->GetEcmaVM()->GetPGOProfiler();
         if (pgoProfiler != nullptr && !thread->IsConcurrentCopying()) {
             pgoProfiler->ResumeByGC();
         }
+#endif
 #if defined(ECMASCRIPT_SUPPORT_CPUPROFILER)
         thread->SetGcState(false);
 #endif

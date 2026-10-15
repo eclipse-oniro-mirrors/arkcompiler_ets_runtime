@@ -23,6 +23,18 @@
 
 namespace panda::ecmascript {
 
+#ifndef EXCLUDE_JIT
+static bool IsJitFortEnabled()
+{
+    return Jit::GetInstance()->IsEnableJitFort();
+}
+#else
+static bool IsJitFortEnabled()
+{
+    return false;
+}
+#endif
+
 HeapRegionAllocator::HeapRegionAllocator(JSRuntimeOptions &option)
 {
     enablePageTagThreadId_ = option.EnablePageTagThreadId();
@@ -52,7 +64,7 @@ Region *HeapRegionAllocator::AllocateAlignedRegion(Space *space, size_t capacity
     }
     auto pool = MemMapAllocator::GetInstance()->Allocate(tid, capacity, DEFAULT_REGION_SIZE,
         ToSpaceTypeName(space->GetSpaceType()), isRegular, isCompress, isMachineCode,
-        Jit::GetInstance()->IsEnableJitFort(), shouldPageTag, false);
+        IsJitFortEnabled(), shouldPageTag, false);
     void *mapMem = pool.GetMem();
     if (mapMem == nullptr) { // LOCV_EXCL_BR_LINE
         if (heap->InGC()) {
@@ -60,7 +72,7 @@ Region *HeapRegionAllocator::AllocateAlignedRegion(Space *space, size_t capacity
             heap->ShouldForceThrowOOMError();
             pool = MemMapAllocator::GetInstance()->Allocate(tid, capacity, DEFAULT_REGION_SIZE,
                 ToSpaceTypeName(space->GetSpaceType()), isRegular, isCompress, isMachineCode,
-                Jit::GetInstance()->IsEnableJitFort(), shouldPageTag, true);
+                IsJitFortEnabled(), shouldPageTag, true);
             mapMem = pool.GetMem();
             if (mapMem == nullptr) {
                 // This should not happen

@@ -1574,9 +1574,13 @@ JSTaggedValue BuiltinsArkTools::JitCompileSync(EcmaRuntimeCallInfo *info)
         return JSTaggedValue::False();
     }
     JSHandle<JSFunction> jsFunction(thisValue);
+#ifndef EXCLUDE_JIT
     Jit::Compile(thread->GetEcmaVM(), jsFunction, CompilerTier::Tier::FAST,
                  MachineCode::INVALID_OSR_OFFSET, JitCompileMode::Mode::SYNC);
     return JSTaggedValue::True();
+#else
+    return JSTaggedValue::False();
+#endif
 }
 
 JSTaggedValue BuiltinsArkTools::JitCompileAsync(EcmaRuntimeCallInfo *info)
@@ -1593,14 +1597,19 @@ JSTaggedValue BuiltinsArkTools::JitCompileAsync(EcmaRuntimeCallInfo *info)
         return JSTaggedValue::False();
     }
     JSHandle<JSFunction> jsFunction(thisValue);
+#ifndef EXCLUDE_JIT
     Jit::Compile(thread->GetEcmaVM(), jsFunction, CompilerTier::Tier::FAST,
                  MachineCode::INVALID_OSR_OFFSET, JitCompileMode::Mode::ASYNC);
     return JSTaggedValue::True();
+#else
+    return JSTaggedValue::False();
+#endif
 }
 
 #if ECMASCRIPT_ENABLE_ARK_STEED
 JSTaggedValue BuiltinsArkTools::ArkSteedCompileSync(EcmaRuntimeCallInfo *info)
 {
+#ifndef EXCLUDE_JIT
     JSThread *thread = info->GetThread();
     if (!thread->GetEcmaVM()->GetJSOptions().IsEnableJIT() ||
         Jit::GetInstance()->GetJitBackend() != JitBackend::ARKSTEED) {
@@ -1617,6 +1626,10 @@ JSTaggedValue BuiltinsArkTools::ArkSteedCompileSync(EcmaRuntimeCallInfo *info)
     Jit::CompileArkSteed(thread->GetEcmaVM(), jsFunction, CompilerTier::Tier::ARKSTEED,
                          MachineCode::INVALID_OSR_OFFSET, JitCompileMode::Mode::SYNC);
     return JSTaggedValue::True();
+#else
+    (void)info;
+    return JSTaggedValue::False();
+#endif
 }
 
 JSTaggedValue BuiltinsArkTools::ArkSteedIsCompiled(EcmaRuntimeCallInfo *info)
@@ -1642,6 +1655,7 @@ JSTaggedValue BuiltinsArkTools::ArkSteedIsCompiled(EcmaRuntimeCallInfo *info)
 
 JSTaggedValue BuiltinsArkTools::ArkSteedCompileAsync(EcmaRuntimeCallInfo *info)
 {
+#ifndef EXCLUDE_JIT
     JSThread *thread = info->GetThread();
     if (!thread->GetEcmaVM()->GetJSOptions().IsEnableJIT() ||
         Jit::GetInstance()->GetJitBackend() != JitBackend::ARKSTEED) {
@@ -1658,6 +1672,10 @@ JSTaggedValue BuiltinsArkTools::ArkSteedCompileAsync(EcmaRuntimeCallInfo *info)
     Jit::CompileArkSteed(thread->GetEcmaVM(), jsFunction, CompilerTier::Tier::ARKSTEED,
                          MachineCode::INVALID_OSR_OFFSET, JitCompileMode::Mode::ASYNC);
     return JSTaggedValue::True();
+#else
+    (void)info;
+    return JSTaggedValue::False();
+#endif
 }
 #endif
 
@@ -1673,6 +1691,7 @@ JSTaggedValue BuiltinsArkTools::WaitJitCompileFinish(EcmaRuntimeCallInfo *info)
     }
     JSHandle<JSFunction> jsFunction(thisValue);
 
+#ifndef EXCLUDE_JIT
     auto jit = Jit::GetInstance();
     if (!jit->IsEnableFastJit()) {
         return JSTaggedValue::False();
@@ -1687,6 +1706,9 @@ JSTaggedValue BuiltinsArkTools::WaitJitCompileFinish(EcmaRuntimeCallInfo *info)
         thread->CheckSafepoint();
     }
     return JSTaggedValue::True();
+#else
+    return JSTaggedValue::False();
+#endif
 }
 
 JSTaggedValue BuiltinsArkTools::WaitAllJitCompileFinish(EcmaRuntimeCallInfo *info)
@@ -1694,6 +1716,7 @@ JSTaggedValue BuiltinsArkTools::WaitAllJitCompileFinish(EcmaRuntimeCallInfo *inf
     JSThread *thread = info->GetThread();
     [[maybe_unused]] EcmaHandleScope handleScope(thread);
 
+#ifndef EXCLUDE_JIT
     auto jit = Jit::GetInstance();
     if (!jit->IsEnableFastJit()) {
         return JSTaggedValue::False();
@@ -1706,6 +1729,9 @@ JSTaggedValue BuiltinsArkTools::WaitAllJitCompileFinish(EcmaRuntimeCallInfo *inf
     thread->CheckOrSwitchPGOStubs();
     thread->GetEcmaVM()->GetJSOptions().SetEnablePGOProfiler(false);
     return JSTaggedValue::True();
+#else
+    return JSTaggedValue::False();
+#endif
 }
 
 JSTaggedValue BuiltinsArkTools::IsInFastJit(EcmaRuntimeCallInfo *info)

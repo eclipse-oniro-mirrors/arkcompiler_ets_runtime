@@ -643,8 +643,10 @@ public:
                         }
                     }
                     JSHandle<JSObject> obj = JSObject::CreateObjectFromProperties(thread, properties, ihcVal);
+#ifndef EXCLUDE_PGO
                     auto profiler = thread->GetEcmaVM()->GetPGOProfiler();
                     profiler->RecordProfileType(obj->GetClass(), jsPandaFile, id.GetOffset());
+#endif
                     JSMutableHandle<JSTaggedValue> key(thread, JSTaggedValue::Undefined());
                     JSMutableHandle<JSTaggedValue> valueHandle(thread, JSTaggedValue::Undefined());
                     size_t elementsLen = elements->GetLength();
