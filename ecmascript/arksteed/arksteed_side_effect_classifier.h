@@ -255,6 +255,24 @@ public:
         return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
     }
 
+    static SideEffectDescriptor Classify(CallBaseConstructorVertex *vertex)
+    {
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
+    }
+
+    static SideEffectDescriptor Classify(CallDerivedConstructorVertex *vertex)
+    {
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
+    }
+
+    static SideEffectDescriptor Classify(FastSuperAllocateThisVertex *vertex)
+    {
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
+    }
+
     template <typename VertexT>
     static SideEffectDescriptor Classify(VertexT *vertex)
     {

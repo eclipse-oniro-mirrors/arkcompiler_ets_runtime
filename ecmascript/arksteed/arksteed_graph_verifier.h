@@ -99,6 +99,8 @@ public:
     //      size and absence of recovery metadata; glue comes from the call ABI
     //    - CallCommonStubVertex: Validates GetInputCount() >= 1 (minimum glue
     //      parameter required for common stubs)
+    //    - FastSuperAllocateThisVertex: Validates GetInputCount() == 3 (glue,
+    //      superCtor, newTarget)
     //    - DeoptVertex: Has no SSA inputs; eager frame values are stored separately
     //    - ReturnVertex: Uses the fixed-input verifier for the return value
     //    - ThrowVertex: Variable-input vertex; input count depends on runtime stub

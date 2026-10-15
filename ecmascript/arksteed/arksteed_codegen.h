@@ -94,14 +94,20 @@ private:
     int PrepareCommonStubStackArguments(const Vertex *callVertex, int argCount);
     int PrepareRuntimeStubStackArguments(const Vertex *callVertex, int argCount, int runtimeId);
     void LoadSteedExpectedArgc(ArkSteedRegister target, ArkSteedRegister expectedArgc);
-    void ComputeSteedCallSlotCount(CallVertex *call, ArkSteedRegister slotCount);
-    void PrepareArkSteedCall(CallVertex *call, ArkSteedRegister target, ArkSteedRegister scratch);
+    template <typename CallVertexT>
+    void ComputeSteedCallSlotCount(CallVertexT *call, ArkSteedRegister slotCount);
+    template <typename CallVertexT>
+    void PrepareArkSteedCall(CallVertexT *call, ArkSteedRegister target, ArkSteedRegister scratch);
     void PrepareArkSteedSelfCall(CallSelfVertex *call);
     void PrepareKnownCall(CallKnownJSFunctionVertex *call);
-    void FreeArkSteedCallFrame(CallVertex *call);
-    void EmitCallArkSteed(CallVertex *call, ArkSteedRegister target, ArkSteedRegister scratch, Label *exit);
+    template <typename CallVertexT>
+    void FreeArkSteedCallFrame(CallVertexT *call);
+    template <typename CallVertexT>
+    void EmitCallArkSteed(CallVertexT *call, ArkSteedRegister target, ArkSteedRegister scratch, Label *exit);
     void EmitCallGeneric(CallVertex *call, ArkSteedRegister scratch);
     void EmitCallGeneric(CallKnownJSFunctionVertex *call, ArkSteedRegister scratch);
+    template <typename CallVertexT>
+    void EmitCallConstructorGeneric(CallVertexT *call, ArkSteedRegister scratch);
     void EmitReturnWithPendingException();
     void EmitReturnIfPendingException();
     int PrepareTrampolineArguments(const Vertex *call, uint32_t actualArgc, uint32_t targetIndex,

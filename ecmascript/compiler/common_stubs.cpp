@@ -1432,6 +1432,77 @@ void ConstructorCheckStubBuilder::GenerateCircuit()
     Return(ConstructorCheck(glue, ctor, value, thisObj));
 }
 
+// Base-variant [[Construct]] result tail for the arksteed super-call lazy-deopt
+// continuation: an explicit EcmaObject return replaces this, any other value keeps
+// the bound this. The only live undefined path is a base constructor's explicit
+// `return undefined` (the frontend emits implicit returns as `lda a2; return`),
+// so unlike ConstructorCheck this needs no ctor and never throws or allocates.
+void BaseConstructResultCheckStubBuilder::GenerateCircuit()
+{
+    auto env = GetEnvironment();
+    GateRef glue = PtrArgument(0);
+    GateRef value = TaggedArgument(1); // 1 : 2nd para, raw [[Construct]] result
+    GateRef thisObj = TaggedArgument(2); // 2 : 3rd para, bound this of the base variant
+    Label entry(env);
+    Label isHeapObject(env);
+    Label isEcmaObj(env);
+    Label notEcmaObj(env);
+    Label exit(env);
+    env->SubCfgEntry(&entry);
+    DEFVARIABLE(result, VariableType::JS_ANY(), thisObj);
+    BRANCH(TaggedIsHeapObject(value), &isHeapObject, &notEcmaObj);
+    Bind(&isHeapObject);
+    BRANCH(TaggedObjectIsEcmaObject(glue, value), &isEcmaObj, &notEcmaObj);
+    Bind(&isEcmaObj);
+    {
+        result = value;
+        Jump(&exit);
+    }
+    Bind(&notEcmaObj);
+    {
+        Jump(&exit);
+    }
+    Bind(&exit);
+    auto ret = *result;
+    env->SubCfgExit();
+    Return(ret);
+}
+
+// Derived-variant [[Construct]] result tail for the arksteed super-call lazy-deopt
+// continuation: the frontend guarantees a derived constructor never returns
+// undefined across the call boundary (its returns are rewritten to `return this`
+// in bytecode), so any non-object here is a primitive and throws.
+void DerivedConstructResultCheckStubBuilder::GenerateCircuit()
+{
+    auto env = GetEnvironment();
+    GateRef glue = PtrArgument(0);
+    GateRef value = TaggedArgument(1); // 1 : 2nd para, raw [[Construct]] result
+    Label entry(env);
+    Label isHeapObject(env);
+    Label isEcmaObj(env);
+    Label notEcmaObj(env);
+    Label exit(env);
+    env->SubCfgEntry(&entry);
+    DEFVARIABLE(result, VariableType::JS_ANY(), Exception());
+    BRANCH(TaggedIsHeapObject(value), &isHeapObject, &notEcmaObj);
+    Bind(&isHeapObject);
+    BRANCH(TaggedObjectIsEcmaObject(glue, value), &isEcmaObj, &notEcmaObj);
+    Bind(&isEcmaObj);
+    {
+        result = value;
+        Jump(&exit);
+    }
+    Bind(&notEcmaObj);
+    {
+        CallRuntime(glue, RTSTUB_ID(ThrowNonConstructorException), {});
+        Jump(&exit);
+    }
+    Bind(&exit);
+    auto ret = *result;
+    env->SubCfgExit();
+    Return(ret);
+}
+
 void CreateEmptyArrayStubBuilder::GenerateCircuit()
 {
     GateRef glue = PtrArgument(0);

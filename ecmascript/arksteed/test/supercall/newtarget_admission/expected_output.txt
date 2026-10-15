@@ -1,0 +1,3 @@
+cold: cold true cold true
+proxy-newtarget: nt true false
+proxy-newtarget-derived: midnt true true false

@@ -50,10 +50,13 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(AllocateInYoung)                  \
     V(InitializeEmptyArray)             \
     V(InitializeArrayWithBuffer)        \
+    V(CallBaseConstructor)              \
+    V(CallDerivedConstructor)           \
     V(CallRuntime)                      \
     V(CallCommonStub)                   \
     V(InitializeEmptyObject)            \
     V(InitializeObjectWithBuffer)       \
+    V(FastSuperAllocateThis)            \
     V(LineStringLoadElement)            \
     V(Phi)                              \
     V(LoadTaggedFromAddress)            \
@@ -66,7 +69,7 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(LoadSingleCharTableElement)       \
     V(TypedArrayIntLoadElement)         \
     V(TypedArrayDoubleLoadElement)      \
-    V(LoadPrototypeFromObject)          \
+    V(LoadPrototypeFromNonJSProxyObject)\
     V(LoadPrototypeHolderByHClass)      \
     V(ConvertHoleToUndefined)           \
     V(LoadHClassAddress)                \
@@ -80,8 +83,8 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(I32ConditionCheck)                \
     V(F64ConditionCheck)                \
     V(Float64ToBoolean)                 \
-    V(TaggedNumberToBoolean)           \
-    V(TaggedDoubleToBoolean)           \
+    V(TaggedNumberToBoolean)            \
+    V(TaggedDoubleToBoolean)            \
     V(TaggedEqual)                      \
     V(TaggedNotEqual)                   \
     V(StringEqual)                      \
@@ -174,7 +177,10 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(BranchIfReferenceEqual)               \
     V(BranchIfObjectType)                   \
     V(BranchIfCallable)                     \
-    V(BranchIfTaggedHeapObject)
+    V(BranchIfTaggedHeapObject)             \
+    V(BranchIfJSConstructorFunction)        \
+    V(BranchIfNewTargetHClassReady)         \
+    V(BranchIfBase)
 
 #define UNCONDITIONAL_CONTROL_VERTEX_LIST(V) \
     V(Jump)                                  \

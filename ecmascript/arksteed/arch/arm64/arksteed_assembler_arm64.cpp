@@ -1288,6 +1288,21 @@ void ArkSteedAssembler::JumpIfNotJSFunction(ArkSteedRegister value, Label *targe
     JumpIf(Condition::GREATER_THAN, target);
 }
 
+void ArkSteedAssembler::JumpIfNotEcmaObject(ArkSteedRegister value, Label *target)
+{
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister hclass = scope.Acquire();
+    ArkSteedRegister objectType = scope.Acquire();
+    LoadField(hclass, value, TaggedObject::HCLASS_OFFSET);
+    And(hclass, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    LoadField(objectType, hclass, JSHClass::BIT_FIELD_OFFSET);
+    And(objectType, static_cast<int32_t>((1U << JSHClass::TYPE_BITFIELD_NUM) - 1));
+    Compare(objectType, static_cast<int32_t>(JSType::ECMA_OBJECT_FIRST));
+    JumpIf(Condition::LESS_THAN, target);
+    Compare(objectType, static_cast<int32_t>(JSType::ECMA_OBJECT_LAST));
+    JumpIf(Condition::GREATER_THAN, target);
+}
+
 void ArkSteedAssembler::JumpIfClassConstructor(ArkSteedRegister jsFunc, Label *target)
 {
     TemporaryRegisterScope scope(this);
@@ -1300,6 +1315,71 @@ void ArkSteedAssembler::JumpIfClassConstructor(ArkSteedRegister jsFunc, Label *t
     TestAndBranchIfZero(bitfield, JSHClass::IsClassConstructorOrPrototypeBit::START_BIT, &notClassConstructor);
     TestAndBranchIfNotZero(bitfield, JSHClass::ConstructorBit::START_BIT, target);
     Bind(&notClassConstructor);
+}
+
+void ArkSteedAssembler::JumpIfNotJSConstructorFunction(ArkSteedRegister value, Label *target)
+{
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister bitfield = scope.Acquire();
+    LoadField(bitfield, value, TaggedObject::HCLASS_OFFSET);
+    And(bitfield, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    LoadField(bitfield, bitfield, JSHClass::BIT_FIELD_OFFSET);
+    // Constructor bit first: the type mask below clears the rest of the bitfield.
+    TestAndBranchIfZero(bitfield, JSHClass::ConstructorBit::START_BIT, target);
+    And(bitfield, static_cast<int32_t>((1U << JSHClass::TYPE_BITFIELD_NUM) - 1));
+    Compare(bitfield, static_cast<int32_t>(JSType::JS_FUNCTION_FIRST));
+    JumpIf(Condition::LESS_THAN, target);
+    Compare(bitfield, static_cast<int32_t>(JSType::JS_FUNCTION_LAST));
+    JumpIf(Condition::GREATER_THAN, target);
+}
+
+void ArkSteedAssembler::JumpIfNewTargetHClassNotReady(ArkSteedRegister value, Label *target)
+{
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister protoOrHClass = scope.Acquire();
+    ArkSteedRegister scratch = scope.Acquire();
+    // Mirrors the FastSuperAllocateThis stub's inline conditions: JSFunction first (the
+    // proto-or-hclass load dereferences newTarget), tag bits before the slot content is
+    // dereferenced, then JSHClass, then a JS_OBJECT instance type.
+    LoadField(scratch, value, TaggedObject::HCLASS_OFFSET);
+    And(scratch, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    LoadField(scratch, scratch, JSHClass::BIT_FIELD_OFFSET);
+    And(scratch, static_cast<int32_t>((1U << JSHClass::TYPE_BITFIELD_NUM) - 1));
+    Compare(scratch, static_cast<int32_t>(JSType::JS_FUNCTION_FIRST));
+    JumpIf(Condition::LESS_THAN, target);
+    Compare(scratch, static_cast<int32_t>(JSType::JS_FUNCTION_LAST));
+    JumpIf(Condition::GREATER_THAN, target);
+    LoadField(protoOrHClass, value, JSFunction::PROTO_OR_DYNCLASS_OFFSET);
+    Move(scratch, protoOrHClass);
+    And(scratch, static_cast<int64_t>(JSTaggedValue::TAG_HEAPOBJECT_MASK));
+    Compare(scratch, 0);
+    JumpIf(Condition::NOT_EQUAL, target);
+    LoadField(scratch, protoOrHClass, TaggedObject::HCLASS_OFFSET);
+    And(scratch, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    LoadField(scratch, scratch, JSHClass::BIT_FIELD_OFFSET);
+    And(scratch, static_cast<int32_t>((1U << JSHClass::TYPE_BITFIELD_NUM) - 1));
+    Compare(scratch, static_cast<int32_t>(JSType::HCLASS));
+    JumpIf(Condition::NOT_EQUAL, target);
+    LoadField(scratch, protoOrHClass, JSHClass::BIT_FIELD_OFFSET);
+    And(scratch, static_cast<int32_t>((1U << JSHClass::TYPE_BITFIELD_NUM) - 1));
+    Compare(scratch, static_cast<int32_t>(JSType::JS_OBJECT));
+    JumpIf(Condition::NOT_EQUAL, target);
+}
+
+void ArkSteedAssembler::JumpIfConstructorIsBase(ArkSteedRegister jsFunc, Label *target)
+{
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister method = scope.Acquire();
+    ArkSteedRegister kind = scope.Acquire();
+    // Base super constructors carry FunctionKind <= CLASS_CONSTRUCTOR in the method's
+    // extra literal info; derived and builtin constructors sort above it.
+    LoadField(method, jsFunc, JSFunctionBase::METHOD_OFFSET);
+    LoadField(kind, method, Method::EXTRA_LITERAL_INFO_OFFSET);
+    Lsr(kind, Method::FunctionKindBits::START_BIT);
+    And(kind, static_cast<int64_t>(
+        Method::FunctionKindBits::Mask() >> Method::FunctionKindBits::START_BIT));
+    Compare(kind, static_cast<int32_t>(FunctionKind::CLASS_CONSTRUCTOR));
+    JumpIf(Condition::LESS_THAN_OR_EQUAL, target);
 }
 
 void ArkSteedAssembler::JumpIfFunctionNotCompiled(ArkSteedRegister jsFunc, Label *target)

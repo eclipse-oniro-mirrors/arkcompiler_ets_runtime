@@ -1,0 +1,1 @@
+generic-deopt: true int true

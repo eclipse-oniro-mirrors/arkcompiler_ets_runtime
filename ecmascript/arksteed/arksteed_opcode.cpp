@@ -296,6 +296,55 @@ void InitializeUnmappedArgumentsVertex::SetValueLocationConstraints()
     UseRegister(Arg(HCLASS_INDEX));
 }
 
+void CallBaseConstructorVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+    // Pre-call: the call scratch plus the compiled-code guard bitfield. Post-call:
+    // JumpIfNotEcmaObject needs two concurrent scratch registers on arm64 (hclass
+    // plus objectType) but only one on x64, on top of the vertex-level scratch
+    // held across the call for the slot-loaded select.
+#if defined(PANDA_TARGET_ARM64)
+    SetTemporariesNeeded(3);
+#else
+    SetTemporariesNeeded(2);
+#endif
+    UseRegister(Arg(TARGET_INDEX));
+    UseAny(Arg(NEW_TARGET_INDEX));
+    // this must live in a spill slot: the not-object arm of the inline result
+    // select reads it after the embedded call, which clobbers every register, and
+    // the deopt bundle references the same slot as BASE_CONSTRUCTOR_THIS_INDEX.
+    // Call-argument placement reads slot operands fine.
+    UseSlot(Arg(THIS_INDEX));
+    for (uint32_t i = FIRST_ARG_INDEX; i < GetInputCount(); i++) {
+        UseAny(Arg(i));
+    }
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
+
+void CallDerivedConstructorVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+    // Pre-call: the call scratch plus the compiled-code guard bitfield. Post-call:
+    // JumpIfNotEcmaObject needs two concurrent scratch registers on arm64 (hclass
+    // plus objectType) but only one on x64. The cold throw path marshals its
+    // runtime id through reserved scratch, not RA temporaries.
+#if defined(PANDA_TARGET_ARM64)
+    SetTemporariesNeeded(3);
+#else
+    SetTemporariesNeeded(2);
+#endif
+    UseRegister(Arg(TARGET_INDEX));
+    UseAny(Arg(NEW_TARGET_INDEX));
+    // this is the undefined placeholder, pure call-argument forwarding: nothing
+    // reads it after the embedded call (the derived normalization only tests the
+    // result), so unlike the base variant any location is fine.
+    UseAny(Arg(THIS_INDEX));
+    for (uint32_t i = FIRST_ARG_INDEX; i < GetInputCount(); i++) {
+        UseAny(Arg(i));
+    }
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
+
 void CallCommonStubVertex::SetValueLocationConstraints()
 {
     // Define return value in x0/rax (C calling convention)
@@ -304,6 +353,14 @@ void CallCommonStubVertex::SetValueLocationConstraints()
     // Set parameter location constraints using helper function
     SetStubValueLocationConstraints(this, GetArgCount());
     UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
+
+void FastSuperAllocateThisVertex::SetValueLocationConstraints()
+{
+    // Define return value in x0/rax (C calling convention), like CallCommonStubVertex
+    DefineAsFixed(this, 0);
+
+    SetStubValueLocationConstraints(this, GetArgCount());
 }
 
 void LineStringLoadElementVertex::SetValueLocationConstraints()
@@ -498,7 +555,7 @@ void TypedArrayDoubleLoadElementVertex::SetValueLocationConstraints()
     SetTemporariesNeeded(2);
 }
 
-void LoadPrototypeFromObjectVertex::SetValueLocationConstraints()
+void LoadPrototypeFromNonJSProxyObjectVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
     UseRegister(Arg(OBJECT_INDEX));
@@ -1135,6 +1192,29 @@ void BranchIfTaggedHeapObjectVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(VALUE_INDEX));
     SetTemporariesNeeded(1);
+}
+
+void BranchIfJSConstructorFunctionVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    // JumpIfNotJSConstructorFunction chains hclass -> bitfield -> type through one
+    // RA temporary on every platform.
+    SetTemporariesNeeded(1);
+}
+
+void BranchIfNewTargetHClassReadyVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    // JumpIfNewTargetHClassNotReady keeps the loaded proto-or-hclass slot live while
+    // the hclass checks chain through a second RA temporary on every platform.
+    SetTemporariesNeeded(2);
+}
+
+void BranchIfBaseVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    // JumpIfConstructorIsBase acquires two RA temporaries (method pointer + function kind).
+    SetTemporariesNeeded(2);
 }
 
 void GapMoveVertex::SetValueLocationConstraints()

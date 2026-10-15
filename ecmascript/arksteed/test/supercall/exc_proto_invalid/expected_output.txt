@@ -1,0 +1,3 @@
+null-proto: true | Constructor is false
+object-proto: true | Constructor is false
+arrow-proto: true | Constructor is false

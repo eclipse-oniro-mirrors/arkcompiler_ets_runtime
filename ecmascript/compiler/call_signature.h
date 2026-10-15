@@ -511,6 +511,8 @@ private:
     V(GetCallSpreadArgs)                        \
     V(NewThisObjectChecked)                     \
     V(ConstructorCheck)                         \
+    V(BaseConstructResultCheck)                 \
+    V(DerivedConstructResultCheck)              \
     V(CreateEmptyArray)                         \
     V(CreateArrayWithBuffer)                    \
     V(NewJSObject)                              \

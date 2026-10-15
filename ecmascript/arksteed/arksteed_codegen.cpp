@@ -721,6 +721,34 @@ void AppendDeoptSources(std::vector<ArkSteedDeoptValue> *deopts,
     }
 }
 
+void AppendBaseConstructorSources(std::vector<ArkSteedDeoptValue> *deopts,
+                                  const CallBaseConstructorVertex *call, ArkSteedAssembler *assembler)
+{
+    deopts->push_back(MakeConstantDeopt(
+        static_cast<int32_t>(SpecVregIndex::DEOPT_CONTINUATION_KIND_INDEX),
+        static_cast<int64_t>(EncodeDeoptContinuationKind(DeoptContinuationKind::BASE_CTOR))));
+    const InstructionOperand &thisOperand = call->GetInputLocation(CallBaseConstructorVertex::THIS_INDEX)->GetOperand();
+    ASSERT(thisOperand.IsAnyStackSlot());
+    auto thisSlot = AllocatedState::Cast(thisOperand);
+    deopts->push_back({
+        static_cast<kungfu::LLVMStackMapType::VRegId>(SpecVregIndex::BASE_CONSTRUCTOR_THIS_INDEX),
+        ArkSteedDeoptValueKind::STACK_SLOT,
+        EncodeLazyDeoptOffset(
+            assembler->GetFramePointerOffsetForStackSlot(thisSlot.GetIndex(), thisSlot.GetRepresentation()),
+            DeoptTranslationKind::TAGGED),
+        static_cast<kungfu::LLVMStackMapType::DwarfRegType>(GCStackMapRegisters::FP),
+    });
+}
+
+void AppendDerivedConstructorSources(std::vector<ArkSteedDeoptValue> *deopts,
+                                     const CallDerivedConstructorVertex *call)
+{
+    (void)call;
+    deopts->push_back(MakeConstantDeopt(
+        static_cast<int32_t>(SpecVregIndex::DEOPT_CONTINUATION_KIND_INDEX),
+        static_cast<int64_t>(EncodeDeoptContinuationKind(DeoptContinuationKind::DERIVED_CTOR))));
+}
+
 template <class NodeT>
 bool HasLazyDeoptSafepointFor(const NodeT *vertex)
 {
@@ -756,6 +784,12 @@ void EmitLazyDeoptSafepoint(ArkSteedAssembler *assembler,
     std::vector<ArkSteedDeoptValue> deopts;
     deopts.emplace_back(MakeConstantDeopt(static_cast<int32_t>(SpecVregIndex::INLINE_DEPTH), 0));
     AppendDeoptSources(&deopts, lazy, assembler, literalTableBuilder);
+    if constexpr (std::is_same_v<NodeT, CallBaseConstructorVertex>) {
+        AppendBaseConstructorSources(&deopts, vertex, assembler);
+    }
+    if constexpr (std::is_same_v<NodeT, CallDerivedConstructorVertex>) {
+        AppendDerivedConstructorSources(&deopts, vertex);
+    }
 
     ExceptionHandlerKind exceptionHandlerKind = ExceptionHandlerKind::NONE;
     if constexpr (std::is_base_of_v<ThrowableMixin, NodeT>) {
@@ -1041,7 +1075,8 @@ void ArkSteedCodeGenerator::LoadSteedExpectedArgc(ArkSteedRegister target, ArkSt
         Method::NumArgsBits::Mask() >> Method::NumArgsBits::START_BIT));
 }
 
-void ArkSteedCodeGenerator::ComputeSteedCallSlotCount(CallVertex *call, ArkSteedRegister slotCount)
+template <typename CallVertexT>
+void ArkSteedCodeGenerator::ComputeSteedCallSlotCount(CallVertexT *call, ArkSteedRegister slotCount)
 {
     uint32_t userArgc = call->GetActualArgc();
 
@@ -1056,7 +1091,8 @@ void ArkSteedCodeGenerator::ComputeSteedCallSlotCount(CallVertex *call, ArkSteed
     __ And(slotCount, static_cast<int32_t>(~1));
 }
 
-void ArkSteedCodeGenerator::PrepareArkSteedCall(CallVertex *call, ArkSteedRegister target, ArkSteedRegister scratch)
+template <typename CallVertexT>
+void ArkSteedCodeGenerator::PrepareArkSteedCall(CallVertexT *call, ArkSteedRegister target, ArkSteedRegister scratch)
 {
     const uint32_t userArgc = call->GetActualArgc();
     const uint32_t totalArgc = userArgc + NUM_MANDATORY_JSFUNC_ARGS;
@@ -1068,15 +1104,15 @@ void ArkSteedCodeGenerator::PrepareArkSteedCall(CallVertex *call, ArkSteedRegist
     __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0),
                          scratch);
 
-    StoreStubStackArgument(call, CallVertex::TARGET_INDEX,
-                           __ GetCallArgSlot(CallVertex::TARGET_INDEX + CALL_ARG1));
-    StoreStubStackArgument(call, CallVertex::NEW_TARGET_INDEX,
-                           __ GetCallArgSlot(CallVertex::NEW_TARGET_INDEX + CALL_ARG1));
-    StoreStubStackArgument(call, CallVertex::THIS_INDEX,
-                           __ GetCallArgSlot(CallVertex::THIS_INDEX + CALL_ARG1));
+    StoreStubStackArgument(call, CallVertexT::TARGET_INDEX,
+                           __ GetCallArgSlot(CallVertexT::TARGET_INDEX + CALL_ARG1));
+    StoreStubStackArgument(call, CallVertexT::NEW_TARGET_INDEX,
+                           __ GetCallArgSlot(CallVertexT::NEW_TARGET_INDEX + CALL_ARG1));
+    StoreStubStackArgument(call, CallVertexT::THIS_INDEX,
+                           __ GetCallArgSlot(CallVertexT::THIS_INDEX + CALL_ARG1));
     for (uint32_t i = 0; i < userArgc; i++) {
-        StoreStubStackArgument(call, CallVertex::FIRST_ARG_INDEX + i,
-                               __ GetCallArgSlot(CallVertex::FIRST_ARG_INDEX +
+        StoreStubStackArgument(call, CallVertexT::FIRST_ARG_INDEX + i,
+                               __ GetCallArgSlot(CallVertexT::FIRST_ARG_INDEX +
                                                           CALL_ARG1 + i));
     }
 
@@ -1085,7 +1121,7 @@ void ArkSteedCodeGenerator::PrepareArkSteedCall(CallVertex *call, ArkSteedRegist
     __ Move(target, static_cast<uint64_t>(totalArgc));
     __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0), target);
     __ MoveRepr(MachineRepresentation::Tagged, target,
-                         __ GetCallArgSlot(CallVertex::TARGET_INDEX + CALL_ARG1));
+                         __ GetCallArgSlot(CallVertexT::TARGET_INDEX + CALL_ARG1));
 }
 
 void ArkSteedCodeGenerator::PrepareArkSteedSelfCall(CallSelfVertex *call)
@@ -1166,14 +1202,16 @@ void ArkSteedCodeGenerator::PrepareKnownCall(CallKnownJSFunctionVertex *call)
     }
 }
 
-void ArkSteedCodeGenerator::FreeArkSteedCallFrame(CallVertex *call)
+template <typename CallVertexT>
+void ArkSteedCodeGenerator::FreeArkSteedCallFrame(CallVertexT *call)
 {
     (void)call;
     __ RestoreStackPointerToFrameBottom(graph_);
 }
 
-void ArkSteedCodeGenerator::EmitCallArkSteed(CallVertex *call, ArkSteedRegister target, ArkSteedRegister scratch,
-                                            Label *exit)
+template <typename CallVertexT>
+void ArkSteedCodeGenerator::EmitCallArkSteed(CallVertexT *call, ArkSteedRegister target, ArkSteedRegister scratch,
+                                             Label *exit)
 {
     PrepareArkSteedCall(call, target, scratch);
     TemporaryRegisterScope scope(assembler_);
@@ -1210,6 +1248,21 @@ void ArkSteedCodeGenerator::EmitCallGeneric(CallKnownJSFunctionVertex *call, Ark
         CallKnownJSFunctionVertex::NEW_TARGET_INDEX, CallKnownJSFunctionVertex::RECEIVER_INDEX,
         CallKnownJSFunctionVertex::FIRST_ARG_INDEX, scratch);
     __ CallTrampoline(RTSTUB_ID(JSCall));
+    if (HasLazyDeoptSafepoint(call)) {
+        EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
+    } else {
+        safepointBuilder_->DefineSafepoint(__ GetPcOffset());
+    }
+    __ FreeCallArgSlots(stackArgCount);
+}
+
+template <typename CallVertexT>
+void ArkSteedCodeGenerator::EmitCallConstructorGeneric(CallVertexT *call, ArkSteedRegister scratch)
+{
+    int stackArgCount = PrepareTrampolineArguments(
+        call, call->GetActualArgc(), CallVertexT::TARGET_INDEX, CallVertexT::NEW_TARGET_INDEX,
+        CallVertexT::THIS_INDEX, CallVertexT::FIRST_ARG_INDEX, scratch);
+    __ CallTrampoline(RTSTUB_ID(JSCallNew));
     if (HasLazyDeoptSafepoint(call)) {
         EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
     } else {
@@ -1809,6 +1862,101 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfReferenceNotEqualVertex
 }
 
 template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<CallBaseConstructorVertex>(CallBaseConstructorVertex *call)
+{
+    Label callConstructor;
+    Label checkDone;
+    ArkSteedRegister target = GetInputRegister(call, CallBaseConstructorVertex::TARGET_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister scratch = scope.Acquire();
+    // The graph builder has already guaranteed the target is a base constructor
+    // (the BranchIfBase split, with the BranchIfJSConstructorFunction guard or the
+    // speculation identity deopt in the monomorphic shape before it) and produced
+    // the bound this object, so unlike CallVertex no callee-type guards are needed;
+    // only the compiled-code state stays runtime variable. Uncompiled supers
+    // (builtin constructors, interpreted callees) take the generic [[Construct]]
+    // fallback, which already returns a normalized result.
+    __ JumpIfFunctionNotCompiled(target, &callConstructor);
+    EmitCallArkSteed(call, target, scratch, &checkDone);
+    __ Bind(&callConstructor);
+    EmitCallConstructorGeneric(call, scratch);
+    // Inline the base-variant result tail (what JSFunction::ConstructInternal and
+    // the BaseConstructResultCheck stub implement for base targets): an explicit
+    // EcmaObject return replaces this, any other value keeps thisObj. The only live
+    // undefined path is the callee's explicit `return undefined` (the frontend
+    // compiles a base constructor's implicit return as `lda a2; return`, i.e. this);
+    // null and other primitives ride the same fallback, so the tree is a pure
+    // select: no ctor read, no kind check, no cold path — it cannot throw. The raw
+    // result sits in the result register; thisObj is read from its spill slot (the
+    // calls clobber every register), so the fast path costs two tests and one
+    // slot load on the fallback arm — no moves on the object arm.
+    __ Bind(&checkDone);
+    ArkSteedRegister result = GetResultRegister(call);
+    const InstructionOperand &thisOperand =
+        call->GetInputLocation(CallBaseConstructorVertex::THIS_INDEX)->GetOperand();
+    ASSERT(thisOperand.IsAnyStackSlot());
+    ArkSteedAssembler::MemoryOperand thisSlot = __ GetStackSlot(AllocatedState::Cast(thisOperand));
+    Label notObject;
+    Label exit;
+    __ JumpIfNotTaggedHeapObject(result, &notObject);
+    __ JumpIfNotEcmaObject(result, &notObject);
+    __ Jump(&exit);  // result already holds the value
+    __ Bind(&notObject);
+    __ MoveRepr(MachineRepresentation::Tagged, result, thisSlot);
+    __ Bind(&exit);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<CallDerivedConstructorVertex>(CallDerivedConstructorVertex *call)
+{
+    Label callConstructor;
+    Label checkDone;
+    ArkSteedRegister target = GetInputRegister(call, CallDerivedConstructorVertex::TARGET_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister scratch = scope.Acquire();
+    // The graph builder has already guaranteed the target is a derived (or builtin)
+    // constructor (the BranchIfBase split, with the BranchIfJSConstructorFunction
+    // guard or the speculation identity deopt in the monomorphic shape before it)
+    // and passed an undefined placeholder this (the callee's own super chain
+    // re-initializes it), so unlike CallVertex no callee-type guards are needed;
+    // only the compiled-code state stays runtime variable. Uncompiled supers take
+    // the generic [[Construct]] fallback, which already returns a normalized result.
+    __ JumpIfFunctionNotCompiled(target, &callConstructor);
+    EmitCallArkSteed(call, target, scratch, &checkDone);
+    __ Bind(&callConstructor);
+    EmitCallConstructorGeneric(call, scratch);
+    // Inline the derived-variant result tail: an explicit EcmaObject return passes
+    // through, anything else throws. There is no undefined arm and no this fallback
+    // because the frontend guarantees a derived constructor never returns undefined
+    // across the call boundary (implicit returns and `return undefined` are
+    // rewritten to `return this` in bytecode; the stricteq guard in explicit returns
+    // only swaps undefined), so the only values reaching the throw arm are raw
+    // primitives. The fast path is two tests and a jump; the cold arm throws.
+    __ Bind(&checkDone);
+    ArkSteedRegister result = GetResultRegister(call);
+    Label notObject;
+    Label exit;
+    __ JumpIfNotTaggedHeapObject(result, &notObject);
+    __ JumpIfNotEcmaObject(result, &notObject);
+    __ Jump(&exit);  // result already holds the value
+    __ Bind(&notObject);
+    // Cold arm: throw TypeError. The throw runtime takes no JS arguments; the
+    // exception dispatch matches the parked pc exactly, so this call site needs
+    // its own lazy-deopt kind (an exception settlement skips the continuation
+    // branch, and the derived variant carries no ctor/this sources anyway).
+    int stackArgCount = PrepareRuntimeStubStackArguments(
+        call, 0, static_cast<int>(RTSTUB_ID(ThrowNonConstructorException)));
+    __ CallRuntime(RTSTUB_ID(ThrowNonConstructorException));
+    if (HasLazyDeoptSafepoint(call)) {
+        EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
+    } else {
+        safepointBuilder_->DefineSafepoint(__ GetPcOffset());
+    }
+    __ FreeCallArgSlots(stackArgCount);
+    __ Bind(&exit);
+}
+
+template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfHClassMismatchVertex>(DeoptIfHClassMismatchVertex *checkHClass)
 {
     constexpr int RECEIVER_INDEX = static_cast<int>(DeoptIfHClassMismatchVertex::RECEIVER_INDEX);
@@ -2319,15 +2467,15 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<LoadSingleCharTableElementVert
 }
 
 template <>
-void ArkSteedCodeGenerator::VisitNonControlVertex<LoadPrototypeFromObjectVertex>(
-    LoadPrototypeFromObjectVertex *loadPrototype)
+void ArkSteedCodeGenerator::VisitNonControlVertex<LoadPrototypeFromNonJSProxyObjectVertex>(
+    LoadPrototypeFromNonJSProxyObjectVertex *loadPrototype)
 {
 #ifndef NDEBUG
     LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << loadPrototype->GetId()
-                        << ": LoadPrototypeFromObjectVertex";
+                        << ": LoadPrototypeFromNonJSProxyObjectVertex";
 #endif
     auto dst = GetResultRegister(loadPrototype);
-    auto obj = GetInputRegister(loadPrototype, LoadPrototypeFromObjectVertex::OBJECT_INDEX);
+    auto obj = GetInputRegister(loadPrototype, LoadPrototypeFromNonJSProxyObjectVertex::OBJECT_INDEX);
     __ LoadField(dst, obj, TaggedObject::HCLASS_OFFSET);
     __ And(dst, static_cast<int64_t>(TaggedStateWord::ADDRESS_MASK));
     __ LoadField(dst, dst, JSHClass::PROTOTYPE_OFFSET);
@@ -4116,6 +4264,16 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CallCommonStubVertex>(CallComm
 }
 
 template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<FastSuperAllocateThisVertex>(FastSuperAllocateThisVertex *call)
+{
+    // TODO: lower the allocation inline instead of calling the common stub.
+    int stackArgCount = PrepareCommonStubStackArguments(call, call->GetArgCount());
+    __ CallCommonStub(CommonStubID::FastSuperAllocateThis);
+    safepointBuilder_->DefineSafepoint(__ GetPcOffset());
+    __ FreeCallArgSlots(stackArgCount);
+}
+
+template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<LineStringLoadElementVertex>(LineStringLoadElementVertex *load)
 {
     auto dst = GetResultRegister(load);
@@ -4338,6 +4496,44 @@ void ArkSteedCodeGenerator::VisitControlVertex<BranchIfTaggedHeapObjectVertex>(B
     __ Compare(scratch, 0);
     __ Branch(Condition::EQUAL, ifTrue->GetLabel(), trueBranchIsFallthrough, ifFalse->GetLabel(),
               falseBranchIsFallthrough);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitControlVertex<BranchIfJSConstructorFunctionVertex>(
+    BranchIfJSConstructorFunctionVertex *jumpIf)
+{
+    BB *ifTrue = jumpIf->IfTrue();
+    BB *ifFalse = jumpIf->IfFalse();
+    auto value = GetInputRegister(jumpIf, BranchIfJSConstructorFunctionVertex::VALUE_INDEX);
+    __ JumpIfNotJSConstructorFunction(value, ifFalse->GetLabel());
+    if (!IsNextBlockInLayout(ifTrue)) {
+        __ Jump(ifTrue->GetLabel());
+    }
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitControlVertex<BranchIfNewTargetHClassReadyVertex>(
+    BranchIfNewTargetHClassReadyVertex *jumpIf)
+{
+    BB *ifTrue = jumpIf->IfTrue();
+    BB *ifFalse = jumpIf->IfFalse();
+    auto value = GetInputRegister(jumpIf, BranchIfNewTargetHClassReadyVertex::VALUE_INDEX);
+    __ JumpIfNewTargetHClassNotReady(value, ifFalse->GetLabel());
+    if (!IsNextBlockInLayout(ifTrue)) {
+        __ Jump(ifTrue->GetLabel());
+    }
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitControlVertex<BranchIfBaseVertex>(BranchIfBaseVertex *jumpIf)
+{
+    BB *ifTrue = jumpIf->IfTrue();
+    BB *ifFalse = jumpIf->IfFalse();
+    auto value = GetInputRegister(jumpIf, BranchIfBaseVertex::VALUE_INDEX);
+    __ JumpIfConstructorIsBase(value, ifTrue->GetLabel());
+    if (!IsNextBlockInLayout(ifFalse)) {
+        __ Jump(ifFalse->GetLabel());
+    }
 }
 
 template <>

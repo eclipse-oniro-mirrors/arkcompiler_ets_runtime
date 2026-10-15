@@ -975,7 +975,17 @@ private:
     bool isOnHeap_;
 };
 
-class LoadPrototypeFromObjectVertex : public FixedInputVertexMixin<ValueVertex, LoadPrototypeFromObjectVertex> {
+/**
+ * LoadPrototypeFromNonJSProxyObject vertex - loads the [[Prototype]] of an object
+ * that is statically known not to be a JSProxy, via the two-load sequence
+ * (object -> hclass -> hclass->prototype). The precondition is part of the
+ * contract: a JSProxy's [[GetPrototypeOf]] is a trap, so the raw field load
+ * would silently return the wrong value; the graph builder must guarantee the
+ * input cannot be a proxy (e.g. it is the enclosing JSFunction, whose
+ * [[Prototype]] is the super constructor of a derived class).
+ */
+class LoadPrototypeFromNonJSProxyObjectVertex
+    : public FixedInputVertexMixin<ValueVertex, LoadPrototypeFromNonJSProxyObjectVertex> {
 public:
     enum Indices : uint32_t {
         OBJECT_INDEX = 0,
@@ -987,7 +997,7 @@ public:
     };
     static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_READ;
 
-    explicit LoadPrototypeFromObjectVertex() : FixedInputVertexMixin() {}
+    explicit LoadPrototypeFromNonJSProxyObjectVertex() : FixedInputVertexMixin() {}
 
     void SetValueLocationConstraints();
 };
@@ -2204,6 +2214,115 @@ public:
 };
 
 /**
+ * CallBaseConstructor vertex - a [[Construct]] call to a BASE super constructor,
+ * carrying the caller's real newTarget. The graph builder emits it on the
+ * BranchIfBase true-arm (the same arm whose FastSuperAllocateThis produced the
+ * bound this) and guarantees the target is a constructible JSFunction (the
+ * BranchIfJSConstructorFunction guard, or the speculation identity deopt in the
+ * monomorphic shape); the codegen enters compiled supers directly with the steed
+ * frame convention and routes uncompiled ones (builtin or interpreted
+ * constructors) to the generic [[Construct]] trampoline (JSCallNew).
+ *
+ * The inline result normalization is a pure select — an explicit EcmaObject
+ * return replaces this, any other value keeps this — so it cannot throw and has
+ * no cold path. The only live undefined path is the callee's explicit
+ * `return undefined` (the frontend compiles a base constructor's implicit return
+ * as `lda a2; return`, i.e. this, an object); null and other primitives ride the
+ * same fallback. The this input must survive the embedded call (the not-object
+ * arm reads it after the call clobbers every register) and doubles as the deopt
+ * pseudo-vreg BASE_CONSTRUCTOR_THIS_INDEX, so it is slot-constrained.
+ */
+class CallBaseConstructorVertex : public VertexMixin<ValueVertex, CallBaseConstructorVertex>,
+                                  public ThrowableMixin,
+                                  public LazyDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        TARGET_INDEX = 0,
+        NEW_TARGET_INDEX = 1,
+        THIS_INDEX = 2,
+        FIRST_ARG_INDEX = 3,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::IS_CALL |
+        VertexPropertyFlag::CAN_READ |
+        VertexPropertyFlag::CAN_WRITE |
+        VertexPropertyFlag::CAN_ALLOCATE |
+        VertexPropertyFlag::CAN_LAZY_DEOPT |
+        VertexPropertyFlag::CAN_THROW;
+
+    explicit CallBaseConstructorVertex(uint32_t actualArgc) : VertexMixin(), actualArgc_(actualArgc) {}
+
+    uint32_t GetActualArgc() const
+    {
+        return actualArgc_;
+    }
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == FIRST_ARG_INDEX + actualArgc_);
+    }
+
+private:
+    uint32_t actualArgc_;
+};
+
+/**
+ * CallDerivedConstructor vertex - a [[Construct]] call to a DERIVED (or builtin)
+ * super constructor, carrying the caller's real newTarget. The graph builder
+ * emits it on the BranchIfBase false-arm with an undefined placeholder this
+ * (no allocation; the callee's own super chain re-initializes this).
+ *
+ * The inline result normalization is a single check — an explicit EcmaObject
+ * return passes through, anything else throws TypeError on the cold path —
+ * because the frontend guarantees a derived constructor never returns undefined
+ * across the call boundary: all its return shapes are rewritten in bytecode
+ * (implicit and `return undefined` become `return this`; the stricteq guard in
+ * explicit returns only swaps undefined), so only a raw non-undefined primitive
+ * can arrive here. Consequently the this input is pure call-argument forwarding
+ * (never read after the call) and the deopt bundle carries no pseudo vregs
+ * beyond the constant kind marker.
+ */
+class CallDerivedConstructorVertex : public VertexMixin<ValueVertex, CallDerivedConstructorVertex>,
+                                     public ThrowableMixin,
+                                     public LazyDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        TARGET_INDEX = 0,
+        NEW_TARGET_INDEX = 1,
+        THIS_INDEX = 2,
+        FIRST_ARG_INDEX = 3,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::IS_CALL |
+        VertexPropertyFlag::CAN_READ |
+        VertexPropertyFlag::CAN_WRITE |
+        VertexPropertyFlag::CAN_ALLOCATE |
+        VertexPropertyFlag::CAN_LAZY_DEOPT |
+        VertexPropertyFlag::CAN_THROW;
+
+    explicit CallDerivedConstructorVertex(uint32_t actualArgc) : VertexMixin(), actualArgc_(actualArgc) {}
+
+    uint32_t GetActualArgc() const
+    {
+        return actualArgc_;
+    }
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == FIRST_ARG_INDEX + actualArgc_);
+    }
+
+private:
+    uint32_t actualArgc_;
+};
+
+/**
  * CallCommonStub vertex - for common stub calls
  */
 class CallCommonStubVertex : public VertexMixin<ValueVertex, CallCommonStubVertex>,
@@ -2240,6 +2359,47 @@ public:
 
 private:
     SideEffectKind sideEffectKind_;
+};
+
+/**
+ * FastSuperAllocateThis vertex - allocates the this object for a super call whose super
+ * constructor is a base constructor (graph-builder-guarded by BranchIfNewTargetHClassReady
+ * on newTarget and BranchIfTaggedHeapObject / BranchIfJSConstructorFunction / BranchIfBase
+ * on the super constructor before reaching this vertex; a monomorphic call slot
+ * replaces the middle two with one identity eager deopt, the profiled slot value
+ * being constructor-checked by the interpreter before it was recorded).
+ * TODO: A dedicated vertex instead of a generic CallCommonStubVertex: the current codegen is a
+ * plain call to the FastSuperAllocateThis common stub, but the allocation can be lowered
+ * inline inside this vertex without touching the graph builder again.
+ */
+class FastSuperAllocateThisVertex : public VertexMixin<ValueVertex, FastSuperAllocateThisVertex> {
+public:
+    enum Indices : uint32_t {
+        GLUE_INDEX = 0,
+        SUPER_CTOR_INDEX = 1,
+        NEW_TARGET_INDEX = 2,
+        NUM_INPUTS = 3,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::IS_CALL |
+        VertexPropertyFlag::CAN_READ |
+        VertexPropertyFlag::CAN_WRITE |
+        VertexPropertyFlag::CAN_ALLOCATE;
+
+    FastSuperAllocateThisVertex() : VertexMixin() {}
+
+    size_t GetArgCount() const
+    {
+        return GetInputCount();
+    }
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+    }
 };
 
 class LineStringLoadElementVertex : public FixedInputVertexMixin<ValueVertex, LineStringLoadElementVertex> {
@@ -3948,6 +4108,85 @@ public:
     static constexpr VertexPropertyFlag PROPERTIES = {};
 
     BranchIfTaggedHeapObjectVertex(BB *ifTrue, BB *ifFalse) : BranchControlVertexT(ifTrue, ifFalse) {}
+
+    void SetValueLocationConstraints();
+};
+
+/**
+ * BranchIfJSConstructorFunction vertex - jumps to if_true when the value is a
+ * constructor JSFunction (JSType within [JS_FUNCTION_FIRST, JS_FUNCTION_LAST] and
+ * the hclass constructor bit set). Both checks read the same hclass bitfield, so a
+ * single vertex loads it once. Guard for the super-call fast path; requires the value
+ * to be a heap object (BranchIfTaggedHeapObject first).
+ */
+class BranchIfJSConstructorFunctionVertex : public BranchControlVertexT<BranchIfJSConstructorFunctionVertex> {
+public:
+    enum Indices : uint32_t {
+        VALUE_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    BranchIfJSConstructorFunctionVertex(BB *ifTrue, BB *ifFalse)
+        : BranchControlVertexT(ifTrue, ifFalse)
+    {}
+
+    void SetValueLocationConstraints();
+};
+
+/**
+ * BranchIfNewTargetHClassReady vertex - jumps to if_true when the value is a JSFunction
+ * whose proto-or-hclass slot holds a JSHClass describing JS_OBJECT instances: exactly
+ * the inline-path condition set of the FastSuperAllocateThis stub, so on the arksteed
+ * super-call path the stub's reentrant CallRuntime fallback is unreachable. An undefined
+ * newTarget never reaches the guard's dereference: class constructor frames are only
+ * entered through [[Construct]].
+ */
+class BranchIfNewTargetHClassReadyVertex : public BranchControlVertexT<BranchIfNewTargetHClassReadyVertex> {
+public:
+    enum Indices : uint32_t {
+        VALUE_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    BranchIfNewTargetHClassReadyVertex(BB *ifTrue, BB *ifFalse)
+        : BranchControlVertexT(ifTrue, ifFalse)
+    {}
+
+    void SetValueLocationConstraints();
+};
+
+/**
+ * BranchIfBase vertex - jumps to if_true when the value is a base constructor
+ * (method FunctionKind <= CLASS_CONSTRUCTOR). Splits the super-call fast path into
+ * the allocating arm (base super) and the undefined-this arm (derived or builtin
+ * super); requires the value to be a constructor JSFunction
+ * (the BranchIfJSConstructorFunction guard or the speculated identity first).
+ */
+class BranchIfBaseVertex : public BranchControlVertexT<BranchIfBaseVertex> {
+public:
+    enum Indices : uint32_t {
+        VALUE_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    BranchIfBaseVertex(BB *ifTrue, BB *ifFalse)
+        : BranchControlVertexT(ifTrue, ifFalse)
+    {}
 
     void SetValueLocationConstraints();
 };

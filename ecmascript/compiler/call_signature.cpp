@@ -1007,6 +1007,16 @@ DEF_CALL_SIGNATURE(ConstructorCheck)
     FOUR_ARGS_CALL_SIGNATURE(ConstructorCheck, VariableType::JS_ANY());
 }
 
+DEF_CALL_SIGNATURE(BaseConstructResultCheck)
+{
+    THREE_ARGS_CALL_SIGNATURE(BaseConstructResultCheck, VariableType::JS_ANY());
+}
+
+DEF_CALL_SIGNATURE(DerivedConstructResultCheck)
+{
+    TWO_ARGS_CALL_SIGNATURE(DerivedConstructResultCheck, VariableType::JS_ANY());
+}
+
 DEF_CALL_SIGNATURE(CreateEmptyArray)
 {
     TWO_ARGS_CALL_SIGNATURE(CreateEmptyArray, VariableType::JS_ANY());

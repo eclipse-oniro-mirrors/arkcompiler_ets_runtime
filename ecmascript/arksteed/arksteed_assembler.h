@@ -264,6 +264,10 @@ public:
     void JumpIf(Condition condition, Label *target);
     void JumpIfNotTaggedHeapObject(ArkSteedRegister value, Label *target);
     void JumpIfNotJSFunction(ArkSteedRegister value, Label *target);
+    void JumpIfNotEcmaObject(ArkSteedRegister value, Label *target);
+    void JumpIfNotJSConstructorFunction(ArkSteedRegister value, Label *target);
+    void JumpIfNewTargetHClassNotReady(ArkSteedRegister value, Label *target);
+    void JumpIfConstructorIsBase(ArkSteedRegister jsFunc, Label *target);
     void JumpIfClassConstructor(ArkSteedRegister jsFunc, Label *target);
     void JumpIfFunctionNotCompiled(ArkSteedRegister jsFunc, Label *target);
     void Bind(Label *label);
