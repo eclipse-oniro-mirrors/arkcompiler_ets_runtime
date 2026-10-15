@@ -692,6 +692,8 @@
     <target name="Jsnapi_003_Test">
         <preparer>
             <option name="push" value="arkcompiler/ets_runtime/libark_jsruntime_test.so -> /data/test" src="out"/>
+            <option name="push" value="obj/arkcompiler/ets_runtime/ecmascript/napi/test/microtask_scope_main.abc -> /data/test" src="out"/>
+            <option name="push" value="obj/arkcompiler/ets_runtime/ecmascript/napi/test/microtask_scope_dep.abc -> /data/test" src="out"/>
         </preparer>
     </target>
     <target name="Jsnapi_004_Test">
