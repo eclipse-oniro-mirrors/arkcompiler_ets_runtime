@@ -269,6 +269,9 @@ enum CommandValues {
     OPTION_COMPILER_ENABLE_JIT_LAZY_DEOPT,
     OPTION_COMPILER_ENABLE_LAZY_DEOPT_TRACE,
     OPTION_ENABLE_LOADING_STUBS_LOG,
+#ifdef CONTROLFLOW_OPTIMIZATION
+    OPTION_COMPILER_OPT_CONTROLFLOW_OPT,
+#endif
     OPTION_COMPILER_JIT_METHOD_DICHOTOMY,
     OPTION_COMPILER_JIT_METHOD_PATH,
     OPTION_COMPILER_ENABLE_MERGE_POLY,
@@ -2618,6 +2621,17 @@ public:
     static bool ParseUint64(const std::string &arg, uint64_t* argUInt64);
     static bool ParseDouble(const std::string &arg, double* argDouble);
 
+#ifdef CONTROLFLOW_OPTIMIZATION
+    bool IsEnableControlFlowOptimization() const
+    {
+        return enableControlFlowOptimization_;
+    }
+
+    void SetControlFlowOptimization(bool value)
+    {
+        enableControlFlowOptimization_ = value;
+    }
+#endif
 public:
     static constexpr int32_t MAX_APP_COMPILE_METHOD_SIZE = 4_KB;
 
@@ -2828,6 +2842,9 @@ private:
     bool enableTypeLowering_ {true};
     bool enableEarlyElimination_ {true};
     bool enableLaterElimination_ {true};
+#ifdef CONTROLFLOW_OPTIMIZATION
+    bool enableControlFlowOptimization_ {false};
+#endif
     bool enableValueNumbering_ {true};
     bool enableOptString_ {true};
     bool enableMutantArray_ {false};

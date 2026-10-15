@@ -49,6 +49,9 @@ CompilationOptions::CompilationOptions(JSRuntimeOptions &runtimeOptions)
     isEnableTypeLowering_ = runtimeOptions.IsEnableTypeLowering();
     isEnableEarlyElimination_ = runtimeOptions.IsEnableEarlyElimination();
     isEnableLaterElimination_ = runtimeOptions.IsEnableLaterElimination();
+#ifdef CONTROLFLOW_OPTIMIZATION
+    isEnableControlFlowOptimization_ = runtimeOptions.IsEnableControlFlowOptimization();
+#endif
     isEnableValueNumbering_ = runtimeOptions.IsEnableValueNumbering();
     isEnableOptInlining_ = runtimeOptions.IsEnableOptInlining();
     isEnableOptString_ = runtimeOptions.IsEnableOptString();

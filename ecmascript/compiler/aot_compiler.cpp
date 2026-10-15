@@ -185,6 +185,9 @@ int Main(const int argc, const char **argv)
 #ifdef ENABLE_BRANCH_PROFILE
                 .EnableBreProfiling(cOptions.isEnableBreProfiling_)
 #endif
+#ifdef CONTROLFLOW_OPTIMIZATION
+                .EnableControlFlowOptimization(cOptions.isEnableControlFlowOptimization_)
+#endif
                 .Build();
 
         PassManager passManager(&aotCompilationEnv,

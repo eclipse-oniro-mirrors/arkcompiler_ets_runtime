@@ -76,6 +76,9 @@ struct CompilationOptions {
     bool isEnableTypeLowering_ {true};
     bool isEnableEarlyElimination_ {true};
     bool isEnableLaterElimination_ {true};
+#ifdef CONTROLFLOW_OPTIMIZATION
+    bool isEnableControlFlowOptimization_ {false};
+#endif
     bool isEnableValueNumbering_ {true};
     bool isEnableOptInlining_ {true};
     bool isEnableOptString_ {true};

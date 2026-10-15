@@ -28,6 +28,9 @@
 #endif
 
 #include "ecmascript/compiler/aot_compilation_env.h"
+#ifdef CONTROLFLOW_OPTIMIZATION
+#include "ecmascript/compiler/controlflow_optimization.h"
+#endif
 #include "ecmascript/compiler/jit_compilation_env.h"
 #include "ecmascript/compiler/async_function_lowering.h"
 #include "ecmascript/compiler/bytecode_circuit_builder.h"
@@ -833,6 +836,25 @@ public:
         return true;
     }
 };
+
+#ifdef CONTROLFLOW_OPTIMIZATION
+class ControlFlowOptimizationPass {
+public:
+    bool Run(PassData *data)
+    {
+        TimeScope timescope("ControlFlowOptimizationPass", data->GetMethodName(),
+                            data->GetMethodOffset(), data->GetLog());
+        bool enableLog = data->GetLog()->EnableMethodCIRLog();
+        if (data->GetPassOptions()->EnableControlFlowOptimization()) {
+            Chunk chunk(data->GetNativeAreaAllocator());
+            ControlFlowOptimization controlFlowOptimization(data->GetCircuit(), &chunk,
+                                                            enableLog, data->GetMethodName());
+            controlFlowOptimization.Run();
+        }
+        return true;
+    }
+};
+#endif
 
 class ValueNumberingPass {
 public:

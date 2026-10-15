@@ -87,6 +87,9 @@ declare_args() {
   # For v70
   enable_v70_optimization = true
 
+  # Enable redundant calculation elimination and controlflow optimization
+  enable_controlflow_optimization = false
+
   # If true app_aot_jit_enable_list will be placed in /etc/ark
   # Default false.
   ets_runtime_feature_enable_list = false
