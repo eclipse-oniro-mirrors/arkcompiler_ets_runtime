@@ -121,6 +121,7 @@ void JsStackInfo::AppendMethodTrace(std::string &data, const JSThread *thread, M
 
 void JsStackInfo::DumpJitCode(JSThread *thread)
 {
+#ifndef EXCLUDE_JIT
     JSTaggedType exception = thread->GetException().GetRawData();
     auto &jitCodeMaps = thread->GetJitCodeMaps();
     auto jitCode = jitCodeMaps.find(exception);
@@ -163,6 +164,7 @@ void JsStackInfo::DumpJitCode(JSThread *thread)
     FdsanExchangeOwnerTag(reinterpret_cast<fd_t>(fd));
     jitDumpElf.WriteJitElfFile(fd);
     Close(reinterpret_cast<fd_t>(fd));
+#endif
 }
 
 void AssembleJitCodeMap(JSThread *thread, const JSHandle<JSObject> &jsErrorObj, JSFunction *func, Method *method,
@@ -280,8 +282,14 @@ void JsStackInfo::BuildCrashInfo(bool isJsCrash, uintptr_t pc, JSThread *thread)
     if (JsStackInfo::loader == nullptr) {
         return;
     }
-    if (!JsStackInfo::loader->IsEnableAOT() && !Jit::GetInstance()->IsEnableFastJit() &&
-        !pgo::PGOProfilerManager::GetInstance()->IsEnable()) {
+    bool isAotOrJitOrPgoEnabled = JsStackInfo::loader->IsEnableAOT();
+#ifndef EXCLUDE_JIT
+    isAotOrJitOrPgoEnabled = isAotOrJitOrPgoEnabled || Jit::GetInstance()->IsEnableFastJit();
+#endif
+#ifndef EXCLUDE_PGO
+    isAotOrJitOrPgoEnabled = isAotOrJitOrPgoEnabled || pgo::PGOProfilerManager::GetInstance()->IsEnable();
+#endif
+    if (!isAotOrJitOrPgoEnabled) {
         return;
     }
     ohos::RuntimeInfoType type;
@@ -298,7 +306,9 @@ void JsStackInfo::BuildCrashInfo(bool isJsCrash, uintptr_t pc, JSThread *thread)
     ohos::AotRuntimeInfo::GetInstance().BuildCrashInfo();
 #endif
     if (isJsCrash && thread != nullptr) {
+#ifndef EXCLUDE_JIT
         DumpJitCode(thread);
+#endif
     }
 }
 
@@ -940,6 +950,7 @@ bool ArkGetNextFrameWithJit(ArkUnwindParam *arkUnwindParam, uintptr_t &currentPt
 bool ArkWriteJitCode([[maybe_unused]] void *ctx, [[maybe_unused]] ReadMemFunc readMem,
                      int fd, const uintptr_t *const jitCodeArray, const size_t jitSize)
 {
+#ifndef EXCLUDE_JIT
     JsJitDumpElf jitDumpElf;
     jitDumpElf.Init();
     std::set<uintptr_t> memos;
@@ -961,6 +972,9 @@ bool ArkWriteJitCode([[maybe_unused]] void *ctx, [[maybe_unused]] ReadMemFunc re
     JsStackInfo::nameMap.clear();
     JsStackInfo::machineCodeMap.clear();
     return true;
+#else
+    return false;
+#endif
 }
 
 bool StepArkWithRecordJit(ArkUnwindParam *arkUnwindParam)

@@ -75,6 +75,7 @@ void AOTSnapshot::StoreConstantPoolInfo(BytecodeInfoCollector *bcInfoCollector)
         return;
     }
     const CMap<int32_t, JSTaggedValue> &allConstantPools = constpoolsOptional.value();
+#ifndef EXCLUDE_PGO
     pgo::ApEntityId fileId = INVALID_INDEX;
     if (!pgo::PGOProfilerManager::GetInstance()->GetPandaFileId(jsPandaFile->GetJSPandaFileDesc(), fileId)) {
         LOG_COMPILER(ERROR) << "StoreConstantPoolInfo failed. no file id found for "
@@ -83,5 +84,6 @@ void AOTSnapshot::StoreConstantPoolInfo(BytecodeInfoCollector *bcInfoCollector)
     }
     GenerateSnapshotConstantPools(allConstantPools, jsPandaFile->GetNormalizedFileDesc(), fileId);
     bcInfoCollector->StoreDataToGlobalData(snapshotData_);
+#endif
 }
 }  // namespace panda::ecmascript

@@ -21,6 +21,7 @@
 namespace panda::ecmascript {
 void Snapshot::Serialize(const CString &fileName)
 {
+#ifndef EXCLUDE_PGO
     kungfu::AOTSnapshot& aotSnapshot = vm_->GetPTManager()->GetAOTSnapshot();
     JSTaggedValue root = aotSnapshot.GetSnapshotData();
     if (root == JSTaggedValue::Hole()) {
@@ -29,6 +30,9 @@ void Snapshot::Serialize(const CString &fileName)
         return;
     }
     Serialize(root.GetTaggedObject(), nullptr, fileName);
+#else
+    LOG_COMPILER(ERROR) << "AOT snapshot generation is not supported in dfx runtime";
+#endif
 }
 
 void Snapshot::Serialize(TaggedObject *objectHeader, const JSPandaFile *jsPandaFile, const CString &fileName)

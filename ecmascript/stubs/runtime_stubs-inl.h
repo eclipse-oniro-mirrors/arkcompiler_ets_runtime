@@ -1257,11 +1257,13 @@ JSTaggedValue RuntimeStubs::RuntimeNotifyInlineCache(JSThread *thread, const JSH
     }
     Method *method = Method::Cast(function->GetMethod(thread));
     auto codeSize = method->GetCodeSize(thread);
+#ifndef EXCLUDE_PGO
     if (pgo::PGOProfilerManager::GetInstance()->IsBigMethod(codeSize)) {
         LOG_ECMA(DEBUG) << "method size is too large, skip pgo. code size: " << codeSize
                         << ", max code size: " << pgo::PGOProfilerManager::GetInstance()->GetMaxAotMethodSize();
         profileTypeInfo->SetBigMethodPeriodIndex();
     }
+#endif
     JSFunction::SetProfileTypeInfo(thread, function, JSHandle<JSTaggedValue>::Cast(profileTypeInfo));
     return profileTypeInfo.GetTaggedValue();
 }
@@ -2746,10 +2748,12 @@ JSTaggedValue RuntimeStubs::RuntimeDefineGetterSetterByValue(JSThread *thread, c
             JSHClass::EnablePHCProtoChangeMarker(thread, phcHandle);
         }
         if (thread->GetEcmaVM()->IsEnablePGOProfiler()) {
+#ifndef EXCLUDE_PGO
             if (!func->IsUndefined()) {
                 thread->GetEcmaVM()->GetPGOProfiler()->ProfileDefineGetterSetter(
                     receiverHClass, holderTraHClass, func, pcOffset);
             }
+#endif
         }
     }
     return obj.GetTaggedValue();

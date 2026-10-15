@@ -203,8 +203,10 @@ JSHClass *JSFunction::GetOrCreateInitialJSHClass(JSThread *thread, const JSHandl
     if (!fun->HasFunctionPrototype(thread)) {
         proto = JSHandle<JSTaggedValue>::Cast(NewJSFunctionPrototype(thread, fun));
         if (thread->GetEcmaVM()->IsEnablePGOProfiler()) {
+#ifndef EXCLUDE_PGO
             thread->GetEcmaVM()->GetPGOProfiler()->ProfileClassRootHClass(fun.GetTaggedType(),
                 JSTaggedType(proto->GetTaggedObject()->GetClass()), pgo::ProfileType::Kind::PrototypeId);
+#endif
         }
     } else {
         proto = JSHandle<JSTaggedValue>(thread, fun->GetProtoOrHClass(thread));
@@ -231,9 +233,15 @@ JSHClass *JSFunction::GetOrCreateInitialJSHClass(JSThread *thread, const JSHandl
     fun->SetProtoOrHClass(thread, hclass);
     if (thread->GetEcmaVM()->IsEnablePGOProfiler()) {
         if (!needProfileTransition) {
+#ifndef EXCLUDE_PGO
             thread->GetEcmaVM()->GetPGOProfiler()->ProfileClassRootHClass(fun.GetTaggedType(), hclass.GetTaggedType());
+#else
+            (void)hclass;
+#endif
         } else {
+#ifndef EXCLUDE_PGO
             thread->GetEcmaVM()->GetPGOProfiler()->ProfileProtoTransitionClass(fun, hclass, proto);
+#endif
         }
     }
     return *hclass;
@@ -272,8 +280,10 @@ JSTaggedValue JSFunction::PrototypeGetter(JSThread *thread, const JSHandle<JSObj
     if (!func->HasFunctionPrototype(thread)) {
         JSHandle<JSTaggedValue> proto = JSHandle<JSTaggedValue>::Cast(NewJSFunctionPrototype(thread, func));
         if (thread->GetEcmaVM()->IsEnablePGOProfiler()) {
+#ifndef EXCLUDE_PGO
             thread->GetEcmaVM()->GetPGOProfiler()->ProfileClassRootHClass(func.GetTaggedType(),
                 JSTaggedType(proto->GetTaggedObject()->GetClass()), pgo::ProfileType::Kind::PrototypeId);
+#endif
         }
     }
     return JSFunction::Cast(*self)->GetFunctionPrototype(thread);
@@ -292,8 +302,10 @@ bool JSFunction::PrototypeSetter(JSThread *thread, const JSHandle<JSObject> &sel
         func->SetProtoOrHClass(thread, newClass);
         // Forbide to profile for changing the function prototype after an instance of the function has been created
         if (!hclass->IsAOT() && thread->GetEcmaVM()->IsEnablePGOProfiler()) {
+#ifndef EXCLUDE_PGO
             EntityId ctorMethodId = Method::Cast(func->GetMethod(thread).GetTaggedObject())->GetMethodId();
             thread->GetEcmaVM()->GetPGOProfiler()->InsertSkipCtorMethodIdSafe(ctorMethodId);
+#endif
         }
     } else {
         if (!value->IsECMAObject()) {
@@ -311,7 +323,9 @@ bool JSFunction::PrototypeSetter(JSThread *thread, const JSHandle<JSObject> &sel
         func->SetProtoOrHClass(thread, value.GetTaggedValue());
         JSHClass::OptimizePrototypeForIC(thread, thread->GetGlobalEnv(), value, true);
         if (thread->GetEcmaVM()->IsEnablePGOProfiler()) {
+#ifndef EXCLUDE_PGO
             thread->GetEcmaVM()->GetPGOProfiler()->ProfileProtoTransitionPrototype(func, value, oldPrototype, baseIhc);
+#endif
         }
     }
     return true;
@@ -1066,8 +1080,10 @@ JSHandle<JSHClass> JSFunction::GetOrCreateDerivedJSHClass(JSThread *thread, JSHa
     derived->SetProtoOrHClass(thread, newJSHClass);
 
     if (thread->GetEcmaVM()->IsEnablePGOProfiler()) {
+#ifndef EXCLUDE_PGO
         thread->GetEcmaVM()->GetPGOProfiler()->ProfileClassRootHClass(derived.GetTaggedType(),
             newJSHClass.GetTaggedType());
+#endif
     }
 
     return newJSHClass;

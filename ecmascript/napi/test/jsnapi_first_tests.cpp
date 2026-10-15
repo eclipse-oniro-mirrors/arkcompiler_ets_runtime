@@ -2325,6 +2325,7 @@ HWTEST_F_L0(JSNApiTests, FunctionCallScope)
     ASSERT_TRUE(vm_->IsTopLevelCallDepth());
 }
 
+#ifndef EXCLUDE_PGO
 HWTEST_F_L0(JSNApiTests, AotTrigger)
 {
     std::string bundle;
@@ -2343,6 +2344,7 @@ HWTEST_F_L0(JSNApiTests, AotTrigger)
     ASSERT_EQ(module, "requestAot");
     ASSERT_EQ(trigger, 0);
 }
+#endif
 
 HWTEST_F_L0(JSNApiTests, JSNApiInternalsTest)
 {

@@ -125,7 +125,9 @@ void ParallelEvacuator::UpdateTrackInfo()
             auto trackInfo = trackInfoVal.GetTaggedObject();
             trackInfo = UpdateAddressAfterEvacation(trackInfo);
             if (trackInfo) {
+#ifndef EXCLUDE_PGO
                 heap_->GetEcmaVM()->GetPGOProfiler()->UpdateTrackSpaceFlag(trackInfo, RegionSpaceFlag::IN_OLD_SPACE);
+#endif
             }
         }
         trackInfoSet.clear();

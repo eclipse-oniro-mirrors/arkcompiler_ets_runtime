@@ -230,13 +230,14 @@ group("ark_js_unittest_suit") {
   if (is_ohos && is_standard_system) {
     deps += [ "test/fuzztest:fuzztest" ]
   }
-  if (current_cpu == "arm64") {
+  if (current_cpu == "arm64" && !ets_runtime_test_enable_dfx) {
     deps += [
       "ecmascript/compiler/aot_file/tests:host_unittest",
       "ecmascript/pgo_profiler/tests:unittest",
     ]
   }
-  if (current_cpu == "arm64" || current_cpu == "amd64") {
+  if ((current_cpu == "arm64" || current_cpu == "amd64") &&
+      !ets_runtime_test_enable_dfx) {
     deps += [ "ecmascript/jit/tests:unittest" ]
   }
 }
@@ -303,6 +304,17 @@ group("ark_unittest") {
       ]
     }
   }
+
+  if (ets_runtime_test_enable_dfx) {
+    deps -= [
+      "ecmascript/compiler/aot_file/tests:host_unittest",
+      "ecmascript/compiler/codegen/maple/test:host_unittest",
+      "ecmascript/compiler/tests:host_unittest",
+      "ecmascript/jit/tests:host_unittest",
+      "ecmascript/ohos/tests:host_unittest",
+      "ecmascript/pgo_profiler/tests:host_unittest",
+    ]
+  }
 }
 
 ohos_static_library("ark_runtime_host_unittest") {
@@ -361,6 +373,15 @@ ohos_static_library("ark_runtime_host_unittest") {
         ]
       }
     }
+  }
+
+  if (ets_runtime_test_enable_dfx) {
+    deps -= [
+      "$js_root/test/pgotypeinfer:ark_pgotypeinfer_test",
+      "$js_root/test/jittest:ark_jit_test",
+      "$js_root/test/aottest:ark_aot_test",
+      "$js_root/test/deopttest:ark_deopt_test",
+    ]
   }
   part_name = "ets_runtime"
   subsystem_name = "arkcompiler"
@@ -493,7 +514,11 @@ config("hiviewdfx_config") {
 # This config is used to compile libark_jsruntime_dfx.so.
 # NOTE: The macro in this config must not be used in header files.
 config("dfx_extra_config") {
-  defines = [ "ENABLE_HITRACE_LOCAL_HANDLE_DETECT" ]
+  defines = [
+    "ENABLE_HITRACE_LOCAL_HANDLE_DETECT",
+    "EXCLUDE_JIT",
+    "EXCLUDE_PGO",
+  ]
 }
 
 config("ark_jsruntime_common_config") {
@@ -919,6 +944,7 @@ config("asm_interp_enable_config") {
 }
 
 ecma_source = [
+  "ecmascript/aot_literal_info.cpp",
   "ecmascript/base/array_helper.cpp",
   "ecmascript/base/atomic_helper.cpp",
   "ecmascript/base/builtins_base.cpp",
@@ -1846,6 +1872,11 @@ ohos_source_set("libark_jsruntime_test_set") {
     "$js_root:icu_path_test_config",
     "$js_root:ark_jsruntime_test_nolto",
   ]
+
+  if (ets_runtime_test_enable_dfx) {
+    sources -= dfx_trim_exclude_sources
+    configs += [ "$js_root:dfx_extra_config" ]
+  }
 
   if (enable_target_compilation) {
     external_deps += [ "c_utils:utils" ]

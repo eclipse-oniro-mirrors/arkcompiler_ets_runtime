@@ -562,9 +562,11 @@ public:
     static bool IsNeedNotifyHclassChangedForAotTransition(const JSThread *thread, const JSHandle<JSHClass> &hclass,
                                                           JSTaggedValue key);
 
+#ifndef EXCLUDE_PGO
     static JSHandle<JSTaggedValue> ParseKeyFromPGOCString(ObjectFactory* factory,
                                                           const CString& key,
                                                           const PGOHandler& handler);
+#endif
 
     static CString GetJSTypeDesc(JSType type);
 
@@ -2255,6 +2257,7 @@ public:
 
     static CString PUBLIC_API DumpJSType(JSType type);
 
+#ifndef EXCLUDE_PGO
     static JSHandle<JSHClass> CreateRootHClassFromPGO(const JSThread* thread,
                                                       const HClassLayoutDesc* desc,
                                                       uint32_t maxNum);
@@ -2269,6 +2272,7 @@ public:
     static bool DumpChildHClassByPGO(const JSThread *thread, const JSHClass* hclass, HClassLayoutDesc* desc);
     static bool UpdateRootLayoutDescByPGO(const JSThread* thread, const JSHClass* hclass, HClassLayoutDesc* rootDesc);
     static bool UpdateChildLayoutDescByPGO(const JSThread* thread, const JSHClass* hclass, HClassLayoutDesc* childDesc);
+#endif
     static std::pair<bool, CString> DumpToString(const JSThread *thread, JSTaggedType hclassVal);
 
     DECL_VISIT_OBJECT(PROTOTYPE_OFFSET, BIT_FIELD2_OFFSET);

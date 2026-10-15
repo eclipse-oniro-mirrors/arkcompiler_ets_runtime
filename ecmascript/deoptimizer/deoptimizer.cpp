@@ -802,7 +802,9 @@ void Deoptimizier::ClearCompiledCodeStatusWhenDeopt(JSThread *thread, JSFunction
 {
     method->SetDeoptType(type);
     if (func->GetMachineCode(thread).IsMachineCodeObject()) {
+#ifndef EXCLUDE_JIT
         Jit::GetInstance()->GetJitDfx()->SetJitDeoptCount();
+#endif
     }
     if (func->IsCompiledCode()) {
         bool isFastCall = func->IsCompiledFastCall();  // get this flag before clear it
@@ -926,7 +928,7 @@ void Deoptimizier::ReplaceReturnAddrWithLazyDeoptTrampline(JSThread *thread,
 // static
 bool Deoptimizier::PrepareForExceptionLazyDeopt(JSThread *thread, JSTaggedType *startFrame)
 {
-#if ECMASCRIPT_ENABLE_ARK_STEED
+#if ECMASCRIPT_ENABLE_ARK_STEED && !defined(EXCLUDE_JIT)
     auto *jit = Jit::GetInstance();
     if (!jit->IsEnableFastJit() || jit->GetJitBackend() != JitBackend::ARKSTEED) {
         return false;

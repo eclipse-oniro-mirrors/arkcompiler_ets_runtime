@@ -38,7 +38,11 @@ ohos_executable("ark_js_vm") {
   ]
 
   external_deps = []
-  deps = [ "$js_root:libark_jsruntime" ]
+  if (ets_runtime_test_enable_dfx) {
+    deps = [ "$js_root:libark_jsruntime_dfx" ]
+  } else {
+    deps = [ "$js_root:libark_jsruntime" ]
+  }
   if (ark_standalone_build) {
     if (run_with_qemu && is_ohos) {
       deps += [

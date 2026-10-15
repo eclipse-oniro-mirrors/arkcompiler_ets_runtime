@@ -117,8 +117,10 @@ JSHandle<TaggedArray> JSObject::GrowElementsCapacity(const JSThread *thread, con
                            obj->IsJSShared() ? MemSpaceType::SHARED_OLD_SPACE : MemSpaceType::SEMI_SPACE, kind);
     obj->SetElements(thread, newElements);
     if (thread->IsPGOProfilerEnable() && obj->IsJSArray()) {
+#ifndef EXCLUDE_PGO
         auto trackInfo = JSHandle<JSArray>(obj)->GetTrackInfo(thread);
         thread->GetEcmaVM()->GetPGOProfiler()->UpdateTrackArrayLength(trackInfo, newCapacity);
+#endif
     }
     return newElements;
 }

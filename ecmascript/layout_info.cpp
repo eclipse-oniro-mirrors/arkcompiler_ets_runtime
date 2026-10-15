@@ -188,6 +188,7 @@ CString LayoutInfo::GetSymbolKeyString(const JSThread *thread, JSTaggedValue key
     return str.append("_").append(ToCString(id));
 }
 
+#ifndef EXCLUDE_PGO
 void LayoutInfo::DumpFieldIndexByPGO(const JSThread *thread, int index, pgo::HClassLayoutDesc* desc)
 {
     auto key = GetKey(thread, index);
@@ -229,4 +230,14 @@ bool LayoutInfo::UpdateFieldIndexByPGO(const JSThread *thread, int index, pgo::H
     }
     return false;
 }
+#else
+void LayoutInfo::DumpFieldIndexByPGO(const JSThread *thread, int index, pgo::HClassLayoutDesc* desc)
+{
+}
+
+bool LayoutInfo::UpdateFieldIndexByPGO(const JSThread *thread, int index, pgo::HClassLayoutDesc* desc)
+{
+    return false;
+}
+#endif
 }  // namespace panda::ecmascript

@@ -88,7 +88,9 @@ void AotCrashInfo::SetOptionPGOProfiler(JSRuntimeOptions *options, const std::st
         if (options->GetAOTHasException() || ecmascript::AnFileDataManager::GetInstance()->IsEnable()
             || IsAotEscaped()) {
             options->SetEnablePGOProfiler(false);
+#ifndef EXCLUDE_PGO
             pgo::PGOProfilerManager::GetInstance()->SetDisablePGO(true);
+#endif
             LOG_ECMA(INFO) << "Aot has compile success once or escaped.";
         }
     }

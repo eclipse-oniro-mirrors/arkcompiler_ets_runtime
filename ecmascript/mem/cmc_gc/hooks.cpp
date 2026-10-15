@@ -154,10 +154,12 @@ void VisitDynamicLocalRoots(const RefFieldVisitor &visitorFunc)
         auto vm = thread->GetEcmaVM();
         ObjectXRay::VisitSTWVMRoots(vm, visitor);
 
+#ifndef EXCLUDE_PGO
         auto profiler = vm->GetPGOProfiler();
         if (profiler != nullptr) {
             profiler->IteratePGOPreFuncList(visitor);
         }
+#endif
     });
 
     if (!panda::ecmascript::g_isEnableCMCGCConcurrentRootMarking) {
@@ -274,10 +276,12 @@ void VisitDynamicThreadRoot(const RefFieldVisitor &visitorFunc, void *vm)
         ObjectXRay::VisitConcurrentVMRoots(ecmaVm, visitor);
     }
 
+#ifndef EXCLUDE_PGO
     auto profiler = ecmaVm->GetPGOProfiler();
     if (profiler != nullptr) {
         profiler->IteratePGOPreFuncList(visitor);
     }
+#endif
 }
 
 void VisitDynamicWeakThreadRoot(const WeakRefFieldVisitor &visitorFunc, void *vm)

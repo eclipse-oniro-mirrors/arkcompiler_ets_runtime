@@ -4254,6 +4254,13 @@ group("unittest") {
       deps += [ ":Dynamic_Object_Accessor_Test" ]
     }
   }
+
+  if (ets_runtime_test_enable_dfx) {
+    deps -= [
+      ":GC_MachineCode_Test",
+      ":GC_MemMapAllocator_Test",
+    ]
+  }
 }
 
 group("host_unittest") {
@@ -4598,5 +4605,12 @@ group("host_unittest") {
     if (!is_arkui_x) {
       deps += [ ":Dynamic_Object_Accessor_TestAction" ]
     }
+  }
+
+  if (ets_runtime_test_enable_dfx) {
+    deps -= [
+      ":GC_MachineCode_TestAction",
+      ":GC_MemMapAllocator_TestAction",
+    ]
   }
 }

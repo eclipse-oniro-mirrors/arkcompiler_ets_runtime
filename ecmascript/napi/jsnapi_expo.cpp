@@ -5165,7 +5165,9 @@ std::string JSNApi::GetBundleName(EcmaVM *vm)
 void JSNApi::SetModuleName(EcmaVM *vm, const std::string &moduleName)
 {
     ecmascript::CString name = moduleName.c_str();
+#ifndef EXCLUDE_PGO
     ecmascript::pgo::PGOProfilerManager::GetInstance()->SetModuleName(moduleName);
+#endif
     vm->SetModuleName(name);
 }
 
@@ -6334,8 +6336,10 @@ void JSNApi::PostFork(EcmaVM *vm, const RuntimeOption &option)
     jsOption.SetEnableBaselineJIT(option.GetEnableBaselineJIT());
     jsOption.SetMaxAotMethodSize(JSRuntimeOptions::MAX_APP_COMPILE_METHOD_SIZE);
     jsOption.SetArkTSMode(option.GetArkTSMode());
+#ifndef EXCLUDE_PGO
     ecmascript::pgo::PGOProfilerManager::GetInstance()->SetBundleName(option.GetBundleName());
     ecmascript::pgo::PGOProfilerManager::GetInstance()->SetMaxAotMethodSize(jsOption.GetMaxAotMethodSize());
+#endif
     JSRuntimeOptions runtimeOptions;
     runtimeOptions.SetLogLevel(common::Log::LevelToString(common::Log::ConvertFromRuntime(option.GetLogLevel())));
     common::Log::Initialize(runtimeOptions.GetLogOptions());
@@ -6992,7 +6996,9 @@ void JSNApi::SetIsMainProcess(bool isMainProcess)
 void JSNApi::SetRequestAotCallback([[maybe_unused]] EcmaVM *vm, const std::function<int32_t
     (const std::string &bundleName, const std::string &moduleName, int32_t triggerMode)> &cb)
 {
+#ifndef EXCLUDE_PGO
     ecmascript::pgo::PGOProfilerManager::GetInstance()->SetRequestAotCallback(cb);
+#endif
 }
 
 void JSNApi::SetUnloadNativeModuleCallback(EcmaVM *vm, const std::function<bool(const std::string &moduleKey)> &cb)

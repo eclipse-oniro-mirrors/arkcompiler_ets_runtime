@@ -35,9 +35,14 @@ void DFXHiSysEvent::SendLongGCEvent([[maybe_unused]] LongGCStats *longGCStats)
         << ";GC_REASON" << longGCStats->GetGCReason()
         << ";GC_IS_SENSITIVE" << longGCStats->GetGCIsSensitive()
         << ";GC_TOTAL_TIME" << longGCStats->GetGCTotalTime();
+    std::string bundleName;
+    auto mainThread = Runtime::GetInstance()->GetMainThread();
+    if (mainThread != nullptr && mainThread->GetEcmaVM() != nullptr) {
+        bundleName = mainThread->GetEcmaVM()->GetBundleName();
+    }
     int32_t ret = HiSysEventWrite(OHOS::HiviewDFX::HiSysEvent::Domain::ARKTS_RUNTIME,
         "ARK_GC_LONG_TIME", OHOS::HiviewDFX::HiSysEvent::EventType::BEHAVIOR,
-        "BUNDLE_NAME", PGOProfilerManager::GetInstance()->GetBundleName(),
+        "BUNDLE_NAME", bundleName.c_str(),
         "PID", getpid(),
         "TID", syscall(SYS_gettid),
         "GC_TYPE", longGCStats->GetGCType(),

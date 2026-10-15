@@ -79,6 +79,9 @@ host_unittest_action("JsStackInfoTest") {
     "STACKINFO_TEST_JS_FILES_DIR=\"${test_js_dir}\"",
     "STACKINFO_TEST_ABC_FILES_DIR=\"${test_abc_dir}\"",
   ]
+  if (ets_runtime_test_enable_dfx) {
+    defines += [ "EXCLUDE_JIT" ]
+  }
 
   # hiviewdfx libraries
   external_deps = hiviewdfx_ext_deps

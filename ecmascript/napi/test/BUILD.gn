@@ -114,6 +114,9 @@ host_unittest_action("Jsnapi_002_Test") {
   configs = [ "../../../:ecma_test_config" ]
 
   deps = [ "$js_root:libark_jsruntime_test" ]
+  if (ets_runtime_test_enable_dfx) {
+    defines = [ "EXCLUDE_PGO" ]
+  }
 
   foreach(file, test_js_files) {
     deps += [ ":gen_${file}_abc" ]

@@ -1243,8 +1243,10 @@ bool JSThread::CheckSafepoint()
         vmThreadControl_->SuspendVM();
     }
     if (HasInstallMachineCode()) {
+#ifndef EXCLUDE_JIT
         Jit::JitGCLockHolder lock(this);
         vm_->GetJit()->InstallTasks(this);
+#endif
         SetInstallMachineCode(false);
     }
 

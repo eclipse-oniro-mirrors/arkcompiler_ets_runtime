@@ -192,10 +192,12 @@ void SharedCC::FinalizeAndReclaim()
 void SharedCC::EnterSharedGCScope()
 {
     Runtime::GetInstance()->GCIterateThreadList([](JSThread *thread) {
+#ifndef EXCLUDE_PGO
         std::shared_ptr<PGOProfiler> pgoProfiler = thread->GetEcmaVM()->GetPGOProfiler();
         if (pgoProfiler != nullptr) {
             pgoProfiler->SuspendByGC();
         }
+#endif
 #if defined(ECMASCRIPT_SUPPORT_CPUPROFILER)
         thread->SetGcState(true);
 #endif
@@ -208,11 +210,13 @@ void SharedCC::ExitSharedGCScope()
         ASSERT(thread->IsSuspended() || thread->HasLaunchedSuspendAll() ||
                os::thread::GetCurrentThreadId() == DaemonThread::GetInstance()->GetThreadId());
         const_cast<Heap *>(thread->GetEcmaVM()->GetHeap())->ProcessGCListeners();
+#ifndef EXCLUDE_PGO
         std::shared_ptr<PGOProfiler> pgoProfiler = thread->GetEcmaVM()->GetPGOProfiler();
         // LocalCC PostGC resumes PGO if copying is still active.
         if (pgoProfiler != nullptr && !thread->IsConcurrentCopying()) {
             pgoProfiler->ResumeByGC();
         }
+#endif
 #if defined(ECMASCRIPT_SUPPORT_CPUPROFILER)
         thread->SetGcState(false);
 #endif

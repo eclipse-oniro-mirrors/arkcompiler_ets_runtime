@@ -62,7 +62,10 @@
    ./build.sh --product-name rk3568 --build-target ets_frontend_build
    ```
 
-   更多编译命令请参考 [编译命令](https://gitee.com/openharmony/docs/blob/master/zh-cn/device-dev/subsystems/subsys-arkcompiler-guide.md)
+    更多编译命令请参考 [编译命令](https://gitee.com/openharmony/docs/blob/master/zh-cn/device-dev/subsystems/subsys-arkcompiler-guide.md)
+
+    dfx 版运行时（libark_jsruntime_dfx.so）的裁剪说明与单独验证方法，请参考
+    [dfx 运行时裁剪与验证指南](dfx-so-trim-guide_zh.md)。
 
 **说明**：上述编译命令为release版本，编译debug版本需增加编译选项：--gn-args is_debug=true。
 
