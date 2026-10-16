@@ -53,23 +53,23 @@
 
 四者命中同一张环境表（`JitCompilationEnv` 的 `heapConstantTable`，按 `GetTaggedType()` 去重），因此同一对象无论走哪条路径都拿到**同一个 handleIndex**。
 
-### 2.1 `GetHeapConstant`：登记并创建值节点
+### 3.1 `GetHeapConstant`：登记并创建值节点
 
 **判断标准**：这个对象需要在 IR 数据流中**作为一个 tagged 值被后续节点消费**——作为其他 vertex 的输入、参与寄存器分配、可能成为 phi 输入、或需要出现在 deopt 帧状态里。
 
-### 2.2 `GetHeapConstantHandleIndex`：仅登记，索引作元数据
+### 3.2 `GetHeapConstantHandleIndex`：仅登记，索引作元数据
 
 **判断标准**：对象不进入数据流，只作为**比较的期望值**被一个控制/检查类 vertex 持有；codegen 时该 vertex 自己 `MoveEmbeddedTagged` 加载期望值并比较。
 
-### 2.3 `GetHeapConstantNameHandleIndex`：String/Symbol 属性键
+### 3.3 `GetHeapConstantNameHandleIndex`：String/Symbol 属性键
 
 **判断标准**：需要把**属性键**（名字）而非普通对象登记为常量。入口内部要求 ref 是 String 或 Symbol，否则失败。现用于 `TryBuildLoadPropertyByValue` 的 `propertyKeyHandleIndex`（key 由值计算但被观测为常量字符串时，把"按值访问"降级为"命名访问"）。
 
-### 2.4 `GetHeapConstantHandleIndices`：批量、全有或全无
+### 3.4 `GetHeapConstantHandleIndices`：批量、全有或全无
 
 **判断标准**：一组 HClass 必须**同时**登记成功才有意义（原型链形状、多态组），任何一个失败则整组放弃（返回 false，不产生部分状态）。
 
-### 2.5 误用后果
+### 3.5 误用后果
 用 GetHeapConstantHandleIndex 代替 GetHeapConstant 会导致数据流缺值节点（需要手工在 codegen 补加载，容易漏）；用 GetHeapConstant 代替 GetHeapConstantHandleIndex 会额外创建 IR 节点、把守卫期望值卷入寄存器分配，得不偿失。
 
 ---

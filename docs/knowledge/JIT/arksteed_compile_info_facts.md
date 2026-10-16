@@ -91,9 +91,9 @@
 
 无法精确归类时会落到模板兜底重载（WARN 日志 + `UNKNOWN_CALL`）——新节点不应长期依赖兜底，必须提供显式 `Classify`。
 
-****
-**新增SideEffectKind**：如要新增或修改SideEffectKind枚举含义，请务必修改MarkPossibleSideEffect中的switch块并同步此文档
-**手动失效**（少数特判路径）：不经 `NewVertex` 手动构造节点时，直接调 `MarkPossibleSideEffect(effect, CurrentLoopEffects())`；极端场景用 `OnSideEffect()`（等价 UNKNOWN_CALL 全失效）、`ClearAll()`（整表作废）、`ClearEnvSlotsFor`（`LowerPopLexicalEnv` 弹出环境时清该 env 全部槽位缓存）。
+
+- **新增SideEffectKind**：如要新增或修改SideEffectKind枚举含义，请务必修改MarkPossibleSideEffect中的switch块并同步此文档
+- **手动失效**（少数特判路径）：不经 `NewVertex` 手动构造节点时，直接调 `MarkPossibleSideEffect(effect, CurrentLoopEffects())`；极端场景用 `OnSideEffect()`（等价 UNKNOWN_CALL 全失效）、`ClearAll()`（整表作废）、`ClearEnvSlotsFor`（`LowerPopLexicalEnv` 弹出环境时清该 env 全部槽位缓存）。
 
 ### 2.5 注意事项
 

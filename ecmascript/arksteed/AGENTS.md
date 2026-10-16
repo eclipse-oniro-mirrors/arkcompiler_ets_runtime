@@ -25,7 +25,7 @@ ArkTS轻量化JIT编译器，对中等热度代码执行优化编译，注重编
 | **LiveIn / LiveOut** | 块入口/出口处的活跃变量集合。 | 字节码级：`BytecodeAnalysis` 的 `blockLiveIn_/blockLiveOut_/bcLiveIn_/bcLiveOut_`（`arksteed_bytecode_analysis.h`，迭代求解 `UpdateLiveness` `arksteed_bytecode_analysis.cpp`）；IR 级：`LivenessProcessor`（`arksteed_regalloc_processors.h`） |
 | **Phi 节点** | 在控制流汇合点处合并不同前驱传来的值的 IR 节点。 | `PhiVertex`（`arksteed_opcode.h`），GraphBuilder 创建后添加 `BB::AddPhiVertex`（`arksteed_bb.h`） |
 | **CompileInfoFacts** | 节点事实缓存 | `CompileInfoFacts`（`arksteed_compile_info_facts.h`）文档 `docs/knowledge/JIT/arksteed_compile_info_facts.md` |
-| **Safepoint** | 安全点，GC 可暂停的位置。代码生成阶段为每条可能触发 GC 的指令记录栈映射。 | 表结构 `ArkSteedSafepointHeader`/`ArkSteedSafepointEntry`/`ArkSteedSafepointTable`（`arksteed_safepoint_table.h` |
+| **Safepoint** | 安全点，GC 可暂停的位置。代码生成阶段为每条可能触发 GC 的指令记录栈映射。 | 表结构 `ArkSteedSafepointHeader`/`ArkSteedSafepointEntry`/`ArkSteedSafepointTable` (`arksteed_safepoint_table.h`) |
 | **eager deopt** | 即时去优化：JIT 代码内检查失败点立即退出优化代码 | ABI 定义 `arksteed_deopt_abi.h`（`x64_eager_deopt_abi`/`aarch64_eager_deopt_abi` 不同namespace区分不同架构 `ArkSteedDeoptSnapshot`） |
 | **lazy deopt** | 延迟去优化：JIT 帧已在栈上（如调用运行时例程中）时依赖失效，仅 patch 返回地址、不建新帧，返回时回退解释器。 | 返回入口 stub `LazyDeoptEntry`（`ecmascript/stubs/runtime_stubs.h`） |
 
@@ -45,7 +45,7 @@ ArkTS轻量化JIT编译器，对中等热度代码执行优化编译，注重编
 构建方法参考ets_runtime项目根目录AGENTS.md
 
 ### 功能测试
-#### 功功能内用例
+#### 工程内用例
 从OpenHarmony源码根目录切换到arkcompiler/ets_runtime/ecmascript/arksteed/test
 ```bash
 python ./run_arksteed_tests.py -m debug -F # See ./README.md for details of <params>
