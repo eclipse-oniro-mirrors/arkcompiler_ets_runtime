@@ -16,9 +16,9 @@
 #ifndef ECMASCRIPT_REGEXP_DYN_BUFFER_H
 #define ECMASCRIPT_REGEXP_DYN_BUFFER_H
 
+#include <algorithm>
 #include <cstring>
 
-#include "ecmascript/common.h"
 #include "ecmascript/mem/regexp_cached_chunk.h"
 #include "ecmascript/mem/chunk.h"
 
@@ -52,16 +52,31 @@ public:
 
     inline int EmitU16(uint16_t data)
     {
+        if (LIKELY(size_ + U16_SIZE <= allocatedSize_)) {
+            std::copy_n(reinterpret_cast<uint8_t*>(&data), U16_SIZE, buf_ + size_);
+            size_ += U16_SIZE;
+            return SUCCESS;
+        }
         return Emit(reinterpret_cast<uint8_t *>(&data), U16_SIZE);
     }
 
     inline int EmitU32(uint32_t data)
     {
+        if (LIKELY(size_ + U32_SIZE <= allocatedSize_)) {
+            std::copy_n(reinterpret_cast<uint8_t*>(&data), U32_SIZE, buf_ + size_);
+            size_ += U32_SIZE;
+            return SUCCESS;
+        }
         return Emit(reinterpret_cast<uint8_t *>(&data), U32_SIZE);
     }
 
     inline int EmitU64(uint64_t data)
     {
+        if (LIKELY(size_ + U64_SIZE <= allocatedSize_)) {
+            std::copy_n(reinterpret_cast<uint8_t*>(&data), U64_SIZE, buf_ + size_);
+            size_ += U64_SIZE;
+            return SUCCESS;
+        }
         return Emit(reinterpret_cast<uint8_t *>(&data), U64_SIZE);
     }
 

@@ -17,6 +17,7 @@
 
 #include "ecmascript/deoptimizer/deoptimizer.h"
 #include "libpandabase/macros.h"
+#include "libpandabase/utils/leb128.h"
 #include "securec.h"
 
 #include <algorithm>
@@ -28,13 +29,14 @@
 namespace panda::ecmascript::arksteed {
 namespace {
 constexpr size_t DEOPT_LOGICAL_PAIR_SIZE = 2;
+// SLEB128 of int64_t needs at most ceil(64 / 7) = 10 bytes.
+constexpr size_t MAX_SLEB128_INT64_SIZE = 10;
 
 void EncodeSignedValue(ChunkVector<uint8_t> *out, int64_t value)
 {
-    std::vector<uint8_t> bytes;
-    size_t byteSize = 0;
-    kungfu::LLVMStackMapType::EncodeData(bytes, byteSize, value);
-    out->insert(out->end(), bytes.begin(), bytes.begin() + byteSize);
+    uint8_t bytes[MAX_SLEB128_INT64_SIZE];
+    size_t byteSize = panda::leb128::EncodeSigned(value, bytes);
+    out->insert(out->end(), bytes, bytes + byteSize);
 }
 
 void EncodeDeoptValue(ChunkVector<uint8_t> *out, const ArkSteedDeoptValue &deopt)

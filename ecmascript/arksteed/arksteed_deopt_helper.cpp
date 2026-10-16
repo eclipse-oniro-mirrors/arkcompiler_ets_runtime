@@ -39,13 +39,14 @@ namespace panda::ecmascript::arksteed {
 
 uint32_t DeoptLiteralTableBuilder::GetOrAdd(uint32_t handleIndex)
 {
-    auto existing = std::find(handleIndexByLiteralIndex_.begin(), handleIndexByLiteralIndex_.end(), handleIndex);
-    if (existing != handleIndexByLiteralIndex_.end()) {
-        return static_cast<uint32_t>(std::distance(handleIndexByLiteralIndex_.begin(), existing));
+    auto it = literalIndexByHandle_.find(handleIndex);
+    if (it != literalIndexByHandle_.end()) {
+        return it->second;
     }
     ASSERT(handleIndexByLiteralIndex_.size() < std::numeric_limits<uint32_t>::max());
     uint32_t literalIndex = static_cast<uint32_t>(handleIndexByLiteralIndex_.size());
     handleIndexByLiteralIndex_.push_back(handleIndex);
+    literalIndexByHandle_.emplace(handleIndex, literalIndex);
     return literalIndex;
 }
 

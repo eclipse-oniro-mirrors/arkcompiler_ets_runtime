@@ -138,20 +138,18 @@ ArkSteedCompilerTask *ArkSteedCompilerTask::CreateJitCompilerTask(ArkSteedTask *
 
 void ArkSteedCompilerTask::DebugLogOnCompilationStart()
 {
-    if (!common::Log::LogIsLoggable(Level::INFO, Component::COMPILER)) {
-        return;
+    if (common::Log::LogIsLoggable(Level::INFO, Component::COMPILER)) {
+        LOG_COMPILER(INFO) << "======== ArkSteedCompilerTask: Starts compiling: "
+                           << GetCompiledMethodName() << " ========";
     }
-    LOG_COMPILER(INFO) << "======== ArkSteedCompilerTask: Starts compiling: " << GetCompiledMethodName()
-                       << " ========";
 }
 
 void ArkSteedCompilerTask::DebugLogOnCompilationDone()
 {
-    if (!common::Log::LogIsLoggable(Level::INFO, Component::COMPILER)) {
-        return;
+    if (common::Log::LogIsLoggable(Level::INFO, Component::COMPILER)) {
+        LOG_COMPILER(INFO) << "======== ArkSteedCompilerTask: Finished compiling: "
+                           << GetCompiledMethodName() << " ========";
     }
-    LOG_COMPILER(INFO) << "======== ArkSteedCompilerTask: Finished compiling: " << GetCompiledMethodName()
-                       << " ========";
 }
 
 CString ArkSteedCompilerTask::GetCompiledMethodName() const
@@ -174,12 +172,7 @@ bool ArkSteedCompilerTask::ShouldEnablePipelineStatistics(ArkSteedTask *arkSteed
 
 bool ArkSteedCompilerTask::BuildGraph(JSThread *compilerThread, uintptr_t hostGlueAddr)
 {
-    (void)compilerThread;  // Unused
-
-    ArkSteedPipelineStatistics statsScope(pipelineStatistics_, "BuildGraph");
-
     JitCompilationEnv *env = jitCompilationEnv_.get();
-
     BytecodePreprocessor preproc(env, chunk_.get());
     {
         ArkSteedPipelineStatistics stats(pipelineStatistics_, "BytecodePreprocessor");
@@ -196,12 +189,10 @@ bool ArkSteedCompilerTask::BuildGraph(JSThread *compilerThread, uintptr_t hostGl
             return false;
         }
     }
-
     {
         ArkSteedPipelineStatistics stats(pipelineStatistics_, "GraphBuilder");
-
-        GraphBuilder graphBuilder(compilerThread, graph_, hostGlueAddr, &preproc, &analysis,
-                                  arkSteedTask_->IsOsrTask());
+        bool isOSR = arkSteedTask_->IsOsrTask();
+        GraphBuilder graphBuilder(compilerThread, graph_, hostGlueAddr, &preproc, &analysis, isOSR);
         if (!graphBuilder.Run()) {
             LOG_COMPILER(WARN) << "JIT compilation halts due to graph building error.";
             return false;
@@ -212,34 +203,13 @@ bool ArkSteedCompilerTask::BuildGraph(JSThread *compilerThread, uintptr_t hostGl
 
 void ArkSteedCompilerTask::RunPreRegallocProcessors()
 {
-    ArkSteedPipelineStatistics statsScope(pipelineStatistics_, "RunPreRegallocProcessors");
+    // The following preprocessing passes are lightweight enough to combine their statistics data.
+    ArkSteedPipelineStatistics statsScope(pipelineStatistics_, "PreRegallocProcessors");
 
-    // VertexInfoAllocateProcessor - allocate regalloc info for all vertices
-    {
-        ArkSteedPipelineStatistics stats(pipelineStatistics_, "VertexInfoAllocate");
-        GraphProcessor<VertexInfoAllocateProcessor> processor;
-        processor.Run(graph_);
-    }
-    // ValueLocationConstraintProcessor - set input/output location constraints
-    {
-        ArkSteedPipelineStatistics stats(pipelineStatistics_, "ValueLocationConstraint");
-        GraphProcessor<ValueLocationConstraintProcessor> constraintProcessor;
-        constraintProcessor.Run(graph_);
-    }
-
-    // MaxCallDepthProcessor - compute max call stack args
-    {
-        ArkSteedPipelineStatistics stats(pipelineStatistics_, "MaxCallDepth");
-        GraphProcessor<MaxCallDepthProcessor> callDepthProcessor;
-        callDepthProcessor.Run(graph_);
-    }
-
-    // LivenessProcessor - track live ranges and next use
-    {
-        ArkSteedPipelineStatistics stats(pipelineStatistics_, "Liveness");
-        GraphProcessor<LivenessProcessor> liveRangeProcessor;
-        liveRangeProcessor.Run(graph_);
-    }
+    GraphProcessor<VertexInfoAllocateProcessor>().Run(graph_);
+    GraphProcessor<ValueLocationConstraintProcessor>().Run(graph_);
+    GraphProcessor<MaxCallDepthProcessor>().Run(graph_);
+    GraphProcessor<LivenessProcessor>().Run(graph_);
 }
 
 bool ArkSteedCompilerTask::Compile()
@@ -268,7 +238,6 @@ bool ArkSteedCompilerTask::Compile()
 
     ArkSteedPGOContext pgoContext(compilerThread, jitCompilationEnv_.get());
 
-
     if (!BuildGraph(compilerThread, hostGlueAddr)) {
         return false;
     }
@@ -278,12 +247,9 @@ bool ArkSteedCompilerTask::Compile()
         WriteBarrierValueKindPass writeBarrierValueKindPass(graph_);
         writeBarrierValueKindPass.Run();
     }
-
-    // Verify graph integrity
-    {
-        ArkSteedPipelineStatistics stats(pipelineStatistics_, "VerifyGraph");
-        VerifyGraph(graph_);
-    }
+#ifndef NDEBUG
+    VerifyGraph(graph_);
+#endif
     RunPreRegallocProcessors();
 
     // Print graph with labeller if option is enabled
@@ -298,8 +264,7 @@ bool ArkSteedCompilerTask::Compile()
     // Register allocation
     {
         ArkSteedPipelineStatistics stats(pipelineStatistics_, "RegisterAllocation");
-        graph_->SetReuseStackSlots(
-            arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedReuseStackSlots());
+        graph_->SetReuseStackSlots(arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedReuseStackSlots());
         ArkSteedRegisterAllocator registerAllocator(graph_);
     }
 

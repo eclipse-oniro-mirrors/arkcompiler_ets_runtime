@@ -84,6 +84,7 @@ public:
 
 private:
     std::vector<uint32_t> handleIndexByLiteralIndex_;
+    std::unordered_map<uint32_t, uint32_t> literalIndexByHandle_;
 };
 
 /*

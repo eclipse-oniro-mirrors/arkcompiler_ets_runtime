@@ -21,7 +21,7 @@
 #include "ecmascript/compiler/compilation_env.h"
 #include "ecmascript/platform/mutex.h"
 #include "ecmascript/ecma_vm.h"
-#include "ecmascript/mem/clock_scope.h"
+#include "ecmascript/mem/cpu_clock_scope.h"
 #include "ecmascript/mem/machine_code.h"
 #include "ecmascript/compiler/compiler_log.h"
 #include "ecmascript/jit/jit_thread.h"
@@ -127,7 +127,8 @@ public:
     NO_COPY_SEMANTIC(Jit);
     NO_MOVE_SEMANTIC(Jit);
 
-    class TimeScope : public ClockScope {
+    // Compile time in thread CPU time, see CPUClockScope
+    class TimeScope : public CPUClockScope {
     public:
         PUBLIC_API explicit TimeScope(EcmaVM *vm, CString message, CompilerTier tier, bool outPutLog = true,
             bool isDebugLevel = false);

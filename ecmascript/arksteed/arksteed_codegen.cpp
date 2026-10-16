@@ -782,6 +782,8 @@ void EmitLazyDeoptSafepoint(ArkSteedAssembler *assembler,
     ASSERT(lazy->HasLazyDeoptFrameState());
 
     std::vector<ArkSteedDeoptValue> deopts;
+    // 3: INLINE_DEPTH plus at most two base-constructor sources
+    deopts.reserve(lazy->GetLazyDeoptFrameState().size() + 3);
     deopts.emplace_back(MakeConstantDeopt(static_cast<int32_t>(SpecVregIndex::INLINE_DEPTH), 0));
     AppendDeoptSources(&deopts, lazy, assembler, literalTableBuilder);
     if constexpr (std::is_same_v<NodeT, CallBaseConstructorVertex>) {
@@ -4822,11 +4824,13 @@ void ArkSteedCodeGenerator::DeconstructPhisInSuccessor(BB *successor, uint32_t p
     }
     // Gap moves are part of the current block's code (preparing for jump to successor)
     // so we use the current block color, not the successor's color
-    std::ostringstream gapMovesSs;
-    WITH_ANSI_COLOR_SCOPE(NthBrightColor(gapMovesSs, currentBlockColorIndex_, withColors_)) {
-        gapMovesSs << "--   Gap moves:";
+    if (__ IsCommentEnabled()) {
+        std::ostringstream gapMovesSs;
+        WITH_ANSI_COLOR_SCOPE(NthBrightColor(gapMovesSs, currentBlockColorIndex_, withColors_)) {
+            gapMovesSs << "--   Gap moves:";
+        }
+        RecordComment(gapMovesSs.str().c_str());
     }
-    RecordComment(gapMovesSs.str().c_str());
     TemporaryRegisterScope scope(assembler_);
     ArkSteedRegister scratchGPR = scope.AcquireScratch();
     ArkSteedDoubleRegister scratchFPR = scope.AcquireDoubleScratch();

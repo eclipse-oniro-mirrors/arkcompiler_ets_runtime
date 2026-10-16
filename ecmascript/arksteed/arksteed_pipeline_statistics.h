@@ -27,7 +27,7 @@
 #include "ecmascript/log_wrapper.h"
 #include "ecmascript/mem/chunk.h"
 #include "ecmascript/mem/c_string.h"
-#include "ecmascript/mem/clock_scope.h"
+#include "ecmascript/mem/cpu_clock_scope.h"
 #include "libpandabase/macros.h"
 
 namespace panda::ecmascript::arksteed {
@@ -92,8 +92,7 @@ public:
 private:
     static uint64_t NowUs()
     {
-        auto now = std::chrono::high_resolution_clock::now().time_since_epoch();
-        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
+        return CPUClockScope::NowUs();
     }
 
     size_t ChunkAllocatedSize() const
@@ -209,7 +208,7 @@ inline std::vector<CString> FormatPipelineStatisticsSummary(const CString &metho
 // so the summary is logged before the total compile time line. Destructor
 // outputs the summary via LOG_JIT(INFO) when the option is on and the JIT log
 // component is loggable at INFO; call MarkSuccess() right before returning true.
-class ArkSteedPipelineStatisticsSummary : public ClockScope {
+class ArkSteedPipelineStatisticsSummary : public CPUClockScope {
 public:
     ArkSteedPipelineStatisticsSummary(PipelineStatisticsCollector &collector, CString methodName)
         : collector_(collector), methodName_(std::move(methodName))
