@@ -81,6 +81,7 @@ public:
     void SplitSourceMap(const std::string& sourceMapData);
     bool TranslateUrlPositionBySourceMap(std::string& url, int& line, int& column, std::string& packageName);
     std::string TranslateBySourceMap(const std::string& stackStr);
+    std::string TranslateStackTraceWithStatus(const std::string& stackStr);
     static std::string ExtractFileName(const std::string& str);
     static void ExtractStackInfo(const std::string& stackStr, std::vector<std::string>& res);
     void SetInitStatus(InitStatus status);

@@ -305,6 +305,11 @@ public:
         return sourceMap_->TranslateBySourceMap(stackStr);
     }
 
+    std::string TranslateStackTraceWithStatus(const std::string& stackStr)
+    {
+        return sourceMap_->TranslateStackTraceWithStatus(stackStr);
+    }
+
     static std::string ExtractFileName(const std::string& str)
     {
         return SourceMap::ExtractFileName(str);

@@ -1453,7 +1453,7 @@ bool DFXJSNApi::SourceMapTranslateUrlPosition(std::string &url, int &line, int &
 
 std::string DFXJSNApi::SourceMapTranslateBySourceMap(const std::string &stackStr)
 {
-    return ecmascript::SourceMap::GetInstance().TranslateBySourceMap(stackStr);
+    return ecmascript::SourceMap::GetInstance().TranslateStackTraceWithStatus(stackStr);
 }
 
 void DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus status)
@@ -1493,7 +1493,7 @@ void DFXJSNApi::GetMainThreadStackTrace(const EcmaVM *vm, std::string &stackTrac
         }
     }
     if (!stackTraceStr.empty()) {
-        stackTraceStr = ecmascript::SourceMap::GetInstance().TranslateBySourceMap(stackTraceStr);
+        stackTraceStr = ecmascript::SourceMap::GetInstance().TranslateStackTraceWithStatus(stackTraceStr);
     }
 }
 

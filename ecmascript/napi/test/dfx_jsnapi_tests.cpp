@@ -2257,7 +2257,7 @@ HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateUrlPosition_AfterSplit_001)
 
 /**
  * @tc.name: SourceMapTranslateBySourceMap_NoSourceMap_001
- * @tc.desc: Test DFXJSNApi::SourceMapTranslateBySourceMap returns NOT_FOUNDMAP prefix when InitStatus=NO_SOURCEMAP
+ * @tc.desc: Test DFXJSNApi::SourceMapTranslateBySourceMap
  * @tc.type: FUNC
  */
 HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_NoSourceMap_001)
@@ -2266,8 +2266,9 @@ HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_NoSourceMap_001)
 
     std::string stackStr = "at func (entry/src/main/ets/pages/Index.ts:10:5)";
     std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr);
-    GTEST_LOG_(INFO) << "result << " << result;
-    EXPECT_NE(result.find("at func entry (entry/src/main/ets/pages/Index.ets:1:1)"), std::string::npos);
+    // After unification, NO_SOURCEMAP returns prefix + raw stack instead of attempting translation
+    std::string expected = "Cannot get SourceMap info, dump raw stack:\n" + stackStr;
+    EXPECT_EQ(result, expected);
 
     DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
 }
@@ -2391,5 +2392,75 @@ HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_MixedLines_001)
 
     DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
     DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+}
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_InExecuted_001
+ * @tc.desc: Test SourceMapTranslateBySourceMap returns "not initialized" prefix + raw stack when InitStatus=IN_EXECUTED
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_InExecuted_001)
+{
+    // InitStatus=IN_EXECUTED, expect "SourceMap is not initialized yet \n" + stackStr
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::IN_EXECUTED);
+    std::string stackStr = "at foo (bar.js:1:1)";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr);
+    std::string expected = "SourceMap is not initialized yet \n" + stackStr;
+    EXPECT_EQ(result, expected);
+
+    // State isolation: restore to NOT_EXECUTED
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+}
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_NotExecuted_001
+ * @tc.desc: Test SourceMapTranslateBySourceMap returns raw stack when InitStatus=NOT_EXECUTED
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_NotExecuted_001)
+{
+    // InitStatus=NOT_EXECUTED, expect raw stack preserved
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+    std::string stackStr = "at foo (bar.js:1:1)";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr);
+    EXPECT_EQ(result, stackStr);
+
+    // State isolation: NOT_EXECUTED is the default state, no extra restore needed
+}
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_ExecutedSuccessfully_002
+ * @tc.desc: Test SourceMapTranslateBySourceMap delegates to TranslateBySourceMap when InitStatus=EXECUTED_SUCCESSFULLY
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_ExecutedSuccessfully_002)
+{
+    // InitStatus=EXECUTED_SUCCESSFULLY, delegates to TranslateBySourceMap, expect raw stack preserved
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+    std::string stackStr = "at foo (unknown.js:1:1)";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr);
+    // TranslateBySourceMap falls back to raw stack for unknown URL, verify stack content passthrough
+    EXPECT_NE(result.find("unknown.js"), std::string::npos);
+
+    // State isolation: restore to NOT_EXECUTED
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+}
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_EmptyStack_001
+ * @tc.desc: Test SourceMapTranslateBySourceMap with empty stack string boundary case
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_EmptyStack_001)
+{
+    // Empty stackStr with IN_EXECUTED returns only the prefix (boundary condition)
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::IN_EXECUTED);
+    std::string stackStr = "";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr);
+    std::string expected = "SourceMap is not initialized yet \n";
+    EXPECT_EQ(result, expected);
+
+    // State isolation: restore to NOT_EXECUTED
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
 }
 } // namespace panda::test
