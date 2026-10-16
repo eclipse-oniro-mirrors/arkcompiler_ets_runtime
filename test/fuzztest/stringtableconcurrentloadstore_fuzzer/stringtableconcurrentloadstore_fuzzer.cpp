@@ -103,8 +103,8 @@ void StringTableConcurrentLoadStoreFuzzTest(const uint8_t* data, size_t size)
     EcmaVM* vm = JSNApi::CreateJSVM(option);
     JSThread* thread = vm->GetJSThread();
 
-    auto* map = new ChainedHashMap<EcmaStringTableMutex>();
-    ChainedHashMapOperation<EcmaStringTableMutex, JSThread, ChainedHashMapConfig::NeedSlotBarrier>
+    auto* map = new ChainedHashMap();
+    ChainedHashMapOperation<ChainedHashMapConfig::NeedSlotBarrier>
         chainedHashMapOperation(map);
     std::vector<uint8_t> utf8Data = CreateValidUtf8(data, size);
     uint32_t hashcode = EcmaStringAccessor::ComputeHashcodeUtf8(utf8Data.data(), utf8Data.size(), true);

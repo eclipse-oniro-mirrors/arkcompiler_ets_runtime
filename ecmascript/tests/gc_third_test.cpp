@@ -52,6 +52,8 @@ using namespace panda::panda_file;
 using namespace panda::pandasm;
 
 namespace panda::test {
+using ChainedHashMapType = ChainedHashMap;
+
 class GCTest : public BaseTestWithScope<false> {
 public:
     void SetUp() override
@@ -881,9 +883,7 @@ void TestStringTable(JSThread *thread, EcmaStringTable *stringTable)
 HWTEST_F_L0(GCTest, stringTableConcurrentSweepTest1)
 {
     EcmaStringTable* stringTable = Runtime::GetInstance()->GetEcmaStringTable();
-    DisableCMCGCNormalTrait::ChainedHashMapType*
-        chainedHashMap = reinterpret_cast<DisableCMCGCNormalTrait::ChainedHashMapType*>(
-            stringTable->GetChainedHashMap());
+    ChainedHashMap* chainedHashMap = stringTable->GetChainedHashMap();
     stringTable->GetCleaner()->SetEnableConcurrentSweep(true);
 
     {
@@ -905,9 +905,7 @@ HWTEST_F_L0(GCTest, stringTableConcurrentSweepTest2)
 {
     SharedHeap* sHeap = SharedHeap::GetInstance();
     EcmaStringTable* stringTable = Runtime::GetInstance()->GetEcmaStringTable();
-    DisableCMCGCNormalTrait::ChainedHashMapType*
-        chainedHashMap = reinterpret_cast<DisableCMCGCNormalTrait::ChainedHashMapType*>(
-            stringTable->GetChainedHashMap());
+    ChainedHashMap* chainedHashMap = stringTable->GetChainedHashMap();
     stringTable->GetCleaner()->SetEnableConcurrentSweep(true);
 
     chainedHashMap->IncreaseInuseCount();

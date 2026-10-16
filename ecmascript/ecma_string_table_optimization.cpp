@@ -22,6 +22,23 @@
 #include "ecmascript/string/chained_hash_map-inl.h"
 
 namespace panda::ecmascript {
+
+#define STRING_TABLE_OPERATION_SCOPE() \
+    ChainedHashMapOperation<ChainedHashMapConfig::NoSlotBarrier> chainedHashMapOperation(GetChainedHashMap()); \
+    ChainedHashMapInUseScope mapInUse(GetChainedHashMap())
+
+#define STRING_TABLE_READ_BARRIER(thread_name) \
+    [thread_name](const void *obj, size_t offset) -> TaggedObject* { \
+        return Barriers::GetTaggedObject(thread_name, obj, offset); \
+    }
+
+#define ASSERT_STRING_TABLE_INVARIANTS(value) \
+    do { \
+        ASSERT(!EcmaStringAccessor(value).IsInternString()); \
+        ASSERT(EcmaStringAccessor(value).NotTreeString()); \
+        ASSERT(Region::ObjectAddressToRange(reinterpret_cast<TaggedObject *>(value))->InSharedHeap()); \
+    } while (0)
+
 void EcmaStringTableCleaner::PostSweepWeakRefTask(const WeakRootVisitor &visitor)
 {
     StartSweepWeakRefTask();
@@ -47,8 +64,7 @@ void EcmaStringTableCleaner::WaitSweepWeakRefTaskFinished()
 void EcmaStringTableCleaner::PostConcurrentSweepWeakRefTask(const WeakRootVisitor &visitor)
 {
     StartSweepWeakRefTask();
-    reinterpret_cast<DisableCMCGCNormalTrait::ChainedHashMapType *>(
-        stringTable_->GetChainedHashMap())->StartSweeping();
+    stringTable_->GetChainedHashMap()->StartSweeping();
     iter_ = std::make_shared<std::atomic<uint32_t>>(0U);
     const uint32_t postTaskCount = common::Taskpool::GetCurrentTaskpool()->GetTotalThreadNum();
     for (uint32_t i = 0U; i < postTaskCount; ++i) {
@@ -76,12 +92,7 @@ void EcmaStringTableCleaner::WaitConcurrentSweepWeakRefTaskAndSuspendByDaemonThr
 void EcmaStringTableCleaner::FinishConcurrentSweepInSTW(DaemonThread *dThread)
 {
     WaitConcurrentSweepWeakRefTask();
-    ProcessCheckAndFreeHeadEntries();
-    DisableCMCGCNormalTrait::ChainedHashMapType* chainedHashMap =
-        reinterpret_cast<DisableCMCGCNormalTrait::ChainedHashMapType*>(
-            stringTable_->GetChainedHashMap());
-    chainedHashMap->ClearToSpaceTagForFreshEntries();
-    chainedHashMap->FinishSweeping();
+    FinishSweepingInternal();
     SignalSweepWeakRefTaskFinish();
     iter_.reset();
 }
@@ -160,22 +171,20 @@ void EcmaStringTableCleaner::SignalSweepWeakRefTaskPending()
 void EcmaStringTableCleaner::SuspendAllAndFinishSweeping(JSThread* thread)
 {
     SuspendAllScope scope(thread);
-    ProcessCheckAndFreeHeadEntries();
-    DisableCMCGCNormalTrait::ChainedHashMapType*
-        chainedHashMap = reinterpret_cast<DisableCMCGCNormalTrait::ChainedHashMapType*>(
-            stringTable_->GetChainedHashMap());
-    chainedHashMap->ClearToSpaceTagForFreshEntries();
-    chainedHashMap->FinishSweeping();
+    FinishSweepingInternal();
 }
 
 void EcmaStringTableCleaner::SuspendAllAndFinishSweepingByDaemonThread(DaemonThread* dThread)
 {
     ThreadManagedScope runningScope(dThread);
     SuspendAllScope scope(dThread);
+    FinishSweepingInternal();
+}
+
+void EcmaStringTableCleaner::FinishSweepingInternal()
+{
     ProcessCheckAndFreeHeadEntries();
-    DisableCMCGCNormalTrait::ChainedHashMapType*
-        chainedHashMap = reinterpret_cast<DisableCMCGCNormalTrait::ChainedHashMapType*>(
-            stringTable_->GetChainedHashMap());
+    ChainedHashMap* chainedHashMap = stringTable_->GetChainedHashMap();
     chainedHashMap->ClearToSpaceTagForFreshEntries();
     chainedHashMap->FinishSweeping();
 }
@@ -184,9 +193,7 @@ void EcmaStringTableCleaner::ProcessCheckAndFreeHeadEntries()
 {
     ECMA_BYTRACE_NAME(
         HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "EcmaStringTableCleaner::ProcessCheckAndFreeHeadEntries", "");
-    DisableCMCGCNormalTrait::ChainedHashMapType*
-        chainedHashMap = reinterpret_cast<DisableCMCGCNormalTrait::ChainedHashMapType*>(
-            stringTable_->GetChainedHashMap());
+    ChainedHashMap* chainedHashMap = stringTable_->GetChainedHashMap();
     for (uint32_t i = 0; i < ChainedHashMapConfig::SWEEP_PARTITION_COUNT; i++) {
         chainedHashMap->CheckAndFreeHeadEntries(i);
     }
@@ -207,117 +214,73 @@ bool EcmaStringTableCleaner::ConcurrentSweepWeakRefTask::Run([[maybe_unused]] ui
     return true;
 }
 
-template <typename Traits>
 EcmaString* EcmaStringTableImpl::GetOrInternFlattenString(EcmaVM* vm, EcmaString* string)
 {
-    typename Traits::ChainedHashMapOperationType chainedHashMapOperation(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
-    typename Traits::ChainedHashMapInUseScopeType mapInUse(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
+    STRING_TABLE_OPERATION_SCOPE();
     ASSERT(EcmaStringAccessor(string).NotTreeString());
     if (EcmaStringAccessor(string).IsInternString()) {
         return string;
     }
     JSThread *thread = vm->GetAssociatedJSThread();
     uint32_t hashcode = EcmaStringAccessor(string).GetHashcode(thread);
-    ASSERT(!EcmaStringAccessor(string).IsInternString());
-    ASSERT(EcmaStringAccessor(string).NotTreeString());
-    // Strings in string table should not be in the young space.
-    if constexpr (Traits::EnableCMCGC) {
-        ASSERT(string->IsInSharedHeap());
-    } else {
-        ASSERT(Region::ObjectAddressToRange(reinterpret_cast<TaggedObject *>(string))->InSharedHeap());
-    }
-    auto readBarrierForLoad = [thread](const void *obj, size_t offset) -> TaggedObject* {
-        return Barriers::GetTaggedObject(thread, obj, offset);
-    };
+    ASSERT_STRING_TABLE_INVARIANTS(string);
+    auto readBarrierForLoad = STRING_TABLE_READ_BARRIER(thread);
     auto *existing = chainedHashMapOperation.template Load(std::move(readBarrierForLoad), hashcode,
                                                            string->ToBaseString());
     if (existing != nullptr) {
         return EcmaString::FromBaseString(existing);
     }
     JSHandle<EcmaString> stringHandle(thread, string);
-    typename Traits::ThreadType* holder = GetThreadHolder<Traits>(thread);
-    auto readBarrierForStoreOrLoad = [thread](const void *obj, size_t offset) -> TaggedObject* {
-        return Barriers::GetTaggedObject(thread, obj, offset);
-    };
+    auto readBarrierForStoreOrLoad = STRING_TABLE_READ_BARRIER(thread);
     BaseString *result = chainedHashMapOperation.template StoreOrLoad<
         true, decltype(readBarrierForStoreOrLoad), common::ReadOnlyHandle<BaseString>>(
-        holder, std::move(readBarrierForStoreOrLoad), hashcode, stringHandle);
+        thread, std::move(readBarrierForStoreOrLoad), hashcode, stringHandle);
     ASSERT(result != nullptr);
     return EcmaString::FromBaseString(result);
 }
 
-template <typename Traits>
 EcmaString* EcmaStringTableImpl::GetOrInternFlattenStringNoGC(EcmaVM* vm, EcmaString* string)
 {
-    typename Traits::ChainedHashMapOperationType chainedHashMapOperation(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
-    typename Traits::ChainedHashMapInUseScopeType mapInUse(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
+    STRING_TABLE_OPERATION_SCOPE();
     ASSERT(EcmaStringAccessor(string).NotTreeString());
     if (EcmaStringAccessor(string).IsInternString()) {
         return string;
     }
     JSThread *thread = vm->GetAssociatedJSThread();
     uint32_t hashcode = EcmaStringAccessor(string).GetHashcode(thread);
-    ASSERT(!EcmaStringAccessor(string).IsInternString());
-    ASSERT(EcmaStringAccessor(string).NotTreeString());
-    // Strings in string table should not be in the young space.
-    if constexpr (Traits::EnableCMCGC) {
-        ASSERT(string->IsInSharedHeap());
-    } else {
-        ASSERT(Region::ObjectAddressToRange(reinterpret_cast<TaggedObject *>(string))->InSharedHeap());
-    }
-    auto readBarrier = [thread](const void *obj, size_t offset) -> TaggedObject* {
-        return Barriers::GetTaggedObject(thread, obj, offset);
-    };
+    ASSERT_STRING_TABLE_INVARIANTS(string);
+    auto readBarrier = STRING_TABLE_READ_BARRIER(thread);
     auto *existing = chainedHashMapOperation.template Load(readBarrier, hashcode, string->ToBaseString());
     if (existing != nullptr) {
         return EcmaString::FromBaseString(existing);
     }
-    typename Traits::ThreadType* holder = GetThreadHolder<Traits>(vm->GetJSThread());
     JSHandle<EcmaString> stringHandle(thread, string);
     BaseString* result = chainedHashMapOperation.template StoreOrLoad<
         false, decltype(readBarrier), common::ReadOnlyHandle<BaseString>>(
-        holder, std::move(readBarrier), hashcode, stringHandle);
+        thread, std::move(readBarrier), hashcode, stringHandle);
     ASSERT(result != nullptr);
     return EcmaString::FromBaseString(result);
 }
 
-template <typename Traits>
 EcmaString* EcmaStringTableImpl::GetOrInternStringFromCompressedSubString(
     EcmaVM* vm, const JSHandle<EcmaString>& string, uint32_t offset, uint32_t utf8Len)
 {
-    typename Traits::ChainedHashMapOperationType chainedHashMapOperation(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
-    typename Traits::ChainedHashMapInUseScopeType mapInUse(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
+    STRING_TABLE_OPERATION_SCOPE();
     const uint8_t* utf8Data = EcmaStringAccessor(string).GetDataUtf8() + offset;
     uint32_t hashcode = EcmaStringAccessor::ComputeHashcodeUtf8(utf8Data, utf8Len, true);
     JSThread *thread = vm->GetAssociatedJSThread();
-    auto readBarrier = [thread](const void *obj, size_t offset) -> TaggedObject* {
-        return Barriers::GetTaggedObject(thread, obj, offset);
-    };
+    auto readBarrier = STRING_TABLE_READ_BARRIER(thread);
     auto *existing = chainedHashMapOperation.template Load(std::move(readBarrier), hashcode, string, offset, utf8Len);
     if (existing != nullptr) {
         return EcmaString::FromBaseString(existing);
     }
-    typename Traits::ThreadType* holder = GetThreadHolder<Traits>(vm->GetJSThread());
     BaseString *result = chainedHashMapOperation.template StoreOrLoad(
-        holder, hashcode,
+        thread, hashcode,
         [vm, string, offset, utf8Len, hashcode]() -> common::ReadOnlyHandle<BaseString> {
             EcmaString* str = EcmaStringAccessor::CreateFromUtf8CompressedSubString(vm, string, offset, utf8Len,
                 MemSpaceType::SHARED_OLD_SPACE);
             str->SetMixHashcode(hashcode);
-            ASSERT(!EcmaStringAccessor(str).IsInternString());
-            ASSERT(EcmaStringAccessor(str).NotTreeString());
-            // Strings in string table should not be in the young space.
-            if constexpr (Traits::EnableCMCGC) {
-                ASSERT(str->IsInSharedHeap());
-            } else {
-                ASSERT(Region::ObjectAddressToRange(reinterpret_cast<TaggedObject *>(str))->InSharedHeap());
-            }
+            ASSERT_STRING_TABLE_INVARIANTS(str);
             JSThread *thread = vm->GetJSThread();
             JSHandle<EcmaString> strHandle(thread, str);
             return strHandle;
@@ -332,13 +295,9 @@ EcmaString* EcmaStringTableImpl::GetOrInternStringFromCompressedSubString(
     return EcmaString::FromBaseString(result);
 }
 
-template <typename Traits>
 EcmaString *EcmaStringTableImpl::GetOrInternString(EcmaVM *vm, EcmaString *string)
 {
-    typename Traits::ChainedHashMapOperationType chainedHashMapOperation(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
-    typename Traits::ChainedHashMapInUseScopeType mapInUse(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
+    STRING_TABLE_OPERATION_SCOPE();
     if (EcmaStringAccessor(string).IsInternString()) {
         return string;
     }
@@ -350,33 +309,26 @@ EcmaString *EcmaStringTableImpl::GetOrInternString(EcmaVM *vm, EcmaString *strin
         return strFlat;
     }
     uint32_t hashcode = EcmaStringAccessor(strFlat).GetHashcode(thread);
-    auto readBarrier = [thread](const void *obj, size_t offset) -> TaggedObject* {
-        return Barriers::GetTaggedObject(thread, obj, offset);
-    };
+    auto readBarrier = STRING_TABLE_READ_BARRIER(thread);
     auto *existing = chainedHashMapOperation.template Load(readBarrier, hashcode, strFlat->ToBaseString());
     if (existing != nullptr) {
         return EcmaString::FromBaseString(existing);
     }
     JSHandle<EcmaString> strFlatHandle(thread, strFlat);
-    typename Traits::ThreadType* holder = GetThreadHolder<Traits>(vm->GetJSThread());
     BaseString* result = chainedHashMapOperation.template StoreOrLoad<
         true, decltype(readBarrier), common::ReadOnlyHandle<BaseString>>(
-        holder, std::move(readBarrier), hashcode, strFlatHandle);
+        thread, std::move(readBarrier), hashcode, strFlatHandle);
     ASSERT(result != nullptr);
     return EcmaString::FromBaseString(result);
 }
 
-template <typename Traits>
 EcmaString* EcmaStringTableImpl::GetOrInternString(EcmaVM* vm, const JSHandle<EcmaString>& firstString,
                                                    const JSHandle<EcmaString>& secondString)
 {
-    typename Traits::ChainedHashMapOperationType chainedHashMapOperation(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
-    typename Traits::ChainedHashMapInUseScopeType mapInUse(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
+    STRING_TABLE_OPERATION_SCOPE();
     bool signalState = vm->GetJsDebuggerManager()->GetSignalState();
     if (UNLIKELY(signalState)) {
-        return GetOrInternStringThreadUnsafe<Traits>(vm, firstString, secondString);
+        return GetOrInternStringThreadUnsafe(vm, firstString, secondString);
     }
     JSThread *thread = vm->GetJSThread();
     JSHandle<EcmaString> firstFlat(thread, EcmaStringAccessor::Flatten(vm, firstString));
@@ -384,22 +336,14 @@ EcmaString* EcmaStringTableImpl::GetOrInternString(EcmaVM* vm, const JSHandle<Ec
     uint32_t hashcode = EcmaStringAccessor::CalculateAllConcatHashCode(thread, firstFlat, secondFlat);
     ASSERT(EcmaStringAccessor(firstFlat).NotTreeString());
     ASSERT(EcmaStringAccessor(secondFlat).NotTreeString());
-    typename Traits::ThreadType* holder = GetThreadHolder<Traits>(vm->GetJSThread());
     BaseString *result = chainedHashMapOperation.template LoadOrStore<true>(
-        holder, hashcode,
+        thread, hashcode,
         [vm, hashcode, thread, firstFlat, secondFlat]() {
             JSHandle<EcmaString> concatHandle(
                 thread, EcmaStringAccessor::Concat(vm, firstFlat, secondFlat, MemSpaceType::SHARED_OLD_SPACE));
             EcmaString *value = EcmaStringAccessor::Flatten(vm, concatHandle, MemSpaceType::SHARED_OLD_SPACE);
             value->SetMixHashcode(hashcode);
-            ASSERT(!EcmaStringAccessor(value).IsInternString());
-            ASSERT(EcmaStringAccessor(value).NotTreeString());
-            // Strings in string table should not be in the young space.
-            if constexpr (Traits::EnableCMCGC) {
-                ASSERT(value->IsInSharedHeap());
-            } else {
-                ASSERT(Region::ObjectAddressToRange(reinterpret_cast<TaggedObject *>(value))->InSharedHeap());
-            }
+            ASSERT_STRING_TABLE_INVARIANTS(value);
             JSHandle<EcmaString> stringHandle(thread, value);
             return stringHandle;
         },
@@ -413,34 +357,23 @@ EcmaString* EcmaStringTableImpl::GetOrInternString(EcmaVM* vm, const JSHandle<Ec
     return EcmaString::FromBaseString(result);
 }
 
-template <typename Traits>
 EcmaString* EcmaStringTableImpl::GetOrInternString(EcmaVM* vm, const uint8_t* utf8Data, uint32_t utf8Len,
                                                    bool canBeCompress, [[maybe_unused]] MemSpaceType type)
 {
-    typename Traits::ChainedHashMapOperationType chainedHashMapOperation(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
-    typename Traits::ChainedHashMapInUseScopeType mapInUse(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
+    STRING_TABLE_OPERATION_SCOPE();
     ASSERT(IsSMemSpace(type));
     bool signalState = vm->GetJsDebuggerManager()->GetSignalState();
     if (UNLIKELY(signalState)) {
-        return GetOrInternStringThreadUnsafe<Traits>(vm, utf8Data, utf8Len, canBeCompress);
+        return GetOrInternStringThreadUnsafe(vm, utf8Data, utf8Len, canBeCompress);
     }
-    typename Traits::ThreadType* holder = GetThreadHolder<Traits>(vm->GetJSThread());
+    JSThread* thread = vm->GetJSThread();
     uint32_t hashcode = EcmaStringAccessor::ComputeHashcodeUtf8(utf8Data, utf8Len, canBeCompress);
     BaseString *result = chainedHashMapOperation.template LoadOrStore<true>(
-        holder, hashcode,
+        thread, hashcode,
         [vm, hashcode, utf8Data, utf8Len, canBeCompress, type]() {
             EcmaString* value = EcmaStringAccessor::CreateFromUtf8(vm, utf8Data, utf8Len, canBeCompress, type);
             value->SetMixHashcode(hashcode);
-            ASSERT(!EcmaStringAccessor(value).IsInternString());
-            ASSERT(EcmaStringAccessor(value).NotTreeString());
-            // Strings in string table should not be in the young space.
-            if constexpr (Traits::EnableCMCGC) {
-                ASSERT(value->IsInSharedHeap());
-            } else {
-                ASSERT(Region::ObjectAddressToRange(reinterpret_cast<TaggedObject *>(value))->InSharedHeap());
-            }
+            ASSERT_STRING_TABLE_INVARIANTS(value);
             JSThread *thread = vm->GetJSThread();
             JSHandle<EcmaString> stringHandle(thread, value);
             return stringHandle;
@@ -454,66 +387,46 @@ EcmaString* EcmaStringTableImpl::GetOrInternString(EcmaVM* vm, const uint8_t* ut
     return EcmaString::FromBaseString(result);
 }
 
-template<typename Traits>
 EcmaString* EcmaStringTableImpl::GetOrInternString(EcmaVM* vm,
                                                    const uint8_t* utf8Data,
                                                    uint32_t utf16Len,
                                                    MemSpaceType type)
 {
-    typename Traits::ChainedHashMapOperationType chainedHashMapOperation(
-        reinterpret_cast<typename Traits::ChainedHashMapType*>(GetChainedHashMap()));
-    typename Traits::ChainedHashMapInUseScopeType mapInUse(
-        reinterpret_cast<typename Traits::ChainedHashMapType*>(GetChainedHashMap()));
+    STRING_TABLE_OPERATION_SCOPE();
     ASSERT(IsSMemSpace(type));
     ASSERT(type == MemSpaceType::SHARED_NON_MOVABLE || type == MemSpaceType::SHARED_OLD_SPACE);
     JSThread* thread = vm->GetJSThread();
     EcmaString* str = EcmaStringAccessor::CreateUtf16StringFromUtf8(vm, utf8Data, utf16Len, type);
     uint32_t hashcode = EcmaStringAccessor(str).GetHashcode(thread);
-    auto readBarrierForLoad = [thread](const void* obj, size_t offset) -> TaggedObject* {
-        return Barriers::GetTaggedObject(thread, obj, offset);
-    };
+    auto readBarrierForLoad = STRING_TABLE_READ_BARRIER(thread);
     auto* existing = chainedHashMapOperation.template Load(
         std::move(readBarrierForLoad), hashcode, str->ToBaseString());
     if (existing != nullptr) {
         return EcmaString::FromBaseString(existing);
     }
     JSHandle<EcmaString> strHandle(thread, str);
-    typename Traits::ThreadType* holder = GetThreadHolder<Traits>(vm->GetJSThread());
-    auto readBarrierForStoreOrLoad = [thread](const void* obj, size_t offset) -> TaggedObject* {
-        return Barriers::GetTaggedObject(thread, obj, offset);
-    };
+    auto readBarrierForStoreOrLoad = STRING_TABLE_READ_BARRIER(thread);
     BaseString* result = chainedHashMapOperation.template StoreOrLoad<true,
                                                                       decltype(readBarrierForStoreOrLoad),
                                                                       common::ReadOnlyHandle<BaseString>>(
-        holder, std::move(readBarrierForStoreOrLoad), hashcode, strHandle);
+        thread, std::move(readBarrierForStoreOrLoad), hashcode, strHandle);
     ASSERT(result != nullptr);
     return EcmaString::FromBaseString(result);
 }
 
-template <typename Traits>
 EcmaString* EcmaStringTableImpl::GetOrInternString(EcmaVM* vm, const uint16_t* utf16Data, uint32_t utf16Len,
                                                    bool canBeCompress)
 {
-    typename Traits::ChainedHashMapOperationType chainedHashMapOperation(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
-    typename Traits::ChainedHashMapInUseScopeType mapInUse(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
-    typename Traits::ThreadType* holder = GetThreadHolder<Traits>(vm->GetJSThread());
+    STRING_TABLE_OPERATION_SCOPE();
+    JSThread* thread = vm->GetJSThread();
     uint32_t hashcode = EcmaStringAccessor::ComputeHashcodeUtf16(const_cast<uint16_t*>(utf16Data), utf16Len);
     BaseString *result = chainedHashMapOperation.template LoadOrStore<true>(
-        holder, hashcode,
+        thread, hashcode,
         [vm, utf16Data, utf16Len, canBeCompress, hashcode]() {
             EcmaString* value = EcmaStringAccessor::CreateFromUtf16(vm, utf16Data, utf16Len, canBeCompress,
                                                                     MemSpaceType::SHARED_OLD_SPACE);
             value->SetMixHashcode(hashcode);
-            ASSERT(!EcmaStringAccessor(value).IsInternString());
-            ASSERT(EcmaStringAccessor(value).NotTreeString());
-            // Strings in string table should not be in the young space.
-            if constexpr (Traits::EnableCMCGC) {
-                ASSERT(value->IsInSharedHeap());
-            } else {
-                ASSERT(Region::ObjectAddressToRange(reinterpret_cast<TaggedObject *>(value))->InSharedHeap());
-            }
+            ASSERT_STRING_TABLE_INVARIANTS(value);
             JSThread *thread = vm->GetJSThread();
             JSHandle<EcmaString> stringHandle(thread, value);
             return stringHandle;
@@ -527,49 +440,31 @@ EcmaString* EcmaStringTableImpl::GetOrInternString(EcmaVM* vm, const uint16_t* u
     return EcmaString::FromBaseString(result);
 }
 
-template <typename Traits>
 EcmaString *EcmaStringTableImpl::TryGetInternString(JSThread *thread, const JSHandle<EcmaString> &string)
 {
-    typename Traits::ChainedHashMapOperationType chainedHashMapOperation(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
-    typename Traits::ChainedHashMapInUseScopeType mapInUse(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
+    STRING_TABLE_OPERATION_SCOPE();
     uint32_t hashcode = EcmaStringAccessor(*string).GetHashcode(thread);
     EcmaString *str = *string;
-    auto readBarrier = [thread](const void *obj, size_t offset) -> TaggedObject* {
-        return Barriers::GetTaggedObject(thread, obj, offset);
-    };
+    auto readBarrier = STRING_TABLE_READ_BARRIER(thread);
     return EcmaString::FromBaseString(
         chainedHashMapOperation.template Load<false>(std::move(readBarrier), hashcode, str->ToBaseString()));
 }
 
 // used in jit thread, which unsupport create jshandle
-template <typename Traits>
 EcmaString* EcmaStringTableImpl::GetOrInternStringWithoutJSHandleForJit(EcmaVM* vm, const uint8_t* utf8Data,
     uint32_t utf8Len, bool canBeCompress, MemSpaceType type)
 {
-    typename Traits::ChainedHashMapOperationType chainedHashMapOperation(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
-    typename Traits::ChainedHashMapInUseScopeType mapInUse(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
+    STRING_TABLE_OPERATION_SCOPE();
     ASSERT(IsSMemSpace(type));
     ASSERT(type == MemSpaceType::SHARED_NON_MOVABLE || type == MemSpaceType::SHARED_OLD_SPACE);
     uint32_t hashcode = EcmaStringAccessor::ComputeHashcodeUtf8(utf8Data, utf8Len, canBeCompress);
-    typename Traits::ThreadType* holder = GetThreadHolder<Traits>(vm->GetJSThread());
+    JSThread* thread = vm->GetJSThread();
     BaseString *result = chainedHashMapOperation.LoadOrStoreForJit(
-        holder, hashcode,
+        thread, hashcode,
         [vm, utf8Data, utf8Len, canBeCompress, type, hashcode]() {
             EcmaString *value = EcmaStringAccessor::CreateFromUtf8(vm, utf8Data, utf8Len, canBeCompress, type);
-
             value->SetMixHashcode(hashcode);
-            ASSERT(!EcmaStringAccessor(value).IsInternString());
-            ASSERT(EcmaStringAccessor(value).NotTreeString());
-            // Strings in string table should not be in the young space.
-            if constexpr (Traits::EnableCMCGC) {
-                ASSERT(value->IsInSharedHeap());
-            } else {
-                ASSERT(Region::ObjectAddressToRange(reinterpret_cast<TaggedObject *>(value))->InSharedHeap());
-            }
+            ASSERT_STRING_TABLE_INVARIANTS(value);
             return value->ToBaseString();
         },
         [vm, utf8Data, utf8Len, canBeCompress](BaseString *foundString) {
@@ -582,14 +477,10 @@ EcmaString* EcmaStringTableImpl::GetOrInternStringWithoutJSHandleForJit(EcmaVM* 
 }
 
 // used in jit thread, which unsupport create jshandle
-template <typename Traits>
 EcmaString* EcmaStringTableImpl::GetOrInternStringWithoutJSHandleForJit(EcmaVM* vm, const uint8_t* utf8Data,
     uint32_t utf16Len, MemSpaceType type)
 {
-    typename Traits::ChainedHashMapOperationType chainedHashMapOperation(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
-    typename Traits::ChainedHashMapInUseScopeType mapInUse(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
+    STRING_TABLE_OPERATION_SCOPE();
     ASSERT(vm->GetJSThread()->IsJitThread());
     ASSERT(IsSMemSpace(type));
     type = (type == MemSpaceType::SHARED_NON_MOVABLE) ? type : MemSpaceType::SHARED_OLD_SPACE;
@@ -597,20 +488,13 @@ EcmaString* EcmaStringTableImpl::GetOrInternStringWithoutJSHandleForJit(EcmaVM* 
     utf::ConvertRegionMUtf8ToUtf16(utf8Data, u16Buffer.data(), utf::Mutf8Size(utf8Data), utf16Len, 0);
     uint32_t hashcode = EcmaStringAccessor::ComputeHashcodeUtf16(u16Buffer.data(), utf16Len);
     const uint16_t *utf16Data = u16Buffer.data();
-    typename Traits::ThreadType* holder = GetThreadHolder<Traits>(vm->GetJSThread());
+    JSThread* thread = vm->GetJSThread();
     BaseString *result = chainedHashMapOperation.LoadOrStoreForJit(
-        holder, hashcode,
+        thread, hashcode,
         [vm, u16Buffer, utf16Len, hashcode, type]() {
             EcmaString *value = EcmaStringAccessor::CreateFromUtf16(vm, u16Buffer.data(), utf16Len, false, type);
             value->SetMixHashcode(hashcode);
-            ASSERT(!EcmaStringAccessor(value).IsInternString());
-            ASSERT(EcmaStringAccessor(value).NotTreeString());
-            // Strings in string table should not be in the young space.
-            if constexpr (Traits::EnableCMCGC) {
-                ASSERT(value->IsInSharedHeap());
-            } else {
-                ASSERT(Region::ObjectAddressToRange(reinterpret_cast<TaggedObject *>(value))->InSharedHeap());
-            }
+            ASSERT_STRING_TABLE_INVARIANTS(value);
             return value->ToBaseString();
         },
         [vm, utf16Data, utf16Len](BaseString *foundString) {
@@ -622,11 +506,10 @@ EcmaString* EcmaStringTableImpl::GetOrInternStringWithoutJSHandleForJit(EcmaVM* 
     return EcmaString::FromBaseString(result);
 }
 
-template <typename Traits, std::enable_if_t<!Traits::ConcurrentSweep, int>>
 void EcmaStringTableImpl::SweepWeakRef(const WeakRootVisitor &visitor, uint32_t partitionID)
 {
-    auto *chainedHashMap = reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap());
-    typename Traits::ChainedHashMapOperationType chainedHashMapOperation(chainedHashMap);
+    auto *chainedHashMap = GetChainedHashMap();
+    ChainedHashMapOperation<ChainedHashMapConfig::NoSlotBarrier> chainedHashMapOperation(chainedHashMap);
     chainedHashMap->ForEachBucketHeadInPartition(partitionID, [&](ChainedHashMapEntry* bucketHead, uint32_t index) {
         chainedHashMapOperation.ClearNodeFromGC(bucketHead, index, visitor);
     });
@@ -635,26 +518,19 @@ void EcmaStringTableImpl::SweepWeakRef(const WeakRootVisitor &visitor, uint32_t 
 void EcmaStringTableImpl::ConcurrentSweepWeakRef(const WeakRootVisitor &visitor, uint32_t partitionID,
                                                  std::vector<ChainedHashMapEntry*>& waitDeleteEntries)
 {
-    auto *chainedHashMap = reinterpret_cast<DisableCMCGCNormalTrait::ChainedHashMapType *>(GetChainedHashMap());
-    using ConcurrentSweepOperation = ChainedHashMapOperation<EcmaStringTableMutex, JSThread,
-                                                             ChainedHashMapConfig::NeedSlotBarrier>;
+    auto *chainedHashMap = GetChainedHashMap();
+    using ConcurrentSweepOperation = ChainedHashMapOperation<ChainedHashMapConfig::NeedSlotBarrier>;
     ConcurrentSweepOperation chainedHashMapOperation(chainedHashMap);
     chainedHashMap->ForEachBucketHeadInPartition(partitionID, [&](ChainedHashMapEntry* bucketHead, uint32_t index) {
         chainedHashMapOperation.ClearNodeFromGC(bucketHead, index, visitor, waitDeleteEntries);
     });
 }
 
-template <typename Traits>
 bool EcmaStringTableImpl::CheckStringTableValidity(JSThread *thread)
 {
-    typename Traits::ChainedHashMapOperationType chainedHashMapOperation(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
-    typename Traits::ChainedHashMapInUseScopeType mapInUse(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
+    STRING_TABLE_OPERATION_SCOPE();
     bool isValid = true;
-    auto readBarrier = [thread](const void *obj, size_t offset) -> TaggedObject* {
-        return Barriers::GetTaggedObject(thread, obj, offset);
-    };
+    auto readBarrier = STRING_TABLE_READ_BARRIER(thread);
     chainedHashMapOperation.Range(std::move(readBarrier), isValid);
     return isValid;
 }
@@ -672,15 +548,11 @@ JSTaggedValue SingleCharTable::CreateSingleCharTable(JSThread *thread)
 }
 
 // This should only call in Debugger Signal, and need to fix and remove
-template <typename Traits>
 EcmaString* EcmaStringTableImpl::GetOrInternStringThreadUnsafe(
     EcmaVM* vm, const JSHandle<EcmaString> firstString,
     const JSHandle<EcmaString> secondString)
 {
-    typename Traits::ChainedHashMapOperationType chainedHashMapOperation(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
-    typename Traits::ChainedHashMapInUseScopeType mapInUse(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
+    STRING_TABLE_OPERATION_SCOPE();
     ASSERT(vm->GetJsDebuggerManager()->GetSignalState());
     JSThread *thread = vm->GetJSThreadNoCheck();
     JSHandle<EcmaString> firstFlat(thread, EcmaStringAccessor::Flatten(vm, firstString));
@@ -688,22 +560,14 @@ EcmaString* EcmaStringTableImpl::GetOrInternStringThreadUnsafe(
     uint32_t hashcode = EcmaStringAccessor::CalculateAllConcatHashCode(thread, firstFlat, secondFlat);
     ASSERT(EcmaStringAccessor(firstFlat).NotTreeString());
     ASSERT(EcmaStringAccessor(secondFlat).NotTreeString());
-    typename Traits::ThreadType* holder = GetThreadHolder<Traits>(vm->GetJSThread());
     BaseString *result = chainedHashMapOperation.template LoadOrStore<false>(
-        holder, hashcode,
+        thread, hashcode,
         [hashcode, thread, vm, firstFlat, secondFlat]() {
             JSHandle<EcmaString> concatHandle(
                 thread, EcmaStringAccessor::Concat(vm, firstFlat, secondFlat, MemSpaceType::SHARED_OLD_SPACE));
             EcmaString *concatString = EcmaStringAccessor::Flatten(vm, concatHandle, MemSpaceType::SHARED_OLD_SPACE);
             concatString->SetMixHashcode(hashcode);
-            ASSERT(!EcmaStringAccessor(concatString).IsInternString());
-            ASSERT(EcmaStringAccessor(concatString).NotTreeString());
-            // Strings in string table should not be in the young space.
-            if constexpr (Traits::EnableCMCGC) {
-                ASSERT(concatString->IsInSharedHeap());
-            } else {
-                ASSERT(Region::ObjectAddressToRange(reinterpret_cast<TaggedObject *>(concatString))->InSharedHeap());
-            }
+            ASSERT_STRING_TABLE_INVARIANTS(concatString);
             JSHandle<EcmaString> stringHandle(thread, concatString);
             return stringHandle;
         },
@@ -719,19 +583,15 @@ EcmaString* EcmaStringTableImpl::GetOrInternStringThreadUnsafe(
 }
 
 // This should only call in Debugger Signal, and need to fix and remove
-template <typename Traits>
 EcmaString* EcmaStringTableImpl::GetOrInternStringThreadUnsafe(EcmaVM* vm, const uint8_t* utf8Data,
                                                                uint32_t utf8Len, bool canBeCompress)
 {
-    typename Traits::ChainedHashMapOperationType chainedHashMapOperation(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
-    typename Traits::ChainedHashMapInUseScopeType mapInUse(
-        reinterpret_cast<typename Traits::ChainedHashMapType *>(GetChainedHashMap()));
+    STRING_TABLE_OPERATION_SCOPE();
     ASSERT(vm->GetJsDebuggerManager()->GetSignalState());
     uint32_t hashcode = EcmaStringAccessor::ComputeHashcodeUtf8(utf8Data, utf8Len, canBeCompress);
-    typename Traits::ThreadType* holder = GetThreadHolder<Traits>(vm->GetJSThread());
+    JSThread* thread = vm->GetJSThread();
     BaseString *result = chainedHashMapOperation.template LoadOrStore<false>(
-        holder, hashcode,
+        thread, hashcode,
         [vm, utf8Data, utf8Len, canBeCompress, hashcode]() {
             EcmaString *value = EcmaStringAccessor::CreateFromUtf8(vm, utf8Data, utf8Len, canBeCompress,
                                                                    MemSpaceType::SHARED_OLD_SPACE);
@@ -751,88 +611,48 @@ EcmaString* EcmaStringTableImpl::GetOrInternStringThreadUnsafe(EcmaVM* vm, const
 
 EcmaString* EcmaStringTable::GetOrInternFlattenString(EcmaVM* vm, EcmaString* string)
 {
-#ifdef USE_CMC_GC
-    if (enableCMCGC_) {
-        return impl_.GetOrInternFlattenString<EnableCMCGCTrait>(vm, string);
-    }
-#endif
-    return impl_.GetOrInternFlattenString<DisableCMCGCNormalTrait>(vm, string);
+    return impl_.GetOrInternFlattenString(vm, string);
 }
 
 EcmaString* EcmaStringTable::GetOrInternFlattenStringNoGC(EcmaVM* vm, EcmaString* string)
 {
-#ifdef USE_CMC_GC
-    if (enableCMCGC_) {
-        return impl_.GetOrInternFlattenStringNoGC<EnableCMCGCTrait>(vm, string);
-    }
-#endif
-    return impl_.GetOrInternFlattenStringNoGC<DisableCMCGCNormalTrait>(vm, string);
+    return impl_.GetOrInternFlattenStringNoGC(vm, string);
 }
 
 EcmaString* EcmaStringTable::GetOrInternStringFromCompressedSubString(EcmaVM* vm, const JSHandle<EcmaString>& string,
                                                                       uint32_t offset, uint32_t utf8Len)
 {
-#ifdef USE_CMC_GC
-    if (enableCMCGC_) {
-        return impl_.GetOrInternStringFromCompressedSubString<EnableCMCGCTrait>(vm, string, offset, utf8Len);
-    }
-#endif
-    return impl_.GetOrInternStringFromCompressedSubString<DisableCMCGCNormalTrait>(vm, string, offset, utf8Len);
+    return impl_.GetOrInternStringFromCompressedSubString(vm, string, offset, utf8Len);
 }
 
 EcmaString* EcmaStringTable::GetOrInternString(EcmaVM* vm, EcmaString* string)
 {
-#ifdef USE_CMC_GC
-    if (enableCMCGC_) {
-        return impl_.GetOrInternString<EnableCMCGCTrait>(vm, string);
-    }
-#endif
-    return impl_.GetOrInternString<DisableCMCGCNormalTrait>(vm, string);
+    return impl_.GetOrInternString(vm, string);
 }
 
 EcmaString* EcmaStringTable::GetOrInternString(EcmaVM* vm, const JSHandle<EcmaString>& firstString,
                                                const JSHandle<EcmaString>& secondString)
 {
-#ifdef USE_CMC_GC
-    if (enableCMCGC_) {
-        return impl_.GetOrInternString<EnableCMCGCTrait>(vm, firstString, secondString);
-    }
-#endif
-    return impl_.GetOrInternString<DisableCMCGCNormalTrait>(vm, firstString, secondString);
+    return impl_.GetOrInternString(vm, firstString, secondString);
 }
 
 EcmaString* EcmaStringTable::GetOrInternString(EcmaVM* vm, const uint8_t* utf8Data, uint32_t utf8Len,
                                                bool canBeCompress,
                                                MemSpaceType type)
 {
-#ifdef USE_CMC_GC
-    if (enableCMCGC_) {
-        return impl_.GetOrInternString<EnableCMCGCTrait>(vm, utf8Data, utf8Len, canBeCompress, type);
-    }
-#endif
-    return impl_.GetOrInternString<DisableCMCGCNormalTrait>(vm, utf8Data, utf8Len, canBeCompress, type);
+    return impl_.GetOrInternString(vm, utf8Data, utf8Len, canBeCompress, type);
 }
 
 EcmaString* EcmaStringTable::GetOrInternString(EcmaVM* vm, const uint8_t* utf8Data, uint32_t utf16Len,
                                                MemSpaceType type)
 {
-#ifdef USE_CMC_GC
-    if (enableCMCGC_) {
-        return impl_.GetOrInternString<EnableCMCGCTrait>(vm, utf8Data, utf16Len, type);
-    }
-#endif
-    return impl_.GetOrInternString<DisableCMCGCNormalTrait>(vm, utf8Data, utf16Len, type);
+    return impl_.GetOrInternString(vm, utf8Data, utf16Len, type);
 }
 
 EcmaString* EcmaStringTable::GetOrInternString(EcmaVM* vm, const uint16_t* utf16Data, uint32_t utf16Len,
                                                bool canBeCompress)
 {
-#ifdef USE_CMC_GC
-    if (enableCMCGC_) {
-        return impl_.GetOrInternString<EnableCMCGCTrait>(vm, utf16Data, utf16Len, canBeCompress);
-    }
-#endif
-    return impl_.GetOrInternString<DisableCMCGCNormalTrait>(vm, utf16Data, utf16Len, canBeCompress);
+    return impl_.GetOrInternString(vm, utf16Data, utf16Len, canBeCompress);
 }
 
 // This is ONLY for JIT Thread, since JIT could not create JSHandle so need to allocate String with holding
@@ -841,100 +661,52 @@ EcmaString* EcmaStringTable::GetOrInternStringWithoutJSHandleForJit(EcmaVM* vm, 
                                                                     uint32_t utf16Len,
                                                                     MemSpaceType type)
 {
-#ifdef USE_CMC_GC
-    if (enableCMCGC_) {
-        return impl_.GetOrInternStringWithoutJSHandleForJit<EnableCMCGCTrait>(vm, utf8Data, utf16Len, type);
-    }
-#endif
-    return impl_.GetOrInternStringWithoutJSHandleForJit<DisableCMCGCNormalTrait>(vm, utf8Data, utf16Len, type);
+    return impl_.GetOrInternStringWithoutJSHandleForJit(vm, utf8Data, utf16Len, type);
 }
 
 EcmaString* EcmaStringTable::GetOrInternStringWithoutJSHandleForJit(EcmaVM* vm, const uint8_t* utf8Data,
                                                                     uint32_t utf8Len,
                                                                     bool canBeCompress, MemSpaceType type)
 {
-#ifdef USE_CMC_GC
-    if (enableCMCGC_) {
-        return impl_.GetOrInternStringWithoutJSHandleForJit<EnableCMCGCTrait>(vm, utf8Data, utf8Len,
-                                                                               canBeCompress, type);
-    }
-#endif
-    return impl_.GetOrInternStringWithoutJSHandleForJit<DisableCMCGCNormalTrait>(vm, utf8Data, utf8Len,
-                                                                                 canBeCompress, type);
+    return impl_.GetOrInternStringWithoutJSHandleForJit(vm, utf8Data, utf8Len, canBeCompress, type);
 }
 
 EcmaString *EcmaStringTable::TryGetInternString(JSThread *thread, const JSHandle<EcmaString> &string)
 {
-#ifdef USE_CMC_GC
-    if (enableCMCGC_) {
-        return impl_.TryGetInternString<EnableCMCGCTrait>(thread, string);
-    }
-#endif
-    return impl_.TryGetInternString<DisableCMCGCNormalTrait>(thread, string);
+    return impl_.TryGetInternString(thread, string);
 }
 
 void EcmaStringTable::SweepWeakRef(const WeakRootVisitor& visitor, uint32_t partitionID)
 {
-#ifdef USE_CMC_GC
-    if (enableCMCGC_) {
-        UNREACHABLE();
-    }
-#endif
-    impl_.SweepWeakRef<DisableCMCGCNormalTrait>(visitor, partitionID);
+    impl_.SweepWeakRef(visitor, partitionID);
 }
 
 void EcmaStringTable::ConcurrentSweepWeakRef(const WeakRootVisitor& visitor, uint32_t partitionID,
                                              std::vector<ChainedHashMapEntry*>& waitDeleteEntries)
 {
-#ifdef USE_CMC_GC
-    if (enableCMCGC_) {
-        UNREACHABLE();
-    }
-#endif
     impl_.ConcurrentSweepWeakRef(visitor, partitionID, waitDeleteEntries);
 }
 
 bool EcmaStringTable::CheckStringTableValidity(JSThread *thread)
 {
-#ifdef USE_CMC_GC
-    if (enableCMCGC_) {
-        return impl_.CheckStringTableValidity<EnableCMCGCTrait>(thread);
-    }
-#endif
-    return impl_.CheckStringTableValidity<DisableCMCGCNormalTrait>(thread);
+    return impl_.CheckStringTableValidity(thread);
 }
-
 
 EcmaString* EcmaStringTable::GetOrInternStringThreadUnsafe(EcmaVM* vm, const JSHandle<EcmaString> firstString,
                                                            const JSHandle<EcmaString> secondString)
 {
-#ifdef USE_CMC_GC
-    if (enableCMCGC_) {
-        return impl_.GetOrInternStringThreadUnsafe<EnableCMCGCTrait>(vm, firstString, secondString);
-    }
-#endif
-    return impl_.GetOrInternStringThreadUnsafe<DisableCMCGCNormalTrait>(vm, firstString, secondString);
+    return impl_.GetOrInternStringThreadUnsafe(vm, firstString, secondString);
 }
 
 // This should only call in Debugger Signal, and need to fix and remove
 EcmaString* EcmaStringTable::GetOrInternStringThreadUnsafe(EcmaVM* vm, const uint8_t* utf8Data, uint32_t utf8Len,
                                                            bool canBeCompress)
 {
-#ifdef USE_CMC_GC
-    if (enableCMCGC_) {
-        return impl_.GetOrInternStringThreadUnsafe<EnableCMCGCTrait>(vm, utf8Data, utf8Len, canBeCompress);
-    }
-#endif
-    return impl_.GetOrInternStringThreadUnsafe<DisableCMCGCNormalTrait>(vm, utf8Data, utf8Len, canBeCompress);
+    return impl_.GetOrInternStringThreadUnsafe(vm, utf8Data, utf8Len, canBeCompress);
 }
 
 void EcmaStringTable::TransferToNativeAndWaitSweepWeakRefTaskFinished(JSThread *thread)
 {
-#ifdef USE_CMC_GC
-    if (enableCMCGC_) {
-        return;
-    }
-#endif
     panda::ecmascript::ThreadNativeScope scope(thread);
     cleaner_->WaitSweepWeakRefTaskFinished();
 }

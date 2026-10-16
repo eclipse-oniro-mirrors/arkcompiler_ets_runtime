@@ -41,29 +41,6 @@ host_unittest_action("Base_String_Test") {
   ]
 }
 
-host_unittest_action("Base_String_Table_Test") {
-  module_out_path = module_output_path
-
-  sources = [
-    # test file
-    "base_string_table_test.cpp",
-  ]
-
-  configs = [
-    "//arkcompiler/ets_runtime:ecma_test_config",
-    "//arkcompiler/ets_runtime:icu_path_test_config",
-  ]
-
-  deps = [ "$js_root:libark_jsruntime_test" ]
-
-  # hiviewdfx libraries
-  external_deps = [
-    "icu:shared_icui18n",
-    "icu:shared_icuuc",
-    "zlib:libz",
-  ]
-}
-
 host_unittest_action("Composite_Base_Class_Test") {
   module_out_path = module_output_path
 
@@ -95,7 +72,6 @@ group("unittest") {
   # deps file
   deps = [
     ":Base_String_Test",
-    ":Base_String_Table_Test",
     ":Composite_Base_Class_Test",
   ]
 }
@@ -106,7 +82,6 @@ group("host_unittest") {
   # deps file
   deps = [
     ":Base_String_TestAction",
-    ":Base_String_Table_TestAction",
     ":Composite_Base_Class_TestAction",
   ]
 }
