@@ -74,6 +74,10 @@ declare_args() {
 
   enable_litecg_emit = true
 
+  # Only use LiteCG as the AOT/JIT codegen backend on device.
+  # When true, libark_llvmcodegen.so is not built or packaged into ROM.
+  ets_runtime_disable_llvm_backend = true
+
   TARGET = "x86_64"
   HOST_ARCH = 64
 

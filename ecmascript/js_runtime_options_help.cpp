@@ -185,7 +185,7 @@ const std::string PUBLIC_API HELP_OPTION_MSG =
     "--compiler-enable-native-inline:      Enable inline native function: Default: 'false'\n"
     "--compiler-enable-lowering-builtin:   Enable lowering global object: Default: 'false'\n"
     "--compiler-opt-array-onheap-check:    Enable TypedArray on heap check for aot compiler: Default: 'false'\n"
-    "--compiler-enable-litecg:             Enable LiteCG: Default: 'false'\n"
+    "--compiler-enable-litecg:             Enable LiteCG: Default: 'true'\n"
     "--compiler-enable-jit:                Enable jit: Default: 'false'\n"
     "--compiler-jit-backend:               JIT backend: 'arksteed' or 'fastjit'. Default: 'arksteed'\n"
     "--compiler-enable-osr:                Enable osr: Default: 'false'\n"

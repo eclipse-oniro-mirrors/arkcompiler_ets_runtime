@@ -965,7 +965,7 @@ public:
         Chunk chunk(data->GetNativeAreaAllocator());
         bool enableLog = data->GetLog()->EnableMethodCIRLog();
         bool licm = data->GetPassOptions()->EnableOptLoopInvariantCodeMotion();
-        bool liteCG = data->GetPassContext()->GetCompilationEnv()->GetJSOptions().IsCompilerEnableLiteCG();
+        bool liteCG = IsLiteCGEnabled(data->GetPassContext()->GetCompilationEnv());
         bool enableStoreBarrier = data->GetPassContext()->GetCompilationEnv()->GetJSOptions().IsStoreBarrierOpt();
         GraphLinearizer(data->GetCircuit(), enableLog, data->GetMethodName(), &chunk, false, licm, liteCG)
             .Run(data->GetCfg());
@@ -980,7 +980,9 @@ class CGIRGenPass {
 public:
     void CreateCodeGen(IRModule *module, bool enableLog)
     {
-#ifdef COMPILE_MAPLE
+#ifdef DISABLE_LLVM_BACKEND
+        cgImpl_ = std::make_unique<LiteCGIRGeneratorImpl>(static_cast<LMIRModule*>(module), enableLog);
+#elif defined(COMPILE_MAPLE)
         if (module->GetModuleKind() == MODULE_LLVM) {
             cgImpl_ = std::make_unique<LLVMIRGeneratorImpl>(static_cast<LLVMModule*>(module), enableLog);
         } else {

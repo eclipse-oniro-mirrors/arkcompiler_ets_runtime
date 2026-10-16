@@ -15,8 +15,10 @@
 
 #include "ecmascript/arksteed/arksteed_disassembler.h"
 
+#ifndef DISABLE_LLVM_BACKEND
 #include <llvm-c/Disassembler.h>
 #include <llvm-c/Target.h>
+#endif
 
 #include <iomanip>
 #include <mutex>
@@ -26,6 +28,7 @@
 
 namespace panda::ecmascript::arksteed {
 
+#ifndef DISABLE_LLVM_BACKEND
 void ArkSteedDisassembler::InitializeDisassemblerTarget()
 {
     static std::once_flag initOnce;
@@ -109,5 +112,20 @@ void ArkSteedDisassembler::Disassemble(std::ostream &os)
 
     LLVMDisasmDispose(ctx);
 }
+#else
+ArkSteedDisassembler::ArkSteedDisassembler(const uint8_t *code, size_t codeSize, const uint8_t *commentsData,
+                                           uint32_t commentsSize)
+    : code_(code), codeSize_(codeSize), commentsData_(commentsData), commentsSize_(commentsSize)
+{}
+
+void ArkSteedDisassembler::InitializeDisassemblerTarget()
+{
+}
+
+void ArkSteedDisassembler::Disassemble([[maybe_unused]] std::ostream &os)
+{
+    LOG_JIT(ERROR) << "ArkSteed disassembler is not available when DISABLE_LLVM_BACKEND";
+}
+#endif
 
 }  // namespace panda::ecmascript::arksteed

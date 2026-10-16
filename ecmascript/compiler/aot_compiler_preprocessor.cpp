@@ -239,7 +239,8 @@ void AotCompilerPreprocessor::AnalyzeGraph(BCInfo &bytecodeInfo, CompilationOpti
     AotMethodLogList logList(cOptions.logMethodsList_);
     AOTCompilationEnv aotCompilationEnv(vm_);
     CompilerLog log(cOptions.logOption_);
-    AOTFileGenerator generator(&log, &logList, &aotCompilationEnv, cOptions.triple_, false);
+    AOTFileGenerator generator(&log, &logList, &aotCompilationEnv, cOptions.triple_,
+                               IsLiteCGEnabled(&aotCompilationEnv));
     PGOProfilerDecoder profilerDecoder;
     LOptions lOptions = LOptions(DEFAULT_OPT_LEVEL, FPFlag::RESERVE_FP, DEFAULT_REL_MODE);
     Module *m = generator.AddModule("", cOptions.triple_, lOptions, false);

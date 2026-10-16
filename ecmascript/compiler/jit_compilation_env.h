@@ -61,13 +61,13 @@ public:
             // Disable heapConstant until we enable barrier for heap constant table
             return false;
         } else {
-            return hostThread_->GetEcmaVM()->GetJSOptions().IsCompilerEnableLiteCG();
+            return IsLiteCGEnabled(this);
         }
     }
 
     bool SupportIntrinsic() const override
     {
-        return hostThread_->GetEcmaVM()->GetJSOptions().IsCompilerEnableLiteCG();
+        return IsLiteCGEnabled(this);
     }
 
     bool SupportNonExistIC() const override

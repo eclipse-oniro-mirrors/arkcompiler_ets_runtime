@@ -143,5 +143,17 @@ protected:
     JSThread *thread_ {nullptr};
     kungfu::PGOTypeManager *ptManager_ {nullptr};
 };
+
+// Whether the LiteCG backend is used for the current compilation. On a build
+// where the LLVM backend is not compiled in (DISABLE_LLVM_BACKEND), LiteCG is
+// the only available backend, so the runtime option is always overridden to true.
+static inline bool IsLiteCGEnabled([[maybe_unused]] const CompilationEnv *env)
+{
+#ifdef DISABLE_LLVM_BACKEND
+    return true;
+#else
+    return env->GetJSOptions().IsCompilerEnableLiteCG();
+#endif
+}
 } // namespace panda::ecmascript
 #endif  // ECMASCRIPT_COMPILER_COMPILATION_ENV_H
