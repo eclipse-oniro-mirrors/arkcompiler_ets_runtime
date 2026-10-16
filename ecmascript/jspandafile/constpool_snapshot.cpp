@@ -28,6 +28,7 @@
 #include <securec.h>
 #include <zlib.h>
 #include <cstdint>
+#include <string>
 
 using IndexHeader = panda::panda_file::File::IndexHeader;
 
@@ -42,8 +43,9 @@ struct ConstPoolCacheStats {
 };
 
 // Classify restored cache slots by object type (counted before publishing the pools).
-// methods stays 0 until Method serialization lands; strings are always LineString
-// (the serializer only persists LINE_STRING entries in the cache region).
+// The serializer persists LINE_STRING and METHOD entries in the cache region; every other
+// object type (and every non-heap value) is filtered to Hole at serialize time, so
+// 'otherSlots' covers holes and the stats-only leftovers of unimplemented cache types.
 void ClassifyConstPoolCacheSlots(const JSThread* thread, const JSHandle<TaggedArray>& constpools,
                                  ConstPoolCacheStats& stats)
 {
@@ -71,6 +73,137 @@ void ClassifyConstPoolCacheSlots(const JSThread* thread, const JSHandle<TaggedAr
             }
         }
     }
+}
+
+// Re-anchor deserialized Methods in this constpool's cache to this process (native pointers +
+// AOT-domain defaults) before publishing. Extracted from DeserializeData to keep the function
+// size in check; the loop must run before AddOrUpdateConstpool exposes the constpool.
+// Patch safety: this pass rebuilds Methods from the BASE literals without consulting QuickFix.
+// This holds by ordering: snapshot restore publishes the pool BEFORE any LoadPatch /
+// LoadPatchIfNeeded for the same file (both registration entries require the file to be loaded
+// first), and the later registration replaces these published Methods through
+// PatchLoader::FindAndReplaceSameMethod exactly like fresh-filled ones. Do not move restore to
+// a path that can run after patch registration without adding a CheckAndGetPatch lookup here.
+// Orphan slots are counted and logged once per file by LogOrphanMethodSlots: when literals
+// are missing entirely (e.g. a restore path that skipped translation), a per-slot WARN would
+// flood every startup.
+void ReAnchorMethodsBeforePublish(JSThread* thread, const JSPandaFile* pandafile,
+                                  const JSHandle<ConstantPool>& constpoolHdl, uint32_t* orphanCount)
+{
+    for (uint32_t idx = 0; idx < constpoolHdl->GetNumOfCacheElement(); idx++) {
+        JSTaggedValue slotVal = constpoolHdl->GetObjectFromCache(thread, idx);
+        JSHandle<JSTaggedValue> slot(thread, slotVal);
+        if (!slot->IsHeapObject() || !slot->IsMethod()) {
+            continue;
+        }
+        JSHandle<Method> method = JSHandle<Method>::Cast(slot);
+        EntityId eid = constpoolHdl->GetEntityId(idx);
+        MethodLiteral *methodLiteral = pandafile->FindMethodLiteral(eid.GetOffset());
+        if (methodLiteral == nullptr) {
+            // Cannot re-anchor the serialized pointers: reset the cache slot to hole so the
+            // orphaned Method is collected and ConstantPool::GetMethodFromCache rebuilds it
+            // from scratch on demand. Count the slot; LogOrphanMethodSlots logs once per file.
+            constpoolHdl->SetObjectToCache(thread, idx, JSTaggedValue::Hole());
+            if (orphanCount != nullptr) {
+                (*orphanCount)++;
+            }
+            continue;
+        }
+        // Re-initialize the Method from the MethodLiteral exactly like a fresh cache fill
+        // (ObjectFactory::InitializeMethod + NewMethod's non-AOT path): the snapshot fields
+        // are raw copies and may still carry old-process AOT/deopt state (IsAotCodeBit,
+        // IsFastCallBit, DeoptType, IsJitCompiledCodeBit, FpDelta) next to stale pointers.
+        method->SetCallField(methodLiteral->GetCallField());
+        method->SetLiteralInfo(methodLiteral->GetLiteralInfo());
+        method->SetNativePointerOrBytecodeArray(const_cast<void *>(methodLiteral->GetNativePointer()));
+        method->SetExtraLiteralInfo(methodLiteral->GetExtraLiteralInfo());
+        method->SetExpectedPropertyCount(methodLiteral->GetExpectedPropertyCount());
+        method->SetCodeEntryOrLiteral(reinterpret_cast<uintptr_t>(methodLiteral));
+        method->SetFpDelta(0);
+        // If the literal itself carries AOT bits, downgrade to the interpreter stub entry and
+        // clear the AOT flags, matching NewMethod(needSetAotFlag=false). Deliberate trade-off:
+        // a snapshot written by a JIT process and restored in an AOT-loaded process gets
+        // interpreter entries for these Methods (a Method cache slot does not carry the AOT
+        // function entry index, so SetAOTFuncEntry cannot be re-derived here); correctness
+        // stays, and AOT speed is recovered by JIT re-profiling.
+        method->InitInterpreterStatusForCompiledMethod(thread);
+    }
+}
+
+// Reads the snapshot data for pandafile from filePath and verifies the version header.
+// On false the caller aborts: the snapshot file has already been removed on failure.
+bool ReadSnapshotData(EcmaVM* vm, const JSPandaFile* pandafile, const CString& version,
+                      const CString& filePath, std::unique_ptr<SerializeData>& fileData)
+{
+    JSThread* thread = vm->GetJSThread();
+    fileData = std::make_unique<SerializeData>(thread);
+    auto header = ModulesSnapshotHelper::SnapshotVersionInfo::New(vm->GetApplicationVersionCode(), version,
+                                                                  pandafile->GetJSPandaFileDesc());
+    if (!ModulesSnapshotHelper::ReadDataFromFile(fileData, filePath, header, "ConstPoolSnapshot")) {
+        LOG_ECMA(ERROR) << "ConstPoolSnapshot::DeserializeData failed: " << filePath;
+        ModulesSnapshotHelper::RemoveFile(filePath);
+        return false;
+    }
+    return true;
+}
+
+// Initialize, re-anchor and publish one restored constpool. Returns false only on a fatal
+// inconsistency (index header out of range) so the caller removes the snapshot file; a
+// non-constpool entry is skipped with a WARN and counts as success.
+bool PublishOneRestoredConstpool(JSThread* thread, EcmaVM* vm, const JSPandaFile* pandafile,
+                                 JSTaggedValue constpoolVal, uint32_t* orphanMethodSlots)
+{
+    if (!constpoolVal.IsConstantPool()) {
+        LOG_ECMA(WARN) << "ConstPoolSnapshot::DeserializeData: invalid constpool";
+        return true;
+    }
+    JSHandle<ConstantPool> constpoolHdl(thread, constpoolVal);
+    JSTaggedValue taggedConstpoolId = constpoolHdl->GetSharedConstpoolId();
+    constpoolHdl->InitializeWithSpecialValue(thread);
+    int sharedId = taggedConstpoolId.GetInt();
+    auto idxHeaders = pandafile->GetPandaFile()->GetIndexHeaders();
+    if (static_cast<uint32_t>(sharedId) >= idxHeaders.size()) {
+        LOG_ECMA(ERROR) << "ConstPoolSnapshot::DeserializeData failed: sharedId out of range";
+        return false;
+    }
+    const IndexHeader* idxHeader = &idxHeaders[sharedId];
+    constpoolHdl->SetJSPandaFile(pandafile);
+    constpoolHdl->SetIndexHeader(idxHeader);
+    constpoolHdl->SetSharedConstpoolId(taggedConstpoolId);
+    // Re-anchor deserialized Methods to this process before publishing the constpool
+    // (see ReAnchorMethodsBeforePublish: other isolates must never observe old-process
+    // addresses or compiled-state residue once AddOrUpdateConstpool exposes the pool).
+    ReAnchorMethodsBeforePublish(thread, pandafile, constpoolHdl, orphanMethodSlots);
+    vm->AddOrUpdateConstpool(pandafile, constpoolHdl, static_cast<int32_t>(sharedId));
+    vm->CreateUnsharedConstpool(constpoolVal);
+    return true;
+}
+
+// One aggregated WARN per restored file for Method cache slots that had no local
+// MethodLiteral and were reset to hole.
+void LogOrphanMethodSlots(const JSPandaFile* pandafile, uint32_t orphanMethodSlots)
+{
+    if (orphanMethodSlots == 0) {
+        return;
+    }
+    LOG_ECMA(WARN) << "ConstPoolSnapshot::DeserializeData: " << orphanMethodSlots <<
+        " orphan Method cache slot(s) reset to hole, pandafile: " <<
+        pandafile->GetJSPandaFileDesc();
+}
+
+// Gated stats summary. The plain success line is the default path; the detailed line runs
+// only when ENABLE_SNAPSHOT_STATS is set (one conditional branch when off).
+void LogRestoreStats(const EcmaVM* vm, const JSPandaFile* pandafile, const SerializeData* fileData,
+                     uint32_t constpoolCount, const ConstPoolCacheStats& stats)
+{
+    if (!vm->GetJSOptions().IsSnapshotStatsEnabled()) {
+        LOG_ECMA(INFO) << "ConstPoolSnapshot::DeserializeData success";
+        return;
+    }
+    LOG_ECMA(INFO) << "ConstPoolSnapshot::DeserializeData success" << ", pandafile: " <<
+        pandafile->GetJSPandaFileDesc() << ", constpools: " << constpoolCount << ", cacheSlots: " <<
+        stats.cacheSlots << ", strings: " << stats.stringSlots << ", methods: " <<
+        stats.methodSlots << ", others: " << stats.otherSlots << ", dataSize: " << fileData->Size();
 }
 } // namespace
 
@@ -125,12 +258,8 @@ bool ConstPoolSnapshot::DeserializeData(EcmaVM* vm, JSPandaFile* pandafile, cons
     }
     ModulesSnapshotHelper::MarkConstPoolSnapshotLoaded();
     JSThread* thread = vm->GetJSThread();
-    std::unique_ptr<SerializeData> fileData = std::make_unique<SerializeData>(thread);
-    auto header = ModulesSnapshotHelper::SnapshotVersionInfo::New(vm->GetApplicationVersionCode(), version,
-                                                                  pandafile->GetJSPandaFileDesc());
-    if (!ModulesSnapshotHelper::ReadDataFromFile(fileData, filePath, header, "ConstPoolSnapshot")) {
-        LOG_ECMA(ERROR) << "ConstPoolSnapshot::DeserializeData failed: " << filePath;
-        ModulesSnapshotHelper::RemoveFile(filePath);
+    std::unique_ptr<SerializeData> fileData;
+    if (!ReadSnapshotData(vm, pandafile, version, filePath, fileData)) {
         return false;
     }
     FileDeserializer deserializer(thread, fileData.get());
@@ -146,38 +275,18 @@ bool ConstPoolSnapshot::DeserializeData(EcmaVM* vm, JSPandaFile* pandafile, cons
     if (vm->GetJSOptions().IsSnapshotStatsEnabled()) {
         ClassifyConstPoolCacheSlots(thread, deserializedConstpools, stats);
     }
+    // Orphan Method slots are counted across all pools of this file and logged once
+    // (per-slot WARN would flood when literals are systematically missing).
+    uint32_t orphanMethodSlots = 0;
     for (uint32_t i = 0; i < length; i++) {
         JSTaggedValue constpool = deserializedConstpools->Get(thread, i);
-        if (!constpool.IsConstantPool()) {
-            LOG_ECMA(WARN) << "ConstPoolSnapshot::DeserializeData: invalid constpool";
-            continue;
-        }
-        JSHandle<ConstantPool> constpoolHdl(thread, constpool);
-        JSTaggedValue taggedConstpoolId = constpoolHdl->GetSharedConstpoolId();
-        constpoolHdl->InitializeWithSpecialValue(thread);
-        int sharedId = taggedConstpoolId.GetInt();
-        auto idxHeaders = pandafile->GetPandaFile()->GetIndexHeaders();
-        if (static_cast<uint32_t>(sharedId) >= idxHeaders.size()) {
-            LOG_ECMA(ERROR) << "ConstPoolSnapshot::DeserializeData failed: sharedId out of range";
+        if (!PublishOneRestoredConstpool(thread, vm, pandafile, constpool, &orphanMethodSlots)) {
             ModulesSnapshotHelper::RemoveFile(filePath);
             return false;
         }
-        const IndexHeader* idxHeader = &idxHeaders[sharedId];
-        constpoolHdl->SetJSPandaFile(pandafile);
-        constpoolHdl->SetIndexHeader(idxHeader);
-        constpoolHdl->SetSharedConstpoolId(taggedConstpoolId);
-        vm->AddOrUpdateConstpool(pandafile, constpoolHdl, static_cast<int32_t>(sharedId));
-        vm->CreateUnsharedConstpool(constpool);
     }
-    if (vm->GetJSOptions().IsSnapshotStatsEnabled()) {
-        LOG_ECMA(INFO) << "ConstPoolSnapshot::DeserializeData success" << ", pandafile: "
-                       << pandafile->GetJSPandaFileDesc() << ", constpools: " << length
-                       << ", cacheSlots: " << stats.cacheSlots << ", strings: " << stats.stringSlots
-                       << ", methods: " << stats.methodSlots << ", others: " << stats.otherSlots
-                       << ", dataSize: " << fileData->Size();
-    } else {
-        LOG_ECMA(INFO) << "ConstPoolSnapshot::DeserializeData success";
-    }
+    LogOrphanMethodSlots(pandafile, orphanMethodSlots);
+    LogRestoreStats(vm, pandafile, fileData.get(), length, stats);
     return true;
 }
 

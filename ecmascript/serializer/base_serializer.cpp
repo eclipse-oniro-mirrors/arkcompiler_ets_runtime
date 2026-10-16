@@ -488,6 +488,7 @@ void BaseSerializer::SerializeConstantPoolFieldIndividually(TaggedObject *root,
             }
             TaggedObject *object = value.GetHeapObject();
             switch (object->GetClass()->GetObjectType()) {
+                case JSType::METHOD:
                 case JSType::LINE_STRING:
                     writeCompressedHoles();
                     SerializeCompressedTaggedObject(object);

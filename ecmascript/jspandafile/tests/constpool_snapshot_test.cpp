@@ -39,6 +39,8 @@
 
 #include "ecmascript/ecma_string.h"
 #include "ecmascript/js_array.h"
+#include "ecmascript/js_runtime_options.h"
+#include "ecmascript/method.h"
 #include "ecmascript/object_factory.h"
 #include "ecmascript/serializer/file_deserializer.h"
 #include "ecmascript/serializer/file_serializer.h"
@@ -51,7 +53,6 @@ constexpr std::string_view MOCK_PANDAFILE_NAME = "/data/storage/el1/bundle/entry
 constexpr std::string_view MOCK_SNAPSHOT_LOG_PREFIX = "MockConstPoolSnapshot";
 constexpr std::string_view INVALID_MMAP_PATH = "/non_existent_dir/deep/nested/path/";
 constexpr std::string_view INVALID_READ_PATH = "/non_existent_path/";
-
 using namespace panda::ecmascript;
 using namespace panda::panda_file;
 using namespace panda::pandasm;
@@ -226,6 +227,32 @@ public:
         PandaFileTranslator::TranslateClasses(thread, pf.get(), CString(methodName));
         // Register shared constpools so ForEachSharedConstpool can find them
         thread->GetEcmaVM()->CreateAllConstpool(pf.get());
+    }
+
+    // Main-method offset of the mock abc. Every instance emitted from the same source shares
+    // this offset, which is what makes a serialize-side file and a deserialize-side file match.
+    static uint32_t MockMainMethodOffset(const std::shared_ptr<JSPandaFile> &pf)
+    {
+        const File *file = pf->GetPandaFile();
+        const uint8_t *typeDesc = utf::CStringAsMutf8("L_GLOBAL;");
+        const File::EntityId classId = file->GetClassId(typeDesc);
+        ClassDataAccessor cda(*file, classId);
+        uint32_t methodOffset = 0;
+        cda.EnumerateMethods([&](const MethodDataAccessor &mda) {
+            methodOffset = mda.GetMethodId().GetOffset();
+        });
+        return methodOffset;
+    }
+
+    // Creates the MethodLiterals of the mock file (fills methodLiteralMap_ via TranslateClasses)
+    // WITHOUT CreateAllConstpool: the cache tests only need the literal array.
+    void TranslateMockJSPandaFile(const std::shared_ptr<JSPandaFile> &pf) const
+    {
+        const uint32_t methodOffset = MockMainMethodOffset(pf);
+        pf->UpdateMainMethodIndex(methodOffset);
+        const File::EntityId methodId(methodOffset);
+        const char *methodName = MethodLiteral::GetMethodName(pf.get(), methodId);
+        PandaFileTranslator::TranslateClasses(thread, pf.get(), CString(methodName));
     }
 
     // Round-trips a single ConstantPool through the same FileSerializer/FileDeserializer pipeline
@@ -607,4 +634,33 @@ HWTEST_F_L0(ConstPoolSnapshotTest, CacheLiteralCannotBeSerialized)
     // Non-string cache entries (literal / JSArray) CANNOT be serialized and become Hole.
     ASSERT_TRUE(cached.IsHole());
 }
+
+// A REAL Method object (as opposed to an AOTLiteralInfo) in the constpool cache IS serialized
+// individually (JSType::METHOD branch of the cache serializer) and survives the round-trip.
+HWTEST_F_L0(ConstPoolSnapshotTest, CacheRealMethodCanBeSerialized)
+{
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    const std::shared_ptr<JSPandaFile> pf = NewMockJSPandaFile();
+    TranslateMockJSPandaFile(pf);
+    MethodLiteral *methodLiteral = pf->FindMethodLiteral(MockMainMethodOffset(pf));
+    ASSERT_NE(methodLiteral, nullptr);
+
+    const uint32_t numOfCache = ConstantPool::AlignUpNumOfCacheForCompressedPointer(1);
+    JSHandle<ConstantPool> constpool = factory->NewConstantPool(numOfCache);
+    constpool->SetSharedConstpoolId(JSTaggedValue(0));
+    JSHandle<Method> method = factory->NewMethod(methodLiteral, SHARED_OLD_SPACE);
+    ASSERT_TRUE(method.GetTaggedValue().IsMethod());
+    constpool->SetObjectToCache(thread, 0, method.GetTaggedValue());
+
+    JSHandle<ConstantPool> deserialized = SerializeAndDeserializeConstPool(constpool);
+    ASSERT_TRUE(deserialized.GetTaggedValue().IsConstantPool());
+    JSTaggedValue cached = deserialized->GetObjectFromCache(thread, 0);
+    // Before this change the METHOD entry was hole-d out; it now survives as a Method object.
+    ASSERT_TRUE(cached.IsMethod());
+    JSHandle<Method> deserializedMethod(thread, cached);
+    // In-process raw copies preserve the literal pointer and call field.
+    EXPECT_EQ(deserializedMethod->GetCodeEntryOrLiteral(), reinterpret_cast<uintptr_t>(methodLiteral));
+    EXPECT_EQ(deserializedMethod->GetCallField(), methodLiteral->GetCallField());
+}
+
 } // namespace panda::test
