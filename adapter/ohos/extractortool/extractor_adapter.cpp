@@ -18,9 +18,9 @@
 
 namespace panda::ecmascript {
 
-std::shared_ptr<FileMapper> GetSafeDataAsShared(Extractor& extractor, const std::string& fileName)
+std::shared_ptr<FileMapper> GetMmapDataAsShared(Extractor& extractor, const std::string& fileName)
 {
-    std::unique_ptr<FileMapper> uniqueMapper = extractor.GetSafeData(fileName);
+    std::unique_ptr<FileMapper> uniqueMapper = extractor.GetMmapData(fileName);
     if (uniqueMapper) {
         uniqueMapper->SetAutoReleaseMem(true);
     }

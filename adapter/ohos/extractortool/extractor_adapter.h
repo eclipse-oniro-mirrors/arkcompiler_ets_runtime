@@ -34,8 +34,8 @@ using FileMapperType = OHOS::AbilityBase::FileMapperType;
 using ZipEntryMap = OHOS::AbilityBase::ZipEntryMap;
 using ZipPos = OHOS::AbilityBase::ZipPos;
 
-// Bridge: foundation GetSafeData returns unique_ptr, arkcompiler consumers hold shared_ptr
-std::shared_ptr<FileMapper> GetSafeDataAsShared(Extractor& extractor, const std::string& fileName);
+// Bridge: foundation GetMmapData returns unique_ptr, arkcompiler consumers hold shared_ptr
+std::shared_ptr<FileMapper> GetMmapDataAsShared(Extractor& extractor, const std::string& fileName);
 
 // Bridge: foundation has no GetFilePathByOffset, implement via ZipFile::GetAllEntries + GetDataOffsetRelative
 std::string GetFilePathByOffset(ZipFile& zipFile, uintptr_t offset);

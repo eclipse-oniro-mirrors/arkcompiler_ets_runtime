@@ -136,7 +136,7 @@ public:
     explicit Extractor(const std::string &source) : hapPath_(source) {}
     virtual ~Extractor() = default;
 
-    std::unique_ptr<FileMapper> GetSafeData(const std::string &fileName)
+    std::unique_ptr<FileMapper> GetMmapData(const std::string &fileName)
     {
         lastRequestedFileName_ = fileName;
         return std::move(safeDataResult_);
@@ -171,9 +171,9 @@ using ZipFile = OHOS::AbilityBase::ZipFile;
 using ZipEntryMap = OHOS::AbilityBase::ZipEntryMap;
 using ZipPos = OHOS::AbilityBase::ZipPos;
 
-std::shared_ptr<FileMapper> GetSafeDataAsShared(Extractor& extractor, const std::string& fileName)
+std::shared_ptr<FileMapper> GetMmapDataAsShared(Extractor& extractor, const std::string& fileName)
 {
-    std::unique_ptr<FileMapper> uniqueMapper = extractor.GetSafeData(fileName);
+    std::unique_ptr<FileMapper> uniqueMapper = extractor.GetMmapData(fileName);
     if (uniqueMapper) {
         uniqueMapper->SetAutoReleaseMem(true);
     }
@@ -240,14 +240,13 @@ public:
     void TearDown() override {}
 };
 
-// --- GetSafeDataAsShared tests ---
-
+// --- GetMmapDataAsShared tests ---
 TEST_F(ExtractorAdapterTest, GetSafeDataAsShared_ReturnsSharedWithValidMapper)
 {
     Extractor extractor("dummy.hap");
     extractor.SetSafeDataResult(MakeFileMapper("test.abc", TEST_DATA_LEN_DEFAULT));
 
-    auto shared = GetSafeDataAsShared(extractor, "test.abc");
+    auto shared = GetMmapDataAsShared(extractor, "test.abc");
     ASSERT_NE(shared, nullptr);
     EXPECT_EQ(shared.use_count(), 1);
     EXPECT_EQ(shared->GetFileName(), "test.abc");
@@ -259,7 +258,7 @@ TEST_F(ExtractorAdapterTest, GetSafeDataAsShared_ReturnsNullWhenGetSafeDataRetur
     Extractor extractor("dummy.hap");
     extractor.SetSafeDataResult(nullptr);
 
-    auto shared = GetSafeDataAsShared(extractor, "missing.abc");
+    auto shared = GetMmapDataAsShared(extractor, "missing.abc");
     EXPECT_EQ(shared, nullptr);
 }
 
@@ -269,7 +268,7 @@ TEST_F(ExtractorAdapterTest, GetSafeDataAsShared_ForwardsFileNameToExtractor)
     extractor.SetSafeDataResult(MakeFileMapper("forwarded.abc", TEST_DATA_LEN_SMALL));
 
     const std::string requested = "forwarded.abc";
-    auto shared = GetSafeDataAsShared(extractor, requested);
+    auto shared = GetMmapDataAsShared(extractor, requested);
     ASSERT_NE(shared, nullptr);
     EXPECT_EQ(extractor.GetLastRequestedFileName(), requested);
 }
@@ -279,9 +278,9 @@ TEST_F(ExtractorAdapterTest, GetSafeDataAsShared_TransfersOwnership)
     Extractor extractor("dummy.hap");
     extractor.SetSafeDataResult(MakeFileMapper("owner.abc", TEST_DATA_LEN_MEDIUM));
 
-    auto shared = GetSafeDataAsShared(extractor, "owner.abc");
+    auto shared = GetMmapDataAsShared(extractor, "owner.abc");
     ASSERT_NE(shared, nullptr);
-    auto second = GetSafeDataAsShared(extractor, "owner.abc");
+    auto second = GetMmapDataAsShared(extractor, "owner.abc");
     EXPECT_EQ(second, nullptr);
     EXPECT_EQ(shared->GetFileName(), "owner.abc");
 }
@@ -293,7 +292,7 @@ TEST_F(ExtractorAdapterTest, GetSafeDataAsShared_SetsAutoReleaseMem)
         Extractor extractor("dummy.hap");
         extractor.SetSafeDataResult(MakeFileMapper("autorelease.abc", TEST_DATA_LEN_DEFAULT));
 
-        auto shared = GetSafeDataAsShared(extractor, "autorelease.abc");
+        auto shared = GetMmapDataAsShared(extractor, "autorelease.abc");
         ASSERT_NE(shared, nullptr);
         EXPECT_FALSE(FileMapper::WasReleased());
     }
