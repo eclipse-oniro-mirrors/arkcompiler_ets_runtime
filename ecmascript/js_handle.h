@@ -108,7 +108,12 @@ public:
     }
 
     template <typename S>
-    explicit JSHandle(const JSHandle<S> &handle) : address_(handle.GetAddress()) {}
+    explicit JSHandle(const JSHandle<S> &handle) : address_(handle.GetAddress())
+    {
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+        EcmaHandleScope::CheckHandleValid(address_);
+#endif
+    }
 
     template <typename S>
     inline static JSHandle<T> Cast(const JSHandle<S> &handle)
@@ -168,6 +173,9 @@ public:
 
     inline explicit JSHandle(uintptr_t slot) : address_(slot)
     {
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+        EcmaHandleScope::CheckHandleValid(address_);
+#endif
         if (!std::is_convertible<T *, JSTaggedValue *>::value) {
             ASSERT(slot != 0);
             if ((*reinterpret_cast<JSTaggedValue *>(slot)).IsHeapObject()) {
@@ -193,9 +201,19 @@ public:
         return common::ReadOnlyHandle<R>(address_);
     }
 private:
-    inline explicit JSHandle(const JSTaggedType *slot) : address_(reinterpret_cast<uintptr_t>(slot)) {}
-    inline explicit JSHandle(const T *const *slot) : address_(reinterpret_cast<uintptr_t>(slot)) {}
+    inline explicit JSHandle(const JSTaggedType *slot) : address_(reinterpret_cast<uintptr_t>(slot))
+    {
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+        EcmaHandleScope::CheckHandleValid(address_);
+#endif
+    }
 
+    inline explicit JSHandle(const T *const *slot) : address_(reinterpret_cast<uintptr_t>(slot))
+    {
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+        EcmaHandleScope::CheckHandleValid(address_);
+#endif
+    }
     uintptr_t address_;  // NOLINT(misc-non-private-member-variables-in-classes)
     friend class EcmaVM;
     friend class GlobalEnv;

@@ -16,6 +16,9 @@
 #include "ecmascript/ecma_handle_scope.h"
 
 #include "ecmascript/ecma_vm.h"
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+#include "ecmascript/napi/jsnapi_handle_scope_check.h"
+#endif
 #if defined(ENABLE_LOCAL_HANDLE_LEAK_DETECT)
 #include "ecmascript/dfx/hprof/heap_profiler.h"
 #endif
@@ -197,4 +200,11 @@ uintptr_t EcmaHandleScope::NewPrimitiveHandle(JSThread *thread, JSTaggedType val
 #endif // ENABLE_HITRACE_LOCAL_HANDLE_DETECT
     return reinterpret_cast<uintptr_t>(result);
 }
+
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+void EcmaHandleScope::CheckHandleValid(uintptr_t handle)
+{
+    panda::CheckHandleValid(handle);
+}
+#endif
 }  // namespace panda::ecmascript

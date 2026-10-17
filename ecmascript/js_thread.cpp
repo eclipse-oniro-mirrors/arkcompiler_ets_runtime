@@ -629,9 +629,13 @@ void JSThread::Iterate(RootVisitor &visitor, GlobalVisitType visitType)
         size_t globalCount = 0;
         auto callback = [&visitor, &globalCount](Node *node) {
             JSTaggedValue value(node->GetObject());
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+            visitor.VisitRoot(Root::ROOT_GLOBAL_HANDLE, ecmascript::ObjectSlot(node->GetObjectAddress()));
+#else
             if (value.IsHeapObject()) {
                 visitor.VisitRoot(Root::ROOT_GLOBAL_HANDLE, ecmascript::ObjectSlot(node->GetObjectAddress()));
             }
+#endif
             globalCount++;
         };
         if (visitType == GlobalVisitType::YOUNG_GLOBAL_VISIT) {
@@ -814,6 +818,25 @@ void JSThread::IterateWeakRoots(const WeakRootVisitor &visitor)
     IterateBuiltinHClassEntries(visitor);
     IterateCtorHClassEntries(visitor);
 }
+
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+void JSThread::IterateGlobal(RootVisitor &visitor)
+{
+    auto callBackWeak = [&visitor](WeakNode *node) {
+        visitor.VisitRoot(ecmascript::Root::ROOT_GLOBAL_HANDLE, ecmascript::ObjectSlot(node->GetObjectAddress()));
+    };
+    auto callBack = [&visitor](Node *node) {
+        visitor.VisitRoot(ecmascript::Root::ROOT_GLOBAL_HANDLE, ecmascript::ObjectSlot(node->GetObjectAddress()));
+    };
+    if (!vm_->GetJSOptions().EnableGlobalLeakCheck()) {
+        globalStorage_->IterateWeakUsageGlobal(callBackWeak);
+        globalStorage_->IterateUsageGlobal(callBack);
+    } else {
+        globalDebugStorage_->IterateWeakUsageGlobal(callBackWeak);
+        globalDebugStorage_->IterateUsageGlobal(callBack);
+    }
+}
+#endif
 
 void JSThread::UpdateJitCodeMapReference(const WeakRootVisitor &visitor)
 {
@@ -1862,8 +1885,14 @@ JSHClass *JSThread::GetArrayInstanceHClass(JSHandle<GlobalEnv> env, ElementsKind
 
 ModuleManager *JSThread::GetModuleManager() const
 {
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+    GlobalEnv *globalEnv = GetGlobalEnvRaw();
+    JSTaggedValue val = globalEnv->GetTaggedModuleManagerNativePointer();
+    JSNativePointer *nativePointer = reinterpret_cast<JSNativePointer *>(val.GetTaggedObject());
+#else
     JSHandle<GlobalEnv> globalEnv = GetGlobalEnv();
     JSHandle<JSNativePointer> nativePointer(globalEnv->GetModuleManagerNativePointer());
+#endif
     ModuleManager *moduleManager = reinterpret_cast<ModuleManager *>(nativePointer->GetExternalPointer());
     return moduleManager;
 }

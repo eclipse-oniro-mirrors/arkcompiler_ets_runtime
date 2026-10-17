@@ -1251,6 +1251,7 @@ ecma_source = [
   "ecmascript/mutator_lock.cpp",
   "ecmascript/napi/jsnapi.cpp",
   "ecmascript/napi/jsnapi_expo.cpp",
+  "ecmascript/napi/jsnapi_handle_scope_check.cpp",
   "ecmascript/napi/jsnapi_class_creation_helper.cpp",
   "ecmascript/object_factory.cpp",
   "ecmascript/object_operator.cpp",

@@ -119,6 +119,24 @@ public:
         }
     }
 
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+    template<class Callback>
+    void IterateThreadList(const Callback &cb)
+    {
+        LockHolder lock(threadsLock_);
+        for (auto thread : threads_) {
+            if (!thread->IsJSThread()) {
+                cb(thread);
+            }
+        }
+    }
+
+    GlobalEnv *GetGlobalEnvRaw() const
+    {
+        return reinterpret_cast<GlobalEnv*>(globalEnv_.GetTaggedObject());
+    }
+#endif
+
     void SetEnableLargeHeap(bool value)
     {
         enableLargeHeap_ = value;
@@ -652,6 +670,9 @@ private:
     friend class EcmaVM;
     friend class JSThread;
     friend class SharedHeap;
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+    friend bool CheckAddrValid(uintptr_t);
+#endif
 
     NO_COPY_SEMANTIC(Runtime);
     NO_MOVE_SEMANTIC(Runtime);
