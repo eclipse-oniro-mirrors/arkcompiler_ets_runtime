@@ -153,6 +153,24 @@ public:
         return SideEffectDescriptor {vertex->GetSideEffectKind()};
     }
 
+    static SideEffectDescriptor Classify(CallKnownJSFunctionVertex *vertex)
+    {
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
+    }
+
+    static SideEffectDescriptor Classify(CallSelfVertex *vertex)
+    {
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
+    }
+
+    static SideEffectDescriptor Classify(CallKnownBuiltinVertex *vertex)
+    {
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
+    }
+
     template <typename VertexT>
     static SideEffectDescriptor Classify(VertexT *vertex)
     {

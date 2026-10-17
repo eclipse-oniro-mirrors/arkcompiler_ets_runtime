@@ -983,6 +983,84 @@ void ArkSteedCodeGenerator::PrepareArkSteedCall(CallVertex *call, ArkSteedRegist
     __ MoveRepr(MachineRepresentation::Tagged, target, __ GetCallArgSlot(CallVertex::TARGET_INDEX + CALL_ARG1));
 }
 
+void ArkSteedCodeGenerator::PrepareArkSteedSelfCall(CallSelfVertex *call)
+{
+    const uint32_t userArgc = call->GetActualArgc();
+    const uint32_t expectedParameterCount = call->GetExpectedParameterCount();
+    const uint32_t totalArgc = userArgc + NUM_MANDATORY_JSFUNC_ARGS;
+    const uint32_t reservedSlotCount = call->GetReservedCallSlotCount();
+    __ ReserveCallArgSlots(static_cast<int32_t>(reservedSlotCount));
+
+    {
+        TemporaryRegisterScope scope(assembler_);
+        ArkSteedRegister scratch = scope.AcquireScratch();
+        __ Move(scratch, static_cast<uint64_t>(totalArgc));
+        __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0), scratch);
+    }
+
+    StoreStubStackArgument(call, CallSelfVertex::TARGET_INDEX,
+                           __ GetCallArgSlot(CallSelfVertex::TARGET_INDEX + CALL_ARG1));
+    StoreStubStackArgument(call, CallSelfVertex::NEW_TARGET_INDEX,
+                           __ GetCallArgSlot(CallSelfVertex::NEW_TARGET_INDEX + CALL_ARG1));
+    StoreStubStackArgument(call, CallSelfVertex::RECEIVER_INDEX,
+                           __ GetCallArgSlot(CallSelfVertex::RECEIVER_INDEX + CALL_ARG1));
+    for (uint32_t index = 0; index < userArgc; index++) {
+        StoreStubStackArgument(call, CallSelfVertex::FIRST_ARG_INDEX + index,
+                               __ GetCallArgSlot(CallVertex::FIRST_ARG_INDEX + CALL_ARG1 + index));
+    }
+
+    const uint32_t userSlotCount = std::max(userArgc, expectedParameterCount);
+    const uint32_t firstUnusedSlot = CallVertex::FIRST_ARG_INDEX + CALL_ARG1 + userArgc;
+    const uint32_t logicalSlotCount = CallVertex::FIRST_ARG_INDEX + CALL_ARG1 + userSlotCount;
+    if (firstUnusedSlot < reservedSlotCount) {
+        TemporaryRegisterScope scope(assembler_);
+        ArkSteedRegister scratch = scope.AcquireScratch();
+        __ Move(scratch, static_cast<int64_t>(JSTaggedValue::VALUE_UNDEFINED));
+        for (uint32_t slot = firstUnusedSlot; slot < logicalSlotCount; slot++) {
+            __ MoveRepr(MachineRepresentation::Tagged, __ GetCallArgSlot(slot), scratch);
+        }
+        for (uint32_t slot = logicalSlotCount; slot < reservedSlotCount; slot++) {
+            __ MoveRepr(MachineRepresentation::Tagged, __ GetCallArgSlot(slot), scratch);
+        }
+    }
+}
+
+void ArkSteedCodeGenerator::PrepareKnownCall(CallKnownJSFunctionVertex *call)
+{
+    const uint32_t userArgc = call->GetActualArgc();
+    const uint32_t totalArgc = userArgc + NUM_MANDATORY_JSFUNC_ARGS;
+    const uint32_t reservedSlotCount = call->GetReservedCallSlotCount();
+    __ ReserveCallArgSlots(static_cast<int32_t>(reservedSlotCount));
+
+    {
+        TemporaryRegisterScope scope(assembler_);
+        ArkSteedRegister scratch = scope.AcquireScratch();
+        __ Move(scratch, static_cast<uint64_t>(totalArgc));
+        __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0), scratch);
+    }
+
+    StoreStubStackArgument(call, CallKnownJSFunctionVertex::TARGET_INDEX,
+                           __ GetCallArgSlot(CallVertex::TARGET_INDEX + CALL_ARG1));
+    StoreStubStackArgument(call, CallKnownJSFunctionVertex::NEW_TARGET_INDEX,
+                           __ GetCallArgSlot(CallVertex::NEW_TARGET_INDEX + CALL_ARG1));
+    StoreStubStackArgument(call, CallKnownJSFunctionVertex::RECEIVER_INDEX,
+                           __ GetCallArgSlot(CallVertex::THIS_INDEX + CALL_ARG1));
+    for (uint32_t index = 0; index < userArgc; index++) {
+        StoreStubStackArgument(call, CallKnownJSFunctionVertex::FIRST_ARG_INDEX + index,
+                               __ GetCallArgSlot(CallVertex::FIRST_ARG_INDEX + CALL_ARG1 + index));
+    }
+
+    const uint32_t firstUnusedSlot = CallVertex::FIRST_ARG_INDEX + CALL_ARG1 + userArgc;
+    if (firstUnusedSlot < reservedSlotCount) {
+        TemporaryRegisterScope scope(assembler_);
+        ArkSteedRegister scratch = scope.AcquireScratch();
+        __ Move(scratch, static_cast<int64_t>(JSTaggedValue::VALUE_UNDEFINED));
+        for (uint32_t slot = firstUnusedSlot; slot < reservedSlotCount; slot++) {
+            __ MoveRepr(MachineRepresentation::Tagged, __ GetCallArgSlot(slot), scratch);
+        }
+    }
+}
+
 void ArkSteedCodeGenerator::FreeArkSteedCallFrame(CallVertex *call)
 {
     (void)call;
@@ -1008,7 +1086,24 @@ void ArkSteedCodeGenerator::EmitCallArkSteed(CallVertex *call, ArkSteedRegister 
 
 void ArkSteedCodeGenerator::EmitCallGeneric(CallVertex *call, ArkSteedRegister scratch)
 {
-    int stackArgCount = PrepareTrampolineArguments(call, scratch);
+    int stackArgCount = PrepareTrampolineArguments(
+        call, call->GetActualArgc(), CallVertex::TARGET_INDEX, CallVertex::NEW_TARGET_INDEX,
+        CallVertex::THIS_INDEX, CallVertex::FIRST_ARG_INDEX, scratch);
+    __ CallTrampoline(RTSTUB_ID(JSCall));
+    if (HasLazyDeoptSafepoint(call)) {
+        EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
+    } else {
+        safepointBuilder_->DefineSafepoint(__ GetPcOffset());
+    }
+    __ FreeCallArgSlots(stackArgCount);
+}
+
+void ArkSteedCodeGenerator::EmitCallGeneric(CallKnownJSFunctionVertex *call, ArkSteedRegister scratch)
+{
+    int stackArgCount = PrepareTrampolineArguments(
+        call, call->GetActualArgc(), CallKnownJSFunctionVertex::TARGET_INDEX,
+        CallKnownJSFunctionVertex::NEW_TARGET_INDEX, CallKnownJSFunctionVertex::RECEIVER_INDEX,
+        CallKnownJSFunctionVertex::FIRST_ARG_INDEX, scratch);
     __ CallTrampoline(RTSTUB_ID(JSCall));
     if (HasLazyDeoptSafepoint(call)) {
         EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
@@ -1049,9 +1144,11 @@ void ArkSteedCodeGenerator::EmitReturnIfPendingException()
     __ Bind(&noPendingException);
 }
 
-int ArkSteedCodeGenerator::PrepareTrampolineArguments(CallVertex *call, ArkSteedRegister scratch)
+int ArkSteedCodeGenerator::PrepareTrampolineArguments(const Vertex *call, uint32_t userArgc,
+                                                      uint32_t targetIndex, uint32_t newTargetIndex,
+                                                      uint32_t receiverIndex, uint32_t firstArgIndex,
+                                                      ArkSteedRegister scratch)
 {
-    uint32_t userArgc = call->GetActualArgc();
     uint32_t totalArgc = userArgc + NUM_MANDATORY_JSFUNC_ARGS;
     // stack layout: totalArgc, actualArgV, target, newTarget, this, userArgs
     uint32_t stackArgCount = totalArgc + CALL_ARG2;
@@ -1063,15 +1160,94 @@ int ArkSteedCodeGenerator::PrepareTrampolineArguments(CallVertex *call, ArkSteed
     __ Move(scratch, 0);
     __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG1), scratch);
 
-    StoreStubStackArgument(call, CallVertex::TARGET_INDEX, __ GetCallArgSlot(CallVertex::TARGET_INDEX + CALL_ARG2));
-    StoreStubStackArgument(call, CallVertex::NEW_TARGET_INDEX,
-                           __ GetCallArgSlot(CallVertex::NEW_TARGET_INDEX + CALL_ARG2));
-    StoreStubStackArgument(call, CallVertex::THIS_INDEX, __ GetCallArgSlot(CallVertex::THIS_INDEX + CALL_ARG2));
+    StoreStubStackArgument(call, targetIndex, __ GetCallArgSlot(CallVertex::TARGET_INDEX + CALL_ARG2));
+    StoreStubStackArgument(call, newTargetIndex, __ GetCallArgSlot(CallVertex::NEW_TARGET_INDEX + CALL_ARG2));
+    StoreStubStackArgument(call, receiverIndex, __ GetCallArgSlot(CallVertex::THIS_INDEX + CALL_ARG2));
     for (uint32_t i = 0; i < userArgc; i++) {
-        StoreStubStackArgument(call, CallVertex::FIRST_ARG_INDEX + i,
-                               __ GetCallArgSlot(CallVertex::FIRST_ARG_INDEX + CALL_ARG2 + i));
+        StoreStubStackArgument(call, firstArgIndex + i, __ GetCallArgSlot(CallVertex::FIRST_ARG_INDEX + CALL_ARG2 + i));
     }
     return static_cast<int>(reservedSlotCount);
+}
+
+int ArkSteedCodeGenerator::PrepareKnownBuiltinStubArguments(CallKnownBuiltinVertex *call)
+{
+    ASSERT(call->UsesFastStub());
+    int reservedSlotCount = static_cast<int>(call->GetReservedCallSlotCount());
+    __ ReserveCallArgSlots(reservedSlotCount);
+
+    constexpr uint32_t FIRST_USER_ARG_PARAMETER = static_cast<uint32_t>(kungfu::BuiltinsArgs::ARG0_OR_ARGV);
+    constexpr uint32_t MAX_FAST_BUILTIN_ARGS = 3;
+    // Spill stack-passed inputs before writing C argument registers. A stack-passed input may currently live in one
+    // of those registers even though its final ABI location is on the outgoing stack.
+    for (uint32_t index = 0; index < MAX_FAST_BUILTIN_ARGS; index++) {
+        uint32_t parameterIndex = FIRST_USER_ARG_PARAMETER + index;
+        bool isRegisterArgument = parameterIndex < static_cast<uint32_t>(ArkSteedAssembler::NUM_ARG_REGISTERS);
+        if (index < call->GetActualArgc()) {
+            if (!isRegisterArgument) {
+                int32_t slotIndex = static_cast<int32_t>(parameterIndex) - ArkSteedAssembler::NUM_ARG_REGISTERS;
+                StoreStubStackArgument(call, CallKnownBuiltinVertex::FIRST_ARG_INDEX + index,
+                                       __ GetCallArgSlot(slotIndex));
+            }
+            continue;
+        }
+        if (isRegisterArgument) {
+            __ Move(ArkSteedAssembler::GetParameterRegister(static_cast<int>(parameterIndex)),
+                    static_cast<uint64_t>(JSTaggedValue::VALUE_UNDEFINED));
+        } else {
+            TemporaryRegisterScope scope(assembler_);
+            ArkSteedRegister scratch = scope.AcquireScratch();
+            int32_t slotIndex = static_cast<int32_t>(parameterIndex) - ArkSteedAssembler::NUM_ARG_REGISTERS;
+            __ Move(scratch, static_cast<uint64_t>(JSTaggedValue::VALUE_UNDEFINED));
+            __ MoveRepr(MachineRepresentation::Tagged, __ GetCallArgSlot(slotIndex), scratch);
+        }
+    }
+
+    constexpr int BUILTIN_STACK_ARG_COUNT =
+        static_cast<int>(kungfu::BuiltinsArgs::NUM_OF_INPUTS) - ArkSteedAssembler::NUM_ARG_REGISTERS;
+    if (reservedSlotCount > BUILTIN_STACK_ARG_COUNT) {
+        TemporaryRegisterScope scope(assembler_);
+        ArkSteedRegister scratch = scope.AcquireScratch();
+        __ Move(scratch, static_cast<uint64_t>(JSTaggedValue::VALUE_UNDEFINED));
+        __ MoveRepr(MachineRepresentation::Tagged, __ GetCallArgSlot(BUILTIN_STACK_ARG_COUNT), scratch);
+    }
+
+    ArkSteedRegister glue = ArkSteedAssembler::GetParameterRegister(static_cast<int>(kungfu::BuiltinsArgs::GLUE));
+    ArkSteedRegister nativeCode =
+        ArkSteedAssembler::GetParameterRegister(static_cast<int>(kungfu::BuiltinsArgs::NATIVECODE));
+    ArkSteedRegister target = GetInputRegister(call, CallKnownBuiltinVertex::TARGET_INDEX);
+    __ LoadGlue(glue);
+    __ LoadField(nativeCode, target, JSFunction::CODE_ENTRY_OFFSET);
+    __ Move(ArkSteedAssembler::GetParameterRegister(static_cast<int>(kungfu::BuiltinsArgs::NUMARGS)),
+            static_cast<int32_t>(call->GetActualArgc()));
+    return reservedSlotCount;
+}
+
+int ArkSteedCodeGenerator::PrepareKnownBuiltinNativeArguments(CallKnownBuiltinVertex *call)
+{
+    ASSERT(!call->UsesFastStub());
+    int reservedSlotCount = static_cast<int>(call->GetReservedCallSlotCount());
+    __ ReserveCallArgSlots(reservedSlotCount);
+
+    {
+        TemporaryRegisterScope scope(assembler_);
+        ArkSteedRegister scratch = scope.AcquireScratch();
+        __ LoadGlue(scratch);
+        __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(0), scratch);
+        uint32_t totalArgc = call->GetActualArgc() + NUM_MANDATORY_JSFUNC_ARGS;
+        __ Move(scratch, static_cast<int64_t>(totalArgc));
+        __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(1), scratch);
+    }
+    for (uint32_t index = 0; index < call->GetInputCount(); index++) {
+        StoreStubStackArgument(call, index, __ GetCallArgSlot(static_cast<int32_t>(index + 2U)));
+    }
+    if (reservedSlotCount > static_cast<int>(call->GetInputCount() + 2U)) {
+        TemporaryRegisterScope scope(assembler_);
+        ArkSteedRegister scratch = scope.AcquireScratch();
+        __ Move(scratch, static_cast<uint64_t>(JSTaggedValue::VALUE_UNDEFINED));
+        __ MoveRepr(MachineRepresentation::Tagged,
+                    __ GetCallArgSlot(static_cast<int32_t>(call->GetInputCount() + 2U)), scratch);
+    }
+    return reservedSlotCount;
 }
 
 template <>
@@ -1104,6 +1280,94 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CallVertex>(CallVertex *call)
     __ Bind(&callGeneric);
     EmitCallGeneric(call, scratch);
     __ Bind(&exit);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<CallKnownJSFunctionVertex>(CallKnownJSFunctionVertex *call)
+{
+    Label callGeneric;
+    Label exit;
+    ArkSteedRegister target = GetInputRegister(call, CallKnownJSFunctionVertex::TARGET_INDEX);
+    __ JumpIfNotArkSteedEntry(target, &callGeneric);
+    ArkSteedRegister context = GetInputRegister(call, CallKnownJSFunctionVertex::CONTEXT_INDEX);
+    ASSERT(target == ArkSteedAssembler::CALLEE_TARGET_REGISTER);
+    ASSERT(context == ArkSteedAssembler::CALLEE_CONTEXT_REGISTER);
+    PrepareKnownCall(call);
+    {
+        TemporaryRegisterScope scope(assembler_);
+        ArkSteedRegister codeEntry = scope.AcquireScratch();
+        __ LoadField(codeEntry, target, JSFunction::CODE_ENTRY_OFFSET);
+        __ Call(codeEntry);
+    }
+    if (HasLazyDeoptSafepoint(call)) {
+        EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
+    } else {
+        safepointBuilder_->DefineSafepoint(__ GetPcOffset());
+    }
+    __ RestoreStackPointerToFrameBottom(graph_);
+    __ Jump(&exit);
+
+    __ Bind(&callGeneric);
+    {
+        TemporaryRegisterScope scope(assembler_);
+        ArkSteedRegister scratch = scope.Acquire();
+        EmitCallGeneric(call, scratch);
+    }
+    __ Bind(&exit);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<CallKnownBuiltinVertex>(CallKnownBuiltinVertex *call)
+{
+    int reservedSlotCount = 0;
+    if (call->UsesFastStub()) {
+        reservedSlotCount = PrepareKnownBuiltinStubArguments(call);
+        TemporaryRegisterScope scope(assembler_);
+        ArkSteedRegister entry = scope.AcquireScratch();
+        ArkSteedRegister glue =
+            ArkSteedAssembler::GetParameterRegister(static_cast<int>(kungfu::BuiltinsArgs::GLUE));
+        __ LoadBuiltinStubEntry(entry, glue, static_cast<uint32_t>(call->GetBuiltinId()));
+        __ Call(entry);
+    } else {
+        reservedSlotCount = PrepareKnownBuiltinNativeArguments(call);
+        ArkSteedRegister target = GetInputRegister(call, CallKnownBuiltinVertex::TARGET_INDEX);
+        ArkSteedRegister nativeCode = GetResultRegister(call);
+        __ LoadField(nativeCode, target, JSFunction::CODE_ENTRY_OFFSET);
+        __ CallNativeBuiltinTrampoline(nativeCode);
+    }
+    if (HasLazyDeoptSafepoint(call)) {
+        EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
+    } else {
+        safepointBuilder_->DefineSafepoint(__ GetPcOffset());
+    }
+    __ FreeCallArgSlots(reservedSlotCount);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<CallSelfVertex>(CallSelfVertex *call)
+{
+    ArkSteedRegister target = GetInputRegister(call, CallSelfVertex::TARGET_INDEX);
+    ArkSteedRegister context = GetInputRegister(call, CallSelfVertex::CONTEXT_INDEX);
+    ASSERT(target == ArkSteedAssembler::CALLEE_TARGET_REGISTER);
+    ASSERT(context == ArkSteedAssembler::CALLEE_CONTEXT_REGISTER);
+
+    PrepareArkSteedSelfCall(call);
+    __ Call(&entryLabel_);
+    if (HasLazyDeoptSafepoint(call)) {
+        EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
+    } else {
+        safepointBuilder_->DefineSafepoint(__ GetPcOffset());
+    }
+    __ RestoreStackPointerToFrameBottom(graph_);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfReferenceNotEqualVertex>(DeoptIfReferenceNotEqualVertex *guard)
+{
+    ArkSteedRegister left = GetInputRegister(guard, DeoptIfReferenceNotEqualVertex::LEFT_INDEX);
+    ArkSteedRegister right = GetInputRegister(guard, DeoptIfReferenceNotEqualVertex::RIGHT_INDEX);
+    __ Compare(left, right);
+    BranchToEagerDeoptTarget(Condition::NOT_EQUAL, guard, guard->GetDeoptType());
 }
 
 template <>
@@ -3421,6 +3685,7 @@ void ArkSteedCodeGenerator::Generate()
         ComputeBlockColors();
     }
 
+    __ Bind(&entryLabel_);
     __ Prologue(graph_);
 #if defined(PANDA_TARGET_ARM64)
     __ CheckCodePools(true);

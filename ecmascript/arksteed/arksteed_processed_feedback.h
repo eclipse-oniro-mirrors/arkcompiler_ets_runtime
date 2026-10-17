@@ -19,6 +19,7 @@
 #include <array>
 
 #include "ecmascript/arksteed/arksteed_pgo_access_info.h"
+#include "ecmascript/compiler/builtins/builtins_call_signature.h"
 #include "ecmascript/js_tagged_value_wrapper.h"
 
 namespace panda::ecmascript::arksteed {
@@ -35,6 +36,12 @@ enum class ValueAccessFeedbackKind : uint8_t {
     INSUFFICIENT,
     NAMED,
     ELEMENT,
+};
+
+enum class CallFeedbackKind : uint8_t {
+    INSUFFICIENT,
+    MONOMORPHIC_JS_FUNCTION,
+    MONOMORPHIC_BUILTIN,
 };
 
 enum class ArkSteedOperationHint : uint8_t {
@@ -66,6 +73,23 @@ struct OperationFeedback {
     bool IsInsufficient() const
     {
         return hint == ArkSteedOperationHint::NONE;
+    }
+};
+
+struct CallFeedback {
+    CallFeedbackKind kind {CallFeedbackKind::INSUFFICIENT};
+    uint32_t slotId {0};
+    ArkSteedFunctionRef target {};
+    kungfu::BuiltinsStubCSigns::ID builtinId {kungfu::BuiltinsStubCSigns::ID::NONE};
+
+    bool IsMonomorphicJSFunction() const
+    {
+        return kind == CallFeedbackKind::MONOMORPHIC_JS_FUNCTION;
+    }
+
+    bool IsMonomorphicBuiltin() const
+    {
+        return kind == CallFeedbackKind::MONOMORPHIC_BUILTIN;
     }
 };
 

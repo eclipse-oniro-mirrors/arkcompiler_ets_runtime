@@ -84,6 +84,7 @@ private:
 };
 
 using ArkSteedObjectRef = ArkSteedHeapRef;
+using ArkSteedFunctionRef = ArkSteedHeapRef;
 using ArkSteedHClassRef = ArkSteedHeapRef;
 using ArkSteedProtoCellRef = ArkSteedHeapRef;
 using ArkSteedHandlerRef = ArkSteedHeapRef;

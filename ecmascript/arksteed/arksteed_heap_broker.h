@@ -154,6 +154,14 @@ public:
         return name->IsSafeForCompile();
     }
 
+    ArkSteedFunctionRef MakeFunctionRef(JSTaggedValue value) const
+    {
+        if (!value.IsJSFunction()) {
+            return ArkSteedFunctionRef();
+        }
+        return MakeStableHeapRef(value, false);
+    }
+
     bool TryGetNameFromConstantPool(uint16_t cpIdx, ArkSteedNameRef *name) const
     {
         if (!SerializingAllowed()) {
@@ -214,6 +222,17 @@ public:
         return true;
     }
 
+    bool IsSameFunction(const ArkSteedFunctionRef &ref) const
+    {
+        if (!ref.IsSafeForCompile()) {
+            return false;
+        }
+        SerializingScope scope(this, "ArkSteedHeapBroker::IsSameFunction");
+        JSTaggedValue target = ref.ValueAllowHandleDeref();
+        JSHandle<JSFunction> currentFunction = env_->GetJsFunction();
+        return target.IsJSFunction() && target == currentFunction.GetTaggedValue();
+    }
+
     JSThread *GetCompilerThread() const
     {
         return compilerThread_;
@@ -229,6 +248,8 @@ public:
     bool GetFeedbackForGlobalAccess(const ArkSteedFeedbackReader &reader, GlobalAccessFeedback *feedback) const;
 
     bool GetFeedbackForOperation(const ArkSteedFeedbackReader &reader, OperationFeedback *feedback) const;
+
+    bool GetFeedbackForCall(const ArkSteedFeedbackReader &reader, CallFeedback *feedback) const;
 
     bool TryGetCachedNamedAccessFeedback(AccessFeedbackSource source, NamedAccessFeedback *feedback) const
     {

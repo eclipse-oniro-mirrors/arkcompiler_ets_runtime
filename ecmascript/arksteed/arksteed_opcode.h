@@ -27,6 +27,8 @@
 #include "ecmascript/arksteed/arksteed_regalloc_types.h"
 #include "ecmascript/arksteed/arksteed_vertex.h"
 #include "ecmascript/arksteed/arksteed_vreg.h"
+#include "ecmascript/common.h"
+#include "ecmascript/compiler/builtins/builtins_call_signature.h"
 #include "ecmascript/compiler/deopt_type.h"
 #include "ecmascript/compiler/rt_call_signature.h"
 #include "ecmascript/js_hclass.h"
@@ -48,6 +50,11 @@ enum class BinaryOpKind : uint8_t {
     DIV,
     MOD,
     EXP,
+};
+
+enum class BuiltinCallEntryKind : uint8_t {
+    FAST_STUB,
+    NATIVE_CPP,
 };
 
 enum class IntBitwiseKind : uint8_t {
@@ -1690,6 +1697,194 @@ private:
     uint32_t actualArgc_;
 };
 
+class CallKnownJSFunctionVertex : public VertexMixin<ValueVertex, CallKnownJSFunctionVertex>,
+                                  public ThrowableMixin,
+                                  public LazyDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        TARGET_INDEX = 0,
+        NEW_TARGET_INDEX = 1,
+        RECEIVER_INDEX = 2,
+        CONTEXT_INDEX = 3,
+        FIRST_ARG_INDEX = 4,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::IS_CALL |
+        VertexPropertyFlag::CAN_READ |
+        VertexPropertyFlag::CAN_WRITE |
+        VertexPropertyFlag::CAN_ALLOCATE |
+        VertexPropertyFlag::CAN_LAZY_DEOPT |
+        VertexPropertyFlag::CAN_THROW;
+
+    explicit CallKnownJSFunctionVertex(uint32_t actualArgc)
+        : VertexMixin(), actualArgc_(actualArgc)
+    {
+    }
+
+    uint32_t GetActualArgc() const
+    {
+        return actualArgc_;
+    }
+
+    uint32_t GetReservedCallSlotCount() const
+    {
+        uint32_t logicalSlots = actualArgc_ + NUM_MANDATORY_JSFUNC_ARGS + 1U;
+        return (logicalSlots + 1U) & ~1U;
+    }
+
+    size_t GetArgCount() const
+    {
+        return GetInputCount();
+    }
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == FIRST_ARG_INDEX + actualArgc_);
+        for (uint32_t index = 0; index < GetInputCount(); ++index) {
+            ASSERT(GetInput(index)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        }
+    }
+
+private:
+    uint32_t actualArgc_;
+};
+
+class CallKnownBuiltinVertex : public VertexMixin<ValueVertex, CallKnownBuiltinVertex>,
+                               public ThrowableMixin,
+                               public LazyDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        TARGET_INDEX = 0,
+        NEW_TARGET_INDEX = 1,
+        RECEIVER_INDEX = 2,
+        FIRST_ARG_INDEX = 3,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::IS_CALL |
+        VertexPropertyFlag::CAN_READ |
+        VertexPropertyFlag::CAN_WRITE |
+        VertexPropertyFlag::CAN_ALLOCATE |
+        VertexPropertyFlag::CAN_LAZY_DEOPT |
+        VertexPropertyFlag::CAN_THROW;
+
+    CallKnownBuiltinVertex(uint32_t actualArgc, kungfu::BuiltinsStubCSigns::ID builtinId,
+                           BuiltinCallEntryKind entryKind)
+        : VertexMixin(), actualArgc_(actualArgc), builtinId_(builtinId), entryKind_(entryKind)
+    {
+    }
+
+    uint32_t GetActualArgc() const
+    {
+        return actualArgc_;
+    }
+
+    kungfu::BuiltinsStubCSigns::ID GetBuiltinId() const
+    {
+        return builtinId_;
+    }
+
+    BuiltinCallEntryKind GetEntryKind() const
+    {
+        return entryKind_;
+    }
+
+    bool UsesFastStub() const
+    {
+        return entryKind_ == BuiltinCallEntryKind::FAST_STUB;
+    }
+
+    uint32_t GetReservedCallSlotCount() const;
+
+    size_t GetArgCount() const
+    {
+        return GetInputCount();
+    }
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == FIRST_ARG_INDEX + actualArgc_);
+        ASSERT(builtinId_ > kungfu::BuiltinsStubCSigns::ID::NONE);
+        ASSERT(builtinId_ < kungfu::BuiltinsStubCSigns::ID::NUM_OF_BUILTINS_ID);
+        ASSERT(entryKind_ == BuiltinCallEntryKind::FAST_STUB ||
+               entryKind_ == BuiltinCallEntryKind::NATIVE_CPP);
+        ASSERT(!UsesFastStub() || actualArgc_ <= 3U);
+    }
+
+private:
+    uint32_t actualArgc_;
+    kungfu::BuiltinsStubCSigns::ID builtinId_;
+    BuiltinCallEntryKind entryKind_;
+};
+
+class CallSelfVertex : public VertexMixin<ValueVertex, CallSelfVertex>,
+                       public ThrowableMixin,
+                       public LazyDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        TARGET_INDEX = 0,
+        NEW_TARGET_INDEX = 1,
+        RECEIVER_INDEX = 2,
+        CONTEXT_INDEX = 3,
+        FIRST_ARG_INDEX = 4,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::IS_CALL |
+        VertexPropertyFlag::CAN_READ |
+        VertexPropertyFlag::CAN_WRITE |
+        VertexPropertyFlag::CAN_ALLOCATE |
+        VertexPropertyFlag::CAN_LAZY_DEOPT |
+        VertexPropertyFlag::CAN_THROW;
+
+    CallSelfVertex(uint32_t actualArgc, uint32_t expectedParameterCount)
+        : VertexMixin(),
+          actualArgc_(actualArgc),
+          expectedParameterCount_(expectedParameterCount)
+    {
+    }
+
+    uint32_t GetActualArgc() const
+    {
+        return actualArgc_;
+    }
+
+    uint32_t GetExpectedParameterCount() const
+    {
+        return expectedParameterCount_;
+    }
+
+    uint32_t GetReservedCallSlotCount() const
+    {
+        uint32_t logicalSlots = std::max(actualArgc_, expectedParameterCount_) + NUM_MANDATORY_JSFUNC_ARGS + 1U;
+        return (logicalSlots + 1U) & ~1U;
+    }
+
+    size_t GetArgCount() const
+    {
+        return GetInputCount();
+    }
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == FIRST_ARG_INDEX + actualArgc_);
+        for (uint32_t index = 0; index < GetInputCount(); ++index) {
+            ASSERT(GetInput(index)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        }
+    }
+
+private:
+    uint32_t actualArgc_;
+    uint32_t expectedParameterCount_;
+};
+
 /**
  * CallCommonStub vertex - for common stub calls
  */
@@ -2539,6 +2734,41 @@ public:
 //==============================================================================
 // Load/Store Vertices
 //==============================================================================
+
+class DeoptIfReferenceNotEqualVertex : public VertexMixin<NonControlVertex, DeoptIfReferenceNotEqualVertex>,
+                                       public EagerDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        LEFT_INDEX = 0,
+        RIGHT_INDEX = 1,
+        NUM_INPUTS = 2,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_EAGER_DEOPT;
+
+    DeoptIfReferenceNotEqualVertex(Chunk *chunk, uint32_t bytecodeOffset, kungfu::DeoptType deoptType)
+        : VertexMixin(), EagerDeoptimizableMixin(chunk, bytecodeOffset), deoptType_(deoptType)
+    {
+    }
+
+    kungfu::DeoptType GetDeoptType() const
+    {
+        return deoptType_;
+    }
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+        ASSERT(GetInput(LEFT_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(GetInput(RIGHT_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(deoptType_ != kungfu::DeoptType::NONE);
+    }
+
+private:
+    kungfu::DeoptType deoptType_;
+};
 
 class DeoptIfHClassMismatchVertex : public VertexMixin<NonControlVertex, DeoptIfHClassMismatchVertex>,
                                     public EagerDeoptimizableMixin {

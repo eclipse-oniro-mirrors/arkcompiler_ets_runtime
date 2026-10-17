@@ -40,6 +40,9 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(InitialValue)                     \
     V(ActualArgc)                       \
     V(Call)                             \
+    V(CallKnownJSFunction)              \
+    V(CallKnownBuiltin)                 \
+    V(CallSelf)                         \
     V(CallRuntime)                      \
     V(CallCommonStub)                   \
     V(LineStringLoadElement)            \
@@ -103,6 +106,7 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(F64Div)
 
 #define NON_VALUE_VERTEX_LIST(V)    \
+    V(DeoptIfReferenceNotEqual)     \
     V(DeoptIfHClassMismatch)        \
     V(DeoptIfHClassNotIn)           \
     V(DeoptIfPrototypeChanged)      \

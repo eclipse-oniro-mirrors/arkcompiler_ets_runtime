@@ -458,7 +458,7 @@ public:
                                 const JSHandle<JSFunction> &newFunc);
 
     bool IsSendableOrConcurrentFunction(JSThread *thread) const;
-    bool IsSharedFunction() const;
+    bool PUBLIC_API IsSharedFunction() const;
 
     static uint32_t CalcuExpotedOfProperties(JSThread *thread, const JSHandle<JSFunction> &fun,
                                              bool *isStartSlackTracking);
