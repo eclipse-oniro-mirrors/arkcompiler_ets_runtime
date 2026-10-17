@@ -141,7 +141,7 @@ bool JitCompilerTask::Compile()
     passManager_.reset(jitPassManager);
     auto aotFileGenerator = new (std::nothrow) AOTFileGenerator(&jitCompiler->GetCompilerLog(),
         &jitCompiler->GetLogList(), jitCompilationEnv_.get(),
-        jitCompiler->GetJitOptions().triple_, jitCompilationEnv_->GetJSOptions().IsCompilerEnableLiteCG());
+        jitCompiler->GetJitOptions().triple_, IsLiteCGEnabled(jitCompilationEnv_.get()));
     if (aotFileGenerator == nullptr) {
         return false;
     }

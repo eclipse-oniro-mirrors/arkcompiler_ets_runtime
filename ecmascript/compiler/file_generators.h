@@ -185,7 +185,7 @@ protected:
 class AOTFileGenerator : public FileGenerator {
 public:
     AOTFileGenerator(const CompilerLog *log, const MethodLogList *logList, CompilationEnv *env,
-                     const std::string &triple, bool useLiteCG = false, size_t anFileMaxByteSize = 0)
+                     const std::string &triple, bool useLiteCG = true, size_t anFileMaxByteSize = 0)
         : FileGenerator(log, logList),
           cfg_(triple),
           compilationEnv_(env),

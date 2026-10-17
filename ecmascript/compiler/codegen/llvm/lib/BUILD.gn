@@ -127,36 +127,38 @@ ohos_source_set("libark_llvmcodegen_set") {
   subsystem_name = "arkcompiler"
 }
 
-ohos_shared_library("libark_llvmcodegen") {
-  stack_protector_ret = false
-  deps = [ ":libark_llvmcodegen_set" ]
-  _used_symbols = [
-    "LLVMGetInlineAsm",
-    "LLVMPassManagerBuilderCreate",
-    "LLVMCreateSimpleMCJITMemoryManager",
-    "LLVMLinkInMCJIT",
-    "LLVMVerifyModule",
-    "LLVMCreateDisasm",
-    "LLVMCreateRewriteStatepointsForGCLegacyPass",
-    "LLVMLinkAllBuiltinGCs",
+if (!ets_runtime_disable_llvm_backend) {
+  ohos_shared_library("libark_llvmcodegen") {
+    stack_protector_ret = false
+    deps = [ ":libark_llvmcodegen_set" ]
+    _used_symbols = [
+      "LLVMGetInlineAsm",
+      "LLVMPassManagerBuilderCreate",
+      "LLVMCreateSimpleMCJITMemoryManager",
+      "LLVMLinkInMCJIT",
+      "LLVMVerifyModule",
+      "LLVMCreateDisasm",
+      "LLVMCreateRewriteStatepointsForGCLegacyPass",
+      "LLVMLinkAllBuiltinGCs",
 
-    "LLVMInitializeAArch64Target",
-    "LLVMInitializeAArch64AsmParser",
-    "LLVMInitializeAArch64Disassembler",
-    "LLVMInitializeAArch64AsmPrinter",
-  ]
-  ldflags = []
-  foreach(symbol, _used_symbols) {
-    ldflags += [ "-Wl,-u," + symbol ]
+      "LLVMInitializeAArch64Target",
+      "LLVMInitializeAArch64AsmParser",
+      "LLVMInitializeAArch64Disassembler",
+      "LLVMInitializeAArch64AsmPrinter",
+    ]
+    ldflags = []
+    foreach(symbol, _used_symbols) {
+      ldflags += [ "-Wl,-u," + symbol ]
+    }
+    ldflags += [ "-Wl,-mllvm,-import-instr-limit=0" ]
+    if (is_ohos && target_cpu == "arm64") {
+      ldflags += [ "-Wl,--version-script=" + rebase_path("libark_llvmcodegen.versionscript") ]
+    }
+    install_enable = true
+    if (!is_mingw && !is_mac) {
+      output_extension = "so"
+    }
+    part_name = "ets_runtime"
+    subsystem_name = "arkcompiler"
   }
-  ldflags += [ "-Wl,-mllvm,-import-instr-limit=0" ]
-  if (is_ohos && target_cpu == "arm64") {
-    ldflags += [ "-Wl,--version-script=" + rebase_path("libark_llvmcodegen.versionscript") ]
-  }
-  install_enable = true
-  if (!is_mingw && !is_mac) {
-    output_extension = "so"
-  }
-  part_name = "ets_runtime"
-  subsystem_name = "arkcompiler"
 }

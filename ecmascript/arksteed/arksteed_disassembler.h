@@ -30,10 +30,10 @@ public:
 private:
     static void InitializeDisassemblerTarget();
 
-    const uint8_t *code_;
-    size_t codeSize_;
-    const uint8_t *commentsData_;
-    uint32_t commentsSize_;
+    [[maybe_unused]] const uint8_t *code_;
+    [[maybe_unused]] size_t codeSize_;
+    [[maybe_unused]] const uint8_t *commentsData_;
+    [[maybe_unused]] uint32_t commentsSize_;
 };
 
 }  // namespace panda::ecmascript::arksteed

@@ -33,6 +33,7 @@
 #include "ecmascript/compiler/jit_compiler.h"
 
 namespace panda::ecmascript::kungfu {
+#ifndef DISABLE_LLVM_BACKEND
 void Module::CollectStackMapDes(ModuleSectionDes& des) const
 {
     uint32_t stackmapSize = des.GetSecSize(ElfSecName::LLVM_STACKMAP);
@@ -54,6 +55,7 @@ void Module::CollectStackMapDes(ModuleSectionDes& des) const
     des.SetArkStackMapPtr(ptr);
     des.SetArkStackMapSize(size);
 }
+#endif
 
 void Module::CollectAnStackMapDes(ModuleSectionDes& des, uint64_t textOffset,
                                   CGStackMapInfo &stackMapInfo) const
@@ -80,6 +82,7 @@ void Module::CollectAnStackMapDes(ModuleSectionDes& des, uint64_t textOffset,
     des.EraseSec(ElfSecName::LLVM_STACKMAP);
 }
 
+#ifndef DISABLE_LLVM_BACKEND
 std::vector<uintptr_t> Module::GetFuncEntryPoints()
 {
     std::vector<uintptr_t> entrys;
@@ -130,6 +133,7 @@ void Module::CollectFuncEntryInfo(const std::vector<uintptr_t>& entrys, std::map
         addr2name[entrys[j]] = cs->GetName();
     }
 }
+#endif
 
 void Module::CollectFuncEntryInfo(std::map<uintptr_t, std::string> &addr2name, AnFileInfo &aotInfo, uint32_t fileIndex,
                                   uint32_t moduleIndex, const CompilerLog &log)
@@ -140,6 +144,7 @@ void Module::CollectFuncEntryInfo(std::map<uintptr_t, std::string> &addr2name, A
         return;
     }
 #endif
+#ifndef DISABLE_LLVM_BACKEND
     LLVMAssembler *assembler = static_cast<LLVMAssembler*>(assembler_);
     auto engine = assembler->GetEngine();
     std::vector<std::tuple<uint64_t, size_t, int, bool>> funcInfo; // entry idx delta
@@ -200,6 +205,7 @@ void Module::CollectFuncEntryInfo(std::map<uintptr_t, std::string> &addr2name, A
         aotInfo.AlignTextSec(AOTFileInfo::RODATA_SEC_ALIGN);
         aotInfo.UpdateCurTextSecOffset(rodataSizeAfterText);
     }
+#endif
 }
 
 #ifdef COMPILE_MAPLE
@@ -267,8 +273,9 @@ void Module::CollectFuncEntryInfoByLiteCG(std::map<uintptr_t, std::string> &addr
 }
 #endif
 
-void Module::CollectModuleSectionDes(ModuleSectionDes &moduleDes) const
+void Module::CollectModuleSectionDes([[maybe_unused]] ModuleSectionDes &moduleDes) const
 {
+#ifndef DISABLE_LLVM_BACKEND
     if (irModule_->GetModuleKind() != MODULE_LLVM) {
         std::cout << "CollectModuleSectionDes is not supported for litecg currently" << std::endl;
         return;
@@ -283,6 +290,7 @@ void Module::CollectModuleSectionDes(ModuleSectionDes &moduleDes) const
         moduleDes.SetFuncCount(funcCount_);
     });
     CollectStackMapDes(moduleDes);
+#endif
 }
 
 void Module::CollectAnModuleSectionDes(ModuleSectionDes &moduleDes, uint64_t textOffset,
@@ -320,15 +328,20 @@ void Module::RunAssembler(const CompilerLog &log, bool fastCompileMode, bool isJ
     assembler_->Run(log, fastCompileMode, isJit);
 }
 
-void Module::DisassemblerFunc(std::map<uintptr_t, std::string> &addr2name, uint64_t textOffset,
-                              const CompilerLog &log, const MethodLogList &logList, std::string &codeStream)
+void Module::DisassemblerFunc([[maybe_unused]] std::map<uintptr_t, std::string> &addr2name,
+                              [[maybe_unused]] uint64_t textOffset,
+                              [[maybe_unused]] const CompilerLog &log,
+                              [[maybe_unused]] const MethodLogList &logList,
+                              [[maybe_unused]] std::string &codeStream)
 {
+#ifndef DISABLE_LLVM_BACKEND
     if (irModule_->GetModuleKind() != MODULE_LLVM) {
         std::cout << "DisassemblerFunc is not supported for litecg currently" << std::endl;
         return;
     }
     auto *assembler = static_cast<LLVMAssembler*>(assembler_);
     assembler->Disassemble(addr2name, textOffset, log, logList, codeStream);
+#endif
 }
 
 void Module::DestroyModule()
@@ -362,6 +375,7 @@ void StubFileGenerator::CollectAsmStubCodeInfo(std::map<uintptr_t, std::string> 
     }
 }
 
+#ifndef DISABLE_LLVM_BACKEND
 void StubFileGenerator::CollectCodeInfo()
 {
     std::map<uintptr_t, std::string> stubAddr2Name;
@@ -372,8 +386,6 @@ void StubFileGenerator::CollectCodeInfo()
             entryPoints[i] = modulePackage_[i].GetFuncEntryPoints();
         }
     } else if (!modulePackage_.empty()) {
-        // For first module, run it in current thread.
-        // For others, run them in child threads and wait for finish.
         std::vector<std::thread> threads;
         for (size_t i = 1; i < modulePackage_.size(); ++i) {
             threads.emplace_back([&, i]() {
@@ -399,14 +411,15 @@ void StubFileGenerator::CollectCodeInfo()
         stubInfo_.AddModuleDes(des);
     }
     std::map<uintptr_t, std::string> asmAddr2Name;
-    // idx for bridge module is the one after last module in modulePackage
     CollectAsmStubCodeInfo(asmAddr2Name, modulePackage_.size());
     if (log_->OutputASM()) {
         DisassembleAsmStubs(asmAddr2Name);
         DisassembleEachFunc(stubAddr2Name);
     }
 }
+#endif
 
+#ifndef DISABLE_LLVM_BACKEND
 void StubFileGenerator::DisassembleAsmStubs(std::map<uintptr_t, std::string> &addr2name)
 {
     std::string tri = cfg_.GetTripleStr();
@@ -414,6 +427,7 @@ void StubFileGenerator::DisassembleAsmStubs(std::map<uintptr_t, std::string> &ad
     size_t size = stubInfo_.GetAsmStubSize();
     LLVMAssembler::Disassemble(&addr2name, tri, buf, size);
 }
+#endif
 
 uint64_t AOTFileGenerator::RollbackTextSize(Module *module)
 {
@@ -474,7 +488,12 @@ Module* AOTFileGenerator::AddModule(const std::string &name, const std::string &
                                     [[maybe_unused]] LOptions option, bool logDebug, [[maybe_unused]] bool isJit)
 {
 #ifdef COMPILE_MAPLE
-    if (useLiteCG_) {
+    bool useLiteCG = useLiteCG_;
+#ifdef DISABLE_LLVM_BACKEND
+    // LLVM backend is not available in this build, always fall back to LiteCG.
+    useLiteCG = true;
+#endif
+    if (useLiteCG) {
         LMIRModule *irModule = new LMIRModule(compilationEnv_->GetNativeAreaAllocator(), name, logDebug, triple, isJit);
         LiteCGAssembler *ass = new LiteCGAssembler(*irModule, jitCodeSpace_,
             compilationEnv_->GetJSOptions().GetCompilerCodegenOptions());
@@ -485,6 +504,7 @@ Module* AOTFileGenerator::AddModule(const std::string &name, const std::string &
         return &modulePackage_.back();
     }
 #endif
+#ifndef DISABLE_LLVM_BACKEND
     LLVMModule *m = new LLVMModule(compilationEnv_->GetNativeAreaAllocator(), name, logDebug, triple);
     LLVMAssembler *ass = new LLVMAssembler(m, jitCodeSpace_, option);
     modulePackage_.emplace_back(Module(m, ass));
@@ -492,8 +512,14 @@ Module* AOTFileGenerator::AddModule(const std::string &name, const std::string &
         stackMapInfo_ = new LLVMStackMapInfo();
     }
     return &modulePackage_.back();
+#else
+    LOG_COMPILER(FATAL) << "LLVM backend is not available in disable_llvm_backend build";
+    UNREACHABLE();
+    return nullptr;
+#endif
 }
 
+#ifndef DISABLE_LLVM_BACKEND
 #if defined(STUB_FUNCTION_REORDERING)
 Module *StubFileGenerator::AddModule(NativeAreaAllocator *allocator,
                                      const std::string &name,
@@ -540,6 +566,7 @@ Module* StubFileGenerator::AddModule(NativeAreaAllocator *allocator, const std::
     modulePackage_.emplace_back(Module(m, ass));
     return &modulePackage_.back();
 }
+#endif
 
 void StubFileGenerator::RunLLVMAssembler()
 {
@@ -586,6 +613,7 @@ void StubFileGenerator::RunAsmAssembler()
     stubInfo_.accumulateTotalSize(bufferSize);
 }
 
+#ifndef DISABLE_LLVM_BACKEND
 void StubFileGenerator::SaveStubFile(const std::string &filename)
 {
     RunLLVMAssembler();
@@ -593,6 +621,7 @@ void StubFileGenerator::SaveStubFile(const std::string &filename)
     CollectCodeInfo();
     stubInfo_.Save(filename, cfg_.GetTriple());
 }
+#endif
 
 void AOTFileGenerator::CompileLatestModuleThenDestroy(bool isJit)
 {

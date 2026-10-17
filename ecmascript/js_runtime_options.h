@@ -2923,7 +2923,7 @@ private:
     bool enableLexenvSpecialization_ {false};
     bool enableNativeInline_ {true};
     bool enableLoweringBuiltin_ {true};
-    bool enableLiteCG_ {false};
+    bool enableLiteCG_ {true};
     bool enableTypedOpProfiler_ {false};
     bool enableBranchProfiling_ {true};
     bool enablePgoSpace_ {false};

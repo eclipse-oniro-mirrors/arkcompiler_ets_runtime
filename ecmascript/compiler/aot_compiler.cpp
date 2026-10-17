@@ -205,7 +205,7 @@ int Main(const int argc, const char **argv)
                                 cPreprocessor.GetBcInfoCollectors(),
                                 cOptions.optBCRange_);
 
-        bool isEnableLiteCG = runtimeOptions.IsCompilerEnableLiteCG();
+        bool isEnableLiteCG = IsLiteCGEnabled(&aotCompilationEnv);
         compilerStats.SetIsLiteCg(isEnableLiteCG);
 
         AOTFileGenerator generator(&log, &logList, &aotCompilationEnv, cOptions.triple_, isEnableLiteCG,
