@@ -73,6 +73,7 @@
 - `ecmascript/extractortool/` → 文件提取与SourceMap；先读 `docs/knowledge/ExtractorTool-Subsystem.md`
 - `ecmascript/patch/` → Quick Fix/Hot Reload/Patch；先读 `docs/knowledge/Patch-Subsystem.md`
 - `ecmascript/builtins/` -> ES 标准库相关
+- `ecmascript/mem/` → 并发 barrier/原子操作；涉及多线程或共享堆时先读 `docs/knowledge/ArkTS-Concurrency.md`
 
 ### 基于术语的路由
 
@@ -87,7 +88,8 @@
 | debugger / 调试器 / 断点 / dropframe / single step | 调试器子系统；BytecodePcChanged是热路径，非调试模式须零开销 | `docs/knowledge/Debugger-Subsystem.md` |
 | interpreter / IC / 内联缓存 | 与解释器紧密耦合；性能敏感 | `ecmascript/ic/AGENTS.md` + `ecmascript/interpreter/AGENTS.md` |
 | PGO | 配置文件引导优化；与 AOT 关联 | `ecmascript/` 下 PGO 子模块 AGENTS.md + `docs/aot-guide_zh.md` |
-| TaskPool / Actor / Sendable| 并发模型；影响启动性能 | `docs/knowledge/ArkTS-Concurrency.md` | （待创建）
+| TaskPool / Actor / Sendable| 并发模型；影响启动性能 | `docs/knowledge/ArkTS-Sendable.md` |
+| 并发 / CAS / 原子操作 / 锁 / 内存序 / fence / write barrier / shared heap / 多线程 / Worker | 并发编程；涉及锁、原子操作、内存序、写屏障、共享堆 | `docs/knowledge/ArkTS-Concurrency.md` |
 | .abc / 字节码 / jspandafile | 字节码格式；须保持向后兼容 | `ecmascript/jspandafile/AGENTS.md` |
 | Stub / StubCompiler | 运行时桩代码；必须匹配解释器调用约定 | `ecmascript/stubs/AGENTS.md` |
 | Module | 模块加载器 | `docs/knowledge/ArkTS-Module.md` |
@@ -117,6 +119,7 @@
 - 使用位域或 tag pointer 时，须检查标记位是否占用指针高位（57-64 位），与 HWAsan 的 shadow 地址空间冲突。
 - 修改 IR 或 C++ 解释器任一路径的字节码语义时，须检查另一路径是否存在相同逻辑并保持行为一致（见 `ecmascript/interpreter/AGENTS.md` 与 `ecmascript/compiler/AGENTS.md`）。
 - 修改对象布局、删除字段或变更字段语义时，须判定是否构成不兼容变更（影响 `.abc` 类型元数据/`.so` AOT 产物/堆快照/补丁兼容），并显式提醒用户其影响范围。
+- 涉及多线程并发（CAS、原子操作、锁、共享堆写屏障、内存序 fence）的开发，须先阅读 `docs/knowledge/ArkTS-Concurrency.md` 并对照检查清单逐项确认；多字段写必须原子化（打包单对象 + CAS 发布），CAS 失败不破坏赢家数据，发布可见性需 acquire fence 配对。
 
 ### 不要做
 
