@@ -289,6 +289,35 @@ HWTEST_F_L0(ConstPoolSnapshotTest, SerializeAndReadDataFromFile)
     ASSERT_EQ(readData->Size(), serializeData->Size());
 }
 
+HWTEST_F_L0(ConstPoolSnapshotTest, DeserializeDataWithStatsTest)
+{
+    // Reset global snapshot feature state: earlier suites may leave it disabled,
+    // which makes DeserializeData return early before the stats branch.
+    ModulesSnapshotHelper::ResetStateForTest();
+    CString path = GetSnapshotPath();
+    CString version = TEST_ROM_VERSION.data();
+    const std::shared_ptr<JSPandaFile> serializePf = NewMockJSPandaFile();
+    NormalTranslateJSPandaFile(serializePf);
+    // prepare a valid snapshot file
+    std::unique_ptr<SerializeData> serializeData = MockConstPoolSnapshot::GetSerializeData(thread, serializePf.get());
+    ASSERT_NE(serializeData, nullptr);
+    CString fileName = path + GetSnapshotFileName(serializePf.get());
+    auto header = NewHeader(version, serializePf.get());
+    ASSERT_TRUE(MockConstPoolSnapshot::WriteDataToFile(serializeData, fileName, std::move(header)));
+    ASSERT_TRUE(FileExist(fileName.c_str()));
+    // a fresh JSPandaFile instance keeps the deserialize-side registration on the fresh-entry path
+    // of AddOrUpdateConstpool, matching a new process loading the constpool snapshot
+    const std::shared_ptr<JSPandaFile> deserializePf = NewMockJSPandaFile();
+    // ENABLE_SNAPSHOT_STATS is a high bit (1ULL << 37), keep the whole int64_t properties word
+    EcmaVM *vm = thread->GetEcmaVM();
+    int64_t arkProperties = vm->GetJSOptions().GetArkProperties();
+    vm->GetJSOptions().SetArkProperties(arkProperties | ArkProperties::ENABLE_SNAPSHOT_STATS);
+    // DeserializeData runs the per-type cache-slot classification pass and still succeeds.
+    // EXPECT so arkProperties is restored below even on failure.
+    EXPECT_TRUE(ConstPoolSnapshot::DeserializeData(vm, deserializePf.get(), path, version));
+    vm->GetJSOptions().SetArkProperties(arkProperties);
+}
+
 HWTEST_F_L0(ConstPoolSnapshotTest, ShouldNotSerializeWhenFileIsExists)
 {
     CString path = GetSnapshotPath();

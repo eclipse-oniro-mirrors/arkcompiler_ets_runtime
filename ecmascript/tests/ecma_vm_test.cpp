@@ -135,10 +135,29 @@ HWTEST_F_L0(EcmaVMTest, DumpExceptionObject)
     option.SetLogLevel(common::LOG_LEVEL::ERROR);
     EcmaVM *ecmaVm = JSNApi::CreateJSVM(option);
     auto thread = ecmaVm->GetJSThread();
-    int arkProperties = thread->GetEcmaVM()->GetJSOptions().GetArkProperties();
+    int64_t arkProperties = thread->GetEcmaVM()->GetJSOptions().GetArkProperties();
     ecmaVm->GetJSOptions().SetArkProperties(arkProperties | ArkProperties::EXCEPTION_BACKTRACE);
     EXPECT_TRUE(ecmaVm->GetJSOptions().EnableExceptionBacktrace());
     JSNApi::DestroyJSVM(ecmaVm);
+}
+
+/*
+ * @tc.name: ArkPropertiesHighBitReadWrite
+ * @tc.desc: Read-modify-write of low property bits must preserve high bits (>= bit 32).
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(EcmaVMTest, ArkPropertiesHighBitReadWrite)
+{
+    JSRuntimeOptions options;
+    constexpr int64_t highBit = static_cast<int64_t>(ArkProperties::ENABLE_SNAPSHOT_STATS);
+    options.SetArkProperties(highBit | ArkProperties::THREAD_CHECK);
+    // a 32-bit truncated getter would silently drop the high bit on read-modify-write
+    options.SetArkProperties(options.GetArkProperties() | ArkProperties::EXCEPTION_BACKTRACE);
+    EXPECT_NE(options.GetArkProperties() & highBit, 0);
+    EXPECT_TRUE(options.IsSnapshotStatsEnabled());
+    EXPECT_TRUE(options.EnableThreadCheck());
+    EXPECT_TRUE(options.EnableExceptionBacktrace());
 }
 
 HWTEST_F_L0(EcmaVMTest, LargeHeap)

@@ -3189,7 +3189,7 @@ HWTEST_F_L0(EcmaModuleTest, ModuleLogger1) {
 HWTEST_F_L0(EcmaModuleTest, ModuleLogger_DisableModuleLogger) {
     auto vm = thread->GetEcmaVM();
     thread->SetModuleLogger(nullptr);
-    int arkProperties = vm->GetJSOptions().GetArkProperties();
+    int64_t arkProperties = vm->GetJSOptions().GetArkProperties();
     vm->GetJSOptions().SetArkProperties(arkProperties & (~ArkProperties::ENABLE_MODULE_LOG));
     ModuleLogger::SetModuleLoggerTask(vm);
     ModuleLogger *moduleLogger = thread->GetModuleLogger();
@@ -3198,7 +3198,7 @@ HWTEST_F_L0(EcmaModuleTest, ModuleLogger_DisableModuleLogger) {
 
 HWTEST_F_L0(EcmaModuleTest, ModuleLogger_EnableModuleLogger) {
     auto vm = thread->GetEcmaVM();
-    int arkProperties = vm->GetJSOptions().GetArkProperties();
+    int64_t arkProperties = vm->GetJSOptions().GetArkProperties();
     vm->GetJSOptions().SetArkProperties(arkProperties | ArkProperties::ENABLE_MODULE_LOG);
     ModuleLogger::SetModuleLoggerTask(vm);
     ModuleLogger *moduleLogger = thread->GetModuleLogger();
@@ -4933,7 +4933,7 @@ HWTEST_F_L0(EcmaModuleTest, GetRecordName3)
 
     JSNApi::EnableUserUncaughtErrorHandler(instance);
 
-    int arkProperties = thread->GetEcmaVM()->GetJSOptions().GetArkProperties();
+    int64_t arkProperties = thread->GetEcmaVM()->GetJSOptions().GetArkProperties();
     thread->GetEcmaVM()->GetJSOptions().SetArkProperties(arkProperties | ArkProperties::ENABLE_ESM_TRACE);
     bool result = JSNApi::Execute(instance, baseFileName, "module_test_module_test_module_base");
     EXPECT_TRUE(result);
@@ -4959,7 +4959,7 @@ HWTEST_F_L0(EcmaModuleTest, GetModuleValueOuterInternal2)
 {
     std::string baseFileName = MODULE_ABC_PATH "module_test_module_test_C.abc";
     JSNApi::EnableUserUncaughtErrorHandler(instance);
-    int arkProperties = thread->GetEcmaVM()->GetJSOptions().GetArkProperties();
+    int64_t arkProperties = thread->GetEcmaVM()->GetJSOptions().GetArkProperties();
     thread->GetEcmaVM()->GetJSOptions().SetArkProperties(arkProperties | ArkProperties::ENABLE_ESM_TRACE);
     bool result = JSNApi::Execute(instance, baseFileName, "module_test_module_test_C");
     EXPECT_TRUE(result);
@@ -4993,7 +4993,7 @@ HWTEST_F_L0(EcmaModuleTest, ResolveNativeStarExport2)
     SourceTextModule::StoreModuleValue(thread, module, 0, val);
     module->SetTypes(ModuleTypes::NATIVE_MODULE);
 
-    int arkProperties = thread->GetEcmaVM()->GetJSOptions().GetArkProperties();
+    int64_t arkProperties = thread->GetEcmaVM()->GetJSOptions().GetArkProperties();
     thread->GetEcmaVM()->GetJSOptions().SetArkProperties(arkProperties | ArkProperties::ENABLE_ESM_TRACE);
     JSHandle<JSTaggedValue> res1 = SourceTextModule::ResolveNativeStarExport(thread, module, val);
     EXPECT_TRUE(res1->IsNull());
@@ -5021,7 +5021,7 @@ HWTEST_F_L0(EcmaModuleTest, LoadNativeModuleImpl2)
     JSHandle<JSTaggedValue> keyValue = JSHandle<JSTaggedValue>::Cast(objectFactory->NewFromUtf8("requireNapi"));
     JSTaggedValue::SetProperty(thread, global, keyValue, thread->GlobalConstants()->GetHandledUndefined());
     module->SetEcmaModuleRecordNameString("@hms:xxxxx");
-    int arkProperties = thread->GetEcmaVM()->GetJSOptions().GetArkProperties();
+    int64_t arkProperties = thread->GetEcmaVM()->GetJSOptions().GetArkProperties();
     thread->GetEcmaVM()->GetJSOptions().SetArkProperties(arkProperties | ArkProperties::ENABLE_ESM_TRACE);
     SourceTextModule::LoadNativeModuleImpl(vm, thread, module, ModuleTypes::INTERNAL_MODULE);
     EXPECT_TRUE(!thread->HasPendingException());
@@ -5051,7 +5051,7 @@ HWTEST_F_L0(EcmaModuleTest, LoadNativeModule3)
     JSFunction::SetFunctionExtraInfo(thread, current, reinterpret_cast<void *>(MockRequireNapiValue),
                                      nullptr, nullptr, 0);
     JSTaggedValue::SetProperty(thread, global, keyValue, JSHandle<JSTaggedValue>(current));
-    int arkProperties = thread->GetEcmaVM()->GetJSOptions().GetArkProperties();
+    int64_t arkProperties = thread->GetEcmaVM()->GetJSOptions().GetArkProperties();
     thread->GetEcmaVM()->GetJSOptions().SetArkProperties(arkProperties | ArkProperties::ENABLE_ESM_TRACE);
     SourceTextModule::LoadNativeModule(thread, module, ModuleTypes::APP_MODULE);
     EXPECT_TRUE(!thread->HasPendingException());
@@ -5088,7 +5088,7 @@ HWTEST_F_L0(EcmaModuleTest, ModuleDeclarationArrayEnvironmentSetup2)
     auto vm = thread->GetEcmaVM();
     ObjectFactory *objectFactory = vm->GetFactory();
     JSHandle<SourceTextModule> module = objectFactory->NewSourceTextModule();
-    int arkProperties = thread->GetEcmaVM()->GetJSOptions().GetArkProperties();
+    int64_t arkProperties = thread->GetEcmaVM()->GetJSOptions().GetArkProperties();
     thread->GetEcmaVM()->GetJSOptions().SetArkProperties(arkProperties | ArkProperties::ENABLE_ESM_TRACE);
     SourceTextModule::ModuleDeclarationArrayEnvironmentSetup(thread, module);
     EXPECT_TRUE(!thread->HasPendingException());
@@ -6847,7 +6847,7 @@ HWTEST_F_L0(EcmaModuleTest, ModuleLogger_SetModuleLoggerTask)
     thread->SetModuleLogger(nullptr);
 
     // Enable ModuleLog and DisableJSPandaFileAndModuleSnapshot
-    int arkProperties = vm->GetJSOptions().GetArkProperties();
+    int64_t arkProperties = vm->GetJSOptions().GetArkProperties();
     vm->GetJSOptions().SetArkProperties((arkProperties |
         ArkProperties::DISABLE_JSPANDAFILE_MODULE_SNAPSHOT) | ArkProperties::ENABLE_MODULE_LOG);
 
