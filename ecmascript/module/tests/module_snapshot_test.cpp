@@ -548,6 +548,32 @@ HWTEST_F_L0(ModuleSnapshotTest, SerializeAndDeserializeTest)
     CheckModule(serializeModule3, deserializeModule3);
 }
 
+HWTEST_F_L0(ModuleSnapshotTest, SerializeAndDeserializeWithStatsTest)
+{
+    CString path = GetSnapshotPath();
+    CString version = TEST_ROM_VERSION.data();
+    // module name resolved by both HostGetImportedModule lookups below
+    constexpr std::string_view testModuleName = "a";
+    InitMockSourceTextModule();
+    EcmaVM *vm = thread->GetEcmaVM();
+    ModuleManager *moduleManager = thread->GetModuleManager();
+    JSHandle<SourceTextModule> serializeModule = moduleManager->HostGetImportedModule(testModuleName.data());
+    // ENABLE_SNAPSHOT_STATS is a high bit (1ULL << 37), keep the whole int64_t properties word
+    int64_t arkProperties = vm->GetJSOptions().GetArkProperties();
+    vm->GetJSOptions().SetArkProperties(arkProperties | ArkProperties::ENABLE_SNAPSHOT_STATS);
+    // EXPECT so arkProperties is restored below even on failure.
+    EXPECT_TRUE(MockModuleSnapshot::SerializeDataAndSaving(vm, path, version));
+    moduleManager->ClearResolvedModules();
+    // DeserializeData runs with the stats option on: exercises the stats log branch and still succeeds.
+    EXPECT_TRUE(ModuleSnapshot::DeserializeData(vm, path, version));
+    // HostGetImportedModule FATALs on unresolved modules; skip when a step failed.
+    if (!HasFailure()) {
+        JSHandle<SourceTextModule> deserializeModule = moduleManager->HostGetImportedModule(testModuleName.data());
+        CheckModule(serializeModule, deserializeModule);
+    }
+    vm->GetJSOptions().SetArkProperties(arkProperties);
+}
+
 HWTEST_F_L0(ModuleSnapshotTest, ShouldNotSerializeWhenFileIsExists)
 {
     // construct Module

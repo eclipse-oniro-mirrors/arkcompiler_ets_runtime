@@ -38,6 +38,8 @@
 #include "ecmascript/jspandafile/program_object.h"
 #include "ecmascript/tests/test_helper.h"
 
+constexpr std::string_view TEST_ROM_VERSION = "version 205.0.1.120(SP20)";
+
 using namespace panda::ecmascript;
 using namespace panda::panda_file;
 using namespace panda::pandasm;
@@ -761,7 +763,7 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, UseSnapshotSuccessTest)
         return;
     }
     JSRuntimeOptions &options = thread->GetEcmaVM()->GetJSOptions();
-    int arkProperties = options.GetArkProperties();
+    int64_t arkProperties = options.GetArkProperties();
     options.SetArkProperties(arkProperties & ~static_cast<int>(ArkProperties::DISABLE_JSPANDAFILE_MODULE_SNAPSHOT));
     ModulesSnapshotHelper::g_featureState_ = static_cast<int>(SnapshotFeatureState::DEFAULT);
     ModulesSnapshotHelper::g_featureLoaded_ = static_cast<int>(SnapshotFeatureState::DEFAULT);
@@ -804,6 +806,33 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, UseSnapshotSuccessTest)
     options.SetArkProperties(arkProperties);
     Unlink(fileName.c_str());
     Unlink(stateFilePath.c_str());
+}
+
+HWTEST_F_L0(JSPandaFileSnapshotTest, UseSnapshotSuccessWithStatsTest)
+{
+    // Reset global snapshot state: earlier tests may have triggered
+    // UpdateFromStateFile with non-existent paths, leaving featureState=disableAll.
+    ModulesSnapshotHelper::ResetStateForTest();
+    CString path = GetSnapshotPath();
+    CString version = TEST_ROM_VERSION.data();
+    const std::shared_ptr<JSPandaFile> serializePf = NewMockJSPandaFile();
+    NormalTranslateJSPandaFile(serializePf);
+    ASSERT_TRUE(MockJSPandaFileSnapshot::WriteDataToFile(thread, serializePf.get(), path, version));
+
+    // ENABLE_SNAPSHOT_STATS is a high bit (1ULL << 37), keep the whole int64_t properties word
+    JSRuntimeOptions &options = thread->GetEcmaVM()->GetJSOptions();
+    int64_t arkProperties = options.GetArkProperties();
+    options.SetArkProperties(arkProperties | static_cast<int64_t>(ArkProperties::ENABLE_SNAPSHOT_STATS));
+
+    // ReadDataFromFile runs with the stats option on: exercises the stats log branch.
+    const std::shared_ptr<JSPandaFile> pf = NewMockJSPandaFile();
+    JSPandaFile *deserializePf = pf.get();
+    deserializePf->SetBundlePack(false);
+    // EXPECT so arkProperties is restored below even on failure.
+    EXPECT_TRUE(JSPandaFileSnapshot::ReadDataFromFile(thread, deserializePf, path, version));
+    EXPECT_EQ(serializePf->GetNumMethods(), deserializePf->GetNumMethods());
+
+    options.SetArkProperties(arkProperties);
 }
 
 HWTEST_F_L0(JSPandaFileSnapshotTest, ResetAfterSnapshotFailTest)

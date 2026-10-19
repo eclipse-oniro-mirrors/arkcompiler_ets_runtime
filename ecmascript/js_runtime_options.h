@@ -84,6 +84,7 @@ enum ArkProperties {
     ENABLE_RUNTIME_MODULE_STACK = 1ULL << 34,
     ENABLE_HANDLE_LEAK_LOG_OUTPUT = 1ULL << 35,
     DISABLE_CONSTPOOL_SNAPSHOT = 1ULL << 36,
+    ENABLE_SNAPSHOT_STATS = 1ULL << 37,
 };
 
 enum ArkTSMode {
@@ -614,7 +615,7 @@ public:
                ArkProperties::ENABLE_ARKTOOLS | ArkProperties::ENABLE_IDLE_GC;
     }
 
-    int GetArkProperties()
+    int64_t GetArkProperties()
     {
         return arkProperties_;
     }
@@ -817,6 +818,11 @@ public:
     bool DisableJSPandaFileAndModuleSnapshot() const
     {
         return (static_cast<uint64_t>(arkProperties_) & ArkProperties::DISABLE_JSPANDAFILE_MODULE_SNAPSHOT) != 0;
+    }
+
+    bool IsSnapshotStatsEnabled() const
+    {
+        return (static_cast<uint64_t>(arkProperties_) & ArkProperties::ENABLE_SNAPSHOT_STATS) != 0;
     }
 
     bool IsBootSnapshotEscapeDisabled() const

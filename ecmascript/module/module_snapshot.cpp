@@ -105,7 +105,22 @@ bool ModuleSnapshot::DeserializeData(const EcmaVM *vm, const CString &path, cons
         }
         thread->GetModuleManager()->AddResolveImportedModule(moduleName, module);
     }
-    LOG_ECMA(INFO) << "ModuleSnapshot::DeserializeData success";
+    if (vm->GetJSOptions().IsSnapshotStatsEnabled()) {
+        // Separate gated pass: the registration loop above stays overhead-free when stats are off.
+        uint32_t sharedModules = 0;
+        for (uint32_t i = 0; i < length; i++) {
+            JSHandle<SourceTextModule> moduleHdl(thread,
+                SourceTextModule::Cast(deserializedModules->Get(thread, i).GetTaggedObject()));
+            if (SourceTextModule::IsSharedModule(moduleHdl)) {
+                sharedModules++;
+            }
+        }
+        LOG_ECMA(INFO) << "ModuleSnapshot::DeserializeData success" << ", file: " << filePath
+                       << ", modules: " << length << ", shared: " << sharedModules
+                       << ", normal: " << (length - sharedModules) << ", dataSize: " << fileData->Size();
+    } else {
+        LOG_ECMA(INFO) << "ModuleSnapshot::DeserializeData success";
+    }
     return true;
 }
 

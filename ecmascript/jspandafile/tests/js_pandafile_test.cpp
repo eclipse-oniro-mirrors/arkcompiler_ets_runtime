@@ -950,7 +950,7 @@ HWTEST_F_L0(JSPandaFileTest, ConstructorWithThread_SnapshotDisabled)
 
     EcmaVM *vm = thread->GetEcmaVM();
     JSRuntimeOptions &options = vm->GetJSOptions();
-    int arkProperties = options.GetArkProperties();
+    int64_t arkProperties = options.GetArkProperties();
     options.SetArkProperties(arkProperties | static_cast<int>(ArkProperties::DISABLE_JSPANDAFILE_MODULE_SNAPSHOT));
 
     Parser parser;

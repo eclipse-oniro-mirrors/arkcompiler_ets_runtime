@@ -32,6 +32,48 @@
 using IndexHeader = panda::panda_file::File::IndexHeader;
 
 namespace panda::ecmascript {
+namespace {
+// Per-type counters for restored constpool cache slots, collected only when snapshot stats are on.
+struct ConstPoolCacheStats {
+    uint32_t cacheSlots = 0;
+    uint32_t stringSlots = 0;
+    uint32_t methodSlots = 0;
+    uint32_t otherSlots = 0;
+};
+
+// Classify restored cache slots by object type (counted before publishing the pools).
+// methods stays 0 until Method serialization lands; strings are always LineString
+// (the serializer only persists LINE_STRING entries in the cache region).
+void ClassifyConstPoolCacheSlots(const JSThread* thread, const JSHandle<TaggedArray>& constpools,
+                                 ConstPoolCacheStats& stats)
+{
+    uint32_t length = constpools->GetLength();
+    for (uint32_t i = 0; i < length; i++) {
+        JSTaggedValue statConstpool = constpools->Get(thread, i);
+        if (!statConstpool.IsConstantPool()) {
+            continue;
+        }
+        JSHandle<ConstantPool> statPool(thread, statConstpool);
+        uint32_t numCacheSlots = statPool->GetNumOfCacheElement();
+        stats.cacheSlots += numCacheSlots;
+        for (uint32_t idx = 0; idx < numCacheSlots; idx++) {
+            JSTaggedValue slotVal = statPool->GetObjectFromCache(thread, idx);
+            if (!slotVal.IsHeapObject()) {
+                stats.otherSlots++;  // hole or primitive tag
+                continue;
+            }
+            if (slotVal.IsLineString()) {
+                stats.stringSlots++;
+            } else if (slotVal.IsMethod()) {
+                stats.methodSlots++;
+            } else {
+                stats.otherSlots++;
+            }
+        }
+    }
+}
+} // namespace
+
 void ConstPoolSnapshot::SerializeDataAndPostSavingJob(const EcmaVM* vm, JSPandaFile* pandafile, const CString& path,
                                                       const CString& version)
 {
@@ -100,6 +142,10 @@ bool ConstPoolSnapshot::DeserializeData(EcmaVM* vm, JSPandaFile* pandafile, cons
         return false;
     }
     uint32_t length = deserializedConstpools->GetLength();
+    ConstPoolCacheStats stats;
+    if (vm->GetJSOptions().IsSnapshotStatsEnabled()) {
+        ClassifyConstPoolCacheSlots(thread, deserializedConstpools, stats);
+    }
     for (uint32_t i = 0; i < length; i++) {
         JSTaggedValue constpool = deserializedConstpools->Get(thread, i);
         if (!constpool.IsConstantPool()) {
@@ -123,7 +169,15 @@ bool ConstPoolSnapshot::DeserializeData(EcmaVM* vm, JSPandaFile* pandafile, cons
         vm->AddOrUpdateConstpool(pandafile, constpoolHdl, static_cast<int32_t>(sharedId));
         vm->CreateUnsharedConstpool(constpool);
     }
-    LOG_ECMA(INFO) << "ConstPoolSnapshot::DeserializeData success";
+    if (vm->GetJSOptions().IsSnapshotStatsEnabled()) {
+        LOG_ECMA(INFO) << "ConstPoolSnapshot::DeserializeData success" << ", pandafile: "
+                       << pandafile->GetJSPandaFileDesc() << ", constpools: " << length
+                       << ", cacheSlots: " << stats.cacheSlots << ", strings: " << stats.stringSlots
+                       << ", methods: " << stats.methodSlots << ", others: " << stats.otherSlots
+                       << ", dataSize: " << fileData->Size();
+    } else {
+        LOG_ECMA(INFO) << "ConstPoolSnapshot::DeserializeData success";
+    }
     return true;
 }
 

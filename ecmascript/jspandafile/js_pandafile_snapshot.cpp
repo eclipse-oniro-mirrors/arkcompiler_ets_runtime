@@ -359,7 +359,13 @@ bool JSPandaFileSnapshot::ReadDataFromFile(JSThread *thread, JSPandaFile *jsPand
         }
         recordNum++;
     }
-    LOG_ECMA(INFO) << "JSPandaFileSnapshot::ReadDataFromFile success with: " << filename;
+    if (thread->GetEcmaVM()->GetJSOptions().IsSnapshotStatsEnabled()) {
+        LOG_ECMA(INFO) << "JSPandaFileSnapshot::ReadDataFromFile success with: " << filename
+                       << ", methods: " << numMethods << ", records: " << recordNum
+                       << ", fileSize: " << fileMapMem.GetSize();
+    } else {
+        LOG_ECMA(INFO) << "JSPandaFileSnapshot::ReadDataFromFile success with: " << filename;
+    }
     return true;
 }
 
