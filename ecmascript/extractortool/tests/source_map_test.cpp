@@ -778,18 +778,78 @@ HWTEST_F_L0(SourceMapTest, TranslateBySourceMap_003)
 }
 
 /**
- * @tc.name: TranslateBySourceMap_NoSourceMap_001
- * @tc.desc: Test TranslateBySourceMap returns NOT_FOUNDMAP prefix when InitStatus=NO_SOURCEMAP
+ * @tc.name: TranslateBySourceMap_EmptyStack_001
+ * @tc.desc: Test TranslateBySourceMap returns NOT_FOUNDMAP prefix when stack is empty
  * @tc.type: FUNC
  */
-HWTEST_F_L0(SourceMapTest, TranslateBySourceMap_NoSourceMap_001)
+HWTEST_F_L0(SourceMapTest, TranslateBySourceMap_EmptyStack_001)
+{
+    SourceMapFriend sourceMapFriend(sourceMapData4);
+
+    std::string stackStr = "";
+    std::string result = sourceMapFriend.TranslateBySourceMap(stackStr);
+    EXPECT_NE(result.find("Cannot get SourceMap info"), std::string::npos);
+}
+
+/**
+ * @tc.name: TranslateStackTraceWithStatus_NotExecuted_001
+ * @tc.desc: Test TranslateStackTraceWithStatus returns raw stack when InitStatus=NOT_EXECUTED
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(SourceMapTest, TranslateStackTraceWithStatus_NotExecuted_001)
+{
+    SourceMapFriend sourceMapFriend(sourceMapData4);
+
+    std::string stackStr = "at func (entry/src/main/ets/pages/Index.ts:10:5)";
+    std::string result = sourceMapFriend.TranslateStackTraceWithStatus(stackStr);
+    EXPECT_EQ(result, stackStr);
+}
+
+/**
+ * @tc.name: TranslateStackTraceWithStatus_InExecuted_001
+ * @tc.desc: Test TranslateStackTraceWithStatus returns not-initialized prefix when InitStatus=IN_EXECUTED
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(SourceMapTest, TranslateStackTraceWithStatus_InExecuted_001)
+{
+    SourceMapFriend sourceMapFriend(sourceMapData4);
+    sourceMapFriend.SetInitStatus(InitStatus::IN_EXECUTED);
+
+    std::string stackStr = "at func (entry/src/main/ets/pages/Index.ts:10:5)";
+    std::string result = sourceMapFriend.TranslateStackTraceWithStatus(stackStr);
+    EXPECT_NE(result.find("SourceMap is not initialized yet"), std::string::npos);
+    EXPECT_NE(result.find(stackStr), std::string::npos);
+}
+
+/**
+ * @tc.name: TranslateStackTraceWithStatus_NoSourceMap_001
+ * @tc.desc: Test TranslateStackTraceWithStatus returns NOT_FOUNDMAP prefix when InitStatus=NO_SOURCEMAP
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(SourceMapTest, TranslateStackTraceWithStatus_NoSourceMap_001)
 {
     SourceMapFriend sourceMapFriend(sourceMapData4);
     sourceMapFriend.SetInitStatus(InitStatus::NO_SOURCEMAP);
 
     std::string stackStr = "at func (entry/src/main/ets/pages/Index.ts:10:5)";
-    std::string result = sourceMapFriend.TranslateBySourceMap(stackStr);
-    EXPECT_NE(result.find("Cannot get SourceMap info"), !std::string::npos);
+    std::string result = sourceMapFriend.TranslateStackTraceWithStatus(stackStr);
+    EXPECT_NE(result.find("Cannot get SourceMap info"), std::string::npos);
+    EXPECT_NE(result.find(stackStr), std::string::npos);
+}
+
+/**
+ * @tc.name: TranslateStackTraceWithStatus_ExecutedSuccessfully_001
+ * @tc.desc: Test TranslateStackTraceWithStatus delegates to TranslateBySourceMap when EXECUTED_SUCCESSFULLY
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(SourceMapTest, TranslateStackTraceWithStatus_ExecutedSuccessfully_001)
+{
+    SourceMapFriend sourceMapFriend(sourceMapData4);
+    sourceMapFriend.SetInitStatus(InitStatus::EXECUTED_SUCCESSFULLY);
+
+    std::string stackStr = "at func (entry/src/main/ets/pages/Index.ts:10:5)";
+    std::string result = sourceMapFriend.TranslateStackTraceWithStatus(stackStr);
+    EXPECT_EQ(result, sourceMapFriend.TranslateBySourceMap(stackStr));
 }
 
 /**

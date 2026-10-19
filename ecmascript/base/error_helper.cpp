@@ -223,22 +223,7 @@ JSTaggedValue ErrorHelper::ErrorCommonConstructor(EcmaRuntimeCallInfo *argv,
     JSHandle<EcmaString> stackTraceStr = factory->NewFromStdString(stackTrace);
     JSHandle<EcmaString> cbStackTraceStr = stackTraceStr;
     if (!stackTrace.empty()) {
-        auto& sourceMap = SourceMap::GetInstance();
-        auto initStatus = sourceMap.GetInitStatus();
-        std::string result;
-        switch (initStatus) {
-            case InitStatus::EXECUTED_SUCCESSFULLY:
-                result = sourceMap.TranslateBySourceMap(stackTrace);
-                break;
-            case InitStatus::IN_EXECUTED:
-                result = "SourceMap is not initialized yet \n" + stackTrace;
-                break;
-            case InitStatus::NO_SOURCEMAP:
-                result = "Cannot get SourceMap info, dump raw stack:\n" + stackTrace;
-                break;
-            default:
-                break;
-        }
+        std::string result = SourceMap::GetInstance().TranslateStackTraceWithStatus(stackTrace);
         if (!result.empty()) {
             cbStackTraceStr = factory->NewFromStdString(result);
         }

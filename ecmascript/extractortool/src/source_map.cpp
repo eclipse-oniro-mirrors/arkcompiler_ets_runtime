@@ -784,6 +784,21 @@ void SourceMap::GetPackageName(const SourceMapData& targetMap, std::string& pack
     }
 }
 
+std::string SourceMap::TranslateStackTraceWithStatus(const std::string& stackStr)
+{
+    auto initStatus = GetInitStatus();
+    switch (initStatus) {
+        case InitStatus::EXECUTED_SUCCESSFULLY:
+            return TranslateBySourceMap(stackStr);
+        case InitStatus::IN_EXECUTED:
+            return "SourceMap is not initialized yet \n" + stackStr;
+        case InitStatus::NO_SOURCEMAP:
+            return NOT_FOUNDMAP + stackStr;
+        default:
+            return stackStr;
+    }
+}
+
 void SourceMap::SetInitStatus(InitStatus status)
 {
     initStatus_.store(status, std::memory_order_release);
