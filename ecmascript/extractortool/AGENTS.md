@@ -87,7 +87,7 @@ Tests are organized in `tests/BUILD.gn`:
 
 `extractor_adapter_test.cpp` is fully self-contained:
 - Fake `OHOS::AbilityBase` types (`Extractor`, `FileMapper`, `ZipFile`, `ZipEntry`) are defined inline at the top of the file
-- The adapter functions (`GetSafeDataAsShared`, `GetFilePathByOffset`) are implemented inline with the same logic as `extractor_adapter.cpp`
+- The adapter functions (`GetMmapDataAsShared`, `GetFilePathByOffset`) are implemented inline with the same logic as `extractor_adapter.cpp`
 - No stub header files, no `fake/` directory, no `-include` flags, no `ENABLE_ABILITY_EXTRACTOR` define needed
 - Trade-off: the test validates a copy of the adapter logic, not the compiled production `.cpp`. If `extractor_adapter.cpp` changes, the test must be updated manually.
 

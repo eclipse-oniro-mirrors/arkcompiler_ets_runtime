@@ -1125,7 +1125,7 @@ bool JSSymbolExtractor::InitializeHapFileInfo([[maybe_unused]]uintptr_t offset,
         pandaFilePath = "ets/modules.abc";
         LOG_ECMA(WARN) << "Unknown offset, attempt to parse " << pandaFilePath;
     }
-    fileMapper_ = GetSafeDataAsShared(*extractor, pandaFilePath);
+    fileMapper_ = GetMmapDataAsShared(*extractor, pandaFilePath);
     if (!fileMapper_) {
         LOG_ECMA(ERROR) << "GetSafeData failed, hap path: " << hapPath
                         << ", panda file: " << pandaFilePath;
