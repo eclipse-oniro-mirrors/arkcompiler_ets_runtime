@@ -15,6 +15,8 @@
 
 #include "ecmascript/ohos/tests/mock/mock_aot_runtime_info.h"
 
+#include "ecmascript/ohos/ohos_constants.h"
+
 namespace panda::test {
 MockAotRuntimeInfo::MockAotRuntimeInfo()
 {}
@@ -46,7 +48,7 @@ bool MockAotRuntimeInfo::GetCrashSandBoxRealPath(char *realOutPath, size_t lengt
     if (strcat_s(realOutPath, length, "/") != 0) {
         return false;
     }
-    if (strcat_s(realOutPath, length, AOT_RUNTIME_INFO) != 0) {
+    if (strcat_s(realOutPath, length, ecmascript::ohos::OhosConstants::COMPILER_ESCAPE_FILE_NAME) != 0) {
         return false;
     }
     return true;

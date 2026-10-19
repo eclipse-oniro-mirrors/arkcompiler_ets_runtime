@@ -22,7 +22,6 @@ namespace panda::test {
 class MockAotRuntimeInfo : public ecmascript::ohos::AotRuntimeInfo {
 public:
     static constexpr const char *SANBOX_DIR = "ohos-crash-test";
-    static constexpr const char *AOT_RUNTIME_INFO = "aot_runtime_info.log";
     MockAotRuntimeInfo();
     MockAotRuntimeInfo(bool isRuntimeInfoCrashTest) : isRuntimeInfoCrashTest_(isRuntimeInfoCrashTest) {}
     ~MockAotRuntimeInfo();
