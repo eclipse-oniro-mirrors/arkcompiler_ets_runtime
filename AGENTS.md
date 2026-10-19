@@ -134,3 +134,117 @@
 # 带调试符号构建
 ../../build.sh --product-name rk3568 --build-target ark_js_host_linux_tools_packages --gn-args is_debug=true
 ```
+
+## 5. 提交与 PR 规范
+
+向 openharmony 主仓提交代码时，commit message 与 PR 必须符合以下规范。可参考近期格式规范的 AI 辅助提交，如 `5d6dc99d2`（`fix(ic): handle JSProxy holder in LoadMiss`）。
+
+### 5.1 Commit message 格式
+
+```
+<type>: <简短描述>                      # 第一行标题，必须 ≤48 字符（含 type 与空格）
+
+<body>                                  # 空一行后写正文：做了什么、为什么
+
+Issue: https://gitcode.com/openharmony/arkcompiler_ets_runtime/issues/<N>
+Signed-off-by: <name> <email>
+
+AI[100%] Human Fixed[0%] Human[0%] AI Adopted[100%]
+Co-Authored-By: <tool> (<model>) <ai@local>
+
+Change-Id: Ixxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+要点：
+
+- **标题**：`<type>: <desc>`，**≤48 字符**。`type` 取 `fix` / `feat` / `test` / `refactor` / `docs` / `perf` 等，可带作用域如 `fix(ic):`。标题过长会被门禁拒绝。
+- **正文**：空一行后说明做了什么、为什么，每行建议 ≤72 字符。
+- **Issue**：**必须**先在 `https://gitcode.com/openharmony/arkcompiler_ets_runtime` 新建一个 issue（描述动机/范围/验收点），再把其完整 URL 填入 `Issue:` 行。每条 commit 都要有对应 issue。
+- **Signed-off-by**：用 `git config user.name` 与 `user.email`（DCO 要求）。
+- **AI 辅助标记**：由 AI 参与时加两行：
+  - `AI[100%] Human Fixed[0%] Human[0%] AI Adopted[100%]`（按实际 AI 贡献比例调整百分比）
+  - `Co-Authored-By: <tool> (<model>) <ai@local>`（本环境为 `opencode (glm-5.2)`；其他工具如实填写，如 `codex (gpt-5.6-sol)`）
+- **Change-Id**：由 `.git/hooks/commit-msg`（repo 钩子）在首次提交时自动注入。**`git commit --amend` 时务必保留原 Change-Id**——删掉会被钩子生成新的，导致同一改动产生新评审、PR/CR 关联断裂。
+- **字段顺序**：标题 →（空行）→ 正文 →（空行）→ `Issue:` → `Signed-off-by:` →（空行）→ `AI[..]` → `Co-Authored-By:` →（空行）→ `Change-Id:`。
+
+### 5.2 推送到 fork 与创建 PR
+
+1. **推到自己的 fork**：`git push <fork-remote> HEAD:master`，`<fork-remote>` 指向你名下的 fork（`gitcode.com/<you>/arkcompiler_ets_runtime`）。若已 amend 改写历史，用 `--force-with-lease`。
+2. **创建 PR**：源 `fork:master` → 目标 `openharmony:master`。可用 gitcode API（无需网页）：
+   - 取 token：`printf 'protocol=https\nhost=gitcode.com\n\n' | git credential fill` 中的 `password=` 即 personal access token（若已配置 credential helper 可直接取到缓存 token）。
+   - `POST https://gitcode.com/api/v5/repos/openharmony/arkcompiler_ets_runtime/pulls`，头 `Authorization: Bearer <token>`，JSON body：`{"title","body","head":"<you>:master","base":"master"}`。返回 `number` 即 PR 号。
+3. **PR 描述**：**必须用本仓模板** `.gitee/PULL_REQUEST_TEMPLATE.zh-CN.md` 填写（关联的 Issue / 修改原因 / 修改描述 / 自测试项 / 是否已执行 L0 用例）。纯测试或文档类改动，性能与 IR 自检项勾"不涉及，无需验证"；L0 用例勾"已验证"并贴构建/执行结果。可用 `PATCH .../pulls/<N>`（同上鉴权）更新 title/body；更新后若 GET 仍见旧值多为 CDN 缓存，带 `?_t=<ms>` 与 `Cache-Control: no-cache` 复查即可。
+
+### 5.3 常用 API 速查
+
+| 操作 | 方法 | URL |
+|------|------|-----|
+| 新建 issue | POST | `/api/v5/repos/openharmony/arkcompiler_ets_runtime/issues` |
+| 创建 PR | POST | `/api/v5/repos/openharmony/arkcompiler_ets_runtime/pulls` |
+| 查看/更新 PR | GET/PATCH | `/api/v5/repos/openharmony/arkcompiler_ets_runtime/pulls/<N>` |
+
+鉴权统一用 `Authorization: Bearer <token>`（Gitee 风格 v5 API）。
+
+### 5.4 端到端提交流程（AI 辅助）
+
+以下描述 AI 辅助提交的完整端到端流程，从改动到门禁触发：
+
+```
+①  本地改动 → 编译验证（GN gen 0 ERROR + ninja target 编译通过）
+②  创建 Issue（POST /issues，描述动机/范围/验收点）→ 拿到 issue number
+③  git add + git commit -F commit_msg.txt（commit message 含 Issue URL + Signed-off-by + AI 标记）
+④  git push <fork-remote> <branch>:refs/heads/<branch> [--force-with-lease]
+⑤  创建 PR（POST /pulls，body 用 .gitee 模板，head=<fork>:<branch>, base=master）
+⑥  触发门禁：POST /pulls/<N>/comments，body="start build"
+    - 若 PR 含 AI 生成代码，用 "start build draft"（draft 模式，需人工确认后正式编译）
+    - 若 PR 为纯人工或已人工 review，用 "start build"
+⑦  轮询门禁结果：GET /pulls/<N> 看 mergeable_state / labels
+    - "代码门禁通过" = 通过；"代码门禁未通过" = 需查 CI 报告修复
+⑧  若门禁失败：修复 → amend（保留 Change-Id）→ force-push → 重新评论 start build
+```
+
+**AI 生成代码的 draft 流程**：
+
+当 commit 由 AI 辅助生成时，触发编译用 `start build draft` 而非 `start build`。draft 模式下门禁执行编译但标记为草稿，需人工 review 确认后转为正式构建。流程：
+
+```
+1. AI 生成代码改动 + commit message 标记 AI[100%] / Co-Authored-By
+2. push 到 fork 分支
+3. 创建 PR，PR 描述自测项如实勾选
+4. 评论 "start build draft" 触发 draft 编译
+5. 人工 review 代码 → 确认无问题 → 评论 "start build" 转正式编译
+6. 正式门禁通过后可合入
+```
+
+**门禁状态解读**：
+
+| 标签 / 状态 | 含义 |
+|---|---|
+| `dco检查成功` | DCO 签名通过 |
+| `静态检查成功` | 静态代码检查通过 |
+| `代码门禁通过` | 编译 + 测试全通过，可合入 |
+| `代码门禁未通过` | 编译或测试失败，查 CI 报告修复 |
+| `waiting_on_author` | 等待作者处理 review 意见 |
+| `检测到同仓同分支存在2个或以上PR` | 需先关闭旧 PR |
+| `你因提交次数过多被限制提交` | 触发频率超限，需等冷却或申请恢复 |
+
+### 5.5 Push 前强制检查清单
+
+**每次 push 前必须逐项检查，缺一不可。不检查不 push。**
+
+```
+□ 1. Commit message 标题 ≤48 字符（含 type: 和空格）
+□ 2. Commit message 含 Issue: URL（且与 PR 关联的 Issue 一致）
+□ 3. Commit message 含 Signed-off-by（git config user.name / user.email）
+□ 4. AI 辅助提交含 AI[...] + Co-Authored-By 两行
+□ 5. Change-Id 保留（amend 时未删）
+□ 6. 本地编译通过（gn gen 0 ERROR + ninja target 编译 0 FAILED）
+□ 7. PR 描述使用 .gitee/PULL_REQUEST_TEMPLATE.zh-CN.md 模板
+□ 8. PR 描述自测试项全部勾选（不涉及的勾"不涉及，无需验证"）
+□ 9. PR 描述含测试结果（贴 GN gen / ninja 输出摘要）
+□ 10. 触发编译用 "start build draft"（AI 生成代码）或 "start build"（人工确认）
+```
+
+### 5.6 示例
+
+格式范本见本仓近期 commit `5d6dc99d2`（含 Issue / Signed-off-by / AI 行 / Co-Authored-By / Change-Id 完整字段）。
