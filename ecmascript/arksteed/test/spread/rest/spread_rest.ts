@@ -146,7 +146,8 @@ function spreadMathMax(): string {
 // Spread with Set (deduplication)
 //! METHOD spreadSetDedup
 //! HAS CallRuntime StArraySpread
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallKnownBuiltin 1
+//! HAS_NOT CallRuntime OptNewObjRange
 function spreadSetDedup(): string {
     const arr = [1, 2, 2, 3, 3, 3, 4];
     const unique = [...new Set(arr)];
@@ -344,7 +345,9 @@ class SpreadConstructor {
 }
 
 //! METHOD testSpreadConstructor
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallNewObjRangeBase 1
+//! COUNT CallNewObjRangeDerived 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! HAS CallKnownJSFunction
 function testSpreadConstructor(): string {
     const obj = new SpreadConstructor(1, 2, 3, 4, 5);

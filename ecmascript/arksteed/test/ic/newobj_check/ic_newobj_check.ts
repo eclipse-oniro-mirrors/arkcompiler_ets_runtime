@@ -12,11 +12,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+//! PARAMS --compiler-jit-hotness-threshold=60000
 //! METHOD Test
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallNewObjRangeBase 1
+//! COUNT CallNewObjRangeDerived 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! COMPILE_COUNT_GE *Test* 1
-//! EXEC_COUNT_GE *Test* 1
-//! DEOPT_COUNT *Deoptimize* 0
+//! EXEC_COUNT *Test* 2
+//! DEOPT_COUNT *Deoptimize* 1
 
 class MyClass {}
 class MyClass2 {}
@@ -24,8 +27,16 @@ function Test(ctor) {
     return new ctor();
 }
 
-Test(MyClass)
+Test(MyClass);
 ArkTools.arkSteedCompileSync(Test);
-var ret = true;
-print(ret);
-Test(MyClass2)
+ArkTools.waitJitCompileFinish(Test);
+
+// The original target must finish in JIT before the target-change probe.
+const original = Test(MyClass);
+print(original instanceof MyClass && Object.getPrototypeOf(original) === MyClass.prototype);
+
+// Changing the monomorphic target must deopt and construct the new class.
+const changed = Test(MyClass2);
+if (!(changed instanceof MyClass2) || Object.getPrototypeOf(changed) !== MyClass2.prototype) {
+    throw new Error("newobjrange target change returned the wrong object");
+}

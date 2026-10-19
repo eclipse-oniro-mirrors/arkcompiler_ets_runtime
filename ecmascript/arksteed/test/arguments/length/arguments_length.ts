@@ -14,7 +14,9 @@
  */
 //! METHOD      arguments_length
 //! HAS         Call
-//! HAS         CallCommonStub  GetUnmappedArgs
+//! COUNT       InitializeUnmappedArgumentsElements 1
+//! COUNT       InitializeUnmappedArguments 1
+//! HAS_NOT     CallCommonStub GetUnmappedArgs
 //! COMPILE_COUNT_GE *arguments_length* 1
 //! EXEC_COUNT_GE *arguments_length* 1
 //! METHOD      invokeLengthTarget

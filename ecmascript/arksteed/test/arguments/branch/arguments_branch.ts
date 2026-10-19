@@ -14,7 +14,9 @@
  */
 //! METHOD      arguments_branch
 //! HAS         Call
-//! HAS         CallCommonStub  GetUnmappedArgs
+//! COUNT       InitializeUnmappedArgumentsElements 1
+//! COUNT       InitializeUnmappedArguments 1
+//! HAS_NOT     CallCommonStub GetUnmappedArgs
 //! COMPILE_COUNT_GE *arguments_branch* 1
 //! EXEC_COUNT_GE *arguments_branch* 1
 //! METHOD      invokeBranchTarget

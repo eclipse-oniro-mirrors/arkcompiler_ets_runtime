@@ -13,92 +13,131 @@
  * limitations under the License.
  */
 
-// G11.6 additive evidence (arksteed-g116-call-closure-and-additive-evidence#C1,#C3):
-// every compiled `test*` target is entered on its own construction scenario and
-// carries the actual construction form of this leaf in its own dump. The
-// post-compilation builtin reassignment probes below are preserved unchanged,
-// and no printed value changes.
+// Compile the original builtin targets explicitly, then verify normal JIT
+// construction before replacing the global constructors. Each replacement
+// must trigger one target-guard deopt and produce an instance of C.
+//! PARAMS --compiler-jit-hotness-threshold=60000
 //! COMPILE_COUNT_GE testBoolean 1
-//! EXEC_COUNT_GE *testBoolean 1
+//! EXEC_COUNT *testBoolean 2
 //! COMPILE_COUNT_GE testNumber 1
-//! EXEC_COUNT_GE *testNumber 1
+//! EXEC_COUNT *testNumber 2
 //! COMPILE_COUNT_GE testProxy 1
-//! EXEC_COUNT_GE *testProxy 1
+//! EXEC_COUNT *testProxy 2
 //! COMPILE_COUNT_GE testDate 1
-//! EXEC_COUNT_GE *testDate 1
+//! EXEC_COUNT *testDate 2
 //! COMPILE_COUNT_GE testArray 1
-//! EXEC_COUNT_GE *testArray 1
+//! EXEC_COUNT *testArray 2
 //! COMPILE_COUNT_GE testSet 1
-//! EXEC_COUNT_GE *testSet 1
+//! EXEC_COUNT *testSet 2
 //! COMPILE_COUNT_GE testMap 1
-//! EXEC_COUNT_GE *testMap 1
+//! EXEC_COUNT *testMap 2
 //! COMPILE_COUNT_GE testObject 1
-//! EXEC_COUNT_GE *testObject 1
+//! EXEC_COUNT *testObject 2
 //! COMPILE_COUNT_GE testError 1
-//! EXEC_COUNT_GE *testError 1
+//! EXEC_COUNT *testError 2
 //! COMPILE_COUNT_GE testInt8Array 1
-//! EXEC_COUNT_GE *testInt8Array 1
+//! EXEC_COUNT *testInt8Array 2
 //! COMPILE_COUNT_GE testUint8Array 1
-//! EXEC_COUNT_GE *testUint8Array 1
+//! EXEC_COUNT *testUint8Array 2
 //! COMPILE_COUNT_GE testUint8ClampedArray 1
-//! EXEC_COUNT_GE *testUint8ClampedArray 1
+//! EXEC_COUNT *testUint8ClampedArray 2
 //! COMPILE_COUNT_GE testInt16Array 1
-//! EXEC_COUNT_GE *testInt16Array 1
+//! EXEC_COUNT *testInt16Array 2
 //! COMPILE_COUNT_GE testUint16Array 1
-//! EXEC_COUNT_GE *testUint16Array 1
+//! EXEC_COUNT *testUint16Array 2
 //! COMPILE_COUNT_GE testInt32Array 1
-//! EXEC_COUNT_GE *testInt32Array 1
+//! EXEC_COUNT *testInt32Array 2
 //! COMPILE_COUNT_GE testUint32Array 1
-//! EXEC_COUNT_GE *testUint32Array 1
+//! EXEC_COUNT *testUint32Array 2
 //! COMPILE_COUNT_GE testFloat32Array 1
-//! EXEC_COUNT_GE *testFloat32Array 1
+//! EXEC_COUNT *testFloat32Array 2
 //! COMPILE_COUNT_GE testFloat64Array 1
-//! EXEC_COUNT_GE *testFloat64Array 1
+//! EXEC_COUNT *testFloat64Array 2
 //! COMPILE_COUNT_GE testBigInt64Array 1
-//! EXEC_COUNT_GE *testBigInt64Array 1
+//! EXEC_COUNT *testBigInt64Array 2
 //! COMPILE_COUNT_GE testBigUint64Array 1
-//! EXEC_COUNT_GE *testBigUint64Array 1
-//! DEOPT_COUNT *Deoptimize* 0
+//! EXEC_COUNT *testBigUint64Array 2
+//! DEOPT_COUNT *Deoptimize* 20
 //! METHOD testBoolean
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallCommonStub ArkSteedNewObjectFromPrimitive 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! METHOD testNumber
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallCommonStub ArkSteedNewObjectFromPrimitive 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! METHOD testProxy
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallKnownBuiltin 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! METHOD testDate
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallKnownBuiltin 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! METHOD testArray
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallKnownBuiltin 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! METHOD testSet
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallKnownBuiltin 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! METHOD testMap
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallKnownBuiltin 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! METHOD testObject
-//! HAS CallRuntime OptNewObjRange
+//! COUNT InitializeEmptyObject 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! METHOD testError
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallKnownBuiltin 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! METHOD testInt8Array
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallKnownBuiltin 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! METHOD testUint8Array
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallKnownBuiltin 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! METHOD testUint8ClampedArray
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallKnownBuiltin 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! METHOD testInt16Array
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallKnownBuiltin 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! METHOD testUint16Array
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallKnownBuiltin 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! METHOD testInt32Array
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallKnownBuiltin 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! METHOD testUint32Array
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallKnownBuiltin 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! METHOD testFloat32Array
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallCommonStub NewFloat32ArrayWithNoArgs 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! METHOD testFloat64Array
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallKnownBuiltin 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! METHOD testBigInt64Array
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallKnownBuiltin 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallRuntime OptNewObjRange
 //! METHOD testBigUint64Array
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallKnownBuiltin 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallRuntime OptNewObjRange
 
 function testBoolean() {
     return new Boolean();
@@ -225,26 +264,46 @@ ArkTools.waitJitCompileFinish(testBigInt64Array);
 ArkTools.arkSteedCompileSync(testBigUint64Array);
 ArkTools.waitJitCompileFinish(testBigUint64Array);
 
-print(true);
-print(true);
-print(true);
-print(true);
-print(true);
-print(true);
-print(true);
-print(true);
-print(true);
-print(true);
-print(true);
-print(true);
-print(true);
-print(true);
-print(true);
-print(true);
-print(true);
-print(true);
-print(true);
-print(true);
+// These outputs validate construction while the original targets are intact.
+print(testBoolean().valueOf() === false);
+print(testNumber().valueOf() === 0);
+const proxy = testProxy();
+print(Object.getPrototypeOf(proxy) === Object.prototype);
+print(testDate() instanceof Date);
+const array = testArray();
+print(Array.isArray(array) && array.length === 0);
+const set = testSet();
+print(set instanceof Set && set.size === 0);
+const map = testMap();
+print(map instanceof Map && map.size === 0);
+const object = testObject();
+print(Object.getPrototypeOf(object) === Object.prototype);
+print(testError() instanceof Error);
+const int8Array = testInt8Array();
+print(int8Array instanceof Int8Array && int8Array.length === 0);
+const uint8Array = testUint8Array();
+print(uint8Array instanceof Uint8Array && uint8Array.length === 0);
+const uint8ClampedArray = testUint8ClampedArray();
+print(uint8ClampedArray instanceof Uint8ClampedArray && uint8ClampedArray.length === 0);
+const int16Array = testInt16Array();
+print(int16Array instanceof Int16Array && int16Array.length === 0);
+const uint16Array = testUint16Array();
+print(uint16Array instanceof Uint16Array && uint16Array.length === 0);
+const int32Array = testInt32Array();
+print(int32Array instanceof Int32Array && int32Array.length === 0);
+const uint32Array = testUint32Array();
+print(uint32Array instanceof Uint32Array && uint32Array.length === 0);
+const float32Array = testFloat32Array();
+print(float32Array instanceof Float32Array && float32Array.length === 0);
+const float64Array = testFloat64Array();
+print(float64Array instanceof Float64Array && float64Array.length === 0);
+const bigInt64Array = testBigInt64Array();
+print(bigInt64Array instanceof BigInt64Array && bigInt64Array.length === 0);
+const bigUint64Array = testBigUint64Array();
+print(bigUint64Array instanceof BigUint64Array && bigUint64Array.length === 0);
+
+// Object is replaced below too, so retain the intrinsic used by the checks.
+const originalGetPrototypeOf = Object.getPrototypeOf;
 
 class C {};
 Boolean = C;
@@ -268,23 +327,29 @@ Float64Array = C;
 BigInt64Array = C;
 BigUint64Array = C;
 
-testBoolean();
-testNumber();
-testProxy();
-testDate();
-testArray();
-testSet();
-testMap();
-testObject();
-testError();
-testInt8Array();
-testUint8Array();
-testUint8ClampedArray();
-testInt16Array();
-testUint16Array();
-testInt32Array();
-testUint32Array();
-testFloat32Array();
-testFloat64Array();
-testBigInt64Array();
-testBigUint64Array();
+function checkReplacement(value, name) {
+    if (!(value instanceof C) || originalGetPrototypeOf(value) !== C.prototype) {
+        throw name + ": wrong constructor after replacement";
+    }
+}
+
+checkReplacement(testBoolean(), "Boolean");
+checkReplacement(testNumber(), "Number");
+checkReplacement(testProxy(), "Proxy");
+checkReplacement(testDate(), "Date");
+checkReplacement(testArray(), "Array");
+checkReplacement(testSet(), "Set");
+checkReplacement(testMap(), "Map");
+checkReplacement(testObject(), "Object");
+checkReplacement(testError(), "Error");
+checkReplacement(testInt8Array(), "Int8Array");
+checkReplacement(testUint8Array(), "Uint8Array");
+checkReplacement(testUint8ClampedArray(), "Uint8ClampedArray");
+checkReplacement(testInt16Array(), "Int16Array");
+checkReplacement(testUint16Array(), "Uint16Array");
+checkReplacement(testInt32Array(), "Int32Array");
+checkReplacement(testUint32Array(), "Uint32Array");
+checkReplacement(testFloat32Array(), "Float32Array");
+checkReplacement(testFloat64Array(), "Float64Array");
+checkReplacement(testBigInt64Array(), "BigInt64Array");
+checkReplacement(testBigUint64Array(), "BigUint64Array");

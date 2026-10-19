@@ -13,11 +13,15 @@
  * limitations under the License.
  */
 //! METHOD      ArgumentsConstructor
-//! HAS         CallCommonStub  GetUnmappedArgs
+//! COUNT       InitializeUnmappedArgumentsElements 1
+//! COUNT       InitializeUnmappedArguments 1
+//! HAS_NOT     CallCommonStub GetUnmappedArgs
 //! COMPILE_COUNT_GE *ArgumentsConstructor* 1
 //! EXEC_COUNT_GE *ArgumentsConstructor* 1
 //! METHOD      constructTargetObject
-//! HAS         CallRuntime  OptNewObjRange
+//! COUNT       CallNewObjRangeBase 1
+//! COUNT       CallNewObjRangeDerived 1
+//! HAS_NOT     CallRuntime OptNewObjRange
 //! COMPILE_COUNT_GE *constructTargetObject* 1
 //! EXEC_COUNT_GE *constructTargetObject* 1
 //! DEOPT_COUNT *Deoptimize* 0

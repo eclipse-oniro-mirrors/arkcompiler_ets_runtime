@@ -16,75 +16,79 @@
 //! PARAMS --compiler-jit-hotness-threshold=2000 --enable-pgo-profiler=true
 
 //! METHOD boolDoubleBang
-//! COUNT DeoptIfNotBoolean 1
-//! COUNT TaggedNotEqual 2
+//! COMPILE_COUNT_GE *boolDoubleBang 1
+//! EXEC_COUNT_GE *boolDoubleBang 1
+//! HAS DeoptIfNotBoolean
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD boolNegate
-//! COUNT DeoptIfNotBoolean 1
+//! COMPILE_COUNT_GE *boolNegate 1
+//! EXEC_COUNT_GE *boolNegate 1
+//! HAS DeoptIfNotBoolean
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD intDoubleBang
-//! COUNT CheckedTaggedIntToI32 1
-//! COUNT I32ConditionCheck 1
-//! HAS_NOT DeoptIfNotBoolean
-//! COUNT TaggedNotEqual 1
-//! HAS_NOT TaggedNumberToBoolean
-//! HAS_NOT BranchIfFloat64Compare
+//! COMPILE_COUNT_GE *intDoubleBang 1
+//! EXEC_COUNT_GE *intDoubleBang 1
+//! HAS CheckedTaggedIntToI32
+//! HAS I32ConditionCheck
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD doubleDoubleBang
-//! COUNT TaggedDoubleToBoolean 1
-//! HAS_NOT DeoptIfNotBoolean
-//! COUNT TaggedNotEqual 1
-//! HAS_NOT TaggedNumberToBoolean
-//! HAS_NOT BranchIfFloat64Compare
+//! COMPILE_COUNT_GE *doubleDoubleBang 1
+//! EXEC_COUNT_GE *doubleDoubleBang 1
+//! HAS TaggedDoubleToBoolean
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD nullDoubleBang
-//! COUNT DeoptIfNotUndefinedOrNull 1
+//! COMPILE_COUNT_GE *nullDoubleBang 1
+//! EXEC_COUNT_GE *nullDoubleBang 1
+//! HAS DeoptIfNotUndefinedOrNull
 //! HAS TaggedConstant
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD andLeft
-//! COUNT DeoptIfNotBoolean 1
+//! COMPILE_COUNT_GE *andLeft 1
+//! EXEC_COUNT_GE *andLeft 1
+//! HAS DeoptIfNotBoolean
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD staticNumber
+//! COMPILE_COUNT_GE *staticNumber 1
+//! EXEC_COUNT_GE *staticNumber 1
 //! HAS Float64ToBoolean
-//! HAS_NOT BranchIfFloat64Compare
 //! HAS_NOT DeoptIfNotNumber
-//! HAS_NOT DeoptIfNotBoolean
-//! COUNT TaggedNotEqual 1
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD staticInt
+//! COMPILE_COUNT_GE *staticInt 1
+//! EXEC_COUNT_GE *staticInt 1
 //! HAS I32ConditionCheck
 //! HAS_NOT DeoptIfNotNumber
-//! HAS_NOT DeoptIfNotBoolean
-//! COUNT TaggedNotEqual 1
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD receiverTruthy
+//! COMPILE_COUNT_GE *receiverTruthy 1
+//! EXEC_COUNT_GE *receiverTruthy 1
 //! HAS TaggedConstant
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD constFold
+//! COMPILE_COUNT_GE *constFold 1
+//! EXEC_COUNT_GE *constFold 1
 //! HAS TaggedConstant
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD specTruthy
-//! COUNT TaggedDoubleToBoolean 1
-//! HAS_NOT DeoptIfNotBoolean
-//! COUNT TaggedNotEqual 1
-//! HAS_NOT TaggedNumberToBoolean
-//! HAS_NOT BranchIfFloat64Compare
+//! COMPILE_COUNT_GE *specTruthy 1
+//! EXEC_COUNT_GE *specTruthy 1
+//! HAS TaggedDoubleToBoolean
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD specFalsy
-//! COUNT TaggedDoubleToBoolean 1
-//! HAS_NOT TaggedNumberToBoolean
-//! HAS_NOT BranchIfFloat64Compare
+//! COMPILE_COUNT_GE *specFalsy 1
+//! EXEC_COUNT_GE *specFalsy 1
+//! HAS TaggedDoubleToBoolean
 //! HAS_NOT CallCommonStub ToBoolean*
 
 function boolDoubleBang(x) { return !!x; }

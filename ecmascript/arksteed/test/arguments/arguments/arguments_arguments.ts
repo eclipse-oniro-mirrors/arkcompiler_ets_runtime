@@ -14,10 +14,14 @@
  */
 //! METHOD      f
 //! HAS         Call
-//! HAS         CallCommonStub  GetUnmappedArgs
+//! COUNT       InitializeUnmappedArgumentsElements 1
+//! COUNT       InitializeUnmappedArguments 1
+//! HAS_NOT     CallCommonStub GetUnmappedArgs
 //! METHOD      printArgs
 //! HAS         Call
-//! HAS         CallCommonStub  GetUnmappedArgs
+//! COUNT       InitializeUnmappedArgumentsElements 1
+//! COUNT       InitializeUnmappedArguments 1
+//! HAS_NOT     CallCommonStub GetUnmappedArgs
 //! COMPILE_COUNT_GE *f* 1
 //! EXEC_COUNT_GE *f* 1
 //! COMPILE_COUNT_GE *printArgs* 1

@@ -51,7 +51,9 @@ Test();
 //! EXEC_COUNT_GE *Test 1
 //! DEOPT_COUNT *Deoptimize* 0
 //! METHOD Test
-//! HAS CallRuntime OptNewObjRange
+//! COUNT CallNewObjRangeBase 3
+//! COUNT CallNewObjRangeDerived 3
+//! HAS_NOT CallRuntime OptNewObjRange
 
 ArkTools.arkSteedCompileSync(Test);
 ArkTools.waitJitCompileFinish(Test);
