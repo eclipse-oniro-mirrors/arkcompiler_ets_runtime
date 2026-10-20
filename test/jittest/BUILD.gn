@@ -141,6 +141,7 @@ group("ark_jit_ts_test") {
     "error",
     "function_advanced",
     "bigint",
+    "jit_string_builder",
   ]
 
   callable_test_list = [
