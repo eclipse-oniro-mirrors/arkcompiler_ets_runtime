@@ -164,8 +164,6 @@ private:
     bool isForceThrowOOM_ = { false };
 }; // end class HeapImpl
 
-static ImmortalWrapper<HeapImpl> g_heapInstance;
-
 HeapAddress HeapImpl::Allocate(size_t size, AllocType allocType, bool allowGC)
 {
     if (allowGC) {
@@ -358,7 +356,12 @@ HeapAddress HeapImpl::GetStartAddress() const { return theSpace_->GetSpaceStartA
 
 HeapAddress HeapImpl::GetSpaceEndAddress() const { return theSpace_->GetSpaceEndAddress(); }
 
-Heap& Heap::GetHeap() { return *g_heapInstance; }
+// moved to lazy init in Heap::GetHeap() to avoid .init_array allocation on dlopen
+Heap& Heap::GetHeap()
+{
+    static ImmortalWrapper<HeapImpl> heapInstance;
+    return *heapInstance;
+}
 
 void HeapImpl::VisitStaticRoots(const RefFieldVisitor& visitor) { staticRootTable_.VisitRoots(visitor); }
 

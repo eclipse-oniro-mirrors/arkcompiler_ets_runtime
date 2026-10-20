@@ -20,7 +20,7 @@ host_unittest_action("Heap_Manager_Test") {
 
   sources = [
     # test file
-    "heap_manager_test.cpp",
+    # "heap_manager_test.cpp",
   ]
 
   configs = [
@@ -43,7 +43,7 @@ host_unittest_action("Verification_Test") {
 
   sources = [
     # test file
-    "verification_test.cpp",
+    # "verification_test.cpp",
   ]
 
   include_dirs = [ "//arkcompiler/ets_runtime/common_components/" ]

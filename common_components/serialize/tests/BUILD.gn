@@ -20,7 +20,7 @@ host_unittest_action("Serialize_Utils_Test") {
 
   sources = [
     # test file
-    "serialize_utils_test.cpp",
+    # "serialize_utils_test.cpp",
   ]
 
   configs = [

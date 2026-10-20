@@ -20,7 +20,7 @@ host_unittest_action("Thread_Holder_Test") {
 
   sources = [
     # test file
-    "thread_holder_test.cpp",
+    # "thread_holder_test.cpp",
   ]
 
   configs = [

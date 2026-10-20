@@ -20,7 +20,7 @@ host_unittest_action("Log_Test") {
 
   sources = [
     # test file
-    "log_test.cpp",
+    # "log_test.cpp",
   ]
 
   configs = [

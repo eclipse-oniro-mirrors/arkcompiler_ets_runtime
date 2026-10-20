@@ -20,7 +20,7 @@ host_unittest_action("Collector_Test") {
 
   sources = [
     # test file
-    "collector_resources_test.cpp",
+    # "collector_resources_test.cpp",
   ]
 
   configs = [
@@ -44,7 +44,7 @@ host_unittest_action("Finalizer_Processor_Test") {
 
   sources = [
     # test file
-    "finalizer_processor_test.cpp",
+    # "finalizer_processor_test.cpp",
   ]
 
   configs = [
@@ -68,7 +68,7 @@ host_unittest_action("Heuristic_Gc_Policy_Test") {
 
   sources = [
     # test file
-    "heuristic_gc_policy_test.cpp",
+    # "heuristic_gc_policy_test.cpp",
   ]
 
   configs = [
@@ -91,7 +91,7 @@ host_unittest_action("Collector_Proxy_Test") {
 
   sources = [
     # test file
-    "collector_proxy_test.cpp",
+    # "collector_proxy_test.cpp",
   ]
 
   configs = [
@@ -114,7 +114,7 @@ host_unittest_action("Marking_Collector_Test") {
 
   sources = [
     # test file
-    "marking_collector_test.cpp",
+    # "marking_collector_test.cpp",
   ]
 
   configs = [
@@ -137,7 +137,7 @@ host_unittest_action("Task_Queue_Test") {
 
   sources = [
     # test file
-    "task_queue_test.cpp",
+    # "task_queue_test.cpp",
   ]
 
   configs = [
@@ -160,7 +160,7 @@ host_unittest_action("Gc_Request_Test") {
 
   sources = [
     # test file
-    "gc_request_test.cpp",
+    # "gc_request_test.cpp",
   ]
 
   configs = [

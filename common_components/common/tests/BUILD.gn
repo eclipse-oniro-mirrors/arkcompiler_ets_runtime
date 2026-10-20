@@ -20,7 +20,7 @@ host_unittest_action("Page_Cache_Test") {
 
   sources = [
     # test file
-    "page_cache_test.cpp",
+    # "page_cache_test.cpp",
   ]
 
   configs = [

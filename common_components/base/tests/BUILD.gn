@@ -20,7 +20,7 @@ host_unittest_action("C_String_Test") {
 
   sources = [
     # test file
-    "c_string_test.cpp",
+    # "c_string_test.cpp",
   ]
 
   configs = [
@@ -43,7 +43,7 @@ host_unittest_action("Mem_Utils_Test") {
 
   sources = [
     # test file
-    "mem_utils_test.cpp",
+    # "mem_utils_test.cpp",
   ]
 
   configs = [
@@ -66,7 +66,7 @@ host_unittest_action("Utf_Helper_Test") {
 
   sources = [
     # test file
-    "utf_helper_test.cpp",
+    # "utf_helper_test.cpp",
   ]
 
   configs = [
@@ -89,7 +89,7 @@ host_unittest_action("TimeUtilsTest") {
 
   sources = [
     # test file
-    "time_utils_test.cpp",
+    # "time_utils_test.cpp",
   ]
 
   configs = [

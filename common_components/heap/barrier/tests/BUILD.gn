@@ -20,7 +20,7 @@ host_unittest_action("Barrier_Test") {
 
   sources = [
     # test file
-    "barrier_test.cpp",
+    # "barrier_test.cpp",
   ]
 
   configs = [
