@@ -1620,7 +1620,7 @@ HWTEST_F_L0(JsStackInfoTest, TestStepArk_026)
 {
     size_t size = 1;  // 1: unknown tpye
     JSTaggedType frame[size];
-    frame[0] = static_cast<JSTaggedType>(FrameType::BASELINE_BUILTIN_FRAME) + 1; // 0: type
+    frame[0] = static_cast<JSTaggedType>(FrameType::BASELINE_BUILTIN_FRAME) + 0x100; // 0: type
 
     uintptr_t fp  = reinterpret_cast<uintptr_t>(&frame[0]) + 8; // 0: type addr
     uintptr_t sp  = 0;
