@@ -479,6 +479,7 @@ void GCStats::PrintGCDurationStatistic()
                          << STATS_DATA_FORMAT(scopeDuration_[Scope::ScopeId::WaitFinish]) << "ms\n"
                          << STATS_DESCRIPTION_FORMAT("Finish:")
                          << STATS_DATA_FORMAT(scopeDuration_[Scope::ScopeId::Finish]) << "ms";
+            break;
         case GCType::CMS_GC:
             LOG_GC(INFO) << STATS_DESCRIPTION_FORMAT("TotalGC:")
                          << STATS_DATA_FORMAT(scopeDuration_[Scope::ScopeId::TotalGC]) << "ms\n"
