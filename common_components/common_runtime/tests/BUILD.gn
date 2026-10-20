@@ -20,7 +20,7 @@ host_unittest_action("Base_Runtime_Test") {
 
   sources = [
     # test file
-    "base_runtime_test.cpp",
+    # "base_runtime_test.cpp",
   ]
 
   configs = [

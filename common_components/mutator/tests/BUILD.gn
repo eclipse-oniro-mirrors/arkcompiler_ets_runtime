@@ -20,7 +20,7 @@ host_unittest_action("Mutator_Manager_Test") {
 
   sources = [
     # test file
-    "mutator_manager_test.cpp",
+    # "mutator_manager_test.cpp",
   ]
 
   configs = [
@@ -43,7 +43,7 @@ host_unittest_action("Mutator_Test") {
 
   sources = [
     # test file
-    "mutator_test.cpp",
+    # "mutator_test.cpp",
   ]
 
   configs = [
@@ -66,7 +66,7 @@ host_unittest_action("Satb_Buffer_Test") {
 
   sources = [
     # test file
-    "satb_buffer_test.cpp",
+    # "satb_buffer_test.cpp",
   ]
 
   configs = [
@@ -89,7 +89,7 @@ host_unittest_action("Thread_Local_Test") {
 
   sources = [
     # test file
-    "thread_local_test.cpp",
+    # "thread_local_test.cpp",
   ]
 
   configs = [

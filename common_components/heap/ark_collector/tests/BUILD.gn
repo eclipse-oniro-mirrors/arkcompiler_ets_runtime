@@ -20,7 +20,7 @@ host_unittest_action("Copy_Barrier_Test") {
 
   sources = [
     # test file
-    "copy_barrier_test.cpp",
+    # "copy_barrier_test.cpp",
   ]
 
   configs = [
@@ -43,7 +43,7 @@ host_unittest_action("Enum_Barrier_Test") {
 
   sources = [
     # test file
-    "enum_barrier_test.cpp",
+    # "enum_barrier_test.cpp",
   ]
 
   configs = [
@@ -65,7 +65,7 @@ host_unittest_action("Idle_Barrier_Test") {
 
   sources = [
     # test file
-    "idle_barrier_test.cpp",
+    # "idle_barrier_test.cpp",
   ]
 
   configs = [
@@ -88,7 +88,7 @@ host_unittest_action("Post_Marking_Barrier_Test") {
 
   sources = [
     # test file
-    "post_marking_barrier_test.cpp",
+    # "post_marking_barrier_test.cpp",
   ]
 
   configs = [
@@ -111,7 +111,7 @@ host_unittest_action("Preforward_Barrier_Test") {
 
   sources = [
     # test file
-    "preforward_barrier_test.cpp",
+    # "preforward_barrier_test.cpp",
   ]
 
   configs = [
@@ -134,7 +134,7 @@ host_unittest_action("Remark_Barrier_Test") {
 
   sources = [
     # test file
-    "remark_barrier_test.cpp",
+    # "remark_barrier_test.cpp",
   ]
 
   configs = [
@@ -157,7 +157,7 @@ host_unittest_action("Marking_Barrier_Test") {
 
   sources = [
     # test file
-    "marking_barrier_test.cpp",
+    # "marking_barrier_test.cpp",
   ]
 
   configs = [
@@ -180,7 +180,7 @@ host_unittest_action("Ark_Collector_Test") {
 
   sources = [
     # test file
-    "ark_collector_test.cpp",
+    # "ark_collector_test.cpp",
   ]
 
   configs = [

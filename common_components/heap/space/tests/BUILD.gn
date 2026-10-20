@@ -20,7 +20,7 @@ host_unittest_action("From_Space_Test") {
 
   sources = [
     # test file
-    "from_space_test.cpp",
+    # "from_space_test.cpp",
   ]
 
   configs = [

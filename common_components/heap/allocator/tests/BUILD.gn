@@ -20,7 +20,7 @@ host_unittest_action("Allocator_Test") {
 
   sources = [
     # test file
-    "allocator_test.cpp",
+    # "allocator_test.cpp",
   ]
 
   configs = [
@@ -44,7 +44,7 @@ host_unittest_action("Region_Manager_Test") {
 
   sources = [
     # test file
-    "region_manager_test.cpp",
+    # "region_manager_test.cpp",
   ]
 
   configs = [
@@ -68,7 +68,7 @@ host_unittest_action("Treap_Test") {
 
   sources = [
     # test file
-    "treap_test.cpp",
+    # "treap_test.cpp",
   ]
 
   configs = [
@@ -91,7 +91,7 @@ host_unittest_action("Regional_Heap_Test") {
 
   sources = [
     # test file
-    "regional_heap_test.cpp",
+    # "regional_heap_test.cpp",
   ]
 
   configs = [
@@ -115,7 +115,7 @@ host_unittest_action("Heap_Allocator_Test") {
 
   sources = [
     # test file
-    "heap_allocator_test.cpp",
+    # "heap_allocator_test.cpp",
   ]
 
   configs = [

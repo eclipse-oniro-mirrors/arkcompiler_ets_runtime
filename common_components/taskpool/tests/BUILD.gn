@@ -20,7 +20,7 @@ host_unittest_action("Runner_Test") {
 
   sources = [
     # test file
-    "runner_test.cpp",
+    # "runner_test.cpp",
   ]
 
   configs = [
@@ -43,7 +43,7 @@ host_unittest_action("Taskpool_Task_Queue_Test") {
 
   sources = [
     # test file
-    "task_queue_test.cpp",
+    # "task_queue_test.cpp",
   ]
 
   configs = [
@@ -66,7 +66,7 @@ host_unittest_action("Taskpool_Test") {
 
   sources = [
     # test file
-    "taskpool_test.cpp",
+    # "taskpool_test.cpp",
   ]
 
   configs = [

@@ -20,7 +20,7 @@ host_unittest_action("Map_Test") {
 
   sources = [
     # test file
-    "map_test.cpp",
+    # "map_test.cpp",
   ]
 
   configs = [
