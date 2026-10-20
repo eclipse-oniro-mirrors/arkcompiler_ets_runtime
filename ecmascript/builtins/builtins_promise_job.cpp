@@ -25,6 +25,7 @@
 #include "ecmascript/module/js_module_deregister.h"
 #include "ecmascript/module/js_module_manager.h"
 #include "ecmascript/module/module_path_helper.h"
+#include "ecmascript/module/dependency_extractor.h"
 #include "ecmascript/module/module_tools.h"
 #include "ecmascript/module/static/static_module_loader.h"
 #include "ecmascript/patch/quick_fix_manager.h"
@@ -256,8 +257,10 @@ JSTaggedValue BuiltinsPromiseJob::DynamicImportJob(EcmaRuntimeCallInfo *argv)
     // resolve native module
     ModuleManager *moduleManager = thread->GetModuleManager();
     if (SourceTextModule::IsNativeModule(requestPath)) {
+        CString callerRec = recordName->IsUndefined() ? "" : recordNameStr;
         return DynamicImport::ExecuteNativeOrJsonModule(thread, requestPath,
-            SourceTextModule::GetNativeModuleType(requestPath), resolve, reject);
+            SourceTextModule::GetNativeModuleType(requestPath), resolve, reject,
+            nullptr, callerRec, fileName);
     }
     bool isExport = ModulePathHelper::CheckExportsWithOhmurl(vm, fileName, recordNameStr, requestPath);
     if (!isExport) {
@@ -280,6 +283,11 @@ JSTaggedValue BuiltinsPromiseJob::DynamicImportJob(EcmaRuntimeCallInfo *argv)
             HandleModuleException(thread, resolve, reject, specifierString));
         moduleName = entryPoint;
     }
+    if (vm->GetJSOptions().EnableModuleDependencyLog()) {
+        CString callerRecord = recordName->IsUndefined() ? "" : recordNameStr;
+        DynamicImportRecorder::RecordDynamicImport(
+            callerRecord, fileName, moduleName, requestPath);
+    }
     std::shared_ptr<JSPandaFile> jsPandaFile = JSPandaFileManager::GetInstance()->LoadJSPandaFile(
         thread, fileName, entryPoint, false, ExecuteTypes::STATIC);
     RETURN_VALUE_IF_ABRUPT_COMPLETION(thread,
@@ -297,8 +305,10 @@ JSTaggedValue BuiltinsPromiseJob::DynamicImportJob(EcmaRuntimeCallInfo *argv)
     }
 
     if (jsPandaFile->IsJson(recordInfo)) {
+        CString callerRec = recordName->IsUndefined() ? "" : recordNameStr;
         return DynamicImport::ExecuteNativeOrJsonModule(
-            thread, entryPoint, ModuleTypes::JSON_MODULE, resolve, reject, jsPandaFile.get());
+            thread, entryPoint, ModuleTypes::JSON_MODULE, resolve, reject, jsPandaFile.get(),
+            callerRec, fileName);
     }
     // IsInstantiatedModule is for lazy module to execute
     if (!moduleManager->IsModuleLoaded(moduleName) || moduleManager->IsInstantiatedModule(moduleName)) {
