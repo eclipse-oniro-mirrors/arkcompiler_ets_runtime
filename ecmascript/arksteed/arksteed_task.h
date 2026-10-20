@@ -36,8 +36,8 @@ public:
     void InstallCode() override;
     void PUBLIC_API SetDeoptTranslationData(std::vector<uint8_t> data);
     void PUBLIC_API SetDeoptLiteralData(std::vector<JSHandle<JSTaggedValue>> literals);
-    void PUBLIC_API SetEmbeddedRefData(const std::vector<EmbeddedCodeRefReloc> &relocations,
-                                       const std::vector<JSHandle<JSTaggedValue>> &handles);
+    void PUBLIC_API SetEmbeddedRefData(std::vector<EmbeddedCodeRefReloc> relocations,
+                                       std::vector<JSHandle<JSTaggedValue>> handles);
 
     class AsyncTask : public common::Task {
     public:

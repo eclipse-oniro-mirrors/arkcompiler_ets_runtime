@@ -35,6 +35,7 @@
 
 #include "ecmascript/arksteed/arksteed_bb.h"
 #include "ecmascript/arksteed/arksteed_graph.h"
+#include "ecmascript/arksteed/arksteed_heap_broker.h"
 #include "ecmascript/arksteed/arksteed_loop_effects.h"
 #include "ecmascript/arksteed/arksteed_opcode.h"
 #include "ecmascript/ecma_string.h"
@@ -42,15 +43,18 @@
 #include "ecmascript/js_array.h"
 #include "ecmascript/js_hclass.h"
 #include "ecmascript/js_object.h"
+#include "ecmascript/jit/jit_task.h"
 #include "ecmascript/mem/native_area_allocator.h"
 #include "ecmascript/object_factory.h"
 #include "ecmascript/tests/test_helper.h"
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <initializer_list>
 #include <sstream>
 #include <string>
+#include <thread>
 
 namespace panda::ecmascript::arksteed {
 
@@ -108,10 +112,49 @@ bool LatticePairIsExpected(NodeType lhs, NodeType rhs, uint32_t expectedUnion, u
            Bits(NodeInfo::IntersectNodeType(lhs, rhs)) == expectedIntersection;
 }
 
-bool NarrowedHClassIsExpected(const NodeInfo &info, JSHClass *expectedHClass, NodeType expectedType)
+bool NarrowedHClassIsExpected(const NodeInfo &info, ArkSteedHClassRef expectedHClass, NodeType expectedType)
 {
-    return info.HasFreshKnownHClass() && info.GetFreshKnownHClass() == expectedHClass &&
+    return info.HasFreshKnownHClass() && info.GetFreshKnownHClass().Equals(expectedHClass) &&
            Bits(info.GetType()) == Bits(expectedType);
+}
+
+// Ref creation uses the same task-owned handles and heap-access scope as compilation.
+void WithHClassRefs(EcmaVM *vm, JSThread *thread, const std::function<void(ArkSteedHClassRef, ArkSteedHClassRef)> &body)
+{
+    vm->SetEnableForceGC(false);
+    vm->GetJSOptions().SetCompilerEnableLiteCG(true);
+    Jit::GetInstance()->PreFork();
+    auto *factory = vm->GetFactory();
+    auto function = factory->NewJSFunction(vm->GetGlobalEnv());
+    auto lexicalEnv = factory->NewLexicalEnv(0);
+    lexicalEnv->SetGlobalEnv(thread, vm->GetGlobalEnv().GetTaggedValue());
+    function->SetLexicalEnv(thread, lexicalEnv.GetTaggedValue());
+    auto plainClass = factory->NewEcmaHClass(static_cast<uint32_t>(JSObject::SIZE), JSType::JS_OBJECT);
+    auto array = factory->NewJSArray();
+    std::thread worker([vm, thread, &function, plainClass, array, &body] {
+        auto *jitVM = JitVM::Create();
+        jitVM->SetHostVM(thread);
+        auto *jitThread = static_cast<JitThread *>(jitVM->GetJSThreadNoCheck());
+        CString name("compile-info-facts-test");
+        {
+            JitTask task(thread, jitThread, Jit::GetInstance(), function, CompilerTier(CompilerTier::Tier::FAST),
+                         name, 0, JitCompileMode(JitCompileMode::Mode::SYNC));
+            jitThread->SetCurrentTask(&task);
+            {
+                JitHeapAccessScope heapAccess(jitThread);
+                JitCompilationEnv env(jitVM, vm, function, task.GetDependencies());
+                ArkSteedHeapBroker broker(jitThread, &env);
+                auto plainHClass = broker.MakeObjectRef(plainClass);
+                auto arrayHClass = broker.MakeHClassRef(array->GetClass());
+                body(plainHClass, arrayHClass);
+            }
+            jitThread->SetCurrentTask(nullptr);
+        }
+        jitVM->ReSetHostVM();
+        JitVM::Destroy(jitVM);
+    });
+    ThreadNativeScope native(thread);
+    worker.join();
 }
 
 struct GraphFixture {
@@ -410,115 +453,107 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, NodeInfoHClassFactsOnRealHClasses)
     ASSERT_TRUE(scope.IsValid()) << "cannot create EcmaVM";
     ASSERT_NE(scope.GetThread(), nullptr);
 
-    ObjectFactory *factory = scope.GetVm()->GetFactory();
-    JSHandle<JSHClass> plainClass = factory->NewEcmaHClass(static_cast<uint32_t>(JSObject::SIZE), JSType::JS_OBJECT);
-    JSHandle<JSObject> plainObject = factory->NewJSObject(plainClass);
-    JSHandle<JSArray> array = factory->NewJSArray();
-    ASSERT_NE(*plainObject, nullptr);
-    ASSERT_NE(*array, nullptr);
+    WithHClassRefs(scope.GetVm(), scope.GetThread(), [&](ArkSteedHClassRef plainHClass, ArkSteedHClassRef arrayHClass) {
+        ASSERT_TRUE(plainHClass.IsJSHClass());
+        ASSERT_TRUE(arrayHClass.IsJSHClass());
+        ASSERT_FALSE(plainHClass.Equals(arrayHClass));
+        ASSERT_EQ(NodeTypeFromHClass(plainHClass), NodeType::OTHER_JS_RECEIVER);
+        ASSERT_EQ(NodeTypeFromHClass(arrayHClass), NodeType::JS_ARRAY);
 
-    // Both classes are real, non-movable heap objects; their object types are
-    // independent of the recorded facts.
-    JSHClass *plainHClass = (*plainObject)->GetClass();
-    JSHClass *arrayHClass = (*array)->GetClass();
-    ASSERT_NE(plainHClass, nullptr);
-    ASSERT_NE(arrayHClass, nullptr);
-    ASSERT_NE(plainHClass, arrayHClass);
-    ASSERT_EQ(NodeTypeFromHClass(plainHClass), NodeType::OTHER_JS_RECEIVER);
-    ASSERT_EQ(NodeTypeFromHClass(arrayHClass), NodeType::JS_ARRAY);
+        NodeInfo info;
+        ASSERT_TRUE(info.NoInfoAvailable());
+        info.RecordPossibleHClasses({plainHClass, arrayHClass}, true);
+        ASSERT_EQ(info.PossibleHClassCount(), 2U);
+        ASSERT_TRUE(info.HasFreshPossibleHClasses());
+        ASSERT_FALSE(info.HasFreshKnownHClass());
+        ASSERT_FALSE(info.PossibleHClassesAreStale());
+        ASSERT_FALSE(info.HasUnstablePossibleHClass());
+        // The recorded receiver classes narrow the unknown type to the union
+        // of their atom types (ANY_HEAP_OBJECT is not part of that union).
+        ASSERT_EQ(Bits(info.GetType()), Bits(NodeType::OTHER_JS_RECEIVER) | Bits(NodeType::JS_ARRAY));
 
-    NodeInfo info;
-    ASSERT_TRUE(info.NoInfoAvailable());
-    info.RecordPossibleHClasses({plainHClass, arrayHClass}, true);
-    ASSERT_EQ(info.PossibleHClassCount(), 2U);
-    ASSERT_TRUE(info.HasFreshPossibleHClasses());
-    ASSERT_FALSE(info.HasFreshKnownHClass());
-    ASSERT_FALSE(info.PossibleHClassesAreStale());
-    ASSERT_FALSE(info.HasUnstablePossibleHClass());
-    // The recorded receiver classes narrow the unknown type to the union of
-    // their atom types (ANY_HEAP_OBJECT is not part of that union).
-    ASSERT_EQ(Bits(info.GetType()), Bits(NodeType::OTHER_JS_RECEIVER) | Bits(NodeType::JS_ARRAY));
+        // Narrowing to one class keeps exactly one fresh known class.
+        ASSERT_TRUE(info.NarrowPossibleHClasses({plainHClass}));
+        ASSERT_EQ(info.PossibleHClassCount(), 1U);
+        ASSERT_TRUE(info.HasFreshKnownHClass());
+        ASSERT_TRUE(info.GetFreshKnownHClass().Equals(plainHClass));
+        ASSERT_EQ(Bits(info.GetType()), Bits(NodeType::OTHER_JS_RECEIVER));
+        ASSERT_TRUE(NarrowedHClassIsExpected(info, plainHClass, NodeType::OTHER_JS_RECEIVER));
+        ASSERT_TRUE(info.NarrowPossibleHClasses({plainHClass})) << "narrowing to the same set is stable";
+        // A disjoint set empties the possible classes and reports failure.
+        ASSERT_FALSE(info.NarrowPossibleHClasses({arrayHClass}));
+        ASSERT_EQ(info.PossibleHClassCount(), 0U);
+        ASSERT_FALSE(info.HasFreshKnownHClass());
+        ASSERT_FALSE(info.HasFreshPossibleHClasses());
 
-    // Narrowing to one class keeps exactly one fresh known class.
-    ASSERT_TRUE(info.NarrowPossibleHClasses({plainHClass}));
-    ASSERT_EQ(info.PossibleHClassCount(), 1U);
-    ASSERT_TRUE(info.HasFreshKnownHClass());
-    ASSERT_EQ(info.GetFreshKnownHClass(), plainHClass);
-    ASSERT_EQ(Bits(info.GetType()), Bits(NodeType::OTHER_JS_RECEIVER));
-    ASSERT_TRUE(NarrowedHClassIsExpected(info, plainHClass, NodeType::OTHER_JS_RECEIVER));
-    ASSERT_TRUE(info.NarrowPossibleHClasses({plainHClass})) << "narrowing to the same set is stable";
-    // A disjoint set empties the possible classes and reports failure.
-    ASSERT_FALSE(info.NarrowPossibleHClasses({arrayHClass}));
-    ASSERT_EQ(info.PossibleHClassCount(), 0U);
-    ASSERT_FALSE(info.HasFreshKnownHClass());
-    ASSERT_FALSE(info.HasFreshPossibleHClasses());
+        // An unstable single class is a fresh known class but not a stable
+        // one.
+        NodeInfo unstable;
+        unstable.RecordPossibleHClasses({plainHClass}, false);
+        ASSERT_FALSE(unstable.HClassIsStable());
+        ASSERT_TRUE(unstable.HasUnstablePossibleHClass());
+        ASSERT_TRUE(unstable.HasFreshKnownHClass());
+        unstable.MarkUnstableHClassesStale();
+        ASSERT_TRUE(unstable.PossibleHClassesAreStale());
+        ASSERT_FALSE(unstable.HasFreshKnownHClass());
 
-    // An unstable single class is a fresh known class but not a stable one.
-    NodeInfo unstable;
-    unstable.RecordPossibleHClasses({plainHClass}, false);
-    ASSERT_FALSE(unstable.HClassIsStable());
-    ASSERT_TRUE(unstable.HasUnstablePossibleHClass());
-    ASSERT_TRUE(unstable.HasFreshKnownHClass());
-    unstable.MarkUnstableHClassesStale();
-    ASSERT_TRUE(unstable.PossibleHClassesAreStale());
-    ASSERT_FALSE(unstable.HasFreshKnownHClass());
+        // A stable class is never invalidated by MarkUnstableHClassesStale.
+        NodeInfo stable;
+        stable.RecordPossibleHClasses({plainHClass}, true);
+        stable.MarkUnstableHClassesStale();
+        ASSERT_FALSE(stable.PossibleHClassesAreStale());
+        ASSERT_TRUE(stable.HasFreshKnownHClass());
 
-    // A stable class is never invalidated by MarkUnstableHClassesStale.
-    NodeInfo stable;
-    stable.RecordPossibleHClasses({plainHClass}, true);
-    stable.MarkUnstableHClassesStale();
-    ASSERT_FALSE(stable.PossibleHClassesAreStale());
-    ASSERT_TRUE(stable.HasFreshKnownHClass());
+        // Merging two different single-class facts unions the receiver sets.
+        NodeInfo left;
+        left.RecordPossibleHClasses({plainHClass}, true);
+        NodeInfo right;
+        right.RecordPossibleHClasses({arrayHClass}, true);
+        ASSERT_TRUE(left.MergeWith(right));
+        ASSERT_EQ(left.PossibleHClassCount(), 2U);
+        ASSERT_TRUE(left.ContainsPossibleHClass(plainHClass));
+        ASSERT_TRUE(left.ContainsPossibleHClass(arrayHClass));
+        ASSERT_EQ(Bits(left.GetType()), Bits(NodeType::OTHER_JS_RECEIVER) | Bits(NodeType::JS_ARRAY));
+        // A side without any possible class drops the merged set entirely.
+        NodeInfo withoutHClasses;
+        left.MergeWith(withoutHClasses);
+        ASSERT_EQ(left.PossibleHClassCount(), 0U);
+        ASSERT_FALSE(left.HasFreshPossibleHClasses());
 
-    // Merging two different single-class facts unions the receiver sets.
-    NodeInfo left;
-    left.RecordPossibleHClasses({plainHClass}, true);
-    NodeInfo right;
-    right.RecordPossibleHClasses({arrayHClass}, true);
-    ASSERT_TRUE(left.MergeWith(right));
-    ASSERT_EQ(left.PossibleHClassCount(), 2U);
-    ASSERT_TRUE(left.ContainsPossibleHClass(plainHClass));
-    ASSERT_TRUE(left.ContainsPossibleHClass(arrayHClass));
-    ASSERT_EQ(Bits(left.GetType()), Bits(NodeType::OTHER_JS_RECEIVER) | Bits(NodeType::JS_ARRAY));
-    // A side without any possible class drops the merged set entirely.
-    NodeInfo withoutHClasses;
-    left.MergeWith(withoutHClasses);
-    ASSERT_EQ(left.PossibleHClassCount(), 0U);
-    ASSERT_FALSE(left.HasFreshPossibleHClasses());
+        // IsCompatibleWith: an expected set with unstable entries requires
+        // the actual set to be at least as stable and to be a subset of it.
+        NodeInfo expectedUnstable;
+        expectedUnstable.RecordPossibleHClasses({plainHClass}, false);
+        NodeInfo actualUnstable;
+        actualUnstable.RecordPossibleHClasses({plainHClass}, false);
+        ASSERT_TRUE(actualUnstable.IsCompatibleWith(expectedUnstable)) << "unstable expected entries are compatible";
+        NodeInfo actualOtherClass;
+        actualOtherClass.RecordPossibleHClasses({arrayHClass}, false);
+        ASSERT_FALSE(actualOtherClass.IsCompatibleWith(expectedUnstable)) << "class outside the expected set";
 
-    // IsCompatibleWith: an expected set with unstable entries requires the
-    // actual set to be at least as stable and to be a subset of it.
-    NodeInfo expectedUnstable;
-    expectedUnstable.RecordPossibleHClasses({plainHClass}, false);
-    NodeInfo actualUnstable;
-    actualUnstable.RecordPossibleHClasses({plainHClass}, false);
-    ASSERT_TRUE(actualUnstable.IsCompatibleWith(expectedUnstable)) << "unstable expected entries are compatible";
-    NodeInfo actualOtherClass;
-    actualOtherClass.RecordPossibleHClasses({arrayHClass}, false);
-    ASSERT_FALSE(actualOtherClass.IsCompatibleWith(expectedUnstable)) << "class outside the expected set";
+        // In a mixed expected set a stable expected class cannot be covered
+        // by an unstable actual class, while a stable actual class is always
+        // accepted.
+        NodeInfo expectedMixed;
+        expectedMixed.RecordPossibleHClasses(NodeInfo::PossibleHClassInfos {
+            NodeInfo::PossibleHClassInfo {plainHClass, true}, NodeInfo::PossibleHClassInfo {arrayHClass, false}});
+        ASSERT_TRUE(expectedMixed.HasUnstablePossibleHClass());
+        NodeInfo actualStable;
+        actualStable.RecordPossibleHClasses({plainHClass}, true);
+        ASSERT_TRUE(actualStable.IsCompatibleWith(expectedMixed));
+        NodeInfo actualNotAsStable;
+        actualNotAsStable.RecordPossibleHClasses({plainHClass}, false);
+        ASSERT_FALSE(actualNotAsStable.IsCompatibleWith(expectedMixed));
 
-    // In a mixed expected set a stable expected class cannot be covered by an
-    // unstable actual class, while a stable actual class is always accepted.
-    NodeInfo expectedMixed;
-    expectedMixed.RecordPossibleHClasses(
-        NodeInfo::PossibleHClassInfos {NodeInfo::PossibleHClassInfo {plainHClass, true},
-                                       NodeInfo::PossibleHClassInfo {arrayHClass, false}});
-    ASSERT_TRUE(expectedMixed.HasUnstablePossibleHClass());
-    NodeInfo actualStable;
-    actualStable.RecordPossibleHClasses({plainHClass}, true);
-    ASSERT_TRUE(actualStable.IsCompatibleWith(expectedMixed));
-    NodeInfo actualNotAsStable;
-    actualNotAsStable.RecordPossibleHClasses({plainHClass}, false);
-    ASSERT_FALSE(actualNotAsStable.IsCompatibleWith(expectedMixed));
-
-    // A stale expected set is accepted without comparing classes.
-    NodeInfo expectedStale;
-    expectedStale.RecordPossibleHClasses({plainHClass}, false);
-    expectedStale.MarkUnstableHClassesStale();
-    ASSERT_TRUE(expectedStale.PossibleHClassesAreStale());
-    NodeInfo actualTyped;
-    actualTyped.SetType(NodeType::OTHER_JS_RECEIVER);
-    ASSERT_TRUE(actualTyped.IsCompatibleWith(expectedStale));
+        // A stale expected set is accepted without comparing classes.
+        NodeInfo expectedStale;
+        expectedStale.RecordPossibleHClasses({plainHClass}, false);
+        expectedStale.MarkUnstableHClassesStale();
+        ASSERT_TRUE(expectedStale.PossibleHClassesAreStale());
+        NodeInfo actualTyped;
+        actualTyped.SetType(NodeType::OTHER_JS_RECEIVER);
+        ASSERT_TRUE(actualTyped.IsCompatibleWith(expectedStale));
+    });
 }
 
 // --- NodeInfo: merge and compatibility of plain facts ----------------------
@@ -635,23 +670,19 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, MutationControlForTypePairAndHClassSet
     ArkSteedCompileInfoFactsTest::ScopedEcmaVm scope;
     ASSERT_TRUE(scope.IsValid()) << "cannot create EcmaVM";
 
-    ObjectFactory *factory = scope.GetVm()->GetFactory();
-    JSHandle<JSHClass> plainClass = factory->NewEcmaHClass(static_cast<uint32_t>(JSObject::SIZE), JSType::JS_OBJECT);
-    JSHandle<JSObject> plainObject = factory->NewJSObject(plainClass);
-    JSHandle<JSArray> array = factory->NewJSArray();
-    ASSERT_NE(*plainObject, nullptr);
-    ASSERT_NE(*array, nullptr);
-    JSHClass *plainHClass = (*plainObject)->GetClass();
-    JSHClass *arrayHClass = (*array)->GetClass();
-    ASSERT_NE(plainHClass, arrayHClass);
+    WithHClassRefs(scope.GetVm(), scope.GetThread(), [&](ArkSteedHClassRef plainHClass, ArkSteedHClassRef arrayHClass) {
+        ASSERT_TRUE(plainHClass.IsJSHClass());
+        ASSERT_TRUE(arrayHClass.IsJSHClass());
+        ASSERT_FALSE(plainHClass.Equals(arrayHClass));
 
-    NodeInfo info;
-    info.RecordPossibleHClasses({plainHClass}, true);
-    ASSERT_TRUE(NarrowedHClassIsExpected(info, plainHClass, NodeType::OTHER_JS_RECEIVER));
-    EXPECT_FALSE(NarrowedHClassIsExpected(info, arrayHClass, NodeType::OTHER_JS_RECEIVER))
-        << "a substituted expected HClass must be detected";
-    EXPECT_FALSE(NarrowedHClassIsExpected(info, plainHClass, NodeType::JS_ARRAY))
-        << "a substituted expected receiver type must be detected";
+        NodeInfo info;
+        info.RecordPossibleHClasses({plainHClass}, true);
+        ASSERT_TRUE(NarrowedHClassIsExpected(info, plainHClass, NodeType::OTHER_JS_RECEIVER));
+        EXPECT_FALSE(NarrowedHClassIsExpected(info, arrayHClass, NodeType::OTHER_JS_RECEIVER))
+            << "a substituted expected HClass must be detected";
+        EXPECT_FALSE(NarrowedHClassIsExpected(info, plainHClass, NodeType::JS_ARRAY))
+            << "a substituted expected receiver type must be detected";
+    });
 }
 
 // --- CompileInfoFacts: CSE -------------------------------------------------

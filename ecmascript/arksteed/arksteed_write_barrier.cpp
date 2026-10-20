@@ -19,7 +19,6 @@
 #include "ecmascript/js_thread.h"
 #include "ecmascript/js_tagged_value.h"
 #include "ecmascript/mem/mem.h"
-#include "ecmascript/mem/remembered_set.h"
 #include "ecmascript/mem/region.h"
 
 namespace panda::ecmascript::arksteed {
@@ -144,175 +143,57 @@ void ArkSteedWriteBarrierEmitter::CallBarrierRuntime(kungfu::RuntimeStubCSigns::
 }
 
 void ArkSteedWriteBarrierEmitter::EmitFastWriteBarrier(ArkSteedRegister glue, ArkSteedRegister object,
-                                                       ArkSteedRegister value, int32_t offset)
+                                                       ArkSteedRegister value, int32_t offset, bool preserveInputs)
 {
-    CallBarrierRuntime(RTSTUB_ID(ASMFastWriteBarrier), glue, object, offset, value, false);
-}
-
-void ArkSteedWriteBarrierEmitter::EmitLocalToShareRSet(ArkSteedRegister glue, ArkSteedRegister object,
-                                                       ArkSteedRegister value, int32_t offset,
-                                                       ArkSteedRegister objectRegionScratch,
-                                                       ArkSteedRegister bitsetWordAddrScratch, Label *next)
-{
-    ASSERT(objectRegionScratch != bitsetWordAddrScratch);
-    ASSERT(glue != objectRegionScratch);
-    ASSERT(glue != bitsetWordAddrScratch);
-
-    Label callRuntime;
-    Label restoreGlue;
-    constexpr int64_t REGION_BASE_MASK = static_cast<int64_t>(~(JSTaggedValue::TAG_MARK | DEFAULT_REGION_MASK));
-    constexpr uint32_t BITSET_WORD_BYTE_INDEX_SHIFT =
-        TAGGED_TYPE_SIZE_LOG + GCBitset::BIT_PER_WORD_LOG2 - GCBitset::BYTE_PER_WORD_LOG2;
-    constexpr uint32_t BITSET_WORD_BYTE_INDEX_MASK = static_cast<uint32_t>(~uint64_t {0} >> TAGGED_TYPE_SIZE_LOG) >>
-                                                     GCBitset::BIT_PER_WORD_LOG2 << GCBitset::BYTE_PER_WORD_LOG2;
-    static_assert(BITSET_WORD_BYTE_INDEX_MASK == 0x1ffffffc, "LocalToShareSet byte index layout changed");
-
-    ArkSteedRegister regionBase = objectRegionScratch;
-    ArkSteedRegister bitsetWordAddr = bitsetWordAddrScratch;
-    ArkSteedRegister slotOffset = glue;
-
-    __ Move(regionBase, object);
-    __ And(regionBase, REGION_BASE_MASK);
-    __ LoadField(bitsetWordAddr, regionBase, static_cast<int32_t>(Region::PackedData::GetLocalToShareSetOffset(false)));
-    __ Compare(bitsetWordAddr, 0);
-    __ JumpIf(Condition::EQUAL, &callRuntime);
-
-    __ Move(slotOffset, object);
-    __ And(slotOffset, static_cast<int64_t>(DEFAULT_REGION_MASK));
-    __ Add(slotOffset, offset);
-    __ ShiftRightLogical(slotOffset, BITSET_WORD_BYTE_INDEX_SHIFT);
-    __ And(slotOffset, static_cast<int64_t>(BITSET_WORD_BYTE_INDEX_MASK));
-    __ Add(bitsetWordAddr, static_cast<int32_t>(RememberedSet::GCBITSET_DATA_OFFSET));
-    __ Add(bitsetWordAddr, slotOffset);
-
-    __ Move(slotOffset, object);
-    __ And(slotOffset, static_cast<int64_t>(DEFAULT_REGION_MASK));
-    __ Add(slotOffset, offset);
-    __ ShiftRightLogical32(slotOffset, TAGGED_TYPE_SIZE_LOG);
-    __ And(slotOffset, static_cast<int64_t>(GCBitset::BIT_PER_WORD_MASK));
-    ArkSteedRegister bitMask = objectRegionScratch;
-    __ MoveBitMask32(bitMask, slotOffset);
-
-    __ LoadInt32Field(slotOffset, bitsetWordAddr, 0);
-    __ And(slotOffset, bitMask);
-    __ Compare(slotOffset, 0);
-    __ JumpIf(Condition::NOT_EQUAL, &restoreGlue);
-
-    __ LoadInt32Field(slotOffset, bitsetWordAddr, 0);
-    __ Or(slotOffset, bitMask);
-    __ StoreInt32Field(slotOffset, bitsetWordAddr, 0);
-    __ Jump(&restoreGlue);
-
-    __ Bind(&callRuntime);
-    CallBarrierRuntime(RTSTUB_ID(InsertLocalToShareRSet), glue, object, offset, value, true);
-    __ Jump(next);
-
-    __ Bind(&restoreGlue);
-    __ LoadGlue(glue);
-    __ Jump(next);
+    CallBarrierRuntime(RTSTUB_ID(ASMFastWriteBarrier), glue, object, offset, value, preserveInputs);
 }
 
 void ArkSteedWriteBarrierEmitter::EmitWriteBarrier(ArkSteedRegister glue, ArkSteedRegister object,
                                                    ArkSteedRegister value, int32_t offset,
                                                    ArkSteedWriteBarrierKind barrierKind,
                                                    ArkSteedRegister objectRegionScratch,
-                                                   ArkSteedRegister valueRegionScratch)
+                                                   ArkSteedRegister valueRegionScratch, bool preserveInputs)
 {
-    switch (barrierKind) {
-        case ArkSteedWriteBarrierKind::NO_BARRIER:
-            return;
-        case ArkSteedWriteBarrierKind::GENERIC_BARRIER:
-        case ArkSteedWriteBarrierKind::SHARED_BARRIER:
-            break;
+    if (barrierKind == ArkSteedWriteBarrierKind::NO_BARRIER) {
+        return;
     }
 
-    Label done;
-    Label valueNotShared;
-    Label checkSharedMarking;
-    Label checkNormalMarking;
-
-    constexpr int64_t REGION_BASE_MASK = static_cast<int64_t>(~(JSTaggedValue::TAG_MARK | DEFAULT_REGION_MASK));
-    ArkSteedRegister objectRegion = objectRegionScratch;
-    ArkSteedRegister valueRegion = valueRegionScratch;
-    __ Move(objectRegion, object);
-    __ And(objectRegion, REGION_BASE_MASK);
-    __ Move(valueRegion, value);
-    __ And(valueRegion, REGION_BASE_MASK);
-
-    __ LoadField(valueRegion, valueRegion, static_cast<int32_t>(Region::PackedData::GetFlagsOffset(false)));
-    __ And(valueRegion, static_cast<int64_t>(RegionSpaceFlag::VALID_SPACE_MASK));
-
-    if (barrierKind == ArkSteedWriteBarrierKind::GENERIC_BARRIER) {
-        __ Compare(valueRegion, static_cast<int32_t>(RegionSpaceFlag::SHARED_SPACE_BEGIN));
-        __ JumpIf(Condition::LESS_THAN, &valueNotShared);
-        __ Compare(valueRegion, static_cast<int32_t>(RegionSpaceFlag::SHARED_SPACE_END));
-        __ JumpIf(Condition::GREATER_THAN, &valueNotShared);
-        __ Jump(&checkSharedMarking);
-
-        __ Bind(&valueNotShared);
-        Label notOldToYoung;
-        __ LoadField(objectRegion, objectRegion, static_cast<int32_t>(Region::PackedData::GetFlagsOffset(false)));
-        __ And(objectRegion, static_cast<int64_t>(RegionSpaceFlag::VALID_SPACE_MASK));
-        __ Compare(objectRegion, static_cast<int32_t>(RegionSpaceFlag::IN_YOUNG_SPACE));
-        __ JumpIf(Condition::EQUAL, &notOldToYoung);
-        __ Compare(valueRegion, static_cast<int32_t>(RegionSpaceFlag::IN_YOUNG_SPACE));
-        __ JumpIf(Condition::NOT_EQUAL, &notOldToYoung);
-        CallBarrierRuntime(RTSTUB_ID(InsertOldToNewRSet), glue, object, offset, value, true);
-        __ Bind(&notOldToYoung);
-        __ Jump(&checkNormalMarking);
-    }
-
-    __ Bind(&checkSharedMarking);
-    Label notLocalToShare;
-    __ Compare(valueRegion, static_cast<int32_t>(RegionSpaceFlag::SHARED_SWEEPABLE_SPACE_BEGIN));
-    __ JumpIf(Condition::LESS_THAN, &done);
-    __ Compare(valueRegion, static_cast<int32_t>(RegionSpaceFlag::SHARED_SWEEPABLE_SPACE_END));
-    __ JumpIf(Condition::GREATER_THAN, &done);
-    __ Move(objectRegion, object);
-    __ And(objectRegion, REGION_BASE_MASK);
-    __ LoadField(objectRegion, objectRegion, static_cast<int32_t>(Region::PackedData::GetFlagsOffset(false)));
-    __ And(objectRegion, static_cast<int64_t>(RegionSpaceFlag::VALID_SPACE_MASK));
-    __ Compare(objectRegion, static_cast<int32_t>(RegionSpaceFlag::SHARED_SPACE_BEGIN));
-    __ JumpIf(Condition::GREATER_THAN_OR_EQUAL, &notLocalToShare);
-    EmitLocalToShareRSet(glue, object, value, offset, objectRegionScratch, valueRegionScratch, &notLocalToShare);
-    __ Bind(&notLocalToShare);
-
-    __ Move(objectRegion, glue);
-    __ LoadField(objectRegion, objectRegion,
-                 static_cast<int32_t>(JSThread::GlueData::GetSharedGCStateBitFieldOffset(false)));
-    __ And(objectRegion, static_cast<int64_t>(JSThread::SHARED_CONCURRENT_MARKING_BITFIELD_MASK));
-    __ Compare(objectRegion, static_cast<int32_t>(SharedMarkStatus::READY_TO_CONCURRENT_MARK));
-    __ JumpIf(Condition::EQUAL, &done);
-    CallBarrierRuntime(RTSTUB_ID(SharedGCMarkingBarrier), glue, object, offset, value, false);
-    __ Jump(&done);
-
-    if (barrierKind == ArkSteedWriteBarrierKind::GENERIC_BARRIER) {
-        __ Bind(&checkNormalMarking);
-        __ Move(objectRegion, glue);
-        __ LoadField(objectRegion, objectRegion,
-                     static_cast<int32_t>(JSThread::GlueData::GetGCStateBitFieldOffset(false)));
-        __ And(objectRegion, static_cast<int64_t>(JSThread::CONCURRENT_MARKING_BITFIELD_MASK));
-        __ Compare(objectRegion, static_cast<int32_t>(MarkStatus::READY_TO_MARK));
-        __ JumpIf(Condition::EQUAL, &done);
-        CallBarrierRuntime(RTSTUB_ID(MarkingBarrier), glue, object, offset, value, false);
-    }
-
-    __ Bind(&done);
-}
-
-void ArkSteedWriteBarrierEmitter::EmitPostStoreWriteBarrier(ArkSteedRegister glue, ArkSteedRegister object,
-                                                            ArkSteedRegister value, int32_t offset,
-                                                            ArkSteedWriteBarrierKind barrierKind,
-                                                            ArkSteedRegister objectRegionScratch,
-                                                            ArkSteedRegister valueRegionScratch)
-{
 #if USE_STICKY_CMS_GC
     if (barrierKind == ArkSteedWriteBarrierKind::GENERIC_BARRIER) {
-        EmitFastWriteBarrier(glue, object, value, offset);
+        EmitFastWriteBarrier(glue, object, value, offset, preserveInputs);
         return;
     }
 #endif
-    EmitWriteBarrier(glue, object, value, offset, barrierKind, objectRegionScratch, valueRegionScratch);
+
+    Label done;
+    Label callBarrier;
+    constexpr int64_t REGION_BASE_MASK = static_cast<int64_t>(~(JSTaggedValue::TAG_MARK | DEFAULT_REGION_MASK));
+    static_assert(RegionSpaceFlag::VALID_SPACE_MASK == 0xff);
+    __ Move(valueRegionScratch, value);
+    __ And(valueRegionScratch, REGION_BASE_MASK);
+    __ LoadUint8Field(valueRegionScratch, valueRegionScratch,
+                      static_cast<int32_t>(Region::PackedData::GetFlagsOffset(false)));
+    __ Compare(valueRegionScratch, static_cast<int32_t>(RegionSpaceFlag::IN_SHARED_READ_ONLY_SPACE));
+    __ JumpIf(Condition::EQUAL, &done);
+
+    // Only local non-young values can skip the barrier based on local marking.
+    // Compare space boundaries directly so young and shared values go to the
+    // common stub, which handles shared marking independently of the local GC state.
+    constexpr int32_t LOCAL_NON_YOUNG_BEGIN = static_cast<int32_t>(RegionSpaceFlag::IN_YOUNG_SPACE) + 1;
+    __ Compare(valueRegionScratch, LOCAL_NON_YOUNG_BEGIN);
+    __ JumpIf(Condition::LESS_THAN, &callBarrier);
+    __ Compare(valueRegionScratch, static_cast<int32_t>(RegionSpaceFlag::SHARED_SPACE_BEGIN));
+    __ JumpIf(Condition::GREATER_THAN_OR_EQUAL, &callBarrier);
+    __ LoadField(objectRegionScratch, glue, static_cast<int32_t>(JSThread::GlueData::GetGCStateBitFieldOffset(false)));
+    __ And(objectRegionScratch, static_cast<int64_t>(JSThread::CONCURRENT_MARKING_BITFIELD_MASK));
+    __ Compare(objectRegionScratch, static_cast<int32_t>(MarkStatus::READY_TO_MARK));
+    __ JumpIf(Condition::EQUAL, &done);
+
+    __ Bind(&callBarrier);
+    // Keep region-pair dispatch, remembered sets and marking in shared machine
+    // code instead of emitting all their paths and call adapters at every store.
+    EmitFastWriteBarrier(glue, object, value, offset, preserveInputs);
+    __ Bind(&done);
 }
 
 void ArkSteedWriteBarrierEmitter::StoreTaggedField(ArkSteedRegister glue, ArkSteedRegister object,
@@ -329,22 +210,17 @@ void ArkSteedWriteBarrierEmitter::StoreTaggedField(ArkSteedRegister glue, ArkSte
 
     if (valueKind == ArkSteedWriteBarrierValueKind::HeapObject) {
         __ StoreField(value, object, offset);
-        EmitPostStoreWriteBarrier(glue, object, value, offset, barrierKind, objectRegionScratch, valueRegionScratch);
+        EmitWriteBarrier(glue, object, value, offset, barrierKind, objectRegionScratch, valueRegionScratch);
         return;
     }
 
-    Label needsBarrier;
     Label done;
+    __ StoreField(value, object, offset);
     __ Move(objectRegionScratch, value);
     __ And(objectRegionScratch, static_cast<int64_t>(JSTaggedValue::TAG_HEAPOBJECT_MASK));
     __ Compare(objectRegionScratch, 0);
-    __ JumpIf(Condition::EQUAL, &needsBarrier);
-    __ StoreField(value, object, offset);
-    __ Jump(&done);
-
-    __ Bind(&needsBarrier);
-    __ StoreField(value, object, offset);
-    EmitPostStoreWriteBarrier(glue, object, value, offset, barrierKind, objectRegionScratch, valueRegionScratch);
+    __ JumpIf(Condition::NOT_EQUAL, &done);
+    EmitWriteBarrier(glue, object, value, offset, barrierKind, objectRegionScratch, valueRegionScratch);
     __ Bind(&done);
 }
 
@@ -356,8 +232,8 @@ void ArkSteedWriteBarrierEmitter::TransitionHClass(ArkSteedRegister glue, ArkSte
     constexpr int32_t offset = static_cast<int32_t>(TaggedObject::HCLASS_OFFSET);
 #ifndef ARK_USE_SATB_BARRIER
     __ StoreInt32FieldRelease(hclass, object, offset);
-    EmitPostStoreWriteBarrier(glue, object, hclass, offset, ArkSteedWriteBarrierKind::GENERIC_BARRIER,
-                              objectRegionScratch, hclassRegionScratch);
+    EmitWriteBarrier(glue, object, hclass, offset, ArkSteedWriteBarrierKind::GENERIC_BARRIER, objectRegionScratch,
+                     hclassRegionScratch);
 #else
     CallBarrierRuntime(RTSTUB_ID(ASMFastWriteBarrier), glue, object, offset, hclass, true);
     __ StoreInt32FieldRelease(hclass, object, offset);
@@ -370,8 +246,9 @@ void ArkSteedWriteBarrierEmitter::InitializeHClass(ArkSteedRegister glue, ArkSte
 {
     static_assert(TaggedObject::HCLASS_OFFSET == 0);
     constexpr int32_t offset = static_cast<int32_t>(TaggedObject::HCLASS_OFFSET);
-    EmitPostStoreWriteBarrier(glue, object, hclass, offset, ArkSteedWriteBarrierKind::GENERIC_BARRIER,
-                              objectRegionScratch, hclassRegionScratch);
+    // The header store after the deferred call still needs object and hclass.
+    EmitWriteBarrier(glue, object, hclass, offset, ArkSteedWriteBarrierKind::GENERIC_BARRIER, objectRegionScratch,
+                     hclassRegionScratch, true);
     __ StoreHeaderRelease(hclass, object);
 }
 

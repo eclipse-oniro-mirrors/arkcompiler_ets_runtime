@@ -15,9 +15,12 @@
 
 #include "ecmascript/arksteed/arksteed_write_barrier.h"
 #include "ecmascript/arksteed/arksteed_assembler-inl.h"
+#include <vector>
 #include "ecmascript/js_hclass.h"
 #include "ecmascript/mem/chunk.h"
 #include "ecmascript/mem/native_area_allocator.h"
+#include "ecmascript/mem/region.h"
+#include "ecmascript/platform/map.h"
 #include "ecmascript/tests/test_helper.h"
 
 namespace panda::ecmascript::arksteed {
@@ -34,9 +37,9 @@ using panda::test::BaseTestWithScope;
 //   * an unknown value kind must add the tag/region check in front of the same
 //     single post-store barrier.
 //
-// Only structural observables are used (D4): the emitted code length returned by
-// ArkSteedAssembler::GetCodeSize() and the number of deferred blocks queued by
-// the emitter. Machine-code bytes and absolute offsets are never compared.
+// Emission tests compare code lengths and deferred-block counts, including the
+// deferred bodies. Execution tests check the conservative filter with synthetic
+// region metadata and sentinel deferred bodies; they never invoke a GC helper.
 //
 // Every barrier path reads the glue address and the runtime stub table from the
 // entry thread (arksteed_assembler-inl.h), so fixture C uses a real JSThread;
@@ -49,6 +52,7 @@ namespace {
 struct Emission {
     size_t codeSize {0};
     size_t deferredBlocks {0};
+    size_t totalCodeSize {0};
 };
 
 }  // namespace
@@ -60,11 +64,7 @@ protected:
 
     static constexpr int32_t FIELD_OFFSET = 8;
 
-    // StoreTaggedField / TransitionHClass have no in-function register
-    // assertions, but every GENERIC and SHARED barrier reaches
-    // EmitLocalToShareRSet, which asserts that glue, the object region scratch
-    // and the bitset scratch are pairwise distinct. The parameter registers
-    // satisfy that and stay out of each other's way.
+    // Inputs and scratch registers must stay out of each other's way.
     static ArkSteedRegister Glue()
     {
         return ArkSteedAssembler::GetParameterRegister(0);
@@ -121,7 +121,54 @@ protected:
 
         Emission Finish()
         {
-            return {assembler_.GetCodeSize(), deferred_.size()};
+            size_t mainCodeSize = assembler_.GetCodeSize();
+            for (auto *block : deferred_) {
+                assembler_.Bind(block->GetEntryLabel());
+                block->Generate(&assembler_);
+            }
+            return {mainCodeSize, deferred_.size(), assembler_.GetCodeSize()};
+        }
+
+        // Execute the actual filter, replacing each deferred body with a
+        // sentinel return. No GC helper sees the synthetic region or object.
+        uint64_t RunFilter(uintptr_t glue, uintptr_t object, uintptr_t value)
+        {
+#if defined(PANDA_TARGET_AMD64)
+            ArkSteedRegister result = x64::rax;
+#elif defined(PANDA_TARGET_ARM64)
+            ArkSteedRegister result = aarch64::x0;
+#endif
+            assembler_.Move(result, static_cast<int64_t>(0));
+            assembler_.Return();
+            for (auto *block : deferred_) {
+                assembler_.Bind(block->GetEntryLabel());
+                assembler_.Move(result, static_cast<int64_t>(1));
+                assembler_.Return();
+            }
+            MemMap code = PageMap(PageSize(), PAGE_PROT_READWRITE);
+            EXPECT_NE(code.GetMem(), nullptr);
+            if (code.GetMem() == nullptr) {
+                return UINT64_MAX;
+            }
+            errno_t copyStatus =
+                memcpy_s(code.GetMem(), code.GetSize(), assembler_.GetCodeBuffer(), assembler_.GetCodeSize());
+            EXPECT_EQ(copyStatus, EOK);
+            if (copyStatus != EOK) {
+                PageUnmap(code);
+                return UINT64_MAX;
+            }
+            int status = PageProtect(code.GetMem(), code.GetSize(), PAGE_PROT_EXEC_READ);
+            EXPECT_EQ(status, 0);
+            if (status != 0) {
+                PageUnmap(code);
+                return UINT64_MAX;
+            }
+            auto *begin = static_cast<char *>(code.GetMem());
+            __builtin___clear_cache(begin, begin + assembler_.GetCodeSize());
+            using Filter = uint64_t (*)(uintptr_t, uintptr_t, uintptr_t);
+            uint64_t called = reinterpret_cast<Filter>(code.GetMem())(glue, object, value);
+            PageUnmap(code);
+            return called;
         }
 
     private:
@@ -183,6 +230,64 @@ protected:
         return fixture.Finish();
     }
 };
+
+HWTEST_F_L0(ArkSteedWriteBarrierEmitterTest, FieldBarrierUsesOneCommonCall)
+{
+    for (Kind kind : {Kind::GENERIC_BARRIER, Kind::SHARED_BARRIER}) {
+        for (ValueKind valueKind : {ValueKind::HeapObject, ValueKind::Unknown}) {
+            Emission emitted = FieldStore(kind, valueKind);
+            EXPECT_EQ(emitted.deferredBlocks, 1u);
+            EXPECT_GT(emitted.totalCodeSize, emitted.codeSize);
+        }
+    }
+    Emission heap = FieldStore(Kind::GENERIC_BARRIER, ValueKind::HeapObject);
+    Emission unknown = FieldStore(Kind::GENERIC_BARRIER, ValueKind::Unknown);
+    RecordProperty("heap_main_bytes", static_cast<int>(heap.codeSize));
+    RecordProperty("heap_total_bytes", static_cast<int>(heap.totalCodeSize));
+    RecordProperty("unknown_main_bytes", static_cast<int>(unknown.codeSize));
+    RecordProperty("unknown_total_bytes", static_cast<int>(unknown.totalCodeSize));
+}
+
+#if !USE_STICKY_CMS_GC
+HWTEST_F_L0(ArkSteedWriteBarrierEmitterTest, FieldConservativeFilter)
+{
+    MemMap region = PageMap(DEFAULT_REGION_SIZE, PAGE_PROT_READWRITE, DEFAULT_REGION_SIZE);
+    ASSERT_NE(region.GetMem(), nullptr);
+    auto *flags = static_cast<uint8_t *>(region.GetMem()) + Region::PackedData::GetFlagsOffset(false);
+    uintptr_t value = reinterpret_cast<uintptr_t>(region.GetMem()) + DEFAULT_REGION_SIZE / 2;
+    size_t gcOffset = JSThread::GlueData::GetGCStateBitFieldOffset(false);
+    std::vector<uint64_t> glue(gcOffset / sizeof(uint64_t) + 1, 0);
+    uint64_t object[2] = {0, 0};
+    for (MarkStatus marking : {MarkStatus::READY_TO_MARK, MarkStatus::MARKING, MarkStatus::MARK_FINISHED}) {
+        glue[gcOffset / sizeof(uint64_t)] = static_cast<uint64_t>(marking);
+        for (int space = RegionSpaceFlag::HEAP_SPACE_BEGIN; space <= RegionSpaceFlag::HEAP_SPACE_END; ++space) {
+            *flags = static_cast<uint8_t>(space);
+            bool needsBarrier = space != RegionSpaceFlag::IN_SHARED_READ_ONLY_SPACE &&
+                (space == RegionSpaceFlag::IN_YOUNG_SPACE || space >= RegionSpaceFlag::SHARED_SPACE_BEGIN ||
+                 marking != MarkStatus::READY_TO_MARK);
+            ColdEmit fixture(thread);
+            fixture.Emitter().StoreTaggedField(Glue(), Object(), Value(), FIELD_OFFSET, Kind::GENERIC_BARRIER,
+                                               ObjectScratch(), ValueScratch(), ValueKind::HeapObject);
+            EXPECT_EQ(fixture.RunFilter(reinterpret_cast<uintptr_t>(glue.data()),
+                                        reinterpret_cast<uintptr_t>(object), value), needsBarrier)
+                << "space=" << space << " marking=" << static_cast<int>(marking);
+            EXPECT_EQ(object[1], value);
+        }
+    }
+    PageUnmap(region);
+}
+
+HWTEST_F_L0(ArkSteedWriteBarrierEmitterTest, UnknownScalarSkipsRegionAccess)
+{
+    uint64_t object[2] = {0, 0};
+    uintptr_t value = JSTaggedValue(17).GetRawData();
+    ColdEmit fixture(thread);
+    fixture.Emitter().StoreTaggedField(Glue(), Object(), Value(), FIELD_OFFSET, Kind::GENERIC_BARRIER,
+                                       ObjectScratch(), ValueScratch(), ValueKind::Unknown);
+    EXPECT_EQ(fixture.RunFilter(0, reinterpret_cast<uintptr_t>(object), value), 0u);
+    EXPECT_EQ(object[1], value);
+}
+#endif
 
 // Whole {barrier kind} x {value kind} matrix for StoreTaggedField plus the
 // barrier-kind precedence: a non-heap value kind and NO_BARRIER both select the

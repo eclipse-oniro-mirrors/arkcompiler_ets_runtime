@@ -17,6 +17,7 @@
 #define ECMASCRIPT_ARKSTEED_HEAP_BROKER_H
 
 #include <array>
+#include <map>
 #include <optional>
 #include <type_traits>
 #include <utility>
@@ -193,6 +194,16 @@ class ArkSteedHeapBroker {
         return hclassRef->IsSafeForCompile();
     }
 
+    // Immediate records need no heap access and are owned by this broker.
+    ArkSteedHeapRef MakeImmediateRef(JSTaggedValue value) const
+    {
+        if (value.IsHeapObject()) {
+            return {};
+        }
+        auto entry = immediateRefs_.try_emplace(value.GetRawData(), value);
+        return ArkSteedHeapRef(&entry.first->second);
+    }
+
     // Raw values require an active NoGCScope. The handle overload opens a
     // no-safepoint read operation; callers must already be in JitHeapAccessScope.
     ArkSteedObjectRef MakeObjectRef(JSTaggedValue value) const
@@ -338,7 +349,7 @@ class ArkSteedHeapBroker {
         if (handleIndex == nullptr || !OwnsRef(ref) || !ref.IsHeapObject()) {
             return false;
         }
-        *handleIndex = ref.index_;
+        *handleIndex = ref.data_->index_;
         return true;
     }
 
@@ -350,7 +361,7 @@ class ArkSteedHeapBroker {
             return false;
         }
         ASSERT((SerializingAllowed() || ref.IsImmediate()) && "Resolving a heap object requires an active NoGCScope");
-        *value = ref.IsImmediate() ? ref.value_ : env_->GetHeapConstantHandle(ref.index_).GetTaggedValue();
+        *value = ref.IsImmediate() ? ref.Value() : ref.data_->GetHandle().GetTaggedValue();
         return true;
     }
 
@@ -371,8 +382,8 @@ class ArkSteedHeapBroker {
     bool TryGetStringLength(const ArkSteedHeapRef &ref, uint32_t *length) const;
     bool TryGetStringChar(const ArkSteedHeapRef &ref, uint32_t index, uint16_t *character) const;
 
-    // Non-CMC compiler facts already retain HClass pointers. Only non-moving,
-    // rooted HClasses may escape a scope; layout/prototype reads stay inside it.
+    // Raw HClasses are temporary views within the caller's JitHeapAccessScope.
+    // Compiler facts retain canonical refs instead.
     JSHClass *TryGetHClass(const ArkSteedHClassRef &ref) const;
     JSHClass *TryGetObjectHClass(const ArkSteedHeapRef &ref) const;
     ArkSteedHClassRef MakeHClassRef(JSHClass *hclass) const;
@@ -407,7 +418,7 @@ class ArkSteedHeapBroker {
             return false;
         }
         if (ref.IsImmediate()) {
-            return std::forward<Reader>(reader)(ref.value_);
+            return std::forward<Reader>(reader)(ref.Value());
         }
         NoGCScope scope(this);
         JSTaggedValue value;
@@ -522,7 +533,7 @@ private:
     {
         ASSERT(SerializingAllowed());
         if (!value.IsHeapObject()) {
-            return allowPrimitive ? ArkSteedHeapRef::FromImmediate(value) : ArkSteedHeapRef();
+            return allowPrimitive ? MakeImmediateRef(value) : ArkSteedHeapRef();
         }
         if (value.IsWeak()) {
             return {};
@@ -540,12 +551,16 @@ private:
         } else if (value.IsProtoChangeMarker()) {
             kind = Kind::PROTO_CELL;
         }
-        return ArkSteedHeapRef(env_, env_->RecordHeapConstant(value), kind);
+        uint8_t objectType = kind == Kind::HCLASS
+            ? static_cast<uint8_t>(JSHClass::Cast(value.GetTaggedObject())->GetObjectType()) : 0;
+        auto *entry = env_->GetHeapConstantEntry(env_->RecordHeapConstant(value));
+        entry->Classify(kind, objectType);
+        return ArkSteedHeapRef(entry);
     }
 
     bool OwnsRef(const ArkSteedHeapRef &ref) const
     {
-        return ref.IsSafeForCompile() && (ref.IsImmediate() || ref.owner_ == env_);
+        return ref.IsSafeForCompile() && (ref.IsImmediate() || ref.data_->owner_ == env_);
     }
 
     JSThread *compilerThread_ {nullptr};
@@ -553,6 +568,7 @@ private:
     uint32_t methodOffset_ {0};
     JSHandle<ProfileTypeInfo> profileTypeInfo_;
     mutable ArkSteedBrokerMode mode_ {ArkSteedBrokerMode::SERIALIZED};
+    mutable std::map<JSTaggedType, HeapConstantEntry> immediateRefs_;
     mutable std::array<NamedAccessFeedbackCacheEntry, FEEDBACK_CACHE_SIZE> namedAccessFeedbackCache_ {};
     mutable std::array<ValueAccessFeedbackCacheEntry, FEEDBACK_CACHE_SIZE> valueAccessFeedbackCache_ {};
 };

@@ -5405,7 +5405,7 @@ struct GraphBuilder::BytecodeVisitor {
             return;
         }
         self->NewVertex<TransitionHClassWithBarrierVertex>(compileInfoFacts_, currentBlock, {glue, array, constant});
-        compileInfoFacts_->RecordHClass(array, hclass, false);
+        compileInfoFacts_->RecordHClass(array, hclassRef, false);
     }
 
     void LowerCreateEmptyArray(const BytecodeInfo *bcInfo)
@@ -5533,7 +5533,7 @@ struct GraphBuilder::BytecodeVisitor {
         }
         self->NewVertex<TransitionHClassWithBarrierVertex>(
             compileInfoFacts_, currentBlock, {glue, array, creatorHClassConstant});
-        compileInfoFacts_->RecordHClass(array, creatorHClass, false);
+        compileInfoFacts_->RecordHClass(array, creatorHClassRef, false);
     }
 
     void LowerCreateRegExpWithLiteral(const BytecodeInfo *bcInfo)
@@ -6004,9 +6004,19 @@ struct GraphBuilder::BytecodeVisitor {
         if (!hclasses.has_value() || hclasses->empty()) {
             return TypeOfKind::UNKNOWN;
         }
-        TypeOfKind kind = TypeOfKindFromHClass(hclasses->front());
-        bool allAgree = std::all_of(hclasses->begin(), hclasses->end(),
-                                    [kind](const JSHClass *hclass) { return TypeOfKindFromHClass(hclass) == kind; });
+        auto *broker = self->pgoContext_.GetBroker();
+        auto classify = [broker](ArkSteedHClassRef ref) {
+            TypeOfKind result = TypeOfKind::UNKNOWN;
+            broker->TryReadRef(ref, [&result](JSTaggedValue value) {
+                result = TypeOfKindFromHClass(JSHClass::Cast(value.GetTaggedObject()));
+                return true;
+            });
+            return result;
+        };
+        TypeOfKind kind = classify(hclasses->front());
+        bool allAgree = std::all_of(hclasses->begin(), hclasses->end(), [&](ArkSteedHClassRef ref) {
+            return classify(ref) == kind;
+        });
         return allAgree ? kind : TypeOfKind::UNKNOWN;
     }
 
@@ -6327,8 +6337,8 @@ struct GraphBuilder::BytecodeVisitor {
     {
         HClassInference inference(this, object);
         std::optional<NodeInfo::PossibleHClasses> possibleHClasses = inference.TryGetPossibleHClasses();
-        if (inference.AllHClassesAreFresh() && possibleHClasses.has_value() && possibleHClasses->size() == 1) {
-            plan->hclass = possibleHClasses->front();
+        if (inference.AllHClassesAreFresh() && possibleHClasses.has_value() && possibleHClasses->size() == 1 &&
+            TryResolveHClassRef(possibleHClasses->front(), &plan->hclass)) {
             if (plan->hclass->IsECMAObject() && !plan->hclass->IsJSProxy()) {
                 plan->useLhsChain = factory.TryPrewalkInstanceofLhsChain(plan->hclass, &plan->hclassRef, &plan->chain);
             }
@@ -7607,7 +7617,11 @@ struct GraphBuilder::BytecodeVisitor {
         if (auto *constant = node->TryCast<TaggedConstantVertex>()) {
             JSTaggedValue value(constant->GetValue());
             if (value.IsHole()) {
-                return ArkSteedHeapRef::FromImmediate(value);
+                auto *broker = self->pgoContext_.GetBroker();
+                if (broker == nullptr) {
+                    return std::nullopt;
+                }
+                return broker->MakeImmediateRef(value);
             }
             // Heap constants must be rooted before entering the graph.
             ASSERT(!value.IsHeapObject());
@@ -7615,7 +7629,7 @@ struct GraphBuilder::BytecodeVisitor {
         }
         if (auto *constant = node->TryCast<HeapConstantVertex>()) {
             JitCompilationEnv *env = self->preproc_->GetEnv();
-            if (env == nullptr || constant->GetHandleIndex() >= env->GetHeapConstantTable().size()) {
+            if (env == nullptr || constant->GetHandleIndex() >= env->GetHeapConstantCount()) {
                 return std::nullopt;
             }
             auto *broker = self->pgoContext_.GetBroker();
@@ -9568,7 +9582,6 @@ struct GraphBuilder::BytecodeVisitor {
     }
 
     struct RequestedHClassInfo {
-        JSHClass *hclass {nullptr};
         ArkSteedHClassRef hclassRef {};
         bool hasExternalStableDependency {false};
     };
@@ -9584,28 +9597,26 @@ struct GraphBuilder::BytecodeVisitor {
             }
             inputIsValid_ = true;
             for (const RequestedHClassInfo &requested : requestedHClasses) {
-                if (requested.hclass == nullptr) {
+                if (!requested.hclassRef.IsJSHClass()) {
                     inputIsValid_ = false;
                     requestedHClasses_.clear();
-                    requestedHClassPointers_.clear();
+                    requestedHClassRefs_.clear();
                     return;
                 }
-                NodeInfo::NodeType hclassType = NodeTypeFromHClass(requested.hclass);
+                NodeInfo::NodeType hclassType = NodeTypeFromHClass(requested.hclassRef);
                 if (!NodeInfo::NodeTypeCanBe(knownType_, hclassType)) {
                     continue;
                 }
-                auto existing =
-                    std::find_if(requestedHClasses_.begin(), requestedHClasses_.end(),
-                                 [&requested](const auto &entry) { return entry.hclass == requested.hclass; });
+                auto existing = std::find_if(
+                    requestedHClasses_.begin(), requestedHClasses_.end(), [&requested](const auto &entry) {
+                        return entry.hclassRef.Equals(requested.hclassRef);
+                    });
                 if (existing != requestedHClasses_.end()) {
                     existing->hasExternalStableDependency |= requested.hasExternalStableDependency;
-                    if (!existing->hclassRef.IsSafeForCompile() && requested.hclassRef.IsSafeForCompile()) {
-                        existing->hclassRef = requested.hclassRef;
-                    }
                     continue;
                 }
                 requestedHClasses_.push_back(requested);
-                requestedHClassPointers_.push_back(requested.hclass);
+                requestedHClassRefs_.push_back(requested.hclassRef);
             }
 
             std::optional<NodeInfo::PossibleHClasses> knownHClasses = facts->TryGetPossibleHClasses(object);
@@ -9615,7 +9626,7 @@ struct GraphBuilder::BytecodeVisitor {
             existingFreshHClassesFound_ = true;
             knownHClasses_ = std::move(knownHClasses.value());
             knownHClassesAreSubset_ = true;
-            for (JSHClass *knownHClass : knownHClasses_) {
+            for (ArkSteedHClassRef knownHClass : knownHClasses_) {
                 if (FindRequestedInfo(knownHClass) == nullptr) {
                     knownHClassesAreSubset_ = false;
                     continue;
@@ -9651,7 +9662,7 @@ struct GraphBuilder::BytecodeVisitor {
 
         const NodeInfo::PossibleHClasses &RequestedHClasses() const
         {
-            return requestedHClassPointers_;
+            return requestedHClassRefs_;
         }
 
         const NodeInfo::PossibleHClasses &IntersectSet() const
@@ -9659,17 +9670,18 @@ struct GraphBuilder::BytecodeVisitor {
             return intersectSet_;
         }
 
-        const RequestedHClassInfo *FindRequestedInfo(JSHClass *hclass) const
+        const RequestedHClassInfo *FindRequestedInfo(ArkSteedHClassRef hclass) const
         {
-            auto it = std::find_if(requestedHClasses_.begin(), requestedHClasses_.end(),
-                                   [hclass](const auto &entry) { return entry.hclass == hclass; });
+            auto it = std::find_if(requestedHClasses_.begin(), requestedHClasses_.end(), [hclass](const auto &entry) {
+                return entry.hclassRef.Equals(hclass);
+            });
             return it == requestedHClasses_.end() ? nullptr : &*it;
         }
 
     private:
         NodeInfo::NodeType knownType_ {NodeInfo::NodeType::UNKNOWN};
         std::vector<RequestedHClassInfo> requestedHClasses_;
-        NodeInfo::PossibleHClasses requestedHClassPointers_;
+        NodeInfo::PossibleHClasses requestedHClassRefs_;
         NodeInfo::PossibleHClasses knownHClasses_;
         NodeInfo::PossibleHClasses intersectSet_;
         bool inputIsValid_ {false};
@@ -9692,7 +9704,7 @@ struct GraphBuilder::BytecodeVisitor {
         ASSERT(!hclasses.empty());
         std::vector<uint32_t> expectedHClassHandleIndices;
         expectedHClassHandleIndices.reserve(hclasses.size());
-        for (JSHClass *hclass : hclasses) {
+        for (ArkSteedHClassRef hclass : hclasses) {
             const RequestedHClassInfo *requested = merger.FindRequestedInfo(hclass);
             if (requested == nullptr || !requested->hclassRef.IsSafeForCompile()) {
                 return HClassCheckResult::FAILURE;
@@ -9718,9 +9730,17 @@ struct GraphBuilder::BytecodeVisitor {
         return HClassCheckResult::SUCCESS;
     }
 
-    bool IsHClassStableForFacts(JSHClass *hclass, bool hasExternalStableDependency) const
+    bool IsHClassStableForFacts(ArkSteedHClassRef hclass, bool hasExternalStableDependency) const
     {
-        return JSTaggedValue(hclass).IsInSharedHeap() || (self->IsLazyDeoptEnabled() && hasExternalStableDependency);
+        if (self->IsLazyDeoptEnabled() && hasExternalStableDependency) {
+            return true;
+        }
+        bool isShared = false;
+        self->pgoContext_.GetBroker()->TryReadRef(hclass, [&isShared](JSTaggedValue value) {
+            isShared = value.IsInSharedHeap();
+            return true;
+        });
+        return isShared;
     }
 
     HClassCheckResult ResolveHClassStability(const NodeInfo::PossibleHClasses &hclasses,
@@ -9730,16 +9750,18 @@ struct GraphBuilder::BytecodeVisitor {
         ASSERT(resolvedHClasses != nullptr);
         resolvedHClasses->clear();
         resolvedHClasses->reserve(hclasses.size());
-        for (JSHClass *hclass : hclasses) {
+        for (ArkSteedHClassRef hclass : hclasses) {
             const RequestedHClassInfo *requested = merger.FindRequestedInfo(hclass);
             ASSERT(requested != nullptr);
-            bool isSharedHClass = JSTaggedValue(hclass).IsInSharedHeap();
             bool isStable = IsHClassStableForFacts(hclass, requested->hasExternalStableDependency);
-            bool shouldInstallDependency =
-                installStableDependencies && self->IsLazyDeoptEnabled() && !isSharedHClass && !isStable;
-            if (shouldInstallDependency &&
-                !self->pgoContext_.GetBroker()->TryInstallStableHClassDependency(hclass, &isStable)) {
-                return HClassCheckResult::FAILURE;
+            bool shouldInstallDependency = installStableDependencies && self->IsLazyDeoptEnabled() &&
+                !isStable;
+            auto *broker = self->pgoContext_.GetBroker();
+            if (shouldInstallDependency && broker->CheckStableHClass(hclass)) {
+                isStable = broker->DependOnStableHClass(hclass);
+                if (!isStable) {
+                    return HClassCheckResult::FAILURE;
+                }
             }
             resolvedHClasses->push_back(NodeInfo::PossibleHClassInfo {
                 .hclass = hclass,
@@ -9764,8 +9786,11 @@ struct GraphBuilder::BytecodeVisitor {
         if (!constantRef->IsHeapObject()) {
             return EmitUnconditionalHClassDeopt(bcIndex);
         }
-        JSHClass *constantHClass = broker->TryGetObjectHClass(*constantRef);
-        if (constantHClass == nullptr) {
+        ArkSteedHClassRef constantHClass;
+        if (!broker->TryReadRef(*constantRef, [&](JSTaggedValue value) {
+                constantHClass = broker->MakeHClassRef(JSTaggedValue(value.GetTaggedObject()->GetClass()));
+                return constantHClass.IsJSHClass();
+            })) {
             return HClassCheckResult::FAILURE;
         }
         if (merger.FindRequestedInfo(constantHClass) == nullptr) {
@@ -9838,7 +9863,8 @@ struct GraphBuilder::BytecodeVisitor {
                                              const ArkSteedHClassRef &hclassRef, bool installStableDependency,
                                              bool hasExternalStableDependency)
     {
-        std::vector<RequestedHClassInfo> requested {{hclass, hclassRef, hasExternalStableDependency}};
+        ASSERT(hclass != nullptr);
+        std::vector<RequestedHClassInfo> requested {{hclassRef, hasExternalStableDependency}};
         return BuildHClassCheck(bcIndex, object, requested, installStableDependency);
     }
 
@@ -9853,7 +9879,7 @@ struct GraphBuilder::BytecodeVisitor {
         std::vector<RequestedHClassInfo> requested;
         requested.reserve(hclasses.size());
         for (size_t i = 0; i < hclasses.size(); ++i) {
-            requested.push_back(RequestedHClassInfo {hclasses[i], hclassRefs[i], hasExternalStableDependencies});
+            requested.push_back(RequestedHClassInfo {hclassRefs[i], hasExternalStableDependencies});
         }
         return BuildHClassCheck(bcIndex, object, requested, installStableDependencies);
     }
@@ -9887,10 +9913,14 @@ struct GraphBuilder::BytecodeVisitor {
             if (!constantRef.has_value() || broker == nullptr) {
                 return;
             }
-            if (auto *hclass = broker->TryGetObjectHClass(*constantRef)) {
-                hclasses_.push_back(hclass);
+            broker->TryReadRef(*constantRef, [&](JSTaggedValue value) {
+                if (!value.IsHeapObject()) {
+                    return false;
+                }
+                hclasses_.push_back(broker->MakeHClassRef(JSTaggedValue(value.GetTaggedObject()->GetClass())));
                 hclassesComeFromConstant_ = true;
-            }
+                return true;
+            });
         }
 
         bool HasHClasses() const
@@ -9970,12 +10000,11 @@ struct GraphBuilder::BytecodeVisitor {
             std::vector<RequestedHClassInfo> requestedHClasses;
             requestedHClasses.reserve(hclasses_.size());
 
-            for (JSHClass *hclass : hclasses_) {
-                ArkSteedHClassRef hclassRef = broker->MakeHClassRef(hclass);
+            for (ArkSteedHClassRef hclassRef : hclasses_) {
                 if (!hclassRef.IsSafeForCompile()) {
                     return std::nullopt;
                 }
-                requestedHClasses.push_back(RequestedHClassInfo {hclass, hclassRef, false});
+                requestedHClasses.push_back(RequestedHClassInfo {hclassRef, false});
             }
             return requestedHClasses;
         }
@@ -9985,8 +10014,9 @@ struct GraphBuilder::BytecodeVisitor {
             if (lhs.size() != rhs.size()) {
                 return false;
             }
-            return std::all_of(lhs.begin(), lhs.end(), [&rhs](JSHClass *hclass) {
-                return std::find(rhs.begin(), rhs.end(), hclass) != rhs.end();
+            return std::all_of(lhs.begin(), lhs.end(), [&rhs](ArkSteedHClassRef hclass) {
+                return std::any_of(rhs.begin(), rhs.end(),
+                    [hclass](ArkSteedHClassRef candidate) { return candidate.Equals(hclass); });
             });
         }
 
@@ -10228,22 +10258,22 @@ struct GraphBuilder::BytecodeVisitor {
     }
 
     void BuildTransitionElementsKind(ValueVertex *receiver, const ResolvedElementStoreTransitionGroup &group,
-                                     JSHClass *knownSourceHClass = nullptr)
+                                     ArkSteedHClassRef knownSourceHClass = {})
     {
         NodeInfo::PossibleHClasses sourceHClasses;
-        if (knownSourceHClass != nullptr) {
+        if (knownSourceHClass.IsJSHClass()) {
             sourceHClasses.push_back(knownSourceHClass);
         } else {
             sourceHClasses.reserve(group.transitionSources.size());
             for (const ResolvedElementStoreHClass &source : group.transitionSources) {
-                sourceHClasses.push_back(source.hclass);
+                sourceHClasses.push_back(source.ref);
             }
         }
         if (group.useExactHClassTransition) {
             ASSERT(group.targetHClassConstant != nullptr);
             NewElementsKindTransition<TransitionHClassWithBarrierVertex>(
                 sourceHClasses, {glue, receiver, group.targetHClassConstant});
-            compileInfoFacts_->RecordHClass(receiver, group.target.hclass, false);
+            compileInfoFacts_->RecordHClass(receiver, group.target.ref, false);
             return;
         }
         // Mutant backing is rejected by the access-info factory, so changing to the canonical array HClass is enough.
@@ -10251,7 +10281,7 @@ struct GraphBuilder::BytecodeVisitor {
             sourceHClasses, {receiver, TaggedConstantFromInt32(static_cast<int32_t>(group.targetElementsKind))},
             RTSTUB_ID(UpdateHClassForElementsKind));
         UpdateCatchBlockData(call);
-        compileInfoFacts_->RecordHClass(receiver, group.target.hclass, false);
+        compileInfoFacts_->RecordHClass(receiver, group.target.ref, false);
     }
 
     ValueVertex *BuildLoadJSArrayLength(ValueVertex *receiver)
@@ -10444,7 +10474,7 @@ struct GraphBuilder::BytecodeVisitor {
                                                return candidate.hclass == knownHClass;
                                            });
                 if (source != group.transitionSources.end()) {
-                    BuildTransitionElementsKind(receiver, group, source->hclass);
+                    BuildTransitionElementsKind(receiver, group, source->ref);
                     storeAction(receiver, index, value, group.targetElementsKind);
                     return true;
                 }
@@ -10542,7 +10572,7 @@ struct GraphBuilder::BytecodeVisitor {
             currentBlock = actionBlocks[groupIndex];
             compileInfoFacts_ = actionEntryFacts;
             // Both the target-map edge and the completed transition reach this block with the target HClass.
-            compileInfoFacts_->RecordHClass(receiver, groups[groupIndex].target.hclass, false);
+            compileInfoFacts_->RecordHClass(receiver, groups[groupIndex].target.ref, false);
             storeAction(receiver, index, value, groups[groupIndex].targetElementsKind);
             self->FinishBlockWithJump(currentBlock, doneBlock);
             if (mergedExitFacts == nullptr) {
@@ -10824,7 +10854,7 @@ struct GraphBuilder::BytecodeVisitor {
 
     JSHClass *TryGetFreshKnownHClass(ValueVertex *receiver) const
     {
-        return compileInfoFacts_->TryGetHClass(receiver);
+        return self->pgoContext_.GetBroker()->TryGetHClass(compileInfoFacts_->TryGetHClass(receiver));
     }
 
     HClassCheckResult RequireKnownHClass(uint32_t bcIndex, const NamedStoreAccessInfo &access, ValueVertex *receiver,
@@ -11047,7 +11077,8 @@ struct GraphBuilder::BytecodeVisitor {
         } else {
             BuildPreparedNamedStoreField(receiver, access.fieldOffset, preparedValue, access.fieldRepresentation);
         }
-        compileInfoFacts_->RecordHClass(receiver, transitionHClass, IsHClassStableForFacts(transitionHClass, false));
+        compileInfoFacts_->RecordHClass(
+            receiver, access.transitionHClass, IsHClassStableForFacts(access.transitionHClass, false));
         return true;
     }
 
@@ -11218,7 +11249,6 @@ struct GraphBuilder::BytecodeVisitor {
         }
         expectedHClasses.push_back(firstHClass);
         requestedHClasses.push_back(RequestedHClassInfo {
-            firstHClass,
             access.cases[0].expectedHClass,
             access.cases[0].dependencies.canAssumeStableHClass,
         });
@@ -11236,7 +11266,6 @@ struct GraphBuilder::BytecodeVisitor {
             }
             expectedHClasses.push_back(expectedHClass);
             requestedHClasses.push_back(RequestedHClassInfo {
-                expectedHClass,
                 access.cases[i].expectedHClass,
                 access.cases[i].dependencies.canAssumeStableHClass,
             });
@@ -11289,8 +11318,9 @@ struct GraphBuilder::BytecodeVisitor {
                 return false;
             }
             provenHClasses.push_back(NodeInfo::PossibleHClassInfo {
-                .hclass = expectedHClass,
-                .isStable = IsHClassStableForFacts(expectedHClass, storeCaseInfo.dependencies.canAssumeStableHClass),
+                .hclass = storeCaseInfo.expectedHClass,
+                .isStable = IsHClassStableForFacts(
+                    storeCaseInfo.expectedHClass, storeCaseInfo.dependencies.canAssumeStableHClass),
             });
             storeCases.push_back(StoreTaggedFieldByHClassCase {
                 expectedHClassHandleIndex.value(),
@@ -11390,8 +11420,8 @@ struct GraphBuilder::BytecodeVisitor {
             currentBlock = caseBlocks[i];
             compileInfoFacts_ = entryFacts->Clone();
             compileInfoFacts_->RecordHClass(
-                receiver, expectedHClasses[i],
-                IsHClassStableForFacts(expectedHClasses[i],
+                receiver, access.cases[i].expectedHClass,
+                IsHClassStableForFacts(access.cases[i].expectedHClass,
                                        access.cases[i].dependencies.canAssumeStableHClass));
             bool lowered = TryLowerNamedStoreField(bcIndex, access.cases[i], receiver, value, key);
             ASSERT(lowered);
@@ -11446,7 +11476,7 @@ struct GraphBuilder::BytecodeVisitor {
         HClassInference inference(this, receiver, HClassInference::Mode::ALLOW_STALE);
         std::optional<NodeInfo::PossibleHClasses> inferredHClasses = inference.TryGetPossibleHClasses();
         if (knownHClass == nullptr && inferredHClasses.has_value() && inferredHClasses->size() == 1) {
-            knownHClass = inferredHClasses->front();
+            TryResolveHClassRef(inferredHClasses->front(), &knownHClass);
         }
         if (knownHClass != nullptr) {
             const NamedStoreAccessInfo *matched = nullptr;
@@ -11549,6 +11579,7 @@ struct GraphBuilder::BytecodeVisitor {
     {
         ASSERT(accessInfos.size() > 1);
         std::vector<JSHClass *> allExpectedHClasses;
+        NodeInfo::PossibleHClasses allExpectedHClassRefs;
         std::vector<std::vector<uint32_t>> expectedHClassHandleIndices;
         expectedHClassHandleIndices.reserve(accessInfos.size());
         for (const NamedLoadAccessInfo &accessInfo : accessInfos) {
@@ -11564,6 +11595,7 @@ struct GraphBuilder::BytecodeVisitor {
                     return false;
                 }
                 allExpectedHClasses.push_back(hclass);
+                allExpectedHClassRefs.push_back(accessInfo.lookupStartObjectHClassRefs[i]);
             }
             std::vector<uint32_t> groupHandleIndices;
             if (!GetHeapConstantHandleIndices(accessInfo.lookupStartObjectHClassRefs, &groupHandleIndices)) {
@@ -11637,7 +11669,7 @@ struct GraphBuilder::BytecodeVisitor {
         currentBlock = doneBlock;
         compileInfoFacts_ = entryFacts;
         if (!allExpectedHClasses.empty()) {
-            compileInfoFacts_->RecordPossibleHClasses(receiver, allExpectedHClasses, false);
+            compileInfoFacts_->RecordPossibleHClasses(receiver, allExpectedHClassRefs, false);
         }
         frameState.SetAcc(self->NewPhiVertexWith(currentBlock, results, self->AccIndex()));
         return true;
@@ -12250,7 +12282,11 @@ struct GraphBuilder::BytecodeVisitor {
         bool isInlinedProperties = false;
         uint32_t fieldOffset = 0;
         AccessFieldRepresentation fieldRepresentation = AccessFieldRepresentation::UNKNOWN;
-        for (JSHClass *hclass : possibleHClasses.value()) {
+        for (ArkSteedHClassRef hclassRef : possibleHClasses.value()) {
+            JSHClass *hclass = nullptr;
+            if (!TryResolveHClassRef(hclassRef, &hclass)) {
+                return false;
+            }
             std::optional<PropertyLookupResult> maybePlr = TryLookupPropertyInPGOHClass(hclass, nameRef.value());
             if (!maybePlr.has_value()) {
                 return false;
@@ -12278,21 +12314,23 @@ struct GraphBuilder::BytecodeVisitor {
             return false;
         }
 
-        std::vector<JSHClass *> pendingStableHClasses;
+        NodeInfo::PossibleHClasses pendingStableHClasses;
         pendingStableHClasses.reserve(possibleHClasses->size());
         bool needsNotPrototypeGuard = false;
         auto *broker = self->pgoContext_.GetBroker();
-        for (JSHClass *hclass : possibleHClasses.value()) {
-            bool isStable = JSTaggedValue(hclass).IsInSharedHeap();
-            if (!isStable && self->IsLazyDeoptEnabled() &&
-                !broker->TryInstallStableHClassDependency(hclass, &isStable)) {
-                return false;
+        for (ArkSteedHClassRef hclass : possibleHClasses.value()) {
+            bool isStable = IsHClassStableForFacts(hclass, false);
+            if (!isStable && self->IsLazyDeoptEnabled() && broker->CheckStableHClass(hclass)) {
+                isStable = broker->DependOnStableHClass(hclass);
+                if (!isStable) {
+                    return false;
+                }
             }
             if (isStable) {
                 pendingStableHClasses.push_back(hclass);
             }
-            bool hasNotPrototypeDependency =
-                self->IsLazyDeoptEnabled() && broker->TryInstallNotPrototypeDependency(hclass);
+            bool hasNotPrototypeDependency = self->IsLazyDeoptEnabled() &&
+                broker->DependOnNotPrototype(hclass);
             needsNotPrototypeGuard |= !hasNotPrototypeDependency;
         }
 
@@ -12300,7 +12338,7 @@ struct GraphBuilder::BytecodeVisitor {
         if (freshnessResult != HClassCheckResult::SUCCESS) {
             return freshnessResult == HClassCheckResult::UNREACHABLE;
         }
-        for (JSHClass *hclass : pendingStableHClasses) {
+        for (ArkSteedHClassRef hclass : pendingStableHClasses) {
             bool marked = compileInfoFacts_->MarkPossibleHClassStable(receiver, hclass);
             ASSERT(marked);
         }
@@ -12747,7 +12785,7 @@ bool ArkSteedGraphBuilderTestAccess::TryBuildInlineInstanceofWithConstants(Graph
         return false;
     }
     if (staleLhsHClass != nullptr) {
-        visitor.compileInfoFacts_->RecordHClass(objectVertex, staleLhsHClass, true);
+        visitor.compileInfoFacts_->RecordHClass(objectVertex, broker->MakeHClassRef(staleLhsHClass), true);
     }
     visitor.frameState.SetAcc(targetVertex);
     return visitor.TryBuildInlineInstanceof(bcInfo, objectVertex, targetVertex);

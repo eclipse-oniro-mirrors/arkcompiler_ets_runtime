@@ -17,6 +17,7 @@
 
 #include "ecmascript/ecma_macros.h"
 #include <limits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -235,6 +236,7 @@ bool ArkSteedCompilerTask::Compile()
 
     NativeAreaAllocator *allocator = arkSteedTask_->GetCompilerVM()->GetNativeAreaAllocator();
     chunk_ = std::make_unique<Chunk>(allocator, pipelineStatistics_.Enabled());
+    jitCompilationEnv_->SetHeapConstantChunk(chunk_.get());
     pipelineStatistics_.AttachChunk(chunk_.get());
     graph_ = Graph::New(chunk_.get());
 
@@ -354,13 +356,12 @@ void ArkSteedCompilerTask::FillCodeDesc(MachineCodeDesc &codeDesc)
 
     codeDesc.codeType = MachineCodeType::ARKSTEED_CODE;
 
-    const auto &heapConstantHandles = jitCompilationEnv_->GetHeapConstantTable();
     std::vector<JSHandle<JSTaggedValue>> deoptLiteralHandles;
     const auto &deoptLiteralHandleIndices = deoptLiteralTableBuilder_->GetHandleIndices();
     deoptLiteralHandles.reserve(deoptLiteralHandleIndices.size());
     for (uint32_t handleIndex : deoptLiteralHandleIndices) {
-        CHECK(handleIndex < heapConstantHandles.size());
-        deoptLiteralHandles.push_back(heapConstantHandles[handleIndex]);
+        CHECK(handleIndex < jitCompilationEnv_->GetHeapConstantCount());
+        deoptLiteralHandles.push_back(jitCompilationEnv_->GetHeapConstantHandle(handleIndex));
     }
     CHECK(deoptLiteralHandles.size() <= std::numeric_limits<uint32_t>::max());
     safepointTableBuilder_->SetDeoptLiteralCount(static_cast<uint32_t>(deoptLiteralHandles.size()));
@@ -431,7 +432,20 @@ void ArkSteedCompilerTask::FillCodeDesc(MachineCodeDesc &codeDesc)
     arkSteedTask_->SetDeoptTranslationData(translationBuilder_->Encode());
 #endif
 
-    arkSteedTask_->SetEmbeddedRefData(assembler_->GetEmbeddedRefRelocations(), heapConstantHandles);
+    // Retain only referenced handles for installation, with indices local to this compact array.
+    auto embeddedRelocations = assembler_->GetEmbeddedRefRelocations();
+    std::vector<JSHandle<JSTaggedValue>> embeddedHandles;
+    std::unordered_map<uint32_t, uint32_t> embeddedHandleIndices;
+    for (auto &relocation : embeddedRelocations) {
+        CHECK(relocation.handleIndex < jitCompilationEnv_->GetHeapConstantCount());
+        auto [it, inserted] =
+            embeddedHandleIndices.try_emplace(relocation.handleIndex, static_cast<uint32_t>(embeddedHandles.size()));
+        if (inserted) {
+            embeddedHandles.push_back(jitCompilationEnv_->GetHeapConstantHandle(relocation.handleIndex));
+        }
+        relocation.handleIndex = it->second;
+    }
+    arkSteedTask_->SetEmbeddedRefData(std::move(embeddedRelocations), std::move(embeddedHandles));
 
     // Frame info - fill FuncEntryDes
     // Set funcEntry to point to heap-allocated FuncEntryDes

@@ -15,16 +15,19 @@
 
 #include "ecmascript/compiler/lazy_deopt_dependency.h"
 
+#include <algorithm>
+
 #include "ecmascript/js_function.h"
 #include "ecmascript/js_handle.h"
 #include "ecmascript/js_hclass-inl.h"
 #include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/js_thread.h"
 #include "ecmascript/stubs/runtime_stubs.h"
+#include "ecmascript/sustaining_js_handle.h"
 
 namespace panda::ecmascript::kungfu {
 
-void CombinedDependencies::Register(JSHClass *hclass, DependentState state)
+void CombinedDependencies::Register(JSHandle<JSHClass> hclass, DependentState state)
 {
     // Since the value of deps_ is uint32_t, we don't need to check whether we can find it.
     deps_[hclass] |= static_cast<uint32_t>(state);
@@ -42,9 +45,8 @@ void CombinedDependencies::Register(DependentState state)
 
 void CombinedDependencies::InstallAll(JSThread *thread, JSHandle<JSTaggedValue> jsFunc)
 {
-    JSMutableHandle<JSHClass> hclass(thread, JSTaggedValue::Undefined());
     for (auto iter : deps_) {
-        hclass.Update(JSTaggedValue(iter.first));
+        JSHandle<JSHClass> hclass = iter.first;
         uint32_t collection = iter.second;
         JSHandle<DependentInfos> dependentInfos =
             JSHandle<DependentInfos>::Cast(JSObject::GetOrCreateDependentInfos(thread, hclass));
@@ -70,6 +72,19 @@ void CombinedDependencies::InstallAll(JSThread *thread, JSHandle<JSTaggedValue> 
 }
 
 // ---------------------------- LazyDeoptAllDependencies ----------------------------
+
+JSHandle<JSHClass> LazyDeoptAllDependencies::GetOrCreateHClassHandle(JSHClass *hclass)
+{
+    JSTaggedValue value(hclass);
+    auto it = std::find_if(hclassHandles_.begin(), hclassHandles_.end(),
+        [value](const JSHandle<JSHClass> &handle) { return handle.GetTaggedValue() == value; });
+    if (it != hclassHandles_.end()) {
+        return *it;
+    }
+    auto handle = handles_->NewHandle<JSHClass>(value.GetRawData());
+    hclassHandles_.push_back(handle);
+    return handle;
+}
 
 void LazyDeoptAllDependencies::RegisterDependency(const LazyDeoptDependency *dependency)
 {
@@ -97,7 +112,7 @@ bool LazyDeoptAllDependencies::DependOnDetector(uint32_t detectorID, GlobalEnv *
 
 bool LazyDeoptAllDependencies::DependOnNotPrototype(JSHClass *hclass)
 {
-    LazyDeoptDependency *dependency = new NotPrototypeDependency(hclass);
+    LazyDeoptDependency *dependency = new NotPrototypeDependency(GetOrCreateHClassHandle(hclass));
     if (dependency->IsValid()) {
         RegisterDependency(dependency);
         return true;
@@ -114,7 +129,7 @@ bool LazyDeoptAllDependencies::CheckStableHClass(JSHClass *hclass)
 
 bool LazyDeoptAllDependencies::DependOnStableHClass(JSHClass *hclass)
 {
-    LazyDeoptDependency *dependency = new StableHClassDependency(hclass);
+    LazyDeoptDependency *dependency = new StableHClassDependency(GetOrCreateHClassHandle(hclass));
     if (dependency->IsValid()) {
         RegisterDependency(dependency);
         return true;

@@ -45,16 +45,10 @@ public:
 
 private:
     void EmitFastWriteBarrier(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister value,
-                              int32_t offset);
+                              int32_t offset, bool preserveInputs = false);
     void EmitWriteBarrier(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister value, int32_t offset,
                           ArkSteedWriteBarrierKind barrierKind, ArkSteedRegister objectRegionScratch,
-                          ArkSteedRegister valueRegionScratch);
-    void EmitLocalToShareRSet(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister value, int32_t offset,
-                              ArkSteedRegister objectRegionScratch, ArkSteedRegister bitsetWordAddrScratch,
-                              Label *next);
-    void EmitPostStoreWriteBarrier(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister value,
-                                   int32_t offset, ArkSteedWriteBarrierKind barrierKind,
-                                   ArkSteedRegister objectRegionScratch, ArkSteedRegister valueRegionScratch);
+                          ArkSteedRegister valueRegionScratch, bool preserveInputs = false);
     void CallBarrierRuntime(kungfu::RuntimeStubCSigns::ID runtimeId, ArkSteedRegister glue,
                             ArkSteedRegister object, int32_t offset, ArkSteedRegister value,
                             bool preserveInputs);

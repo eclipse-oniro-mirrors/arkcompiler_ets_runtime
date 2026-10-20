@@ -261,6 +261,8 @@ private:
 
     CGStackMapInfo *stackMapInfo_ = nullptr;
     CompilationEnv *compilationEnv_ {nullptr};
+    // Only legacy JIT installation requires a contiguous array of every handle.
+    std::vector<JSHandle<JSTaggedValue>> jitHeapConstantHandles_;
     std::string curCompileFileName_;
     // MethodID->EntryIndex
     std::map<uint32_t, uint32_t> methodToEntryIndexMap_ {};

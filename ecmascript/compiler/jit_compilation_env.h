@@ -18,9 +18,11 @@
 
 #include "ecmascript/compiler/bytecode_info_collector.h"
 #include "ecmascript/compiler/compilation_env.h"
+#include "ecmascript/compiler/heap_constant_entry.h"
 #include "ecmascript/dependent_infos.h"
 #include "ecmascript/ic/profile_type_info.h"
 #include "ecmascript/jit/jit_thread.h"
+#include "ecmascript/mem/chunk.h"
 
 namespace panda::ecmascript {
 class JitCompilationEnv final : public CompilationEnv {
@@ -50,7 +52,7 @@ public:
 
     JitCompilationEnv(EcmaVM *vm, EcmaVM *hVm,
         JSHandle<JSFunction> &jsFunction, kungfu::LazyDeoptAllDependencies *dependencies);
-    ~JitCompilationEnv() = default;
+    ~JitCompilationEnv() override;
     bool IsJitCompiler() const override
     {
         return true;
@@ -153,9 +155,26 @@ public:
         return profileTypeInfo_;
     }
 
-    const std::vector<JSHandle<JSTaggedValue>> &GetHeapConstantTable() const
+    // Only the pointer array moves on growth; records live in the compilation's chunk.
+    const std::vector<HeapConstantEntry *> &GetHeapConstantTable() const
     {
         return heapConstantInfo_.heapConstantTable;
+    }
+
+    size_t GetHeapConstantCount() const
+    {
+        const auto &table = heapConstantInfo_.heapConstantTable;
+        return table.size();
+    }
+
+    HeapConstantEntry *GetHeapConstantEntry(uint32_t index) const;
+
+    // Attach the task's existing arena before recording constants. Standalone
+    // and legacy environments allocate their own arena lazily when needed.
+    void SetHeapConstantChunk(Chunk *chunk)
+    {
+        ASSERT(chunk != nullptr && GetHeapConstantCount() == 0 && ownedHeapConstantChunk_ == nullptr);
+        heapConstantChunk_ = chunk;
     }
 
     JSHandle<JSFunction> GetJsFunction() const
@@ -169,11 +188,12 @@ public:
     // moving GC updates the slots while the append-only table preserves their indices.
     uint32_t FindHeapConstantIndex(JSTaggedValue heapObj) const
     {
-        auto it =
-            std::find_if(heapConstantInfo_.heapConstantTable.begin(), heapConstantInfo_.heapConstantTable.end(),
-                         [heapObj](const JSHandle<JSTaggedValue> &value) { return value.GetTaggedValue() == heapObj; });
-        if (it != heapConstantInfo_.heapConstantTable.end()) {
-            return std::distance(heapConstantInfo_.heapConstantTable.begin(), it);
+        const auto &table = heapConstantInfo_.heapConstantTable;
+        auto it = std::find_if(table.begin(), table.end(), [heapObj](const HeapConstantEntry *entry) {
+            return entry->GetHandle().GetTaggedValue() == heapObj;
+        });
+        if (it != table.end()) {
+            return std::distance(table.begin(), it);
         }
         return INVALID_HEAP_CONSTANT_INDEX;
     }
@@ -186,9 +206,7 @@ public:
             return index;
         }
         // Allocate a sustaining slot only on a miss, including refs created from feedback.
-        heapConstantInfo_.heapConstantTable.push_back(NewJSHandle(heapObj));
-        ASSERT(heapConstantInfo_.heapConstantTable.size() < INVALID_HEAP_CONSTANT_INDEX);
-        return static_cast<uint32_t>(heapConstantInfo_.heapConstantTable.size() - 1);
+        return AppendHeapConstant(NewJSHandle(heapObj));
     }
 
     uint32_t RecordHeapConstant(const JSHandle<JSTaggedValue> &heapObj)
@@ -197,10 +215,7 @@ public:
         if (existing != INVALID_HEAP_CONSTANT_INDEX) {
             return existing;
         }
-        heapConstantInfo_.heapConstantTable.push_back(heapObj);
-        ASSERT(heapConstantInfo_.heapConstantTable.size() < INVALID_HEAP_CONSTANT_INDEX);
-        size_t index = heapConstantInfo_.heapConstantTable.size() - 1;
-        return static_cast<uint32_t>(index);
+        return AppendHeapConstant(heapObj);
     }
 
     uint32_t RecordHeapConstant(ConstantPoolHeapConstant heapConstant, const JSHandle<JSTaggedValue> &heapObj);
@@ -316,6 +331,19 @@ public:
         calleeFunctions_[methodOffset] = callee;
     }
 private:
+    uint32_t AppendHeapConstant(JSHandle<JSTaggedValue> handle)
+    {
+        if (heapConstantChunk_ == nullptr) {
+            ownedHeapConstantChunk_ = std::make_unique<Chunk>(vm_->GetNativeAreaAllocator());
+            heapConstantChunk_ = ownedHeapConstantChunk_.get();
+        }
+        auto &table = heapConstantInfo_.heapConstantTable;
+        ASSERT(table.size() < INVALID_HEAP_CONSTANT_INDEX);
+        uint32_t index = static_cast<uint32_t>(table.size());
+        table.push_back(heapConstantChunk_->New<HeapConstantEntry>(this, index, handle));
+        return index;
+    }
+
     JSThread *hostThread_ {nullptr};
     JSHandle<JSFunction> jsFunction_;
     std::map<uint32_t, JSHandle<JSFunction>> calleeFunctions_;
@@ -327,8 +355,10 @@ private:
     pgo::ApEntityId abcId_ {0};
     JSHandle<ProfileTypeInfo> profileTypeInfo_;
     std::unordered_map<uint32_t, std::unordered_map<uint32_t, bool>> ldExtModuleVarResolved_;
+    std::unique_ptr<Chunk> ownedHeapConstantChunk_;
+    Chunk *heapConstantChunk_{nullptr};
     struct HeapConstantInfo {
-        std::vector<JSHandle<JSTaggedValue>> heapConstantTable;
+        std::vector<HeapConstantEntry *> heapConstantTable;
         std::map<ConstantPoolHeapConstant, uint32_t> constPoolHeapConstant2Index;
         std::unordered_map<int32_t, uint32_t> gate2HeapConstantIndex;
         std::unordered_map<uint32_t, uint32_t> callMethodId2HeapConstantIndex;

@@ -16,6 +16,7 @@
 #include "ecmascript/jspandafile/program_object.h"
 #include "ecmascript/ic/ic_handler.h"
 #include "ecmascript/jit/jit_thread.h"
+#include "ecmascript/mem/chunk.h"
 
 namespace panda::ecmascript {
 // jit
@@ -40,6 +41,8 @@ JitCompilationEnv::JitCompilationEnv(EcmaVM *jitVm, EcmaVM *jsVm,
         methodLiteral_->SetFunctionKind(FunctionKind::CLASS_CONSTRUCTOR);
     }
 }
+
+JitCompilationEnv::~JitCompilationEnv() = default;
 
 JSRuntimeOptions &JitCompilationEnv::GetJSOptions() const
 {
@@ -230,7 +233,13 @@ uint32_t JitCompilationEnv::RecordHeapConstant(
 
 JSHandle<JSTaggedValue> JitCompilationEnv::GetHeapConstantHandle(uint32_t heapConstantIndex) const
 {
-    ASSERT(heapConstantIndex < heapConstantInfo_.heapConstantTable.size());
-    return heapConstantInfo_.heapConstantTable[heapConstantIndex];
+    return GetHeapConstantEntry(heapConstantIndex)->GetHandle();
 }
+
+HeapConstantEntry *JitCompilationEnv::GetHeapConstantEntry(uint32_t index) const
+{
+    ASSERT(index < GetHeapConstantCount());
+    return heapConstantInfo_.heapConstantTable[index];
+}
+
 } // namespace panda::ecmascript
