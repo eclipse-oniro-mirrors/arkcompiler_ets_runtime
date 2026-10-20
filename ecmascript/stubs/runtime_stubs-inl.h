@@ -2704,7 +2704,7 @@ JSTaggedValue RuntimeStubs::RuntimeDefineGetterSetterByValue(JSThread *thread, c
             "In a class, computed property names for static getter that are named 'prototype' throw a TypeError");
     }
 
-    auto receiverHClass = obj->GetJSHClass();
+    JSHandle<JSHClass> receiverHClass(thread, obj->GetJSHClass());
 
     if (flag) {
         if (!getter->IsUndefined()) {
@@ -2742,17 +2742,16 @@ JSTaggedValue RuntimeStubs::RuntimeDefineGetterSetterByValue(JSThread *thread, c
     }
 
     JSObject::DefineOwnProperty(thread, obj, propKey, desc);
-    auto holderTraHClass = obj->GetJSHClass();
-    if (receiverHClass != holderTraHClass) {
+    JSHandle<JSHClass> holderTraHClass(thread, obj->GetJSHClass());
+    if (*receiverHClass != *holderTraHClass) {
         if (holderTraHClass->IsAOT()) {
-            JSHandle<JSHClass> phcHandle(thread, holderTraHClass);
-            JSHClass::EnablePHCProtoChangeMarker(thread, phcHandle);
+            JSHClass::EnablePHCProtoChangeMarker(thread, holderTraHClass);
         }
         if (thread->GetEcmaVM()->IsEnablePGOProfiler()) {
 #ifndef EXCLUDE_PGO
             if (!func->IsUndefined()) {
                 thread->GetEcmaVM()->GetPGOProfiler()->ProfileDefineGetterSetter(
-                    receiverHClass, holderTraHClass, func, pcOffset);
+                    *receiverHClass, *holderTraHClass, func, pcOffset);
             }
 #endif
         }

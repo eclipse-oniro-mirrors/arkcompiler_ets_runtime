@@ -226,16 +226,16 @@ ITERATE_INTL(INTL_CALLBACK)
 void BuiltinsLazyCallback::ResetLazyInternalAttr(JSThread *thread, const JSHandle<JSObject> &object,
     const char *name)
 {
-    JSHClass *hclass = object->GetClass();
+    JSHandle<JSHClass> hclass(thread, object->GetClass());
     ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
     JSHandle<JSTaggedValue> key(factory->NewFromUtf8ReadOnly(name));
     if (LIKELY(!hclass->IsDictionaryMode())) {
         LayoutInfo *layoutInfo = LayoutInfo::Cast(hclass->GetLayout(thread).GetTaggedObject());
         uint32_t propsNumber = hclass->NumberOfProps();
 #if ENABLE_V70_OPTIMIZATION
-        int entry = layoutInfo->FindElement(thread, hclass, key.GetTaggedValue(), propsNumber);
+        int entry = layoutInfo->FindElement(thread, *hclass, key.GetTaggedValue(), propsNumber);
 #else
-        int entry = layoutInfo->FindElementWithCache(thread, hclass, key.GetTaggedValue(), propsNumber);
+        int entry = layoutInfo->FindElementWithCache(thread, *hclass, key.GetTaggedValue(), propsNumber);
 #endif
         if (entry != -1) {
             PropertyAttributes attr(layoutInfo->GetAttr(thread, entry));
