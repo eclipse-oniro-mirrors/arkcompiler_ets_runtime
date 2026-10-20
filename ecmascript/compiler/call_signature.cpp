@@ -3757,4 +3757,20 @@ DEF_CALL_SIGNATURE(LoadBarrierCopyBack)
     callSign->SetTargetKind(CallSignature::TargetKind::RUNTIME_STUB_NO_GC);
     callSign->SetCallConv(CallSignature::CallConv::CCallConv);
 }
+
+DEF_CALL_SIGNATURE(TryResolveSendableModule)
+{
+    // 2 : 2 input parameters
+    CallSignature index("TryResolveSendableModule", 0, 2, ArgumentsOrder::DEFAULT_ORDER,
+                        VariableType::JS_ANY());
+    *callSign = index;
+    std::array<VariableType, 2> params = { // 2 : 2 input parameters
+        VariableType::NATIVE_POINTER(),  // glue
+        VariableType::JS_ANY(),          // ResolvedRecordIndexBinding
+    };
+    callSign->SetParameters(params.data());
+    callSign->SetGCLeafFunction(true);
+    callSign->SetTargetKind(CallSignature::TargetKind::RUNTIME_STUB_NO_GC);
+    callSign->SetNoTailCall(true);
+}
 }  // namespace panda::ecmascript::kungfu

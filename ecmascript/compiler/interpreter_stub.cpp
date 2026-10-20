@@ -23,6 +23,7 @@
 #include "ecmascript/dfx/vm_thread_control.h"
 #include "ecmascript/interpreter/interpreter.h"
 #include "ecmascript/interpreter/interpreter_assembly.h"
+#include "ecmascript/lexical_env.h"
 
 namespace panda::ecmascript::kungfu {
 #define DECLARE_ASM_HANDLER_BASE(name, needPrint, V, format)                                      \
@@ -6218,12 +6219,31 @@ DECLARE_ASM_HANDLER(HandleCallRuntimeDefineSendableClassPrefImm16Id16Id16Imm16V8
     }
 }
 
+// @ref panda::ecmascript::RuntimeStubs::RuntimeLdSendableClass(env, level);
 DECLARE_ASM_HANDLER(HandleCallRuntimeLdSendableClassPrefImm16)
 {
+    auto env = GetEnvironment();
     DEFVARIABLE(varAcc, VariableType::JS_ANY(), acc);
-    GateRef level = ReadInst16_1(pc);
-    GateRef lexEnv = GetEnvFromFrame(glue, GetFrame(sp));
-    varAcc = CallRuntime(glue, RTSTUB_ID(LdSendableClass), { lexEnv, Int16ToTaggedInt(level) });
+    GateRef level = ZExtInt16ToInt32(ReadInst16_1(pc));
+    DEFVARIABLE(currentEnv, VariableType::JS_ANY(), GetEnvFromFrame(glue, GetFrame(sp)));
+    DEFVARIABLE(i, VariableType::INT32(), Int32(0));
+
+    Label loopHead(env);
+    Label loopEnd(env);
+    Label afterLoop(env);
+    BRANCH(Int32LessThan(*i, level), &loopHead, &afterLoop);
+    LoopBegin(&loopHead);
+    currentEnv = GetParentEnv(glue, *currentEnv);
+    i = Int32Add(*i, Int32(1));
+    BRANCH(Int32LessThan(*i, level), &loopEnd, &afterLoop);
+    Bind(&loopEnd);
+#if ENABLE_LATEST_OPTIMIZATION
+    LoopEnd(&loopHead);
+#else
+    LoopEndWithCheckSafePoint(&loopHead, env, glue);
+#endif
+    Bind(&afterLoop);
+    varAcc = GetValueFromTaggedArray(glue, *currentEnv, Int32(SFunctionEnv::CONSTRUCTOR_INDEX));
     DISPATCH_WITH_ACC(CALLRUNTIME_LDSENDABLECLASS_PREF_IMM16);
 }
 
@@ -6232,10 +6252,19 @@ DECLARE_ASM_HANDLER(HandleCallRuntimeLdsendableexternalmodulevarImm8)
     DEFVARIABLE(varAcc, VariableType::JS_ANY(), acc);
     DEFVARIABLE(moduleRef, VariableType::JS_ANY(), Undefined());
     GateRef index = ReadInst8_1(pc);
+    GateRef indexInt32 = ZExtInt8ToInt32(index);
 
     // LdSendableExternalModuleVarByIndex may load uninitialized module lazy. Exception could happened.
-    GateRef currentFunc = GetFunctionFromFrame(glue, GetFrame(sp));
-    moduleRef = CallRuntime(glue, RTSTUB_ID(LdSendableExternalModuleVarByIndex), {Int8ToTaggedInt(index), currentFunc});
+    GateRef frame = GetFrame(sp);
+    GateRef currentFunc = GetFunctionFromFrame(glue, frame);
+    auto globalenvGetter = [this, &glue, &frame]() -> GateRef {
+        GateRef currentEnv = GetEnvFromFrame(glue, frame);
+        return GetCurrentGlobalEnv(glue, currentEnv);
+    };
+    SetCallBackForLazyGetGlobalEnv(globalenvGetter);
+    // @ref panda::ecmascript::ModuleValueAccessor::GetSendableModuleValueOuter(index, jsFunc);
+    moduleRef = FastLoadSendableModuleVar(glue, indexInt32, GetModuleFromFunction(glue, currentFunc),
+                                          currentFunc, false);
 
     auto env = GetEnvironment();
     IR_IF (TaggedIsException(*moduleRef)) {
@@ -6252,11 +6281,18 @@ DECLARE_ASM_HANDLER(HandleCallRuntimeWideLdsendableexternalmodulevarPrefImm16)
     DEFVARIABLE(moduleRef, VariableType::JS_ANY(), Undefined());
 
     GateRef index = ReadInst16_1(pc);
+    GateRef indexInt32 = ZExtInt16ToInt32(index);
 
-    // LdSendableExternalModuleVarByIndex may load uninitialized module lazy. Exception could happened.
-    GateRef currentFunc = GetFunctionFromFrame(glue, GetFrame(sp));
-    moduleRef =
-        CallRuntime(glue, RTSTUB_ID(LdSendableExternalModuleVarByIndex), {Int16ToTaggedInt(index), currentFunc});
+    GateRef frame = GetFrame(sp);
+    GateRef currentFunc = GetFunctionFromFrame(glue, frame);
+    auto globalenvGetter = [this, &glue, &frame]() -> GateRef {
+        GateRef currentEnv = GetEnvFromFrame(glue, frame);
+        return GetCurrentGlobalEnv(glue, currentEnv);
+    };
+    SetCallBackForLazyGetGlobalEnv(globalenvGetter);
+    // @ref panda::ecmascript::ModuleValueAccessor::GetSendableModuleValueOuter(index, jsFunc);
+    moduleRef = FastLoadSendableModuleVar(glue, indexInt32, GetModuleFromFunction(glue, currentFunc),
+                                          currentFunc, false);
 
     auto env = GetEnvironment();
     IR_IF (TaggedIsException(*moduleRef)) {
@@ -6271,16 +6307,33 @@ DECLARE_ASM_HANDLER(HandleCallRuntimeNewSendableEnvImm8)
 {
     auto env = GetEnvironment();
     DEFVARIABLE(varAcc, VariableType::JS_ANY(), acc);
-    GateRef numVars = ZExtInt8ToInt16(ReadInst8_1(pc));
-    GateRef res = CallRuntime(glue, RTSTUB_ID(NewSendableEnv),
-                              { Int16ToTaggedInt(numVars) });
-    IR_IF (TaggedIsException(res)) {
+    DEFVARIABLE(res, VariableType::JS_ANY(), Undefined());
+    GateRef numVars = ZExtInt8ToInt32(ReadInst8_1(pc));
+
+    Label callRuntime(env);
+    Label afterNew(env);
+    GateRef frame = GetFrame(sp);
+    GateRef currentFunc = GetFunctionFromFrame(glue, frame);
+    GateRef module = GetModuleFromFunction(glue, currentFunc);
+
+    NewObjectStubBuilder newBuilder(this);
+    newBuilder.SetParameters(glue, 0);
+    // @ref panda::ecmascript::RuntimeStubs::RuntimeNewSendableEnv(numVars);
+    newBuilder.NewSendableEnvStub(&res, &callRuntime, &afterNew, numVars,
+                                  GetSendableEnvFromModule(glue, module));
+
+    Bind(&callRuntime);
+    {
+        res = CallRuntime(glue, RTSTUB_ID(NewSendableEnv), { IntToTaggedInt(numVars) });
+        Jump(&afterNew);
+    }
+
+    Bind(&afterNew);
+    IR_IF (TaggedIsException(*res)) {
         DISPATCH_LAST();
     } IR_ELSE {
-        varAcc = res;
-        GateRef currentFunc = GetFunctionFromFrame(glue, GetFrame(sp));
-        GateRef module = GetModuleFromFunction(glue, currentFunc);
-        SetSendableEnvToModule(glue, module, res);
+        varAcc = *res;
+        SetSendableEnvToModule(glue, module, *res);
         DISPATCH_WITH_ACC(CALLRUNTIME_NEWSENDABLEENV_PREF_IMM8);
     }
 }
@@ -6289,16 +6342,33 @@ DECLARE_ASM_HANDLER(HandleCallRuntimeNewSendableEnvImm16)
 {
     auto env = GetEnvironment();
     DEFVARIABLE(varAcc, VariableType::JS_ANY(), acc);
-    GateRef numVars = ReadInst16_1(pc);
-    GateRef res = CallRuntime(glue, RTSTUB_ID(NewSendableEnv),
-                              { Int16ToTaggedInt(numVars) });
-    IR_IF (TaggedIsException(res)) {
+    DEFVARIABLE(res, VariableType::JS_ANY(), Undefined());
+    GateRef numVars = ZExtInt16ToInt32(ReadInst16_1(pc));
+
+    Label callRuntime(env);
+    Label afterNew(env);
+    GateRef frame = GetFrame(sp);
+    GateRef currentFunc = GetFunctionFromFrame(glue, frame);
+    GateRef module = GetModuleFromFunction(glue, currentFunc);
+
+    NewObjectStubBuilder newBuilder(this);
+    newBuilder.SetParameters(glue, 0);
+    // @ref panda::ecmascript::RuntimeStubs::RuntimeNewSendableEnv(numVars);
+    newBuilder.NewSendableEnvStub(&res, &callRuntime, &afterNew, numVars,
+                                  GetSendableEnvFromModule(glue, module));
+
+    Bind(&callRuntime);
+    {
+        res = CallRuntime(glue, RTSTUB_ID(NewSendableEnv), { IntToTaggedInt(numVars) });
+        Jump(&afterNew);
+    }
+
+    Bind(&afterNew);
+    IR_IF (TaggedIsException(*res)) {
         DISPATCH_LAST();
     } IR_ELSE {
-        varAcc = res;
-        GateRef currentFunc = GetFunctionFromFrame(glue, GetFrame(sp));
-        GateRef module = GetModuleFromFunction(glue, currentFunc);
-        SetSendableEnvToModule(glue, module, res);
+        varAcc = *res;
+        SetSendableEnvToModule(glue, module, *res);
         DISPATCH_WITH_ACC(CALLRUNTIME_WIDENEWSENDABLEENV_PREF_IMM16);
     }
 }
@@ -6518,10 +6588,18 @@ DECLARE_ASM_HANDLER(HandleCallRuntimeLdLazySendableModuleVarPrefImm8)
     DEFVARIABLE(varAcc, VariableType::JS_ANY(), acc);
     DEFVARIABLE(moduleRef, VariableType::JS_ANY(), Undefined());
     GateRef index = ReadInst8_1(pc);
+    GateRef indexInt32 = ZExtInt8ToInt32(index);
 
-    GateRef currentFunc = GetFunctionFromFrame(glue, GetFrame(sp));
-    moduleRef = CallRuntime(glue, RTSTUB_ID(LdLazySendableExternalModuleVarByIndex),
-        { Int8ToTaggedInt(index), currentFunc });
+    GateRef frame = GetFrame(sp);
+    GateRef currentFunc = GetFunctionFromFrame(glue, frame);
+    auto globalenvGetter = [this, &glue, &frame]() -> GateRef {
+        GateRef currentEnv = GetEnvFromFrame(glue, frame);
+        return GetCurrentGlobalEnv(glue, currentEnv);
+    };
+    SetCallBackForLazyGetGlobalEnv(globalenvGetter);
+    // @ref panda::ecmascript::ModuleValueAccessor::GetLazySendableModuleValueOuter(index, jsFunc);
+    moduleRef = FastLoadSendableModuleVar(glue, indexInt32, GetModuleFromFunction(glue, currentFunc),
+                                          currentFunc, true);
 
     auto env = GetEnvironment();
     IR_IF (TaggedIsException(*moduleRef)) {
@@ -6538,10 +6616,18 @@ DECLARE_ASM_HANDLER(HandleCallRuntimeWideLdLazySendableModuleVarPrefImm16)
     DEFVARIABLE(moduleRef, VariableType::JS_ANY(), Undefined());
 
     GateRef index = ReadInst16_1(pc);
+    GateRef indexInt32 = ZExtInt16ToInt32(index);
 
-    GateRef currentFunc = GetFunctionFromFrame(glue, GetFrame(sp));
-    moduleRef = CallRuntime(glue, RTSTUB_ID(LdLazySendableExternalModuleVarByIndex),
-        { Int16ToTaggedInt(index), currentFunc });
+    GateRef frame = GetFrame(sp);
+    GateRef currentFunc = GetFunctionFromFrame(glue, frame);
+    auto globalenvGetter = [this, &glue, &frame]() -> GateRef {
+        GateRef currentEnv = GetEnvFromFrame(glue, frame);
+        return GetCurrentGlobalEnv(glue, currentEnv);
+    };
+    SetCallBackForLazyGetGlobalEnv(globalenvGetter);
+    // @ref panda::ecmascript::ModuleValueAccessor::GetLazySendableModuleValueOuter(index, jsFunc);
+    moduleRef = FastLoadSendableModuleVar(glue, indexInt32, GetModuleFromFunction(glue, currentFunc),
+                                          currentFunc, true);
 
     auto env = GetEnvironment();
     IR_IF (TaggedIsException(*moduleRef)) {
@@ -6649,10 +6735,13 @@ DECLARE_ASM_HANDLER(HandleCallRuntimeLdsendablelocalmodulevarImm8)
     DEFVARIABLE(varAcc, VariableType::JS_ANY(), acc);
     DEFVARIABLE(moduleRef, VariableType::JS_ANY(), Undefined());
     GateRef index = ReadInst8_1(pc);
+    GateRef indexInt32 = ZExtInt8ToInt32(index);
 
     // LdSendableLocalModuleVarByIndex may load uninitialized module lazy. Exception could happened.
     GateRef currentFunc = GetFunctionFromFrame(glue, GetFrame(sp));
-    moduleRef = CallRuntime(glue, RTSTUB_ID(LdSendableLocalModuleVarByIndex), {Int8ToTaggedInt(index), currentFunc});
+    // @ref panda::ecmascript::ModuleValueAccessor::GetSendableModuleValueInner(index, jsFunc);
+    moduleRef = FastLoadSendableLocalModuleVar(glue, indexInt32, GetModuleFromFunction(glue, currentFunc),
+                                               currentFunc);
 
     auto env = GetEnvironment();
     IR_IF (TaggedIsException(*moduleRef)) {
@@ -6669,11 +6758,12 @@ DECLARE_ASM_HANDLER(HandleCallRuntimeWideLdsendablelocalmodulevarPrefImm16)
     DEFVARIABLE(moduleRef, VariableType::JS_ANY(), Undefined());
 
     GateRef index = ReadInst16_1(pc);
+    GateRef indexInt32 = ZExtInt16ToInt32(index);
 
     // LdSendableLocalModuleVarByIndex may load uninitialized module lazy. Exception could happened.
     GateRef currentFunc = GetFunctionFromFrame(glue, GetFrame(sp));
-    moduleRef =
-        CallRuntime(glue, RTSTUB_ID(LdSendableLocalModuleVarByIndex), {Int16ToTaggedInt(index), currentFunc});
+    // @ref panda::ecmascript::ModuleValueAccessor::GetSendableModuleValueInner(index, jsFunc);
+    moduleRef = FastLoadSendableLocalModuleVar(glue, indexInt32, GetModuleFromFunction(glue, currentFunc), currentFunc);
 
     auto env = GetEnvironment();
     IR_IF (TaggedIsException(*moduleRef)) {

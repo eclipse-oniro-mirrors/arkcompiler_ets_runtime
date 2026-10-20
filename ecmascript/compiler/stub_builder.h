@@ -1411,6 +1411,11 @@ public:
         return lazyGetGlobalEnvCallBack_();
     }
 
+    GateRef FastLoadSendableModuleVar(GateRef glue, GateRef index, GateRef curModule,
+                                      GateRef currentFunc, bool isLazy);
+    GateRef FastLoadSendableLocalModuleVar(GateRef glue, GateRef index, GateRef curModule,
+                                           GateRef currentFunc);
+
 #if ENABLE_V70_OPTIMIZATION
     // RAII helper class for automatic GlobalEnv management
     class GlobalEnvScope {

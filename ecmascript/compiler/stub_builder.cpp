@@ -13306,6 +13306,8 @@ GateRef StubBuilder::FastLoadExternalmodulevar(GateRef glue, GateRef index, Gate
         Jump(&exit);
     }
 
+    // @ref panda::ecmascript::ModuleValueAccessor::GetSendableModuleValueOuterInternal:
+    // moduleEnvironment undefined -> return undefined (EX-2).
     Bind(&moduleEnvUndefined);
     {
         result = Undefined();
@@ -13378,6 +13380,7 @@ GateRef StubBuilder::LoadExternalmodulevar(GateRef glue, GateRef index, GateRef 
         Label isResolvedIndexBinding(env);
         BRANCH(IsResolvedIndexBinding(glue, resolvedBinding), &isResolvedIndexBinding, &judgeResolvedBinding);
 
+        // @ref panda::ecmascript::ModuleValueAccessor::GetModuleValueFromIndexBinding<isLazy>(info);
         Bind(&isResolvedIndexBinding);
         {
             Label isLdEndExecPatchMain(env);
@@ -14552,5 +14555,253 @@ void WhileHelper::Finish()
 bool WhileHelper::IsActive() const
 {
     return active_;
+}
+
+// @ref panda::ecmascript::ModuleValueAccessor::GetSendableModuleValueOuter / GetLazySendableModuleValueOuter;
+// @ref panda::ecmascript::ModuleValueAccessor::GetSendableModuleValueOuterInternal<isLazy>(index, curModule);
+// IR fast path for LDSENDABLEEXTERNALMODULEVAR / LDLAZYSENDABLEMODULEVAR (isLazy) with C++ slow-path fallback.
+GateRef StubBuilder::FastLoadSendableModuleVar(GateRef glue, GateRef index, GateRef curModule,
+                                               GateRef currentFunc, bool isLazy)
+{
+    auto env = GetEnvironment();
+    Label subentry(env);
+    env->SubCfgEntry(&subentry);
+    Label exit(env);
+    Label slowPath(env);
+    DEFVARIABLE(result, VariableType::JS_ANY(), Hole());
+
+    Label curModuleDefined(env);
+    BRANCH_UNLIKELY(TaggedIsUndefined(curModule), &slowPath, &curModuleDefined);
+    Bind(&curModuleDefined);
+
+    Label moduleEnvUndefined(env);
+    Label moduleEnvIsdefined(env);
+    GateRef curModuleEnv = GetCurrentModuleEnv(glue, curModule);
+    BRANCH_UNLIKELY(TaggedIsUndefined(curModuleEnv), &moduleEnvUndefined, &moduleEnvIsdefined);
+
+    Bind(&moduleEnvUndefined);
+    {
+        result = Undefined();
+        Jump(&exit);
+    }
+
+    Bind(&moduleEnvIsdefined);
+    {
+        GateRef resolvedBinding = GetValueFromTaggedArray(glue, curModuleEnv, index);
+
+        Label isResolvedIndexBinding(env);
+        Label judgeResolvedRecordIndexBinding(env);
+        BRANCH(IsResolvedIndexBinding(glue, resolvedBinding), &isResolvedIndexBinding,
+               &judgeResolvedRecordIndexBinding);
+
+        Bind(&isResolvedIndexBinding);
+        {
+            DEFVARIABLE(resolvedModule, VariableType::JS_ANY(), Hole());
+            resolvedModule = GetResolveModuleFromResolvedIndexBinding(glue, resolvedBinding);
+            GateRef idxOfResolvedBinding = GetIdxOfResolvedIndexBinding(resolvedBinding);
+            Label indexBindingFast(env);
+
+            // @ref panda::ecmascript::ModuleValueAccessor::EvaluateModuleIfNeeded<true>(module)
+            // @ref panda::ecmascript::ModuleValueAccessor::GetModuleValueFromIndexBinding
+            if (isLazy) {
+                Label indexBindingNeedSlow(env);
+                GateRef bitfield = LoadPrimitive(VariableType::INT32(), *resolvedModule,
+                                                 Int32(SourceTextModule::BIT_FIELD_OFFSET));
+                GateRef status = Int32And(bitfield, Int32((1U << SourceTextModule::STATUS_BITS) - 1U));
+                BRANCH(Int32GreaterThanOrEqual(status, Int32(static_cast<int32_t>(ModuleStatus::EVALUATED))),
+                       &indexBindingFast, &indexBindingNeedSlow);
+
+                Bind(&indexBindingNeedSlow);
+                {
+                    Jump(&slowPath);
+                }
+            } else {
+                Jump(&indexBindingFast);
+            }
+
+            Bind(&indexBindingFast);
+            {
+                // @ref panda::ecmascript::ModuleValueAccessor::GetModuleValueFromIndexBinding:
+                // IsSharedModule -> GetSModule swap; kept on slow path here.
+                Label isSharedModule(env);
+                Label notSharedModule(env);
+                BRANCH_UNLIKELY(IsSharedModule(*resolvedModule), &isSharedModule, &notSharedModule);
+
+                Bind(&isSharedModule);
+                {
+                    Jump(&slowPath);
+                }
+
+                Bind(&notSharedModule);
+                {
+                    Label isEcmaModule(env);
+                    Label getModuleSlow(env);
+                    Label notUndefined(env);
+                    BRANCH_LIKELY(IsEcmaModule(*resolvedModule), &isEcmaModule, &getModuleSlow);
+
+                    Bind(&isEcmaModule);
+                    {
+                        GateRef dictionary = GetNameDictionary(glue, *resolvedModule);
+                        BRANCH_UNLIKELY(TaggedIsUndefined(dictionary), &getModuleSlow, &notUndefined);
+
+                        // @ref panda::ecmascript::SourceTextModule::GetModuleValue(index, isThrow=false):
+                        // TaggedArray::Get(dictionary, index).
+                        Bind(&notUndefined);
+                        {
+                            result = GetValueFromTaggedArray(glue, dictionary, idxOfResolvedBinding);
+                            Jump(&exit);
+                        }
+                    }
+
+                    // @ref panda::ecmascript::ModuleValueAccessor::GetModuleValue(module, index);
+                    // (native/cjs dispatch + dictionary-undefined CheckAndThrow chain).
+                    Bind(&getModuleSlow);
+                    {
+                        SetCurrentGlobalEnv(LazyGetGlobalEnv());
+                        result = GetModuleValue(glue, *resolvedModule, idxOfResolvedBinding);
+                        Jump(&exit);
+                    }
+                }
+            }
+        }
+
+        // @ref panda::ecmascript::ModuleValueAccessor::GetModuleValueFromRecordIndexBinding<isLazy>(info);
+        Bind(&judgeResolvedRecordIndexBinding);
+        {
+            Label isResolvedRecordIndexBinding(env);
+            Label recordIndexNeedSlow(env);
+            BRANCH(IsResolvedRecordIndexBinding(glue, resolvedBinding), &isResolvedRecordIndexBinding,
+                   &recordIndexNeedSlow);
+
+            Bind(&isResolvedRecordIndexBinding);
+            {
+                // @ref panda::ecmascript::ModuleValueAccessor::TryGetEvaluatedImportedModuleValueByIndex
+                GateRef resolvedModule = CallNGCRuntime(glue, RTSTUB_ID(TryResolveSendableModule),
+                                                        {glue, resolvedBinding});
+                Label moduleHit(env);
+                BRANCH(TaggedIsHole(resolvedModule), &recordIndexNeedSlow, &moduleHit);
+
+                Bind(&moduleHit);
+                {
+                    Label isEcma(env);
+                    BRANCH_LIKELY(IsEcmaModule(resolvedModule), &isEcma, &recordIndexNeedSlow);
+
+                    // @ref panda::ecmascript::ModuleValueAccessor::EvaluateModuleIfNeeded<isLazy>(module);
+                    Bind(&isEcma);
+                    {
+                        GateRef bitfield = LoadPrimitive(VariableType::INT32(), resolvedModule,
+                                                         Int32(SourceTextModule::BIT_FIELD_OFFSET));
+                        GateRef status = Int32And(bitfield, Int32((1U << SourceTextModule::STATUS_BITS) - 1U));
+                        Label statusOk(env);
+                        BRANCH(Int32GreaterThanOrEqual(status,
+                            Int32(static_cast<int32_t>(ModuleStatus::EVALUATED))), &statusOk, &recordIndexNeedSlow);
+
+                        Bind(&statusOk);
+                        {
+                            GateRef dictionary = GetNameDictionary(glue, resolvedModule);
+                            Label dictOk(env);
+                            BRANCH_UNLIKELY(TaggedIsUndefined(dictionary), &recordIndexNeedSlow, &dictOk);
+
+                            Bind(&dictOk);
+                            {
+                                GateRef idxOfRecordBinding = GetIdxOfResolvedRecordIndexBinding(resolvedBinding);
+                                result = GetValueFromTaggedArray(glue, dictionary, idxOfRecordBinding);
+                                Jump(&exit);
+                            }
+                        }
+                    }
+                }
+            }
+
+            Bind(&recordIndexNeedSlow);
+            {
+                Jump(&slowPath);
+            }
+        }
+    }
+
+    // @ref panda::ecmascript::RuntimeStubs::RuntimeLdLazySendableExternalModuleVar(index, jsFunc);
+    // @ref panda::ecmascript::RuntimeStubs::RuntimeLdSendableExternalModuleVar(index, jsFunc);
+    Bind(&slowPath);
+    {
+        if (isLazy) {
+            result = CallRuntime(glue, RTSTUB_ID(LdLazySendableExternalModuleVarByIndex),
+                                 {IntToTaggedInt(index), currentFunc});
+        } else {
+            result = CallRuntime(glue, RTSTUB_ID(LdSendableExternalModuleVarByIndex),
+                                 {IntToTaggedInt(index), currentFunc});
+        }
+        Jump(&exit);
+    }
+
+    Bind(&exit);
+    auto ret = *result;
+    env->SubCfgExit();
+    return ret;
+}
+
+// @ref panda::ecmascript::ModuleValueAccessor::GetSendableModuleValueInner(index, jsFunc);
+// IR fast path for LDSENDABLELOCALMODULEVAR with C++ slow-path fallback.
+GateRef StubBuilder::FastLoadSendableLocalModuleVar(GateRef glue, GateRef index, GateRef curModule,
+                                                    GateRef currentFunc)
+{
+    auto env = GetEnvironment();
+    Label subentry(env);
+    env->SubCfgEntry(&subentry);
+    Label exit(env);
+    Label slowPath(env);
+    DEFVARIABLE(result, VariableType::JS_ANY(), Hole());
+
+    Label curModuleDefined(env);
+    BRANCH_UNLIKELY(TaggedIsUndefined(curModule), &slowPath, &curModuleDefined);
+    Bind(&curModuleDefined);
+
+    Label isSFM(env);
+    Label notSFM(env);
+    BRANCH(IsSendableFunctionModule(glue, curModule), &isSFM, &notSFM);
+
+    // @ref panda::ecmascript::ModuleValueAccessor::GetSendableModuleValueInner:
+    // ModuleManager::IsModuleLoaded/GetImportedModule + status > INSTANTIATED.
+    Bind(&isSFM);
+    {
+        GateRef value = CallRuntime(glue, RTSTUB_ID(TryGetSendableLocalModuleValue),
+                                    {IntToTaggedInt(index), currentFunc});
+        Label tryHit(env);
+        BRANCH(TaggedIsHole(value), &slowPath, &tryHit);
+        Bind(&tryHit);
+        {
+            result = value;
+            Jump(&exit);
+        }
+    }
+
+    // @ref panda::ecmascript::SourceTextModule::GetModuleValue(index, isThrow=false):
+    // dictionary defined -> TaggedArray::Get(dictionary, index).
+    Bind(&notSFM);
+    {
+        GateRef dictionary = GetNameDictionary(glue, curModule);
+        Label dictDefined(env);
+        BRANCH_UNLIKELY(TaggedIsUndefined(dictionary), &slowPath, &dictDefined);
+
+        Bind(&dictDefined);
+        {
+            result = GetValueFromTaggedArray(glue, dictionary, index);
+            Jump(&exit);
+        }
+    }
+
+    // @ref panda::ecmascript::RuntimeStubs::RuntimeLdSendableLocalModuleVar(index, jsFunc);
+    // Slow path keeps the full C++ semantics (module lazy load, exceptions).
+    Bind(&slowPath);
+    {
+        result = CallRuntime(glue, RTSTUB_ID(LdSendableLocalModuleVarByIndex),
+                             {IntToTaggedInt(index), currentFunc});
+        Jump(&exit);
+    }
+
+    Bind(&exit);
+    auto ret = *result;
+    env->SubCfgExit();
+    return ret;
 }
 }  // namespace panda::ecmascript::kungfu

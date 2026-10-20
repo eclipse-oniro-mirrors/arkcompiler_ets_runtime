@@ -1,0 +1,62 @@
+# Copyright (c) 2026 Huawei Device Co., Ltd.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+sendable-ir-baseline start
+DEFINESENDABLECLASS result 100 400
+DEFINESENDABLECLASS time-ms
+__INT__
+LDSENDABLECLASS result true true
+LDSENDABLECLASS time-ms
+__INT__
+LDSENDABLEVAR_IMM4 result true true
+LDSENDABLEVAR_IMM4 time-ms
+__INT__
+STSENDABLEVAR_IMM4 result true true
+STSENDABLEVAR_IMM4 time-ms
+__INT__
+LDSENDABLELOCALMODULEVAR result 1500 3000000
+LDSENDABLELOCALMODULEVAR time-ms
+__INT__
+LDSENDABLEEXTERNALMODULEVAR result 10000 20000000
+LDSENDABLEEXTERNALMODULEVAR time-ms
+__INT__
+WIDE_LDSENDABLEEXTERNALMODULEVAR result 149500 299000000
+WIDE_LDSENDABLEEXTERNALMODULEVAR time-ms
+__INT__
+LDLAZYSENDABLEMODULEVAR result 10000 20000000
+LDLAZYSENDABLEMODULEVAR time-ms
+__INT__
+WIDE_LDLAZYSENDABLEMODULEVAR result 149500 299000000
+WIDE_LDLAZYSENDABLEMODULEVAR time-ms
+__INT__
+WIDE_LDSENDABLELOCALMODULEVAR result 149500 299000000
+WIDE_LDSENDABLELOCALMODULEVAR time-ms
+__INT__
+NEWSENDABLEENV module-init-ms
+__INT__
+NEWSENDABLEENV check true
+WIDENEWSENDABLEENV module-init-ms
+__INT__
+LDSENDABLEVAR_IMM8 result true true
+LDSENDABLEVAR_IMM8 time-ms
+__INT__
+WIDE_LDSENDABLEVAR result true true
+WIDE_LDSENDABLEVAR time-ms
+__INT__
+STSENDABLEVAR_IMM8 result true true
+STSENDABLEVAR_IMM8 time-ms
+__INT__
+WIDE_STSENDABLEVAR result true true
+WIDE_STSENDABLEVAR time-ms
+__INT__
+sendable-ir-baseline done
