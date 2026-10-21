@@ -459,7 +459,7 @@ JSTaggedValue JSDate::GetTimeFromString(const char *str, int len)
             double day = MakeDay(time[YEAR], time[MONTH], time[DAYS]);
             double dateTime = MakeTime(time[HOUR], time[MIN], time[SEC], time[MS]);
             timeValue = MakeDate(day, dateTime);
-            double timeZoneMs = static_cast<double>(time[TIMEZONE] * MS_PER_SECOND);
+            double timeZoneMs = static_cast<double>(static_cast<int64_t>(time[TIMEZONE]) * MS_PER_SECOND);
             timeValue -= timeZoneMs;
         }
         return JSTaggedValue(TimeClip(timeValue));
