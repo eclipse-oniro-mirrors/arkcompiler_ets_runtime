@@ -1218,6 +1218,27 @@ size_t EcmaVM::IterateHandle(RootVisitor &visitor)
     return handleCount;
 }
 
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+size_t EcmaVM::IteratePrimitive(RootVisitor &visitor)
+{
+    // EnableGlobalLeakCheck.
+    size_t handleCount = 0;
+    if (currentPrimitiveStorageIndex_ != -1) {
+        DISALLOW_HANDLE_ALLOC;
+
+        int32_t nid = currentPrimitiveStorageIndex_;
+        for (int32_t i = 0; i <= nid; ++i) {
+            auto node = primitiveStorageNodes_.at(i);
+            auto start = node->data();
+            auto end = (i != nid) ? &(node->data()[NODE_BLOCK_SIZE]) : primitiveScopeStorageNext_;
+            visitor.VisitRangeRoot(Root::ROOT_LOCAL_HANDLE, ObjectSlot(ToUintPtr(start)), ObjectSlot(ToUintPtr(end)));
+            handleCount += (ToUintPtr(end) - ToUintPtr(start)) / sizeof(JSTaggedType);
+        }
+    }
+    return handleCount;
+}
+#endif
+
 void EcmaVM::IterateWeakGlobalEnvList(WeakVisitor &visitor)
 {
     for (auto it = globalEnvRecordList_.begin(); it != globalEnvRecordList_.end();) {

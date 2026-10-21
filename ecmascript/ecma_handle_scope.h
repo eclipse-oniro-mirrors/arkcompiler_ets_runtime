@@ -33,6 +33,9 @@ public:
     PUBLIC_API ~EcmaHandleScope();
     static uintptr_t PUBLIC_API NewHandle(JSThread *thread, JSTaggedType value);
     static uintptr_t PUBLIC_API NewPrimitiveHandle(JSThread *thread, JSTaggedType value);
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+    static void PUBLIC_API CheckHandleValid(uintptr_t handle);
+#endif
     void OpenHandleScope(EcmaVM *vm);
     void OpenPrimitiveScope(EcmaVM *vm);
     void CloseHandleScope(EcmaVM *vm);

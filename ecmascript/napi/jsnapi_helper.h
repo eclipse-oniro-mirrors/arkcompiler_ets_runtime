@@ -20,6 +20,7 @@
 #include "ecmascript/js_handle.h"
 #include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/napi/include/jsnapi.h"
+#include "ecmascript/napi/jsnapi_handle_scope_check.h"
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define RETURN_VALUE_IF_ABRUPT(thread, value)                 \
@@ -148,26 +149,50 @@ public:
 
     static inline ecmascript::JSTaggedValue ToJSTaggedValue(JSValueRef *from)
     {
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+        auto ret = ecmascript::JSHandle<ecmascript::JSTaggedValue>(reinterpret_cast<uintptr_t>(from));
+        CheckHandleValid(ret.GetAddress());
+        return **ret;
+#else
         ASSERT(from != nullptr);
         return *reinterpret_cast<ecmascript::JSTaggedValue *>(from);
+#endif
     }
 
     static inline ecmascript::JSMutableHandle<ecmascript::JSTaggedValue> ToJSMutableHandle(Local<JSValueRef> from)
     {
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+        auto ret = ecmascript::JSMutableHandle<ecmascript::JSTaggedValue>(reinterpret_cast<uintptr_t>(*from));
+        CheckHandleValid(ret.GetAddress());
+        return ret;
+#else
         ASSERT(!from.IsEmpty());
         return ecmascript::JSMutableHandle<ecmascript::JSTaggedValue>(reinterpret_cast<uintptr_t>(*from));
+#endif
     }
 
     static inline ecmascript::JSHandle<ecmascript::JSTaggedValue> ToJSHandle(Local<JSValueRef> from)
     {
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+        auto ret = ecmascript::JSHandle<ecmascript::JSTaggedValue>(reinterpret_cast<uintptr_t>(*from));
+        CheckHandleValid(ret.GetAddress());
+        return ret;
+#else
         ASSERT(!from.IsEmpty());
         return ecmascript::JSHandle<ecmascript::JSTaggedValue>(reinterpret_cast<uintptr_t>(*from));
+#endif
     }
 
     static inline ecmascript::JSHandle<ecmascript::JSTaggedValue> ToJSHandle(JSValueRef *from)
     {
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+        auto ret = ecmascript::JSHandle<ecmascript::JSTaggedValue>(reinterpret_cast<uintptr_t>(from));
+        CheckHandleValid(ret.GetAddress());
+        return ret;
+#else
         ASSERT(from != nullptr);
         return ecmascript::JSHandle<ecmascript::JSTaggedValue>(reinterpret_cast<uintptr_t>(from));
+#endif
     }
 };
 

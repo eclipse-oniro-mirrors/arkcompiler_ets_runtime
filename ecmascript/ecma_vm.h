@@ -543,6 +543,9 @@ public:
     }
 
     size_t IterateHandle(RootVisitor &visitor);
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+    size_t IteratePrimitive(RootVisitor &visitor);
+#endif
     // Visit all roots, including STW-only and concurrent roots
     void Iterate(RootVisitor &v);
     // STW roots are unsafe to visit duirng GC
@@ -1646,6 +1649,16 @@ public:
     {
         globalEnvRecordList_.push_back(static_cast<JSTaggedType>(ToUintPtr(globalEnv)));
     }
+
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+    template <class Visitor>
+    void IterateGlobalEnv(Visitor &&visitor)
+    {
+        for (JSTaggedType type : globalEnvRecordList_) {
+            visitor(JSTaggedValue(type));
+        }
+    }
+#endif
 
     void AddHandleScopeDepth()
     {

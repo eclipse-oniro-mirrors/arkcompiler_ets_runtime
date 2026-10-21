@@ -620,6 +620,10 @@ public:
 
     void IterateWeakRoots(const WeakRootVisitor &visitor);
 
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+    void IterateGlobal(RootVisitor &visitor);
+#endif
+
     void UpdateJitCodeMapReference(const WeakRootVisitor &visitor);
 
     PUBLIC_API PropertiesCache *GetPropertiesCache() const;
@@ -1189,6 +1193,18 @@ public:
     }
 
     JSHandle<GlobalEnv> PUBLIC_API GetGlobalEnv() const;
+
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+    GlobalEnv *GetGlobalEnvRaw() const
+    {
+        return reinterpret_cast<GlobalEnv *>(GetGlueGlobalEnv().GetTaggedObject());
+    }
+
+    uintptr_t GetFrameBase() const
+    {
+        return reinterpret_cast<uintptr_t>(glueData_.frameBase_);
+    }
+#endif
 
     JSTaggedValue PUBLIC_API GetCurrentGlobalEnv(JSTaggedValue currentEnv);
 
