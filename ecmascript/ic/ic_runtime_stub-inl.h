@@ -640,10 +640,7 @@ JSTaggedValue ICRuntimeStub::StoreElement(JSThread *thread, JSObject *receiver, 
         } else if (HandlerBase::IsJSArray(handlerInfo)) {
             JSTaggedValue receiveValue = receiverHandle.GetTaggedValue();
             if (receiveValue.IsJSCOWArray(thread)) {
-                if (!HandlerBase::StoreHandlesCOW(handlerInfo)) {
-                    return JSTaggedValue::Hole();
-                }
-                // Copy on write array.
+                // The feedback bit guides ArkSteed codegen; IC hits always copy COW elements.
                 JSArray::CheckAndCopyArray(thread, JSHandle<JSArray>::Cast(receiverHandle));
             }
             JSArray *arr = JSArray::Cast(*receiverHandle);

@@ -56,12 +56,13 @@ const sibling = literal();
 print(storeUnseenCOW(lateCOW, "changed") === "changed" && sibling[0] === "first");
 print(ArkTools.isAOTDeoptimized(storeUnseenCOW));
 
-// Upgrade an existing mono IC, without creating a second case for the same HClass.
+// A later COW hit in a mono IC keeps the existing feedback. Only ArkSteed
+// interprets that feedback, so compiled code must guard an unobserved COW backing.
 //! METHOD storeUpgradeMono
-//! HAS EnsureWritableElements
-//! HAS_NOT DeoptIfCOWElements
+//! HAS_NOT EnsureWritableElements
+//! HAS DeoptIfCOWElements
 //! HAS_NOT CallCommonStub SetPropertyByValue
-//! CODEGEN_COUNT CopyCOWElements deferred call 1
+//! CODEGEN_COUNT CopyCOWElements deferred call 0
 function storeUpgradeMono(array, value) {
     array[0] = value;
     return array[0];
@@ -77,13 +78,14 @@ ArkTools.waitJitCompileFinish(storeUpgradeMono);
 const monoCOW = literal();
 ArkTools.forceFullGC();
 print(storeUpgradeMono(monoCOW, "mono") === "mono" && sibling[0] === "first" &&
-      ArkTools.arkSteedIsCompiled(storeUpgradeMono) && !ArkTools.isAOTDeoptimized(storeUpgradeMono));
+      ArkTools.isAOTDeoptimized(storeUpgradeMono));
 
-// Upgrade one case of a poly IC and retain the other case.
+// A later COW hit in a poly IC also keeps its handler and requires a JIT guard.
 //! METHOD storeUpgradePoly
-//! HAS EnsureWritableElements
-//! HAS_NOT DeoptIfCOWElements
+//! HAS_NOT EnsureWritableElements
+//! HAS DeoptIfCOWElements
 //! HAS_NOT CallCommonStub SetPropertyByValue
+//! CODEGEN_COUNT CopyCOWElements deferred call 0
 function storeUpgradePoly(array, value) {
     array[0] = value;
     return array[0];
@@ -101,5 +103,4 @@ ArkTools.waitJitCompileFinish(storeUpgradePoly);
 const polyCOW = literal();
 ArkTools.forceFullGC();
 print(storeUpgradePoly(polyCOW, "poly") === "poly" && storeUpgradePoly(otherShape, "other") === "other" &&
-      sibling[0] === "first" && ArkTools.arkSteedIsCompiled(storeUpgradePoly) &&
-      !ArkTools.isAOTDeoptimized(storeUpgradePoly));
+      sibling[0] === "first" && ArkTools.isAOTDeoptimized(storeUpgradePoly));
