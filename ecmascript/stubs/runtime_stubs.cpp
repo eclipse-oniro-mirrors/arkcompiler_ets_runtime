@@ -2306,6 +2306,40 @@ DEF_RUNTIME_STUBS(GetResolvedRecordBindingModule)
     return moduleManager->HostGetImportedModule(recordNameStr).GetTaggedValue().GetRawData();
 }
 
+// @ref panda::ecmascript::ModuleValueAccessor::GetSendableModuleValueInner(index, jsFunc);
+DEF_RUNTIME_STUBS(TryGetSendableLocalModuleValue)
+{
+    RUNTIME_STUBS_HEADER(TryGetSendableLocalModuleValue);
+    JSTaggedValue index = GetArg(argv, argc, 0);  // 0: means the zeroth parameter
+    JSTaggedValue jsFunc = GetArg(argv, argc, 1); // 1: means the first parameter
+    JSTaggedValue currentModule = JSFunction::Cast(jsFunc.GetTaggedObject())->GetModule(thread);
+    if (!currentModule.IsSourceTextModule()) {
+        return JSTaggedValue::Hole().GetRawData();
+    }
+    SourceTextModule *sfm = SourceTextModule::Cast(currentModule.GetTaggedObject());
+    const CString *referenceName = reinterpret_cast<const CString *>(sfm->GetEcmaModuleRecordName());
+    if (referenceName == nullptr || referenceName->empty()) {
+        referenceName = reinterpret_cast<const CString *>(sfm->GetEcmaModuleFilename());
+    }
+    if (referenceName == nullptr) {
+        return JSTaggedValue::Hole().GetRawData();
+    }
+    JSTaggedValue originalModule = JSTaggedValue::Undefined();
+    if (!thread->GetModuleManager()->TryGetImportedModuleTaggedValue(*referenceName, originalModule)) {
+        return JSTaggedValue::Hole().GetRawData();
+    }
+    if (!originalModule.IsSourceTextModule()) {
+        return JSTaggedValue::Hole().GetRawData();
+    }
+    SourceTextModule *module = SourceTextModule::Cast(originalModule.GetTaggedObject());
+    // Keep the same status gate as ModuleValueAccessor::GetSendableModuleValueInner.
+    if (module->GetStatus() <= ModuleStatus::INSTANTIATED) {
+        return JSTaggedValue::Hole().GetRawData();
+    }
+    JSTaggedValue moduleValue = module->GetModuleValue(thread, index.GetInt(), false);
+    return moduleValue.GetRawData();
+}
+
 DEF_RUNTIME_STUBS(GetPropIteratorSlowpath)
 {
     RUNTIME_STUBS_HEADER(GetPropIteratorSlowpath);
@@ -3844,6 +3878,28 @@ JSTaggedType RuntimeStubs::ReadBarrier(uintptr_t argGlue, uintptr_t addr, uintpt
 {
     auto thread = JSThread::GlueToJSThread(argGlue);
     return Barriers::ReadBarrierForObject(thread, addr, JSTaggedValue(static_cast<JSTaggedType>(argValue)));
+}
+
+// @ref panda::ecmascript::ModuleValueAccessor::TryGetEvaluatedImportedModuleValueByIndex(thread,
+//     moduleRecord, index, result);
+JSTaggedType RuntimeStubs::TryResolveSendableModule(uintptr_t argGlue, JSTaggedType binding)
+{
+    // NoGC contract: pure lookup only -- no allocation, no GC, no throw.
+    auto thread = JSThread::GlueToJSThread(argGlue);
+    ResolvedRecordIndexBinding *recordBinding =
+        ResolvedRecordIndexBinding::Cast(JSTaggedValue(binding).GetTaggedObject());
+    const CString *moduleRecord = recordBinding->GetModuleRecordName();
+    if (moduleRecord == nullptr) {
+        return JSTaggedValue::Hole().GetRawData();
+    }
+    JSTaggedValue resolvedModule = JSTaggedValue::Undefined();
+    if (!thread->GetModuleManager()->TryGetImportedModuleTaggedValue(*moduleRecord, resolvedModule)) {
+        return JSTaggedValue::Hole().GetRawData();
+    }
+    if (!resolvedModule.IsSourceTextModule()) {
+        return JSTaggedValue::Hole().GetRawData();
+    }
+    return resolvedModule.GetRawData();
 }
 
 TemporaryJSTaggedValue RuntimeStubs::ReadBarrierForCompressed(uintptr_t argGlue, uintptr_t addr,

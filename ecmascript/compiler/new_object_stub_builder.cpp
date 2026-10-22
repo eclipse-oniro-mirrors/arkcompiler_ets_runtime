@@ -29,6 +29,7 @@
 #include "ecmascript/js_set_iterator.h"
 #include "ecmascript/js_set.h"
 #include "ecmascript/js_map.h"
+#include "ecmascript/sendable_env.h"
 #include "ecmascript/shared_objects/js_shared_map_iterator.h"
 
 namespace panda::ecmascript::kungfu {
@@ -74,6 +75,81 @@ void NewObjectStubBuilder::NewLexicalEnv(Variable *result, Label *exit, GateRef 
     {
         Jump(exit);
     }
+}
+
+// @ref panda::ecmascript::RuntimeStubs::RuntimeNewSendableEnv(numVars);
+// @ref panda::ecmascript::ObjectFactory::NewSendableEnv(numSlots);
+// IR fast path for NEWSENDABLEENV: shared-old TLAB bump allocation + field init with lossless
+// fallback to the C++ RTSTUB below (no partial write before any non-inlinable branch).
+void NewObjectStubBuilder::NewSendableEnvStub(Variable *result, Label *callRuntime, Label *exit,
+                                              GateRef numSlots, GateRef parent)
+{
+    auto env = GetEnvironment();
+
+    // @ref panda::ecmascript::SendableEnv::ComputeSize(numSlots);
+    auto length = Int32Add(numSlots, Int32(SendableEnv::SENDABLE_RESERVED_ENV_LENGTH));
+    size_ = ComputeTaggedArraySize(ZExtInt32ToPtr(length));
+    auto hclass = GetGlobalConstantValue(VariableType::JS_POINTER(), glue_,
+                                         ConstantIndex::SENDABLE_ENV_CLASS_INDEX);
+
+#if defined(ARK_ASAN_ON)
+    Jump(callRuntime);
+#else
+#ifdef ECMASCRIPT_SUPPORT_HEAPSAMPLING
+    Label next(env);
+    auto isStartHeapSamplingOffset = JSThread::GlueData::GetIsStartHeapSamplingOffset(env->Is32Bit());
+    auto isStartHeapSampling = LoadPrimitive(VariableType::JS_ANY(), glue_, IntPtr(isStartHeapSamplingOffset));
+    BRANCH_UNLIKELY(TaggedIsTrue(isStartHeapSampling), callRuntime, &next);
+    Bind(&next);
+#endif
+    Label isCMCGC(env);
+    Label notCMCGC(env);
+    BRANCH_UNLIKELY(
+        LoadPrimitive(VariableType::BOOL(), glue_, IntPtr(JSThread::GlueData::GetIsEnableCMCGCOffset(env->Is32Bit()))),
+        &isCMCGC, &notCMCGC);
+    Bind(&isCMCGC);
+    {
+        Jump(callRuntime);
+    }
+    Bind(&notCMCGC);
+    {
+        // @ref panda::ecmascript::Heap::AllocateSharedOldSpaceFromTlab(thread, size);
+        // (TLAB branch of SharedHeap::AllocateOldOrHugeObject).
+        auto topOffset = JSThread::GlueData::GetSOldSpaceAllocationTopAddressOffset(env->Is32Bit());
+        auto endOffset = JSThread::GlueData::GetSOldSpaceAllocationEndAddressOffset(env->Is32Bit());
+        auto topAddress = LoadPrimitive(VariableType::NATIVE_POINTER(), glue_, IntPtr(topOffset));
+        auto endAddress = LoadPrimitive(VariableType::NATIVE_POINTER(), glue_, IntPtr(endOffset));
+        auto top = LoadPrimitive(VariableType::JS_POINTER(), topAddress, IntPtr(0));
+        auto end = LoadPrimitive(VariableType::JS_POINTER(), endAddress, IntPtr(0));
+        auto newTop = PtrAdd(top, size_);
+        Label success(env);
+        BRANCH(IntPtrGreaterThan(newTop, end), callRuntime, &success);
+        Bind(&success);
+        {
+            Store(VariableType::NATIVE_POINTER(), glue_, topAddress, IntPtr(0), newTop);
+            if (env->Is32Bit()) {
+                top = ZExtInt32ToInt64(top);
+            }
+            // @ref panda::ecmascript::TaggedObject::SetClass(thread, hclass);
+            // (via SharedHeap::AllocateOldOrHugeObject(hclass, size)).
+            Store(VariableType::JS_POINTER(), glue_, top, IntPtr(TaggedObject::HCLASS_OFFSET), hclass,
+                  MemoryAttribute::DefaultWithShareBarrier());
+            Label afterInitialize(env);
+            // @ref panda::ecmascript::SendableEnv::InitializeWithSpecialValue(Hole(), numSlots + 2);
+            InitializeTaggedArrayWithSpeicalValue(&afterInitialize, top, Hole(),
+                Int32(SendableEnv::SENDABLE_RESERVED_ENV_LENGTH), length);
+            Bind(&afterInitialize);
+            // @ref panda::ecmascript::RuntimeStubs::RuntimeNewSendableEnv:
+            // SetScopeInfo(Hole) + SetParentEnv(module->GetSendableEnv).
+            SetValueToTaggedArray(VariableType::INT64(), glue_, top,
+                Int32(SendableEnv::SENDABLE_SCOPE_INFO_INDEX), Hole());
+            SetValueToTaggedArray(VariableType::JS_POINTER(), glue_, top,
+                Int32(SendableEnv::SENDABLE_PARENT_ENV_INDEX), parent);
+            result->WriteVariable(top);
+            Jump(exit);
+        }
+    }
+#endif
 }
 
 GateRef NewObjectStubBuilder::NewJSArrayWithSize(GateRef hclass, GateRef size)

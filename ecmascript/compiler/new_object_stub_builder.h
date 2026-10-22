@@ -55,6 +55,7 @@ public:
     }
 
     void NewLexicalEnv(Variable *result, Label *exit, GateRef numSlots, GateRef parent);
+    void NewSendableEnvStub(Variable *result, Label *callRuntime, Label *exit, GateRef numSlots, GateRef parent);
     void NewJSObject(Variable *result, Label *exit, GateRef hclass, GateRef size);
     void NewJSObject(Variable *result, Label *exit, GateRef hclass);
     void NewSObject(Variable *result, Label *exit, GateRef hclass);

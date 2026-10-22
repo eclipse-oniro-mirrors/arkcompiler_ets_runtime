@@ -119,6 +119,7 @@ public:
     static JSTaggedType ReadBarrier(uintptr_t argGlue, uintptr_t addr, uintptr_t argValue);
     static TemporaryJSTaggedValue ReadBarrierForCompressed(uintptr_t argGlue, uintptr_t addr,
                                                            TemporaryJSTaggedValue temporaryValue);
+    static JSTaggedType TryResolveSendableModule(uintptr_t argGlue, JSTaggedType binding);
     static void CopyCallTarget(uintptr_t argGlue, uintptr_t callTarget);
     static void CopyArgvArray(uintptr_t argGlue, uintptr_t argv, uint64_t argc);
     static JSTaggedType GetActualArgvNoGC(uintptr_t argGlue);

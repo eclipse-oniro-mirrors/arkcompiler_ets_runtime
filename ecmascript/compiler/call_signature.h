@@ -769,6 +769,7 @@ private:
     V(ReverseBarrier)                                \
     V(FindPatchModule)                               \
     V(FatalPrintMisstakenResolvedBinding)            \
+    V(TryResolveSendableModule)                      \
     V(LoadNativeModuleFailed)                        \
     V(GetExternalModuleVar)                          \
     V(GetValueWithBarrier)                           \

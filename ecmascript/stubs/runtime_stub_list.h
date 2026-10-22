@@ -215,6 +215,7 @@ namespace panda::ecmascript {
     V(FloatCeil)                               \
     V(CallDateNow)                             \
     V(UpdateFieldType)                         \
+    V(TryResolveSendableModule)                \
     V(BigIntEquals)                            \
     V(TimeClip)                                \
     V(LazyDeoptEntry)                          \
@@ -537,6 +538,7 @@ namespace panda::ecmascript {
     V(LdSendableExternalModuleVarByIndex)                      \
     V(LdSendableLocalModuleVarByIndex)                         \
     V(LdLazySendableExternalModuleVarByIndex)                  \
+    V(TryGetSendableLocalModuleValue)                          \
     V(GetModuleName)                                           \
     V(NewResolvedIndexBindingRecord)                           \
     V(Throw)                                                   \
