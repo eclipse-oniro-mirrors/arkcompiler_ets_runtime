@@ -1523,7 +1523,8 @@ bool JSStackTrace::GetJsFrameInfo(uintptr_t byteCodePc, uintptr_t mapBase,
     auto pandafile = FindJSpandaFile(mapBase);
     auto debugInfoExtractor =
         JSPandaFileManager::GetInstance()->GetJSPtExtractor(pandafile.get());
-    if (!ParseJsFrameInfo(pandafile.get(), debugInfoExtractor, EntityId(codeInfo->methodId), offset, *jsFunction)) {
+    if (!ParseJsFrameInfo(pandafile.get(), debugInfoExtractor, EntityId(codeInfo->methodId), offset,
+                          *jsFunction, &SourceMap::GetInstance())) {
         return false;
     }
     jsFunction->codeBegin = byteCodePc - offset;
