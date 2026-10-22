@@ -44,6 +44,7 @@ config("include_maple") {
 libark_jsoptimizer_sources = [
   "access_object_stub_builder.cpp",
   "aot_compilation_env.cpp",
+  "aot_compat_util.cpp",
   "aot_compiler_preprocessor.cpp",
   "aot_compiler_stats.cpp",
   "argument_accessor.cpp",
