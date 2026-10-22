@@ -2037,4 +2037,226 @@ HWTEST_F_L0(JsStackInfoTest, ParseJsFrameInfo_NormalName_FieldsCorrect)
 
     EXPECT_STREQ(jsFunction.functionName, "bar");
 }
+
+// ============================================================================
+// SourceMap singleton pass-through tests for ParseJsFrameInfo
+//
+// These cases verify the normalization change in JSStackTrace::GetJsFrameInfo
+// (js_stackinfo.cpp:1661-1662), which now forwards &SourceMap::GetInstance()
+// to the ParseJsFrameInfo template instead of leaving the sourceMap parameter
+// at its nullptr default. The unit-test environment has no hap, so
+// SourceMap::TranslateUrlPositionBySourceMap returns false for any url and
+// leaves url/line/column/packageName unchanged. The cases below check that:
+//   * Passing the singleton does not crash and returns the expected fields.
+//   * The nullptr path and the singleton path produce identical primary
+//     fields (functionName/url/line/column) under the same pandafile.
+//   * SourceMap::GetInstance().GetInitStatus() is safely accessible and equals
+//     NOT_EXECUTED when no Init/ReadSourceMapData has been invoked.
+//   * Repeated singleton calls within one thread are idempotent.
+//   * Long-name truncation is orthogonal to the SourceMap translation path.
+// No SourceMap internal state is mutated: the tests never call
+// Init/ReadSourceMapData/SetInitStatus, so the global singleton stays clean
+// for other cases.
+// ============================================================================
+
+// Test: ParseJsFrameInfo with &SourceMap::GetInstance() returns true, fills
+// functionName/url/line/column correctly, and leaves packageName empty
+// because TranslateUrlPositionBySourceMap fails to find the url in the
+// unit-test environment (no hap, no source map data loaded).
+HWTEST_F_L0(JsStackInfoTest, ParseJsFrameInfo_WithSourceMapSingleton_NoCrash)
+{
+    const char *filename = "__JsStackInfoSingleton.pa";
+    const char *data = R"(
+        .function void fooSingleton() {
+            return
+        }
+    )";
+    pandasm::Parser parser;
+    auto res = parser.Parse(data);
+    ASSERT_TRUE(res);
+    auto file = pandasm::AsmEmitter::Emit(res.Value());
+    ASSERT_NE(file, nullptr);
+    auto jsPandaFile = std::make_shared<JSPandaFile>(file.release(), CString(filename), CreateMode::DFX);
+    auto debugExtractor = std::make_unique<DebugInfoExtractor>(jsPandaFile.get());
+    auto methods = JSStackTrace::ReadAllMethodInfos(jsPandaFile);
+    ASSERT_FALSE(methods.empty());
+
+    JsFunction jsFunction;
+    (void)memset_s(&jsFunction, sizeof(jsFunction), 0, sizeof(jsFunction));
+    // Pass the SourceMap singleton exactly as JSStackTrace::GetJsFrameInfo does.
+    EXPECT_TRUE(ParseJsFrameInfo(jsPandaFile.get(), debugExtractor.get(),
+        EntityId(methods[0].methodId), 0, jsFunction, &SourceMap::GetInstance()));
+
+    // Primary fields must be populated correctly.
+    EXPECT_STREQ(jsFunction.functionName, "fooSingleton");
+    // packageName stays empty: TranslateUrlPositionBySourceMap returned false
+    // because the url is not present in any loaded source map.
+    EXPECT_EQ(strlen(jsFunction.packageName), 0U);
+    // url should be empty or non-empty depending on debug info, but must be a
+    // valid C string (no overflow). Verify it is null-terminated.
+    EXPECT_EQ(jsFunction.url[URL_MAX - 1], '\0');
+    // line/column parity: compare against the nullptr path to ensure the
+    // singleton path does not perturb line/column. A standalone
+    // EXPECT_GE(line, 0) would be a tautology because lineNumber is always
+    // reset to 0 on MatchLine failure and set to line+1 on success.
+    JsFunction jsFunctionBaseline;
+    (void)memset_s(&jsFunctionBaseline, sizeof(jsFunctionBaseline), 0, sizeof(jsFunctionBaseline));
+    EXPECT_TRUE(ParseJsFrameInfo(jsPandaFile.get(), debugExtractor.get(),
+        EntityId(methods[0].methodId), 0, jsFunctionBaseline, nullptr));
+    EXPECT_EQ(jsFunction.line, jsFunctionBaseline.line);
+    EXPECT_EQ(jsFunction.column, jsFunctionBaseline.column);
+}
+
+// Test: Under the same pandafile, passing nullptr and passing
+// &SourceMap::GetInstance() must produce identical primary fields because
+// the unit-test SourceMap has no data and TranslateUrlPositionBySourceMap
+// returns false without modifying url/line/column/packageName.
+HWTEST_F_L0(JsStackInfoTest, ParseJsFrameInfo_NullptrVsSingleton_Parity)
+{
+    const char *filename = "__JsStackInfoParity.pa";
+    const char *data = R"(
+        .function void parityFunc() {
+            return
+        }
+    )";
+    pandasm::Parser parser;
+    auto res = parser.Parse(data);
+    ASSERT_TRUE(res);
+    auto file = pandasm::AsmEmitter::Emit(res.Value());
+    ASSERT_NE(file, nullptr);
+    auto jsPandaFile = std::make_shared<JSPandaFile>(file.release(), CString(filename), CreateMode::DFX);
+    auto debugExtractor = std::make_unique<DebugInfoExtractor>(jsPandaFile.get());
+    auto methods = JSStackTrace::ReadAllMethodInfos(jsPandaFile);
+    ASSERT_FALSE(methods.empty());
+
+    // First call: nullptr path (pre-normalization behavior).
+    JsFunction jsFunctionNullptr;
+    (void)memset_s(&jsFunctionNullptr, sizeof(jsFunctionNullptr), 0, sizeof(jsFunctionNullptr));
+    EXPECT_TRUE(ParseJsFrameInfo(jsPandaFile.get(), debugExtractor.get(),
+        EntityId(methods[0].methodId), 0, jsFunctionNullptr, nullptr));
+
+    // Second call: singleton path (post-normalization behavior).
+    JsFunction jsFunctionSingleton;
+    (void)memset_s(&jsFunctionSingleton, sizeof(jsFunctionSingleton), 0, sizeof(jsFunctionSingleton));
+    EXPECT_TRUE(ParseJsFrameInfo(jsPandaFile.get(), debugExtractor.get(),
+        EntityId(methods[0].methodId), 0, jsFunctionSingleton, &SourceMap::GetInstance()));
+
+    // Primary fields must match between the two paths.
+    EXPECT_STREQ(jsFunctionNullptr.functionName, jsFunctionSingleton.functionName);
+    EXPECT_STREQ(jsFunctionNullptr.url, jsFunctionSingleton.url);
+    EXPECT_EQ(jsFunctionNullptr.line, jsFunctionSingleton.line);
+    EXPECT_EQ(jsFunctionNullptr.column, jsFunctionSingleton.column);
+    // packageName must be empty in both cases.
+    EXPECT_EQ(strlen(jsFunctionNullptr.packageName), 0U);
+    EXPECT_EQ(strlen(jsFunctionSingleton.packageName), 0U);
+}
+
+// Test: SourceMap::GetInstance() is safely accessible in the unit-test
+// environment and GetInitStatus() returns NOT_EXECUTED because no Init /
+// ReadSourceMapData / SetInitStatus has been called. This confirms the
+// singleton can be queried without crashing before any hap loads.
+HWTEST_F_L0(JsStackInfoTest, SourceMap_GetInstance_InitStatusNotExecuted)
+{
+    // Touch the singleton and query its init status. Must not crash.
+    InitStatus status = SourceMap::GetInstance().GetInitStatus();
+    EXPECT_EQ(status, InitStatus::NOT_EXECUTED);
+
+    // Repeated queries must remain stable and idempotent.
+    EXPECT_EQ(SourceMap::GetInstance().GetInitStatus(), InitStatus::NOT_EXECUTED);
+    EXPECT_EQ(SourceMap::GetInstance().GetInitStatus(), status);
+}
+
+// Test: Repeated ParseJsFrameInfo calls passing &SourceMap::GetInstance()
+// within the same thread must be idempotent: every call returns true, the
+// primary fields are stable, and packageName stays empty. This verifies that
+// the SourceMap translation path does not accumulate state across calls when
+// no source map data is loaded.
+HWTEST_F_L0(JsStackInfoTest, ParseJsFrameInfo_Singleton_IdempotentRepeatCalls)
+{
+    const char *filename = "__JsStackInfoIdempotent.pa";
+    const char *data = R"(
+        .function void idempotentFunc() {
+            return
+        }
+    )";
+    pandasm::Parser parser;
+    auto res = parser.Parse(data);
+    ASSERT_TRUE(res);
+    auto file = pandasm::AsmEmitter::Emit(res.Value());
+    ASSERT_NE(file, nullptr);
+    auto jsPandaFile = std::make_shared<JSPandaFile>(file.release(), CString(filename), CreateMode::DFX);
+    auto debugExtractor = std::make_unique<DebugInfoExtractor>(jsPandaFile.get());
+    auto methods = JSStackTrace::ReadAllMethodInfos(jsPandaFile);
+    ASSERT_FALSE(methods.empty());
+
+    JsFunction first;
+    (void)memset_s(&first, sizeof(first), 0, sizeof(first));
+    EXPECT_TRUE(ParseJsFrameInfo(jsPandaFile.get(), debugExtractor.get(),
+        EntityId(methods[0].methodId), 0, first, &SourceMap::GetInstance()));
+    EXPECT_STREQ(first.functionName, "idempotentFunc");
+    EXPECT_EQ(strlen(first.packageName), 0U);
+
+    // Call repeatedly and compare against the first invocation.
+    for (int i = 0; i < 5; ++i) {
+        JsFunction iter;
+        (void)memset_s(&iter, sizeof(iter), 0, sizeof(iter));
+        EXPECT_TRUE(ParseJsFrameInfo(jsPandaFile.get(), debugExtractor.get(),
+            EntityId(methods[0].methodId), 0, iter, &SourceMap::GetInstance()));
+        EXPECT_STREQ(iter.functionName, first.functionName);
+        EXPECT_STREQ(iter.url, first.url);
+        EXPECT_EQ(iter.line, first.line);
+        EXPECT_EQ(iter.column, first.column);
+        EXPECT_EQ(strlen(iter.packageName), 0U);
+    }
+
+    // JsStackInfo::nameMap is cleared in TearDown, no extra cleanup needed.
+}
+
+// Test: A long function name combined with the singleton SourceMap path
+// verifies that the truncation logic (name.resize(FUNCTIONNAME_MAX - 1)) and
+// the SourceMap translation path are orthogonal: truncation still happens,
+// packageName remains empty, and no buffer overflow is introduced by the
+// additional sourceMap->TranslateUrlPositionBySourceMap call.
+HWTEST_F_L0(JsStackInfoTest, ParseJsFrameInfo_LongName_WithSingleton_OrthogonalTruncation)
+{
+    const size_t nameLen = FUNCTIONNAME_MAX + 1024;  // 2048, well over the truncation threshold
+    std::string source = BuildLongNameSource(nameLen);
+    const char *filename = "__JsStackInfoLongNameSingleton.pa";
+    pandasm::Parser parser;
+    auto res = parser.Parse(source);
+    ASSERT_TRUE(res);
+    auto file = pandasm::AsmEmitter::Emit(res.Value());
+    ASSERT_NE(file, nullptr);
+    auto jsPandaFile = std::make_shared<JSPandaFile>(file.release(), CString(filename), CreateMode::DFX);
+    auto debugExtractor = std::make_unique<DebugInfoExtractor>(jsPandaFile.get());
+    auto methods = JSStackTrace::ReadAllMethodInfos(jsPandaFile);
+    ASSERT_FALSE(methods.empty());
+
+    JsFunction jsFunction;
+    // Fill buffers with sentinels to detect any overflow introduced by the
+    // SourceMap path.
+    (void)memset_s(jsFunction.functionName, sizeof(jsFunction.functionName), 0xAA,
+                   sizeof(jsFunction.functionName));
+    (void)memset_s(jsFunction.packageName, sizeof(jsFunction.packageName), 0xBB,
+                   sizeof(jsFunction.packageName));
+    (void)memset_s(jsFunction.url, sizeof(jsFunction.url), 0xCC, sizeof(jsFunction.url));
+
+    EXPECT_TRUE(ParseJsFrameInfo(jsPandaFile.get(), debugExtractor.get(),
+        EntityId(methods[0].methodId), 0, jsFunction, &SourceMap::GetInstance()));
+
+    // Truncation must still occur: name is clamped to FUNCTIONNAME_MAX-1 chars.
+    EXPECT_EQ(strlen(jsFunction.functionName), FUNCTIONNAME_MAX - 1);
+    EXPECT_EQ(jsFunction.functionName[FUNCTIONNAME_MAX - 1], '\0');
+
+    // SourceMap path must not corrupt packageName: TranslateUrlPositionBySourceMap
+    // returned false, so packageName stays empty (no overflow from functionName).
+    EXPECT_EQ(strlen(jsFunction.packageName), 0U)
+        << "packageName overflowed — SourceMap path corrupted buffer!";
+    // url stays empty (no overflow from functionName). Only url[0] is written
+    // to '\0' by strcpy_s when the source file is empty; sentinel bytes beyond
+    // url[0] are intentionally left untouched, so check strlen instead of the
+    // trailing byte.
+    EXPECT_EQ(strlen(jsFunction.url), 0U)
+        << "url overflowed — SourceMap path corrupted buffer!";
+}
 }  // namespace panda::test
