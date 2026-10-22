@@ -1112,6 +1112,7 @@ ecma_source = [
   "ecmascript/intl/locale_helper.cpp",
   "ecmascript/jit/compile_decision.cpp",
   "ecmascript/jit/jit.cpp",
+  "ecmascript/jit/jit_compat_util.cpp",
   "ecmascript/jit/jit_dfx.cpp",
   "ecmascript/jit/jit_task.cpp",
   "ecmascript/jit/jit_resources.cpp",
