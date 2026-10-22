@@ -225,6 +225,7 @@ private:
     void InitializeMath(const JSHandle<GlobalEnv> &env, const JSHandle<JSTaggedValue> &objFuncPrototypeVal) const;
 
     void InitializeAtomics(const JSHandle<GlobalEnv> &env, const JSHandle<JSTaggedValue> &objFuncPrototypeVal) const;
+    void InitializeSendableAtomics(const JSHandle<GlobalEnv> &env) const;
 
     void InitializeJson(const JSHandle<GlobalEnv> &env, const JSHandle<JSTaggedValue> &objFuncPrototypeVal) const;
 

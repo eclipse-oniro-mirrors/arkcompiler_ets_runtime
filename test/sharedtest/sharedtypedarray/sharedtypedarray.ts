@@ -944,3 +944,50 @@ function testReflectApply() {
 }
 
 testReflectApply()
+
+print("================Test Sendable Atomics================");
+const collectionsAtomics = SendableAtomics;
+function testNumberAtomics(ctor: Function): boolean {
+  const array = new ctor(1);
+  return collectionsAtomics.store(array, 0, 1) === 1 &&
+    collectionsAtomics.load(array, 0) === 1 &&
+    collectionsAtomics.add(array, 0, 2) === 1 &&
+    collectionsAtomics.sub(array, 0, 1) === 3 &&
+    collectionsAtomics.and(array, 0, 1) === 2 &&
+    collectionsAtomics.or(array, 0, 2) === 0 &&
+    collectionsAtomics.xor(array, 0, 3) === 2 &&
+    collectionsAtomics.exchange(array, 0, 4) === 1 &&
+    collectionsAtomics.compareExchange(array, 0, 4, 5) === 4 &&
+    collectionsAtomics.compareExchange(array, 0, 4, 6) === 5 &&
+    collectionsAtomics.load(array, 0) === 5;
+}
+
+[
+  SendableInt8Array,
+  SendableUint8Array,
+  SendableInt16Array,
+  SendableUint16Array,
+  SendableInt32Array,
+  SendableUint32Array,
+].forEach((ctor: Function) => print(ctor.name + " Atomics: " + testNumberAtomics(ctor)));
+
+try {
+  collectionsAtomics.store(new SendableFloat32Array(1), 0, 1);
+  print("SendableFloat32Array Atomics rejection: false");
+} catch (e) {
+  print("SendableFloat32Array Atomics rejection: true");
+}
+try {
+  collectionsAtomics.store(new SendableUint8ClampedArray(1), 0, 1);
+  print("SendableUint8ClampedArray Atomics rejection: false");
+} catch (e) {
+  print("SendableUint8ClampedArray Atomics rejection: true");
+}
+const waitInt32 = new SendableInt32Array(new SendableArrayBuffer(4));
+print("SendableInt32Array wait not-equal: " + (collectionsAtomics.wait(waitInt32, 0, 1, 0) === "not-equal"));
+try {
+  collectionsAtomics.wait(new SendableUint32Array(1), 0, 0, 0);
+  print("SendableUint32Array wait rejection: false");
+} catch (e) {
+  print("SendableUint32Array wait rejection: true");
+}

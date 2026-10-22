@@ -44,6 +44,9 @@ public:
     // the memory address data corresponding to the offset
     int8_t *waitPointer_ {nullptr};
 
+    // Slot in the live Atomics.wait HandleScope; GC updates its array reference.
+    uintptr_t arrayHandle_ {0};
+
     // used to determine whether to wait, start wait when waiting_ is true
     bool waiting_ {false};
 
@@ -66,6 +69,9 @@ public:
     // locationListMap_  is used AddNode or DeleteNode
     // When calling addnode If there is no corresponding memory data, add the node corresponding to the key
     CMap<int8_t *, HeadAndTail> locationListMap_;
+
+    // Sendable waiters resolve their current backing store when notified.
+    CList<WaiterListNode *> sharedWaiters_;
 };
 
 // The Singleton pattern is used to creat a global metux and WaiterList

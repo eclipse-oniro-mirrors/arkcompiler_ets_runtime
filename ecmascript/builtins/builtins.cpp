@@ -20,14 +20,14 @@
 #include "ecmascript/builtins/builtins_arraybuffer.h"
 #include "ecmascript/builtins/builtins_async_from_sync_iterator.h"
 #include "ecmascript/builtins/builtins_async_function.h"
-#include "ecmascript/builtins/builtins_async_iterator.h"
 #include "ecmascript/builtins/builtins_async_generator.h"
+#include "ecmascript/builtins/builtins_async_iterator.h"
 #include "ecmascript/builtins/builtins_atomics.h"
 #include "ecmascript/builtins/builtins_bigint.h"
 #include "ecmascript/builtins/builtins_boolean.h"
+#include "ecmascript/builtins/builtins_cjs_exports.h"
 #include "ecmascript/builtins/builtins_cjs_module.h"
 #include "ecmascript/builtins/builtins_cjs_require.h"
-#include "ecmascript/builtins/builtins_cjs_exports.h"
 #include "ecmascript/builtins/builtins_dataview.h"
 #include "ecmascript/builtins/builtins_date.h"
 #include "ecmascript/builtins/builtins_errors.h"
@@ -49,8 +49,8 @@
 #include "ecmascript/builtins/builtins_reflect.h"
 #include "ecmascript/builtins/builtins_regexp.h"
 #include "ecmascript/builtins/builtins_set.h"
-#include "ecmascript/builtins/builtins_sharedarraybuffer.h"
 #include "ecmascript/builtins/builtins_shared_typedarray.h"
+#include "ecmascript/builtins/builtins_sharedarraybuffer.h"
 #include "ecmascript/builtins/builtins_string_iterator.h"
 #include "ecmascript/builtins/builtins_symbol.h"
 #include "ecmascript/builtins/builtins_typedarray.h"
@@ -60,12 +60,13 @@
 #include "ecmascript/containers/containers_private.h"
 #include "ecmascript/dfx/native_module_failure_info.h"
 #include "ecmascript/global_env.h"
-#include "ecmascript/js_arraybuffer.h"
 #include "ecmascript/js_array_iterator.h"
+#include "ecmascript/js_arraybuffer.h"
+#include "ecmascript/js_async_from_sync_iterator.h"
 #include "ecmascript/js_async_function.h"
 #include "ecmascript/js_async_generator_object.h"
-#include "ecmascript/js_for_in_iterator.h"
 #include "ecmascript/js_finalization_registry.h"
+#include "ecmascript/js_for_in_iterator.h"
 #include "ecmascript/js_map.h"
 #include "ecmascript/js_map_iterator.h"
 #include "ecmascript/js_primitive_ref.h"
@@ -73,15 +74,15 @@
 #include "ecmascript/js_set.h"
 #include "ecmascript/js_set_iterator.h"
 #include "ecmascript/js_string_iterator.h"
-#include "ecmascript/js_async_from_sync_iterator.h"
 #include "ecmascript/js_weak_container.h"
 #include "ecmascript/js_weak_ref.h"
+#include "ecmascript/marker_cell.h"
 #include "ecmascript/require/js_cjs_module_cache.h"
 #include "ecmascript/require/js_cjs_require.h"
 #include "ecmascript/shared_objects/js_shared_array_iterator.h"
 #include "ecmascript/shared_objects/js_shared_map_iterator.h"
 #include "ecmascript/shared_objects/js_shared_set_iterator.h"
-#include "ecmascript/marker_cell.h"
+#include "ecmascript/utils/collections_atomics.h"
 #ifdef ARK_SUPPORT_INTL
 #include "ecmascript/builtins/builtins_collator.h"
 #include "ecmascript/builtins/builtins_date_time_format.h"
@@ -92,17 +93,17 @@
 #include "ecmascript/builtins/builtins_number_format.h"
 #include "ecmascript/builtins/builtins_plural_rules.h"
 #include "ecmascript/builtins/builtins_relative_time_format.h"
+#include "ecmascript/builtins/builtins_segment_iterator.h"
 #include "ecmascript/builtins/builtins_segmenter.h"
 #include "ecmascript/builtins/builtins_segments.h"
-#include "ecmascript/builtins/builtins_segment_iterator.h"
 #include "ecmascript/js_collator.h"
 #include "ecmascript/js_date_time_format.h"
 #include "ecmascript/js_displaynames.h"
 #include "ecmascript/js_list_format.h"
 #include "ecmascript/js_number_format.h"
 #include "ecmascript/js_plural_rules.h"
-#include "ecmascript/js_segments.h"
 #include "ecmascript/js_segment_iterator.h"
+#include "ecmascript/js_segments.h"
 #endif
 
 
@@ -1715,6 +1716,22 @@ void Builtins::InitializeAtomics(const JSHandle<GlobalEnv> &env,
     // @@ToStringTag
     SetStringTagSymbol(env, atomicsObject, "Atomics");
     env->SetAtomicsFunction(thread_, atomicsObject);
+    InitializeSendableAtomics(env);
+}
+
+void Builtins::InitializeSendableAtomics(const JSHandle<GlobalEnv> &env) const
+{
+    [[maybe_unused]] EcmaHandleScope scope(thread_);
+    JSHandle<JSObject> globalObject(thread_, env->GetGlobalObject());
+    JSHandle<JSObject> atomics = factory_->NewEmptyJSObject(env);
+    for (const base::BuiltinFunctionEntry &entry : collections::CollectionsAtomics::GetAtomicsFunctions()) {
+        SetFunction(env, atomics, entry.GetName(), entry.GetEntrypoint(),
+            entry.GetLength(), entry.GetBuiltinStubId());
+    }
+    SetStringTagSymbol(env, atomics, "SendableAtomics");
+    JSHandle<JSTaggedValue> atomicsName(factory_->NewFromUtf8ReadOnly("SendableAtomics"));
+    PropertyDescriptor atomicsDesc(thread_, JSHandle<JSTaggedValue>::Cast(atomics), true, false, true);
+    JSObject::DefineOwnProperty(thread_, globalObject, atomicsName, atomicsDesc);
 }
 
 void Builtins::InitializeWeakRef(const JSHandle<GlobalEnv> &env, const JSHandle<JSHClass> &objFuncClass) const

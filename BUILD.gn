@@ -1336,6 +1336,8 @@ ecma_source = [
   "ecmascript/tagged_array.cpp",
   "ecmascript/tagged_tree.cpp",
   "ecmascript/template_string.cpp",
+  "ecmascript/utils/collections_atomic_helper.cpp",
+  "ecmascript/utils/collections_atomics.cpp",
   "ecmascript/vtable.cpp",
   "ecmascript/waiter_list.cpp",
   "ecmascript/weak_vector.cpp",
