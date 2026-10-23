@@ -22,7 +22,9 @@
 #include "ecmascript/jit/jit_task.h"
 #include "ecmascript/js_runtime_options.h"
 #include "ecmascript/pgo_profiler/pgo_profiler.h"
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
 #include "ecmascript/compiler/baseline/baseline_compiler.h"
+#endif
 
 namespace panda::ecmascript::kungfu {
 extern "C" {
@@ -76,7 +78,7 @@ public:
                            jitTask->GetHostVM(), jsFunction_, jitTask->GetDependencies())),
         profileTypeInfo_(jitTask->GetProfileTypeInfo()),
         compilerTier_(jitTask->GetCompilerTier()),
-        baselineCompiler_(nullptr), passManager_(nullptr), jitCodeGenerator_(nullptr) { };
+        passManager_(nullptr), jitCodeGenerator_(nullptr) { };
     static JitCompilerTask *CreateJitCompilerTask(JitTask *jitTask);
 
     bool Compile();
@@ -90,7 +92,9 @@ private:
     std::unique_ptr<JitCompilationEnv> jitCompilationEnv_;
     JSHandle<ProfileTypeInfo> profileTypeInfo_;
     CompilerTier compilerTier_;
-    std::unique_ptr<BaselineCompiler> baselineCompiler_;
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
+    std::unique_ptr<BaselineCompiler> baselineCompiler_ {nullptr};
+#endif
     std::unique_ptr<JitPassManager> passManager_;
     // need refact AOTFileGenerator to JitCodeGenerator
     std::unique_ptr<AOTFileGenerator> jitCodeGenerator_;

@@ -282,12 +282,13 @@ void Module::CollectModuleSectionDes([[maybe_unused]] ModuleSectionDes &moduleDe
     }
     ASSERT(assembler_ != nullptr);
     LLVMAssembler *assembler = static_cast<LLVMAssembler *>(assembler_);
+    // Empty modules still need a valid entry range in the serialized descriptor.
+    moduleDes.SetStartIndex(startIndex_);
+    moduleDes.SetFuncCount(funcCount_);
     assembler->IterateSecInfos([&](size_t i, std::pair<uint8_t *, size_t> secInfo) {
         auto curSec = ElfSection(i);
         ElfSecName sec = curSec.GetElfEnumValue();
         moduleDes.SetSecAddrAndSize(sec, reinterpret_cast<uint64_t>(secInfo.first), secInfo.second);
-        moduleDes.SetStartIndex(startIndex_);
-        moduleDes.SetFuncCount(funcCount_);
     });
     CollectStackMapDes(moduleDes);
 #endif
@@ -543,9 +544,11 @@ Module* StubFileGenerator::AddModule(NativeAreaAllocator *allocator, const std::
         case StubFileKind::BUILTIN:
             m->SetUpForBuiltinsStubs();
             break;
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
         case StubFileKind::BASELINE:
             m->SetUpForBaselineStubs();
             break;
+#endif
         case StubFileKind::BC_STW_COPY:
             m->SetUpForBytecodeStwCopyHandlerStubs();
             break;

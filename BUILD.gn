@@ -409,6 +409,10 @@ config("ark_jsruntime_public_config") {
   defines = []
   ldflags = []
 
+  if (compile_baseline_stub) {
+    defines += [ "ECMASCRIPT_ENABLE_BASELINE_STUB" ]
+  }
+
   if (ark_hybrid) {
     defines += [ "ARK_HYBRID" ]
 

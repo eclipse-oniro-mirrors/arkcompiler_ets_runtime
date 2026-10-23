@@ -58,10 +58,6 @@ libark_jsoptimizer_sources = [
   "async_function_lowering.cpp",
   "barrier_stub_builder.cpp",
   "base/depend_chain_helper.cpp",
-  "baseline/baseline_assembler.cpp",
-  "baseline/baseline_call_signature.cpp",
-  "baseline/baseline_compiler.cpp",
-  "baseline/baseline_stubs.cpp",
   "bc_call_signature.cpp",
   "builtins/builtins_array_indexof_stub_builder.cpp",
   "builtins/builtins_array_stub_builder.cpp",
@@ -191,6 +187,15 @@ libark_jsoptimizer_sources = [
 ]
 
 arksteed_jit_sources = []
+
+if (compile_baseline_stub) {
+  libark_jsoptimizer_sources += [
+    "baseline/baseline_assembler.cpp",
+    "baseline/baseline_call_signature.cpp",
+    "baseline/baseline_compiler.cpp",
+    "baseline/baseline_stubs.cpp",
+  ]
+}
 
 if (enable_branch_elimination) {
   libark_jsoptimizer_sources += [

@@ -64,7 +64,11 @@ private:
         return moduleInfoSize / sizeof(ModuleSectionDes::ModuleRegionInfo);
     }
 
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
     static constexpr uint32_t ASMSTUB_MODULE_NUM = 6;
+#else
+    static constexpr uint32_t ASMSTUB_MODULE_NUM = 5;
+#endif
     ExecutedMemoryAllocator::ExeMem stubsMem_ {};
     MemMap fileMapMem_ {};
     std::vector<ModuleSectionDes::ModuleRegionInfo> moduleInfo_;

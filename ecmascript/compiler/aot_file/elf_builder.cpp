@@ -369,7 +369,9 @@ void ElfBuilder::MergeTextSections(std::iostream &file,
             file.seekp(curSecOffset);
         }
         stubTextOffset_.emplace_back(curSecOffset);
-        file.write(reinterpret_cast<char *>(curSecAddr), curSecSize);
+        if (curSecSize != 0) {
+            file.write(reinterpret_cast<char *>(curSecAddr), curSecSize);
+        }
         curInfo.textSize = curSecSize;
         curSecOffset += curSecSize;
         if (rodataSizeAfterText != 0) {
@@ -392,7 +394,9 @@ void ElfBuilder::MergeStrtabSections(std::iostream &file,
         uint32_t curSecSize = des.GetSecSize(ElfSecName::STRTAB);
         uint64_t curSecAddr = des.GetSecAddr(ElfSecName::STRTAB);
         curInfo.strtabSize = curSecSize;
-        file.write(reinterpret_cast<char *>(curSecAddr), curSecSize);
+        if (curSecSize != 0) {
+            file.write(reinterpret_cast<char *>(curSecAddr), curSecSize);
+        }
         curSecOffset += curSecSize;
         if (des.HasAsmStubStrTab()) {
             uint32_t asmStubStrTabSize = AddAsmStubStrTab(file, des.GetAsmStubELFInfo());
@@ -416,7 +420,9 @@ void ElfBuilder::MergeSymtabSections(std::iostream &file,
         uint32_t curSecSize = des.GetSecSize(ElfSecName::SYMTAB);
         uint64_t curSecAddr = des.GetSecAddr(ElfSecName::SYMTAB);
         curInfo.symtabSize = curSecSize;
-        file.write(reinterpret_cast<char *>(curSecAddr), curSecSize);
+        if (curSecSize != 0) {
+            file.write(reinterpret_cast<char *>(curSecAddr), curSecSize);
+        }
         curSecOffset += curSecSize;
         strTabSize += des.GetSecSize(ElfSecName::STRTAB);
         if (des.HasAsmStubStrTab()) {
@@ -457,7 +463,9 @@ void ElfBuilder::MergeArkStackMapSections(std::iostream &file,
         curInfo.startIndex = index;
         curInfo.funcCount = cnt;
         curInfo.stackMapSize = curSecSize;
-        file.write(reinterpret_cast<char *>(curSecAddr), curSecSize);
+        if (curSecSize != 0) {
+            file.write(reinterpret_cast<char *>(curSecAddr), curSecSize);
+        }
         curSecOffset += curSecSize;
     }
 }
@@ -709,7 +717,9 @@ void ElfBuilder::PackELFSections(std::iostream &file)
             case ElfSecName::ARK_CHECKSUMINFO: {
                 uint32_t curSecSize = des_[FullSecIndex].GetSecSize(secName);
                 uint64_t curSecAddr = des_[FullSecIndex].GetSecAddr(secName);
-                file.write(reinterpret_cast<char *>(curSecAddr), curSecSize);
+                if (curSecSize != 0) {
+                    file.write(reinterpret_cast<char *>(curSecAddr), curSecSize);
+                }
                 curSecOffset += curSecSize;
                 curShdr.sh_size = curSecSize;
                 break;
