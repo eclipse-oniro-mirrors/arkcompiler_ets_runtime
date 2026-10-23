@@ -300,8 +300,10 @@ bool AnFileDataManager::SafeTryReadLock()
     // so the status of whether the lock is held by vm thread will not change until the signal callback ends. If the
     // attempt is successful, it means that the current vm thread does not hold the lock，the reentrancy problem will
     // not occur in the callback.
-    if (lock_.TryReadLock()) {
-        lock_.Unlock();
+    // No-log variants: FATAL_IF_ERROR logs on failure, which is forbidden inside
+    // the SIGPROF handler (plan §6.2); any error here is treated as contention.
+    if (lock_.TryReadLockNoLog()) {
+        lock_.UnlockNoLog();
         return true;
     }
     return false;
@@ -343,6 +345,54 @@ bool AnFileDataManager::SafeInsideAOT(uintptr_t pc)
         }
     }
     return false;
+}
+
+// Signal-handler-safe union of SafeInsideStub and SafeInsideAOT: the lock is only
+// taken in try mode, so a concurrent writer (AN file load/remove on another thread)
+// degrades the answer to false instead of blocking the handler. Callers must treat
+// false as "use the fallback walk", not as a definitive range answer.
+namespace {
+bool StubRangeContains(StubFileInfo &stub, uintptr_t pc)
+{
+    uint64_t stubStartAddr = stub.GetAsmStubAddr();
+    uint64_t stubEndAddr = stubStartAddr + stub.GetAsmStubSize();
+    if (pc >= stubStartAddr && pc <= stubEndAddr) {
+        return true;
+    }
+    const std::vector<ModuleSectionDes> &des = stub.GetCodeUnits();
+    for (const auto &curDes : des) {
+        if (curDes.ContainCode(pc)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool AnyAotRangeContains(const std::vector<std::shared_ptr<AnFileInfo>> &loadedAn, uintptr_t pc)
+{
+    for (auto &info : loadedAn) {
+        const std::vector<ModuleSectionDes> &des = info->GetCodeUnits();
+        for (const auto &curDes : des) {
+            if (curDes.ContainCode(pc)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+} // namespace
+
+bool AnFileDataManager::SafeTryInsideStubOrAOT(uintptr_t pc)
+{
+    if (!lock_.TryReadLockNoLog()) {
+        return false;
+    }
+    bool inside = (loadedStub_ != nullptr) && StubRangeContains(*loadedStub_, pc);
+    if (!inside) {
+        inside = AnyAotRangeContains(loadedAn_, pc);
+    }
+    lock_.UnlockNoLog();
+    return inside;
 }
 
 AOTFileInfo::CallSiteInfo AnFileDataManager::SafeCalCallSiteInfo(uintptr_t retAddr, bool isDeopt)

@@ -16,7 +16,7 @@ import("//arkcompiler/ets_runtime/test/test_helper.gni")
 
 test_js_path = "//arkcompiler/ets_runtime/ecmascript/dfx/cpu_profiler/tests/js/"
 
-test_js_files = [ "cpuprofiler_1" ]
+test_js_files = [ "cpuprofiler_1", "cpuprofiler_deep_recursion" ]
 
 foreach(file, test_js_files) {
   es2abc_gen_abc("gen_${file}_abc") {
@@ -42,8 +42,13 @@ host_unittest_action("CpuProfilerTest") {
 
   sources = [
     # test file
+    "cpu_profiler_symbolizer_test.cpp",
     "cpu_profiler_test.cpp",
+    "profiler_metadata_registry_test.cpp",
+    "raw_sample_test.cpp",
+    "raw_samples_queue_test.cpp",
     "samples_record_test.cpp",
+    "signal_safe_frame_iterator_test.cpp",
   ]
 
   configs = [ "../../../../:ecma_test_config" ]
@@ -66,6 +71,11 @@ host_unittest_action("CpuProfilerTest") {
     "DEBUGGER_ABC_DIR=\"${test_abc_dir}/\"",
     "DEBUGGER_JS_DIR=\"${test_js_dir}\"",
   ]
+
+  # Keep the legacy-scheme guards in the test TUs consistent with libark_jsruntime.
+  if (ets_runtime_cpuprofiler_legacy) {
+    defines += [ "ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY" ]
+  }
 
   # hiviewdfx libraries
   external_deps = hiviewdfx_ext_deps

@@ -876,6 +876,9 @@ config("ark_jsruntime_profiler_config") {
         "ECMASCRIPT_SUPPORT_TRACING",
       ]
     }
+    if (ets_runtime_cpuprofiler_legacy) {
+      defines += [ "ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY" ]
+    }
   }
 }
 
@@ -1481,8 +1484,10 @@ if (!is_mingw && !is_mac && target_os != "ios") {
   if (ark_compile_mode == "debug") {
     ecma_profiler_source += [
       "ecmascript/dfx/cpu_profiler/cpu_profiler.cpp",
+      "ecmascript/dfx/cpu_profiler/cpu_profiler_symbolizer.cpp",
       "ecmascript/dfx/cpu_profiler/sampling_processor.cpp",
       "ecmascript/dfx/cpu_profiler/samples_record.cpp",
+      "ecmascript/dfx/cpu_profiler/signal_safe_frame_iterator.cpp",
       "ecmascript/dfx/hprof/file_stream.cpp",
       "ecmascript/dfx/hprof/heap_dump_session.cpp",
       "ecmascript/dfx/hprof/heap_marker.cpp",

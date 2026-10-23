@@ -443,6 +443,10 @@ public:
     const JSPandaFile *PUBLIC_API GetJSPandaFile(const JSThread *thread) const;
     uint32_t PUBLIC_API GetCodeSize(const JSThread *thread) const;
     MethodLiteral *PUBLIC_API GetMethodLiteral(const JSThread *thread) const;
+    // No-barrier variants for the SIGPROF handler path (see js_stackgetter.h):
+    // raw field reads that can never enter CC-GC evacuation.
+    const JSPandaFile *GetJSPandaFileNoBarrier() const;
+    MethodLiteral *GetMethodLiteralNoBarrier() const;
 
     const char *PUBLIC_API GetMethodName(const JSThread *thread) const;
     const char *PUBLIC_API GetMethodName(const JSPandaFile *file) const;

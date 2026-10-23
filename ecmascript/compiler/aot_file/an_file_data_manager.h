@@ -45,6 +45,10 @@ public:
     bool SafeTryReadLock();
     bool SafeInsideStub(uintptr_t pc);
     bool SafeInsideAOT(uintptr_t pc);
+    // Non-blocking variant for the SIGPROF handler path: on write-lock contention
+    // it returns false so the caller can fall back to a coarser stack walk.
+    // Never logs and never waits.
+    bool SafeTryInsideStubOrAOT(uintptr_t pc);
     AOTFileInfo::CallSiteInfo SafeCalCallSiteInfo(uintptr_t retAddr, bool isDeopt);
     static void DestroyFileMapMem(MemMap &fileMapMem);
     void SafeDestroyAllData();

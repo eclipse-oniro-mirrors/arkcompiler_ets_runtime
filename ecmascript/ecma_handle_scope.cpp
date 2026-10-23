@@ -19,6 +19,7 @@
 #if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
 #include "ecmascript/napi/jsnapi_handle_scope_check.h"
 #endif
+#include "ecmascript/platform/profiler_signal_guard.h"
 #if defined(ENABLE_LOCAL_HANDLE_LEAK_DETECT)
 #include "ecmascript/dfx/hprof/heap_profiler.h"
 #endif
@@ -116,6 +117,7 @@ void EcmaHandleScope::ClosePrimitiveScope(EcmaVM *vm)
 uintptr_t EcmaHandleScope::NewHandle(JSThread *thread, JSTaggedType value)
 {
     CHECK_NO_HANDLE_ALLOC;
+    ProfilerSignalGuardCheck();
 #if ECMASCRIPT_ENABLE_THREAD_STATE_CHECK
     if (UNLIKELY(!thread->IsInRunningStateOrProfiling())) {
         LOG_ECMA(FATAL) << "New handle must be in jsthread running state";

@@ -95,9 +95,39 @@ public:
         return static_cast<int>(samples_record.profileInfo_->samples.size());
     }
 
+    void AddSampleDirectTest(const FrameStackAndInfo &frame)
+    {
+        samples_record.AddSample(frame);
+    }
+
+    uint64_t GetPreviousTimeStampTest() const
+    {
+        return samples_record.previousTimeStamp_;
+    }
+
     int GetTimeDeltasSize()
     {
         return static_cast<int>(samples_record.profileInfo_->timeDeltas.size());
+    }
+
+    int IndexFreeSemInitTest()
+    {
+        return samples_record.SemInit(0, 0);
+    }
+
+    int IndexFreeSemPostTest()
+    {
+        return samples_record.SemPost();
+    }
+
+    int IndexFreeSemWaitTest()
+    {
+        return samples_record.SemWait();
+    }
+
+    int IndexFreeSemDestroyTest()
+    {
+        return samples_record.SemDestroy();
     }
 
 private:
@@ -133,6 +163,34 @@ public:
     EcmaHandleScope *scope {nullptr};
     JSThread *thread {nullptr};
 };
+
+HWTEST_F_L0(SamplesRecordTest, AddSampleClampsNegativeDelta)
+{
+    SamplesRecordFriendTest samplesRecord;
+    samplesRecord.NodeInit();
+
+    // Simulate the fire-and-forget consumption order: the first sample is
+    // stamped LATER than the second one (a late-delivered sample carries an
+    // earlier request timestamp). Without the clamp the second delta would go
+    // negative and poison the uint64 state-time statistics (Oracle review F2).
+    FrameStackAndInfo early;
+    early.frameStackLength = 0;
+    early.timeStamp = 2000;
+    samplesRecord.AddSampleDirectTest(early);
+
+    FrameStackAndInfo late;
+    late.frameStackLength = 0;
+    late.timeStamp = 1500; // earlier than the previous sample's stamp
+    samplesRecord.AddSampleDirectTest(late);
+
+    // Both deltas must be >= MIN_TIME_DELTA (clamped, never negative).
+    const std::unique_ptr<ProfileInfo> info = samplesRecord.GetProfileInfoTest();
+    ASSERT_NE(info, nullptr);
+    ASSERT_GE(info->timeDeltas.size(), 2U);
+    for (size_t i = 0; i < info->timeDeltas.size(); i++) {
+        EXPECT_GE(info->timeDeltas[i], MIN_TIME_DELTA) << "timeDeltas[" << i << "]";
+    }
+}
 
 HWTEST_F_L0(SamplesRecordTest, AddRunningStateTest)
 {
@@ -714,5 +772,16 @@ HWTEST_F_L0(SamplesRecordTest, AddSampleMaxNodeCountTest_DiscardIncompleteSample
 
     // nodeCount should be MAX_NODE_COUNT (one new node created before return)
     EXPECT_EQ(samplesRecord.GetProfileInfoTest()->nodeCount, MAX_NODE_COUNT);
+}
+
+HWTEST_F_L0(SamplesRecordTest, IndexFreeSemaphoreWrappers)
+{
+    // The lock-free scheme's handshake wrappers delegate to sem_[1].
+    SamplesRecordFriendTest samplesRecord;
+    samplesRecord.NodeInit();
+    EXPECT_EQ(samplesRecord.IndexFreeSemInitTest(), 0);
+    EXPECT_EQ(samplesRecord.IndexFreeSemPostTest(), 0);
+    EXPECT_EQ(samplesRecord.IndexFreeSemWaitTest(), 0);
+    EXPECT_EQ(samplesRecord.IndexFreeSemDestroyTest(), 0);
 }
 }  // namespace panda::test

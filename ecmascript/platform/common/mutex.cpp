@@ -14,6 +14,7 @@
  */
 
 #include "ecmascript/platform/mutex.h"
+#include "ecmascript/platform/profiler_signal_guard.h"
 
 
 namespace panda::ecmascript {
@@ -39,6 +40,7 @@ void Mutex::Init(pthread_mutexattr_t *attrs)
 
 void Mutex::Lock()
 {
+    ProfilerSignalGuardCheck();
     [[maybe_unused]]int rc = pthread_mutex_lock(&mutex_);
     FATAL_IF_ERROR("pthread_mutex_lock", rc);
 }
@@ -83,12 +85,14 @@ RWLock::~RWLock()
 
 void RWLock::ReadLock()
 {
+    ProfilerSignalGuardCheck();
     [[maybe_unused]]int rc = pthread_rwlock_rdlock(&rwlock_);
     FATAL_IF_ERROR("pthread_rwlock_rdlock", rc);
 }
 
 void RWLock::WriteLock()
 {
+    ProfilerSignalGuardCheck();
     [[maybe_unused]]int rc = pthread_rwlock_wrlock(&rwlock_);
     FATAL_IF_ERROR("pthread_rwlock_wrlock", rc);
 }
@@ -103,6 +107,21 @@ bool RWLock::TryReadLock()
     FATAL_IF_ERROR("pthread_rwlock_tryrdlock", rc);
 
     return true;
+}
+
+bool RWLock::TryReadLockNoLog()
+{
+    // No FATAL_IF_ERROR here: this variant is on the SIGPROF handler path where
+    // logging is forbidden (plan §6.2); a non-zero rc simply means contention.
+    // POSIX lists neither pthread_rwlock_tryrdlock nor pthread_rwlock_unlock
+    // (UnlockNoLog) as async-signal-safe; their uncontended paths are
+    // non-blocking CAS, a sanctioned try-and-drop deviation (plan §3.4/§6.4).
+    return pthread_rwlock_tryrdlock(&rwlock_) == 0;
+}
+
+void RWLock::UnlockNoLog()
+{
+    [[maybe_unused]]int rc = pthread_rwlock_unlock(&rwlock_);
 }
 
 bool RWLock::TryWriteLock()
@@ -149,6 +168,7 @@ void ConditionVariable::SignalAll()
 
 void ConditionVariable::Wait(Mutex *mutex)
 {
+    ProfilerSignalGuardCheck();
     [[maybe_unused]]int rc = pthread_cond_wait(&cond_, &mutex->mutex_);
     FATAL_IF_ERROR("pthread_cond_wait", rc);
 }
@@ -175,6 +195,7 @@ struct timespec ConvertTime(uint64_t ms, uint64_t ns, bool is_absolute)
 
 bool ConditionVariable::TimedWait(Mutex *mutex, uint64_t ms, uint64_t ns, bool is_absolute)
 {
+    ProfilerSignalGuardCheck();
     struct timespec abs_time = ConvertTime(ms, ns, is_absolute);
     int rc = pthread_cond_timedwait(&cond_, &mutex->mutex_, &abs_time);
     if (rc != 0) {

@@ -122,6 +122,11 @@ declare_args() {
 
   ets_runtime_enable_cmc_gc = false
 
+  # Compile the legacy CPU profiler sampling scheme (in-handler symbolization,
+  # NOT async-signal-safe, issue #13618) behind ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY.
+  # Off by default: the lock-free two-phase scheme is the only compiled scheme.
+  ets_runtime_cpuprofiler_legacy = false
+
   enable_handle_leak_detect = false
 
   enable_cms_gc = false

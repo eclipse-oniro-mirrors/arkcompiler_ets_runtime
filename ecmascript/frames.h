@@ -244,6 +244,7 @@ private:
     alignas(EAS) JSTaggedType *prevFp {nullptr};
     alignas(EAS) uintptr_t returnAddr {0};
     friend class FrameIterator;
+    friend class SignalSafeProfilerFrameIterator;
 };
 STATIC_ASSERT_EQ_ARCH(sizeof(OptimizedFrame), OptimizedFrame::SizeArch32, OptimizedFrame::SizeArch64);
 
@@ -326,6 +327,7 @@ private:
     alignas(EAS) JSTaggedType *prevFp {nullptr};
     alignas(EAS) uintptr_t returnAddr {0};
     friend class FrameIterator;
+    friend class SignalSafeProfilerFrameIterator;
 };
 STATIC_ASSERT_EQ_ARCH(sizeof(BaselineBuiltinFrame), BaselineBuiltinFrame::SizeArch32, BaselineBuiltinFrame::SizeArch64);
 
@@ -392,6 +394,7 @@ private:
     alignas(EAS) JSTaggedType *prevFp {nullptr};
     alignas(EAS) uintptr_t returnAddr {0};
     friend class FrameIterator;
+    friend class SignalSafeProfilerFrameIterator;
 };
 STATIC_ASSERT_EQ_ARCH(sizeof(AsmBridgeFrame), AsmBridgeFrame::SizeArch32, AsmBridgeFrame::SizeArch64);
 
@@ -473,6 +476,7 @@ private:
     alignas(EAS) JSTaggedType *prevFp {nullptr};
     alignas(EAS) uintptr_t returnAddr {0};
     friend class FrameIterator;
+    friend class SignalSafeProfilerFrameIterator;
 };
 STATIC_ASSERT_EQ_ARCH(sizeof(OptimizedJSFunctionUnfoldArgVFrame),
     OptimizedJSFunctionUnfoldArgVFrame::SizeArch32, OptimizedJSFunctionUnfoldArgVFrame::SizeArch64);
@@ -535,6 +539,7 @@ private:
     alignas(EAS) FrameType type {0};
     alignas(EAS) JSTaggedType *prevFp {nullptr};
     friend class FrameIterator;
+    friend class SignalSafeProfilerFrameIterator;
 };
 STATIC_ASSERT_EQ_ARCH(sizeof(OptimizedJSFunctionArgConfigFrame),
                       OptimizedJSFunctionArgConfigFrame::SizeArch32,
@@ -675,6 +680,7 @@ public:
     }
 
     friend class FrameIterator;
+    friend class SignalSafeProfilerFrameIterator;
     friend class FrameHandler;
     void GetDeoptBundleInfo(const FrameIterator &it, std::vector<kungfu::ARKDeopt>& deopts) const;
     void GetFuncCalleeRegAndOffset(
@@ -755,6 +761,7 @@ public:
         return type;
     }
     friend class FrameIterator;
+    friend class SignalSafeProfilerFrameIterator;
 
 private:
     static OptimizedEntryFrame* GetFrameFromSp(const JSTaggedType *sp)
@@ -939,6 +946,7 @@ public:
     alignas(EAS) const uint8_t *pc {nullptr};
     alignas(EAS) InterpretedFrameBase base;
     friend class FrameIterator;
+    friend class SignalSafeProfilerFrameIterator;
 };
 STATIC_ASSERT_EQ_ARCH(sizeof(InterpretedFrame), InterpretedFrame::SizeArch32, InterpretedFrame::SizeArch64);
 
@@ -1984,6 +1992,7 @@ public:
     }
 
     friend class FrameIterator;
+    friend class SignalSafeProfilerFrameIterator;
     friend class FrameHandler;
     void GetDeoptBundleInfo(const FrameIterator &it, std::vector<kungfu::ARKDeopt>& deopts) const;
     void GetFuncCalleeRegAndOffset(
@@ -2187,6 +2196,7 @@ public:
     }
 
     friend class FrameIterator;
+    friend class SignalSafeProfilerFrameIterator;
     friend class FrameHandler;
     void GetDeoptBundleInfo(const FrameIterator &it, std::vector<kungfu::ARKDeopt>& deopts) const;
     void GetFuncCalleeRegAndOffset(
