@@ -26,21 +26,19 @@
 #include "ecmascript/lexical_env.h"
 
 namespace panda::ecmascript::kungfu {
-#define DECLARE_ASM_HANDLER_BASE(name, needPrint, V, format)                                      \
-void name##StubBuilder::GenerateCircuit()                                                         \
-{                                                                                                 \
-    GateRef glue = PtrArgument(static_cast<size_t>(InterpreterHandlerInputs::GLUE));              \
-    GateRef sp = PtrArgument(static_cast<size_t>(InterpreterHandlerInputs::SP));                  \
-    GateRef pc = PtrArgument(static_cast<size_t>(InterpreterHandlerInputs::PC));                  \
-    GateRef constpool = TaggedPointerArgument(                                                    \
-        static_cast<size_t>(InterpreterHandlerInputs::CONSTPOOL));                                \
-    GateRef profileTypeInfo = TaggedPointerArgument(                                              \
-        static_cast<size_t>(InterpreterHandlerInputs::PROFILE_TYPE_INFO));                        \
-    GateRef acc = TaggedArgument(static_cast<size_t>(InterpreterHandlerInputs::ACC));             \
-    DebugPrintInstruction<needPrint>();                                                           \
-    V(format)                                                                                     \
-    GenerateCircuitImpl(glue, sp, pc, constpool, profileTypeInfo, acc, callback);                 \
-}
+#define DECLARE_ASM_HANDLER_BASE(name, needPrint, callback)                                                        \
+    void name##StubBuilder::GenerateCircuit()                                                                      \
+    {                                                                                                              \
+        GateRef glue = PtrArgument(static_cast<size_t>(InterpreterHandlerInputs::GLUE));                           \
+        GateRef sp = PtrArgument(static_cast<size_t>(InterpreterHandlerInputs::SP));                               \
+        GateRef pc = PtrArgument(static_cast<size_t>(InterpreterHandlerInputs::PC));                               \
+        GateRef constpool = TaggedPointerArgument(static_cast<size_t>(InterpreterHandlerInputs::CONSTPOOL));       \
+        GateRef profileTypeInfo =                                                                                  \
+            TaggedPointerArgument(static_cast<size_t>(InterpreterHandlerInputs::PROFILE_TYPE_INFO));               \
+        GateRef acc = TaggedArgument(static_cast<size_t>(InterpreterHandlerInputs::ACC));                          \
+        DebugPrintInstruction<needPrint>();                                                                        \
+        GenerateCircuitImpl(glue, sp, pc, constpool, profileTypeInfo, acc, callback);                              \
+    }
 
 #define DECLARE_ASM_HANDLE_IMPLEMENT(name)                                                        \
 void name##StubBuilder::GenerateCircuitImpl(GateRef glue, GateRef sp, GateRef pc,                 \
@@ -48,49 +46,45 @@ void name##StubBuilder::GenerateCircuitImpl(GateRef glue, GateRef sp, GateRef pc
                                      GateRef acc, [[maybe_unused]] ProfileOperation callback)
 
 #if ECMASCRIPT_ENABLE_INTERPRETER_PGO_STUBS
-#define REGISTER_PROFILE_CALL_BACK(format)                                                                             \
-    ProfileOperation callback(                                                                                         \
-        [this, glue, sp, pc, profileTypeInfo](const std::initializer_list<GateRef> &values, OperationType type) {      \
-            GateRef state = GetFrame(sp);                                                                              \
-            GateRef currentEnv = GetEnvFromFrame(glue, state);                                                         \
-            GateRef globalEnv = GetCurrentGlobalEnv(glue, currentEnv);                                                 \
-            ProfilerStubBuilder profiler(this, globalEnv);                                                             \
-            profiler.PGOProfiler(glue, pc, GetFunctionFromFrame(glue, state),                                          \
-                profileTypeInfo, values, format, type);                                                                \
-        }, nullptr);
+#define REGISTER_PROFILE_CALL_BACK(format)                                                                         \
+    ProfileOperation(                                                                                              \
+        [this, glue, sp, pc, profileTypeInfo](const std::initializer_list<GateRef>& values, OperationType type) {  \
+            GateRef state = GetFrame(sp);                                                                          \
+            ProfilerStubBuilder profiler(this);                                                                    \
+            profiler.SetCallBackForLazyGetGlobalEnv(GlobalEnvGetter(glue, sp));                                    \
+            profiler.PGOProfiler(                                                                                  \
+                glue, pc, GetFunctionFromFrame(glue, state), profileTypeInfo, values, format, type);               \
+        },                                                                                                         \
+        nullptr)
 
-#define REGISTER_JIT_PROFILE_CALL_BACK(format)                                                                         \
-    ProfileOperation callback(                                                                                         \
-        nullptr,                                                                                                       \
-        [this, glue, sp, pc, profileTypeInfo](const std::initializer_list<GateRef> &values, OperationType type) {      \
-            GateRef state = GetFrame(sp);                                                                              \
-            GateRef currentEnv = GetEnvFromFrame(glue, state);                                                         \
-            GateRef globalEnv = GetCurrentGlobalEnv(glue, currentEnv);                                                 \
-            ProfilerStubBuilder profiler(this, globalEnv);                                                             \
-            profiler.PGOProfiler(glue, pc, GetFunctionFromFrame(glue, state),                                          \
-                profileTypeInfo, values, format, type);                                                                \
-        });
+#define REGISTER_JIT_PROFILE_CALL_BACK(format)                                                                     \
+    ProfileOperation(                                                                                              \
+        nullptr,                                                                                                   \
+        [this, glue, sp, pc, profileTypeInfo](const std::initializer_list<GateRef>& values, OperationType type) {  \
+            GateRef state = GetFrame(sp);                                                                          \
+            ProfilerStubBuilder profiler(this);                                                                    \
+            profiler.SetCallBackForLazyGetGlobalEnv(GlobalEnvGetter(glue, sp));                                    \
+            profiler.PGOProfiler(                                                                                  \
+                glue, pc, GetFunctionFromFrame(glue, state), profileTypeInfo, values, format, type);               \
+        })
 #endif
-#define REGISTER_NULL_CALL_BACK(format) ProfileOperation callback;
-
-#define DECLARE_ASM_HANDLER(name)                                                              \
-    DECLARE_ASM_HANDLER_BASE(name, true, REGISTER_NULL_CALL_BACK, SlotIDFormat::IMM8)          \
+#define DECLARE_ASM_HANDLER(name)                                                                                  \
+    DECLARE_ASM_HANDLER_BASE(name, true, ProfileOperation())                                                       \
     DECLARE_ASM_HANDLE_IMPLEMENT(name)
 
-#define DECLARE_ASM_HANDLER_NOPRINT(name)                                                      \
-    DECLARE_ASM_HANDLER_BASE(name, false, REGISTER_NULL_CALL_BACK, SlotIDFormat::IMM8)         \
+#define DECLARE_ASM_HANDLER_NOPRINT(name)                                                                          \
+    DECLARE_ASM_HANDLER_BASE(name, false, ProfileOperation())                                                      \
     DECLARE_ASM_HANDLE_IMPLEMENT(name)
 
-#define DECLARE_ASM_HANDLER_PROFILE(name, base, format)                                        \
-    DECLARE_ASM_HANDLER_BASE(name, true, REGISTER_PROFILE_CALL_BACK, format)
+#define DECLARE_ASM_HANDLER_PROFILE(name, base, format)                                                            \
+    DECLARE_ASM_HANDLER_BASE(name, true, REGISTER_PROFILE_CALL_BACK(format))
 
 #if ECMASCRIPT_ENABLE_INTERPRETER_JIT_STUBS
-#define DECLARE_ASM_HANDLER_JIT_PROFILE(name, base, format)                                    \
-    DECLARE_ASM_HANDLER_BASE(name, true, REGISTER_JIT_PROFILE_CALL_BACK, format)
+#define DECLARE_ASM_HANDLER_JIT_PROFILE(name, base, format)                                                        \
+    DECLARE_ASM_HANDLER_BASE(name, true, REGISTER_JIT_PROFILE_CALL_BACK(format))
 #endif
 
-#define DECLARE_ASM_HANDLER_STW_COPY(name)                                                     \
-    DECLARE_ASM_HANDLER_BASE(name##StwCopy, true, REGISTER_NULL_CALL_BACK, SlotIDFormat::IMM8)
+#define DECLARE_ASM_HANDLER_STW_COPY(name) DECLARE_ASM_HANDLER_BASE(name##StwCopy, true, ProfileOperation())
 
 // TYPE:{OFFSET, ACC_VARACC, JUMP}
 #define DISPATCH_BAK(TYPE, ...) DISPATCH_##TYPE(__VA_ARGS__)
