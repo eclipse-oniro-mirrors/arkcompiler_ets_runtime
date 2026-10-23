@@ -38,7 +38,7 @@ HWTEST_F_L0(BarrierTest, YoungToYoungBatchCopy)
     std::set<uintptr_t> LocalToShareBeforeCopy;
 
     Region* dstRegion = Region::ObjectAddressToRange(dstArray.GetObject<TaggedArray>());
-    dstRegion->IterateAllLocalToShareBits([&LocalToShareBeforeCopy](void* mem) {
+    dstRegion->IterateAllLocalToShareBits([&LocalToShareBeforeCopy](void* mem, auto) {
         LocalToShareBeforeCopy.emplace(ToUintPtr(mem));
         return true;
     });
@@ -48,7 +48,7 @@ HWTEST_F_L0(BarrierTest, YoungToYoungBatchCopy)
     Barriers::CopyObject<true, false>(thread, *dstArray, to, from, arrayLength);
 
     // young to young, all the bitset should not be changed.
-    dstRegion->IterateAllLocalToShareBits([&LocalToShareBeforeCopy](void* mem) {
+    dstRegion->IterateAllLocalToShareBits([&LocalToShareBeforeCopy](void* mem, auto) {
         EXPECT_TRUE(LocalToShareBeforeCopy.count(ToUintPtr(mem)));
         return true;
     });
@@ -72,7 +72,7 @@ HWTEST_F_L0(BarrierTest, BatchCopyNoBarrier)
     std::set<uintptr_t> LocalToShareBeforeCopy;
 
     Region* dstRegion = Region::ObjectAddressToRange(dstArray.GetObject<TaggedArray>());
-    dstRegion->IterateAllLocalToShareBits([&LocalToShareBeforeCopy](void* mem) {
+    dstRegion->IterateAllLocalToShareBits([&LocalToShareBeforeCopy](void* mem, auto) {
         LocalToShareBeforeCopy.emplace(ToUintPtr(mem));
         return true;
     });
@@ -81,7 +81,7 @@ HWTEST_F_L0(BarrierTest, BatchCopyNoBarrier)
     JSTaggedValue* from = reinterpret_cast<JSTaggedValue*>(ToUintPtr(srcArray->GetData()));
     Barriers::CopyObject<false, false>(thread, nullptr, to, from, arrayLength);
 
-    dstRegion->IterateAllLocalToShareBits([&LocalToShareBeforeCopy](void* mem) {
+    dstRegion->IterateAllLocalToShareBits([&LocalToShareBeforeCopy](void* mem, auto) {
         EXPECT_TRUE(LocalToShareBeforeCopy.count(ToUintPtr(mem)));
         return true;
     });
@@ -117,7 +117,7 @@ HWTEST_F_L0(BarrierTest, LocalToShareBatchCopy)
     std::set<uintptr_t> LocalToShareBeforeCopy;
 
     Region* dstRegion = Region::ObjectAddressToRange(dstArray.GetObject<TaggedArray>());
-    dstRegion->IterateAllLocalToShareBits([&LocalToShareBeforeCopy](void* mem) {
+    dstRegion->IterateAllLocalToShareBits([&LocalToShareBeforeCopy](void* mem, auto) {
         LocalToShareBeforeCopy.emplace(ToUintPtr(mem));
         return true;
     });
@@ -132,7 +132,7 @@ HWTEST_F_L0(BarrierTest, LocalToShareBatchCopy)
     }
     // young to young, all the bitset should not be changed.
     dstRegion->IterateAllLocalToShareBits([&LocalToShareSlot, &LocalToShareBeforeCopy, &dstArray, arrayLength](
-        void* mem) {
+        void* mem, auto) {
             if (!LocalToShareBeforeCopy.count(ToUintPtr(mem))) {
                 EXPECT_GE(ToUintPtr(mem), ToUintPtr(dstArray->GetData()));
                 EXPECT_LT(ToUintPtr(mem), ToUintPtr(dstArray->GetData()+arrayLength));
@@ -164,7 +164,7 @@ HWTEST_F_L0(BarrierTest, LocalToReadOnlyShareBatchCopy)
     std::set<uintptr_t> LocalToShareBeforeCopy;
 
     Region* dstRegion = Region::ObjectAddressToRange(dstArray.GetObject<TaggedArray>());
-    dstRegion->IterateAllLocalToShareBits([&LocalToShareBeforeCopy](void* mem) {
+    dstRegion->IterateAllLocalToShareBits([&LocalToShareBeforeCopy](void* mem, auto) {
         LocalToShareBeforeCopy.emplace(ToUintPtr(mem));
         return true;
     });
@@ -179,7 +179,7 @@ HWTEST_F_L0(BarrierTest, LocalToReadOnlyShareBatchCopy)
     }
     // young to young, all the bitset should not be changed.
     dstRegion->IterateAllLocalToShareBits([&LocalToShareSlot, &LocalToShareBeforeCopy](
-        void* mem) {
+        void* mem, auto) {
             EXPECT_FALSE(LocalToShareSlot.count(ToUintPtr(mem)));
             EXPECT_TRUE(LocalToShareBeforeCopy.count(ToUintPtr(mem)));
             return true;
@@ -209,7 +209,7 @@ HWTEST_F_L0(BarrierTest, LocalToShareMixBatchCopy)
     std::set<uintptr_t> LocalToShareBeforeCopy;
 
     Region* dstRegion = Region::ObjectAddressToRange(dstArray.GetObject<TaggedArray>());
-    dstRegion->IterateAllLocalToShareBits([&LocalToShareBeforeCopy](void* mem) {
+    dstRegion->IterateAllLocalToShareBits([&LocalToShareBeforeCopy](void* mem, auto) {
         LocalToShareBeforeCopy.emplace(ToUintPtr(mem));
         return true;
     });
@@ -226,7 +226,7 @@ HWTEST_F_L0(BarrierTest, LocalToShareMixBatchCopy)
     }
     // young to young, all the bitset should not be changed.
     dstRegion->IterateAllLocalToShareBits([&LocalToShareSlot, &LocalToShareBeforeCopy, &dstArray, arrayLength](
-        void* mem) {
+        void* mem, auto) {
             if (!LocalToShareBeforeCopy.count(ToUintPtr(mem))) {
                 EXPECT_GE(ToUintPtr(mem), ToUintPtr(dstArray->GetData()));
                 EXPECT_LT(ToUintPtr(mem), ToUintPtr(dstArray->GetData()+arrayLength));
@@ -273,11 +273,11 @@ HWTEST_F_L0(BarrierTest, OldToNewBatchCopy)
     std::set<uintptr_t> LocalToShareBeforeCopy;
 
     Region* dstRegion = Region::ObjectAddressToRange(dstArray.GetObject<TaggedArray>());
-    dstRegion->IterateAllOldToNewBits([&OldToNewBeforeCopy](void* mem) {
+    dstRegion->IterateAllOldToNewBits([&OldToNewBeforeCopy](void* mem, auto) {
         OldToNewBeforeCopy.emplace(ToUintPtr(mem));
         return true;
     });
-    dstRegion->IterateAllLocalToShareBits([&LocalToShareBeforeCopy](void* mem) {
+    dstRegion->IterateAllLocalToShareBits([&LocalToShareBeforeCopy](void* mem, auto) {
         LocalToShareBeforeCopy.emplace(ToUintPtr(mem));
         return true;
     });
@@ -287,7 +287,7 @@ HWTEST_F_L0(BarrierTest, OldToNewBatchCopy)
     Barriers::CopyObject<true, false>(thread, *dstArray, to, from, arrayLength);
 
     // young to young, all the bitset should not be changed.
-    dstRegion->IterateAllLocalToShareBits([&LocalToShareBeforeCopy](void* mem) {
+    dstRegion->IterateAllLocalToShareBits([&LocalToShareBeforeCopy](void* mem, auto) {
         EXPECT_TRUE(LocalToShareBeforeCopy.count(ToUintPtr(mem)));
         return true;
     });

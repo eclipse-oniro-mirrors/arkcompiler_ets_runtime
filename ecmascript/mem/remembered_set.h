@@ -89,18 +89,21 @@ public:
     template <typename Visitor>
     void IterateAllMarkedBits(uintptr_t begin, Visitor &&visitor)
     {
+        AssertVisitorAcceptsReferenceType<Visitor>();
         GCBitsetData()->template IterateMarkedBits<Visitor, AccessType::NON_ATOMIC>(begin, size_, visitor);
     }
 
     template <typename Visitor>
     void AtomicIterateAllMarkedBits(uintptr_t begin, Visitor &&visitor)
     {
+        AssertVisitorAcceptsReferenceType<Visitor>();
         GCBitsetData()->template IterateMarkedBits<Visitor, AccessType::ATOMIC>(begin, size_, visitor);
     }
 
     template <typename Visitor>
     void IterateAllMarkedBitsConst(uintptr_t begin, Visitor &&visitor) const
     {
+        AssertVisitorAcceptsReferenceType<Visitor>();
         GCBitsetData()->IterateMarkedBitsConst(begin, size_, visitor);
     }
 
@@ -116,6 +119,18 @@ public:
     }
 
 private:
+    // The visitor is shared by both NORMAL and COMPRESSED remembered sets, and only the ReferenceTypeWrapper
+    // argument can tell them apart, so the visitor must accept (void *mem, ReferenceTypeWrapper).
+    // See SharedGCMarkerBase::ProcessThenMergeBackRSetFromBoundJSThread for an example.
+    template <typename Visitor>
+    static constexpr void AssertVisitorAcceptsReferenceType()
+    {
+        using RefTypeWrapper = std::integral_constant<ReferenceType, refType>;
+        static_assert(std::is_invocable_v<Visitor, void *, RefTypeWrapper>,
+                      "The visitor of RememberedSetBase must accept (void *mem, ReferenceTypeWrapper) "
+                      "to distinguish normal and compressed slots");
+    }
+
     size_t size_;
 };
 
