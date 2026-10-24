@@ -78,6 +78,7 @@ group("ark_jit_ts_test") {
     "jit_test_0002",
     "wide_call_range_pref_imm16v8",
     "string_length",
+    "jit_recursive_fact",
     "ts_inline",
     "count_based_inline_test",
     "depth_based_inline_test",
