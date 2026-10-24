@@ -233,6 +233,9 @@ bool MetaParser::ParseTypeList(const cJSON *json)
         GetString(item, "node_name", meta->nodeName);
         GetString(item, "visit_type", meta->visitType);
         GetUInt32(item, "end_offset", meta->endOffset);
+        // compressed_factor is carried by the CONSTANT_POOL entry and kept on its
+        // own MetaData so the serializer can restore its expanded object sizes.
+        GetUInt32(item, "compressed_factor", meta->compressedFactor);
 
         cJSON *parents {nullptr};
         cJSON *offsets {nullptr};

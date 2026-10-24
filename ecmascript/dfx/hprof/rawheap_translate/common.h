@@ -71,6 +71,7 @@ struct MetaData {
     std::vector<Field> fields {};
     MetaData *parent {nullptr};
     uint32_t endOffset = 0;
+    uint32_t compressedFactor {1};  // restores sizes expanded under compressed pointers
     JSType type = 0;
     NodeType nodeType = DEFAULT_NODETYPE;
     ArrayLayout arrayLayout {};

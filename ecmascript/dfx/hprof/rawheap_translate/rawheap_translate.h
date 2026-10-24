@@ -31,6 +31,20 @@ class RawHeapTranslateV2TestHelper;
 namespace rawheap_translate {
 class SnapshotMerger;
 class StaticRawheapTranslate;
+
+// Heap objects are 8-byte aligned; sizes must stay aligned after dividing the
+// expanded (non-compressed pointer) CONSTANT_POOL size by the compressed factor.
+static constexpr uint32_t MEM_ALIGN_OBJECT = 8U;
+// Rounds x up to the next multiple of alignment (a power of two). Mirrors
+// AlignUp in ecmascript/mem/mem.h; kept local because the translator is built
+// standalone, without the runtime's mem.h.
+template<typename T>
+constexpr T AlignUp(T x, T alignment)
+{
+    // alignment must be a power of two.
+    return (x + alignment - 1) & ~(alignment - 1);
+}
+
 class RawHeap {
 public:
     RawHeap() : strTable_(new StringHashMap())
@@ -96,6 +110,12 @@ protected:
     void SetVersion(const std::string &version);
     void CreateHashEdge(Node *node);
     void AddPrimitiveNodes();
+    // Post-translate fixup: restore CONSTANT_POOL sizes from the expanded
+    // (non-compressed pointer) form recorded in rawheap files. The base
+    // implementation is a no-op; V1/V2 translators override it. The halved
+    // restore is approximate (a constant 40 bytes below the true footprint
+    // per pool); see the V1/V2 implementations for the arithmetic.
+    virtual void RecomputeNodeSize() {}
     void CreateRootNode(Node *root, const std::string &name, size_t count);
     bool ReadHeapMetaData(FileReader &file, uint32_t section);
     void CreateMetadataNode(Node *metadataNode);
@@ -143,6 +163,7 @@ public:
 
     bool Parse(FileReader &file, uint32_t rawheapFileSize) override;
     bool Translate() override;
+    void RecomputeNodeSize() override;
 
 private:
     struct AddrTableItem {
@@ -237,6 +258,7 @@ public:
 
     bool Parse(FileReader &file, uint32_t rawheapFileSize) override;
     bool Translate() override;
+    void RecomputeNodeSize() override;
 
 private:
     struct IndexedReference {
