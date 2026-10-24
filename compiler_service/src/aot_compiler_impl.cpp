@@ -42,6 +42,9 @@
 #ifdef ENABLE_HISYSEVENT
 #include "ecmascript/compiler/aot_compiler_stats.h"
 #endif
+#ifdef SECURITY_GUARD_ENABLE
+#include "security_guard_report.h"
+#endif
 
 namespace OHOS::ArkCompiler {
 
@@ -307,6 +310,9 @@ int32_t AotCompilerImpl::EcmascriptAotCompiler(const AotCompilerArgs &args,
     if (execRet != ERR_OK) {
         return execRet;
     }
+#ifdef SECURITY_GUARD_ENABLE
+    SecurityGuardReport::ReportAotSecurityInfo(args, ret, SgEventType::COMPILE);
+#endif
     return HandlePostCompilation(args, ret, sigData, guard);
 #else
     LOG_SA(ERROR) << "no need to AOT compile when code signature disable";
@@ -984,7 +990,13 @@ int32_t AotCompilerImpl::HandlePostCompilation(const AotCompilerArgs &args, int3
 
 #ifdef CODE_SIGN_ENABLE
     ret = PersistAndSignAnFile(guard, sigData);
-    return FinalizeAotOutput(guard, ret);
+    int32_t finalizeRet = FinalizeAotOutput(guard, ret);
+#ifdef SECURITY_GUARD_ENABLE
+    // Report the code sign event with the final sign-stage result,
+    // which is also what the caller finally receives.
+    SecurityGuardReport::ReportAotSecurityInfo(args, finalizeRet, SgEventType::CODE_SIGN);
+#endif
+    return finalizeRet;
 #else
     return ret;
 #endif

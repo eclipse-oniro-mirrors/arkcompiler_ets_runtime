@@ -90,5 +90,13 @@ ohos_unittest("AotCompilerImplUnitTest") {
     external_deps += [ "code_signature:liblocal_code_sign_sdk" ]
     defines += [ "CODE_SIGN_ENABLE" ]
   }
+  if (security_guard_enable_test) {
+    sources += [ "${compiler_service_root}/src/security_guard_report.cpp" ]
+    external_deps += [
+      "cJSON:cjson_static",
+      "security_guard:libsg_collect_sdk",
+    ]
+    defines += [ "SECURITY_GUARD_ENABLE" ]
+  }
   sources += [ "aotcompilerimpl_unit.cpp" ]
 }
