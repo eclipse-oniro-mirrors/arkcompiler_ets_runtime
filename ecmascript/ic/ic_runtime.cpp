@@ -92,10 +92,10 @@ bool ICRuntime::GetHandler(const ObjectOperator &op, const JSHandle<JSHClass> &h
     }
 
     // Solve IC On Prototype.
-    // Support prototype ic for JSSharedArray and JSSharedMap among sendable types,
+    // Support prototype ic for JSSharedArray, JSSharedMap and JSSharedSet among sendable types,
     // because their prototypes are frozen/immutable after initialization,
     // and ICRuntimeStub::LoadPrototype already skips ProtoChangeMarker check for shared receivers.
-    if (hclass->IsJSShared() && !hclass->IsJSSharedArray() && !hclass->IsJSSharedMap()) {
+    if (hclass->IsJSShared() && !hclass->IsJSSharedArray() && !hclass->IsJSSharedMap() && !hclass->IsJSSharedSet()) {
         return false;
     }
     handlerValue = PrototypeHandler::LoadPrototype(thread_, op, hclass);

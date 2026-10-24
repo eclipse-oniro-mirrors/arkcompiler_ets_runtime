@@ -250,3 +250,113 @@ try {
 }
 
 print("===Type check end===");
+
+// IR-ization UT supplement for the add/delete/has/forEach/values/clear/size
+// stubs: fresh/empty boundaries, duplicate add, missing delete, values
+// iteration protocol, @@iterator alias, and callback exception propagation
+// with scope release.
+function setEdgeCases(): void {
+    print("===set edge cases begin===");
+
+    // Fresh set: size 0, has -> false, delete missing -> false.
+    const fresh = new SendableSet<number>();
+    print("fresh set size: " + fresh.size);
+    print("fresh has: " + fresh.has(1));
+    print("fresh delete: " + fresh.delete(1));
+
+    // Duplicate add: size unchanged.
+    const dup = new SendableSet<number>();
+    dup.add(1);
+    dup.add(1);
+    print("dup add size: " + dup.size);
+
+    // values: for-of iteration, next() protocol, @@iterator alias.
+    const vals = new SendableSet<number>();
+    vals.add(10);
+    vals.add(20);
+    vals.add(30);
+    let acc = "";
+    for (const v of vals.values()) {
+        acc += v + ";";
+    }
+    print("values for-of: " + acc);
+    const valsIter = vals.values();
+    const n1 = valsIter.next();
+    const n2 = valsIter.next();
+    print("values next: " + n1.value + "," + n2.value);
+    const n3 = valsIter.next();
+    print("values last: " + n3.value + "," + n3.done);
+    print("values done: " + valsIter.next().done);
+    print("iterator alias: " + (vals[Symbol.iterator] === vals.values));
+
+    // values on an empty set: done immediately.
+    const emptyIter = fresh.values();
+    print("empty values done: " + emptyIter.next().done);
+
+    // forEach: callback exception propagates; set remains usable (scope released).
+    try {
+        vals.forEach((v: number) => {
+            if (v == 20) {
+                throw new Error("set forEach cb throw");
+            }
+        });
+    } catch (err) {
+        print("set forEach cb exception: " + err);
+    }
+    print("set after exception size: " + vals.size);
+
+    // clear on an empty set: no error.
+    fresh.clear();
+    print("clear empty size: " + fresh.size);
+
+    print("===set edge cases end===");
+}
+setEdgeCases();
+
+// IR-ization UT supplement: subclass receiver for the
+// add/delete/has/forEach/values/clear/size stubs, and values iteration
+// order after delete + re-add (insertion order).
+class SubSendableSet<T> extends SendableSet<T> {
+    constructor() {
+        'use sendable';
+        super();
+    }
+}
+
+function setSubclassEdgeCases(): void {
+    print("===set subclass edge cases begin===");
+
+    // values iteration order after delete + re-add: re-added entry goes to the end.
+    const ord = new SendableSet<number>();
+    ord.add(1);
+    ord.add(2);
+    ord.add(3);
+    ord.delete(2);
+    ord.add(2);
+    let ordAcc = "";
+    for (const v of ord.values()) {
+        ordAcc += v + ";";
+    }
+    print("values order after re-add: " + ordAcc);
+
+    // Subclass receiver: full round-trip over the in-scope methods.
+    const sub = new SubSendableSet<number>();
+    sub.add(1);
+    sub.add(2);
+    print("subset size: " + sub.size);
+    print("subset has: " + sub.has(1));
+    print("subset delete: " + sub.delete(2));
+    let subAcc = "";
+    for (const v of sub.values()) {
+        subAcc += v + ";";
+    }
+    print("subset values: " + subAcc);
+    sub.forEach((v: number) => {
+        print("subset forEach: " + v);
+    });
+    sub.clear();
+    print("subset cleared size: " + sub.size);
+
+    print("===set subclass edge cases end===");
+}
+setSubclassEdgeCases();

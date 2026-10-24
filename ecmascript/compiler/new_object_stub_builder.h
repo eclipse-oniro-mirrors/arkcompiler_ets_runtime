@@ -145,6 +145,7 @@ public:
     template <typename IteratorType, typename CollectionType>
     void CreateJSCollectionIterator(Variable *result, Label *exit, GateRef set, GateRef kind);
     void CreateJSSharedMapIterator(Variable *result, Label *exit, GateRef thisValue, GateRef kind);
+    void CreateJSSharedSetIterator(Variable *result, Label *exit, GateRef thisValue, GateRef kind);
     void CreateJSTypedArrayIterator(Variable *result, Label *exit, GateRef set, GateRef kind);
     GateRef NewTaggedSubArray(GateRef glue, GateRef srcTypedArray, GateRef elementSize, GateRef newLength,
         GateRef beginIndex, GateRef arrayCls, GateRef buffer);
@@ -155,6 +156,7 @@ public:
     GateRef NewFloat32ArrayWithSize(GateRef glue, GateRef size);
     GateRef NewTypedArrayFromCtor(GateRef glue, GateRef ctor, GateRef length, Label *slowPath);
     void NewByteArray(Variable *result, Label *exit, GateRef elementSize, GateRef length);
+    GateRef NewSByteArray(GateRef glue, GateRef elementSize, GateRef length);
     GateRef NewProfileTypeInfoCell(GateRef glue, GateRef value);
     GateRef NewEnumCache(GateRef glue);
     GateRef GetElementSizeFromType(GateRef glue, GateRef type);

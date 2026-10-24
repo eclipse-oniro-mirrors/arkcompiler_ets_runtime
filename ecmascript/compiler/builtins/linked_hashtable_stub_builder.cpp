@@ -386,7 +386,6 @@ GateRef LinkedHashTableStubBuilder<LinkedHashTableType, LinkedHashTableObject>::
     Label entry(env);
     env->SubCfgEntry(&entry);
     Label exit(env);
-    Label setLinked(env);
     DEFVARIABLE(result, VariableType::JS_ANY(), linkedTable);
 
     Label reuseExistingTable(env);
@@ -493,6 +492,59 @@ GateRef LinkedHashTableStubBuilder<LinkedHashTableType, LinkedHashTableObject>::
 template GateRef LinkedHashTableStubBuilder<LinkedHashMap, LinkedHashMapObject>::ForEach(GateRef thisValue,
     GateRef linkedTable, GateRef callbackFnHandle, GateRef thisArg);
 template GateRef LinkedHashTableStubBuilder<LinkedHashSet, LinkedHashSetObject>::ForEach(GateRef thisValue,
+    GateRef linkedTable, GateRef callbackFnHandle, GateRef thisArg);
+
+// @ref panda::ecmascript::builtins::BuiltinsSharedMap/BuiltinsSharedSet::ForEach() while loop
+template <typename LinkedHashTableType, typename LinkedHashTableObject>
+GateRef LinkedHashTableStubBuilder<LinkedHashTableType, LinkedHashTableObject>::SendableForEach(GateRef thisValue,
+    GateRef linkedTable, GateRef callbackFnHandle, GateRef thisArg)
+{
+    auto env = GetEnvironment();
+    Label entry(env);
+    env->SubCfgEntry(&entry);
+    DEFVARIABLE(res, VariableType::JS_ANY(), Undefined());
+    DEFVARIABLE(index, VariableType::INT32(), Int32(0));
+
+    // The read scope guarantees the table is not rehashed during the iteration:
+    // linkedTable and totalElements stay constant, mirroring the C++ handles.
+    GateRef numberOfElements = GetNumberOfElements(linkedTable);
+    GateRef numberOfDeletedElements = GetNumberOfDeletedElements(linkedTable);
+    GateRef totalElements = Int32Add(numberOfElements, numberOfDeletedElements);
+
+    IR_WHILE (Int32LessThan(*index, totalElements)) {
+        GateRef valueIndex = *index;
+
+        GateRef key = GetKey(linkedTable, *index);
+        index = Int32Add(*index, Int32(1));
+        IR_IF (TaggedIsHole(key)) {
+            IR_CONTINUE();
+        }
+
+        GateRef value;
+        if constexpr (std::is_same_v<LinkedHashTableType, LinkedHashMap>) {
+            value = GetValue(linkedTable, valueIndex);
+        } else {
+            // Set: the forEach callback receives (key, key, set).
+            value = key;
+        }
+        JSCallArgs callArgs(JSCallMode::CALL_THIS_ARG3_WITH_RETURN);
+        callArgs.callThisArg3WithReturnArgs = { thisArg, value, key, thisValue };
+        CallStubBuilder callBuilder(this, glue_, callbackFnHandle, Int32(NUM_MANDATORY_JSFUNC_ARGS), 0, nullptr,
+                                    callArgs, ProfileOperation(), false);
+        GateRef retValue = callBuilder.JSCallDispatch();
+        IR_IF (HasPendingException(glue_)) {
+            res = retValue;
+            IR_BREAK();
+        }
+    }
+    auto ret = *res;
+    env->SubCfgExit();
+    return ret;
+}
+
+template GateRef LinkedHashTableStubBuilder<LinkedHashMap, LinkedHashMapObject>::SendableForEach(GateRef thisValue,
+    GateRef linkedTable, GateRef callbackFnHandle, GateRef thisArg);
+template GateRef LinkedHashTableStubBuilder<LinkedHashSet, LinkedHashSetObject>::SendableForEach(GateRef thisValue,
     GateRef linkedTable, GateRef callbackFnHandle, GateRef thisArg);
 
 template <typename LinkedHashTableType, typename LinkedHashTableObject>

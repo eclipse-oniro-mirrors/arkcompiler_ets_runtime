@@ -308,3 +308,23 @@ map key[forEach]:key:2, value:value2
 map key[forEach]:key:3, value:value3
 map key[forEach]:key:4, value:value4
 ===Class inheritance test end ===
+===map edge cases begin===
+fresh map size: 0
+empty entries done: true, value: undefined
+iterator alias: true
+skip forEach: 1=a
+skip forEach: 3=c
+map forEach cb exception: Error: map forEach cb throw
+map after exception size: 2
+clear empty size: 0
+mix size: 2
+mix size after delete: 1
+mix size after clear: 0
+===map edge cases end===
+===map subclass edge cases begin===
+set existing size: 1, value: b
+Same-key Set Scenario[forEach]: BusinessError: Concurrent modification exception, errCode: 10200201
+submap size: 2
+submap cleared size: 0
+submap has after clear: false
+===map subclass edge cases end===

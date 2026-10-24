@@ -1188,12 +1188,16 @@ function map() {
     print("Start Test map")
     const array = new SendableArray<number>(1, 4, 9, 16);
     print(array.map<string>((x: number) => x + x));
+    const empty = new SendableArray<number>();
+    print(empty.map<string>((x: number) => x + x).length); // 0
 }
 
 function filter() {
     print("Start Test filter")
     const words = new SendableArray<string>('spray', 'elite', 'exuberant', 'destruction', 'present');
     print(words.filter((word: string) => word.length > 6))
+    const empty = new SendableArray<string>();
+    print(empty.filter((word: string) => word.length > 6).length); // 0
     const array2 = new SendableArray<SuperClass>(
       new SubClass(5),
       new SuperClass(12),
@@ -1218,6 +1222,33 @@ function reduce() {
     print(array.reduce((acc: number, currValue: number) => acc + currValue, 10)); // 20
 
     print(array.reduce<string>((acc: number, currValue: number) => "" + acc + " " + currValue, "10")); // 10, 1, 2, 3, 4
+
+    // len == 1 boundary: without initialValue the single element IS the accumulator and
+    // the callback never runs; with initialValue it runs exactly once.
+    const single = new SendableArray<number>(42);
+    let callCount = 0;
+    print(single.reduce((acc: number, currValue: number) => { callCount++; return acc + currValue; })); // 42
+    print(callCount); // 0
+    print(single.reduce((acc: number, currValue: number) => { callCount++; return acc + currValue; }, 100)); // 142
+    print(callCount); // 1
+
+    const array2 = new SendableArray<number>();
+    print(array2.reduce((acc: number, currValue: number) => acc + currValue, 1));
+    print(array2.reduce((acc: number, currValue: number) => acc + currValue, undefined));
+
+    print(array.reduce((acc: number, currValue: number) => acc + currValue, 10, 100)); // 20, extra args ignored
+
+    try {
+       print(array2.reduce((acc: number, currValue: number) => acc + currValue));
+    } catch (err) {
+       print("reduce failed. err: " + err + ", code: " + err.code);
+    }
+
+    try {
+        print(array2.reduce(1, 1));
+    } catch (err) {
+        print("reduce failed. err: " + err + ", code: " + err.code);
+    }
 }
 
 function f0() {
@@ -2350,3 +2381,132 @@ toStringTest();
 toLocaleStringTest();
 subSendableArrayTest();
 allApiTest();
+
+// IR-ization UT supplement for the forEach/map/filter/reduce stubs:
+// callback exception propagation (scope release), concurrent modification
+// (10200201), and result-isolation boundaries.
+function forEachFamilyEdgeCases(): void {
+    print("===forEach family edge cases begin===");
+
+    // forEach: callback exception propagates; array remains usable (scope released).
+    const feEx = new SendableArray<number>(1, 2, 3);
+    try {
+        feEx.forEach((v: number) => {
+            if (v == 2) {
+                throw new Error("forEach cb throw");
+            }
+        });
+    } catch (err) {
+        print("forEach cb exception: " + err);
+    }
+    print("forEach after exception length: " + feEx.length);
+
+    // forEach: write during iteration -> Concurrent modification exception.
+    const feCm = new SendableArray<number>(1, 2);
+    try {
+        feCm.forEach((v: number) => {
+            feCm.push(v);
+        });
+    } catch (err) {
+        print("forEach push concurrent: " + err + ", code: " + err.code);
+    }
+    print("forEach after concurrent length: " + feCm.length);
+
+    // map: result is a new sendable array; source unchanged.
+    const mapSrc = new SendableArray<number>(1, 2, 3);
+    const mapRes = mapSrc.map<number>((x: number) => x * 2);
+    print("map result: " + mapRes + ", source unchanged: " + mapSrc);
+    print("map result is sendable array: " + SendableArray.isArray(mapRes));
+
+    // map: callback exception + concurrent modification.
+    try {
+        mapSrc.map<number>((x: number) => {
+            if (x == 2) {
+                throw new Error("map cb throw");
+            }
+            return x;
+        });
+    } catch (err) {
+        print("map cb exception: " + err);
+    }
+    const mapCm = new SendableArray<number>(1, 2);
+    try {
+        mapCm.map<number>((x: number) => {
+            mapCm.push(x);
+            return x;
+        });
+    } catch (err) {
+        print("map push concurrent: " + err + ", code: " + err.code);
+    }
+
+    // filter: none/all match boundaries.
+    const filterSrc = new SendableArray<number>(1, 2, 3);
+    print("filter none: " + filterSrc.filter((x: number) => x > 10).length);
+    print("filter all: " + filterSrc.filter((x: number) => x > 0));
+
+    // filter: callback exception + concurrent modification.
+    try {
+        filterSrc.filter((x: number) => {
+            if (x == 2) {
+                throw new Error("filter cb throw");
+            }
+            return true;
+        });
+    } catch (err) {
+        print("filter cb exception: " + err);
+    }
+    const filterCm = new SendableArray<number>(1, 2);
+    try {
+        filterCm.filter((x: number) => {
+            filterCm.push(x);
+            return true;
+        });
+    } catch (err) {
+        print("filter push concurrent: " + err + ", code: " + err.code);
+    }
+
+    // reduce: concurrent modification; array unchanged after a normal reduce.
+    const reduceCm = new SendableArray<number>(1, 2, 3);
+    try {
+        reduceCm.reduce((acc: number, v: number) => {
+            reduceCm.push(v);
+            return acc + v;
+        });
+    } catch (err) {
+        print("reduce push concurrent: " + err + ", code: " + err.code);
+    }
+    const reduceSrc = new SendableArray<number>(1, 2, 3);
+    print("reduce sum: " + reduceSrc.reduce((a: number, b: number) => a + b) + ", unchanged: " + reduceSrc);
+
+    print("===forEach family edge cases end===");
+}
+forEachFamilyEdgeCases();
+
+// IR-ization UT supplement: subclass receivers (species result, receiver
+// unchanged) and full callback arguments for the map/filter/reduce stubs.
+function forEachFamilySubclassAndArgs(): void {
+    print("===forEach family subclass and args begin===");
+
+    // map: callback receives (value, index, array) — identity of the third arg.
+    const argSrc = new SendableArray<number>(10, 20, 30);
+    argSrc.map<number>((v: number, i: number, arr: SendableArray<number>) => {
+        print("map cb args: " + v + "," + i + "," + (arr === argSrc));
+        return v;
+    });
+
+    // filter on a subclass receiver: result created via species (the subclass
+    // constructor), receiver unchanged.
+    const sub = new SubSharedClass();
+    sub.push(1);
+    sub.push(2);
+    sub.push(3);
+    print("derived filter result: " + sub.filter((x: number) => x > 1));
+    print("derived filter instanceof: " + (sub.filter((x: number) => x > 1) instanceof SubSharedClass));
+
+    // reduce on a subclass receiver; receiver unchanged.
+    print("derived reduce sum: " + sub.reduce((a: number, b: number) => a + b));
+    print("derived reduce unchanged: " + sub);
+
+    print("===forEach family subclass and args end===");
+}
+forEachFamilySubclassAndArgs();

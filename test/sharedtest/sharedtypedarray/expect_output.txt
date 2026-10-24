@@ -691,6 +691,62 @@ SubSendableArrayBuffer slicedSub[0]: 5
 SubSendableArrayBuffer SendableInt32Array isView: true
 SendableArrayBuffer Int8Array isView: false
 Reflect.apply slice success
+compat wrap 2**32: 0,0
+compat wrap 2**32+5: 5,5
+compat wrap 2**32+4096: 4096,4096
+compat wrap 2**32+5000: 5000,5000
+compat huge offset IR: RangeError: The newByteLength is less than 0.
+compat huge offset C++: RangeError: The newByteLength is less than 0.
+compat huge length IR: RangeError: The newByteLength is out of range.
+compat huge length C++: RangeError: The newByteLength is out of range.
+compat misaligned IR: RangeError: The offset cannot be an integral multiple of elementSize.
+compat misaligned count IR: 1
+compat misaligned C++: RangeError: The offset cannot be an integral multiple of elementSize.
+compat misaligned count C++: 1
+compat obj length IR: 4 count 1
+compat obj length C++: 4 count 1
+compat 2.5: 2,2
+compat '8': 8,8
+compat null: 0,0
+compat -1 IR: RangeError: integerIndex < 0 or integerIndex > SAFE_NUMBER
+compat -1 C++: RangeError: integerIndex < 0 or integerIndex > SAFE_NUMBER
+compat onheap SendableInt8Array: 4096,4096
+compat offheap SendableInt8Array: 4097,4097
+compat roundtrip SendableInt8Array: 42,43
+compat onheap SendableUint8Array: 4096,4096
+compat offheap SendableUint8Array: 4097,4097
+compat roundtrip SendableUint8Array: 42,43
+compat onheap SendableUint8ClampedArray: 4096,4096
+compat offheap SendableUint8ClampedArray: 4097,4097
+compat roundtrip SendableUint8ClampedArray: 42,43
+compat onheap SendableInt16Array: 2048,4096
+compat offheap SendableInt16Array: 2049,4098
+compat roundtrip SendableInt16Array: 42,43
+compat onheap SendableUint16Array: 2048,4096
+compat offheap SendableUint16Array: 2049,4098
+compat roundtrip SendableUint16Array: 42,43
+compat onheap SendableInt32Array: 1024,4096
+compat offheap SendableInt32Array: 1025,4100
+compat roundtrip SendableInt32Array: 42,43
+compat onheap SendableUint32Array: 1024,4096
+compat offheap SendableUint32Array: 1025,4100
+compat roundtrip SendableUint32Array: 42,43
+compat onheap SendableFloat32Array: 1024,4096
+compat offheap SendableFloat32Array: 1025,4100
+compat roundtrip SendableFloat32Array: 42,43
+compat onheap SendableFloat64Array: 512,4096
+compat offheap SendableFloat64Array: 513,4104
+compat roundtrip SendableFloat64Array: 42,43
+compat onheap SendableBigInt64Array: 512,4096
+compat offheap SendableBigInt64Array: 513,4104
+compat roundtrip SendableBigInt64Array: -1,-2
+compat onheap SendableBigUint64Array: 512,4096
+compat offheap SendableBigUint64Array: 513,4104
+compat roundtrip SendableBigUint64Array: 1,2
+compat holey+proto IR: 1,42,3
+compat holey+proto C++: 1,42,3
+compat packed+proto IR: 4,5,6
+compat packed+proto C++: 4,5,6
 ================Test Sendable Atomics================
 SendableInt8Array Atomics: true
 SendableUint8Array Atomics: true

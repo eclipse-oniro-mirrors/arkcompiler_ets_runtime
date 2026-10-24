@@ -84,4 +84,45 @@ sobj.__proto__; // not SetProtoCell
   print(arr[0]);
 }
 
+/*
+ * @tc.name:sharedset_proto_ic
+ * @tc.desc:test SharedSet proto ic (method lookup and size accessor after whitelist enabled)
+ * @tc.type: FUNC
+ * @tc.require: issueI8QUU0
+ */
+// Multi-round SendableSet method calls and size reads: proto IC must be installed after
+// whitelist enabled (ic_runtime.cpp / napi_ic_runtime.cpp), and cached lookup must keep
+// exactly the same behavior as the uncached C++ path.
+{
+  let ss = new SendableSet();
+  for (let i = 0; i < 200; i++) {
+    ss.add(i);
+  }
+  print(ss.size);
+  print(ss.has(100));
+  print(ss.has(1000));
+  let sum = 0;
+  ss.forEach(function (v: number) { sum += v; });
+  print(sum);
+  let vals = ss.values();
+  let cnt = 0;
+  let entry = vals.next();
+  while (!entry.done) {
+    cnt++;
+    entry = vals.next();
+  }
+  print(cnt);
+  print(ss.delete(100));
+  print(ss.has(100));
+  print(ss.size);
+  ss.clear();
+  print(ss.size);
+  // repeat method lookups after mutation to re-exercise cached proto handlers
+  for (let i = 0; i < 50; i++) {
+    ss.add(i);
+  }
+  print(ss.size);
+  print(ss.has(49));
+}
+
 print("shared ic over");

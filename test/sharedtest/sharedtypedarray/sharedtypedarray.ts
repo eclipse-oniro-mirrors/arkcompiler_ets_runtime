@@ -945,6 +945,128 @@ function testReflectApply() {
 
 testReflectApply()
 
+// =================Test Constructor IR/C++ Compatibility================
+// The native constructor runs the IR fast-path stub; a sendable subclass runs
+// the pure C++ TypedArrayHelper path. Both must produce identical results.
+// NOTE: testConstructorCompatPrototypeGuardian() must stay LAST — it
+// invalidates the process-global array-prototype guardians irreversibly.
+
+class CompatSubU8 extends SendableUint8Array {
+  constructor(n: any) { "use sendable"; super(n); }
+}
+class CompatSubI8 extends SendableInt8Array {
+  constructor(b: any, o: any, l: any) { "use sendable"; super(b, o, l); }
+}
+class CompatSubI32 extends SendableInt32Array {
+  constructor(a: any, b: any, c: any) { "use sendable"; super(a, b, c); }
+}
+
+function testConstructorCompatWrap(): void {
+  // Form A length >= 2^32: the C++ wraps via static_cast<uint32_t>
+  // (2^32 -> 0, 2^32+5 -> 5); 2^32+5000 wraps to 5000 whose byteLength
+  // exceeds MAX_ONHEAP_LENGTH (the off-heap window). IR must match C++.
+  print("compat wrap 2**32: " + new SendableUint8Array(2 ** 32).length +
+        "," + new CompatSubU8(2 ** 32).length);
+  print("compat wrap 2**32+5: " + new SendableUint8Array(2 ** 32 + 5).length +
+        "," + new CompatSubU8(2 ** 32 + 5).length);
+  print("compat wrap 2**32+4096: " + new SendableUint8Array(2 ** 32 + 4096).length +
+        "," + new CompatSubU8(2 ** 32 + 4096).length);
+  print("compat wrap 2**32+5000: " + new SendableUint8Array(2 ** 32 + 5000).length +
+        "," + new CompatSubU8(2 ** 32 + 5000).length);
+}
+
+function testConstructorCompatHugeFormB(): void {
+  // Form B offset/length >= 2^31 (HeapNumber inputs): exact C++ RangeErrors.
+  let buf = new SendableArrayBuffer(16);
+  try { new SendableInt8Array(buf, 2 ** 31); } catch (e) { print("compat huge offset IR: " + e); }
+  try { new CompatSubI8(buf, 2 ** 31, undefined); } catch (e) { print("compat huge offset C++: " + e); }
+  try { new SendableInt8Array(buf, 0, 2 ** 31); } catch (e) { print("compat huge length IR: " + e); }
+  try { new CompatSubI8(buf, 0, 2 ** 31); } catch (e) { print("compat huge length C++: " + e); }
+}
+
+function testConstructorCompatValueOfOnce(): void {
+  // User code (valueOf) must execute exactly once per ToIndex conversion on
+  // every path (error and success), matching the C++ entry.
+  let buf = new SendableArrayBuffer(16);
+  let count = 0;
+  const evilOffset: any = { valueOf(): number { count++; return 3; } }; // 3: misaligned for Int32
+  try { new SendableInt32Array(buf, evilOffset); } catch (e) { print("compat misaligned IR: " + e); }
+  print("compat misaligned count IR: " + count);
+  count = 0;
+  try { new CompatSubI32(buf, evilOffset, undefined); } catch (e) { print("compat misaligned C++: " + e); }
+  print("compat misaligned count C++: " + count);
+  count = 0;
+  const evilLen: any = { valueOf(): number { count++; return 4; } };
+  print("compat obj length IR: " + new SendableInt32Array(buf, 0, evilLen).length + " count " + count);
+  count = 0;
+  print("compat obj length C++: " + new CompatSubI32(buf, 0, evilLen).length + " count " + count);
+}
+
+function testConstructorCompatNonSmi(): void {
+  // Non-Smi Form A inputs are routed to the C++ entry; results identical.
+  print("compat 2.5: " + new SendableUint8Array(2.5).length + "," + new CompatSubU8(2.5).length);
+  print("compat '8': " + new SendableUint8Array("8").length + "," + new CompatSubU8("8").length);
+  print("compat null: " + new SendableUint8Array(null).length + "," + new CompatSubU8(null).length);
+  try { new SendableUint8Array(-1); } catch (e) { print("compat -1 IR: " + e); }
+  try { new CompatSubU8(-1); } catch (e) { print("compat -1 C++: " + e); }
+}
+
+function testConstructorCompatOnHeapBoundary(): void {
+  // JSTypedArray::MAX_ONHEAP_LENGTH (4096 bytes) boundary for all 11 sendable
+  // typed arrays: the exact boundary (byteLength == 4096) stays on the IR
+  // on-heap path, one element past it takes the off-heap RTSTUB path — both
+  // must construct correctly (length/byteLength + element roundtrip).
+  const ctors: [any, number][] = [
+    [SendableInt8Array, 1], [SendableUint8Array, 1], [SendableUint8ClampedArray, 1],
+    [SendableInt16Array, 2], [SendableUint16Array, 2],
+    [SendableInt32Array, 4], [SendableUint32Array, 4], [SendableFloat32Array, 4],
+    [SendableFloat64Array, 8], [SendableBigInt64Array, 8], [SendableBigUint64Array, 8],
+  ];
+  for (const item of ctors) {
+    const ctor = item[0];
+    const size = item[1];
+    const onLen = 4096 / size;  // byteLength == MAX_ONHEAP_LENGTH -> on-heap
+    const offLen = onLen + 1;   // byteLength > MAX_ONHEAP_LENGTH -> off-heap
+    let onHeap = new ctor(onLen);
+    let offHeap = new ctor(offLen);
+    print("compat onheap " + ctor.name + ": " + onHeap.length + "," + onHeap.byteLength);
+    print("compat offheap " + ctor.name + ": " + offHeap.length + "," + offHeap.byteLength);
+    if (ctor === SendableBigInt64Array || ctor === SendableBigUint64Array) {
+      onHeap[0] = ctor === SendableBigInt64Array ? -1n : 1n;
+      offHeap[offLen - 1] = ctor === SendableBigInt64Array ? -2n : 2n;
+    } else {
+      onHeap[0] = 42;
+      offHeap[offLen - 1] = 43;
+    }
+    print("compat roundtrip " + ctor.name + ": " + onHeap[0] + "," + offHeap[offLen - 1]);
+  }
+}
+
+function testConstructorCompatPrototypeGuardian(): void {
+  // MUST RUN LAST (the guardian is process-global and irreversible).
+  // After Array.prototype is modified, IsStableJSArray(thread) is false and the
+  // constructor must take the C++ CreateFromOrdinaryObject iterator path, where
+  // array holes read through the modified prototype.
+  Array.prototype[1] = 42;
+  let holey = [1, , 3];
+  let irHoley = new SendableInt32Array(holey);
+  let cppHoley = new CompatSubI32(holey, undefined, undefined);
+  print("compat holey+proto IR: " + irHoley[0] + "," + irHoley[1] + "," + irHoley[2]);
+  print("compat holey+proto C++: " + cppHoley[0] + "," + cppHoley[1] + "," + cppHoley[2]);
+  let packed = [4, 5, 6];
+  let irPacked = new SendableInt32Array(packed);
+  let cppPacked = new CompatSubI32(packed, undefined, undefined);
+  print("compat packed+proto IR: " + irPacked[0] + "," + irPacked[1] + "," + irPacked[2]);
+  print("compat packed+proto C++: " + cppPacked[0] + "," + cppPacked[1] + "," + cppPacked[2]);
+}
+
+testConstructorCompatWrap();
+testConstructorCompatHugeFormB();
+testConstructorCompatValueOfOnce();
+testConstructorCompatNonSmi();
+testConstructorCompatOnHeapBoundary();
+testConstructorCompatPrototypeGuardian();
+
 print("================Test Sendable Atomics================");
 const collectionsAtomics = SendableAtomics;
 function testNumberAtomics(ctor: Function): boolean {

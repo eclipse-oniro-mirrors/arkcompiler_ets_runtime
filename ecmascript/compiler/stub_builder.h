@@ -345,6 +345,9 @@ public:
     GateRef InSharedSweepableSpace(GateRef region);
     GateRef TaggedIsGeneratorObject(GateRef glue, GateRef x);
     GateRef TaggedIsJSArray(GateRef glue, GateRef x);
+    GateRef TaggedIsJSSharedArray(GateRef glue, GateRef x);
+    GateRef TaggedIsJSSharedMap(GateRef glue, GateRef x);
+    GateRef TaggedIsJSSharedSet(GateRef glue, GateRef x);
     GateRef TaggedIsJSProxy(GateRef glue, GateRef x);
     GateRef IsTaggedArray(GateRef glue, GateRef x);
     GateRef TaggedIsAsyncGeneratorObject(GateRef glue, GateRef x);
@@ -1236,8 +1239,10 @@ public:
     inline GateRef GetByteLength(GateRef dataView);
     inline GateRef GetArrayBufferData(GateRef glue, GateRef buffer);
     inline GateRef GetArrayBufferByteLength(GateRef buffer);
+    inline GateRef GetSendableArrayBufferByteLength(GateRef buffer);
     inline void SetArrayBufferByteLength(GateRef glue, GateRef buffer, GateRef length);
     GateRef IsDetachedBuffer(GateRef glue, GateRef buffer);
+    GateRef IsSendableArrayBufferDetached(GateRef glue, GateRef buffer);
     inline GateRef IsMarkerCellValid(GateRef cell);
     inline GateRef GetAccessorHasChanged(GateRef obj);
     inline GateRef ComputeTaggedTypedArraySize(GateRef elementSize, GateRef length);

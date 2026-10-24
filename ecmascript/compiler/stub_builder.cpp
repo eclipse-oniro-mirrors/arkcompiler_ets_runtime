@@ -12476,6 +12476,39 @@ GateRef StubBuilder::IsDetachedBuffer(GateRef glue, GateRef buffer)
     return ret;
 }
 
+// @ref BuiltinsSendableArrayBuffer::IsDetachedBuffer
+GateRef StubBuilder::IsSendableArrayBufferDetached(GateRef glue, GateRef buffer)
+{
+    auto env = GetEnvironment();
+    Label entryPass(env);
+    env->SubCfgEntry(&entryPass);
+    Label isNull(env);
+    Label exit(env);
+    Label isByteArray(env);
+    Label notByteArray(env);
+    DEFVARIABLE(result, VariableType::BOOL(), False());
+    BRANCH(IsByteArray(glue, buffer), &isByteArray, &notByteArray);
+    Bind(&isByteArray);
+    {
+        Jump(&exit);
+    }
+    Bind(&notByteArray);
+    {
+        GateRef dataSlot = Load(VariableType::JS_ANY(), glue, buffer,
+            IntPtr(JSSendableArrayBuffer::DATA_OFFSET));
+        BRANCH(TaggedIsNull(dataSlot), &isNull, &exit);
+        Bind(&isNull);
+        {
+            result = True();
+            Jump(&exit);
+        }
+    }
+    Bind(&exit);
+    auto ret = *result;
+    env->SubCfgExit();
+    return ret;
+}
+
 GateRef StubBuilder::DefineFunc(GateRef glue, GateRef constpool, GateRef index, FunctionKind targetKind)
 {
     auto env = GetEnvironment();

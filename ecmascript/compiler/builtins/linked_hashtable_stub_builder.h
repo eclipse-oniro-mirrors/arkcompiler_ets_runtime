@@ -32,6 +32,11 @@ public:
     GateRef Create(GateRef numberOfElements);
     GateRef Clear(GateRef linkedTable);
     GateRef ForEach(GateRef thisValue, GateRef linkedTable, GateRef callbackFnHandle, GateRef thisArg);
+    // Only for SendableMap / SendableSet. Differs from the legacy ForEach:
+    // 1. Return value: reads the result Variable before SubCfgExit, so the callback's
+    //    call result is actually returned on the exception path.
+    // 2. No next-table chase: under the caller's read scope, GetNextTable is always Hole.
+    GateRef SendableForEach(GateRef thisValue, GateRef linkedTable, GateRef callbackFnHandle, GateRef thisArg);
     GateRef Insert(GateRef linkedTable, GateRef key, GateRef value);
     GateRef Delete(GateRef linkedTable, GateRef key);
     GateRef Has(GateRef linkedTable, GateRef key);

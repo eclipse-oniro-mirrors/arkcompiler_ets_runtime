@@ -30,6 +30,7 @@
 #include "ecmascript/js_set.h"
 #include "ecmascript/js_map.h"
 #include "ecmascript/shared_objects/js_shared_map_iterator.h"
+#include "ecmascript/shared_objects/js_shared_set_iterator.h"
 
 namespace panda::ecmascript::kungfu {
 void NewObjectStubBuilder::NewLexicalEnv(Variable *result, Label *exit, GateRef numSlots, GateRef parent)
@@ -2685,6 +2686,9 @@ void NewObjectStubBuilder::CreateJSSharedMapIterator(
     Variable *result, Label *exit, GateRef thisValue, GateRef kind)
 {
     auto env = GetEnvironment();
+    // The hclass constant already carries proto = SharedMapIteratorPrototype and
+    // extensible = true: Builtins::InitializeSMapIterator sets both on every VM,
+    // so the IR do not need to repeat.
     GateRef iteratorHClass = GetGlobalConstantValue(VariableType::JS_POINTER(), glue_,
         ConstantIndex::JS_SHARED_MAP_ITERATOR_CLASS_INDEX);
     Label noException(env);
@@ -2705,8 +2709,47 @@ void NewObjectStubBuilder::CreateJSSharedMapIterator(
         GateRef nextIndexOffset = IntPtr(JSSharedMapIterator::NEXT_INDEX_OFFSET);
         Store(VariableType::INT32(), glue_, result->ReadVariable(), nextIndexOffset, Int32(0));
 
-        // SetIterationKind
+        // SetIterationKind: full-word store. Safe because the BitField is written exactly
+        // once on a fresh object and IterationKind is its only defined field.
+        // If a second field is added, it must be initialized explicitly.
         GateRef kindBitfieldOffset = IntPtr(JSSharedMapIterator::BIT_FIELD_OFFSET);
+        Store(VariableType::INT32(), glue_, result->ReadVariable(), kindBitfieldOffset, kind);
+        Jump(exit);
+    }
+}
+
+void NewObjectStubBuilder::CreateJSSharedSetIterator(
+    Variable *result, Label *exit, GateRef thisValue, GateRef kind)
+{
+    auto env = GetEnvironment();
+    // The hclass constant already carries proto = SharedSetIteratorPrototype and
+    // extensible = true: Builtins::InitializeSSetIterator sets both on every VM,
+    // so the IR do not need to repeat.
+    GateRef iteratorHClass = GetGlobalConstantValue(VariableType::JS_POINTER(), glue_,
+        ConstantIndex::JS_SHARED_SET_ITERATOR_CLASS_INDEX);
+    Label noException(env);
+    // The C++ entry's exception check after CreateSetIterator (returns Undefined) is
+    // unreachable — OOM aborts in the runtime stub and a pre-existing pending exception
+    // cannot reach a builtin entry — so the IR omits it.
+    AllocateInYoung(result, exit, &noException, iteratorHClass);
+    Bind(&noException);
+    {
+        StoreBuiltinHClass(glue_, result->ReadVariable(), iteratorHClass, RegionSpaceFlag::IN_YOUNG_SPACE);
+        InitializeObject(result);
+
+        // SetIteratedSet
+        GateRef iteratedSetOffset = IntPtr(JSSharedSetIterator::ITERATED_SET_OFFSET);
+        Store(VariableType::JS_POINTER(), glue_, result->ReadVariable(), iteratedSetOffset,
+            thisValue, MemoryAttribute::UnknownBarrier());
+
+        // SetIteratorNextIndex
+        GateRef nextIndexOffset = IntPtr(JSSharedSetIterator::NEXT_INDEX_OFFSET);
+        Store(VariableType::INT32(), glue_, result->ReadVariable(), nextIndexOffset, Int32(0));
+
+        // SetIterationKind: full-word store. Safe because the BitField is written exactly
+        // once on a fresh object and IterationKind is its only defined field.
+        // If a second field is added, it must be initialized explicitly.
+        GateRef kindBitfieldOffset = IntPtr(JSSharedSetIterator::BIT_FIELD_OFFSET);
         Store(VariableType::INT32(), glue_, result->ReadVariable(), kindBitfieldOffset, kind);
         Jump(exit);
     }
@@ -3139,6 +3182,42 @@ void NewObjectStubBuilder::NewByteArray(Variable *result, Label *exit, GateRef e
         Store(VariableType::INT32(), glue_, result->ReadVariable(), IntPtr(ByteArray::BYTE_LENGTH_OFFSET), elementSize);
         Jump(exit);
     }
+}
+
+GateRef NewObjectStubBuilder::NewSByteArray(GateRef glue, GateRef elementSize, GateRef length)
+{
+    auto env = GetEnvironment();
+    Label entry(env);
+    env->SubCfgEntry(&entry);
+
+    Label noError(env);
+    Label initializeExit(env);
+    Label exit(env);
+    DEFVARIABLE(result, VariableType::JS_ANY(), Undefined());
+
+    GateRef size = AlignUp(ComputeTaggedTypedArraySize(ZExtInt32ToPtr(elementSize), ZExtInt32ToPtr(length)),
+        IntPtr(static_cast<size_t>(MemAlignment::MEM_ALIGN_OBJECT)));
+    size_ = size;
+    GateRef hclass = GetGlobalConstantValue(VariableType::JS_POINTER(), glue, ConstantIndex::BYTE_ARRAY_CLASS_INDEX);
+    SetGlue(glue);
+    AllocateInSOld(&result, &noError, hclass);
+    Bind(&noError);
+    {
+        StoreBuiltinHClass(glue, *result, hclass, RegionSpaceFlag::IN_SHARED_OLD_SPACE);
+        auto startOffset = Int32(ByteArray::DATA_OFFSET);
+        static_assert(static_cast<size_t>(MemAlignment::MEM_ALIGN_OBJECT) == 8);
+        InitializeWithSpeicalValue(&initializeExit, *result, Int64(0), startOffset,
+                                   TruncPtrToInt32(size), MemoryAttribute::NoBarrier());
+        Bind(&initializeExit);
+        Store(VariableType::INT32(), glue, *result, IntPtr(ByteArray::ARRAY_LENGTH_OFFSET), length);
+        Store(VariableType::INT32(), glue, *result, IntPtr(ByteArray::BYTE_LENGTH_OFFSET), elementSize);
+        Jump(&exit);
+    }
+
+    Bind(&exit);
+    auto ret = *result;
+    env->SubCfgExit();
+    return ret;
 }
 
 GateRef NewObjectStubBuilder::NewProfileTypeInfoCell(GateRef glue, GateRef value)
