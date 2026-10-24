@@ -4053,6 +4053,33 @@ host_unittest_action("GC_RecordData_Test") {
   deps += hiviewdfx_deps
 }
 
+host_unittest_action("GC_LongStats_Test") {
+  module_out_path = module_output_path
+
+  sources = [
+    # test file
+    "gc_long_stats_test.cpp",
+  ]
+
+  configs = [
+    "../../:asm_interp_enable_config",
+    "../../:ecma_test_config",
+  ]
+
+  deps = [ "../../:libark_jsruntime_test" ]
+
+  # hiviewdfx libraries
+  external_deps = hiviewdfx_ext_deps
+  external_deps += [
+    "icu:shared_icui18n",
+    "icu:shared_icuuc",
+    "runtime_core:libarkassembler_static",
+    "runtime_core:libarkverifier",
+    "zlib:libz",
+  ]
+  deps += hiviewdfx_deps
+}
+
 host_unittest_action("GlobalConstants_Test") {
   module_out_path = module_output_path
 
@@ -4123,6 +4150,7 @@ group("unittest") {
     ":GC_SharedHeap_Test",
     ":GC_KeyStats_Test",
     ":GC_RecordData_Test",
+    ":GC_LongStats_Test",
     ":JS_APIArrayListIterator_Test",
     ":JS_APIArrayList_Test",
     ":JS_APIBitVectorIterator_Test",
@@ -4333,6 +4361,7 @@ group("host_unittest") {
     ":GC_SharedHeap_TestAction",
     ":GC_KeyStats_TestAction",
     ":GC_RecordData_TestAction",
+    ":GC_LongStats_TestAction",
     ":JS_APIArrayListIterator_TestAction",
     ":JS_APIArrayList_TestAction",
     ":JS_APIBitVectorIterator_TestAction",
@@ -4485,6 +4514,7 @@ group("host_unittest") {
       ":GC_SharedHeap_TestAction",
       ":GC_KeyStats_TestAction",
       ":GC_RecordData_TestAction",
+    ":GC_LongStats_TestAction",
       ":JS_APIArrayListIterator_TestAction",
       ":JS_APIArrayList_TestAction",
       ":JS_APIBitVectorIterator_TestAction",
@@ -4609,6 +4639,7 @@ group("host_unittest") {
       ":GC_SharedCC_TestAction",
       ":GC_KeyStats_TestAction",
       ":GC_RecordData_TestAction",
+    ":GC_LongStats_TestAction",
       ":GC_Third_TestAction",
       ":GC_Verification_TestAction",
       ":GC_Verify_TestAction",
