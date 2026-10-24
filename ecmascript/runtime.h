@@ -65,6 +65,7 @@ public:
 
     void SuspendAll(JSThread *current);
     void ResumeAll(JSThread *current);
+    bool TryEnableCrossThreadExecution(JSThread *thread);
     // fixme: support call on js thread
     void FlipAllThreads(DaemonThread *current, Closure *suspendCallback, Closure *flipCallback);
     void SuspendOther(JSThread *current, JSThread *target);

@@ -308,6 +308,21 @@ void Runtime::UnregisterThread(JSThread* thread)
     }
 }
 
+bool Runtime::TryEnableCrossThreadExecution(JSThread *thread)
+{
+    // Recovery may have stopped the owner of threadsLock_ with a signal. Never wait for it here.
+    if (!threadsLock_.TryLock()) {
+        return false;
+    }
+    // Serialize admission with SuspendAll/SuspendOther, including their initiating thread.
+    bool allowed = suspendNewCount_ == 0 && !thread->HasSuspendRequest();
+    if (allowed) {
+        thread->SetCrossThreadExecution(true);
+    }
+    threadsLock_.Unlock();
+    return allowed;
+}
+
 void Runtime::SuspendAll(JSThread *current)
 {
     ASSERT(current == nullptr || !current->IsInRunningState());

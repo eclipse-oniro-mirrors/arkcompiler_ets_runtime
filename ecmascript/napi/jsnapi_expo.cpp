@@ -5206,7 +5206,7 @@ void JSNApi::AllowCrossThreadExecution(EcmaVM *vm)
     vm->GetAssociatedJSThread()->SetCrossThreadExecution(true);
 }
 
-// Enable cross thread execution except in gc process.
+// Enable cross thread execution except during GC or thread suspension.
 bool JSNApi::CheckAndSetAllowCrossThreadExecution(EcmaVM *vm)
 {
     if (ecmascript::g_isEnableCMCGC) {
@@ -5215,8 +5215,11 @@ bool JSNApi::CheckAndSetAllowCrossThreadExecution(EcmaVM *vm)
         if (vm->GetHeap()->InGC() || SharedHeap::GetInstance()->InGC()) {
             return false;
         }
+        if (!ecmascript::Runtime::GetInstance()->TryEnableCrossThreadExecution(vm->GetAssociatedJSThread())) {
+            LOG_ECMA(ERROR) << "cross thread execution rejected: suspension active or thread list busy";
+            return false;
+        }
         LOG_ECMA(WARN) << "enable cross thread execution when not in gc process";
-        vm->GetAssociatedJSThread()->SetCrossThreadExecution(true);
         return true;
     }
 }
