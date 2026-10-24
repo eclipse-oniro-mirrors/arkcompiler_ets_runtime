@@ -918,8 +918,12 @@ config("ecma_test_config") {
     "$js_root:ark_jsruntime_common_config",
   ]
 
+  defines = []
   if (enable_handle_leak_detect) {
-    defines = [ "ENABLE_LOCAL_HANDLE_LEAK_DETECT" ]
+    defines += [ "ENABLE_LOCAL_HANDLE_LEAK_DETECT" ]
+  }
+  if (is_emulator) {
+    defines += [ "IS_EMULATOR" ]
   }
   if (!is_mac) {
     ldflags = [ "-Wl,-rpath=\$ORIGIN/" ]
