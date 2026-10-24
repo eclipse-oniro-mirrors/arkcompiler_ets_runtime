@@ -3587,6 +3587,33 @@ host_unittest_action("GC_Verification_Test") {
   deps += hiviewdfx_deps
 }
 
+host_unittest_action("GC_LongThreshold_Test") {
+  module_out_path = module_output_path
+
+  sources = [
+    # test file
+    "gc_long_threshold_test.cpp",
+  ]
+
+  configs = [
+    "../../:asm_interp_enable_config",
+    "../../:ecma_test_config",
+  ]
+
+  deps = [ "../../:libark_jsruntime_test" ]
+
+  # hiviewdfx libraries
+  external_deps = hiviewdfx_ext_deps
+  external_deps += [
+    "icu:shared_icui18n",
+    "icu:shared_icuuc",
+    "runtime_core:libarkassembler_static",
+    "runtime_core:libarkverifier",
+    "zlib:libz",
+  ]
+  deps += hiviewdfx_deps
+}
+
 host_unittest_action("GC_MachineCode_Test") {
   module_out_path = module_output_path
 
@@ -4117,6 +4144,7 @@ group("unittest") {
     ":GC_Third_Test",
     ":GC_Daemon_Test",
     ":GC_Verification_Test",
+    ":GC_LongThreshold_Test",
     ":GC_Verify_Test",
     ":GC_WeakRefOldGC_Test",
     ":GC_WeakRefSemiGC_Test",
@@ -4256,6 +4284,7 @@ group("unittest") {
       ":GC_Third_Test",
       ":GC_Daemon_Test",
       ":GC_Verification_Test",
+    ":GC_LongThreshold_Test",
       ":GC_Verify_Test",
       ":GC_WeakRefOldGC_Test",
       ":GC_WeakRefSemiGC_Test",
@@ -4327,6 +4356,7 @@ group("host_unittest") {
     ":GC_Taskpool_TestAction",
     ":GC_Third_TestAction",
     ":GC_Verification_TestAction",
+    ":GC_LongThreshold_TestAction",
     ":GC_Verify_TestAction",
     ":GC_WeakRefOldGC_TestAction",
     ":GC_WeakRefSemiGC_TestAction",
@@ -4479,6 +4509,7 @@ group("host_unittest") {
       ":GC_Taskpool_TestAction",
       ":GC_Third_TestAction",
       ":GC_Verification_TestAction",
+    ":GC_LongThreshold_TestAction",
       ":GC_Verify_TestAction",
       ":GC_WeakRefOldGC_TestAction",
       ":GC_WeakRefSemiGC_TestAction",
@@ -4611,6 +4642,7 @@ group("host_unittest") {
       ":GC_RecordData_TestAction",
       ":GC_Third_TestAction",
       ":GC_Verification_TestAction",
+    ":GC_LongThreshold_TestAction",
       ":GC_Verify_TestAction",
       ":GC_WeakRefOldGC_TestAction",
       ":GC_WeakRefSemiGC_TestAction",
