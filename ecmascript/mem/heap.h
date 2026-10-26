@@ -1199,7 +1199,8 @@ private:
     SharedGCMovableMarker *sharedGCMovableMarker_ {nullptr};
     SharedMemController *sharedMemController_ {nullptr};
     ExternalStringTable* externalStringTable_ {nullptr};
-    size_t growingFactor_ {0};
+    double growingFactor_ {0.0};
+    double triggerSharedConcurrentMarkingObjectLimitRate_ {TRIGGER_SHARED_CONCURRENT_MARKING_OBJECT_LIMIT_RATE};
     size_t growingStep_ {0};
     size_t incNativeSizeTriggerSharedCM_ {0};
     size_t incNativeSizeTriggerSharedGC_ {0};

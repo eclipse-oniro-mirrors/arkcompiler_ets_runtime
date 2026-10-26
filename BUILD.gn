@@ -563,6 +563,7 @@ config("ark_jsruntime_common_config") {
   print("############ ets_runtime enable compressed pointer = ${ets_runtime_enable_compressed_pointer} #############")
   if (ets_runtime_enable_compressed_pointer) {
     defines += [ "USE_COMPRESSED_POINTER" ]
+    defines += [ "LOW_MEMORY_DEVICE" ]
   }
   if (is_debug) {
     defines += [ "STORE_CHECK_FOR_COMPRESSED_POINTER" ]

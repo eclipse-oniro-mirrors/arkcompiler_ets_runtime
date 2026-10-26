@@ -17,6 +17,10 @@
 
 #include <algorithm>
 #include <cmath>
+#ifdef LOW_MEMORY_DEVICE
+#include <cstdint>
+#include "common_components/platform/cpu.h"
+#endif
 #include "common_components/taskpool/taskpool.h"
 #include "ecmascript/base/config.h"
 #include "ecmascript/platform/debug_signal.h"
@@ -209,9 +213,18 @@ EcmaVM *EcmaVM::Create(const JSRuntimeOptions &options)
             break;
     }
 #endif
+    auto tier = EcmaParamConfiguration::DeviceMemoryTier::TIER_DEFAULT;
+#ifdef LOW_MEMORY_DEVICE
+    constexpr uint64_t DEVICE_6G_LOWER_BYTES = 5ULL * 1024 * 1024 * 1024;
+    constexpr uint64_t DEVICE_6G_UPPER_BYTES = 7ULL * 1024 * 1024 * 1024;
+    uint64_t deviceRamBytes = common::PhysicalSize();
+    if (deviceRamBytes > DEVICE_6G_LOWER_BYTES && deviceRamBytes < DEVICE_6G_UPPER_BYTES) {
+        tier = EcmaParamConfiguration::DeviceMemoryTier::TIER_6G;
+    }
+#endif
     auto config = EcmaParamConfiguration(heapType,
                                          MemMapAllocator::GetInstance()->GetCapacity(),
-                                         heapSize);
+                                         heapSize, tier);
 #if defined(PANDA_TARGET_OHOS) && !defined(STANDALONE_MODE)
     EcmaVM::InitConfigurableParam(config);
 #endif

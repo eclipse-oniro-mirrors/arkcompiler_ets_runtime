@@ -300,12 +300,12 @@ void SharedHeap::CollectGarbageNearOOM(JSThread *thread)
 // Shared gc trigger
 void SharedHeap::AdjustGlobalSpaceAllocLimit()
 {
-    globalSpaceAllocLimit_ = std::max(GetHeapObjectSize() * growingFactor_,
+    globalSpaceAllocLimit_ = std::max(static_cast<size_t>(GetHeapObjectSize() * growingFactor_),
                                       config_.GetDefaultGlobalAllocLimit());
     globalSpaceAllocLimit_ = std::min(std::min(globalSpaceAllocLimit_, GetCommittedSize() + growingStep_),
                                       config_.GetMaxHeapSize());
     globalSpaceConcurrentMarkLimit_ = static_cast<size_t>(globalSpaceAllocLimit_ *
-                                                          TRIGGER_SHARED_CONCURRENT_MARKING_OBJECT_LIMIT_RATE);
+                                                          triggerSharedConcurrentMarkingObjectLimitRate_);
     constexpr double OBJECT_INCREMENT_FACTOR_FOR_MARK_LIMIT = 1.1;
     size_t markLimitByIncrement = static_cast<size_t>(GetHeapObjectSize() * OBJECT_INCREMENT_FACTOR_FOR_MARK_LIMIT);
     globalSpaceConcurrentMarkLimit_ = std::max(globalSpaceConcurrentMarkLimit_, markLimitByIncrement);
@@ -349,9 +349,10 @@ void SharedHeap::Initialize(NativeAreaAllocator *nativeAreaAllocator, HeapRegion
     size_t readOnlySpaceCapacity = config_.GetDefaultReadOnlySpaceSize();
     size_t oldSpaceCapacity =
         AlignUp((maxHeapSize - nonmovableSpaceCapacity - readOnlySpaceCapacity) / 2, DEFAULT_REGION_SIZE); // 2: half
+    triggerSharedConcurrentMarkingObjectLimitRate_ = config_.GetSharedConcurrentMarkRate();
     globalSpaceAllocLimit_ = config_.GetDefaultGlobalAllocLimit();
     globalSpaceConcurrentMarkLimit_ = static_cast<size_t>(globalSpaceAllocLimit_ *
-                                                          TRIGGER_SHARED_CONCURRENT_MARKING_OBJECT_LIMIT_RATE);
+                                                          triggerSharedConcurrentMarkingObjectLimitRate_);
 
     sOldSpace_ = new SharedOldSpace(this, oldSpaceCapacity, oldSpaceCapacity);
     sCompressSpace_ = new SharedOldSpace(this, oldSpaceCapacity, oldSpaceCapacity);
