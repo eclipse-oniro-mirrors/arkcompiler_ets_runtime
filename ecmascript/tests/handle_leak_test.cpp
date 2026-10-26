@@ -15,6 +15,9 @@
 
 #include <csetjmp>
 #include <csignal>
+#if defined(PANDA_TARGET_OHOS) && defined(IS_EMULATOR)
+#include <sigchain.h>
+#endif
 
 #include "ecmascript/ecma_handle_scope.h"
 #include "ecmascript/global_env.h"
@@ -71,6 +74,9 @@ public:
     static int RegisterSignal()
     {
         segmentFaultFlag = false;
+#if defined(PANDA_TARGET_OHOS) && defined(IS_EMULATOR)
+        remove_all_special_handler(SIGSEGV);
+#endif
         struct sigaction act;
         act.sa_handler = ProcessHandleLeakSegmentFault;
         sigemptyset(&act.sa_mask);

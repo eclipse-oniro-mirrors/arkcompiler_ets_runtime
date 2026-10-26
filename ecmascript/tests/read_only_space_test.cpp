@@ -30,6 +30,9 @@
 #include "common_components/heap/heap_manager.h"
 #include <csetjmp>
 #include <csignal>
+#if defined(PANDA_TARGET_OHOS) && defined(IS_EMULATOR)
+#include <sigchain.h>
+#endif
 #include <sys/syscall.h>
 using namespace panda::ecmascript;
 
@@ -67,6 +70,9 @@ public:
 
     static int RegisterSignal()
     {
+#if defined(PANDA_TARGET_OHOS) && defined(IS_EMULATOR)
+        remove_all_special_handler(SIGSEGV);
+#endif
         struct sigaction act;
         act.sa_handler = ProcessReadOnlySegmentFault;
         sigemptyset(&act.sa_mask);
