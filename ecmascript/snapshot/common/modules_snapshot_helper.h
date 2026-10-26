@@ -130,9 +130,18 @@ public:
     /**
      * @brief Try to disable snapshot feature
      * @param reason reason to disable snapshot, number less than 0 means unknown reason,
+     * @note this entry is used by the sigchain crash handler (signal context),
+     *       it writes the state file via the async-signal-safe PosixFile path.
      */
     static bool TryDisableSnapshot(int reason = -1);
+    /**
+     * @brief Try to disable snapshot feature for uncaught exception
+     * @note runs on normal thread context (called from HasPendingException
+     *       branches / crash-message callbacks, never from a signal handler),
+     *       state file is written via the fdsan-managed PosixFile path.
+     */
     static void TryDisableSnapshot(JSThread* thread);
+    // same normal-thread context as the JSThread* entry above
     static void TryDisableSnapshotOnANR();
     static void DisableSnapshotEscaper();
 
@@ -199,6 +208,10 @@ private:
     static constexpr int CMC_GC_REGION_SIZE = 2;
 
     // utils for escaper
+    // `asyncSafe` == true switches the state file access to the raw syscall
+    // based PosixFile path, which is required when running in signal handler
+    // context; normal-thread entries keep the default (false) fdsan-managed path.
+    template<bool asyncSafe = false>
     static bool TryDisableSnapshot(const std::string_view& reason, const std::string_view& extraInfo = "");
     static bool DoNeedEscape();
     static size_t IntToString(int64_t value, char *buf, size_t bufSize);

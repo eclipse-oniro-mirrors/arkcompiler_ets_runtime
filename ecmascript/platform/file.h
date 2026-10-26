@@ -268,15 +268,29 @@ private:
 };
 
 /**
- * @brief posix file reader/writer, safe to use in signal handler (without malloc)
+ * @brief seek origin of PosixFile::Seek/Tell
  */
+enum class SeekOrigin {
+    SET = 0,
+    CURRENT,
+    END,
+};
+
+/**
+ * @brief posix file reader/writer.
+ *
+ * @tparam asyncSafe when true, libc calls are replaced with raw syscalls so that
+ *         the instance is safe to use in a signal handler (without malloc, and
+ *         bypassing fdsan-instrumented libc wrappers);
+ *         when false, the fdsan owner tag is exchanged on open and the fd is
+ *         closed with the matching tag via fdsan-aware Close().
+ */
+template<bool asyncSafe>
 class PosixFile {
 public:
-    enum class SeekOrigin {
-        SET = 0,
-        CURRENT,
-        END,
-    };
+    // kept as a member alias so that `PosixFile<asyncSafe>::SeekOrigin` keeps working
+    using SeekOrigin = panda::ecmascript::SeekOrigin;
+
     PosixFile(const std::string_view &path, const std::string_view &flags, const std::string_view &mode = DEFAULT_MODE);
     ~PosixFile();
     int64_t Write(const char *data, size_t size);
