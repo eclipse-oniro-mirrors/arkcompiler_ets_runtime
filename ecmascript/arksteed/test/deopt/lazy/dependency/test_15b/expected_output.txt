@@ -16,7 +16,7 @@ After call #4: isCompiled: true
 ----------------
 Before call #5: isCompiled: true
 Test value: 20 eager NaN
-After call #5: isCompiled: true
+After call #5: isCompiled: false
 ----------------
 Before call #6: isCompiled: true
 Test value: 20 3 17

@@ -1372,25 +1372,6 @@ void JSFunction::SetJitCompiledFuncEntry(JSThread *thread, JSHandle<MachineCode>
     SetCompiledFuncEntry(codeEntry, isFastCall, machineCode->GetIsArkSteedCode());
 }
 
-void JSFunction::SetJitHotnessCnt(const JSThread *thread, uint16_t cnt)
-{
-    JSTaggedValue profileTypeInfoVal = GetProfileTypeInfo(thread);
-    if (!profileTypeInfoVal.IsUndefined()) {
-        ProfileTypeInfo *profileTypeInfo = ProfileTypeInfo::Cast(profileTypeInfoVal.GetTaggedObject());
-        profileTypeInfo->SetJitHotnessCnt(cnt);
-    }
-}
-
-uint16_t JSFunction::GetJitHotnessCnt(const JSThread *thread) const
-{
-    JSTaggedValue profileTypeInfoVal = GetProfileTypeInfo(thread);
-    if (!profileTypeInfoVal.IsUndefined()) {
-        ProfileTypeInfo *profileTypeInfo = ProfileTypeInfo::Cast(profileTypeInfoVal.GetTaggedObject());
-        return profileTypeInfo->GetJitHotnessCnt();
-    }
-    return 0;
-}
-
 void JSFunctionBase::ClearCompiledCodeFlags()
 {
     SetBitField(GetBitField() & ~COMPILED_CODE_FLAGS_MASK);

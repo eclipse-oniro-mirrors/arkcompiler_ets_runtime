@@ -13,8 +13,8 @@
  * limitations under the License.
  */
 
-// Zero hotness creates profile info early; the high call threshold prevents automatic JIT during warmup.
-//! PARAMS --asm-interpreter=true --compiler-jit-hotness-threshold=0 --compiler-jit-call-threshold=60000 --compiler-enable-baselinejit=false --enable-elements-kind=true --enable-mutant-array=true --enable-cmc-gc=false
+// A high hotness threshold keeps feedback collection in the interpreter until explicit compilation.
+//! PARAMS --asm-interpreter=true --compiler-jit-hotness-threshold=60000 --compiler-enable-baselinejit=false --enable-elements-kind=true --enable-mutant-array=true --enable-cmc-gc=false
 
 //! METHOD createNumberFeedback
 //! COUNT AllocateInYoung 1

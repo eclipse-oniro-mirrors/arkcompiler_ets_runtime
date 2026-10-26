@@ -14,7 +14,7 @@
  */
 
 // Keep the lack-profile guard disabled so the cold branch reaches the original stub.
-//! PARAMS --asm-interpreter=true --compiler-jit-hotness-threshold=0 --compiler-jit-call-threshold=60000 --compiler-enable-baselinejit=false --enable-cmc-gc=false --compiler-arksteed-deopt-on-insufficient-profile=false
+//! PARAMS --asm-interpreter=true --compiler-jit-hotness-threshold=60000 --compiler-enable-baselinejit=false --enable-cmc-gc=false --compiler-arksteed-deopt-on-insufficient-profile=false
 
 // Unsupported warmed templates must be rejected at compile time, with no partial fast path.
 //! METHOD createString

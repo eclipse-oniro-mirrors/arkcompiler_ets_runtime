@@ -414,9 +414,7 @@ void StubBuilder::SaveJumpSizeIfNeeded(GateRef glue, GateRef jumpSize)
 
 void StubBuilder::SetHotnessCounter(GateRef glue, GateRef method, GateRef value)
 {
-    auto env = GetEnvironment();
-    GateRef newValue = env->GetBuilder()->TruncInt64ToInt16(value);
-    Store(VariableType::INT16(), glue, method, IntPtr(Method::LITERAL_INFO_OFFSET), newValue);
+    Store(VariableType::INT32(), glue, method, IntPtr(Method::HOTNESS_COUNTER_OFFSET), value);
 }
 
 // memory

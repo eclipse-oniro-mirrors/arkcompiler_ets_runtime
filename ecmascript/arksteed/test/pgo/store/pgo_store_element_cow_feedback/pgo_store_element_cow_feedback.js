@@ -54,7 +54,7 @@ print(storeUnseenCOW(warm, "compiled") === "compiled" && ArkTools.arkSteedIsComp
 const lateCOW = literal();
 const sibling = literal();
 print(storeUnseenCOW(lateCOW, "changed") === "changed" && sibling[0] === "first");
-print(ArkTools.isAOTDeoptimized(storeUnseenCOW));
+print(!ArkTools.arkSteedIsCompiled(storeUnseenCOW));
 
 // A later COW hit in a mono IC keeps the existing feedback. Only ArkSteed
 // interprets that feedback, so compiled code must guard an unobserved COW backing.
@@ -78,7 +78,7 @@ ArkTools.waitJitCompileFinish(storeUpgradeMono);
 const monoCOW = literal();
 ArkTools.forceFullGC();
 print(storeUpgradeMono(monoCOW, "mono") === "mono" && sibling[0] === "first" &&
-      ArkTools.isAOTDeoptimized(storeUpgradeMono));
+      !ArkTools.arkSteedIsCompiled(storeUpgradeMono));
 
 // A later COW hit in a poly IC also keeps its handler and requires a JIT guard.
 //! METHOD storeUpgradePoly
@@ -103,4 +103,4 @@ ArkTools.waitJitCompileFinish(storeUpgradePoly);
 const polyCOW = literal();
 ArkTools.forceFullGC();
 print(storeUpgradePoly(polyCOW, "poly") === "poly" && storeUpgradePoly(otherShape, "other") === "other" &&
-      sibling[0] === "first" && ArkTools.isAOTDeoptimized(storeUpgradePoly));
+      sibling[0] === "first" && !ArkTools.arkSteedIsCompiled(storeUpgradePoly));

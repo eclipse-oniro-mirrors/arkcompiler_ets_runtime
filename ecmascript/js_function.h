@@ -449,8 +449,6 @@ public:
     }
 
     void SetJitCompiledFuncEntry(JSThread *thread, JSHandle<MachineCode> &machineCode, bool isFastCall);
-    void SetJitHotnessCnt(const JSThread *thread, uint16_t cnt);
-    uint16_t GetJitHotnessCnt(const JSThread *thread) const;
 
     static void InitializeForConcurrentFunction(JSThread *thread, JSHandle<JSFunction> &func);
 

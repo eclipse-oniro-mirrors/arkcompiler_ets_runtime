@@ -361,13 +361,13 @@ public:
             {JSType::LOCAL_EXPORTENTRY_RECORD, {"ExportName", "LocalName", "LOCAL_EXPORTENTRY_RECORD"}},
             {JSType::MACHINE_CODE_OBJECT, {"MACHINE_CODE_OBJECT"}},
             {JSType::MARKER_CELL, {"MARKER_CELL"}},
-            {JSType::METHOD, {"ConstantPool", "METHOD"}},
+            {JSType::METHOD, {"ConstantPool", "HotnessCounter", "METHOD"}},
             {JSType::MICRO_JOB_QUEUE, {"PromiseJobQueue", "ScriptJobQueue", "MICRO_JOB_QUEUE"}},
             {JSType::MODULE_RECORD, {"MODULE_RECORD"}},
             {JSType::MUTANT_TAGGED_ARRAY, {"MUTANT_TAGGED_ARRAY"}},
             {JSType::NATIVE_MODULE_FAILURE_INFO, {"ArkNativeModuleFailureInfo", "NATIVE_MODULE_FAILURE_INFO"}},
             {JSType::PENDING_JOB, {"Job", "Arguments", "PENDING_JOB"}},
-            {JSType::PROFILE_TYPE_INFO, {"Length", "ExtraInfoMap", "JitOsr", "Data", "PROFILE_TYPE_INFO"}},
+            {JSType::PROFILE_TYPE_INFO, {"Length", "Method", "ExtraInfoMap", "JitOsr", "Data", "PROFILE_TYPE_INFO"}},
             {JSType::PROFILE_TYPE_INFO_CELL_0, {"Value", "MachineCode", "Handle", "PROFILE_TYPE_INFO_CELL_0"}},
             {JSType::PROFILE_TYPE_INFO_CELL_1, {"Value", "MachineCode", "Handle", "PROFILE_TYPE_INFO_CELL_1"}},
             {JSType::PROFILE_TYPE_INFO_CELL_N, {"Value", "MachineCode", "Handle", "PROFILE_TYPE_INFO_CELL_N"}},
@@ -923,7 +923,9 @@ public:
                 LocalExportEntry::SIZE - LocalExportEntry::LOCAL_EXPORT_ENTRY_OFFSET}},
             {JSType::MACHINE_CODE_OBJECT, {MachineCode::LAST_OFFSET - MachineCode::INS_SIZE_OFFSET}},
             {JSType::MARKER_CELL, {MarkerCell::SIZE - MarkerCell::BIT_FIELD_OFFSET}},
-            {JSType::METHOD, {Method::CONSTANT_POOL_OFFSET, Method::LAST_OFFSET - Method::CONSTANT_POOL_OFFSET}},
+            {JSType::METHOD, {Method::CONSTANT_POOL_OFFSET,
+                              Method::HOTNESS_COUNTER_OFFSET,
+                              Method::LAST_OFFSET - Method::CONSTANT_POOL_OFFSET}},
             {JSType::MICRO_JOB_QUEUE, {job::MicroJobQueue::PROMISE_JOB_QUEUE_OFFSET,
                                        job::MicroJobQueue::SCRIPT_JOB_QUEUE_OFFSET,
                                        job::MicroJobQueue::SIZE - job::MicroJobQueue::PROMISE_JOB_QUEUE_OFFSET}},
@@ -937,6 +939,7 @@ public:
                                    job::PendingJob::SIZE - job::PendingJob::ARGUMENT_OFFSET}},
             {JSType::PROFILE_TYPE_INFO, {
                 ProfileTypeInfo::LENGTH_OFFSET,
+                ProfileTypeInfo::METHOD_OFFSET,
                 ProfileTypeInfo::EXTRA_INFO_MAP_OFFSET,
                 ProfileTypeInfo::JIT_OSR_OFFSET,
                 ProfileTypeInfo::DATA_OFFSET,
@@ -1669,7 +1672,8 @@ public:
                 LocalExportEntry::LOCAL_INDEX_OFFSET - LocalExportEntry::LOCAL_NAME_OFFSET}},
             {JSType::MACHINE_CODE_OBJECT, {}},
             {JSType::MARKER_CELL, {}},
-            {JSType::METHOD, {Method::CALL_FIELD_OFFSET - Method::CONSTANT_POOL_OFFSET}},
+            {JSType::METHOD, {Method::CALL_FIELD_OFFSET - Method::CONSTANT_POOL_OFFSET,
+                              Method::LAST_OFFSET - Method::HOTNESS_COUNTER_OFFSET}},
             {JSType::MICRO_JOB_QUEUE, {
                 job::MicroJobQueue::SCRIPT_JOB_QUEUE_OFFSET - job::MicroJobQueue::PROMISE_JOB_QUEUE_OFFSET,
                 job::MicroJobQueue::SIZE - job::MicroJobQueue::SCRIPT_JOB_QUEUE_OFFSET}},
@@ -1681,6 +1685,7 @@ public:
                                    job::PendingJob::SIZE - job::PendingJob::ARGUMENT_OFFSET}},
             {JSType::PROFILE_TYPE_INFO, {
                 ProfileTypeInfo::INVOCATION_COUNT_OFFSET - ProfileTypeInfo::LENGTH_OFFSET,
+                ProfileTypeInfo::EXTRA_INFO_MAP_OFFSET - ProfileTypeInfo::METHOD_OFFSET,
                 ProfileTypeInfo::JIT_OSR_OFFSET - ProfileTypeInfo::EXTRA_INFO_MAP_OFFSET,
                 ProfileTypeInfo::SIZE - ProfileTypeInfo::JIT_OSR_OFFSET,
                 JSTaggedValue::TaggedTypeSize()}},
@@ -4447,11 +4452,12 @@ HWTEST_F_L0(JSMetadataTest, TestProfileTypeInfoMetadata)
 
     tester.ReadAndParseMetadataJson(metadataFilePath, metadata);
     ASSERT_TRUE(metadata.status == JSMetadataTestHelper::INITIALIZED);
-    ASSERT_EQ(metadata.offsets.size(), 4U);
+    ASSERT_EQ(metadata.offsets.size(), 5U);
     EXPECT_EQ(metadata.offsets.at("Length"), std::make_pair(0, 4));
-    EXPECT_EQ(metadata.offsets.at("ExtraInfoMap"), std::make_pair(32, 8));
-    EXPECT_EQ(metadata.offsets.at("JitOsr"), std::make_pair(40, 8));
-    EXPECT_EQ(metadata.offsets.at("Data"), std::make_pair(48, 8));
+    EXPECT_EQ(metadata.offsets.at("Method"), std::make_pair(16, 8));
+    EXPECT_EQ(metadata.offsets.at("ExtraInfoMap"), std::make_pair(24, 8));
+    EXPECT_EQ(metadata.offsets.at("JitOsr"), std::make_pair(32, 8));
+    EXPECT_EQ(metadata.offsets.at("Data"), std::make_pair(40, 8));
     ASSERT_TRUE(tester.Test(JSType::PROFILE_TYPE_INFO, metadata));
 }
 

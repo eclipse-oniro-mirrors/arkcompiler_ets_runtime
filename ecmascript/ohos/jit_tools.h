@@ -69,6 +69,14 @@ public:
         return threshold;
     }
 
+    static uint32_t GetJitIcFeedbackThreshold(uint32_t threshold)
+    {
+#ifdef ENABLE_OHOS_PARAMETER
+        return OHOS::system::GetUintParameter("ark.jit.ic.feedback.threshold", threshold);
+#endif
+        return threshold;
+    }
+
     static bool GetJitDumpObjEanble()
     {
 #ifdef ENABLE_OHOS_PARAMETER

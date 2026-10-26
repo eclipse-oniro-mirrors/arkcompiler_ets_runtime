@@ -526,6 +526,9 @@ namespace panda::ecmascript {
     V(Mod2)                                                    \
     V(SetClassConstructorLength)                               \
     V(UpdateHotnessCounter)                                    \
+    V(TryJitCompile)                                           \
+    V(SubmitJitTask)                                            \
+    V(RefreshHotnessCounter)                                   \
     V(CheckSafePoint)                                          \
     V(PGODump)                                                 \
     V(PGOPreDump)                                              \

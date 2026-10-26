@@ -13,6 +13,8 @@
  * limitations under the License.
  */
 
+// Complete feedback collection before explicitly compiling the polymorphic store.
+//! PARAMS --compiler-jit-hotness-threshold=60000
 //! COMPILE_COUNT_GE *storeElement* 1
 //! EXEC_COUNT_GE *storeElement* 1
 //! DEOPT_COUNT_GE *Deoptimize* 1

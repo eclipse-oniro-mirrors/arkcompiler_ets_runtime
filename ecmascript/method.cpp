@@ -126,7 +126,7 @@ JSHandle<Method> Method::Create(JSThread *thread, const JSPandaFile *jsPandaFile
     }
 
     JSHandle<Method> method;
-    method = vm->GetFactory()->NewSMethod(methodLiteral);
+    method = vm->GetFactory()->NewSMethod(methodLiteral, SHARED_OLD_SPACE, jsPandaFile);
     JSHandle<ConstantPool> newConstpool = vm->FindOrCreateConstPool(jsPandaFile, methodId);
     method->SetConstantPool(thread, newConstpool);
     return method;

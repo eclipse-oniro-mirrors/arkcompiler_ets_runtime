@@ -8,18 +8,23 @@
             "size": 4
         },
         {
+            "name": "Method",
+            "offset": 16,
+            "size": 8
+        },
+        {
             "name": "ExtraInfoMap",
-            "offset": 32,
+            "offset": 24,
             "size": 8
         },
         {
             "name": "JitOsr",
-            "offset": 40,
+            "offset": 32,
             "size": 8
         },
         {
             "name": "Data",
-            "offset": 48,
+            "offset": 40,
             "size": 8
         }
     ],

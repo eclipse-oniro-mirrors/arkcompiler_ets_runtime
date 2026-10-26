@@ -22,8 +22,7 @@ void ProfilerStubBuilder::PGOProfiler(GateRef glue, GateRef pc, GateRef func, Ga
     const std::vector<GateRef> &values, SlotIDFormat format, OperationType type)
 {
     if (type == OperationType::TRUE_BRANCH ||
-        type == OperationType::FALSE_BRANCH ||
-        type == OperationType::TRY_JIT) {
+        type == OperationType::FALSE_BRANCH) {
         SlotIDInfo slotIdInfo(pc, SlotIDInfo::SlotIDInfoType::PC);
         PGOProfiler(glue, func, profileTypeInfo, slotIdInfo, values, type);
     } else {
@@ -230,6 +229,12 @@ void ProfilerStubBuilder::ProfileCall(
         IR_IF (BoolNot(IsProfileTypeInfoHotAndValid(targetProfileInfo))) {
             CallRuntime(glue, RTSTUB_ID(UpdateHotnessCounterWithProf), { target });
         }
+        // Deferred compilation
+        GateRef tieringDecision = GetTieringDecisionFromFunction(glue, target);
+        IR_IF (Int32Equal(tieringDecision,
+            Int32(static_cast<int32_t>(TieringDecision::ARKSTEED_REQUESTED)))) {
+            CallRuntime(glue, RTSTUB_ID(SubmitJitTask), { target });
+        }
         IR_IF (IsProfileTypeInfoHotAndValid(profileTypeInfo)) {
             GateRef slotId = GetSlotID(slotInfo);
             GateRef slotIdNext = Int32Add(slotId, Int32(1));
@@ -275,6 +280,19 @@ void ProfilerStubBuilder::ProfileGetterSetterCall(GateRef glue, GateRef target)
     BRANCH(IsJSFunction(glue, target), &targetIsFunction, &exit);
     Bind(&targetIsFunction);
     {
+        // Deferred compilation
+        Label methodIsRequested(env);
+        Label notRequested(env);
+        GateRef tieringDecision = GetTieringDecisionFromFunction(glue, target);
+        BRANCH(Int32Equal(tieringDecision,
+            Int32(static_cast<int32_t>(TieringDecision::ARKSTEED_REQUESTED))),
+            &methodIsRequested, &notRequested);
+        Bind(&methodIsRequested);
+        {
+            CallRuntime(glue, RTSTUB_ID(SubmitJitTask), { target });
+            Jump(&notRequested);
+        }
+        Bind(&notRequested);
         GateRef targetProfileInfo = GetProfileTypeInfo(glue, target);
         Label targetNonHotness(env);
         BRANCH(TaggedIsUndefined(targetProfileInfo), &targetNonHotness, &exit);
@@ -819,6 +837,40 @@ void ProfilerStubBuilder::SetPreDumpPeriodIndex(GateRef glue, GateRef profileTyp
           Int32(ProfileTypeInfo::PRE_DUMP_PERIOD_INDEX));
 }
 
+GateRef ProfilerStubBuilder::GetTieringDecisionFromFunction(GateRef glue, GateRef func)
+{
+    // Matches Method::GetTieringDecision: the tiering state machine reuses the
+    // deopt count field.
+    GateRef method = GetMethodFromJSFunctionOrProxy(glue, func);
+    GateRef extraLiteralInfo = LoadPrimitive(VariableType::INT64(), method,
+        IntPtr(Method::EXTRA_LITERAL_INFO_OFFSET));
+    GateRef decision = Int64And(
+        Int64LSR(extraLiteralInfo, Int64(Method::DeoptCountBits::START_BIT)),
+        Int64((1ULL << Method::DEOPT_THRESHOLD_BITS) - 1));
+    return TruncInt64ToInt32(decision);
+}
+
+void ProfilerStubBuilder::SetTieringDecisionFromFunction(GateRef glue, GateRef func, GateRef decision)
+{
+    GateRef method = GetMethodFromJSFunctionOrProxy(glue, func);
+    GateRef extraLiteralInfo = LoadPrimitive(VariableType::INT64(), method,
+        IntPtr(Method::EXTRA_LITERAL_INFO_OFFSET));
+    GateRef clearedBits = Int64And(extraLiteralInfo,
+        Int64(static_cast<int64_t>(~Method::DeoptCountBits::Mask())));
+    GateRef newBits = Int64LSL(ZExtInt32ToInt64(decision),
+        Int64(static_cast<int64_t>(Method::DeoptCountBits::START_BIT)));
+    Store(VariableType::INT64(), glue, method, IntPtr(Method::EXTRA_LITERAL_INFO_OFFSET),
+        Int64Or(clearedBits, newBits));
+}
+
+void ProfilerStubBuilder::ResetTieringForRecompile(GateRef glue, GateRef func, GateRef profileTypeInfoCell)
+{
+    Store(VariableType::JS_POINTER(), glue, profileTypeInfoCell,
+        IntPtr(ProfileTypeInfoCell::MACHINE_CODE_OFFSET), Hole());
+    SetTieringDecisionFromFunction(glue, func, Int32(static_cast<int32_t>(TieringDecision::PREHEATED)));
+    CallRuntime(glue, RTSTUB_ID(RefreshHotnessCounter), { func });
+}
+
 GateRef ProfilerStubBuilder::IsCompiledOrTryCompile(GateRef glue, GateRef func, GateRef profileTypeInfo,
                                                     ProfileOperation callback, GateRef pc)
 {
@@ -826,38 +878,6 @@ GateRef ProfilerStubBuilder::IsCompiledOrTryCompile(GateRef glue, GateRef func, 
         return Boolean(true);
     }
     return IsCompiledOrTryCompile(glue, func, profileTypeInfo, pc);
-}
-
-void ProfilerStubBuilder::SetJitHotnessCnt(GateRef glue, GateRef profileTypeInfo, GateRef hotnessCnt)
-{
-    Store(VariableType::INT16(), glue, profileTypeInfo, IntPtr(ProfileTypeInfo::JIT_HOTNESS_CNT_OFFSET),
-          hotnessCnt);
-}
-
-GateRef ProfilerStubBuilder::GetJitHotnessCnt(GateRef profileTypeInfo)
-{
-    GateRef hotnessCnt = LoadPrimitive(
-        VariableType::INT16(), profileTypeInfo, IntPtr(ProfileTypeInfo::JIT_HOTNESS_CNT_OFFSET));
-    return ZExtInt16ToInt32(hotnessCnt);
-}
-
-GateRef ProfilerStubBuilder::GetJitHotnessThreshold(GateRef profileTypeInfo)
-{
-    GateRef hotnessThreshold = LoadPrimitive(
-        VariableType::INT16(), profileTypeInfo, IntPtr(ProfileTypeInfo::JIT_HOTNESS_THRESHOLD_OFFSET));
-    return ZExtInt16ToInt32(hotnessThreshold);
-}
-
-void ProfilerStubBuilder::SetJitCallCnt(GateRef glue, GateRef profileTypeInfo, GateRef jitCallCnt)
-{
-    Store(VariableType::INT16(), glue, profileTypeInfo, IntPtr(ProfileTypeInfo::JIT_CALL_CNT_OFFSET), jitCallCnt);
-}
-
-GateRef ProfilerStubBuilder::GetJitCallCnt(GateRef profileTypeInfo)
-{
-    GateRef jitCallCnt = LoadPrimitive(
-        VariableType::INT16(), profileTypeInfo, IntPtr(ProfileTypeInfo::JIT_CALL_CNT_OFFSET));
-    return ZExtInt16ToInt32(jitCallCnt);
 }
 
 void ProfilerStubBuilder::SetInvocationCnt(GateRef glue, GateRef profileTypeInfo, GateRef invocationCnt)
@@ -871,196 +891,16 @@ GateRef ProfilerStubBuilder::GetInvocationCnt(GateRef profileTypeInfo)
     return LoadPrimitive(VariableType::INT32(), profileTypeInfo, IntPtr(ProfileTypeInfo::INVOCATION_COUNT_OFFSET));
 }
 
-GateRef ProfilerStubBuilder::GetOsrHotnessThreshold(GateRef profileTypeInfo)
+GateRef ProfilerStubBuilder::IsCompiledOrTryCompile(GateRef glue, GateRef func, GateRef profileTypeInfo,
+                                                    [[maybe_unused]] GateRef pc)
 {
-    GateRef hotnessThreshold = LoadPrimitive(
-        VariableType::INT16(), profileTypeInfo, IntPtr(ProfileTypeInfo::OSR_HOTNESS_THRESHOLD_OFFSET));
-    return ZExtInt16ToInt32(hotnessThreshold);
-}
-
-GateRef ProfilerStubBuilder::GetBaselineJitHotnessThreshold(GateRef profileTypeInfo)
-{
-    GateRef hotnessThreshold = LoadPrimitive(
-        VariableType::INT16(), profileTypeInfo, IntPtr(ProfileTypeInfo::BASELINE_JIT_HOTNESS_THRESHOLD_OFFSET));
-    return ZExtInt16ToInt32(hotnessThreshold);
-}
-
-void ProfilerStubBuilder::SetOsrHotnessCnt(GateRef glue, GateRef profileTypeInfo, GateRef osrHotnessCnt)
-{
-    Store(VariableType::INT16(), glue, profileTypeInfo, IntPtr(ProfileTypeInfo::OSR_HOTNESS_CNT_OFFSET),
-          osrHotnessCnt);
-}
-
-GateRef ProfilerStubBuilder::GetOsrHotnessCnt(GateRef profileTypeInfo)
-{
-    GateRef hotnessCnt = LoadPrimitive(
-        VariableType::INT16(), profileTypeInfo, IntPtr(ProfileTypeInfo::OSR_HOTNESS_CNT_OFFSET));
-    return ZExtInt16ToInt32(hotnessCnt);
-}
-
-GateRef ProfilerStubBuilder::IsCompiledOrTryCompile(GateRef glue, [[maybe_unused]] GateRef func,
-    GateRef profileTypeInfo, GateRef pc)
-{
-    auto env = GetEnvironment();
-    Label subEntry(env);
-    env->SubCfgEntry(&subEntry);
-
-    DEFVARIABLE(result, VariableType::BOOL(), False());
-
-    GateRef hotnessThreshold = GetJitHotnessThreshold(profileTypeInfo);
-    GateRef jitCallCnt = GetJitCallCnt(profileTypeInfo);
+    GateRef decision = GetTieringDecisionFromFunction(glue, func);
 
     GateRef invocationCnt = GetInvocationCnt(profileTypeInfo);
     GateRef newInvocationCnt = Int32Add(invocationCnt, Int32(1));
     SetInvocationCnt(glue, profileTypeInfo, newInvocationCnt);
 
-    Label cmpJitCallThreshold(env);
-    Label jitCallNotEqualZero(env);
-    Label setResultAsTrue(env);
-    Label exit(env);
-    Label tryCompile(env);
-
-    Branch(Int32Equal(hotnessThreshold, Int32(ProfileTypeInfo::JIT_DISABLE_FLAG)),
-        &setResultAsTrue, &cmpJitCallThreshold);
-    Bind(&cmpJitCallThreshold);
-
-    BRANCH(Int32Equal(jitCallCnt, Int32(0)), &exit, &jitCallNotEqualZero);
-
-    Bind(&jitCallNotEqualZero);
-    GateRef newJitCallCnt = Int32Sub(jitCallCnt, Int32(1));
-    SetJitCallCnt(glue, profileTypeInfo, TruncInt32ToInt16(newJitCallCnt));
-    BRANCH(Int32Equal(newJitCallCnt, Int32(0)), &tryCompile, &exit);
-    Bind(&tryCompile);
-    TryJitCompile(glue, {0, pc, true}, func, profileTypeInfo);
-    Jump(&exit);
-    Bind(&setResultAsTrue);
-    result = True();
-    Jump(&exit);
-    Bind(&exit);
-    GateRef ret = *result;
-    env->SubCfgExit();
-    return ret;
-}
-
-void ProfilerStubBuilder::TryJitCompile(GateRef glue, OffsetInfo offsetInfo,
-                                        GateRef func, GateRef profileTypeInfo)
-{
-    auto env = GetEnvironment();
-    Label subEntry(env);
-    env->SubCfgEntry(&subEntry);
-    Label equalJitThreshold(env);
-    Label equalBaselineJitThreshold(env);
-    Label notEqualJitThreshold(env);
-    Label checkEqualJitThreshold(env);
-    Label incJitHotnessCntAndCmpOpcode(env);
-    Label incJitHotnessCntAndExit(env);
-    Label cmpOpcode(env);
-    Label cmpOsrThreshold(env);
-    Label equalOsrThreshold(env);
-    Label notEqualOsrThreshold(env);
-    Label incOsrHotnessCnt(env);
-    Label checkFastJit(env);
-    Label checkBaselineJit(env);
-    Label exit(env);
-    Label checkNeedIncHotnessCnt(env);
-    Label callCntEqualZero(env);
-
-    GateRef jitHotnessThreshold = GetJitHotnessThreshold(profileTypeInfo);
-    GateRef jitHotnessCnt = GetJitHotnessCnt(profileTypeInfo);
-    GateRef osrHotnessThreshold = GetOsrHotnessThreshold(profileTypeInfo);
-    GateRef osrHotnessCnt = GetOsrHotnessCnt(profileTypeInfo);
-    GateRef baselineJitHotnessThreshold = GetBaselineJitHotnessThreshold(profileTypeInfo);
-    Branch(Int32Equal(baselineJitHotnessThreshold, Int32(ProfileTypeInfo::JIT_DISABLE_FLAG)),
-        &checkFastJit, &checkBaselineJit);
-
-    Bind(&checkBaselineJit);
-    BRANCH(Int32Equal(jitHotnessCnt, baselineJitHotnessThreshold),
-        &equalBaselineJitThreshold, &checkFastJit);
-    Bind(&equalBaselineJitThreshold);
-    {
-        CallRuntime(glue, RTSTUB_ID(BaselineJitCompile), { func });
-        Jump(&checkFastJit);
-    }
-
-    Bind(&checkFastJit);
-    Branch(Int32Equal(jitHotnessThreshold, Int32(ProfileTypeInfo::JIT_DISABLE_FLAG)),
-        &checkNeedIncHotnessCnt, &checkEqualJitThreshold);
-    Bind(&checkNeedIncHotnessCnt);
-    Branch(Int32Equal(baselineJitHotnessThreshold, Int32(ProfileTypeInfo::JIT_DISABLE_FLAG)),
-        &exit, &incJitHotnessCntAndExit);
-
-    Bind(&checkEqualJitThreshold);
-    BRANCH(Int32Equal(jitHotnessCnt, jitHotnessThreshold), &equalJitThreshold, &notEqualJitThreshold);
-    Bind(&equalJitThreshold);
-    {
-        GateRef jitCallCnt = GetJitCallCnt(profileTypeInfo);
-        BRANCH(Int32Equal(jitCallCnt, Int32(0)), &callCntEqualZero, &exit);
-        Bind(&callCntEqualZero);
-        DEFVARIABLE(varOffset, VariableType::INT32(), Int32(MachineCode::INVALID_OSR_OFFSET));
-        CallRuntime(glue, RTSTUB_ID(JitCompile), { func, IntToTaggedInt(*varOffset) });
-        Jump(&incJitHotnessCntAndExit);
-    }
-    Bind(&notEqualJitThreshold);
-    {
-        BRANCH(Int32LessThan(jitHotnessCnt, jitHotnessThreshold), &incJitHotnessCntAndCmpOpcode, &exit);
-    }
-    Bind(&incJitHotnessCntAndCmpOpcode);
-    {
-#if ECMASCRIPT_ENABLE_JIT_WARMUP_PROFILER
-        CallRuntime(glue, RTSTUB_ID(CountInterpExecFuncs), { func });
-#endif
-        GateRef newJitHotnessCnt = Int16Add(jitHotnessCnt, Int16(1));
-        SetJitHotnessCnt(glue, profileTypeInfo, newJitHotnessCnt);
-        Jump(&cmpOpcode);
-    }
-    Bind(&incJitHotnessCntAndExit);
-    {
-        GateRef newJitHotnessCnt = Int16Add(jitHotnessCnt, Int16(1));
-        SetJitHotnessCnt(glue, profileTypeInfo, newJitHotnessCnt);
-        Jump(&exit);
-    }
-    Bind(&cmpOpcode);
-    {
-        GateRef isJmp = 0;
-        if (offsetInfo.isPc) {
-            GateRef opcode = LoadZeroOffsetPrimitive(VariableType::INT8(), offsetInfo.pc);
-            GateRef jmpImm8 = Int8(static_cast<uint8_t>(EcmaOpcode::JMP_IMM8));
-            GateRef jmpImm16 = Int8(static_cast<uint8_t>(EcmaOpcode::JMP_IMM16));
-            GateRef jmpImm32 = Int8(static_cast<uint8_t>(EcmaOpcode::JMP_IMM32));
-            isJmp = BitOr(Int8Equal(opcode, jmpImm8), Int8Equal(opcode, jmpImm16));
-            isJmp = BitOr(isJmp, Int8Equal(opcode, jmpImm32));
-        } else {
-            isJmp = Boolean(offsetInfo.offset == 0);
-        }
-        BRANCH(isJmp, &cmpOsrThreshold, &exit);
-    }
-    Bind(&cmpOsrThreshold);
-    {
-        BRANCH(Int32Equal(osrHotnessCnt, osrHotnessThreshold), &equalOsrThreshold, &notEqualOsrThreshold);
-    }
-    Bind(&equalOsrThreshold);
-    {
-        GateRef method = GetMethodFromJSFunctionOrProxy(glue, func);
-        GateRef firstPC = LoadPrimitive(VariableType::NATIVE_POINTER(), method,
-            IntPtr(Method::NATIVE_POINTER_OR_BYTECODE_ARRAY_OFFSET));
-        GateRef offset = offsetInfo.isPc ? TaggedPtrToTaggedIntPtr(PtrSub(offsetInfo.pc, firstPC))
-                                         : offsetInfo.offset;
-        CallRuntime(glue, RTSTUB_ID(JitCompile), { func, offset });
-        SetOsrHotnessCnt(glue, profileTypeInfo, Int16(0));
-        Jump(&exit);
-    }
-    Bind(&notEqualOsrThreshold);
-    {
-        BRANCH(Int32LessThan(osrHotnessCnt, osrHotnessThreshold), &incOsrHotnessCnt, &exit);
-    }
-    Bind(&incOsrHotnessCnt);
-    {
-        GateRef newOsrHotnessCnt = Int16Add(osrHotnessCnt, Int16(1));
-        SetOsrHotnessCnt(glue, profileTypeInfo, newOsrHotnessCnt);
-        Jump(&exit);
-    }
-    Bind(&exit);
-    env->SubCfgExit();
+    return Int32Equal(decision, Int32(static_cast<int32_t>(TieringDecision::DISABLED)));
 }
 
 void ProfilerStubBuilder::PGOProfiler(GateRef glue, GateRef func, GateRef profileTypeInfo,
@@ -1099,9 +939,6 @@ void ProfilerStubBuilder::PGOProfiler(GateRef glue, GateRef func, GateRef profil
             break;
         case OperationType::ITERATOR_FUNC_KIND:
             ProfileGetIterator(glue, slotIdInfo, func, values[0], profileTypeInfo);
-            break;
-        case OperationType::TRY_JIT:
-            TryJitCompile(glue, { 0, slotIdInfo.GetPC(), true }, func, profileTypeInfo);
             break;
         default:
             break;

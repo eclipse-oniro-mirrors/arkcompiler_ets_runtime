@@ -267,6 +267,9 @@ private:
                         int32_t offset, JitCompileMode mode);
 #if ECMASCRIPT_ENABLE_ARK_STEED
     static bool IsArkSteedBytecodeSupported(EcmaVM *vm, JSHandle<JSFunction> &jsFunction);
+    bool WaitForInFlightArkSteedTask(EcmaVM *vm, JSHandle<JSFunction> &jsFunction);
+    void SubmitArkSteedCompileTask(EcmaVM *vm, JSHandle<JSFunction> &jsFunction, CompilerTier tier,
+                                   int32_t osrOffset, JitCompileMode mode, TimeScope &timeScope);
 #endif
     void CreateJitResources();
     bool IsLibResourcesResolved() const;

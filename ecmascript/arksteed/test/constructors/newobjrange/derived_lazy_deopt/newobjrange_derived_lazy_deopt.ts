@@ -105,5 +105,5 @@ const beforeColdFinally = finalRuns;
 mode = 1;
 check(constructCold(37), "cold TypeError preserves catch-only value");
 check(runs === beforeCold + 1 && finalRuns === beforeColdFinally + 1, "cold completion exactly once");
-check(ArkTools.arkSteedIsCompiled(constructCold), "cold completion uses compiled catch");
+check(!ArkTools.arkSteedIsCompiled(constructCold), "cold completion deoptimizes the caller");
 print("derived_lazy_deopt passed");

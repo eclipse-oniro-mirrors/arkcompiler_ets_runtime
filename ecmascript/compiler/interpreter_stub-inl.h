@@ -696,8 +696,7 @@ void InterpreterStubBuilder::DispatchDebuggerLast(GateRef glue, GateRef sp, Gate
 
 GateRef InterpreterStubBuilder::GetHotnessCounterFromMethod(GateRef method)
 {
-    GateRef x = LoadPrimitive(VariableType::INT16(), method, IntPtr(Method::LITERAL_INFO_OFFSET));
-    return GetEnvironment()->GetBuilder()->SExtInt1ToInt32(x);
+    return LoadPrimitive(VariableType::INT32(), method, IntPtr(Method::HOTNESS_COUNTER_OFFSET));
 }
 
 void InterpreterStubBuilder::DispatchWithId(GateRef glue, GateRef sp, GateRef pc, GateRef constpool,

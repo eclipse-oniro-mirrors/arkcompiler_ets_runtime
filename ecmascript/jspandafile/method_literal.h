@@ -234,8 +234,9 @@ public:
     static constexpr size_t METHOD_ARGS_METHODID_BITS = 32;
     static constexpr size_t METHOD_EXPECTED_PROPERTY_COUNT_BITS = 32;
     static constexpr size_t METHOD_SLOT_SIZE_BITS = 16;
-    using HotnessCounterBits = BitField<int16_t, 0, METHOD_ARGS_NUM_BITS>; // offset 0-15
-    using MethodIdBits = HotnessCounterBits::NextField<uint32_t, METHOD_ARGS_METHODID_BITS>; // offset 16-47
+
+    using ReservedBits = BitField<int16_t, 0, METHOD_ARGS_NUM_BITS>; // offset 0-15 (reserved)
+    using MethodIdBits = ReservedBits::NextField<uint32_t, METHOD_ARGS_METHODID_BITS>; // offset 16-47
     using SlotSizeBits = MethodIdBits::NextField<uint16_t, METHOD_SLOT_SIZE_BITS>; // offset 48-63
 
     static constexpr size_t FUNCTION_KIND_NUM_BITS = 4;
@@ -250,11 +251,6 @@ public:
         EmptyBit::NextField<uint32_t, METHOD_EXPECTED_PROPERTY_COUNT_BITS>; // offset 32-63
 
     static_assert(static_cast<size_t>(FunctionKind::LAST_FUNCTION_KIND) <= (1 << FUNCTION_KIND_NUM_BITS));
-
-    inline NO_THREAD_SANITIZE void SetHotnessCounter(int16_t counter)
-    {
-        literalInfo_ = HotnessCounterBits::Update(literalInfo_, counter);
-    }
 
     EntityId GetMethodId() const
     {
@@ -345,16 +341,6 @@ public:
     inline bool IsClassConstructor() const
     {
         return GetFunctionKind() == FunctionKind::CLASS_CONSTRUCTOR;
-    }
-
-    static inline int16_t GetHotnessCounter(uint64_t literalInfo)
-    {
-        return HotnessCounterBits::Decode(literalInfo);
-    }
-
-    static uint64_t SetHotnessCounter(uint64_t literalInfo, int16_t counter)
-    {
-        return HotnessCounterBits::Update(literalInfo, counter);
     }
 
     static uint64_t SetFunctionKind(uint64_t extraLiteralInfo, FunctionKind kind)

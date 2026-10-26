@@ -53,7 +53,6 @@ static constexpr uint32_t TWO_BYTE_ALL_ONE = 0xFFFF;
     {                                                                                                          \
         GateRef iVecOffset = IntPtr(JSThread::GlueData::GetInterruptVectorOffset(env->IsArch32Bit()));         \
         GateRef interruptsFlag = LoadPrimitive(VariableType::INT8(), glue, iVecOffset);                        \
-        varHotnessCounter = Int32(EcmaInterpreter::METHOD_HOTNESS_THRESHOLD);                                  \
         Label initialized(env);                                                                                \
         Label callRuntime(env);                                                                                \
         BRANCH(BitOr(TaggedIsUndefined(*varProfileTypeInfo),                                                   \
@@ -79,7 +78,8 @@ static constexpr uint32_t TWO_BYTE_ALL_ONE = 0xFFFF;
         }                                                                                                      \
         Bind(&initialized);                                                                                    \
         (callback).TryDump();                                                                                  \
-        (callback).TryJitCompile();                                                                            \
+        CallRuntime(glue, RTSTUB_ID(TryJitCompile), { func });                                                  \
+        varHotnessCounter = GetHotnessCounterFromMethod(GetMethodFromFunction(glue, func));                    \
         Jump(&dispatch);                                                                                       \
     }                                                                                                          \
     Bind(&dispatch);
@@ -3371,11 +3371,10 @@ void BaselineReturnStubBuilder::GenerateCircuit()
     Bind(&isStable);
     {
         GateRef varProfileTypeInfoVal = *varProfileTypeInfo;
-        GateRef isProfileDumpedAndJitCompiled = LogicAndBuilder(env)
-            .And(ProfilerStubBuilder(env).IsCompiledOrTryCompile(
-                glue, GetFunctionFromFrame(glue, frame), varProfileTypeInfoVal, callback, pc))
-            .And(ProfilerStubBuilder(env).IsProfileTypeInfoDumped(varProfileTypeInfoVal, callback))
-            .Done();
+        GateRef isProfileDumpedAndJitCompiled = BitAnd(
+            ProfilerStubBuilder(env).IsCompiledOrTryCompile(
+                glue, GetFunctionFromFrame(glue, frame), varProfileTypeInfoVal, callback, pc),
+            ProfilerStubBuilder(env).IsProfileTypeInfoDumped(varProfileTypeInfoVal, callback));
         BRANCH(isProfileDumpedAndJitCompiled, &tryContinue, &updateHotness);
     }
     Bind(&updateHotness);
@@ -5643,11 +5642,10 @@ void BaselineReturnundefinedStubBuilder::GenerateCircuit()
     Bind(&isStable);
     {
         GateRef varProfileTypeInfoVal = *varProfileTypeInfo;
-        GateRef isProfileDumpedAndJitCompiled = LogicAndBuilder(env)
-            .And(ProfilerStubBuilder(env).IsCompiledOrTryCompile(
-                glue, GetFunctionFromFrame(glue, frame), varProfileTypeInfoVal, callback, pc))
-            .And(ProfilerStubBuilder(env).IsProfileTypeInfoDumped(varProfileTypeInfoVal, callback))
-            .Done();
+        GateRef isProfileDumpedAndJitCompiled = BitAnd(
+            ProfilerStubBuilder(env).IsCompiledOrTryCompile(
+                glue, GetFunctionFromFrame(glue, frame), varProfileTypeInfoVal, callback, pc),
+            ProfilerStubBuilder(env).IsProfileTypeInfoDumped(varProfileTypeInfoVal, callback));
         BRANCH(isProfileDumpedAndJitCompiled, &tryContinue, &updateHotness);
     }
     Bind(&updateHotness);
@@ -5891,7 +5889,6 @@ void BaselineUpdateHotnessStubBuilder::GenerateCircuit()
     {
         GateRef iVecOffset = IntPtr(JSThread::GlueData::GetInterruptVectorOffset(env->IsArch32Bit()));
         GateRef interruptsFlag = LoadPrimitive(VariableType::INT8(), glue, iVecOffset);
-        varHotnessCounter = Int32(EcmaInterpreter::METHOD_HOTNESS_THRESHOLD);
         Label initialized(env);
         Label callRuntime(env);
         BRANCH(BitOr(TaggedIsUndefined(*varProfileTypeInfo),
@@ -5908,8 +5905,8 @@ void BaselineUpdateHotnessStubBuilder::GenerateCircuit()
             Return();
         }
         Bind(&initialized);
-        ProfilerStubBuilder profiler(this);
-        profiler.TryJitCompile(glue, { offset, 0, false }, func, profileTypeInfo);
+        CallRuntime(glue, RTSTUB_ID(TryJitCompile), { func });
+        varHotnessCounter = GetHotnessCounterFromMethod(method);
         Jump(&exitLabel);
     }
     Bind(&exitLabel);

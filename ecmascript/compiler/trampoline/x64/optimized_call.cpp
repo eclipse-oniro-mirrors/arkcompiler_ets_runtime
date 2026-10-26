@@ -452,6 +452,39 @@ void OptimizedCall::GenJSCall(ExtendedAssembler *assembler, bool isNew)
         Label lCallConstructor;
         Label lNotClass;
         __ Mov(Operand(jsFuncReg, JSFunctionBase::METHOD_OFFSET), method); // get method
+        if (!isNew) {
+            Label noSubmit;
+            // Preserve the method in rdx on the no-submit path.
+            Register extraLiteralInfo = r10;
+            __ Movl(Operand(method, Method::EXTRA_LITERAL_INFO_OFFSET), extraLiteralInfo);
+            __ Shr(Method::DeoptCountBits::START_BIT, extraLiteralInfo);
+            __ Andl((1LU << Method::DeoptCountBits::SIZE) - 1, extraLiteralInfo);
+            __ Cmpl(static_cast<int32_t>(TieringDecision::ARKSTEED_REQUESTED), extraLiteralInfo);
+            __ Jne(&noSubmit);
+            {
+                __ Pushq(rbp);
+                __ Pushq(static_cast<int32_t>(FrameType::OPTIMIZED_JS_FUNCTION_ARGS_CONFIG_FRAME));
+                __ Leaq(Operand(rsp, FRAME_SLOT_SIZE), rbp);
+                __ Pushq(glueReg);
+                // Keep the original tagged JS arguments gc-updated throughout submission.
+                __ Movq(RTSTUB_ID(SubmitJitTask), rsi);
+                __ Movq(Operand(rbp, DOUBLE_SLOT_SIZE), rdx); // original argc
+                __ Leaq(Operand(rbp, QUADRUPLE_SLOT_SIZE), rcx); // skip saved fp, return addr, argc and argv
+                __ CallAssemblerStub(RTSTUB_ID(CallRuntimeWithArgv), false);
+                __ Popq(glueReg);                  // restore glue
+                __ Addq(FRAME_SLOT_SIZE, rsp);
+                __ Popq(rbp);
+                __ Movq(Operand(rsp, TRIPLE_SLOT_SIZE), jsFuncReg);
+                // The runtime call clobbered rax; restore the callee hclass
+                // bit field for the class constructor check below.
+                __ Movq(Operand(jsFuncReg, JSFunction::HCLASS_OFFSET), rax);
+                __ Movabs(TaggedObject::GC_STATE_MASK, rdx);
+                __ And(rdx, rax);
+                __ Movl(Operand(rax, JSHClass::BIT_FIELD_OFFSET), rax);
+                __ Mov(Operand(jsFuncReg, JSFunctionBase::METHOD_OFFSET), method); // reload after runtime call
+            }
+            __ Bind(&noSubmit);
+        }
         __ Movl(Operand(rsp, FRAME_SLOT_SIZE), argc); // skip return addr
         __ Mov(Operand(method, Method::CALL_FIELD_OFFSET), methodCallField); // get call field
         __ Btq(Method::IsNativeBit::START_BIT, methodCallField); // is native

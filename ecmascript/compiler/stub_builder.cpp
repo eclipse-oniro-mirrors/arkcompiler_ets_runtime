@@ -13644,8 +13644,9 @@ void StubBuilder::TryToJitReuseCompiledFunc(GateRef glue, GateRef jsFunc, GateRe
         BRANCH(TaggedIsUndefined(profileTypeInfo), &exitPoint, &hasProfileTypeInfo);
         Bind(&hasProfileTypeInfo);
         {
-            GateRef jitHotnessThreshold = ProfilerStubBuilder(env_).GetJitHotnessThreshold(profileTypeInfo);
-            BRANCH(Int32Equal(jitHotnessThreshold, Int32(ProfileTypeInfo::JIT_DISABLE_FLAG)), &exitPoint, &hasNotDisable);
+            GateRef tieringDecision = ProfilerStubBuilder(env_).GetTieringDecisionFromFunction(glue, jsFunc);
+            BRANCH(Int32Equal(tieringDecision, Int32(static_cast<int32_t>(TieringDecision::DISABLED))),
+                   &exitPoint, &hasNotDisable);
             Bind(&hasNotDisable);
             {
                 Label machineCodeIsUndefine(env_);
@@ -13653,9 +13654,7 @@ void StubBuilder::TryToJitReuseCompiledFunc(GateRef glue, GateRef jsFunc, GateRe
                 BRANCH(TaggedIsUndefined(weakMachineCode), &machineCodeIsUndefine, &machineCodeIsNotUndefine);
                 Bind(&machineCodeIsUndefine);
                 {
-                    ProfilerStubBuilder(env_).SetJitHotnessCnt(glue, profileTypeInfo, Int16(0));
-                    Store(VariableType::JS_POINTER(), glue, profileTypeInfoCell,
-                        IntPtr(ProfileTypeInfoCell::MACHINE_CODE_OFFSET), Hole());
+                    ProfilerStubBuilder(env_).ResetTieringForRecompile(glue, jsFunc, profileTypeInfoCell);
                     Jump(&exitPoint);
                 }
                 Bind(&machineCodeIsNotUndefine);

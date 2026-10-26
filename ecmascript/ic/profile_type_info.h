@@ -30,12 +30,11 @@ namespace panda::ecmascript {
  *
  *      +0x00 | TaggedStateWord
  *      +0x08 | length(32)    |  invocation(32)
- *      +0x10 | period(32)    | jit_hot(16)  | jit_cnt(16)
- *      +0x18 | osr_hot(16)   | osr_cnt(16)  | baseline(16) | call(16)
- *      +0x20 | Reserved (64)
- *      +0x28 | extra_info_map (JSTaggedValue)
- *      +0x30 | jit_osr (JSTaggedValue)
- *      +0x38 | ic_slot[0..length-1] (JSTaggedValue, variable)
+ *      +0x10 | period(32)    | padding(32)
+ *      +0x18 | method
+ *      +0x20 | extra_info_map (JSTaggedValue)
+ *      +0x28 | jit_osr (JSTaggedValue)
+ *      +0x30 | ic_slot[0..length-1] (JSTaggedValue, variable)
  */
 class ProfileTypeInfo : public TaggedObject {
 public:
@@ -47,38 +46,21 @@ public:
 
     ACCESSORS_PRIMITIVE_FIELD(Length, uint32_t, LENGTH_OFFSET, INVOCATION_COUNT_OFFSET)
     ACCESSORS_PRIMITIVE_FIELD(InvocationCount, int32_t, INVOCATION_COUNT_OFFSET, PERIOD_INDEX_OFFSET)
-    ACCESSORS_PRIMITIVE_FIELD(PeriodIndex, uint32_t, PERIOD_INDEX_OFFSET, JIT_HOTNESS_THRESHOLD_OFFSET)
-    ACCESSORS_PRIMITIVE_FIELD(JitHotnessThreshold, uint16_t,
-                              JIT_HOTNESS_THRESHOLD_OFFSET, JIT_HOTNESS_CNT_OFFSET)
-    ACCESSORS_PRIMITIVE_FIELD(JitHotnessCnt, uint16_t,
-                              JIT_HOTNESS_CNT_OFFSET, OSR_HOTNESS_THRESHOLD_OFFSET)
-    ACCESSORS_PRIMITIVE_FIELD(OsrHotnessThreshold, uint16_t,
-                              OSR_HOTNESS_THRESHOLD_OFFSET, OSR_HOTNESS_CNT_OFFSET)
-    ACCESSORS_PRIMITIVE_FIELD(OsrHotnessCnt, uint16_t,
-                              OSR_HOTNESS_CNT_OFFSET, BASELINE_JIT_HOTNESS_THRESHOLD_OFFSET)
-    ACCESSORS_PRIMITIVE_FIELD(BaselineJitHotnessThreshold, uint16_t,
-                              BASELINE_JIT_HOTNESS_THRESHOLD_OFFSET, JIT_CALL_CNT_OFFSET)
-    ACCESSORS_PRIMITIVE_FIELD(JitCallCnt, uint16_t,
-                              JIT_CALL_CNT_OFFSET, RESERVED_OFFSET)
-    ACCESSORS_PRIMITIVE_FIELD(Reserved, uint64_t,
-                              RESERVED_OFFSET, EXTRA_INFO_MAP_OFFSET)
+    ACCESSORS_PRIMITIVE_FIELD(PeriodIndex, uint32_t, PERIOD_INDEX_OFFSET, PADDING_OFFSET)
+    ACCESSORS_PRIMITIVE_FIELD(Padding, uint32_t, PADDING_OFFSET, METHOD_OFFSET)
+    ACCESSORS(Method, METHOD_OFFSET, EXTRA_INFO_MAP_OFFSET)
 
     ACCESSORS(ExtraInfoMap, EXTRA_INFO_MAP_OFFSET, JIT_OSR_OFFSET)
     ACCESSORS(JitOsr, JIT_OSR_OFFSET, SIZE)
 
     static constexpr size_t DATA_OFFSET = SIZE;
     static constexpr uint32_t HEADER_TAGGED_SLOTS =
-        (SIZE - EXTRA_INFO_MAP_OFFSET) / JSTaggedValue::TaggedTypeSize();
+        (SIZE - METHOD_OFFSET) / JSTaggedValue::TaggedTypeSize();
 
     static constexpr size_t INITIAL_PERIOD_INDEX = 0;
     static constexpr size_t PRE_DUMP_PERIOD_INDEX = 1;
     static constexpr size_t DUMP_PERIOD_INDEX = 2;
     static constexpr size_t BIG_METHOD_PERIOD_INDEX = 3;
-    static constexpr size_t INITIAL_OSR_HOTNESS_THRESHOLD = 0;
-    static constexpr size_t INITIAL_OSR_HOTNESS_CNT = 0;
-    static constexpr size_t INITIAL_JIT_CALL_THRESHOLD = 0;
-    static constexpr size_t INITIAL_JIT_CALL_CNT = 0;
-    static constexpr uint16_t JIT_DISABLE_FLAG = 0xFFFF;
 
     static ProfileTypeInfo *Cast(TaggedObject *object)
     {
@@ -152,12 +134,6 @@ public:
     inline void SetSpecialValue()
     {
         SetPeriodIndex(INITIAL_PERIOD_INDEX);
-        SetJitHotnessThreshold(JIT_DISABLE_FLAG);
-        SetJitHotnessCnt(0);
-        SetBaselineJitHotnessThreshold(JIT_DISABLE_FLAG);
-        SetOsrHotnessThreshold(INITIAL_OSR_HOTNESS_THRESHOLD);
-        SetOsrHotnessCnt(INITIAL_OSR_HOTNESS_CNT);
-        SetJitCallCnt(INITIAL_JIT_CALL_CNT);
         SetInvocationCount(0);
     }
 
@@ -242,7 +218,7 @@ public:
         profileTypeInfo->SetExtraInfoMap(thread, dict);
     }
 
-    DECL_VISIT_ARRAY(EXTRA_INFO_MAP_OFFSET, GetLength() + HEADER_TAGGED_SLOTS, GetLength() + HEADER_TAGGED_SLOTS)
+    DECL_VISIT_ARRAY(METHOD_OFFSET, GetLength() + HEADER_TAGGED_SLOTS, GetLength() + HEADER_TAGGED_SLOTS)
 
     DECL_DUMP()
 };

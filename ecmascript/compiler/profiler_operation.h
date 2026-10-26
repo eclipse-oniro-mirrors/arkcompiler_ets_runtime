@@ -34,7 +34,6 @@ enum class OperationType : uint8_t {
     TRY_DUMP,
     TRY_PREDUMP,
     ITERATOR_FUNC_KIND,
-    TRY_JIT,
 };
 
 using SlotIDFormat = BytecodeInstruction::Format;
@@ -115,15 +114,6 @@ public:
     {
         if (callback_) {
             callback_({ }, OperationType::TRY_DUMP);
-        }
-    }
-
-    inline void TryJitCompile() const
-    {
-        if (callback_) {
-            callback_({ }, OperationType::TRY_JIT);
-        } else if (jitCallback_) {
-            jitCallback_({ }, OperationType::TRY_JIT);
         }
     }
 

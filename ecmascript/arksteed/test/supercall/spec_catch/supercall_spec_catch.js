@@ -17,8 +17,7 @@
  * A speculation identity miss deopting into the frame's own never-executed
  * catch: the eager deopt re-executes the supercall in the interpreter, the
  * null [[Prototype]] raises the interpreter-identical TypeError, and the
- * interpreted catch runs. An eager deopt is not an invalidation: the code
- * stays installed.
+ * interpreted catch runs. The eager deopt uninstalls the compiled code.
  */
 
 //! METHOD W

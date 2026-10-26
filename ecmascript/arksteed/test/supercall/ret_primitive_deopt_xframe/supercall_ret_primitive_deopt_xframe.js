@@ -27,6 +27,7 @@
  * super, so the handler only records into an outer variable).
  *
  * - deopt happens: Leaf/Mid leave the compiled state (arkSteedIsCompiled false)
+ * - Bad's eager deopt on the cold branch also uninstalls its compiled code
  * - inner catch wins: innerCaught carries the TypeError message, no exception
  *   escapes to the outer try-catch
  */

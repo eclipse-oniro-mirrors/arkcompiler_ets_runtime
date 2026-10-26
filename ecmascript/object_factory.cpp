@@ -26,6 +26,9 @@
 #include "ecmascript/ic/ic_info.h"
 #include "ecmascript/ic/profile_type_info.h"
 #include "ecmascript/ic/proto_change_details.h"
+#include "ecmascript/interpreter/interpreter.h"
+#include "ecmascript/jit/jit.h"
+#include "ecmascript/jit/tiering_manager.h"
 #include "ecmascript/jobs/pending_job.h"
 #include "ecmascript/js_api/js_api_arraylist.h"
 #include "ecmascript/js_api/js_api_arraylist_iterator.h"
@@ -2315,7 +2318,8 @@ JSHandle<JSFunction> ObjectFactory::NewJSFunctionByHClassWithoutAccessor(const J
     return function;
 }
 
-void ObjectFactory::InitializeMethod(const MethodLiteral *methodLiteral, JSHandle<Method> &method)
+void ObjectFactory::InitializeMethod(const MethodLiteral *methodLiteral, JSHandle<Method> &method,
+                                     const JSPandaFile *jsPandaFile)
 {
     if (methodLiteral != nullptr) {
         method->SetCallField(methodLiteral->GetCallField());
@@ -2333,9 +2337,20 @@ void ObjectFactory::InitializeMethod(const MethodLiteral *methodLiteral, JSHandl
     method->SetCodeEntryOrLiteral(reinterpret_cast<uintptr_t>(methodLiteral));
     method->SetConstantPool<SKIP_BARRIER>(thread_, JSTaggedValue::Undefined());
     method->SetFpDelta(0);
+    uint32_t codeSize = 0;
+    if (methodLiteral != nullptr && jsPandaFile != nullptr) {
+        codeSize = MethodLiteral::GetCodeSize(jsPandaFile, methodLiteral->GetMethodId());
+    }
+    method->SetTieringDecision(TieringDecision::PENDING);
+    if (vm_->IsEnableFastJit()) {
+        method->SetHotnessCounter(TieringManager::HotnessBudgetFor(thread_, method, codeSize));
+    } else {
+        method->SetHotnessCounter(EcmaInterpreter::GetHotnessCounter(codeSize));
+    }
 }
 
-JSHandle<Method> ObjectFactory::NewMethod(const MethodLiteral *methodLiteral, MemSpaceType spaceType)
+JSHandle<Method> ObjectFactory::NewMethod(const MethodLiteral *methodLiteral, MemSpaceType spaceType,
+                                          const JSPandaFile *jsPandaFile)
 {
     NewObjectHook();
     TaggedObject *header = nullptr;
@@ -2347,7 +2362,7 @@ JSHandle<Method> ObjectFactory::NewMethod(const MethodLiteral *methodLiteral, Me
             JSHandle<JSHClass>(thread_->GlobalConstants()->GetHandledMethodClass()));
     }
     JSHandle<Method> method(thread_, header);
-    InitializeMethod(methodLiteral, method);
+    InitializeMethod(methodLiteral, method, jsPandaFile);
     return method;
 }
 
@@ -2359,7 +2374,7 @@ JSHandle<Method> ObjectFactory::NewMethod(const JSPandaFile *jsPandaFile, Method
     if (jsPandaFile->IsNewVersion()) {
         method = Method::Create(thread_, jsPandaFile, methodLiteral);
     } else {
-        method = NewMethod(methodLiteral);
+        method = NewMethod(methodLiteral, OLD_SPACE, jsPandaFile);
         method->SetConstantPool(thread_, constpool);
     }
     if (needSetAotFlag) {
@@ -3737,7 +3752,8 @@ JSHandle<ProtoChangeDetails> ObjectFactory::NewProtoChangeDetails()
     return protoInfo;
 }
 
-JSHandle<ProfileTypeInfo> ObjectFactory::NewProfileTypeInfo(uint32_t icSlotSize)
+JSHandle<ProfileTypeInfo> ObjectFactory::NewProfileTypeInfo(uint32_t icSlotSize,
+                                                            const JSHandle<Method> &method)
 {
     NewObjectHook();
     size_t size = ProfileTypeInfo::ComputeSize(icSlotSize);
@@ -3745,18 +3761,10 @@ JSHandle<ProfileTypeInfo> ObjectFactory::NewProfileTypeInfo(uint32_t icSlotSize)
         JSHandle<JSHClass>(thread_->GlobalConstants()->GetHandledProfileTypeInfoClass()), size);
     JSHandle<ProfileTypeInfo> array(thread_, header);
     array->InitializeWithSpecialValue(JSTaggedValue::Undefined(), icSlotSize);
-    if (vm_->IsEnableFastJit()) {
-        uint16_t threshold = vm_->GetJSOptions().GetJitHotnessThreshold();
-        ASSERT(threshold != ProfileTypeInfo::JIT_DISABLE_FLAG);
-        array->SetJitHotnessThreshold(threshold);
-        threshold = vm_->GetJSOptions().GetOsrHotnessThreshold();
-        array->SetOsrHotnessThreshold(threshold);
-        uint16_t jitCallCnt = vm_->GetJSOptions().GetJitCallThreshold();
-        array->SetJitCallCnt(jitCallCnt);
-    }
-    if (vm_->IsEnableBaselineJit()) {
-        uint16_t threshold = vm_->GetJSOptions().GetBaselineJitHotnessThreshold();
-        array->SetBaselineJitHotnessThreshold(threshold);
+    if (method.IsEmpty()) {
+        array->SetMethod(thread_, JSTaggedValue::Undefined());
+    } else {
+        array->SetMethod(thread_, method);
     }
     return array;
 }

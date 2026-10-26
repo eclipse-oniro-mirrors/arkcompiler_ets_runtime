@@ -235,7 +235,8 @@ JSTaggedValue QuickFixManager::CheckAndGetPatch(JSThread *thread, const JSPandaF
     ASSERT(patchFile != nullptr);
 
     EcmaVM *vm = thread->GetEcmaVM();
-    JSHandle<Method> method = vm->GetFactory()->NewSMethod(patchMethodLiteral);
+    JSHandle<Method> method = vm->GetFactory()->NewSMethod(patchMethodLiteral, SHARED_OLD_SPACE,
+                                                           patchFile.get());
     JSHandle<ConstantPool> newConstpool = vm->FindOrCreateConstPool(
         patchFile.get(), patchMethodLiteral->GetMethodId());
     method->SetConstantPool(thread, newConstpool);

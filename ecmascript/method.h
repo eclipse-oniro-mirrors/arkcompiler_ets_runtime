@@ -30,6 +30,15 @@ namespace panda::ecmascript {
 class JSPandaFile;
 struct Reference;
 using EntityId = panda_file::File::EntityId;
+
+enum class TieringDecision : uint8_t {
+    PENDING,
+    PREHEATED,
+    ARKSTEED_REQUESTED,
+    ARKSTEED_SUBMITTED,
+    DISABLED,
+};
+
 class Method : public TaggedObject {
 public:
     CAST_CHECK(Method, IsMethod);
@@ -225,17 +234,37 @@ public:
         return GetNumVregsWithCallField() + GetNumArgs();
     }
 
-    inline int16_t GetHotnessCounter() const
+    inline int32_t GetHotnessCounter() const
     {
-        uint64_t literalInfo = GetLiteralInfo();
-        return MethodLiteral::GetHotnessCounter(literalInfo);
+        return GetHotnessCounterField();
     }
 
-    inline NO_THREAD_SANITIZE void SetHotnessCounter(int16_t counter)
+    inline NO_THREAD_SANITIZE void SetHotnessCounter(int32_t counter)
     {
-        uint64_t literalInfo = GetLiteralInfo();
-        uint64_t newValue = MethodLiteral::SetHotnessCounter(literalInfo, counter);
-        SetLiteralInfo(newValue);
+        SetHotnessCounterField(counter);
+    }
+
+    uint64_t SetTieringDecision(uint64_t extraLiteralInfo, TieringDecision decision)
+    {
+        return DeoptCountBits::Update(extraLiteralInfo, static_cast<uint8_t>(decision));
+    }
+
+    TieringDecision GetTieringDecision(uint64_t extraLiteralInfo) const
+    {
+        return static_cast<TieringDecision>(DeoptCountBits::Decode(extraLiteralInfo));
+    }
+
+    void SetTieringDecision(TieringDecision decision)
+    {
+        uint64_t extraLiteralInfo = GetExtraLiteralInfo();
+        uint64_t newValue = SetTieringDecision(extraLiteralInfo, decision);
+        SetExtraLiteralInfo(newValue);
+    }
+
+    TieringDecision GetTieringDecision() const
+    {
+        uint64_t extraLiteralInfo = GetExtraLiteralInfo();
+        return GetTieringDecision(extraLiteralInfo);
     }
 
     EntityId GetMethodId() const
@@ -472,10 +501,12 @@ public:
     static constexpr size_t FUNCTION_KIND_NUM_BITS = 4;
     static constexpr size_t DEOPT_THRESHOLD_BITS = 8;
     static constexpr size_t DEOPTTYPE_NUM_BITS = 8;
-    static constexpr size_t FP_DELTA_BITS = 31;
+    static constexpr size_t TIERING_DECISION_BITS = 3;
+    static constexpr size_t FP_DELTA_BITS = 32;
     using FunctionKindBits = BitField<FunctionKind, 0, FUNCTION_KIND_NUM_BITS>; // offset 0-3
     using IsSharedBit = FunctionKindBits::NextFlag; // offset 4
     using BuiltinIdBits = IsSharedBit::NextField<uint16_t, BUILTINID_NUM_BITS>; // offset 5-13
+    // Reused by the ArkSteed tiering state while ArkSteed is the active backend
     using DeoptCountBits = BuiltinIdBits::NextField<uint8_t, DEOPT_THRESHOLD_BITS>; // offset 14-21
     using DeoptTypeBits = DeoptCountBits::NextField<kungfu::DeoptType, DEOPTTYPE_NUM_BITS>; // offset 22-29
     using IsCallNapiBit = DeoptTypeBits::NextFlag; // offset 30
@@ -491,11 +522,11 @@ public:
         NativePointerOrBytecodeArray, void, NATIVE_POINTER_OR_BYTECODE_ARRAY_OFFSET, CODEENTRY_LITERAL_OFFSET)
     ACCESSORS_SYNCHRONIZED_PRIMITIVE_FIELD(
         CodeEntryOrLiteral, uintptr_t, CODEENTRY_LITERAL_OFFSET, LITERAL_INFO_OFFSET)
-    // hotness counter is encoded in a js method field, the first uint16_t in a uint64_t.
     ACCESSORS_PRIMITIVE_FIELD(LiteralInfo, uint64_t, LITERAL_INFO_OFFSET, EXTRA_LITERAL_INFO_OFFSET)
     ACCESSORS_SYNCHRONIZED_PRIMITIVE_FIELD(
         ExtraLiteralInfo, uint64_t, EXTRA_LITERAL_INFO_OFFSET, EXPECTED_PROPERTY_COUNT_OFFSET)
-    ACCESSORS_PRIMITIVE_FIELD(ExpectedPropertyCount, uint32_t, EXPECTED_PROPERTY_COUNT_OFFSET, LAST_OFFSET)
+    ACCESSORS_PRIMITIVE_FIELD(ExpectedPropertyCount, uint32_t, EXPECTED_PROPERTY_COUNT_OFFSET, HOTNESS_COUNTER_OFFSET)
+    ACCESSORS_PRIMITIVE_FIELD(HotnessCounterField, int32_t, HOTNESS_COUNTER_OFFSET, LAST_OFFSET)
     DEFINE_ALIGN_SIZE(LAST_OFFSET);
 
     DECL_VISIT_OBJECT(CONSTANT_POOL_OFFSET, CALL_FIELD_OFFSET);

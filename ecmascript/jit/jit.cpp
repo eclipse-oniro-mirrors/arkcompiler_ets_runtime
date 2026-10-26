@@ -69,10 +69,14 @@ void Jit::SetJitEnablePostFork(EcmaVM *vm, const std::string &bundleName)
         options.SetEnableAPPJIT(true);
         isApp_ = true;
         // for app threshold
-        uint32_t defaultSize = 150;
+        // 400/500 is set to align with jsvm
+        uint32_t defaultSize = 400;
         uint32_t threshold = ohos::JitTools::GetJitHotnessThreshold(defaultSize);
         options.SetJitHotnessThreshold(threshold);
         hotnessThreshold_ = threshold;
+        uint32_t defaultIcFeedback = 500;
+        uint32_t jitIcFeedbackThreshold = ohos::JitTools::GetJitIcFeedbackThreshold(defaultIcFeedback);
+        options.SetJitIcFeedbackThreshold(jitIcFeedbackThreshold);
         bundleName_ = bundleName;
         SetEnableOrDisable(options, isEnableFastJit, isEnableBaselineJit);
         if (fastJitEnable_ || baselineJitEnable_) {
@@ -124,6 +128,10 @@ void Jit::ConfigOptions(EcmaVM *vm) const
     uint32_t jitHotnessThreshold = GetHotnessThreshold();
     options.SetJitHotnessThreshold(jitHotnessThreshold);
 
+    uint32_t jitIcFeedbackThreshold = ohos::JitTools::GetJitIcFeedbackThreshold(
+        options.GetJitIcFeedbackThreshold());
+    options.SetJitIcFeedbackThreshold(jitIcFeedbackThreshold);
+
     bool jitDisableCodeSign = ohos::JitTools::GetCodeSignDisable(options.GetDisableCodeSign());
     options.SetDisableCodeSign(jitDisableCodeSign);
 
@@ -145,6 +153,7 @@ void Jit::ConfigOptions(EcmaVM *vm) const
         ", litecg:" << jitEnableLitecg <<
         ", call threshold:" << static_cast<int>(jitCallThreshold) <<
         ", hotness threshold:" << jitHotnessThreshold <<
+        ", ic feedback threshold:" << jitIcFeedbackThreshold <<
         ", disable codesigner:" << jitDisableCodeSign;
 }
 
@@ -547,6 +556,16 @@ bool Jit::IsArkSteedBytecodeSupported(EcmaVM *vm, JSHandle<JSFunction> &jsFuncti
     return true;
 }
 
+bool Jit::WaitForInFlightArkSteedTask(EcmaVM *vm, JSHandle<JSFunction> &jsFunction)
+{
+    JSThread *hostThread = vm->GetJSThread();
+    while (jsFunction->IsJitCompiling() && GetRunningTaskCnt(vm) > 0) {
+        hostThread->SetInstallMachineCode(true);
+        hostThread->CheckSafepoint();
+    }
+    return jsFunction->IsCompiledCode();
+}
+
 // ArkSteed compilation entry point
 void Jit::CompileArkSteed(EcmaVM *vm, JSHandle<JSFunction> &jsFunction,
                           CompilerTier tier, int32_t osrOffset, JitCompileMode mode)
@@ -559,6 +578,12 @@ void Jit::CompileArkSteed(EcmaVM *vm, JSHandle<JSFunction> &jsFunction,
 
     if (!vm->IsEnableOsr() && osrOffset != MachineCode::INVALID_OSR_OFFSET) {
         return;
+    }
+
+    if (mode.IsSync() && jsFunction->IsJitCompiling()) {
+        if (jit->WaitForInFlightArkSteedTask(vm, jsFunction)) {
+            return;
+        }
     }
 
     CompileDecision compileDecision(vm, jsFunction, tier, osrOffset, mode);
@@ -588,37 +613,45 @@ void Jit::CompileArkSteed(EcmaVM *vm, JSHandle<JSFunction> &jsFunction,
     }
     jit->GetJitDfx()->SetTriggerCount(tier);
 
+    jit->SubmitArkSteedCompileTask(vm, jsFunction, tier, osrOffset, mode, scope);
+}
+
+void Jit::SubmitArkSteedCompileTask(EcmaVM *vm, JSHandle<JSFunction> &jsFunction, CompilerTier tier,
+                                    int32_t osrOffset, JitCompileMode mode, TimeScope &timeScope)
+{
     {
-        {
-            ThreadNativeScope scope(vm->GetJSThread());
-            JitTaskpool::GetCurrentTaskpool()->WaitForJitTaskPoolReady();
-        }
-
-        EcmaVM *compilerVm = JitTaskpool::GetCurrentTaskpool()->GetCompilerVm();
-        JSThread *hostThread = vm->GetJSThread();
-        JSThread *compilerThread = compilerVm->GetJSThreadNoCheck();
-
-        Method *method = Method::Cast(jsFunction->GetMethod(hostThread).GetTaggedObject());
-        CString methodName = method->GetMethodName(hostThread);
-
-        auto arkSteedTask = std::make_shared<arksteed::ArkSteedTask>(
-            hostThread, compilerThread, jit, jsFunction, tier, methodName, osrOffset, mode);
-
-        arkSteedTask->PrepareCompile();
-
-        JitTaskpool::GetCurrentTaskpool()->PostTask(
-            std::make_unique<arksteed::ArkSteedTask::AsyncTask>(
-                arkSteedTask, vm->GetJSThread()->GetThreadId()));
-
-        if (mode.IsSync()) {
-            arkSteedTask->WaitFinish();
-            arkSteedTask->InstallCode();
-        }
-
-        int spendTime = scope.TotalSpentTimeInMicroseconds();
-        arkSteedTask->SetMainThreadCompilerTime(spendTime);
-        jit->GetJitDfx()->RecordSpentTimeAndPrintStatsLogInJsThread(spendTime);
+        ThreadNativeScope scope(vm->GetJSThread());
+        JitTaskpool::GetCurrentTaskpool()->WaitForJitTaskPoolReady();
     }
+
+    EcmaVM *compilerVm = JitTaskpool::GetCurrentTaskpool()->GetCompilerVm();
+    JSThread *hostThread = vm->GetJSThread();
+    JSThread *compilerThread = compilerVm->GetJSThreadNoCheck();
+
+    Method *method = Method::Cast(jsFunction->GetMethod(hostThread).GetTaggedObject());
+    CString methodName = method->GetMethodName(hostThread);
+
+    auto arkSteedTask = std::make_shared<arksteed::ArkSteedTask>(
+        hostThread, compilerThread, this, jsFunction, tier, methodName, osrOffset, mode);
+
+    arkSteedTask->PrepareCompile();
+
+    JitTaskpool::GetCurrentTaskpool()->PostTask(
+        std::make_unique<arksteed::ArkSteedTask::AsyncTask>(
+            arkSteedTask, vm->GetJSThread()->GetThreadId()));
+
+    if (mode.IsSync()) {
+        {
+            // move to native scope to avoid deadlock among (MAIN, GC. JIT) threads
+            ThreadNativeScope scope(vm->GetJSThread());
+            arkSteedTask->WaitFinish();
+        }
+        arkSteedTask->InstallCode();
+    }
+
+    int spendTime = timeScope.TotalSpentTimeInMicroseconds();
+    arkSteedTask->SetMainThreadCompilerTime(spendTime);
+    GetJitDfx()->RecordSpentTimeAndPrintStatsLogInJsThread(spendTime);
 }
 #endif
 }  // namespace panda::ecmascript

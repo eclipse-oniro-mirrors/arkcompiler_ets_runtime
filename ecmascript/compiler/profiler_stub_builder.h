@@ -71,12 +71,6 @@ private:
     SlotIDFormat format_ = SlotIDFormat::IMM16;
 };
 
-struct OffsetInfo {
-    GateRef offset = 0;
-    GateRef pc = 0;
-    bool isPc = true;
-};
-
 class ProfilerStubBuilder : public StubBuilder {
 public:
     explicit ProfilerStubBuilder(StubBuilder *parent) : StubBuilder(parent) {}
@@ -120,12 +114,12 @@ public:
 
     GateRef IsProfileTypeInfoDumped(GateRef profileTypeInfo, ProfileOperation callback);
 
-    void TryJitCompile(GateRef glue, OffsetInfo opCodeInfo, GateRef func, GateRef profileTypeInfo);
+    GateRef GetTieringDecisionFromFunction(GateRef glue, GateRef func);
+    void SetTieringDecisionFromFunction(GateRef glue, GateRef func, GateRef decision);
+    void ResetTieringForRecompile(GateRef glue, GateRef func, GateRef profileTypeInfoCell);
     GateRef IsCompiledOrTryCompile(GateRef glue, GateRef func, GateRef profileTypeInfo, ProfileOperation callback,
         GateRef pc);
     GateRef IsCompiledOrTryCompile(GateRef glue, GateRef func, GateRef profileTypeInfo, GateRef pc);
-    GateRef GetJitHotnessThreshold(GateRef profileTypeInfo);
-    void SetJitHotnessCnt(GateRef glue, GateRef profileTypeInfo, GateRef hotnessCnt);
 
 private:
     static constexpr size_t MAX_PROFILE_CALL_COUNT = 10000;
@@ -147,15 +141,8 @@ private:
     GateRef TaggedToTrackType(GateRef value);
     GateRef GetIterationFunctionId(GateRef glue, GateRef iterator);
     GateRef TryGetBuiltinFunctionId(GateRef glue, GateRef target);
-    GateRef GetJitHotnessCnt(GateRef profileTypeInfo);
-    void SetJitCallCnt(GateRef glue, GateRef profileTypeInfo, GateRef jitCallCnt);
-    GateRef GetJitCallCnt(GateRef profileTypeInfo);
     void SetInvocationCnt(GateRef glue, GateRef profileTypeInfo, GateRef invocationCnt);
     GateRef GetInvocationCnt(GateRef profileTypeInfo);
-    GateRef GetOsrHotnessThreshold(GateRef profileTypeInfo);
-    GateRef GetBaselineJitHotnessThreshold(GateRef profileTypeInfo);
-    void SetOsrHotnessCnt(GateRef glue, GateRef profileTypeInfo, GateRef osrHotnessCnt);
-    GateRef GetOsrHotnessCnt(GateRef profileTypeInfo);
     void PGOProfiler(GateRef glue, GateRef func, GateRef profileTypeInfo, SlotIDInfo slotIdInfo,
         const std::vector<GateRef> &values, OperationType type);
 };

@@ -14,7 +14,7 @@
  */
 
 // Warm templates without automatic compilation; use ordinary GC explicitly.
-//! PARAMS --asm-interpreter=true --compiler-jit-hotness-threshold=0 --compiler-jit-call-threshold=60000 --compiler-enable-baselinejit=false --enable-cmc-gc=false
+//! PARAMS --asm-interpreter=true --compiler-jit-hotness-threshold=60000 --compiler-enable-baselinejit=false --enable-cmc-gc=false
 
 //! METHOD create32
 //! HAS_NOT BranchIfInt32Compare

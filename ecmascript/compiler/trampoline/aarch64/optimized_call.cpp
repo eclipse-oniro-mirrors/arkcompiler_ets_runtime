@@ -452,6 +452,42 @@ void OptimizedCall::JSCallInternal(ExtendedAssembler *assembler, Register jsfunc
     JSCallCheck(assembler, jsfunc, taggedValue, &nonCallable, &notJSFunction);
 
     Register method = x2;
+    __ Mov(x5, taggedValue); // reuse the class bit field loaded by JSCallCheck
+    __ Ldr(method, MemoryOperand(jsfunc, JSFunction::METHOD_OFFSET));
+    if (!isNew) {
+        Label noSubmit;
+        Register extraLiteralInfo = x6;
+        __ Ldr(extraLiteralInfo.W(), MemoryOperand(method, Method::EXTRA_LITERAL_INFO_OFFSET));
+        __ Lsr(extraLiteralInfo.W(), extraLiteralInfo.W(), Method::DeoptCountBits::START_BIT);
+        __ And(extraLiteralInfo.W(), extraLiteralInfo.W(),
+            LogicalImmediate::Create((1LU << Method::DeoptCountBits::SIZE) - 1, W_REG_SIZE));
+        __ Cmp(extraLiteralInfo.W(), Immediate(static_cast<int32_t>(TieringDecision::ARKSTEED_REQUESTED)));
+        __ B(Condition::NE, &noSubmit);
+        {
+            __ PushFpAndLr();
+            Register frameType = x6;
+            __ Mov(frameType, Immediate(static_cast<int64_t>(FrameType::OPTIMIZED_JS_FUNCTION_ARGS_CONFIG_FRAME)));
+            __ Stp(xzr, frameType, MemoryOperand(sp, -DOUBLE_SLOT_SIZE, AddrMode::PREINDEX));
+            __ Add(fp, sp, Immediate(DOUBLE_SLOT_SIZE));
+            __ Stp(xzr, glue, MemoryOperand(sp, -DOUBLE_SLOT_SIZE, AddrMode::PREINDEX));
+            // Keep the original tagged JS arguments gc-updated throughout submission.
+            __ Mov(x1, Immediate(RTSTUB_ID(SubmitJitTask)));
+            __ Ldr(x2, MemoryOperand(fp, DOUBLE_SLOT_SIZE)); // original argc
+            __ Add(x3, fp, Immediate(QUADRUPLE_SLOT_SIZE)); // skip saved fp, lr, argc and argv
+            __ CallAssemblerStub(RTSTUB_ID(CallRuntimeWithArgv), false);
+            __ Ldp(xzr, glue, MemoryOperand(sp, DOUBLE_SLOT_SIZE, AddrMode::POSTINDEX)); // restore glue
+            __ Add(sp, sp, Immediate(DOUBLE_SLOT_SIZE));
+            __ RestoreFpAndLr();
+            __ Ldr(jsfunc, MemoryOperand(sp, DOUBLE_SLOT_SIZE));
+            // Reload heap references and the class bit field after the runtime call.
+            __ Ldr(x5, MemoryOperand(jsfunc, JSFunction::HCLASS_OFFSET));
+            __ And(x5, x5, LogicalImmediate::Create(TaggedObject::GC_STATE_MASK, X_REG_SIZE));
+            __ Ldr(x5, MemoryOperand(x5, JSHClass::BIT_FIELD_OFFSET));
+            __ Ldr(method, MemoryOperand(jsfunc, JSFunction::METHOD_OFFSET));
+        }
+        __ Bind(&noSubmit);
+    }
+
     Register callField = x3;
     Register actualArgC = x4;
     Label callNativeMethod;
@@ -460,10 +496,6 @@ void OptimizedCall::JSCallInternal(ExtendedAssembler *assembler, Register jsfunc
     Label lCallNativeCpp;
     Label lNotClass;
 
-    __ Ldr(x5, MemoryOperand(jsfunc, JSFunction::HCLASS_OFFSET));
-    __ And(x5, x5, LogicalImmediate::Create(TaggedObject::GC_STATE_MASK, X_REG_SIZE));
-    __ Ldr(x5, MemoryOperand(x5, JSHClass::BIT_FIELD_OFFSET));
-    __ Ldr(method, MemoryOperand(jsfunc, JSFunction::METHOD_OFFSET));
     __ Ldr(actualArgC, MemoryOperand(sp, 0));
     __ Ldr(callField, MemoryOperand(method, Method::CALL_FIELD_OFFSET));
     __ Tbnz(callField, Method::IsNativeBit::START_BIT, &callNativeMethod);

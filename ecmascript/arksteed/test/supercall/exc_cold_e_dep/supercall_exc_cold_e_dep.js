@@ -18,8 +18,8 @@
  * frame: the caller reads obj.x (prototype-chain dependency) before super(),
  * the derived super returns a primitive on the probe, and the dependency is
  * left untouched. The registered D point must not interfere with the
- * exception dispatch at the cold call site, and the function stays compiled
- * because an exception settlement does not uninstall the code.
+ * exception dispatch at the cold call site. Exception deoptimization uninstalls
+ * the code even though the dependency itself remains valid.
  */
 
 //! PARAMS --compiler-jit-hotness-threshold=60000

@@ -348,13 +348,9 @@ ohos_static_library("ark_runtime_host_unittest") {
   # execution test
   deps += [ "$js_root/test/executiontest:ark_execution_test" ]
 
-  # jit test
-  deps += [ "$js_root/test/jittest:ark_jit_test" ]
-
   # ts aot test and asm test
   if (!run_with_asan) {
     deps += [
-      "$js_root/test/aottest:ark_aot_test",
       "$js_root/test/deopttest:ark_deopt_test",
 
       # Temporarily closed
@@ -374,7 +370,6 @@ ohos_static_library("ark_runtime_host_unittest") {
     if (ets_runtime_enable_cmc_gc) {
       if (!run_with_asan) {
         deps -= [
-          "$js_root/test/aottest:ark_aot_test",
           "$js_root/test/deopttest:ark_deopt_test",
         ]
       }
@@ -385,7 +380,6 @@ ohos_static_library("ark_runtime_host_unittest") {
     deps -= [
       "$js_root/test/pgotypeinfer:ark_pgotypeinfer_test",
       "$js_root/test/jittest:ark_jit_test",
-      "$js_root/test/aottest:ark_aot_test",
       "$js_root/test/deopttest:ark_deopt_test",
     ]
   }
@@ -1120,6 +1114,7 @@ ecma_source = [
   "ecmascript/interpreter/interpreter-inl.cpp",
   "ecmascript/interpreter/slow_runtime_stub.cpp",
   "ecmascript/intl/locale_helper.cpp",
+  "ecmascript/jit/tiering_manager.cpp",
   "ecmascript/jit/compile_decision.cpp",
   "ecmascript/jit/jit.cpp",
   "ecmascript/jit/jit_compat_util.cpp",

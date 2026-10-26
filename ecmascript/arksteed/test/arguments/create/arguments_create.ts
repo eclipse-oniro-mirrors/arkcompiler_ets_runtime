@@ -12,6 +12,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// Keep both argument domains in the interpreter until the explicit compilation.
+//! PARAMS --compiler-jit-hotness-threshold=60000
 //! METHOD      f
 //! HAS         CallRuntime  OptCopyRestArgs
 //! COMPILE_COUNT_GE *f* 1
