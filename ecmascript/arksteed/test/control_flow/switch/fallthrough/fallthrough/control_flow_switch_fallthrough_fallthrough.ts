@@ -39,10 +39,6 @@ function switch_fallthrough(x)
 
 ArkTools.arkSteedCompileSync(switch_fallthrough);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(switch_fallthrough);
-// print(res);
-
 let output = switch_fallthrough(1);
 print(output);
 output = switch_fallthrough(2);

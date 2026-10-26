@@ -364,7 +364,8 @@ void ArkSteedAssembler::StoreInt32FieldRelease(ArkSteedRegister src, ArkSteedReg
 }
 
 void ArkSteedAssembler::StoreHeaderRelease(ArkSteedRegister src,
-                                           ArkSteedRegister object) {
+                                           ArkSteedRegister object)
+{
     static_assert(TaggedObject::HCLASS_OFFSET == 0);
     // AssemblerAarch64::Stlr currently only encodes the W-register form.
     // HClass headers are full tagged words, so emit STLR Xt, [Xn] directly.
@@ -1053,14 +1054,14 @@ void ArkSteedAssembler::EmitEmbeddedLiteralPool(bool precedingCodeCanFallThrough
     for (const auto &literal : pendingEmbeddedLiterals_) {
         uint32_t literalOffset = GetPcOffset();
         ASSERT(literalOffset % EMBEDDED_LITERAL_SIZE == 0);
-        ASSERT(std::all_of(literal->loadOffsets.begin(), literal->loadOffsets.end(),
-                           [literalOffset](uint32_t loadOffset) {
-                               int64_t displacement =
-                                   static_cast<int64_t>(literalOffset) - static_cast<int64_t>(loadOffset);
-                               return displacement >= 0 &&
-                                      displacement <= EMBEDDED_LITERAL_MAX_FORWARD_DISPLACEMENT &&
-                                      displacement % sizeof(uint32_t) == 0;
-                           }));
+#ifndef NDEBUG
+        for (uint32_t loadOffset : literal->loadOffsets) {
+            int64_t displacement = static_cast<int64_t>(literalOffset) - static_cast<int64_t>(loadOffset);
+            ASSERT(displacement >= 0);
+            ASSERT(displacement <= EMBEDDED_LITERAL_MAX_FORWARD_DISPLACEMENT);
+            ASSERT(displacement % sizeof(uint32_t) == 0);
+        }
+#endif
         assembler_.Bind(&literal->label);
         embeddedRefRelocations_.push_back({literalOffset,
                                           literal->handleIndex,

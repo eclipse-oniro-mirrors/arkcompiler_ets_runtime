@@ -24,8 +24,7 @@
 // interpreter recovers the specified Number 4294967295 (ECMA-262 2021
 // Number::unsignedRightShift -> ToUint32). This probe lives in its own process
 // because the eager event contradicts a whole-process zero-deopt counter; the
-// stable inputs are covered by `arithmetic/bitwise_int32`. These are native
-// ArkSteed cases; no V8 test is borrowed (V7).
+// stable inputs are covered by `arithmetic/bitwise_int32`.
 //
 // The required positive transition evidence is the per-target lower bound
 // `COMPILE_COUNT_GE *bitwiseUnsignedBoundary 1`,

@@ -72,7 +72,7 @@ HWTEST_F_L0(ArkSteedPipelineStatisticsTest, PipelineStatistics_Option_ParseTrue)
     JSRuntimeOptions opts;
     optind = 0;
     const char *argv[] = {"test", "--compiler-arksteed-pass-trace=true"};
-    EXPECT_TRUE(opts.ParseCommand(2, argv));
+    EXPECT_TRUE(opts.ParseCommand(2, argv));  // 2: argc (program plus one option)
     EXPECT_TRUE(opts.GetCompilerArkSteedPassTrace());
 }
 
@@ -86,7 +86,7 @@ HWTEST_F_L0(ArkSteedPipelineStatisticsTest, PipelineStatistics_Option_ParseFalse
     JSRuntimeOptions opts;
     optind = 0;
     const char *argv[] = {"test", "--compiler-arksteed-pass-trace=false"};
-    EXPECT_TRUE(opts.ParseCommand(2, argv));
+    EXPECT_TRUE(opts.ParseCommand(2, argv));  // 2: argc (program plus one option)
     EXPECT_FALSE(opts.GetCompilerArkSteedPassTrace());
 }
 
@@ -101,7 +101,7 @@ HWTEST_F_L0(ArkSteedPipelineStatisticsTest, PipelineStatistics_Option_ParseNonBo
     JSRuntimeOptions opts;
     optind = 0;
     const char *argv[] = {"test", "--compiler-arksteed-pass-trace=notabool"};
-    EXPECT_TRUE(opts.ParseCommand(2, argv));
+    EXPECT_TRUE(opts.ParseCommand(2, argv));  // 2: argc (program plus one option)
     EXPECT_TRUE(opts.GetCompilerArkSteedPassTrace());
 }
 
@@ -140,7 +140,7 @@ HWTEST_F_L0(ArkSteedPipelineStatisticsTest, PipelineStatistics_Option_MethodsPar
     JSRuntimeOptions opts;
     optind = 0;
     const char *argv[] = {"test", "--compiler-arksteed-pass-trace-methods=foo,bar"};
-    EXPECT_TRUE(opts.ParseCommand(2, argv));
+    EXPECT_TRUE(opts.ParseCommand(2, argv));  // 2: argc (program plus one option)
     EXPECT_EQ(opts.GetCompilerArkSteedPassTraceMethods(), std::string("foo,bar"));
 }
 
@@ -157,7 +157,7 @@ HWTEST_F_L0(ArkSteedPipelineStatisticsTest, PipelineStatistics_Chunk_AllocateAcc
     void *second = fixture.chunk.Allocate(8);
     (void)first;
     (void)second;
-    EXPECT_EQ(fixture.chunk.GetAllocatedSize(), 112U);
+    EXPECT_EQ(fixture.chunk.GetAllocatedSize(), 112U);  // 112U: 104 (first allocation, aligned) + 8 (second)
 }
 
 /**

@@ -1,0 +1,24 @@
+1
+za 1000 sek.
+za 10 min
+za 2 dni
+za 1 dzień
+za 0 dni
+1 dzień temu
+10 dni temu
+za 1000 lat
+za 2 lata
+za 1 rok
+za 123 456,78 sek.
+1
+za 1000 sek.
+za 10 min
+za 2 dni
+za 1 dzień
+za 0 dni
+1 dzień temu
+10 dni temu
+za 1000 lat
+za 2 lata
+za 1 rok
+za 123 456,78 sek.

@@ -579,7 +579,8 @@ def check_control_construction(module) -> List[str]:
             failures.append(
                 f"{instance.variant_id}: derived value {instance.derived} not "
                 f"present in the re-parsed assertion {mutated.label()}")
-        if instance.variant_id != (f"{'count' if instance.class_token == module.CONTROL_CLASS_COUNT else 'address'}-{instance.line}"):
+        expected_kind = "count" if instance.class_token == module.CONTROL_CLASS_COUNT else "address"
+        if instance.variant_id != (f"{expected_kind}-{instance.line}"):
             failures.append(f"{instance.variant_id}: unexpected variant id")
 
     # S3: equality -> n + 1, lower bound -> observed + 1, upper bound -> observed - 1.
@@ -677,7 +678,7 @@ def check_control_failure_classification(module) -> List[str]:
     # classifier is checked against the real reason vocabulary.
     assertion = module.HasConstraint("LoadTaggedField", None)
     zero_counts = {"target": module.MethodCounts(collections.Counter(),
-                                                  collections.Counter())}
+                                                 collections.Counter())}
     violation_reasons = module.check_constraints({"target": [assertion]}, zero_counts)
     missing_dump_reasons = module.check_constraints({"target": [assertion]}, {})
     expected_case = _make_synthetic_case(module, "print(1);\n", expected="1\n")
@@ -847,16 +848,16 @@ def check_control_failure_classification(module) -> List[str]:
     # pass with a knowingly invalid control (S2/S7 and epic criterion 1: any
     # invalid control of a mandatory case makes the run exit non-zero).
     address_covered = {
-        result.instance.assertion.key() for result in results
-        if result.class_token == module.CONTROL_CLASS_ADDRESS
-        and result.verdict == module.CONTROL_VERDICT_VALID
-        and result.instance.assertion is not None}
+        instance_result.instance.assertion.key() for instance_result in results
+        if instance_result.class_token == module.CONTROL_CLASS_ADDRESS
+        and instance_result.verdict == module.CONTROL_VERDICT_VALID
+        and instance_result.instance.assertion is not None}
     masked_index = next(
-        (index for index, result in enumerate(results)
-         if result.class_token == module.CONTROL_CLASS_COUNT
-         and result.verdict == module.CONTROL_VERDICT_VALID
-         and result.instance.assertion is not None
-         and result.instance.assertion.key() in address_covered), None)
+        (index for index, instance_result in enumerate(results)
+         if instance_result.class_token == module.CONTROL_CLASS_COUNT
+         and instance_result.verdict == module.CONTROL_VERDICT_VALID
+         and instance_result.instance.assertion is not None
+         and instance_result.instance.assertion.key() in address_covered), None)
     if masked_index is None:
         failures.append("no class-3 instance with a valid class-4 sibling to invalidate")
     else:
@@ -873,8 +874,8 @@ def check_control_failure_classification(module) -> List[str]:
                 f"the case {masked_result.verdict}: {masked_result.reasons}")
         instance_id = masked[masked_index].instance.variant_id
         class_token = masked[masked_index].class_token
-        if not any(class_token in reason and instance_id in reason
-                   for reason in masked_result.reasons):
+        if not any(class_token in failure_reason and instance_id in failure_reason
+                   for failure_reason in masked_result.reasons):
             failures.append(
                 f"no case reason names the invalid instance {instance_id}: "
                 f"{masked_result.reasons}")
@@ -892,7 +893,7 @@ def check_control_failure_classification(module) -> List[str]:
     bare = _make_synthetic_case(module, "print(1);\n", create_expected=False)
     bare_result = module.evaluate_case_control(bare, True, [], True)
     if bare_result.verdict != "red" or not any(
-            "no applicable control" in reason for reason in bare_result.reasons):
+            "no applicable control" in failure_reason for failure_reason in bare_result.reasons):
         failures.append(
             f"a case without an applicable class is not a defensive red verdict: "
             f"{bare_result.verdict} {bare_result.reasons}")
@@ -1337,8 +1338,8 @@ def check_control_report_rendering(module) -> List[str]:
     # that case and its reason instead of printing "none" next to a red total
     # (S7: lists every red control verdict with its reason).
     masked_instance = next(
-        instance for instance in instances
-        if instance.class_token == module.CONTROL_CLASS_COUNT)
+        control_instance for control_instance in instances
+        if control_instance.class_token == module.CONTROL_CLASS_COUNT)
     masked_results = list(results) + [
         module.ControlInstanceResult(
             masked_instance, module.CONTROL_VERDICT_INVALID,
@@ -2613,7 +2614,7 @@ def check_corpus_class_defaults(module) -> List[str]:
     perturbed.hotness_threshold = 2
     env_name = module.CORPUS_ROOT_ENV_VAR
     with _patched(module, ARK_ROOT=ark_root, TEST_DIR=workspace,
-                  build_ark=lambda cfg, skip: True,
+                  build_ark=lambda build_cfg, skip: True,
                   make_artifacts_root=lambda *a: artifacts,
                   load_corpus_module=lambda r: (loaded, None),
                   build_reference_namespace=lambda m, c: perturbed):
@@ -3059,7 +3060,7 @@ def check_corpus_class_execution_verdict(module) -> List[str]:
             return _corpus_class_execution(
                 module, compile_markers=compile_markers, exec_markers=exec_markers)
 
-        with _patched(module, ARK_ROOT=ark_root, build_ark=lambda cfg, skip: True,
+        with _patched(module, ARK_ROOT=ark_root, build_ark=lambda build_cfg, skip: True,
                       make_artifacts_root=lambda *a: artifacts,
                       load_corpus_module=lambda r: (loaded, None),
                       compile_corpus_case=fake_compile,
@@ -3300,7 +3301,7 @@ def _chunk_partitions(text: str):
         index += step
         step = step % 4 + 1
     yield pieces
-    yield [""] + [text[index:index + 2] for index in range(0, len(text), 2)] + [""]
+    yield [""] + [text[offset:offset + 2] for offset in range(0, len(text), 2)] + [""]
 
 
 def _consume(module, case, components, chunks, **kwargs):
@@ -3619,12 +3620,12 @@ def check_corpus_filter_bounds(module) -> List[str]:
     complete_deopt = ("[compiler] Deoptimize    at a (x.js:1:1)\n"
                       "    at f (x.js:2:1)\n\n")
     partitions = (
-        ("whole chunk", lambda text: [text]),
-        ("single characters", lambda text: list(text)),
-        ("two-character chunks", lambda text: [text[i:i + 2]
-                                               for i in range(0, len(text), 2)]),
-        ("seven-character chunks", lambda text: [text[i:i + 7]
-                                                 for i in range(0, len(text), 7)]),
+        ("whole chunk", lambda payload: [payload]),
+        ("single characters", lambda payload: list(payload)),
+        ("two-character chunks", lambda payload: [payload[i:i + 2]
+                                                  for i in range(0, len(payload), 2)]),
+        ("seven-character chunks", lambda payload: [payload[i:i + 7]
+                                                    for i in range(0, len(payload), 7)]),
     )
     for label, candidate, case in (("gc", unresolved_gc, gc_case),
                                    ("deopt", unresolved_deopt, deopt_case)):
@@ -3753,7 +3754,7 @@ def check_corpus_filter_bounds(module) -> List[str]:
     if not partial_gc.record_candidate_capped:
         failures.append("the partial `[gc` opener was not charged to the cap")
     partial_deopt = _consume(module, deopt_case, [], ["[compiler"],
-                              record_candidate_cap=8, program_cap=1024 * 1024)
+                             record_candidate_cap=8, program_cap=1024 * 1024)
     if not partial_deopt.record_candidate_capped:
         failures.append("the partial `[compiler` opener was not charged to the cap")
 
@@ -3815,10 +3816,10 @@ def check_corpus_filter_bounds(module) -> List[str]:
     if len(huge_frame.encode("utf-8")) <= default_candidate_cap:
         failures.append("the default-limit frame fixture is not over the cap")
     for partition_label, partition in (
-            ("whole chunk", lambda text: [text]),
-            ("64 KiB chunks", lambda text: [text[index:index + 65536]
-                                            for index in range(0, len(text),
-                                                             65536)])):
+            ("whole chunk", lambda payload: [payload]),
+            ("64 KiB chunks", lambda payload: [payload[index:index + 65536]
+                                               for index in range(0, len(payload),
+                                                                  65536)])):
         evidence = _consume(module, deopt_case, ["compiler"],
                             partition(huge_frame), program_cap=1024 * 1024)
         if not evidence.record_candidate_capped:
@@ -3837,11 +3838,11 @@ def check_corpus_filter_bounds(module) -> List[str]:
     # supplied chunk must not be promoted into a committed diagnostic prefix,
     # and a same-chunk rejection must not release text that a character-wise
     # feed still held unresolved.
-    def _freeze_tuple(evidence):
-        return (evidence.program_output, evidence.program_output_bytes,
-                evidence.program_output_truncated,
-                evidence.record_candidate_capped,
-                evidence.program_output_error)
+    def _freeze_tuple(source_evidence):
+        return (source_evidence.program_output, source_evidence.program_output_bytes,
+                source_evidence.program_output_truncated,
+                source_evidence.record_candidate_capped,
+                source_evidence.program_output_error)
 
     # A broken GC opener at a line start: the excess is reached while only the
     # partial opener exists and nothing has been committed yet, so no partition
@@ -3880,10 +3881,10 @@ def check_corpus_filter_bounds(module) -> List[str]:
                       + "x" * (default_candidate_cap - len(frame_head) - 3)
                       + "\n    atX\nOK\n")
     for partition_label, partition in (
-            ("whole chunk", lambda text: [text]),
-            ("64 KiB chunks", lambda text: [text[index:index + 65536]
-                                            for index in range(0, len(text),
-                                                             65536)])):
+            ("whole chunk", lambda payload: [payload]),
+            ("64 KiB chunks", lambda payload: [payload[index:index + 65536]
+                                               for index in range(0, len(payload),
+                                                                  65536)])):
         evidence = _consume(module, deopt_case, [], partition(mismatch_frame),
                             record_candidate_cap=default_candidate_cap,
                             program_cap=1024 * 1024)
@@ -3958,7 +3959,6 @@ def check_corpus_filter_bounds(module) -> List[str]:
             failures.append(
                 f"the over-limit candidate under {partition_label} certified "
                 f"its output")
-
 
     # Stickiness: a later small chunk cannot restore validity, and an invalid
     # result with an empty retained prefix is still invalid.
@@ -4086,8 +4086,8 @@ def check_corpus_filter_errors(module) -> List[str]:
     # evidence and never an escaped exception or a clean EOF (S5). A genuinely
     # non-iterable input keeps its named configuration error above.
     class _BrokenInit:
-        def __init__(self, error):
-            self._error = error
+        def __init__(self, init_error):
+            self._error = init_error
 
         def __iter__(self):
             raise self._error
@@ -4149,7 +4149,7 @@ def check_corpus_log_failure_ordering(module) -> List[str]:
         yield ("four-character chunks", [text[index:index + 4]
                                          for index in range(0, len(text), 4)])
         yield ("empty pieces", [""] + [text[index:index + 2]
-                                        for index in range(0, len(text), 2)])
+                                       for index in range(0, len(text), 2)])
 
     # The program line after the failing retained line is not committed by any
     # partition: only the text that precedes the failing write was observed
@@ -4532,44 +4532,44 @@ def check_corpus_observation_equivalence(module) -> List[str]:
              [text[index:index + 7] for index in range(0, len(text), 7)]),
         )
 
-    def overlap_check(case, components, stream, expected_log):
-        reference = module.collect_evidence(stream)
-        for label, chunks in partitions(stream):
-            with tempfile.NamedTemporaryFile("wb", delete=False) as log_file:
-                log_path = Path(log_file.name)
-                evidence = module.consume_corpus_stdout(
-                    chunks, case, components, log_file)
-            retained = log_path.read_text(encoding="utf-8")
-            log_path.unlink(missing_ok=True)
-            if evidence.program_output_error is not None:
+    def overlap_check(probe_case, probe_components, probe_stream, expected_log):
+        reference_evidence = module.collect_evidence(probe_stream)
+        for partition_label, partition_chunks in partitions(probe_stream):
+            with tempfile.NamedTemporaryFile("wb", delete=False) as log_handle:
+                log_file_path = Path(log_handle.name)
+                run_evidence = module.consume_corpus_stdout(
+                    partition_chunks, probe_case, probe_components, log_handle)
+            retained_text = log_file_path.read_text(encoding="utf-8")
+            log_file_path.unlink(missing_ok=True)
+            if run_evidence.program_output_error is not None:
                 failures.append(
-                    f"the overlapping prefix {components!r} under {label} "
-                    f"failed: {evidence.program_output_error!r}")
-            if evidence.gc_markers != len(reference["gc"]):
+                    f"the overlapping prefix {probe_components!r} under {partition_label} "
+                    f"failed: {run_evidence.program_output_error!r}")
+            if run_evidence.gc_markers != len(reference_evidence["gc"]):
                 failures.append(
-                    f"the overlapping prefix {components!r} under {label} "
-                    f"counted gc={evidence.gc_markers}, expected "
-                    f"{len(reference['gc'])}")
-            if evidence.exec_markers != len(reference["exec"]):
+                    f"the overlapping prefix {probe_components!r} under {partition_label} "
+                    f"counted gc={run_evidence.gc_markers}, expected "
+                    f"{len(reference_evidence['gc'])}")
+            if run_evidence.exec_markers != len(reference_evidence["exec"]):
                 failures.append(
-                    f"the overlapping prefix {components!r} under {label} "
-                    f"counted exec={evidence.exec_markers}, expected "
-                    f"{len(reference['exec'])}")
-            for constraint in case.evidence_constraints:
-                expected = sum(
-                    1 for candidate in reference[constraint.EVIDENCE_KEY]
-                    if any(fnmatchcase(spelling, constraint.pattern)
-                           for spelling in constraint.spellings(candidate)))
-                actual = module.corpus_evidence_actual(constraint, evidence)
-                if actual != expected:
+                    f"the overlapping prefix {probe_components!r} under {partition_label} "
+                    f"counted exec={run_evidence.exec_markers}, expected "
+                    f"{len(reference_evidence['exec'])}")
+            for evidence_constraint in probe_case.evidence_constraints:
+                expected_count = sum(
+                    1 for candidate in reference_evidence[evidence_constraint.EVIDENCE_KEY]
+                    if any(fnmatchcase(spelling, evidence_constraint.pattern)
+                           for spelling in evidence_constraint.spellings(candidate)))
+                actual_count = module.corpus_evidence_actual(evidence_constraint, run_evidence)
+                if actual_count != expected_count:
                     failures.append(
-                        f"the overlapping prefix {components!r} under {label}: "
-                        f"{constraint.label()} counted {actual}, expected "
-                        f"{expected}")
-            if retained != expected_log:
+                        f"the overlapping prefix {probe_components!r} under {partition_label}: "
+                        f"{evidence_constraint.label()} counted {actual_count}, expected "
+                        f"{expected_count}")
+            if retained_text != expected_log:
                 failures.append(
-                    f"the overlapping prefix {components!r} under {label} "
-                    f"retained {retained!r}, expected {expected_log!r}")
+                    f"the overlapping prefix {probe_components!r} under {partition_label} "
+                    f"retained {retained_text!r}, expected {expected_log!r}")
 
     gc_overlap = _corpus_stream_case(module, "//! GC_COUNT_GE *hi* 1\n")
     overlap_check(gc_overlap, ["compiler", "gc] x"], "[gc] x] hi\n",
@@ -4857,14 +4857,14 @@ def check_corpus_class_executor_errors(module) -> List[str]:
     context = module.CorpusContext(
         module=loaded, root=root, revision=None, build_config=None,
         reference_args=None, class_defaults=None, valid_opcodes=None)
-    art_dir = _temp_dir("arksteed-self-test-artifacts-") / "case"
-    art_dir.mkdir(parents=True, exist_ok=True)
+    case_artifacts = _temp_dir("arksteed-self-test-artifacts-") / "case"
+    case_artifacts.mkdir(parents=True, exist_ok=True)
 
     def run(proc, budget: int = 30):
         with _patched(module.subprocess, Popen=lambda *a, **k: proc):
             return module.run_corpus_class_execution(
-                case, art_dir / "case.abc", cfg, CORPUS_CLASS_ARGS, context,
-                budget, art_dir, [])
+                case, case_artifacts / "case.abc", cfg, CORPUS_CLASS_ARGS, context,
+                budget, case_artifacts, [])
 
     # A normal stream reaches the bounded artifacts.
     execution = run(_FakeProc(b"[compiler] >>> Running method: a.b\nprogram\n"))
@@ -4885,13 +4885,14 @@ def check_corpus_class_executor_errors(module) -> List[str]:
     if not failing.killed:
         failures.append("an incomplete stdout drain did not terminate the child")
     # A start failure is independent and red.
+
     def _fail_start(*args, **kwargs):
         raise OSError("no vm")
 
     with _patched(module.subprocess, Popen=_fail_start):
         execution = module.run_corpus_class_execution(
-            case, art_dir / "case.abc", cfg, CORPUS_CLASS_ARGS, context, 30,
-            art_dir, [])
+            case, case_artifacts / "case.abc", cfg, CORPUS_CLASS_ARGS, context, 30,
+            case_artifacts, [])
     if execution.started or execution.start_error is None:
         failures.append(f"a start failure is {execution!r}")
     verdict = module.evaluate_corpus_class_run(
@@ -4938,8 +4939,8 @@ def check_corpus_class_executor_errors(module) -> List[str]:
         with _patched(module.subprocess, Popen=lambda *a, **k: proc), \
                 _patched_module_attr(module, "open", lambda *a, **k: log_file):
             return module.run_corpus_class_execution(
-                case, art_dir / "case.abc", cfg, CORPUS_CLASS_ARGS, context,
-                30, art_dir, [])
+                case, case_artifacts / "case.abc", cfg, CORPUS_CLASS_ARGS, context,
+                30, case_artifacts, [])
 
     for fail_on in ("write", "close"):
         execution = run_with_log(_FailingLogFile(fail_on), _FakeProc(marked))
@@ -4956,7 +4957,7 @@ def check_corpus_class_executor_errors(module) -> List[str]:
                 f"{execution.evidence!r}")
 
     # An unopenable retained log uses the discard sink and keeps observing.
-    blocked = (art_dir
+    blocked = (case_artifacts
                / f"{module.corpus_case_stem(case)}{module.CORPUS_LIVE_LOG_SUFFIX}")
     if blocked.is_file() or blocked.is_symlink():
         blocked.unlink()
@@ -4986,8 +4987,8 @@ def check_corpus_class_executor_errors(module) -> List[str]:
         with _patched(module.subprocess, Popen=lambda *a, **k: proc), \
                 _patched_module_attr(module, "open", bad_open):
             return module.run_corpus_class_execution(
-                case, art_dir / "case.abc", cfg, CORPUS_CLASS_ARGS, context,
-                30, art_dir, [])
+                case, case_artifacts / "case.abc", cfg, CORPUS_CLASS_ARGS, context,
+                30, case_artifacts, [])
 
     over_cap = marked + b"x" * (module.CORPUS_PROGRAM_OUTPUT_CAP + 4096)
     for label, proc in (
@@ -5038,8 +5039,8 @@ def check_corpus_class_executor_errors(module) -> List[str]:
         with _patched(module, threading=shim,
                       subprocess=_SubprocessShim(lambda *a, **k: proc)):
             execution = module.run_corpus_class_execution(
-                case, art_dir / "case.abc", cfg, CORPUS_CLASS_ARGS, context,
-                30, art_dir, [])
+                case, case_artifacts / "case.abc", cfg, CORPUS_CLASS_ARGS, context,
+                30, case_artifacts, [])
         error = execution.evidence.program_output_error or ""
         if "FIRST stderr failure" not in error:
             failures.append(
@@ -5074,8 +5075,8 @@ def check_corpus_class_executor_errors(module) -> List[str]:
     broken_case = _corpus_case_with_invariant(module, loaded, CORPUS_CASES[0])
     broken_case.evidence_constraints = None
     execution = module.run_corpus_class_execution(
-        broken_case, art_dir / "case.abc", cfg, CORPUS_CLASS_ARGS, context,
-        30, art_dir, [])
+        broken_case, case_artifacts / "case.abc", cfg, CORPUS_CLASS_ARGS, context,
+        30, case_artifacts, [])
     if "filter configuration error: " not in (execution.start_error or ""):
         failures.append(
             f"the executor did not name the missing evidence collection: "
@@ -5106,8 +5107,8 @@ def check_corpus_class_executor_errors(module) -> List[str]:
         with _patched(module.subprocess,
                       Popen=lambda *a, **k: _FakeProc(chain_stream.encode())):
             execution = module.run_corpus_class_execution(
-                gc_case, art_dir / "gc.abc", cfg, CORPUS_CLASS_ARGS, context,
-                30, art_dir, [])
+                gc_case, case_artifacts / "gc.abc", cfg, CORPUS_CLASS_ARGS, context,
+                30, case_artifacts, [])
         if execution.evidence.program_output != expected:
             failures.append(
                 f"the executor chain result is "
@@ -5369,6 +5370,7 @@ def check_corpus_decoder_and_bounded_retention(module) -> List[str]:
             f"{capped_small} -> {capped_large}")
     return failures
 
+
 def check_corpus_main_real_chain_orchestration(module) -> List[str]:
     """(S4) `main --corpus` runs the real chain and writes its exact result.
 
@@ -5562,6 +5564,7 @@ def check_corpus_streaming_provenance(module) -> List[str]:
                 f"the streaming stage sequence is "
                 f"{captured[0].stage_kinds}, expected {expected_kinds}")
     return failures
+
 
 def check_corpus_artifact_failure_orchestration(module) -> List[str]:
     """(S5/Failure) An unwritable required case artifact is a named red reason.
@@ -5930,7 +5933,7 @@ def check_corpus_twin_command_identity(module) -> List[str]:
         raise AssertionError("no execution may happen without a JIT token")
 
     with _patched(module, ARK_ROOT=_fake_ark_root(),
-                  build_ark=lambda cfg, skip: True,
+                  build_ark=lambda build_cfg, skip: True,
                   make_artifacts_root=lambda *a: _temp_dir(
                       "arksteed-self-test-artifacts-"),
                   load_corpus_module=lambda r: (broken_loaded, None),
@@ -5986,9 +5989,9 @@ def check_corpus_twin_command_preflight(module) -> List[str]:
 
     for label, mutate in (("absent", without_jit),
                           ("duplicated", duplicated_jit)):
-        def broken_build(*args, mutate=mutate, **kwargs):
+        def broken_build(*args, mutate_fn=mutate, **kwargs):
             command, components = real_build(*args, **kwargs)
-            return mutate(list(command)), list(components)
+            return mutate_fn(list(command)), list(components)
 
         calls: List[object] = []
 
@@ -6028,13 +6031,13 @@ def check_corpus_twin_command_preflight(module) -> List[str]:
         build_config=module.build_reference_config(loaded, cfg),
         reference_args=module.build_reference_namespace(loaded, cfg),
         class_defaults=module.corpus_class_defaults(loaded), valid_opcodes=None)
-    art_dir = _temp_dir("arksteed-self-test-twin-preflight-") / "case"
-    art_dir.mkdir(parents=True, exist_ok=True)
+    case_artifacts = _temp_dir("arksteed-self-test-twin-preflight-") / "case"
+    case_artifacts.mkdir(parents=True, exist_ok=True)
     for label, mutate in (("absent", without_jit),
                           ("duplicated", duplicated_jit)):
-        def broken_build(*args, mutate=mutate, **kwargs):
+        def broken_build(*args, mutate_fn=mutate, **kwargs):
             command, components = real_build(*args, **kwargs)
-            return mutate(list(command)), list(components)
+            return mutate_fn(list(command)), list(components)
 
         spawned: List[object] = []
 
@@ -6047,7 +6050,7 @@ def check_corpus_twin_command_preflight(module) -> List[str]:
                       subprocess=_SubprocessShim(fake_popen)):
             execution = module.run_corpus_class_execution(
                 case, Path("/tmp/arksteed-self-test.abc"), cfg,
-                CORPUS_CLASS_ARGS, context, 30, art_dir, [])
+                CORPUS_CLASS_ARGS, context, 30, case_artifacts, [])
         if execution.started:
             failures.append(
                 f"the executor launched a {label} JIT command")
@@ -6078,7 +6081,7 @@ def check_corpus_twin_command_preflight(module) -> List[str]:
                                        program_output="program\n")
 
     artifacts = _temp_dir("arksteed-self-test-artifacts-")
-    with _patched(module, ARK_ROOT=ark_root, build_ark=lambda cfg, skip: True,
+    with _patched(module, ARK_ROOT=ark_root, build_ark=lambda build_cfg, skip: True,
                   make_artifacts_root=lambda *a: artifacts,
                   compile_corpus_case=lambda *a, **k: (True, "", False, []),
                   load_corpus_module=lambda r: (loaded, None),
@@ -6214,8 +6217,8 @@ def check_corpus_twin_execution(module) -> List[str]:
     rel = CORPUS_CASES[0]
     case = _corpus_case_with_invariant(module, loaded, rel)
     cfg = module.BuildConfig("debug", "x64")
-    art_dir = _temp_dir("arksteed-self-test-twin-artifacts-") / "case"
-    art_dir.mkdir(parents=True, exist_ok=True)
+    case_artifacts = _temp_dir("arksteed-self-test-twin-artifacts-") / "case"
+    case_artifacts.mkdir(parents=True, exist_ok=True)
     stem = module.corpus_case_stem(case)
 
     # The execution result shape must keep every invalidity flag and every
@@ -6274,7 +6277,7 @@ def check_corpus_twin_execution(module) -> List[str]:
     for label, class_execution, expected_status in ineligible:
         with _patched(module.subprocess, Popen=recording_popen):
             run = module.run_corpus_twin_execution(
-                case, cfg, CORPUS_CLASS_ARGS, 30, class_execution, art_dir, [])
+                case, cfg, CORPUS_CLASS_ARGS, 30, class_execution, case_artifacts, [])
         if run.status != expected_status:
             failures.append(
                 f"the {label} class output gave status {run.status!r}, "
@@ -6318,7 +6321,7 @@ def check_corpus_twin_execution(module) -> List[str]:
     with _patched(module, run_corpus_stream_execution=recording_stream), \
             _patched(module.subprocess, Popen=fake_popen):
         run = module.run_corpus_twin_execution(
-            case, cfg, CORPUS_CLASS_ARGS, 30, class_execution, art_dir, [])
+            case, cfg, CORPUS_CLASS_ARGS, 30, class_execution, case_artifacts, [])
     expected_twin = module.derive_corpus_twin_command(class_execution.command)
     if run.status is not None:
         failures.append(f"an eligible class output gave status {run.status!r}")
@@ -6350,7 +6353,7 @@ def check_corpus_twin_execution(module) -> List[str]:
         if execution.duration < 0:
             failures.append("a twin duration is negative")
     for suffix in module.CORPUS_TWIN_LOG_SUFFIXES:
-        if (art_dir / f"{stem}{suffix}").exists():
+        if (case_artifacts / f"{stem}{suffix}").exists():
             failures.append(f"the temporary twin log {suffix} was not removed")
 
     # A failure of the first twin does not suppress the second: both commands
@@ -6365,7 +6368,7 @@ def check_corpus_twin_execution(module) -> List[str]:
 
     with _patched(module.subprocess, Popen=failing_first):
         run = module.run_corpus_twin_execution(
-            case, cfg, CORPUS_CLASS_ARGS, 30, class_execution, art_dir, [])
+            case, cfg, CORPUS_CLASS_ARGS, 30, class_execution, case_artifacts, [])
     if len(attempts) != 2 or len(run.executions) != 2:
         failures.append(
             f"twin 1 failure gave {len(attempts)} attempt(s), "
@@ -6375,7 +6378,7 @@ def check_corpus_twin_execution(module) -> List[str]:
         failures.append("a twin start failure is not recorded")
     if len(run.executions) > 1 and not run.executions[1].started:
         failures.append("twin 2 was suppressed by the twin 1 start failure")
-    if [execution.command for execution in run.executions] != [
+    if [run_execution.command for run_execution in run.executions] != [
             expected_twin, expected_twin]:
         failures.append("the failed attempt did not retain its command")
 
@@ -6388,9 +6391,9 @@ def check_corpus_twin_execution(module) -> List[str]:
 
     with _patched(module.subprocess, Popen=twin_codes):
         run = module.run_corpus_twin_execution(
-            case, cfg, CORPUS_CLASS_ARGS, 30, class_execution, art_dir, [])
-    if len(run.executions) != 2 or [execution.returncode
-                                    for execution in run.executions] != [-6, 3]:
+            case, cfg, CORPUS_CLASS_ARGS, 30, class_execution, case_artifacts, [])
+    if len(run.executions) != 2 or [run_execution.returncode
+                                    for run_execution in run.executions] != [-6, 3]:
         failures.append(
             f"twin return codes are {[e.returncode for e in run.executions]}")
 
@@ -6404,13 +6407,13 @@ def check_corpus_twin_execution(module) -> List[str]:
 
     with _patched(module.subprocess, Popen=blocking_popen):
         run = module.run_corpus_twin_execution(
-            case, cfg, CORPUS_CLASS_ARGS, 0.05, class_execution, art_dir, [])
+            case, cfg, CORPUS_CLASS_ARGS, 0.05, class_execution, case_artifacts, [])
     if len(blocking) != 2:
         failures.append(f"the blocking run created {len(blocking)} process(es)")
     for proc in blocking:
         if not proc.killed:
             failures.append("a timed-out twin was not killed")
-    if not all(execution.timed_out for execution in run.executions):
+    if not all(run_execution.timed_out for run_execution in run.executions):
         failures.append(
             f"a twin timeout is not recorded: "
             f"{[e.timed_out for e in run.executions]}")
@@ -6423,7 +6426,7 @@ def check_corpus_twin_execution(module) -> List[str]:
 
     with _patched(module.subprocess, Popen=over_cap_popen):
         run = module.run_corpus_twin_execution(
-            case, cfg, CORPUS_CLASS_ARGS, 30, class_execution, art_dir, [])
+            case, cfg, CORPUS_CLASS_ARGS, 30, class_execution, case_artifacts, [])
     for execution in run.executions:
         evidence = execution.evidence
         if not evidence.program_output_truncated:
@@ -6439,7 +6442,7 @@ def check_corpus_twin_execution(module) -> List[str]:
 
     with _patched(module.subprocess, Popen=read_failure_popen):
         run = module.run_corpus_twin_execution(
-            case, cfg, CORPUS_CLASS_ARGS, 30, class_execution, art_dir, [])
+            case, cfg, CORPUS_CLASS_ARGS, 30, class_execution, case_artifacts, [])
     for execution in run.executions:
         if "read" not in (execution.evidence.program_output_error or ""):
             failures.append(
@@ -6456,7 +6459,7 @@ def check_corpus_twin_execution(module) -> List[str]:
 
     with _patched(module.subprocess, Popen=candidate_popen):
         run = module.run_corpus_twin_execution(
-            gc_case, cfg, CORPUS_CLASS_ARGS, 30, class_execution, art_dir, [])
+            gc_case, cfg, CORPUS_CLASS_ARGS, 30, class_execution, case_artifacts, [])
     for execution in run.executions:
         if not execution.evidence.record_candidate_capped:
             failures.append(
@@ -6474,17 +6477,17 @@ def check_corpus_twin_execution(module) -> List[str]:
     # point, the twin command derivation or the corpus streaming executor.
     touched: List[str] = []
 
-    def corpus_only(name):
+    def corpus_only(target_name):
         def _fail(*args, **kwargs):
-            touched.append(name)
-            raise AssertionError(f"{name} ran without --corpus")
+            touched.append(target_name)
+            raise AssertionError(f"{target_name} ran without --corpus")
         return _fail
 
     with _patched(module, ARK_ROOT=_fake_ark_root(),
                   TEST_DIR=_fake_embedded_tree(),
                   make_artifacts_root=lambda *a: _temp_dir(
                       "arksteed-self-test-artifacts-"),
-                  build_ark=lambda cfg, skip: True,
+                  build_ark=lambda build_cfg, skip: True,
                   run_corpus_twin_execution=corpus_only("twin"),
                   run_corpus_stream_execution=corpus_only("stream"),
                   build_corpus_vm_command=corpus_only("command")):
@@ -6546,8 +6549,8 @@ def check_corpus_twin_combined_consumer(module) -> List[str]:
         if naive == expected:
             failures.append("the prefix-only filter is not distinguishable")
     cfg = module.BuildConfig("debug", "x64")
-    art_dir = _temp_dir("arksteed-self-test-twin-chain-") / "case"
-    art_dir.mkdir(parents=True, exist_ok=True)
+    case_artifacts = _temp_dir("arksteed-self-test-twin-chain-") / "case"
+    case_artifacts.mkdir(parents=True, exist_ok=True)
     class_execution = _corpus_class_execution(
         module, command=_twin_class_command(module), program_output="program\n")
 
@@ -6556,7 +6559,7 @@ def check_corpus_twin_combined_consumer(module) -> List[str]:
 
     with _patched(module.subprocess, Popen=fake_popen):
         run = module.run_corpus_twin_execution(
-            case, cfg, CORPUS_CLASS_ARGS, 30, class_execution, art_dir, [])
+            case, cfg, CORPUS_CLASS_ARGS, 30, class_execution, case_artifacts, [])
     if len(run.executions) != 2:
         failures.append(f"the combined twin run made {len(run.executions)} attempt(s)")
     for index, execution in enumerate(run.executions):
@@ -6572,6 +6575,7 @@ def check_corpus_twin_combined_consumer(module) -> List[str]:
         if ">>> Running method" in evidence.program_output:
             failures.append(f"twin {index + 1} kept an execution marker")
     return failures
+
 
 def check_corpus_twin_orchestration(module) -> List[str]:
     """(TW2/TW8) `run_corpus_case` runs the twins of an eligible corpus case.
@@ -7021,8 +7025,8 @@ def check_corpus_mask_combined_twin_filter(module) -> List[str]:
     rel = CORPUS_CASES[0]
     case = _corpus_case_with_invariant(module, loaded, rel)
     cfg = module.BuildConfig("debug", "x64")
-    art_dir = _temp_dir("arksteed-self-test-mask-artifacts-") / "case"
-    art_dir.mkdir(parents=True, exist_ok=True)
+    case_artifacts = _temp_dir("arksteed-self-test-mask-artifacts-") / "case"
+    case_artifacts.mkdir(parents=True, exist_ok=True)
 
     def component_and_program(counter: str, measured: str) -> str:
         # The component lines are the observation noise the shared filter must
@@ -7052,7 +7056,7 @@ def check_corpus_mask_combined_twin_filter(module) -> List[str]:
 
     with _patched(module.subprocess, Popen=fake_popen):
         run = module.run_corpus_twin_execution(
-            case, cfg, CORPUS_CLASS_ARGS, 30, class_execution, art_dir, [])
+            case, cfg, CORPUS_CLASS_ARGS, 30, class_execution, case_artifacts, [])
     if len(run.executions) != 2:
         return failures + [
             f"the combined twin run made {len(run.executions)} attempt(s)"]
@@ -7106,19 +7110,19 @@ def check_corpus_mask_combined_twin_filter(module) -> List[str]:
         with _patched(module, derive_corpus_twin_command=producer,
                       subprocess=_SubprocessShim(local_popen)):
             module.run_corpus_twin_execution(
-                case, cfg, CORPUS_CLASS_ARGS, 30, class_execution, art_dir, [])
+                case, cfg, CORPUS_CLASS_ARGS, 30, class_execution, case_artifacts, [])
         return local_invocations
 
-    def changed_abc(command):
+    def changed_abc(source_command):
         return [token.replace("case.abc", "different.abc")
-                for token in original_derive(command)]
+                for token in original_derive(source_command)]
 
-    def changed_logging_observation(command):
+    def changed_logging_observation(source_command):
         return [token.replace("--log-level=info", "--log-level=error")
-                for token in original_derive(command)]
+                for token in original_derive(source_command)]
 
-    def dropped_compiler_component(command):
-        return [token for token in original_derive(command)
+    def dropped_compiler_component(source_command):
+        return [token for token in original_derive(source_command)
                 if token != "--log-components=compiler"]
 
     for label, producer in (
@@ -7145,8 +7149,8 @@ def check_corpus_mask_combined_twin_filter(module) -> List[str]:
                 f"combined twin {index + 1} lost its raw counts: "
                 f"{execution.evidence!r}")
 
-    outputs = [execution.evidence.program_output
-               for execution in run.executions]
+    outputs = [run_execution.evidence.program_output
+               for run_execution in run.executions]
     expected_outputs = ["result 547\ntiming 12.5 us\ntail\n",
                         "result 547\ntiming 13.0 us\ntail\n"]
     for index, output in enumerate(outputs):

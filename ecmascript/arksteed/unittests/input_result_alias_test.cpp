@@ -231,8 +231,7 @@ protected:
             ASSERT_TRUE(f.Registers().UnblockedFree().Has(freeReg));
             ASSERT_TRUE(f.Registers().IsBlocked(f.first) && f.Registers().IsBlocked(f.second));
             f.HintFirst();
-            EXPECT_TRUE(f.Allocate() == freeReg)
-                << "free-list allocation did not use the available non-input register";
+            EXPECT_TRUE(f.Allocate() == freeReg) << "free-list allocation did not use the available non-input register";
         }
         {
             Fixture<RegisterT> f;

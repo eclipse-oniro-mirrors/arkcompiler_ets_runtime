@@ -93,13 +93,8 @@ void WriteU32LE(uint8_t *data, uint32_t value)
 {
     data[0] = static_cast<uint8_t>(value & 0xFFU);
     data[1] = static_cast<uint8_t>((value >> 8) & 0xFFU);    // 8: byte shift
-    data[2] = static_cast<uint8_t>((value >> 16) & 0xFFU);   // 16: byte shift
-    data[3] = static_cast<uint8_t>((value >> 24) & 0xFFU);   // 24: byte shift
-}
-
-const uint8_t *EntryAt(const uint8_t *buffer, size_t index)
-{
-    return buffer + HEADER_BYTES + index * ENTRY_BYTES;
+    data[2] = static_cast<uint8_t>((value >> 16) & 0xFFU);   // 2: u32 byte index; 16: byte shift
+    data[3] = static_cast<uint8_t>((value >> 24) & 0xFFU);   // 3: u32 byte index; 24: byte shift
 }
 
 uint8_t *EntryAt(uint8_t *buffer, size_t index)
@@ -163,12 +158,12 @@ public:
     {
         bool more = true;
         while (more) {
-            uint8_t byte = static_cast<uint8_t>(value & 0x7F);
-            value >>= 7;
+            uint8_t byte = static_cast<uint8_t>(value & 0x7F);  // 0x7F: 7 payload bits per LEB128 byte
+            value >>= 7;  // 7: payload bits per byte
             if ((value == 0 && (byte & 0x40) == 0) || (value == -1 && (byte & 0x40) != 0)) {
                 more = false;
             } else {
-                byte |= 0x80;
+                byte |= 0x80;  // 0x80: continuation bit
             }
             buf.push_back(byte);
         }
@@ -207,6 +202,7 @@ public:
 
         // Deopt data: vregAndKind, value (both leb128)
         if (deoptNum > 0) {
+            // 4: kind count, packs the DeoptValueKind into the low bits
             int64_t vregAndKind = static_cast<int64_t>(vreg) * 4 +
                 static_cast<int64_t>(ArkSteedDeoptValueKind::CONSTANT);
             AppendLeb128(buf, vregAndKind);
@@ -248,6 +244,7 @@ public:
 
         // Entry 1: pcOffset=100, has deopt with PC_OFFSET_INDEX = 42
         uint32_t pc1 = 100;
+        // 3: entries preceding this one's deopt data
         uint32_t deoptOffset1 = sizeof(ArkSteedSafepointHeader) + 3 * sizeof(ArkSteedSafepointEntry);
         uint16_t deoptNum1 = 2;
         uint16_t flags1 = 0;
@@ -378,7 +375,7 @@ HWTEST_F_L0(ArkSteedSafepointTableTest, PcOffsetNotFound)
  */
 HWTEST_F_L0(ArkSteedSafepointTableTest, EmptyTable)
 {
-    std::vector<uint8_t> empty(16, 0);
+    std::vector<uint8_t> empty(16, 0);  // 16: header bytes only, no entries
     auto result = ExtractBcOffsetFromSafepointTable(empty.data(), empty.size(), 0);
     EXPECT_FALSE(result.has_value());
 }
@@ -401,7 +398,7 @@ HWTEST_F_L0(ArkSteedSafepointTableTest, NullData)
  */
 HWTEST_F_L0(ArkSteedSafepointTableTest, TruncatedData)
 {
-    std::vector<uint8_t> truncated(8, 0);
+    std::vector<uint8_t> truncated(8, 0);  // 8: half of the 16-byte header
     auto result = ExtractBcOffsetFromSafepointTable(truncated.data(), truncated.size(), 100);
     EXPECT_FALSE(result.has_value());
 }
@@ -491,7 +488,7 @@ HWTEST_F_L0(ArkSteedSafepointTableTest, PositionTableBeyondLast)
  */
 HWTEST_F_L0(ArkSteedSafepointTableTest, PositionTableEmpty)
 {
-    std::vector<uint8_t> empty(4, 0);
+    std::vector<uint8_t> empty(4, 0);  // 4: below the position-table header size
     auto result = LookupBcOffsetFromPositionTable(empty.data(), empty.size(), 100);
     EXPECT_FALSE(result.has_value());
 }

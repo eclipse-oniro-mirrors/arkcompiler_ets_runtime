@@ -28,10 +28,6 @@ function loop_break_1(x)
 
 ArkTools.arkSteedCompileSync(loop_break_1);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(loop_break_1);
-// print(res);
-
 let output = loop_break_1(5);
 print(output);
 output = loop_break_1(15);

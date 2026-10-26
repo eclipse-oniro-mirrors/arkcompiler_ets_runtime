@@ -30,8 +30,6 @@ function if_else_2(x, a, b, c)
 
 ArkTools.arkSteedCompileSync(if_else_2);
 
-// Spin loop: A temporary approach to wait for ArkSteed JIT compiler
-
 let output = if_else_2(15, 3, 7, 1);
 print(output);
 output = if_else_2(5, 3, 7, 1);

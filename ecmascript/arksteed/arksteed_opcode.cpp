@@ -163,7 +163,7 @@ void CallVertex::SetValueLocationConstraints()
     SetTemporariesNeeded(2);
 #elif defined(PANDA_TARGET_ARM64)
     // The guards run before the call scratch is acquired; retain the call's temporary budget.
-    SetTemporariesNeeded(3);
+    SetTemporariesNeeded(3);  // 3: arm64: call guards plus the call scratch budget (see above)
 #else
     SetTemporariesNeeded(1);
 #endif
@@ -178,9 +178,9 @@ void CallNewObjRangeBaseVertex::SetValueLocationConstraints()
 {
     DefineAsFixed(this, 0);
 #if defined(PANDA_TARGET_ARM64)
-    SetTemporariesNeeded(3);
+    SetTemporariesNeeded(3);  // 3: arm64 scratch registers for the constructor-call sequence
 #else
-    SetTemporariesNeeded(2);
+    SetTemporariesNeeded(2);  // 2: x64 scratch registers for the constructor-call sequence
 #endif
     if (UsesCommonStub()) {
         using Inputs = kungfu::ArkSteedCallConstructorBodyInputs;
@@ -202,9 +202,9 @@ void CallNewObjRangeDerivedVertex::SetValueLocationConstraints()
 {
     DefineAsFixed(this, 0);
 #if defined(PANDA_TARGET_ARM64)
-    SetTemporariesNeeded(3);
+    SetTemporariesNeeded(3);  // 3: arm64 scratch registers for the derived constructor call
 #else
-    SetTemporariesNeeded(2);
+    SetTemporariesNeeded(2);  // 2: x64 scratch registers for the derived constructor call
 #endif
     if (UsesCommonStub()) {
         using Inputs = kungfu::ArkSteedCallConstructorBodyInputs;
@@ -305,7 +305,7 @@ void CanAllocateInYoungVertex::SetValueLocationConstraints()
     UseRegister(Arg(GLUE_INDEX));
     UseRegister(Arg(SIZE_INDEX));
     DefineAsRegister(this);
-    SetTemporariesNeeded(2);
+    SetTemporariesNeeded(2);  // 2: scratch registers for young-space top and end bounds
 }
 
 void AllocateInYoungVertex::SetValueLocationConstraints()
@@ -347,7 +347,7 @@ void InitializeUnmappedArgumentsElementsVertex::SetValueLocationConstraints()
 void InitializeUnmappedArgumentsVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
-    SetTemporariesNeeded(3);  // value and two internally acquired write-barrier region scratches
+    SetTemporariesNeeded(3);  // 3 : value and two internally acquired write-barrier region scratches
     UseRegister(Arg(GLUE_INDEX));
     UseRegister(Arg(NUM_ARGS_INDEX));
     UseRegister(Arg(ALLOCATION_INDEX));
@@ -364,9 +364,9 @@ void CallBaseConstructorVertex::SetValueLocationConstraints()
     // plus objectType) but only one on x64, on top of the vertex-level scratch
     // held across the call for the slot-loaded select.
 #if defined(PANDA_TARGET_ARM64)
-    SetTemporariesNeeded(3);
+    SetTemporariesNeeded(3);  // 3: arm64: hclass and objectType scratches plus the vertex-level scratch
 #else
-    SetTemporariesNeeded(2);
+    SetTemporariesNeeded(2);  // 2: x64: objectType scratch plus the vertex-level scratch (see above)
 #endif
     UseRegister(Arg(TARGET_INDEX));
     UseAny(Arg(NEW_TARGET_INDEX));
@@ -389,9 +389,9 @@ void CallDerivedConstructorVertex::SetValueLocationConstraints()
     // plus objectType) but only one on x64. The cold throw path marshals its
     // runtime id through reserved scratch, not RA temporaries.
 #if defined(PANDA_TARGET_ARM64)
-    SetTemporariesNeeded(3);
+    SetTemporariesNeeded(3);  // 3: arm64: two concurrent check scratches plus the vertex-level scratch
 #else
-    SetTemporariesNeeded(2);
+    SetTemporariesNeeded(2);  // 2: x64 scratch registers (see comment above)
 #endif
     UseRegister(Arg(TARGET_INDEX));
     UseAny(Arg(NEW_TARGET_INDEX));
@@ -610,7 +610,7 @@ void TypedArrayIntLoadElementVertex::SetValueLocationConstraints()
     UseRegister(Arg(RECEIVER_INDEX));
     UseRegister(Arg(ELEMENT_INDEX));
     UseRegister(Arg(STORAGE_INDEX));
-    SetTemporariesNeeded(2);
+    SetTemporariesNeeded(2);  // 2: data-pointer and element-load scratches
 }
 
 void TypedArrayDoubleLoadElementVertex::SetValueLocationConstraints()
@@ -619,7 +619,7 @@ void TypedArrayDoubleLoadElementVertex::SetValueLocationConstraints()
     UseRegister(Arg(RECEIVER_INDEX));
     UseRegister(Arg(ELEMENT_INDEX));
     UseRegister(Arg(STORAGE_INDEX));
-    SetTemporariesNeeded(2);
+    SetTemporariesNeeded(2);  // 2: data-pointer and element-load scratches
 }
 
 void LoadPrototypeFromNonJSProxyObjectVertex::SetValueLocationConstraints()
@@ -699,7 +699,9 @@ void StoreTaggedElementWithBarrierVertex::SetValueLocationConstraints()
     UseFixed(Arg(GLUE_INDEX), static_cast<uint32_t>(ArkSteedAssembler::GetParameterRegister(0).Code()));
     UseFixed(Arg(OBJECT_INDEX), static_cast<uint32_t>(ArkSteedAssembler::GetParameterRegister(1).Code()));
     UseRegister(Arg(INDEX_INDEX));
+    // 3: value parameter slot of the write-barrier stub
     UseFixed(Arg(VALUE_INDEX), static_cast<uint32_t>(ArkSteedAssembler::GetParameterRegister(3).Code()));
+    // 2: byteOffset parameter slot, doubles as the element-address scratch
     RequireSpecificTemporary(this, ArkSteedAssembler::GetParameterRegister(2));
     SetTemporariesNeeded(1);
 }
@@ -709,6 +711,7 @@ void StoreIntTypedArrayElementVertex::SetValueLocationConstraints()
     UseRegister(Arg(RECEIVER_INDEX));
     UseRegister(Arg(INDEX_INDEX));
     UseRegister(Arg(VALUE_INDEX));
+    // 1: on-heap data-pointer scratch; 2: off-heap adds the backing-offset scratch
     SetTemporariesNeeded(OnHeap::IsOnHeap(onHeapMode_) ? 1 : 2);
 }
 
@@ -717,6 +720,7 @@ void StoreFloatTypedArrayElementVertex::SetValueLocationConstraints()
     UseRegister(Arg(RECEIVER_INDEX));
     UseRegister(Arg(INDEX_INDEX));
     UseRegister(Arg(VALUE_INDEX));
+    // 2: base and byteOffset scratches; 3: off-heap adds the backing offset
     SetTemporariesNeeded(OnHeap::IsOnHeap(onHeapMode_) ? 2 : 3);
     SetDoubleTemporariesNeeded(1);
 }
@@ -825,6 +829,7 @@ void SetValueWithBarrierVertex::SetValueLocationConstraints()
 {
     UseFixed(Arg(GLUE_INDEX), static_cast<uint32_t>(ArkSteedAssembler::GetParameterRegister(0).Code()));
     UseFixed(Arg(OBJECT_INDEX), static_cast<uint32_t>(ArkSteedAssembler::GetParameterRegister(1).Code()));
+    // 3: value parameter slot of the write-barrier stub
     UseFixed(Arg(VALUE_INDEX), static_cast<uint32_t>(ArkSteedAssembler::GetParameterRegister(3).Code()));
 }
 
@@ -845,7 +850,7 @@ void CheckedTaggedStringVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(INPUT_INDEX));
     DefineSameAsFirst(this);
-    SetTemporariesNeeded(2);
+    SetTemporariesNeeded(2);  // 2: scratches for the string hclass type-range check
 }
 
 void I32ConditionCheckVertex::SetValueLocationConstraints()
@@ -873,7 +878,7 @@ void TaggedNumberToBooleanVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
     UseRegister(Arg(INPUT_INDEX));
-    SetTemporariesNeeded(2);
+    SetTemporariesNeeded(2);  // 2: scratch registers for the tagged-number boolean decode
     UseEagerDeoptFrameSlots(this);
 }
 
@@ -881,7 +886,7 @@ void TaggedDoubleToBooleanVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
     UseRegister(Arg(INPUT_INDEX));
-    SetTemporariesNeeded(2);
+    SetTemporariesNeeded(2);  // 2: scratch registers for the tagged-double boolean decode
     UseEagerDeoptFrameSlots(this);
 }
 
@@ -991,7 +996,7 @@ void I32DivByConstWithCheckVertex::SetValueLocationConstraints()
 #else
     DefineAsRegister(this);
     UseRegister(Arg(INPUT_INDEX));
-    SetTemporariesNeeded(2);
+    SetTemporariesNeeded(2);  // 2: work and saved-original dividend scratches
 #endif
 }
 
@@ -1138,7 +1143,7 @@ void CheckedNumberToF64Vertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
     UseRegister(Arg(INPUT_INDEX));
-    SetTemporariesNeeded(2);
+    SetTemporariesNeeded(2);  // 2: tag-bits and tag-constant scratches for the int/double decode
 }
 
 void F64ToI32TruncVertex::SetValueLocationConstraints()
@@ -1157,7 +1162,7 @@ void F64ToUint8ClampedVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(INPUT_INDEX));
     DefineAsRegister(this);
-    SetTemporariesNeeded(2);
+    SetTemporariesNeeded(2);  // 2: immediate and half-bits scratches for the clamp sequence
     SetDoubleTemporariesNeeded(1);
 }
 
@@ -1222,12 +1227,13 @@ void BranchIfTaggedBooleanVertex::SetValueLocationConstraints()
 void BranchIfTaggedStringVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(VALUE_INDEX));
-    SetTemporariesNeeded(2);
+    SetTemporariesNeeded(2);  // 2: scratches for the string hclass type-range check
 }
 
 void BranchIfHClassInVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(VALUE_INDEX));
+    // 1: expected-hclass scratch; 2: adds the actual-hclass load scratch
     SetTemporariesNeeded(InputIsHClassAddress() ? 1 : 2);
 }
 
@@ -1292,8 +1298,7 @@ void BranchIfTaggedHeapObjectVertex::SetValueLocationConstraints()
 void BranchIfJSConstructorFunctionVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(VALUE_INDEX));
-    // JumpIfNotJSConstructorFunction chains hclass -> bitfield -> type through one
-    // RA temporary on every platform.
+    // 1 : JumpIfNotJSConstructorFunction chains hclass -> bitfield -> type through one RA temporary on every platform.
     SetTemporariesNeeded(1);
 }
 
@@ -1302,13 +1307,13 @@ void BranchIfNewTargetHClassReadyVertex::SetValueLocationConstraints()
     UseRegister(Arg(VALUE_INDEX));
     // JumpIfNewTargetHClassNotReady keeps the loaded proto-or-hclass slot live while
     // the hclass checks chain through a second RA temporary on every platform.
-    SetTemporariesNeeded(2);
+    SetTemporariesNeeded(2);  // 2 : See above
 }
 
 void BranchIfBaseVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(VALUE_INDEX));
-    // JumpIfConstructorIsBase acquires two RA temporaries (method pointer + function kind).
+    // 2 : JumpIfConstructorIsBase acquires two RA temporaries (method pointer + function kind).
     SetTemporariesNeeded(2);
 }
 

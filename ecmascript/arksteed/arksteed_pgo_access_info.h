@@ -32,7 +32,6 @@ static constexpr uint32_t MAX_ELEMENT_IC_POLY_CASES = MAX_IC_POLY_CASES;
 
 inline bool IsFixedLengthTypedArrayType(JSType type)
 {
-    // TODO: Exclude resizable/growable-buffer views when those types are introduced.
     switch (type) {
         case JSType::JS_INT8_ARRAY:
         case JSType::JS_UINT8_ARRAY:

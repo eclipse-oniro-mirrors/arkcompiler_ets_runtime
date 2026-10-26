@@ -26,6 +26,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+
+#include "securec.h"
 #include <limits>
 #include <set>
 #include <string>
@@ -130,7 +132,7 @@ constexpr uint32_t REFERENCE_BODY_STREAM_BYTES = 13;
 
 static_assert(sizeof(REFERENCE_STREAM) == REFERENCE_STREAM_SIZE);
 static_assert(REF_BODY_STREAM_OFFSET + REFERENCE_BODY_STREAM_BYTES == REFERENCE_STREAM_SIZE);
-static_assert(OP_COUNT == 16);
+static_assert(OP_COUNT == 16);  // 16: opcodes in the persisted stream (OP_BEGIN..OP_RAW_INT32_CONSTANT)
 
 // ---------------------------------------------------------------------------------------------
 // Independent writers/readers of the documented format
@@ -139,24 +141,24 @@ static_assert(OP_COUNT == 16);
 void PushU32LE(std::vector<uint8_t> &out, uint32_t value)
 {
     for (size_t index = 0; index < U32_BYTES; ++index) {
-        out.push_back(static_cast<uint8_t>(value >> (index * 8U)));
+        out.push_back(static_cast<uint8_t>(value >> (index * 8U)));  // 8U: bits per byte, little-endian
     }
 }
 
 void PushU64LE(std::vector<uint8_t> &out, uint64_t value)
 {
     for (size_t index = 0; index < U64_BYTES; ++index) {
-        out.push_back(static_cast<uint8_t>(value >> (index * 8U)));
+        out.push_back(static_cast<uint8_t>(value >> (index * 8U)));  // 8U: bits per byte, little-endian
     }
 }
 
 void PushULEB128(std::vector<uint8_t> &out, uint64_t value)
 {
     do {
-        uint8_t byte = static_cast<uint8_t>(value & 0x7FU);
-        value >>= 7U;
+        uint8_t byte = static_cast<uint8_t>(value & 0x7FU);  // 0x7F: 7 payload bits per ULEB128 byte
+        value >>= 7U;  // 7U: payload bits per byte
         if (value != 0U) {
-            byte |= 0x80U;
+            byte |= 0x80U;  // 0x80U: continuation bit
         }
         out.push_back(byte);
     } while (value != 0U);
@@ -166,12 +168,12 @@ void PushSLEB128(std::vector<uint8_t> &out, int64_t value)
 {
     bool hasMore = true;
     while (hasMore) {
-        uint8_t byte = static_cast<uint8_t>(value) & 0x7FU;
-        bool signBitSet = (byte & 0x40U) != 0U;
-        value >>= 7;
+        uint8_t byte = static_cast<uint8_t>(value) & 0x7FU;  // 0x7F: 7 payload bits per SLEB128 byte
+        bool signBitSet = (byte & 0x40U) != 0U;  // 0x40U: sign bit of the 7-bit payload
+        value >>= 7;  // 7: payload bits per byte
         hasMore = !((value == 0 && !signBitSet) || (value == -1 && signBitSet));
         if (hasMore) {
-            byte |= 0x80U;
+            byte |= 0x80U;  // 0x80U: continuation bit
         }
         out.push_back(byte);
     }
@@ -181,7 +183,7 @@ uint32_t ReadU32LE(const std::vector<uint8_t> &bytes, size_t offset)
 {
     uint32_t value = 0;
     for (size_t index = 0; index < U32_BYTES; ++index) {
-        value |= static_cast<uint32_t>(bytes[offset + index]) << (index * 8U);
+        value |= static_cast<uint32_t>(bytes[offset + index]) << (index * 8U);  // 8U: bits per byte, little-endian
     }
     return value;
 }
@@ -189,7 +191,7 @@ uint32_t ReadU32LE(const std::vector<uint8_t> &bytes, size_t offset)
 void WriteU32LE(std::vector<uint8_t> &bytes, size_t offset, uint32_t value)
 {
     for (size_t index = 0; index < U32_BYTES; ++index) {
-        bytes[offset + index] = static_cast<uint8_t>(value >> (index * 8U));
+        bytes[offset + index] = static_cast<uint8_t>(value >> (index * 8U));  // 8U: bits per byte, little-endian
     }
 }
 
@@ -197,13 +199,13 @@ std::string HexBytes(const std::vector<uint8_t> &bytes)
 {
     static const char *digits = "0123456789ABCDEF";
     std::string text;
-    text.reserve(bytes.size() * 3U);
+    text.reserve(bytes.size() * 3U);  // 3U: hex characters per byte
     for (uint8_t byte : bytes) {
         if (!text.empty()) {
             text.push_back(' ');
         }
-        text.push_back(digits[byte >> 4U]);
-        text.push_back(digits[byte & 0x0FU]);
+        text.push_back(digits[byte >> 4U]);  // 4U: shift for the high hex digit
+        text.push_back(digits[byte & 0x0FU]);  // 0x0F: mask of the low hex digit
     }
     return text;
 }
@@ -307,7 +309,7 @@ struct ExpectedTranslation {
 };
 
 DeoptTranslationInput MakeInput(int32_t vreg, DeoptTranslationKind valueKind, DeoptSourceKind sourceKind,
-                               int64_t source)
+                                int64_t source)
 {
     DeoptTranslationInput input {};
     input.vreg = vreg;
@@ -394,7 +396,9 @@ protected:
             return nullptr;
         }
         uint8_t *copy = chunk.NewArray<uint8_t>(bytes.size());
-        std::memcpy(copy, bytes.data(), bytes.size());
+        if (memcpy_s(copy, bytes.size(), bytes.data(), bytes.size()) != EOK) {
+            return nullptr;
+        }
         return copy;
     }
 
@@ -468,16 +472,18 @@ HWTEST_F_L0(ArkSteedDeoptTranslationTest, LazyDeoptOffset_UnalignedOffsetRejecte
 #ifndef NDEBUG
     // Debug: production ASSERT (arksteed_deopt_helper.h, EncodeLazyDeoptOffset) fires.
     EXPECT_DEATH(EncodeLazyDeoptOffset(1, DeoptTranslationKind::TAGGED), "ASSERTION FAILED");
+    // 0x1004: misaligned w.r.t. the 3-bit lazy-deopt tag mask
     EXPECT_DEATH(EncodeLazyDeoptOffset(0x1004, DeoptTranslationKind::RAW_INT32), "ASSERTION FAILED");
 #endif
     // Both modes: the low three bits of a tagged word survive as the kind tag and the aligned
     // offset is recovered exactly.
     int32_t tagged = 0x1008 | static_cast<int32_t>(DeoptTranslationKind::RAW_INT32);
-    EXPECT_EQ(StripLazyDeoptOffsetTag(tagged), 0x1008);
+    EXPECT_EQ(StripLazyDeoptOffsetTag(tagged), 0x1008);  // 0x1008: aligned offset passes through
     EXPECT_EQ(static_cast<uint8_t>(DecodeLazyDeoptOffsetTag(tagged)),
               static_cast<uint8_t>(DeoptTranslationKind::RAW_INT32));
+    // 0x1009: 0x1008 tagged with a kind
     int32_t unaligned = 0x1009 | static_cast<int32_t>(DeoptTranslationKind::INT32_TO_TAGGED);
-    EXPECT_EQ(StripLazyDeoptOffsetTag(unaligned), 0x1008);
+    EXPECT_EQ(StripLazyDeoptOffsetTag(unaligned), 0x1008);  // 0x1008: tag stripped back to the aligned offset
     EXPECT_EQ(static_cast<uint8_t>(DecodeLazyDeoptOffsetTag(unaligned)),
               static_cast<uint8_t>(DeoptTranslationKind::INT32_TO_TAGGED));
     EXPECT_EQ(static_cast<uint8_t>(DecodeLazyDeoptOffsetTag(1)),
@@ -591,8 +597,8 @@ HWTEST_F_L0(ArkSteedDeoptTranslationTest, ReferenceStream_MatchesHandComputedDoc
     EXPECT_EQ(ReadU32LE(encoded, REF_BODY_COUNT_OFFSET), 2U);
     EXPECT_EQ(ReadU32LE(encoded, REF_OFFSET_TABLE_OFFSET), 0U);
     EXPECT_EQ(ReadU32LE(encoded, REF_OFFSET1_OFFSET), 6U);
-    EXPECT_EQ(encoded[REF_HEADER0_OFFSET + U32_BYTES], 0x01);
-    EXPECT_EQ(encoded[REF_HEADER1_OFFSET + U32_BYTES], 0x02);
+    EXPECT_EQ(encoded[REF_HEADER0_OFFSET + U32_BYTES], 0x01);  // 0x01: deoptType byte of the first reference body
+    EXPECT_EQ(encoded[REF_HEADER1_OFFSET + U32_BYTES], 0x02);  // 0x02: deoptType byte of the second reference body
 }
 
 /**
@@ -1055,8 +1061,11 @@ HWTEST_F_L0(ArkSteedDeoptTranslationTest, Float64RawBits_MatchHandComputedPatter
     EXPECT_EQ(GetFloat64RawBits(0.0), static_cast<int64_t>(0x0000000000000000ULL));
     EXPECT_EQ(GetFloat64RawBits(-0.0), static_cast<int64_t>(0x8000000000000000ULL));
     EXPECT_EQ(GetFloat64RawBits(1.0), static_cast<int64_t>(0x3FF0000000000000ULL));
+    // 0x3FF8000000000000: IEEE-754 binary64 bits of 1.5
     EXPECT_EQ(GetFloat64RawBits(1.5), static_cast<int64_t>(0x3FF8000000000000ULL));
+    // 0x4014000000000000: IEEE-754 binary64 bits of 5.0
     EXPECT_EQ(GetFloat64RawBits(5.0), static_cast<int64_t>(0x4014000000000000ULL));
+    // 0xC004000000000000: IEEE-754 binary64 bits of -2.5
     EXPECT_EQ(GetFloat64RawBits(-2.5), static_cast<int64_t>(0xC004000000000000ULL));
     EXPECT_EQ(GetFloat64RawBits(std::numeric_limits<double>::infinity()),
               static_cast<int64_t>(0x7FF0000000000000ULL));
@@ -1093,7 +1102,7 @@ HWTEST_F_L0(ArkSteedDeoptTranslationTest, Float64RawBits_MatchHandComputedPatter
     EXPECT_EQ(body.inputs[0].source, GetFloat64RawBits(1.5));
     double untagged = 0.0;
     uint64_t rawBits = static_cast<uint64_t>(body.inputs[0].source);
-    std::memcpy(&untagged, &rawBits, sizeof(untagged));
+    ASSERT_EQ(memcpy_s(&untagged, sizeof(untagged), &rawBits, sizeof(rawBits)), EOK);
     EXPECT_DOUBLE_EQ(untagged, 1.5);
     ASSERT_TRUE(reader.GetBody(1, &body));
     ASSERT_EQ(body.inputs.size(), 1U);
@@ -1203,6 +1212,7 @@ HWTEST_F_L0(ArkSteedDeoptTranslationTest, Negative_InvalidStreamPrefixes)
         EXPECT_EQ(reader.GetDeoptCount(), 0U);
     }
     {
+        // 2: u32 header fields; one byte short of the minimum size
         std::vector<uint8_t> tooShort(2 * U32_BYTES - 1U, 0U);
         DeoptTranslationReader reader(tooShort.data(), tooShort.size());
         EXPECT_FALSE(reader.IsValid());

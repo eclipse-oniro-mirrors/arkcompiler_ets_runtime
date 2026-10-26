@@ -27,10 +27,6 @@ function loop_nested(outer_limit, inner_limit)
 
 ArkTools.arkSteedCompileSync(loop_nested);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(loop_nested);
-// print(res);
-
 let output = loop_nested(3, 3);
 print(output);
 output = loop_nested(0, 3);

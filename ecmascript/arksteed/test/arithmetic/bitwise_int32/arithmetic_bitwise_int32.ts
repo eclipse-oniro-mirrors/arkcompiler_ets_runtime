@@ -29,8 +29,7 @@
 // -2147483648, -1073741824, 2147483647 and -1. The signed reinterpretation of a
 // raw 0xffffffff as a negative int32 belongs only to the tagging guard
 // `CheckedNonNegativeI32ToTaggedInt` in that separate transition process; it
-// does not describe the language semantics. These are native ArkSteed cases; no
-// V8 test is borrowed (V7).
+// does not describe the language semantics.
 //
 // Every one of the seven targets carries its own separately matching positive
 // compile/entry assertion, so the entry of one method can never mask

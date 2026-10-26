@@ -48,8 +48,7 @@ class ArkSteedHeapBroker {
   private:
     friend class ArkSteedHeapBrokerTestAccess;
 
-    class NoGCScope
-    {
+    class NoGCScope {
       public:
         explicit NoGCScope(const ArkSteedHeapBroker *broker) : broker_(broker)
         {

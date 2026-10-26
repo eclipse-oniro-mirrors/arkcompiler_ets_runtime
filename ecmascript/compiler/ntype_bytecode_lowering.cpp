@@ -259,11 +259,11 @@ void NTypeBytecodeLowering::LowerNTypedGetUnmappedArgs(GateRef gate)
 
 void NTypeBytecodeLowering::LowerNTypedStownByIndex(GateRef gate, bool hasIcSlot)
 {
-    // 4: number of value inputs (ICSlotId, receiver, index, acc)
+    // 4: value inputs with the IC slot (ICSlotId, receiver, index, acc); 3: without it
     ASSERT(acc_.GetNumValueIn(gate) == (hasIcSlot ? 4 : 3));
     GateRef receiver = acc_.GetValueIn(gate, hasIcSlot ? 1 : 0);
-    GateRef index = acc_.GetValueIn(gate, hasIcSlot ? 2 : 1);
-    GateRef value = acc_.GetValueIn(gate, hasIcSlot ? 3 : 2);
+    GateRef index = acc_.GetValueIn(gate, hasIcSlot ? 2 : 1);  // 2: index input with IC slot; 1: without
+    GateRef value = acc_.GetValueIn(gate, hasIcSlot ? 3 : 2);  // 3: value input with IC slot; 2: without
     if (acc_.GetOpCode(receiver) != OpCode::CREATE_ARRAY &&
         acc_.GetOpCode(receiver) != OpCode::CREATE_ARRAY_WITH_BUFFER) {
         return;

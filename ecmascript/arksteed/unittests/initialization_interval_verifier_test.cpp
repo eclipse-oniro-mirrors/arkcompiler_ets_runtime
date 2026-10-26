@@ -738,6 +738,7 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, AcceptsConstantArgumentsSizes
 {
     for (int64_t count: {int64_t {0},
                          int64_t {1},
+                         // 8: divisor keeping the size within the regular-object limit
                          static_cast<int64_t>(MAX_REGULAR_HEAP_OBJECT_SIZE / 8),
                          int64_t {1} << 29,
                          static_cast<int64_t>(INT32_MAX)}) {
@@ -842,6 +843,7 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsWrongArgumentsSizeForm
             {count}, TAGGED_TYPE_SIZE_LOG + (part == SizeFormulaPart::ELEMENT_SIZE ? 1 : 0));
         auto* size = f.New<I64AddVertex>(
             {shift,
+             // 8: deliberate header-size error in the corrupted formula
              f.graph.GetInt64Constant(TaggedArray::DATA_OFFSET + (part == SizeFormulaPart::HEADER_SIZE ? 8 : 0))});
         f.BeforeCheck(count);
         f.BeforeCheck(shift);
@@ -1034,6 +1036,7 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsChangedGlueAndSizeAfte
     f.canAllocate->SetInput(CanAllocateInYoungVertex::GLUE_INDEX, f.graph.GetIntPtrConstant(1));
     EXPECT_DEATH(f.Verify(), "Allocation must match the checked glue and size");
     f.canAllocate->SetInput(CanAllocateInYoungVertex::GLUE_INDEX, f.glue);
+    // 8: deliberate size mismatch
     f.canAllocate->SetInput(CanAllocateInYoungVertex::SIZE_INDEX, f.graph.GetInt64Constant(f.objectSize + 8));
     EXPECT_DEATH(f.Verify(), "Allocation must match the checked glue and size");
 }

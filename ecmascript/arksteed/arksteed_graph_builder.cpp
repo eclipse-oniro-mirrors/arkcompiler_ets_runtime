@@ -78,9 +78,8 @@ constexpr uint32_t BUILTIN_CONSTRUCTOR_STUB_COUNT = 0U BUILTINS_CONSTRUCTOR_STUB
 
 constexpr uint32_t BUILTIN_CONSTRUCTOR_STUB_FIRST_ID =
     static_cast<uint32_t>(BuiltinId::BUILTINS_CONSTRUCTOR_STUB_FIRST);
-constexpr uint32_t BUILTIN_CONSTRUCTOR_STUB_LAST_ID = static_cast<uint32_t>(BuiltinId::SharedMapConstructor);
-static_assert(BUILTIN_CONSTRUCTOR_STUB_LAST_ID - BUILTIN_CONSTRUCTOR_STUB_FIRST_ID + 1U ==
-              BUILTIN_CONSTRUCTOR_STUB_COUNT);
+constexpr uint32_t BUILTIN_CONSTRUCTOR_STUB_LAST_ID =
+    BUILTIN_CONSTRUCTOR_STUB_FIRST_ID + BUILTIN_CONSTRUCTOR_STUB_COUNT - 1U;
 
 bool CanOptimizeBuiltinConstructor(BuiltinId id)
 {
@@ -379,6 +378,17 @@ bool IsReferenceComparableRootValue(ValueVertex *node)
     }
     JSTaggedValue tagged(constant->GetValue());
     return tagged.IsBoolean() || tagged.IsNull() || tagged.IsUndefined() || tagged.IsHole();
+}
+
+bool IsNullishRootValue(ValueVertex *node)
+{
+    ASSERT(node != nullptr);
+    auto *constant = node->TryCast<TaggedConstantVertex>();
+    if (constant == nullptr) {
+        return false;
+    }
+    JSTaggedValue tagged(constant->GetValue());
+    return tagged.IsNull() || tagged.IsUndefined();
 }
 
 bool IsReferenceComparableType(NodeInfo::NodeType type)
@@ -708,7 +718,7 @@ bool GraphBuilder::IsEligibleForLoopPeeling(const BytecodeLoopInfo *loop) const
     // CanonicalizeLoopsDFS has already merged multiple entries and backedges.
     ASSERT(loop->header != nullptr && loop->preheader != nullptr && loop->latch != nullptr);
     ASSERT(!loop->members.empty());
-    ASSERT(loop->header->jumpPredecessors.size() == 2);
+    ASSERT(loop->header->jumpPredecessors.size() == 2);  // 2: loop entry and latch backedge
     ASSERT(loop->latch->jumpBlock == loop->header);
     ASSERT(loop->preheader->rpoIndex < loop->header->rpoIndex);
     uint32_t firstBytecodeSize = static_cast<uint32_t>(preproc_->GetBytecode(loop->header->startBcIndex)->GetSize());
@@ -3874,7 +3884,8 @@ struct GraphBuilder::BytecodeVisitor {
     // interpreter's derived arm likewise admits any non-undefined newTarget).
     // Guard-shape failures branch directly into the slow block — no stub call
     // before the guards and no sentinel result inspection; a monomorphic call
-    // slot folds the super-ctor checks into one identity eager deopt instead. thisObj for the fast path is produced per arm: a base super
+    // slot folds the super-ctor checks into one identity eager deopt instead. thisObj for
+    // the fast path is produced per arm: a base super
     // constructor allocates via a FastSuperAllocateThis vertex (currently a stub call, a dedicated
     // vertex so the allocation can be lowered inline later), a derived or builtin one gets
     // undefined (no allocation, callee re-initializes this). The fast path enters the super through
@@ -4584,7 +4595,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *currentEnv = LoadRegister(bcInfo, 0);
         ValueVertex *parentEnv = BuildEnvSlotLoad(currentEnv, GetLexicalEnvParentOffset());
 
-        frameState.SetAcc(parentEnv);
+        // POPLEXENV only updates the lexical env; it must not overwrite the accumulator.
         frameState.SetLexicalEnv(parentEnv);
         compileInfoFacts_->ClearEnvSlotsFor(currentEnv);
     }
@@ -4920,7 +4931,7 @@ struct GraphBuilder::BytecodeVisitor {
 
         currentBlock = loopHeader;
         compileInfoFacts_ = entryFacts->Clone();
-        PhiVertex *indexPhi = self->NewPhiVertex(currentBlock, 2, self->AccIndex());
+        PhiVertex *indexPhi = self->NewPhiVertex(currentBlock, 2, self->AccIndex());  // 2: entry and backedge inputs
         indexPhi->SetPredecessor(entryJump->GetPredecessorId(), TaggedConstantFromInt32(0));
         ValueVertex *index = self->NewVertex<TaggedIntToI32Vertex>(
             compileInfoFacts_, currentBlock, {indexPhi});
@@ -4943,7 +4954,7 @@ struct GraphBuilder::BytecodeVisitor {
         indexPhi->SetPredecessor(backedge->GetPredecessorId(), nextTaggedIndex);
 
         ASSERT(loopHeader->IsLoopHeader());
-        ASSERT(loopHeader->PredecessorCount() == 2);
+        ASSERT(loopHeader->PredecessorCount() == 2);  // 2: loop entry and latch
         ASSERT(indexPhi->GetInputCount() == loopHeader->PredecessorCount());
         ASSERT(indexPhi->GetPredecessor(entryJump->GetPredecessorId()) != nullptr);
         ASSERT(indexPhi->GetPredecessor(backedge->GetPredecessorId()) != nullptr);
@@ -7299,34 +7310,63 @@ struct GraphBuilder::BytecodeVisitor {
         return result;
     }
 
+    ValueVertex *TryReduceLooseEqualityAgainstConstant(JSCondition kind, ValueVertex *left, ValueVertex *right)
+    {
+        // Note: Only nullish cases are implemented currently.
+        bool leftNullish = IsNullishRootValue(left);
+        bool rightNullish = IsNullishRootValue(right);
+        if (leftNullish && rightNullish) {
+            // Every nullish-root pair is loosely equal to the other.
+            return GetBooleanConstant(IsPositiveEqualityCompare(kind));
+        }
+        // Loose equality against a nullish root: `x == null` (and `x == undefined`)
+        // The check reduces to `(x | 1) === null` (based on the fact that VALUE_UNDEFINED=0x2, VALUE_NULL=0x3)
+        if (leftNullish || rightNullish) {
+            ValueVertex *value = leftNullish ? right : left;
+            ValueVertex *raw = self->NewVertex<TaggedToRawI64Vertex>(compileInfoFacts_, currentBlock, {value});
+            ValueVertex *one = self->graph_->GetInt64Constant(1);
+            ValueVertex *normalizedRaw = self->NewVertex<I64BitwiseBinaryVertex>(
+                compileInfoFacts_, currentBlock, {raw, one}, IntBitwiseKind::BITWISE_OR);
+            ValueVertex *normalized = self->NewVertex<RawI64ToTaggedVertex>(
+                compileInfoFacts_, currentBlock, {normalizedRaw});
+            ValueVertex *nullRoot = self->graph_->GetTaggedConstant(
+                static_cast<uint64_t>(JSTaggedValue::VALUE_NULL));
+            ValueVertex *isEqual = BuildTaggedEqual(normalized, nullRoot);
+            if (IsPositiveEqualityCompare(kind)) {
+                return isEqual;
+            }
+            // Boolean negation via the TaggedNotEqual(x, true) idiom; branch
+            // consumers re-fuse the polarity, so the chain stays cheap.
+            return BuildTaggedNotEqual(isEqual, GetBooleanConstant(true));
+        }
+        return nullptr;
+    }
+
     ValueVertex *TryReduceCompareEqualAgainstConstant(JSCondition kind, ValueVertex *left, ValueVertex *right)
     {
         if (left == right && IsEqualityCompare(kind) && compileInfoFacts_->CheckType(left, NodeInfo::NodeType::INT)) {
             return GetBooleanConstant(IsPositiveEqualityCompare(kind));
         }
         if (!IsStrictEqualityCompare(kind)) {
-            return nullptr;
+            // Relational comparisons (<, <=, >, >=, those that are neither strict equality nor loose equality)
+            // are skipped currently. Their optimization is TBD later.
+            return IsLooseEqualityCompare(kind) ? TryReduceLooseEqualityAgainstConstant(kind, left, right) : nullptr;
         }
-
         bool equalResult = IsPositiveEqualityCompare(kind);
         NodeInfo::NodeType leftType = compileInfoFacts_->GetKnownType(left);
         NodeInfo::NodeType rightType = compileInfoFacts_->GetKnownType(right);
         if (left == right && !NodeInfo::NodeTypeCanBe(leftType, NodeInfo::NodeType::NUMBER)) {
             return GetBooleanConstant(equalResult);
         }
-
         if (!StrictTypesCanBeEqual(leftType, rightType)) {
             return GetBooleanConstant(!equalResult);
         }
-
         if (IsReferenceComparableRootValue(left) || IsReferenceComparableRootValue(right)) {
             return equalResult ? BuildTaggedEqual(left, right) : BuildTaggedNotEqual(left, right);
         }
-
         if (IsReferenceComparableType(leftType) && IsReferenceComparableType(rightType)) {
             return equalResult ? BuildTaggedEqual(left, right) : BuildTaggedNotEqual(left, right);
         }
-
         return nullptr;
     }
 
@@ -9223,7 +9263,8 @@ struct GraphBuilder::BytecodeVisitor {
     }
 
     void BuildPreparedNamedStoreField(ValueVertex *storeTarget, int32_t offset, ValueVertex *value,
-                                      AccessFieldRepresentation representation, PropertyKey key = PropertyKey::Unknown())
+                                      AccessFieldRepresentation representation,
+                                      PropertyKey key = PropertyKey::Unknown())
     {
         switch (representation) {
             case AccessFieldRepresentation::TAGGED:

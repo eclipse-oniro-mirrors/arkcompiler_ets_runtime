@@ -52,8 +52,6 @@ function if_else_many_args_1(x: number,
 
 ArkTools.arkSteedCompileSync(if_else_many_args_1);
 
-// Spin loop: A temporary approach to wait for ArkSteed JIT compiler
-
 let output = if_else_many_args_1(15, 1, 2, 3, 4, 5, 6);
 print(output);
 output = if_else_many_args_1(-15, 1, 2, 3, 4, 5, 6);

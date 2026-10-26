@@ -55,13 +55,6 @@ python ./run_arksteed_tests.py -p arm64 -m release --skip-build
 ```
 该测试可以基于测试文件中的特殊注释(//! 开头的)对dump的CFG进行IR正确性测试，注释的详细用法见 `ecmascript/arksteed/test/README.md`
 
-#### 外部用例
-在OpenHarmony源码根目录确保有arksteed_external_tests（不存在则git clone https://gitcode.com/xing-yunhao-huawei/arksteed_external_tests.git）
-cd到arksteed_external_tests目录下，运行
-```bash
-python run_arksteed_external_tests.py -m release -F -c # 参数详细定义使用-h获取，也可参考同目录的README.md
-```
-
 #### 约束
 - 涉及字节码优化相关改动，在`ecmascript/arksteed/test`下新增的ts测试源文必须有`//! `开头的CFG校验注释
 
@@ -71,4 +64,3 @@ python run_arksteed_external_tests.py -m release -F -c # 参数详细定义使�
 2. 代码格式化已执行
 3. libark_jsruntime编译成功
 4. run_arksteed_tests.py 运行全量通过
-5. run_arksteed_external_tests 外部用例全量通过

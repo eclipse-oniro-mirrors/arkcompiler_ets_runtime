@@ -13,7 +13,7 @@
 2. 使用hiperf对应用进行采样，抓取到一个栈快照后进行回栈并符号化后记录
 
 ## 与本工程的协作
-faultloggerd, hiperf都是外部工程，他们不是调用ark_js_vm，而是使用libark_jsruntime.so中导出的函数。主要导出函数在`ecmascript/dfx/stackinfo/js_stackinfo.h`
+faultloggerd, hiperf都是外部工程，它们不是调用ark_js_vm，而是使用libark_jsruntime.so中导出的函数。主要导出函数在`ecmascript/dfx/stackinfo/js_stackinfo.h`
 不管哪种回栈都需要回填参数`ArkUnwindParam`中的fp, sp, pc三个字段
 * fp --- 帧头位置，每层调用的门牌，从这个位置的附近槽位可以得到当前帧是什么类型的，执行完回到哪里（PC指向哪里，也叫returnAddress），上一帧的帧头在哪里
 * sp --- 帧的水位线，栈底（低地址）当前帧把栈空用到哪儿了，通常来说fp ~ sp 就是一帧使用的地址范围

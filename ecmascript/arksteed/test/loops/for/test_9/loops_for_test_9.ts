@@ -20,9 +20,6 @@ function loop_for_9(m: number, n: number, p: number, q: number, callback: (x: nu
 
 ArkTools.arkSteedCompileSync(loop_for_9);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(loop_for_9);
-
 let sum = 0;
 sum = 0; print((loop_for_9(2, 3, 4, 5, (x) => { sum += x; }), sum));
 sum = 0; print((loop_for_9(3, 4, 5, 6, (x) => { sum += x; }), sum));

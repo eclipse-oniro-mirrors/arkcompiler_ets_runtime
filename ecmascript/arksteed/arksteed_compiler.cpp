@@ -230,7 +230,7 @@ bool ArkSteedCompilerTask::Compile()
     ArkSteedCompileTimeScope totalScope(arkSteedTask_);
     ArkSteedPipelineStatisticsSummary statsSummary(
         pipelineStatistics_, pipelineStatistics_.Enabled() ? GetCompiledMethodName() : "");
-    
+
     NativeAreaAllocator *allocator = arkSteedTask_->GetCompilerVM()->GetNativeAreaAllocator();
     chunk_ = std::make_unique<Chunk>(allocator, pipelineStatistics_.Enabled());
     pipelineStatistics_.AttachChunk(chunk_.get());
@@ -302,7 +302,7 @@ bool ArkSteedCompilerTask::Compile()
         translationBuilder_ = new DeoptTranslationBuilder();
         deoptLiteralTableBuilder_ = new DeoptLiteralTableBuilder();
         bool withColors = arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedPrintWithColors();
-        ArkSteedCodeGenerator codegen(assembler_, graph_, safepointTableBuilder_, translationBuilder_, 
+        ArkSteedCodeGenerator codegen(assembler_, graph_, safepointTableBuilder_, translationBuilder_,
             deoptLiteralTableBuilder_, positionTableBuilder_, withColors);
         codegen.Generate();
 
@@ -372,7 +372,7 @@ void ArkSteedCompilerTask::FillCodeDesc(MachineCodeDesc &codeDesc)
     constexpr size_t HEADER_SIZE = ArkSteedTableContainerHeader::SIZE;
     size_t containerSize = HEADER_SIZE + safepointSize + positionSize;
     if (containerSize > 0) {
-        auto containerBuffer = std::unique_ptr<uint8_t[]>(new uint8_t[containerSize]);
+        auto containerBuffer = std::make_unique<uint8_t[]>(containerSize);
         auto *header = reinterpret_cast<ArkSteedTableContainerHeader *>(containerBuffer.get());
         header->magic = ArkSteedTableContainerHeader::MAGIC;
         header->version = ArkSteedTableContainerHeader::VERSION;

@@ -192,7 +192,7 @@ public:
     // 22.2.3.16
     static JSTaggedValue LastIndexOf(EcmaRuntimeCallInfo *argv);
     // 22.2.3.17
-    static JSTaggedValue GetLength(EcmaRuntimeCallInfo *argv);
+    PUBLIC_API static JSTaggedValue GetLength(EcmaRuntimeCallInfo *argv);
     // 22.2.3.18
     static JSTaggedValue Map(EcmaRuntimeCallInfo *argv);
     // 22.2.3.19

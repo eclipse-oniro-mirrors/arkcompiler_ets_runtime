@@ -12542,8 +12542,8 @@ GateRef StubBuilder::DefineFunc(GateRef glue, GateRef constpool, GateRef index, 
     {
         // `temporaryCacheValue` may be a fake JSTaggedValue, see `TemporaryJSTaggedValue`,
         // DO NOT direct use `temporaryCacheValue` further more without convertion
-        GateRef temporaryCacheValue = env->GetBuilder()->GetObjectFromConstPoolCacheUnsafe(glue, 
-            unsharedConstpool, index);
+        GateRef temporaryCacheValue =
+            env->GetBuilder()->GetObjectFromConstPoolCacheUnsafe(glue, unsharedConstpool, index);
         BRANCH(env->GetBuilder()->TemporaryTaggedIsHeapObject(temporaryCacheValue), &isHeapObject, &afterAOTLiteral);
         {
             Bind(&isHeapObject);

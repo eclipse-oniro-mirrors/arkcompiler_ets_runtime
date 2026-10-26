@@ -388,7 +388,7 @@ std::unique_ptr<uint8_t[]> SourcePositionTableBuilder::EmitToNewBuffer() const
     if (size == 0) {
         return nullptr;
     }
-    auto buffer = std::unique_ptr<uint8_t[]>(new uint8_t[size]);
+    auto buffer = std::make_unique<uint8_t[]>(size);
     Emit(buffer.get());
     return buffer;
 }
@@ -402,7 +402,8 @@ void SourcePositionTableBuilder::Clear()
 // Section Container accessors
 // ============================================================================
 
-bool CheckSafepointWrapperHeader(const uint8_t *container, size_t containerSize, size_t *outSize) {
+bool CheckSafepointWrapperHeader(const uint8_t *container, size_t containerSize, size_t *outSize)
+{
     if (container == nullptr || containerSize < sizeof(ArkSteedTableContainerHeader)) {
         if (outSize != nullptr) {
             *outSize = 0;
@@ -410,7 +411,8 @@ bool CheckSafepointWrapperHeader(const uint8_t *container, size_t containerSize,
         return false;
     }
     const auto *header = reinterpret_cast<const ArkSteedTableContainerHeader *>(container);
-    if (header->magic != ArkSteedTableContainerHeader::MAGIC || header->version != ArkSteedTableContainerHeader::VERSION) {
+    if (header->magic != ArkSteedTableContainerHeader::MAGIC ||
+        header->version != ArkSteedTableContainerHeader::VERSION) {
         if (outSize != nullptr) {
             *outSize = 0;
         }
@@ -443,7 +445,7 @@ const uint8_t *GetArkSteedPositionTable(const uint8_t *container, size_t contain
     if (!CheckSafepointWrapperHeader(container, containerSize, outSize)) {
         return nullptr;
     }
-    
+
     const auto *header = reinterpret_cast<const ArkSteedTableContainerHeader *>(container);
     if (header->positionOffset == 0 || header->positionSize == 0) {
         if (outSize != nullptr) {
@@ -465,51 +467,48 @@ const uint8_t *GetArkSteedPositionTable(const uint8_t *container, size_t contain
 
 uint32_t FindBcOffsetByPCOffset(MachineCode *machineCode, uint32_t pcOffset)
 {
-    uint32_t bcOffset = 0;
     // Priority chain: position table → safepoint table → 0
     size_t containerSize = machineCode->GetStackMapOrOffsetTableSize();
     const uint8_t *containerData = machineCode->GetStackMapOrOffsetTableAddress();
-    if (containerData != nullptr && containerSize > 0) {
-        // Try position table first (controlled by --compiler-arksteed-source-position-table)
-        size_t posTableSize = 0;
-        const uint8_t *posTableData = GetArkSteedPositionTable(containerData, containerSize, &posTableSize);
-        if (posTableData != nullptr && posTableSize > 0) {
-            auto result = arksteed::LookupBcOffsetFromPositionTable(posTableData, posTableSize, pcOffset-1);
-            if (result.has_value()) {
-                bcOffset = result.value();
-            }
-        }
-        // Fallback to safepoint table deopt data
-        if (bcOffset == 0) {
-            size_t safepointSize = 0;
-            const uint8_t *safepointData = GetArkSteedSafepointTable(containerData, containerSize, &safepointSize);
-            if (safepointData != nullptr && safepointSize > 0) {
-                auto result = ExtractBcOffsetFromSafepointTable(safepointData, safepointSize, pcOffset);
-                if (result.has_value()) {
-                    bcOffset = result.value();
-                }
-            }
+    if (containerData == nullptr || containerSize <= 0) {
+        return 0;
+    }
+    // Try position table first (controlled by --compiler-arksteed-source-position-table)
+    size_t posTableSize = 0;
+    const uint8_t *posTableData = GetArkSteedPositionTable(containerData, containerSize, &posTableSize);
+    if (posTableData != nullptr && posTableSize > 0) {
+        auto result = arksteed::LookupBcOffsetFromPositionTable(posTableData, posTableSize, pcOffset-1);
+        if (result.has_value()) {
+            return result.value();
         }
     }
-    return bcOffset;
+    // Fallback to safepoint table deopt data
+    size_t safepointSize = 0;
+    const uint8_t *safepointData = GetArkSteedSafepointTable(containerData, containerSize, &safepointSize);
+    if (safepointData != nullptr && safepointSize > 0) {
+        auto result = ExtractBcOffsetFromSafepointTable(safepointData, safepointSize, pcOffset);
+        if (result.has_value()) {
+            return result.value();
+        }
+    }
+    return 0;
 }
 
 // ============================================================================
 // Pure functions
 // ============================================================================
 
-std::optional<uint32_t> ExtractBcOffsetFromSafepointTable(const uint8_t *tableData, size_t tableSize, uint32_t pcOffset) 
+std::optional<uint32_t> ExtractBcOffsetFromSafepointTable(const uint8_t *tableData, size_t tableSize,
+                                                          uint32_t pcOffset)
 {
     ArkSteedSafepointTable table(tableData, tableSize);
     if (!table.IsValid()) {
         return std::nullopt;
     }
-
     const ArkSteedSafepointEntry *entry = table.FindEntry(pcOffset);
     if (entry == nullptr || entry->pcOffset != pcOffset || entry->deoptNum == 0) {
         return std::nullopt;
     }
-
     // Scan deopt data for PC_OFFSET_INDEX with CONSTANT kind
     constexpr int64_t KIND_COUNT = 4;
     constexpr int32_t PC_OFFSET_VREG = static_cast<int32_t>(SpecVregIndex::PC_OFFSET_INDEX);
@@ -520,7 +519,6 @@ std::optional<uint32_t> ExtractBcOffsetFromSafepointTable(const uint8_t *tableDa
     if (offset < entriesEnd || offset >= tableSize) {
         return std::nullopt;
     }
-
     ASSERT(entry->deoptNum % DEOPT_LOGICAL_PAIR_SIZE == 0);
     for (uint32_t i = 0; i < entry->deoptNum; i += DEOPT_LOGICAL_PAIR_SIZE) {
         if (offset >= tableSize) {
@@ -532,7 +530,6 @@ std::optional<uint32_t> ExtractBcOffsetFromSafepointTable(const uint8_t *tableDa
         if (vregsInfoSize == 0 || vregsInfoSize > tableSize - offset) {
             return std::nullopt;
         }
-
         auto kind = static_cast<ArkSteedDeoptValueKind>(static_cast<uint64_t>(vregsInfo) & (KIND_COUNT - 1));
         int64_t vreg = (vregsInfo - static_cast<int64_t>(kind)) / KIND_COUNT;
         if (kind > ArkSteedDeoptValueKind::HEAP_LITERAL ||
@@ -557,7 +554,6 @@ std::optional<uint32_t> ExtractBcOffsetFromSafepointTable(const uint8_t *tableDa
             }
             return static_cast<uint32_t>(encodedValue);
         }
-
         // Skip the value part of this deopt entry
         if (kind == ArkSteedDeoptValueKind::CONSTANT || kind == ArkSteedDeoptValueKind::HEAP_LITERAL) {
             if (offset >= tableSize) {
@@ -594,7 +590,6 @@ std::optional<uint32_t> ExtractBcOffsetFromSafepointTable(const uint8_t *tableDa
             offset += encodedOffsetSize;
         }
     }
-
     return std::nullopt;
 }
 
@@ -603,19 +598,15 @@ std::optional<uint32_t> LookupBcOffsetFromPositionTable(const uint8_t *tableData
     if (tableData == nullptr || tableSize < sizeof(uint32_t)) {
         return std::nullopt;
     }
-
     uint32_t numEntries = ReadU32Unaligned(tableData);
-
     if (numEntries == 0) {
         return std::nullopt;
     }
-
     constexpr size_t ENTRY_SIZE = 2 * sizeof(uint32_t);  // pcOffset + bcOffset
     size_t entriesSize = static_cast<size_t>(numEntries) * ENTRY_SIZE;
     if (entriesSize > tableSize - sizeof(uint32_t)) {
         return std::nullopt;
     }
-
     // Binary search: find the last entry with pcOffset <= target
     const uint8_t *entriesBase = tableData + sizeof(uint32_t);
     uint32_t lo = 0;
@@ -629,11 +620,9 @@ std::optional<uint32_t> LookupBcOffsetFromPositionTable(const uint8_t *tableData
             hi = mid;
         }
     }
-
     if (lo == 0) {
         return std::nullopt;  // pcOffset is before the first entry
     }
-
     // Read bcOffset from the found entry
     size_t foundOffset = (lo - 1) * ENTRY_SIZE + sizeof(uint32_t);
     return ReadU32Unaligned(entriesBase + foundOffset);

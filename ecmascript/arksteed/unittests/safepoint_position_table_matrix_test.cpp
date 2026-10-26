@@ -33,6 +33,8 @@
 
 #include <cstdint>
 #include <cstring>
+
+#include "securec.h"
 #include <optional>
 #include <utility>
 #include <vector>
@@ -73,12 +75,20 @@ public:
 
         // Write safepoint table
         if (!safepointData.empty()) {
-            std::memcpy(buf.data() + safepointOffset, safepointData.data(), safepointData.size());
+            if (memcpy_s(buf.data() + safepointOffset, buf.size() - safepointOffset,
+                         safepointData.data(), safepointData.size()) != EOK) {
+                ADD_FAILURE() << "memcpy_s failed for the safepoint table";
+                return {};
+            }
         }
 
         // Write position table
         if (!positionData.empty()) {
-            std::memcpy(buf.data() + positionOffset, positionData.data(), positionData.size());
+            if (memcpy_s(buf.data() + positionOffset, buf.size() - positionOffset,
+                         positionData.data(), positionData.size()) != EOK) {
+                ADD_FAILURE() << "memcpy_s failed for the position table";
+                return {};
+            }
         }
 
         return buf;
@@ -107,7 +117,7 @@ public:
         uint32_t deoptOffset = sizeof(ArkSteedSafepointHeader) +
             sizeof(ArkSteedSafepointEntry);
         uint16_t flags = 0;
-        uint16_t deoptNum = hasDeopt ? 2 : 0;
+        uint16_t deoptNum = hasDeopt ? 2 : 0;  // 2: vregAndKind plus value entries
         buf.insert(buf.end(), reinterpret_cast<const uint8_t *>(&pcOffset),
                    reinterpret_cast<const uint8_t *>(&pcOffset) + sizeof(pcOffset));
         buf.insert(buf.end(), reinterpret_cast<const uint8_t *>(&deoptOffset),
@@ -124,12 +134,12 @@ public:
             auto appendLeb128 = [](std::vector<uint8_t> &b, int64_t val) {
                 bool more = true;
                 while (more) {
-                    uint8_t byte = static_cast<uint8_t>(val & 0x7F);
-                    val >>= 7;
+                    uint8_t byte = static_cast<uint8_t>(val & 0x7F);  // 0x7F: 7 payload bits per LEB128 byte
+                    val >>= 7;  // 7: payload bits per byte
                     if ((val == 0 && (byte & 0x40) == 0) || (val == -1 && (byte & 0x40) != 0)) {
                         more = false;
                     } else {
-                        byte |= 0x80;
+                        byte |= 0x80;  // 0x80: continuation bit
                     }
                     b.push_back(byte);
                 }
@@ -166,7 +176,7 @@ public:
         const std::vector<std::pair<uint32_t, uint32_t>> &entries)
     {
         std::vector<uint8_t> buf;
-        buf.reserve(sizeof(uint32_t) + entries.size() * 2 * sizeof(uint32_t));
+        buf.reserve(sizeof(uint32_t) + entries.size() * 2 * sizeof(uint32_t));  // 2: pc and bc u32 per entry
 
         // Header: numEntries
         uint32_t numEntries = static_cast<uint32_t>(entries.size());
@@ -206,8 +216,7 @@ HWTEST_F_L0(ArkSteedSafepointPositionTableMatrixTest, SafepointOnly_ExactHit)
 
     // Position table absent: GetArkSteedPositionTable returns nullptr when positionSize == 0
     size_t posSize = 0;
-    const uint8_t *posTable = GetArkSteedPositionTable(
-        container.data(), container.size(), &posSize);
+    GetArkSteedPositionTable(container.data(), container.size(), &posSize);
     ASSERT_EQ(posSize, 0U);
 
     // Verify safepoint extraction works
@@ -314,8 +323,7 @@ HWTEST_F_L0(ArkSteedSafepointPositionTableMatrixTest, BothTablesAbsent_FallbackT
 
     // Position table absent: GetArkSteedPositionTable returns nullptr when positionSize == 0
     size_t posSize = 0;
-    const uint8_t *posTable = GetArkSteedPositionTable(
-        container.data(), container.size(), &posSize);
+    GetArkSteedPositionTable(container.data(), container.size(), &posSize);
     ASSERT_EQ(posSize, 0U);
 }
 
@@ -324,10 +332,10 @@ HWTEST_F_L0(ArkSteedSafepointPositionTableMatrixTest, BothTablesAbsent_FallbackT
 // -----------------------------------------------------------------------
 HWTEST_F_L0(ArkSteedSafepointPositionTableMatrixTest, InvalidContainer_BadMagic)
 {
-    std::vector<uint8_t> badContainer(ArkSteedTableContainerHeader::SIZE, 0xFF);
+    std::vector<uint8_t> badContainer(ArkSteedTableContainerHeader::SIZE, 0xFF);  // 0xFF: corrupt filler bytes
     // Write a different magic
     auto *hdr = reinterpret_cast<ArkSteedTableContainerHeader *>(badContainer.data());
-    hdr->magic = 0xDEADBEEF;
+    hdr->magic = 0xDEADBEEF;  // 0xDEADBEEF: wrong magic value
     hdr->version = ArkSteedTableContainerHeader::VERSION;
 
     size_t safepointSize = 0;

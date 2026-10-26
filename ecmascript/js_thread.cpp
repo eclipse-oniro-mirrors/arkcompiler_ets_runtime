@@ -1785,7 +1785,7 @@ void JSThread::StoreRunningState([[maybe_unused]] ThreadState newState)
             newStateAndFlags.asNonvolatileStruct.state = newState;
 
             if (glueData_.stateAndFlags_.asAtomicInt.compare_exchange_weak(
-                    oldStateAndFlags.asNonvolatileInt, newStateAndFlags.asNonvolatileInt, std::memory_order_acq_rel)) {
+                oldStateAndFlags.asNonvolatileInt, newStateAndFlags.asNonvolatileInt, std::memory_order_acq_rel)) {
                 break;
             }
 #else

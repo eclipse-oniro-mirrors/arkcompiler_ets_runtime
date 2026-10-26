@@ -1471,9 +1471,9 @@ void OptimizedCall::DeoptEnterAsmInterpOrBaseline(ExtendedAssembler *assembler)
         __ Movq(Operand(glueRegister, stubId, Scale::Times8,
             JSThread::GlueData::GetCOStubEntriesOffset(false)), rax);
         __ Movq(Immediate(0), r12);
-        __ Testq(15, rsp);
+        __ Testq(15, rsp);  // 15: mask of rsp low 4 bits for the 16-byte alignment check
         __ Jz(&continuationCallAligned);
-        __ Movq(Immediate(8), r12);
+        __ Movq(Immediate(8), r12);  // 8: alignment padding bytes pushed when misaligned
         __ PushAlignBytes();
         __ Bind(&continuationCallAligned);
         __ Callq(rax);

@@ -25,10 +25,6 @@ function if_simple(x)
 
 ArkTools.arkSteedCompileSync(if_simple);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(if_simple);
-// print(res);
-
 let output = if_simple(10);
 print(output);
 output = if_simple(3);

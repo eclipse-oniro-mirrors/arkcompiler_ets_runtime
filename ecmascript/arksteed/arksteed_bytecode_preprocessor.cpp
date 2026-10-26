@@ -254,7 +254,7 @@ void BytecodePreprocessor::BuildLoopInfos()
         }
     }
 
-    auto innermostLoopOf = [this](const BasicBlockInfo *block) -> BytecodeLoopInfo * {
+    auto innermostLoopOf = [this](const BasicBlockInfo *block) -> BytecodeLoopInfo* {
         if (block == nullptr) {
             return nullptr;
         }

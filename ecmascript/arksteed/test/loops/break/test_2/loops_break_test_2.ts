@@ -32,10 +32,6 @@ function loop_break_2(n: number, r: number, s: number, t: number)
 
 ArkTools.arkSteedCompileSync(loop_break_2);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(loop_break_2);
-// print(res);
-
 print(loop_break_2(10, 10, 21, 11));
 print(loop_break_2(10, 10, 20, 11));
 print(loop_break_2(10, 20, 21, 11));

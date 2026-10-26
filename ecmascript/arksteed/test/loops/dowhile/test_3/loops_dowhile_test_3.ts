@@ -24,9 +24,6 @@ function loop_dowhile_3(m: number, n: number, p: number, q: number): number {
 
 ArkTools.arkSteedCompileSync(loop_dowhile_3);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(loop_dowhile_3);
-
 print(loop_dowhile_3(2, 3, 4, 5));
 print(loop_dowhile_3(3, 4, 5, 6));
 print(loop_dowhile_3(0, 1, 2, 3));

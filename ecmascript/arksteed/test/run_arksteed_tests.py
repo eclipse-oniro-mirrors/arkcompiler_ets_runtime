@@ -2560,7 +2560,7 @@ def observe_case(
 
 
 def assertion_violated(assertion: ControlAssertion,
-                      observation: ControlObservation) -> Optional[str]:
+                       observation: ControlObservation) -> Optional[str]:
     """Verdict of the *original* assertion on the observation, else None."""
     target = assertion.constraint
     if isinstance(target, Constraint):
@@ -2854,6 +2854,7 @@ def build_count_perturbation_instance(
         assertion, CONTROL_CLASS_COUNT, variant_id, mutant_line, mutated,
         observed, derived)
 
+
 def build_address_substitution_instance(
     assertion: ControlAssertion, observation: ControlObservation,
     opcode_order: List[str],
@@ -2959,7 +2960,7 @@ def build_control_instances(
 
 
 def classify_failure_classes(reasons: List[str],
-                            config_errors: Tuple[str, ...] = ()) -> frozenset:
+                             config_errors: Tuple[str, ...] = ()) -> frozenset:
     """Classify the recorded reasons of a variant run into failure classes.
 
     Returns a set of canonical tokens (S6). An empty set means the variant
@@ -3183,8 +3184,8 @@ def evaluate_case_control(
         assertion = result.instance.assertion
         if assertion is not None:
             covered.add(assertion.key())
-    uncovered = tuple(assertion.label() for assertion in assertions.count_shaped
-                      if assertion.key() not in covered)
+    uncovered = tuple(pending.label() for pending in assertions.count_shaped
+                      if pending.key() not in covered)
 
     reasons: List[str] = []
     if not base_passed:
@@ -3427,17 +3428,17 @@ def render_controls_md(report: ControlsReport) -> str:
         lines.append("| Assertion | Covered |")
         lines.append("|---|---|")
         covered_keys = {
-            result.instance.assertion.key()
-            for result in case.instance_results
-            if result.verdict == CONTROL_VERDICT_VALID
-            and result.class_token in (CONTROL_CLASS_COUNT, CONTROL_CLASS_ADDRESS)
-            and result.instance.assertion is not None
+            instance_result.instance.assertion.key()
+            for instance_result in case.instance_results
+            if instance_result.verdict == CONTROL_VERDICT_VALID
+            and instance_result.class_token in (CONTROL_CLASS_COUNT, CONTROL_CLASS_ADDRESS)
+            and instance_result.instance.assertion is not None
         }
         count_shaped = [
-            result.instance.assertion
-            for result in case.instance_results
-            if result.class_token == CONTROL_CLASS_COUNT
-            and result.instance.assertion is not None
+            instance_result.instance.assertion
+            for instance_result in case.instance_results
+            if instance_result.class_token == CONTROL_CLASS_COUNT
+            and instance_result.instance.assertion is not None
         ]
         for assertion in count_shaped:
             covered = assertion.key() in covered_keys
@@ -3751,8 +3752,8 @@ def run_case(
 ) -> CaseResult:
     result = CaseResult(case.rel)
     start = time.time()
-    art_dir = artifacts_root / case.rel
-    art_dir.mkdir(parents=True, exist_ok=True)
+    case_artifacts = artifacts_root / case.rel
+    case_artifacts.mkdir(parents=True, exist_ok=True)
 
     if case.config_errors:
         result.reasons.extend(case.config_errors)
@@ -3772,14 +3773,14 @@ def run_case(
         result.duration = time.time() - start
         return result
 
-    abc_path = art_dir / f"{case.entry}.abc"
+    abc_path = case_artifacts / f"{case.entry}.abc"
     ok, message = compile_case(case, abc_path, cfg)
     if not ok:
         result.reasons.append(f"compilation failed: {message}")
         result.duration = time.time() - start
         return result
 
-    disasm_path = art_dir / f"{case.entry}.disasm.txt"
+    disasm_path = case_artifacts / f"{case.entry}.disasm.txt"
     disasm_error = disassemble_case(case, abc_path, disasm_path, cfg, result.log)
     bytecode_errors: List[str] = []
     if case.bytecode_constraints:
@@ -3806,8 +3807,8 @@ def run_case(
         # Retained only for the control stage's base observation; a run without
         # the flag keeps no reference to the (large) raw output.
         result.stdout = stdout
-    (art_dir / f"{case.entry}.stdout.txt").write_text(stdout, encoding="utf-8")
-    (art_dir / f"{case.entry}.stderr.txt").write_text(stderr, encoding="utf-8")
+    (case_artifacts / f"{case.entry}.stdout.txt").write_text(stdout, encoding="utf-8")
+    (case_artifacts / f"{case.entry}.stderr.txt").write_text(stderr, encoding="utf-8")
 
     if timed_out:
         result.reasons.append("execution timed out")
@@ -3876,12 +3877,12 @@ def run_case(
     return result
 
 
-def make_artifacts_root(platform: str, mode: str) -> Path:
+def make_artifacts_root(platform_name, mode: str) -> Path:
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    root = Path("/tmp") / f"arksteed-{platform}-{mode}-{stamp}"
+    root = Path("/tmp") / f"arksteed-{platform_name}-{mode}-{stamp}"
     suffix = 1
     while root.exists():
-        root = Path("/tmp") / f"arksteed-{platform}-{mode}-{stamp}-{suffix}"
+        root = Path("/tmp") / f"arksteed-{platform_name}-{mode}-{stamp}-{suffix}"
         suffix += 1
     root.mkdir(parents=True)
     return root
@@ -6120,7 +6121,7 @@ class _CorpusFilterPipeline:
         # The ordered stage sequence actually built, in chain order.
         self.stage_kinds = kinds
         self._feed = downstream
-        self._record_stages = [stage for stage, entry in zip(stages, entries)
+        self._record_stages = [record_stage for record_stage, entry in zip(stages, entries)
                                if entry[0] in ("gc", "deopt")]
         self._candidate_capped = False
         self._disabled = False
@@ -6276,7 +6277,7 @@ class _CorpusObserver:
             if name not in self._recognized:
                 self._recognized.append(name)
         self._retained = frozenset(self._components)
-        self._prefixes = tuple(f"[{name}] " for name in self._recognized)
+        self._prefixes = tuple(f"[{recognized}] " for recognized in self._recognized)
         self._kind_prefixes = (
             CORPUS_COMPILE_MARKER_PREFIX, CORPUS_EXEC_MARKER_PREFIX
         ) + tuple(DEOPT_EVENT_PREFIXES)
@@ -7074,7 +7075,7 @@ def run_corpus_stream_execution(
 
 def run_corpus_class_execution(
     case: TestCase, abc_path: Path, cfg: BuildConfig, args: argparse.Namespace,
-    context: CorpusContext, budget: int, art_dir: Path, log: List[str],
+    context: CorpusContext, budget: int, case_artifacts: Path, log: List[str],
     prepared_command: Optional[Tuple[List[str], List[str]]] = None,
 ) -> CorpusClassExecution:
     """Run one corpus case with the class streaming executor (C4).
@@ -7128,7 +7129,7 @@ def run_corpus_class_execution(
             duration=0.0)
     if args.verbose:
         log.append(f"class cmd: {' '.join(cmd)}")
-    log_path = art_dir / f"{corpus_case_stem(case)}{CORPUS_LIVE_LOG_SUFFIX}"
+    log_path = case_artifacts / f"{corpus_case_stem(case)}{CORPUS_LIVE_LOG_SUFFIX}"
     return run_corpus_stream_execution(
         cmd, components, case, explicit_components, budget,
         corpus_execution_environment(cfg), log_path)
@@ -7174,18 +7175,18 @@ def derive_corpus_twin_command(class_command: List[str]) -> List[str]:
     if error is not None:
         raise CorpusTwinCommandError(error)
     twin = list(class_command)
-    index = next(index for index, token in enumerate(twin)
-                 if _option_name(token) == CORPUS_JIT_OPTION)
-    token = twin[index]
+    opt_index = next(index for index, token in enumerate(twin)
+                     if _option_name(token) == CORPUS_JIT_OPTION)
+    token = twin[opt_index]
     if "=" in token:
-        twin[index] = f"{CORPUS_JIT_OPTION}={CORPUS_JIT_OFF_VALUE}"
-    elif index + 1 < len(twin) and not twin[index + 1].startswith("--"):
+        twin[opt_index] = f"{CORPUS_JIT_OPTION}={CORPUS_JIT_OFF_VALUE}"
+    elif opt_index + 1 < len(twin) and not twin[opt_index + 1].startswith("--"):
         # The space-separated form: the value is the following token.
-        twin[index + 1] = CORPUS_JIT_OFF_VALUE
+        twin[opt_index + 1] = CORPUS_JIT_OFF_VALUE
     else:
         # A bare flag means `true`; the only way to turn the JIT off is to name
         # the value explicitly.
-        twin[index] = f"{CORPUS_JIT_OPTION}={CORPUS_JIT_OFF_VALUE}"
+        twin[opt_index] = f"{CORPUS_JIT_OPTION}={CORPUS_JIT_OFF_VALUE}"
     return twin
 
 
@@ -7374,7 +7375,7 @@ def _finalize_corpus_twin_logs(run: CorpusTwinRun) -> None:
 
 def run_corpus_twin_execution(
     case: TestCase, cfg: BuildConfig, args: argparse.Namespace, budget: int,
-    class_execution: Optional[CorpusClassExecution], art_dir: Path,
+    class_execution: Optional[CorpusClassExecution], case_artifacts: Path,
     log: List[str],
 ) -> CorpusTwinRun:
     """Run the two interpreter twins of one corpus case (TW1/TW2).
@@ -7408,7 +7409,7 @@ def run_corpus_twin_execution(
     env = corpus_execution_environment(cfg)
     stem = corpus_case_stem(case)
     for attempt, suffix in enumerate(CORPUS_TWIN_LOG_SUFFIXES):
-        log_path = art_dir / f"{stem}{suffix}"
+        log_path = case_artifacts / f"{stem}{suffix}"
         if args.verbose:
             log.append(f"twin{attempt + 1} cmd: {' '.join(twin_command)}")
         run.executions.append(run_corpus_stream_execution(
@@ -7490,7 +7491,7 @@ def corpus_log_constraint_reasons(
 
 
 def corpus_bytecode_constraint_reasons(
-    case: TestCase, abc_path: Path, cfg: BuildConfig, art_dir: Path,
+    case: TestCase, abc_path: Path, cfg: BuildConfig, case_artifacts: Path,
     stem: str, log: List[str],
 ) -> List[str]:
     """Evaluate the bytecode constraints of a corpus descriptor (C4, C5).
@@ -7501,7 +7502,7 @@ def corpus_bytecode_constraint_reasons(
     """
     if not case.bytecode_constraints:
         return []
-    disasm_path = art_dir / f"{stem}.disasm.txt"
+    disasm_path = case_artifacts / f"{stem}.disasm.txt"
     disasm_error = disassemble_case(case, abc_path, disasm_path, cfg, log)
     if disasm_error is not None:
         return [f"bytecode constraints unavailable: {disasm_error}"]
@@ -7697,16 +7698,16 @@ def run_corpus_case(
 
     result = CaseResult(case.rel)
     result.corpus_reference = reference
-    art_dir = artifacts_root / case.rel
+    case_artifacts = artifacts_root / case.rel
     try:
-        art_dir.mkdir(parents=True, exist_ok=True)
+        case_artifacts.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         result.reasons.append(f"cannot create case artifacts: {e}")
         result.duration = time.time() - start
         result.log = log
         return result
     stem = corpus_case_stem(case)
-    abc_path = art_dir / f"{stem}.abc"
+    abc_path = case_artifacts / f"{stem}.abc"
 
     compile_ok, compile_message, compile_timed_out, _ = compile_corpus_case(
         module, case, abc_path, cfg, args.verbose, log)
@@ -7722,7 +7723,7 @@ def run_corpus_case(
     class_command: Optional[str] = None
     if compile_ok:
         execution = run_corpus_class_execution(
-            case, abc_path, cfg, args, context, budget, art_dir, log,
+            case, abc_path, cfg, args, context, budget, case_artifacts, log,
             prepared_command=context.class_commands.get(case.rel))
         if execution.command_error is not None:
             # The actual class command of this case cannot identify an
@@ -7741,7 +7742,7 @@ def run_corpus_case(
                 (CORPUS_PROGRAM_OUTPUT_SUFFIX,
                  _corpus_program_artifact(execution.evidence))):
             artifact_error = _write_corpus_artifact(
-                art_dir / f"{stem}{artifact_suffix}", artifact_text)
+                case_artifacts / f"{stem}{artifact_suffix}", artifact_text)
             if artifact_error is not None:
                 # A required artifact that cannot be recorded is a named red
                 # reason of this case; every other invalidity reason below is
@@ -7761,7 +7762,7 @@ def run_corpus_case(
     # epic). This call is reached only for a case tagged with the corpus class,
     # so an embedded case never runs a twin and never gains the field.
     result.corpus_twins = run_corpus_twin_execution(
-        case, cfg, args, budget, execution, art_dir, log)
+        case, cfg, args, budget, execution, case_artifacts, log)
 
     verdict = evaluate_corpus_class_run(
         case, module, compile_ok=compile_ok, compile_message=compile_message,
@@ -7771,7 +7772,7 @@ def run_corpus_case(
     result.reasons.extend(verdict.reasons)
     if compile_ok:
         result.reasons.extend(corpus_bytecode_constraint_reasons(
-            case, abc_path, cfg, art_dir, stem, log))
+            case, abc_path, cfg, case_artifacts, stem, log))
     if verdict.parity == CORPUS_PARITY_DIVERGED:
         result.reasons.extend(parity_reasons(
             verdict.base_verdict, class_command, reference.verdict,
@@ -8079,19 +8080,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                 detail += f" ({control_class.reason})"
             print(detail.replace("\n", " "))
 
-    def run_one(case: TestCase
+    def run_one(one_case
                 ) -> Tuple[CaseResult, Optional[CaseControlResult], float]:
-        if case.case_class == CASE_CLASS_CORPUS:
+        if one_case.case_class == CASE_CLASS_CORPUS:
             # Class dispatch by the case tag: an embedded case keeps the
             # existing path, a corpus case goes through its own class branch.
-            return run_corpus_case(case, cfg, args, artifacts_root,
+            return run_corpus_case(one_case, cfg, args, artifacts_root,
                                    corpus_context), None, 0.0
         result = run_case(
-            case, cfg, args, artifacts_root, components, valid_opcodes)
+            one_case, cfg, args, artifacts_root, components, valid_opcodes)
         if not args.sensitivity_controls:
             return result, None, 0.0
         case_control, duration = run_case_controls(
-            case, result, cfg, args, artifacts_root, components,
+            one_case, result, cfg, args, artifacts_root, components,
             valid_opcodes, opcode_order)
         return result, case_control, duration
 
@@ -8106,7 +8107,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     wall_start = time.time()
     if args.num_workers > 1:
         with ThreadPoolExecutor(max_workers=args.num_workers) as pool:
-            futures = {pool.submit(run_one, case): case for case in cases}
+            futures = {pool.submit(run_one, submitted): submitted for submitted in cases}
             for future in as_completed(futures):
                 result, control_result, duration = future.result()
                 results.append(result)
@@ -8128,8 +8129,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 break
 
     failed = [r for r in results if not r.passed]
-    usage_errors = [result.usage_error for result in results
-                    if result.usage_error]
+    usage_errors = [case_result.usage_error for case_result in results
+                    if case_result.usage_error]
     if usage_errors:
         # The actual class command of a case cannot identify an interpreter
         # twin (TW1). The pre-flight rejects such a run before the case loop;
@@ -8143,8 +8144,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         # Report in selection order, so the artifacts do not depend on the
         # completion order of parallel workers; a case left uncontrolled by
         # --stops-on-error keeps the explicit `not-run` verdict (S7).
-        ordered_controls = [control_results.get(case.rel) or not_run_case_control(case)
-                            for case in cases]
+        ordered_controls = [control_results.get(case_key.rel) or not_run_case_control(case_key)
+                            for case_key in cases]
         controls_report = ControlsReport(
             ControlsHeader(True, cfg.platform, args.mode, detect_git_head(),
                            tuple(args.include), tuple(args.exclude), len(cases)),

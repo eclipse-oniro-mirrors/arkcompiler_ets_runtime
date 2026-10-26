@@ -27,10 +27,6 @@ function loop_dowhile_1(limit, p, q)
 
 ArkTools.arkSteedCompileSync(loop_dowhile_1);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(loop_dowhile_1);
-// print(res);
-
 let output = loop_dowhile_1(0, 3, 1);
 print(output);
 output = loop_dowhile_1(5, 5, 2);

@@ -29,10 +29,6 @@ function loop_for_3(arr, limit, p, q, r)
 
 ArkTools.arkSteedCompileSync(loop_for_3);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(loop_for_3);
-// print(res);
-
 let arr = [1, 2, 3];
 print(loop_for_3(arr, 0, 3, 1, 5));
 print(loop_for_3(arr, 5, 7, 2, 3));

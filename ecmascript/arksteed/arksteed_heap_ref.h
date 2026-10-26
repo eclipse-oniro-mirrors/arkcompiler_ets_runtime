@@ -19,8 +19,7 @@
 #include "ecmascript/js_handle.h"
 #include "ecmascript/js_tagged_value_wrapper.h"
 
-namespace panda::ecmascript
-{
+namespace panda::ecmascript {
 class JitCompilationEnv;
 }
 
@@ -103,9 +102,9 @@ private:
       PROTO_CELL,
   };
 
-  ArkSteedHeapRef(const JitCompilationEnv *owner, uint32_t index, Kind kind) : owner_(owner), index_(index), kind_(kind)
-  {
-  }
+    ArkSteedHeapRef(const JitCompilationEnv *owner, uint32_t index, Kind kind)
+        : owner_(owner), index_(index), kind_(kind)
+    {}
 
     JSTaggedValue value_ {JSTaggedValue::Undefined()};
     const JitCompilationEnv *owner_{nullptr};

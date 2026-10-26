@@ -320,15 +320,18 @@ int PageProtect(void *mem, size_t size, int prot)
 #if defined(PANDA_TARGET_MACOS)
 void JitWriteProtect(bool enable)
 {
-    if (__builtin_available(macOS 11.0, *)) {
+    if (__builtin_available(macOS 11.0, *)) {  // 11.0: first macOS with pthread_jit_write_protect_np
         if (!enable) {
             // Always issue the disable call. This is deliberately idempotent:
             // a caller may enter a scope after code that changed the
             // protection state without updating our nesting counter.
             pthread_jit_write_protect_np(0);
             ++g_jitWriteProtectDepth;
-        } else if (g_jitWriteProtectDepth != 0 && --g_jitWriteProtectDepth == 0) {
-            pthread_jit_write_protect_np(1);
+        } else if (g_jitWriteProtectDepth != 0) {
+            --g_jitWriteProtectDepth;
+            if (g_jitWriteProtectDepth == 0) {
+                pthread_jit_write_protect_np(1);
+            }
         }
     }
 }

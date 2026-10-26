@@ -769,7 +769,8 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, CompileInfoFactsEnvSlotFactsAndAliasin
     const int32_t globalEnvOffset =
         static_cast<int32_t>(TaggedArray::DATA_OFFSET) + static_cast<int32_t>(BaseEnv::GLOBAL_ENV_INDEX) * taggedSize;
     const int32_t parentEnvOffset =
-        static_cast<int32_t>(TaggedArray::DATA_OFFSET) + static_cast<int32_t>(LexicalEnv::PARENT_ENV_INDEX) * taggedSize;
+        static_cast<int32_t>(TaggedArray::DATA_OFFSET) +
+        static_cast<int32_t>(LexicalEnv::PARENT_ENV_INDEX) * taggedSize;
     EXPECT_TRUE(facts.ClearAliasedEnvSlotsFor(aliasingEnv, globalEnvOffset, otherValue).empty());
     EXPECT_EQ(facts.LookupEnvSlot(aliasingEnv, 5), slotValue);
     EXPECT_TRUE(facts.ClearAliasedEnvSlotsFor(aliasingEnv, parentEnvOffset, otherValue).empty());

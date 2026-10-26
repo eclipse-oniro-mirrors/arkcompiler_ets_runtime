@@ -34,9 +34,6 @@ function this_1() {
 
 ArkTools.arkSteedCompileSync(this_1);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(this_1);
-
 print(this_1.call(100));
 print(this_1.call(200));
 print(this_1.call(300));

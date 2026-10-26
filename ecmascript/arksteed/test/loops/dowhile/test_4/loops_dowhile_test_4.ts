@@ -23,9 +23,6 @@ function loop_dowhile_4(m: number, n: number, p: number, q: number, callback: (x
 
 ArkTools.arkSteedCompileSync(loop_dowhile_4);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(loop_dowhile_4);
-
 let sum = 0;
 sum = 0; print((loop_dowhile_4(2, 3, 4, 5, (x) => { sum += x; }), sum));
 sum = 0; print((loop_dowhile_4(3, 4, 5, 6, (x) => { sum += x; }), sum));

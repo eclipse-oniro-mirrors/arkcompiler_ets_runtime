@@ -124,7 +124,8 @@ constexpr uint32_t COMMON_STUB_MINIMUM_INPUTS = 1;
 // therefore cannot satisfy a death case.
 constexpr const char *DEATH_CONDITION_DUPLICATE_BLOCK_ID =
     "ASSERTION FAILED: seen_\\[block->GetId\\(\\)\\] == 0";  // arksteed_graph_verifier.h, PreProcessBlock
-constexpr const char *DEATH_CONDITION_EMPTY_PHI = "ASSERTION FAILED: GetInputCount\\(\\) > 0";  // arksteed_opcode.h, PhiVertex
+constexpr const char *DEATH_CONDITION_EMPTY_PHI =
+    "ASSERTION FAILED: GetInputCount\\(\\) > 0";  // arksteed_opcode.h, PhiVertex
 constexpr const char *DEATH_CONDITION_PHI_REPRESENTATION =
     "ASSERTION FAILED: GetInput\\(i\\)->GetValueRepresentation\\(\\) == repr";  // arksteed_opcode.h, PhiVertex
 constexpr const char *DEATH_CONDITION_NULL_PHI_INPUT =

@@ -22,9 +22,6 @@ function loop_for_8(m: number, n: number, p: number, q: number): number {
 
 ArkTools.arkSteedCompileSync(loop_for_8);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(loop_for_8);
-
 print(loop_for_8(2, 3, 4, 5));
 print(loop_for_8(3, 4, 5, 6));
 print(loop_for_8(0, 1, 2, 3));

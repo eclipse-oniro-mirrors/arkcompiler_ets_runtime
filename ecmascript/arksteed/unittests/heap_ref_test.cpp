@@ -34,6 +34,7 @@ class ArkSteedHeapRefTest : public testing::Test
   public:
     void SetUp() override
     {
+        testing::GTEST_FLAG(death_test_style) = "threadsafe";
         panda::test::TestHelper::CreateEcmaVMWithScope(vm_, thread_, scope_);
         vm_->SetEnableForceGC(false);
         vm_->GetJSOptions().SetCompilerEnableLiteCG(true);

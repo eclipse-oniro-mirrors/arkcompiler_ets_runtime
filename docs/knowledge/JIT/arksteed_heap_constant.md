@@ -38,7 +38,7 @@
 - 作为 通用 比较 vertex 的操作数：如`DeoptIfReferenceNotEqual(actual, expected)` ——这类 vertex 没有 handleIndex 定制 codegen，期望值必须是输入操作数（call target、canonical method 都属此类）；
 - 会出现在 deopt frame state 里：`AppendDeoptSource` 只认 operand 形式的`HeapConstantVertex` （HEAP_LITERAL 物化）， 只要该常量可能进 lazy deopt 帧，就必须建节点 。
 
---- 
+---
 
 ## 3. 怎么登记HeapConstant：什么时候调用哪个API
 

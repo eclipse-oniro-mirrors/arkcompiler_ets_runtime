@@ -40,10 +40,6 @@ function switch_true_1(x)
 
 ArkTools.arkSteedCompileSync(switch_true_1);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(switch_true_1);
-// print(res);
-
 let output = switch_true_1(2);
 print(output);
 output = switch_true_1(4);

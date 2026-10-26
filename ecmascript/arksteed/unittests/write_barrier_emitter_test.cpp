@@ -75,26 +75,26 @@ protected:
     }
     static ArkSteedRegister Value()
     {
-        return ArkSteedAssembler::GetParameterRegister(2);
+        return ArkSteedAssembler::GetParameterRegister(2);  // 2: value parameter
     }
     static ArkSteedRegister ObjectScratch()
     {
-        return ArkSteedAssembler::GetParameterRegister(3);
+        return ArkSteedAssembler::GetParameterRegister(3);  // 3: object scratch parameter
     }
     static ArkSteedRegister ValueScratch()
     {
-        return ArkSteedAssembler::GetParameterRegister(4);
+        return ArkSteedAssembler::GetParameterRegister(4);  // 4: value scratch parameter
     }
 
     // StoreTaggedElement pins glue/object/byteOffset/value to the first four
     // parameter registers with in-function ASSERTs; the tag scratch is free.
     static ArkSteedRegister ElementValue()
     {
-        return ArkSteedAssembler::GetParameterRegister(3);
+        return ArkSteedAssembler::GetParameterRegister(3);  // 3: element value parameter
     }
     static ArkSteedRegister ElementScratch()
     {
-        return ArkSteedAssembler::GetParameterRegister(4);
+        return ArkSteedAssembler::GetParameterRegister(4);  // 4: element scratch parameter
     }
 
     // One cold emission fixture (fixture C, H4). The chunk, deferred list and

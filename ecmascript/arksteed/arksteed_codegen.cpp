@@ -65,8 +65,8 @@ namespace {
 class DeferredCopyCOWElements final : public ArkSteedDeferredCode {
 public:
     DeferredCopyCOWElements(ArkSteedRegister object, ArkSteedRegister result,
-                           const DeferredRegisterSnapshot &snapshot,
-                           ArkSteedSafepointTableBuilder *safepointBuilder)
+                            const DeferredRegisterSnapshot &snapshot,
+                            ArkSteedSafepointTableBuilder *safepointBuilder)
         : object_(object), result_(result), snapshot_(snapshot), safepointBuilder_(safepointBuilder)
     {}
 
@@ -83,6 +83,7 @@ public:
         ArkSteedRegList untagged = snapshot_.liveRegisters - snapshot_.liveTaggedRegisters;
         // Keep raw integers/doubles above the GC root range, with a padding slot at the frame boundary.
         // Each area has an even slot count so the call remains 16-byte aligned.
+        // 2: padding slots at the tagged/untagged frame boundary
         int32_t untaggedSlots = (untagged.Count() + snapshot_.liveDoubleRegisters.Count() + 2) & ~1;
         int32_t taggedSlots = (snapshot_.liveTaggedRegisters.Count() + 1) & ~1;
         int32_t totalSlots = untaggedSlots + taggedSlots;
@@ -365,7 +366,8 @@ private:
             return false;
         }
 
-        bool hasCycle = RecursivelyEmitMoveChainTargets(chainStartIndex, targets, emitMove, saveScratch, restoreScratch);
+        bool hasCycle =
+            RecursivelyEmitMoveChainTargets(chainStartIndex, targets, emitMove, saveScratch, restoreScratch);
         EmitMovesFromSource(ValueInStorage(sourceIndex), targets, emitMove, saveScratch);
         return hasCycle;
     }
@@ -579,8 +581,8 @@ void BuildTypedArrayDataPointer(ArkSteedAssembler *assembler, ArkSteedRegister r
 }
 
 void BuildTypedArrayElementAddress(ArkSteedAssembler *assembler, ArkSteedRegister receiver, ArkSteedRegister index,
-                                   JSType type, OnHeapMode onHeapMode, ArkSteedRegister base, ArkSteedRegister byteOffset,
-                                   ArkSteedRegister backingOffset)
+                                   JSType type, OnHeapMode onHeapMode, ArkSteedRegister base,
+                                   ArkSteedRegister byteOffset, ArkSteedRegister backingOffset)
 {
     ASSERT(base != byteOffset);
     assembler->Move(byteOffset, index);
@@ -1057,11 +1059,9 @@ int ArkSteedCodeGenerator::PrepareRuntimeStubStackArguments(const Vertex *callVe
         TemporaryRegisterScope scope(assembler_);
         ArkSteedRegister scratch = scope.AcquireScratch();
         __ Move(scratch, static_cast<int64_t>(runtimeId));
-        __ MoveRepr(MachineRepresentation::Word64,
-                             __ GetCallArgSlot(CALL_ARG0), scratch);
+        __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0), scratch);
         __ Move(scratch, static_cast<int64_t>(argCount));
-        __ MoveRepr(MachineRepresentation::Word64,
-                             __ GetCallArgSlot(CALL_ARG1), scratch);
+        __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG1), scratch);
     }
 
     for (int paramIdx = 0; paramIdx < argCount; paramIdx++) {
@@ -1107,8 +1107,7 @@ void ArkSteedCodeGenerator::PrepareArkSteedCall(CallVertexT *call, ArkSteedRegis
     ComputeSteedCallSlotCount(call, scratch);
     __ ReserveCallArgSlots(scratch);
     __ Sub(scratch, static_cast<int32_t>(NUM_MANDATORY_JSFUNC_ARGS + 1 + userArgc));
-    __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0),
-                         scratch);
+    __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0), scratch);
 
     StoreStubStackArgument(call, CallVertexT::TARGET_INDEX,
                            __ GetCallArgSlot(CallVertexT::TARGET_INDEX + CALL_ARG1));
@@ -1118,21 +1117,20 @@ void ArkSteedCodeGenerator::PrepareArkSteedCall(CallVertexT *call, ArkSteedRegis
                            __ GetCallArgSlot(CallVertexT::THIS_INDEX + CALL_ARG1));
     for (uint32_t i = 0; i < userArgc; i++) {
         StoreStubStackArgument(call, CallVertexT::FIRST_ARG_INDEX + i,
-                               __ GetCallArgSlot(CallVertexT::FIRST_ARG_INDEX +
-                                                          CALL_ARG1 + i));
+                               __ GetCallArgSlot(CallVertexT::FIRST_ARG_INDEX + CALL_ARG1 + i));
     }
 
     __ MoveRepr(MachineRepresentation::Word64, target, __ GetCallArgSlot(CALL_ARG0));
     __ PushUndefinedForSteedCall(target, userArgc);
     __ Move(target, static_cast<uint64_t>(totalArgc));
     __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0), target);
-    __ MoveRepr(MachineRepresentation::Tagged, target,
-                         __ GetCallArgSlot(CallVertexT::TARGET_INDEX + CALL_ARG1));
+    __ MoveRepr(MachineRepresentation::Tagged, target, __ GetCallArgSlot(CallVertexT::TARGET_INDEX + CALL_ARG1));
 }
 
 void ArkSteedCodeGenerator::PrepareKnownCallArguments(const Vertex *call, uint32_t actualArgc, uint32_t expectedArgc,
                                                       uint32_t firstArgIndex)
 {
+    // 5U: argc slot plus target/newTarget/this slots, rounded up to even
     const uint32_t reservedSlots = (std::max(actualArgc, expectedArgc) + 5U) & ~1U;
     __ ReserveCallArgSlots(static_cast<int32_t>(reservedSlots));
     {
@@ -1146,13 +1144,14 @@ void ArkSteedCodeGenerator::PrepareKnownCallArguments(const Vertex *call, uint32
         StoreStubStackArgument(call, index, __ GetCallArgSlot(index + 1U));
     }
     for (uint32_t index = 0; index < actualArgc; ++index) {
+        // 4U: first user-arg slot, after argc + target/newTarget/this
         StoreStubStackArgument(call, firstArgIndex + index, __ GetCallArgSlot(index + 4U));
     }
-    if (actualArgc + 4U < reservedSlots) {
+    if (actualArgc + 4U < reservedSlots) {  // 4U: argc + target/newTarget/this slots
         TemporaryRegisterScope scope(assembler_);
         ArkSteedRegister scratch = scope.AcquireScratch();
         __ Move(scratch, static_cast<int64_t>(JSTaggedValue::VALUE_UNDEFINED));
-        for (uint32_t slot = actualArgc + 4U; slot < reservedSlots; ++slot) {
+        for (uint32_t slot = actualArgc + 4U; slot < reservedSlots; ++slot) {  // 4U: argc + target/newTarget/this slots
             __ MoveRepr(MachineRepresentation::Tagged, __ GetCallArgSlot(slot), scratch);
         }
     }
@@ -1282,23 +1281,15 @@ int ArkSteedCodeGenerator::PrepareTrampolineArguments(const Vertex *call, uint32
     __ ReserveCallArgSlots(static_cast<int32_t>(reservedSlotCount));
 
     __ Move(scratch, static_cast<int64_t>(totalArgc));
-    __ MoveRepr(MachineRepresentation::Word64,
-                         __ GetCallArgSlot(CALL_ARG0), scratch);
+    __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0), scratch);
     __ Move(scratch, 0);
-    __ MoveRepr(MachineRepresentation::Word64,
-                         __ GetCallArgSlot(CALL_ARG1), scratch);
+    __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG1), scratch);
 
-    StoreStubStackArgument(call, targetIndex,
-                           __ GetCallArgSlot(CallVertex::TARGET_INDEX + CALL_ARG2));
-    StoreStubStackArgument(call, newTargetIndex,
-                           __ GetCallArgSlot(CallVertex::NEW_TARGET_INDEX +
-                                                      CALL_ARG2));
-    StoreStubStackArgument(call, receiverIndex,
-                           __ GetCallArgSlot(CallVertex::THIS_INDEX + CALL_ARG2));
+    StoreStubStackArgument(call, targetIndex, __ GetCallArgSlot(CallVertex::TARGET_INDEX + CALL_ARG2));
+    StoreStubStackArgument(call, newTargetIndex, __ GetCallArgSlot(CallVertex::NEW_TARGET_INDEX + CALL_ARG2));
+    StoreStubStackArgument(call, receiverIndex, __ GetCallArgSlot(CallVertex::THIS_INDEX + CALL_ARG2));
     for (uint32_t i = 0; i < userArgc; i++) {
-        StoreStubStackArgument(call, firstArgIndex + i,
-                               __ GetCallArgSlot(CallVertex::FIRST_ARG_INDEX +
-                                                          CALL_ARG2 + i));
+        StoreStubStackArgument(call, firstArgIndex + i, __ GetCallArgSlot(CallVertex::FIRST_ARG_INDEX + CALL_ARG2 + i));
     }
     return static_cast<int>(reservedSlotCount);
 }
@@ -1387,7 +1378,6 @@ int ArkSteedCodeGenerator::PrepareKnownBuiltinNativeArguments(CallKnownBuiltinVe
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<CallRuntimeVertex>(CallRuntimeVertex *callRuntime)
 {
-
     int stackArgCount = PrepareRuntimeStubStackArguments(
         callRuntime, callRuntime->GetArgCount(), static_cast<int>(callRuntime->GetRuntimeStubID()));
     __ CallRuntime(callRuntime->GetRuntimeStubID());
@@ -1551,9 +1541,9 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeArrayWithBufferVerte
     ArkSteedRegister hclass = GetInputRegister(vertex, InitializeArrayWithBufferVertex::HCLASS_INDEX);
     ArkSteedRegister value = scope.Acquire();
     __ InitializeArrayFields(GetInputRegister(vertex, InitializeArrayWithBufferVertex::GLUE_INDEX),
-                              result,
-                              vertex->GetObjectSize(),
-                              value);
+                             result,
+                             vertex->GetObjectSize(),
+                             value);
     __ LoadField(value, literal, JSObject::ELEMENTS_OFFSET);
     __ StoreField(value, result, static_cast<int32_t>(JSObject::ELEMENTS_OFFSET));
     __ LoadInt32Field(value, literal, JSArray::LENGTH_OFFSET);
@@ -1921,7 +1911,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CallKnownJSFunctionVertex>(Cal
     Label callGeneric;
     Label exit;
     ArkSteedRegister target = GetInputRegister(call, CallKnownJSFunctionVertex::TARGET_INDEX);
-    __ JumpIfNotArkSteedEntry(target, &callGeneric);
+    __ JumpIfFunctionNotCompiled(target, &callGeneric);
     ArkSteedRegister context = GetInputRegister(call, CallKnownJSFunctionVertex::CONTEXT_INDEX);
     ASSERT(target == ArkSteedAssembler::CALLEE_TARGET_REGISTER);
     ASSERT(context == ArkSteedAssembler::CALLEE_CONTEXT_REGISTER);
@@ -3641,7 +3631,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<Float64ToBooleanVertex>(Float6
     __ Sub(bits, 2);                     // d = 2m - 2
     __ ShiftRightLogical(bits, 52);      // v = d >>> 52
     __ Add(bits, 2);                     // v + 2
-    __ ShiftRightLogical(bits, 12);      // f: 1 = falsy
+    __ ShiftRightLogical(bits, 12);      // f: 1 = falsy (bit 12)
     if (op->IsTrueIfNonZero()) {
         __ Move(dst, static_cast<int32_t>(JSTaggedValue::VALUE_TRUE));
         __ Sub(dst, bits);
@@ -3680,9 +3670,9 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<TaggedNumberToBooleanVertex>(T
     __ Sub(bits, scratch);                // decoded double bits
     __ ShiftLeft(bits, 1);                // 2m
     __ Sub(bits, 2);                      // 2m - 2
-    __ ShiftRightLogical(bits, 52);       // v
+    __ ShiftRightLogical(bits, 52);       // v: value bits (bit 52)
     __ Add(bits, 2);                      // v + 2
-    __ ShiftRightLogical(bits, 12);       // f: 1 = falsy
+    __ ShiftRightLogical(bits, 12);       // f: 1 = falsy (bit 12)
     if (op->IsTrueIfNonZero()) {
         __ Move(dst, static_cast<int32_t>(JSTaggedValue::VALUE_TRUE));
         __ Sub(dst, bits);                // 7 - f
@@ -3700,7 +3690,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<TaggedNumberToBooleanVertex>(T
     __ Move(bits, input);
     __ Int32Neg(bits, bits);
     __ Int32Or(bits, input);
-    __ ShiftRightLogical32(bits, 31);     // t: 1 = truthy
+    __ ShiftRightLogical32(bits, 31);     // t: 1 = truthy (bit 31)
     if (op->IsTrueIfNonZero()) {
         __ Move(dst, static_cast<int32_t>(JSTaggedValue::VALUE_FALSE));
         __ Add(dst, bits);                // 6 + t
@@ -3738,9 +3728,9 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<TaggedDoubleToBooleanVertex>(T
     __ Sub(bits, scratch);                // decoded double bits
     __ ShiftLeft(bits, 1);                // 2m
     __ Sub(bits, 2);                      // 2m - 2
-    __ ShiftRightLogical(bits, 52);       // v
+    __ ShiftRightLogical(bits, 52);       // v: value bits (bit 52)
     __ Add(bits, 2);                      // v + 2
-    __ ShiftRightLogical(bits, 12);       // f: 1 = falsy
+    __ ShiftRightLogical(bits, 12);       // f: 1 = falsy (bit 12)
     if (op->IsTrueIfNonZero()) {
         __ Move(dst, static_cast<int32_t>(JSTaggedValue::VALUE_TRUE));
         __ Sub(dst, bits);                // 7 - f
@@ -4227,8 +4217,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<I32BitwiseBinaryVertex>(I32Bit
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<I32ToF64Vertex>(I32ToF64Vertex *convert)
 {
-    __ Int32ToFloat64(GetResultDoubleRegister(convert),
-                               GetInputRegister(convert, I32ToF64Vertex::INPUT_INDEX));
+    __ Int32ToFloat64(GetResultDoubleRegister(convert), GetInputRegister(convert, I32ToF64Vertex::INPUT_INDEX));
 }
 
 template <>
@@ -4267,8 +4256,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CheckedNumberToF64Vertex>(Chec
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<F64ToI32TruncVertex>(F64ToI32TruncVertex *op)
 {
-    __ TruncateFloat64ToInt32(GetResultRegister(op),
-                                       GetInputDoubleRegister(op, F64ToI32TruncVertex::INPUT_INDEX));
+    __ TruncateFloat64ToInt32(GetResultRegister(op), GetInputDoubleRegister(op, F64ToI32TruncVertex::INPUT_INDEX));
 }
 
 template <>
@@ -4478,7 +4466,6 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CallCommonStubVertex>(CallComm
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<FastSuperAllocateThisVertex>(FastSuperAllocateThisVertex *call)
 {
-    // TODO: lower the allocation inline instead of calling the common stub.
     int stackArgCount = PrepareCommonStubStackArguments(call, call->GetArgCount());
     __ CallCommonStub(CommonStubID::FastSuperAllocateThis);
     safepointBuilder_->DefineSafepoint(__ GetPcOffset());
@@ -4638,10 +4625,10 @@ void ArkSteedCodeGenerator::VisitControlVertex<BranchIfTrueVertex>(BranchIfTrueV
     __ Compare(cond, scratch);
 
     __ Branch(Condition::ZERO,
-                       ifTrue->GetLabel(),
-                       trueBranchIsFallthrough,
-                       ifFalse->GetLabel(),
-                       falseBranchIsFallthrough);
+              ifTrue->GetLabel(),
+              trueBranchIsFallthrough,
+              ifFalse->GetLabel(),
+              falseBranchIsFallthrough);
 }
 
 template <>
@@ -4659,10 +4646,10 @@ void ArkSteedCodeGenerator::VisitControlVertex<BranchIfInt32CompareVertex>(Branc
         __ CompareInt32(left, GetInputRegister(jumpIf, BranchIfInt32CompareVertex::RIGHT_INDEX));
     }
     __ Branch(jumpIf->GetCondition(),
-                       ifTrue->GetLabel(),
-                       trueBranchIsFallthrough,
-                       ifFalse->GetLabel(),
-                       falseBranchIsFallthrough);
+              ifTrue->GetLabel(),
+              trueBranchIsFallthrough,
+              ifFalse->GetLabel(),
+              falseBranchIsFallthrough);
 }
 
 template <>
@@ -4677,10 +4664,10 @@ void ArkSteedCodeGenerator::VisitControlVertex<BranchIfInt64CompareVertex>(Branc
     auto right = GetInputRegister(jumpIf, BranchIfInt64CompareVertex::RIGHT_INDEX);
     __ Compare(left, right);
     __ Branch(jumpIf->GetCondition(),
-                       ifTrue->GetLabel(),
-                       trueBranchIsFallthrough,
-                       ifFalse->GetLabel(),
-                       falseBranchIsFallthrough);
+              ifTrue->GetLabel(),
+              trueBranchIsFallthrough,
+              ifFalse->GetLabel(),
+              falseBranchIsFallthrough);
 }
 
 template <>
@@ -4709,7 +4696,10 @@ void ArkSteedCodeGenerator::VisitControlVertex<BranchIfTaggedHeapObjectVertex>(B
     __ Move(scratch, value);
     __ And(scratch, static_cast<int64_t>(JSTaggedValue::TAG_HEAPOBJECT_MASK));
     __ Compare(scratch, 0);
-    __ Branch(Condition::EQUAL, ifTrue->GetLabel(), trueBranchIsFallthrough, ifFalse->GetLabel(),
+    __ Branch(Condition::EQUAL,
+              ifTrue->GetLabel(),
+              trueBranchIsFallthrough,
+              ifFalse->GetLabel(),
               falseBranchIsFallthrough);
 }
 
@@ -4756,17 +4746,12 @@ void ArkSteedCodeGenerator::VisitControlVertex<BranchIfReferenceEqualVertex>(Bra
 {
     BB *ifTrue = jumpIf->IfTrue();
     BB *ifFalse = jumpIf->IfFalse();
-    bool trueBranchIsFallthrough = IsNextBlockInLayout(ifTrue);
-    bool falseBranchIsFallthrough = IsNextBlockInLayout(ifFalse);
-
     auto left = GetInputRegister(jumpIf, BranchIfReferenceEqualVertex::LEFT_INDEX);
     auto right = GetInputRegister(jumpIf, BranchIfReferenceEqualVertex::RIGHT_INDEX);
     __ Compare(left, right);
     __ Branch(Condition::EQUAL,
-                       ifTrue->GetLabel(),
-                       trueBranchIsFallthrough,
-                       ifFalse->GetLabel(),
-                       falseBranchIsFallthrough);
+              ifTrue->GetLabel(), IsNextBlockInLayout(ifTrue),
+              ifFalse->GetLabel(), IsNextBlockInLayout(ifFalse));
 }
 
 template <>
@@ -4931,12 +4916,9 @@ void ArkSteedCodeGenerator::ProcessValueVertex(ValueVertex *valueVertex)
             RecordSpillComment();
             auto spillSlot = AllocatedState::Cast(vertexInfo->GetSpillSlot());
             if (source.IsRegister()) {
-                __ MoveRepr(source.GetRepresentation(),
-                                     __ GetStackSlot(spillSlot),
-                                     source.GetRegister());
+                __ MoveRepr(source.GetRepresentation(), __ GetStackSlot(spillSlot), source.GetRegister());
             } else if (source.IsDoubleRegister()) {
-                __ StoreFloat64(__ GetStackSlot(spillSlot),
-                                         source.GetDoubleRegister());
+                __ StoreFloat64(__ GetStackSlot(spillSlot), source.GetDoubleRegister());
             } else {
                 UNREACHABLE();
             }

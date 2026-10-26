@@ -43,9 +43,6 @@ function this_3(a: number) {
 
 ArkTools.arkSteedCompileSync(this_3);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(this_3);
-
 print(this_3.call(1, 2));   // globalValue <- 3
 print(this_3.call(2, -4));  // globalValue <- 5
 print(this_3.call(3, -9));  // globalValue <- 8

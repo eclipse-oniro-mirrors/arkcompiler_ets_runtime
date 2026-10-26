@@ -27,7 +27,7 @@ class JitThread final : public JSThread {
 public:
     JitThread(JitVM *jitVM);
     EcmaVM *GetEcmaVM() const;
-    JSThread * PUBLIC_API GetHostThread() const;
+    JSThread *PUBLIC_API GetHostThread() const;
     void SetHostThread(JSThread *thread);
     JitVM *GetJitVM() const;
 
@@ -55,40 +55,39 @@ public:
     }
 
 private:
-  PUBLIC_API void HeapSafepointSlowPath();
-  friend class JSThread;
-  JSThread *hostThread_{nullptr};
-  JitTask *curJitTask_{nullptr};
-  JitThread *nextHostJitThread_{nullptr};
+    PUBLIC_API void HeapSafepointSlowPath();
+    friend class JSThread;
+    JSThread *hostThread_ {nullptr};
+    JitTask *curJitTask_ {nullptr};
+    JitThread *nextHostJitThread_ {nullptr};
 };
 
 // Like Maglev's outer UnparkedScope: a compilation phase enters once and
 // explicitly polls HeapSafepoint only where no temporary heap addresses survive.
-class JitHeapAccessScope final
-{
+class JitHeapAccessScope final {
 public:
-  explicit JitHeapAccessScope(JSThread *thread) : thread_(static_cast<JitThread *>(thread))
-  {
-      ASSERT(thread->IsJitThread());
-      if (!thread_->IsInRunningState()) {
-          thread_->EnterHeapAccess();
-          ownsRunning_ = true;
-      }
-  }
-  ~JitHeapAccessScope()
-  {
-      if (ownsRunning_) {
-          thread_->LeaveHeapAccess();
-      }
-  }
-  NO_COPY_SEMANTIC(JitHeapAccessScope);
-  NO_MOVE_SEMANTIC(JitHeapAccessScope);
+    explicit JitHeapAccessScope(JSThread *thread) : thread_(static_cast<JitThread *>(thread))
+    {
+        ASSERT(thread->IsJitThread());
+        if (!thread_->IsInRunningState()) {
+            thread_->EnterHeapAccess();
+            ownsRunning_ = true;
+        }
+    }
+    ~JitHeapAccessScope()
+    {
+        if (ownsRunning_) {
+            thread_->LeaveHeapAccess();
+        }
+    }
+    NO_COPY_SEMANTIC(JitHeapAccessScope);
+    NO_MOVE_SEMANTIC(JitHeapAccessScope);
 
 private:
-  JitThread *thread_;
-  bool ownsRunning_{false};
-  ALLOW_HANDLE_ALLOC;
-  ALLOW_DEREF_HANDLE;
+    JitThread *thread_;
+    bool ownsRunning_ {false};
+    ALLOW_HANDLE_ALLOC;
+    ALLOW_DEREF_HANDLE;
 };
 
 class JitVM final : public EcmaVM {

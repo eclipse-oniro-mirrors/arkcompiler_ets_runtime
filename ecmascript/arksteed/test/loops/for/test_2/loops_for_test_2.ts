@@ -27,10 +27,6 @@ function loop_for_2(limit, p, q, r)
 
 ArkTools.arkSteedCompileSync(loop_for_2);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(loop_for_2);
-// print(res);
-
 print(loop_for_2(0, 3, 1, 5));
 print(loop_for_2(5, 7, 2, 3));
 print(loop_for_2(10, 11, 3, 7));

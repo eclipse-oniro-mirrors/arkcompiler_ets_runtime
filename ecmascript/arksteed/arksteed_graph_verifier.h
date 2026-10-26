@@ -258,6 +258,7 @@ private:
         if (!IsAllocationPhi(phi)) {
             return;
         }
+        // 2: one fast and one slow allocation input
         ASSERT(phi->GetInputCount() == 2 && "Allocation merge Phi requires exactly one fast and one slow input");
         auto* fast = phi->GetInput(0)->TryCast<AllocateInYoungVertex>();
         auto* slow = phi->GetInput(1)->TryCast<CallRuntimeVertex>();
@@ -270,8 +271,9 @@ private:
         ASSERT(allocationBlocks_.count(fast) != 0 && allocationBlocks_.count(slow) != 0);
         BB* mergeBlock = state.GetBlock();
         ASSERT(pendingAllocation_ == nullptr && "Second allocation in initialization interval");
+        // 2: fast-path and slow-path blocks
         ASSERT(mergeBlock->GetPredecessors().size() == 2 && "Allocation merge requires two predecessors");
-        for (uint32_t i = 0; i < 2; ++i) {
+        for (uint32_t i = 0; i < 2; ++i) {  // 2: fast and slow inputs
             auto* allocation = phi->GetInput(i);
             auto* block = allocationBlocks_.at(allocation);
             ASSERT(block != nullptr && "Allocation has multiple merge Phis");

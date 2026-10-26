@@ -445,7 +445,7 @@ public:
     {
         glueData_.exception_ = JSTaggedValue::Hole();
     }
-    
+
     void ClearExceptionAndExtraErrorMessage()
     {
         glueData_.extraErrorMessage_ = JSTaggedValue::Hole();
@@ -1904,13 +1904,13 @@ public:
             return GetOffset<static_cast<size_t>(Index::isMultiContextTriggeredIndex)>(
                 isArch32);
         }
-        
+
         static size_t GetExtraErrorMessageOffset(bool isArch32)
         {
             return GetOffset<static_cast<size_t>(Index::ExtraErrorMessageIndex)>(
                 isArch32);
         }
-        
+
         static size_t GetJsonErrorPositionOffset(bool isArch32)
         {
             return GetOffset<static_cast<size_t>(Index::JsonErrorPositionIndex)>(

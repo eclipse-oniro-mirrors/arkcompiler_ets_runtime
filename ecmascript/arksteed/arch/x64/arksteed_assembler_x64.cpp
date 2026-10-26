@@ -285,7 +285,8 @@ void ArkSteedAssembler::StoreInt32FieldRelease(ArkSteedRegister src, ArkSteedReg
 }
 
 void ArkSteedAssembler::StoreHeaderRelease(ArkSteedRegister src,
-                                           ArkSteedRegister object) {
+                                           ArkSteedRegister object)
+{
     static_assert(TaggedObject::HCLASS_OFFSET == 0);
     // Aligned stores are atomic on x64 and TSO provides release ordering.
     StoreField(src, object, 0);

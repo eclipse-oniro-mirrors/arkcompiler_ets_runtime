@@ -34,10 +34,6 @@ function if_nested(x)
 
 ArkTools.arkSteedCompileSync(if_nested);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(if_nested);
-// print(res);
-
 let output = if_nested(10);
 print(output);
 output = if_nested(25);

@@ -64,8 +64,8 @@ inline void ArkSteedAssembler::Branch(Condition condition, Label *ifTrue, bool f
 }
 
 inline void ArkSteedAssembler::InitializeObjectHeader(ArkSteedRegister glue,
-                                                       ArkSteedRegister object,
-                                                       ArkSteedRegister temp)
+                                                      ArkSteedRegister object,
+                                                      ArkSteedRegister temp)
 {
     Move(temp, static_cast<uint64_t>(JSTaggedValue::VALUE_ZERO));
     StoreField(temp, object, static_cast<int32_t>(JSObject::HASH_OFFSET));
@@ -79,9 +79,9 @@ inline void ArkSteedAssembler::InitializeObjectHeader(ArkSteedRegister glue,
 }
 
 inline void ArkSteedAssembler::InitializeArrayFields(ArkSteedRegister glue,
-                                                      ArkSteedRegister object,
-                                                      uint32_t objectSize,
-                                                      ArkSteedRegister value)
+                                                     ArkSteedRegister object,
+                                                     uint32_t objectSize,
+                                                     ArkSteedRegister value)
 {
     Move(value, static_cast<uint64_t>(JSTaggedValue::VALUE_UNDEFINED));
     for (uint32_t offset = JSArray::SIZE; offset < objectSize; offset += JSTaggedValue::TaggedTypeSize()) {

@@ -301,7 +301,7 @@ def render_table(units: List[FileCoverage]) -> str:
     rows.append("| **Итого** | {} | {} | {} | {} | {} | {} | {} |".format(
         total.functions, total.functions_covered, total.lines, total.lines_covered,
         total.branches, total.branches_covered,
-        sum(1 for unit in units if unit.executed),
+        sum(1 for executed_unit in units if executed_unit.executed),
     ))
     return header + "\n".join(rows) + "\n"
 
@@ -324,9 +324,11 @@ def render_report(units: List[FileCoverage], scope: str, excludes: List[str],
         "",
         "| Метрика | Покрыто | Всего | Доля |",
         "|---|---|---|---|",
-        f"| Функции | {total.functions_covered} | {total.functions} | {total.percent(total.functions_covered, total.functions)} |",
+        f"| Функции | {total.functions_covered} | "
+        f"{total.functions} | {total.percent(total.functions_covered, total.functions)} |",
         f"| Строки | {total.lines_covered} | {total.lines} | {total.percent(total.lines_covered, total.lines)} |",
-        f"| Ветви | {total.branches_covered} | {total.branches} | {total.percent(total.branches_covered, total.branches)} |",
+        f"| Ветви | {total.branches_covered} | "
+        f"{total.branches} | {total.percent(total.branches_covered, total.branches)} |",
         "",
         render_table(units),
     ]

@@ -1804,10 +1804,11 @@ public:
     void VerifyInputs() const
     {
         if (ReturnsUninitializedAllocation()) {
+            // 2 : See below
             ASSERT((GetArgCount() == 1 || GetArgCount() == 2) && "Allocation requires size and an optional HClass");
             ASSERT(GetInput(0)->GetValueRepresentation() == ValueRepresentation::TAGGED
                    && "Allocation requires a tagged size");
-            if (GetArgCount() == 2) {
+            if (GetArgCount() == 2) {  // 2: size plus HClass
                 ASSERT(GetInput(1)->GetValueRepresentation() == ValueRepresentation::TAGGED
                        && "Allocation requires a tagged HClass");
             }
@@ -2102,7 +2103,7 @@ public:
         ASSERT(builtinId_ < kungfu::BuiltinsStubCSigns::ID::NUM_OF_BUILTINS_ID);
         ASSERT(entryKind_ == BuiltinCallEntryKind::FAST_STUB ||
                entryKind_ == BuiltinCallEntryKind::NATIVE_CPP);
-        ASSERT(!UsesFastStub() || actualArgc_ <= 3U);
+        ASSERT(!UsesFastStub() || actualArgc_ <= 3U);  // 3U: fast stubs accept at most three actual arguments
     }
 
 private:
@@ -2959,6 +2960,7 @@ public:
     {
         ASSERT(GetInputCount() == NUM_INPUTS);
         ASSERT(GetInput(INPUT_INDEX)->GetValueRepresentation() == ValueRepresentation::INT32);
+        // |divisor| >= 2: 0 and +-1 divisors are excluded from the signed-magic lowering
         ASSERT(divisor_ <= -2 || divisor_ >= 2);
     }
 
@@ -4570,7 +4572,7 @@ public:
 
     void ReduceToSinglePredecessor()
     {
-        ASSERT(GetInputCount() == 2);
+        ASSERT(GetInputCount() == 2);  // 2: inputs before the reduction
         SetInputCountForTransform(1);
     }
 

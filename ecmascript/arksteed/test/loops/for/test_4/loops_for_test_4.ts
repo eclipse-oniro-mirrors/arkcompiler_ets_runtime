@@ -33,10 +33,6 @@ function getSum(arr: number[])
 
 ArkTools.arkSteedCompileSync(loop_for_4);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(loop_for_3);
-// print(res);
-
 let arr = [1, 2, 3];
 loop_for_4(arr, 0, 3, 1, 5);
 print(getSum(arr));

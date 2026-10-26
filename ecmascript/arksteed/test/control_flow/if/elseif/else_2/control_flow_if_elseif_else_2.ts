@@ -29,10 +29,6 @@ function if_elseif_else_2(x, a, b, c)
 
 ArkTools.arkSteedCompileSync(if_elseif_else_2);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(if_elseif_else_2);
-// print(res);
-
 let output = if_elseif_else_2(5, 3, 5, 7);
 print(output);
 output = if_elseif_else_2(15, 3, 5, 7);

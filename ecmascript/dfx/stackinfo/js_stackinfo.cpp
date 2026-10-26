@@ -289,11 +289,6 @@ void JsStackInfo::BuildCrashInfo(bool isJsCrash, uintptr_t pc, JSThread *thread)
     if (JsStackInfo::loader == nullptr) {
         return;
     }
-#if !ECMASCRIPT_ENABLE_ARK_STEED
-// In a non-arksteed build no JIT code can appear unless AOT/FastJit/PGO is enabled.
-// In an arksteed build arksteed is the only JIT compiler and the forced compile
-// entry (ArkTools.arkSteedCompileSync/Async) bypasses enable checks, so JIT code
-// may exist even with all three disabled: never skip DumpJitCode there.
     bool isAotOrJitOrPgoEnabled = JsStackInfo::loader->IsEnableAOT();
 #ifndef EXCLUDE_JIT
     isAotOrJitOrPgoEnabled = isAotOrJitOrPgoEnabled || Jit::GetInstance()->IsEnableFastJit();
@@ -304,7 +299,6 @@ void JsStackInfo::BuildCrashInfo(bool isJsCrash, uintptr_t pc, JSThread *thread)
     if (!isAotOrJitOrPgoEnabled) {
         return;
     }
-#endif
     ohos::RuntimeInfoType type;
     if (isJsCrash) {
         type = ohos::RuntimeInfoType::JS;
@@ -745,8 +739,7 @@ bool ArkParseJsFrameInfo(uintptr_t byteCodePc, uintptr_t mapBase, uintptr_t load
 //   - a new unwind sequence keeps the fault PC passed by the unwinder as the
 //     first-frame candidate (never cleared before use);
 //   - each visited frame with a reliable native return-address slot feeds the
-//     next STEED caller's candidate; interpreter/entry-style frames invalidate
-//     it (Advance() sets optimizedReturnAddr_ = 0 for those);
+//     next STEED caller's candidate; interpreter/entry-style frames invalidate it;
 //   - a candidate outside [funcAddr, funcAddr + instrsiz) degrades that frame
 //     to function-first-line (bcOffset = 0) and never misreports (incl.
 //     lazy-deopt trampoline addresses).
@@ -905,7 +898,7 @@ static void CaptureFrameReturnAddr(void *ctx, ReadMemFunc readMem, uintptr_t typ
     if (hasSlot && returnAddr != 0) {
         g_unwindPcState.candidatePc = returnAddr;
         g_unwindPcState.candidateValid = true;
- 	} else {
+    } else {
         g_unwindPcState.candidatePc = 0;
         g_unwindPcState.candidateValid = false;
     }
@@ -1000,7 +993,7 @@ static uintptr_t GetSteedBytecodePc(void *ctx, ReadMemFunc readMem, uintptr_t ty
     if (!readMem(ctx, typeSlot - SteedFunctionFrame::GetTypeOffset() +
          SteedFunctionFrame::GetFunctionOffset(), &function) || function == 0) {
         return 0;
- 	}
+    }
 
     uintptr_t method = 0;
     if (!readMem(ctx, function + JSFunction::METHOD_OFFSET, &method) || method == 0) {

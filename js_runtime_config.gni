@@ -426,7 +426,7 @@ template("libark_jsruntime_common_set") {
     }
 
     external_deps = [ "libuv:uv" ]
-    
+
     if (enable_static_backtrace) {
       external_deps += [ "runtime_core:arkbacktrace" ]
     }
@@ -501,7 +501,7 @@ template("libark_jsruntime_common_set") {
         "json:nlohmann_json_static"
       ]
     }
-  
+
     if (enable_backtrace_local) {
       external_deps += [ "faultloggerd:libbacktrace_local" ]
     }

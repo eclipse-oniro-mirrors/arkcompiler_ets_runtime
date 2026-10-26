@@ -1049,7 +1049,7 @@ public:
     {
         return compilerArkSteedSourcePositionTable_;
     }
-    
+
     void SetCompilerArkSteedPassTrace(bool value)
     {
         compilerArkSteedPassTrace_ = value;

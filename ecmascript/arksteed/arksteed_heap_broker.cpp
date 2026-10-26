@@ -36,8 +36,7 @@
 
 namespace panda::ecmascript::arksteed {
 
-namespace
-{
+namespace {
 using ParsedStoreHandler = ArkSteedHeapBroker::StoreHandlerData;
 using ParsedLoadHandler = ArkSteedHeapBroker::LoadHandlerData;
 
@@ -428,22 +427,30 @@ bool ArkSteedHeapBroker::TryGetObjectType(const ArkSteedHeapRef &ref, JSType *ty
 
 bool ArkSteedHeapBroker::TryGetStringLength(const ArkSteedHeapRef &ref, uint32_t *length) const
 {
-    return length != nullptr && ref.IsString() && TryReadRef(ref, [&](JSTaggedValue value) {
-               *length = EcmaStringAccessor(value).GetLength();
-               return true;
-           });
+    if (UNLIKELY(length == nullptr || !ref.IsString())) {
+        return false;
+    }
+    auto reader = [length](JSTaggedValue value) {
+        *length = EcmaStringAccessor(value).GetLength();
+        return true;
+    };
+    return TryReadRef(ref, reader);
 }
 
 bool ArkSteedHeapBroker::TryGetStringChar(const ArkSteedHeapRef &ref, uint32_t index, uint16_t *character) const
 {
-    return character != nullptr && ref.IsString() && TryReadRef(ref, [&](JSTaggedValue value) {
-               EcmaStringAccessor accessor(value);
-               if (index >= accessor.GetLength()) {
-                   return false;
-               }
-               *character = accessor.Get(compilerThread_, index);
-               return true;
-           });
+    if (UNLIKELY(character == nullptr || !ref.IsString())) {
+        return false;
+    }
+    auto reader = [this, index, character](JSTaggedValue value) {
+        EcmaStringAccessor accessor(value);
+        if (index >= accessor.GetLength()) {
+            return false;
+        }
+        *character = accessor.Get(compilerThread_, index);
+        return true;
+    };
+    return TryReadRef(ref, reader);
 }
 
 JSHClass *ArkSteedHeapBroker::TryGetHClass(const ArkSteedHClassRef &ref) const

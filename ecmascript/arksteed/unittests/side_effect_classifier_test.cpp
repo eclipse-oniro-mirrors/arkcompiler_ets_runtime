@@ -132,7 +132,8 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, StoreTaggedFieldNamedProperty)
     ValueVertex *object = NewTagged();
     ValueVertex *value = NewTagged();
     auto *vertex = Vertex::New<StoreTaggedFieldVertex>(
-        &chunk_, static_cast<size_t>(StoreTaggedFieldVertex::NUM_INPUTS), static_cast<int32_t>(16), static_cast<uint32_t>(7));
+        &chunk_, static_cast<size_t>(StoreTaggedFieldVertex::NUM_INPUTS), static_cast<int32_t>(16),
+        static_cast<uint32_t>(7));
     vertex->SetInput(StoreTaggedFieldVertex::OBJECT_INDEX, object);
     vertex->SetInput(StoreTaggedFieldVertex::VALUE_INDEX, value);
 
@@ -323,7 +324,8 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, StoreEnvSlot)
     ValueVertex *env = NewTagged();
     ValueVertex *value = NewTagged();
     auto *vertex =
-        Vertex::New<StoreEnvSlotVertex>(&chunk_, static_cast<size_t>(StoreEnvSlotVertex::NUM_INPUTS), static_cast<int32_t>(42));
+        Vertex::New<StoreEnvSlotVertex>(&chunk_, static_cast<size_t>(StoreEnvSlotVertex::NUM_INPUTS),
+                                        static_cast<int32_t>(42));
     vertex->SetInput(StoreEnvSlotVertex::ENV_INDEX, env);
     vertex->SetInput(StoreEnvSlotVertex::VALUE_INDEX, value);
 
@@ -340,7 +342,8 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, StoreEnvSlot)
 HWTEST_F_L0(ArkSteedSideEffectClassifierTest, StoreIntTypedArrayElement)
 {
     auto *vertex = Vertex::New<StoreIntTypedArrayElementVertex>(
-        &chunk_, static_cast<size_t>(StoreIntTypedArrayElementVertex::NUM_INPUTS), JSType::JS_INT32_ARRAY, OnHeapMode::ON_HEAP);
+        &chunk_, static_cast<size_t>(StoreIntTypedArrayElementVertex::NUM_INPUTS), JSType::JS_INT32_ARRAY,
+        OnHeapMode::ON_HEAP);
     vertex->SetInput(StoreIntTypedArrayElementVertex::RECEIVER_INDEX, NewTagged());
     vertex->SetInput(StoreIntTypedArrayElementVertex::INDEX_INDEX, NewInt32());
     vertex->SetInput(StoreIntTypedArrayElementVertex::VALUE_INDEX, NewInt32());
@@ -351,7 +354,8 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, StoreIntTypedArrayElement)
 HWTEST_F_L0(ArkSteedSideEffectClassifierTest, StoreFloatTypedArrayElement)
 {
     auto *vertex = Vertex::New<StoreFloatTypedArrayElementVertex>(
-        &chunk_, static_cast<size_t>(StoreFloatTypedArrayElementVertex::NUM_INPUTS), JSType::JS_FLOAT64_ARRAY, OnHeapMode::ON_HEAP);
+        &chunk_, static_cast<size_t>(StoreFloatTypedArrayElementVertex::NUM_INPUTS), JSType::JS_FLOAT64_ARRAY,
+        OnHeapMode::ON_HEAP);
     vertex->SetInput(StoreFloatTypedArrayElementVertex::RECEIVER_INDEX, NewTagged());
     vertex->SetInput(StoreFloatTypedArrayElementVertex::INDEX_INDEX, NewInt32());
     vertex->SetInput(StoreFloatTypedArrayElementVertex::VALUE_INDEX, NewFloat64());
@@ -517,7 +521,8 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, StringEqualIsSafe)
 HWTEST_F_L0(ArkSteedSideEffectClassifierTest, UnclassifiedWriteVertexFallsBackToUnknownCall)
 {
     auto *vertex =
-        Vertex::New<StoreTaggedToAddressVertex>(&chunk_, static_cast<size_t>(StoreTaggedToAddressVertex::NUM_INPUTS), 16);
+        Vertex::New<StoreTaggedToAddressVertex>(&chunk_,
+                                                static_cast<size_t>(StoreTaggedToAddressVertex::NUM_INPUTS), 16);
     vertex->SetInput(StoreTaggedToAddressVertex::OBJECT_INDEX, NewInt64());
     vertex->SetInput(StoreTaggedToAddressVertex::VALUE_INDEX, NewTagged());
 
@@ -533,7 +538,8 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, MutationControlRejectsMisclassifie
 {
     ValueVertex *object = NewTagged();
     auto *vertex = Vertex::New<StoreTaggedFieldVertex>(
-        &chunk_, static_cast<size_t>(StoreTaggedFieldVertex::NUM_INPUTS), static_cast<int32_t>(16), static_cast<uint32_t>(7));
+        &chunk_, static_cast<size_t>(StoreTaggedFieldVertex::NUM_INPUTS), static_cast<int32_t>(16),
+        static_cast<uint32_t>(7));
     vertex->SetInput(StoreTaggedFieldVertex::OBJECT_INDEX, object);
     vertex->SetInput(StoreTaggedFieldVertex::VALUE_INDEX, NewTagged());
 

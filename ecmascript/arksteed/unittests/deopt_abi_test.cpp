@@ -265,7 +265,8 @@ HWTEST_F_L0(ArkSteedDeoptAbiTest, DeoptAbi_FloatingSnapshotOffsetsFormCompletePe
         EXPECT_LT(static_cast<uint32_t>(offset), ARKSTEED_DEOPT_SNAPSHOT_SIZE)
             << "offset outside the snapshot for FP code " << code;
         const uint32_t slot = static_cast<uint32_t>(offset) / kSlotBytes;
-        EXPECT_GE(slot, ArkSteedDeoptSnapshot::GENERAL_SLOT_COUNT) << "FP code " << code << " overlaps the general half";
+        EXPECT_GE(slot, ArkSteedDeoptSnapshot::GENERAL_SLOT_COUNT)
+            << "FP code " << code << " overlaps the general half";
         EXPECT_LT(slot, ArkSteedDeoptSnapshot::GENERAL_SLOT_COUNT + ArkSteedDeoptSnapshot::FLOATING_SLOT_COUNT)
             << "FP code " << code << " leaves the snapshot";
         EXPECT_TRUE(slots.insert(slot).second) << "snapshot slot " << slot << " used twice";
@@ -313,7 +314,7 @@ HWTEST_F_L0(ArkSteedDeoptAbiTest, DeoptAbi_FrameSizesMatchComponentsAndAlignment
 {
     constexpr uint32_t kAlignment = static_cast<uint32_t>(ARKSTEED_EAGER_DEOPT_STACK_ALIGNMENT);
     constexpr uint32_t kSlot = static_cast<uint32_t>(ARKSTEED_EAGER_DEOPT_SLOT_SIZE);
-    EXPECT_EQ(kAlignment, 16U);
+    EXPECT_EQ(kAlignment, 16U);  // 16U: bytes of stack alignment
     EXPECT_EQ(kSlot, kSlotBytes);
     EXPECT_EQ(alignof(ArkSteedDeoptSnapshot), kAlignment);
 
@@ -335,7 +336,7 @@ HWTEST_F_L0(ArkSteedDeoptAbiTest, DeoptAbi_FrameSizesMatchComponentsAndAlignment
     EXPECT_EQ(ARKSTEED_EAGER_DEOPT_ENTRY_FRAME_SIZE,
               ARKSTEED_DEOPT_SNAPSHOT_SIZE + ARKSTEED_EAGER_DEOPT_ENTRY_METADATA_SIZE);
     EXPECT_EQ(ARKSTEED_EAGER_DEOPT_ENTRY_FRAME_SIZE,
-              ARKSTEED_DEOPT_SNAPSHOT_SIZE + 2U * kSlot);
+              ARKSTEED_DEOPT_SNAPSHOT_SIZE + 2U * kSlot);  // 2U: two extra slots past the snapshot
     EXPECT_EQ(ARKSTEED_EAGER_DEOPT_ENTRY_FRAME_SIZE, x64_eager_deopt_abi::ENTRY_FRAME_SIZE);
     EXPECT_EQ(ARKSTEED_EAGER_DEOPT_ENTRY_FRAME_SIZE % kAlignment, 0U);
 
@@ -362,7 +363,7 @@ HWTEST_F_L0(ArkSteedDeoptAbiTest, DeoptAbi_SysVX64ArgumentRegisterOrder)
     constexpr std::array<ArkSteedRegister, 6> kExpectedRegisters = {
         x64::rdi, x64::rsi, x64::rdx, x64::rcx, x64::r8, x64::r9};
 
-    EXPECT_EQ(ArkSteedAssembler::NUM_ARG_REGISTERS, 6);
+    EXPECT_EQ(ArkSteedAssembler::NUM_ARG_REGISTERS, 6);  // 6: argument registers
     EXPECT_EQ(kExpectedCodes.size(), static_cast<size_t>(ArkSteedAssembler::NUM_ARG_REGISTERS));
     for (int i = 0; i < ArkSteedAssembler::NUM_ARG_REGISTERS; ++i) {
         ArkSteedRegister reg = ArkSteedAssembler::GetParameterRegister(i);

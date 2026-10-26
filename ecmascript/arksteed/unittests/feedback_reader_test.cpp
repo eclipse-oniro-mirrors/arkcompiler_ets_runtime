@@ -574,6 +574,7 @@ TEST_F(ArkSteedFeedbackReaderTest, NamedAccessPolySlotPublishesEveryCaseAtTheLim
     const JSTaggedValue second = profile->GetICSlot(HostThread(), slot + 1);
     ASSERT_TRUE(first.IsTaggedArray()) << "the fixture slot is not a poly array: " << SlotText(first);
     ASSERT_TRUE(second.IsHole()) << "the second slot of a poly case is not hole";
+    // 2: values per (hclass, handler) case pair
     ASSERT_EQ(TaggedArray::Cast(first.GetTaggedObject())->GetLength(), kExpectedPolyCases * 2);
     const std::vector<ProfileCasePair> expected = CapturePolyCasePairs(HostThread(), profile, slot);
     ASSERT_EQ(expected.size(), kExpectedPolyCases);
@@ -700,6 +701,7 @@ TEST_F(ArkSteedFeedbackReaderTest, ValueAndElementAccessStates)
     ASSERT_NE(polySlot, static_cast<uint32_t>(kungfu::ICSlotId::INVALID_ID));
     const JSTaggedValue polyFirst = ProfileOf(poly)->GetICSlot(HostThread(), polySlot);
     ASSERT_TRUE(polyFirst.IsTaggedArray()) << SlotText(polyFirst);
+    // 2: values per (hclass, handler) case pair
     ASSERT_EQ(TaggedArray::Cast(polyFirst.GetTaggedObject())->GetLength(), kExpectedPolyCases * 2);
     const std::vector<ProfileCasePair> polyExpected = CapturePolyCasePairs(HostThread(), ProfileOf(poly), polySlot);
     ASSERT_EQ(polyExpected.size(), kExpectedPolyCases);

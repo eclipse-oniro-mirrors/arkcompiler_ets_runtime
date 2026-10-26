@@ -41,10 +41,6 @@ function switch_simple(x)
 
 ArkTools.arkSteedCompileSync(switch_simple);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(switch_simple);
-// print(res);
-
 let output = switch_simple(1);
 print(output);
 output = switch_simple(2);

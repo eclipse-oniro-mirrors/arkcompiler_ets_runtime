@@ -28,10 +28,6 @@ function loop_continue(x)
 
 ArkTools.arkSteedCompileSync(loop_continue);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(loop_continue);
-// print(res);
-
 let output = loop_continue(2);
 print(output);
 output = loop_continue(10);

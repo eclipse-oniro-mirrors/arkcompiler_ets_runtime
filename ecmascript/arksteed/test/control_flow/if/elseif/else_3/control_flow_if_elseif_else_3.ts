@@ -29,10 +29,6 @@ function if_elseif_else_3(x, a, b, c)
 
 ArkTools.arkSteedCompileSync(if_elseif_else_3);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(if_elseif_else_3);
-// print(res);
-
 let output = if_elseif_else_3(25, 1, 2, 3);  // globalValue <- 1
 print(output);
 

@@ -80,7 +80,7 @@ struct Context {
 //   |      callFrameTop_       |               |
 //   |       inlineDepth_       |               v  (Index 0, pushed last = context base)
 //   |--------------------------| ---------------
-struct AsmStackContext : public base::AlignedStruct<base::AlignedPointer::Size(),
+struct AsmStackContext : public base::AlignedStruct<JSTaggedValue::TaggedTypeSize(),
                                                     base::AlignedPointer,
                                                     base::AlignedPointer,
                                                     base::AlignedPointer,

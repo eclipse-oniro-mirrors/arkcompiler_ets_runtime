@@ -31,9 +31,6 @@ function loop_for_6(limit: number, p: number, q: number, r: number): number
 
 ArkTools.arkSteedCompileSync(loop_for_6);
 
-// TODO: Replace the spin loop with:
-// let res = ArkTools.waitJitCompileFinish(loop_for_3);
-
 print(loop_for_6(0, 3, 2, 1));
 print(loop_for_6(10, 5, 3, 2));
 print(loop_for_6(20, 7, 5, 3));

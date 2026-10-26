@@ -438,17 +438,16 @@ void ArkSteedRegisterAllocator::MarkAsClobbered(ValueVertex *vertex, const Alloc
 
 void ArkSteedRegisterAllocator::AssignInputs(Vertex *vertex)
 {
-
-  // We allocate arbitrary register inputs after fixed inputs, since the fixed
-  // inputs may clobber the arbitrarily chosen ones. Finally we assign the
-  // location for the remaining inputs. Since inputs can alias a vertex, one of
-  // the inputs could be assigned a register in AssignArbitraryRegisterInput
-  // (and respectively its vertex location), therefore we wait until all
-  // registers are allocated before assigning any location for these inputs.
-  for (uint32_t i = 0, n = vertex->GetInputCount(); i < n; i++) {
-    Input input(vertex, i);
-    AssignFixedInput(input);
-  }
+    // We allocate arbitrary register inputs after fixed inputs, since the fixed
+    // inputs may clobber the arbitrarily chosen ones. Finally we assign the
+    // location for the remaining inputs. Since inputs can alias a vertex, one of
+    // the inputs could be assigned a register in AssignArbitraryRegisterInput
+    // (and respectively its vertex location), therefore we wait until all
+    // registers are allocated before assigning any location for these inputs.
+    for (uint32_t i = 0, n = vertex->GetInputCount(); i < n; i++) {
+        Input input(vertex, i);
+        AssignFixedInput(input);
+    }
     AssignFixedTemporaries(vertex);
     for (uint32_t i = 0, n = vertex->GetInputCount(); i < n; i++) {
         Input input(vertex, i);

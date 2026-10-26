@@ -324,9 +324,9 @@ public:
         return LifetimeField::Decode(value_) == static_cast<unsigned>(LifetimeFlag::USED_AT_START);
     }
 
-    bool IsUsedAtEnd() const {
-      return LifetimeField::Decode(value_) ==
-             static_cast<unsigned>(LifetimeFlag::USED_AT_END);
+    bool IsUsedAtEnd() const
+    {
+        return LifetimeField::Decode(value_) == static_cast<unsigned>(LifetimeFlag::USED_AT_END);
     }
 
     bool IsFixedSlotPolicy() const

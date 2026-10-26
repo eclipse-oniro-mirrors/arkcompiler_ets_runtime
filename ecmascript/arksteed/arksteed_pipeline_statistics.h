@@ -175,6 +175,7 @@ inline std::vector<CString> FormatPipelineStatisticsSummary(const CString &metho
     auto formatBytes = [](size_t bytes) {
         CStringStream stream;
         if (bytes >= MB) {
+            // 2: fractional digits
             stream << std::fixed << std::setprecision(2) << (static_cast<double>(bytes) / MB) << "MB";
         } else if (bytes >= KB) {
             stream << (bytes / KB) << "KB";
@@ -187,7 +188,7 @@ inline std::vector<CString> FormatPipelineStatisticsSummary(const CString &metho
     std::vector<CString> lines;
     CStringStream header;
     header << "[ArkSteed] Pipeline statistics for '" << methodName << "' (total: " << std::fixed
-           << std::setprecision(2) << totalMs << "ms, chunk: " << formatBytes(chunkTotalBytes);
+           << std::setprecision(2) << totalMs << "ms, chunk: " << formatBytes(chunkTotalBytes);  // 2: fractional digits
     if (aborted) {
         header << ", aborted";
     }
@@ -196,7 +197,9 @@ inline std::vector<CString> FormatPipelineStatisticsSummary(const CString &metho
 
     for (const auto &entry : entries) {
         CStringStream line;
+        // 2: indent spaces per nesting level
         line << CString(2 * (entry.depth + 1), ' ') << entry.name << ": " << std::fixed << std::setprecision(2)
+             // 1000.0: microseconds to milliseconds
              << (static_cast<double>(entry.durationUs) / 1000.0) << "ms, +" << formatBytes(entry.chunkDeltaBytes)
              << " (cum " << formatBytes(entry.chunkBytesAtStart + entry.chunkDeltaBytes) << ")";
         lines.push_back(line.str());
@@ -225,8 +228,10 @@ public:
         }
         const Chunk *chunk = collector_.GetChunk();
         size_t chunkTotalBytes = chunk != nullptr ? chunk->GetAllocatedSize() : 0;
-        for (const CString &line : FormatPipelineStatisticsSummary(methodName_, TotalSpentTime(), chunkTotalBytes,
-             !success_, collector_.Entries())) {
+
+        const std::vector<CString> &lines = FormatPipelineStatisticsSummary(
+            methodName_, TotalSpentTime(), chunkTotalBytes, !success_, collector_.Entries());
+        for (const CString &line : lines) {
             LOG_JIT(INFO) << line;
         }
     }

@@ -340,8 +340,10 @@ constexpr const char *kCaseScope = "case";
 // link saw instead of substituting a value for it.
 std::string PointerText(const void *pointer)
 {
-    char buffer[32] = {0};
-    std::snprintf(buffer, sizeof(buffer), "%p", pointer);
+    char buffer[32] = {0};  // 32: capacity for a printed pointer
+    if (EOK != snprintf_s(buffer, sizeof(buffer), sizeof(buffer), "%p", pointer)) {
+        return "<FORMAT-ERROR>";
+    }
     return std::string(buffer);
 }
 
@@ -734,22 +736,25 @@ bool ArkSteedBytecodeFixture::ConstructNamedPolyOverflow()
                            ObservedSlotName(sourceFirst));
     }
     JSHandle<TaggedArray> sourceArray(hostThread_, sourceFirst.GetTaggedObject());
-    if (sourceArray->GetLength() != kLimit * 2) {
+    if (sourceArray->GetLength() != kLimit * 2) {  // 2: values per case pair
         return FailProfile(FixtureMethodKindName(kSourceKind),
                            "the polymorphic array does not hold " + std::to_string(kLimit) + " case pairs",
-                           "case pairs=" + std::to_string(sourceArray->GetLength() / 2));
+                           "case pairs=" + std::to_string(sourceArray->GetLength() / 2));  // 2: values per case pair
     }
 
     // The constructed array carries the real pairs plus one duplicate of the
     // first pair, which puts the case count above the ArkSteed limit: that state
     // is unreachable through IC, which stops at the limit.
+    // 2: values per case pair
     JSHandle<TaggedArray> constructed = hostVm_->GetFactory()->NewTaggedArray((kLimit + 1) * 2);
     for (uint32_t index = 0; index < kLimit; ++index) {
+        // 2: stride of one case pair
         constructed->Set(hostThread_, index * 2, sourceArray->Get(hostThread_, index * 2));
+        // 2: stride of one case pair
         constructed->Set(hostThread_, index * 2 + 1, sourceArray->Get(hostThread_, index * 2 + 1));
     }
-    constructed->Set(hostThread_, kLimit * 2, sourceArray->Get(hostThread_, 0));
-    constructed->Set(hostThread_, kLimit * 2 + 1, sourceArray->Get(hostThread_, 1));
+    constructed->Set(hostThread_, kLimit * 2, sourceArray->Get(hostThread_, 0));  // 2: stride of one case pair
+    constructed->Set(hostThread_, kLimit * 2 + 1, sourceArray->Get(hostThread_, 1));  // 2: stride of one case pair
 
     target.profile->SetICSlot(hostThread_, targetSlot, constructed);
     target.profile->SetICSlot(hostThread_, targetSlot + 1, JSTaggedValue::Hole());
@@ -873,10 +878,10 @@ bool ArkSteedBytecodeFixture::CheckProfileState(FixtureMethodKind kind, FixtureM
             return false;
         }
         auto *array = TaggedArray::Cast(first.GetTaggedObject());
-        if (array->GetLength() != expectedPairs * 2) {
+        if (array->GetLength() != expectedPairs * 2) {  // 2: values per case pair
             return false;
         }
-        for (uint32_t index = 0; index < array->GetLength(); index += 2) {
+        for (uint32_t index = 0; index < array->GetLength(); index += 2) {  // 2: stride of one (hclass, handler) pair
             if (!array->Get(hostThread_, index).IsWeak() ||
                 !IsHandlerValue(array->Get(hostThread_, index + 1))) {
                 return false;

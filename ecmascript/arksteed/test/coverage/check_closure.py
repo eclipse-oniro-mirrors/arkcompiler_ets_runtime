@@ -652,12 +652,12 @@ def parse_records_section(
             continue
         if builder is None:
             continue
-        field = FIELD_LINE_RE.match(line)
-        if field is not None:
+        field_match = FIELD_LINE_RE.match(line)
+        if field_match is not None:
             builder.fields.append(
                 FieldEntry(
-                    name=field.group("name").strip(),
-                    value=field.group("value").strip(),
+                    name=field_match.group("name").strip(),
+                    value=field_match.group("value").strip(),
                     line=index + 1,
                 )
             )
@@ -693,7 +693,7 @@ def parse_inventory_blocks(text: str) -> List[InventoryBlock]:
         if pending is None:
             return
         if (
-            not any(field.name in INVENTORY_FIELD_SET for field in pending.fields)
+            not any(field_match.name in INVENTORY_FIELD_SET for field_match in pending.fields)
             and ENUM_IN_HEADING_RE.search(pending.title) is None
         ):
             return
@@ -719,12 +719,12 @@ def parse_inventory_blocks(text: str) -> List[InventoryBlock]:
             continue
         if builder is None:
             continue
-        field = FIELD_LINE_RE.match(line)
-        if field is not None:
+        matched_field = FIELD_LINE_RE.match(line)
+        if matched_field is not None:
             builder.fields.append(
                 FieldEntry(
-                    name=field.group("name").strip(),
-                    value=field.group("value").strip(),
+                    name=matched_field.group("name").strip(),
+                    value=matched_field.group("value").strip(),
                     line=index + 1,
                 )
             )
@@ -862,7 +862,7 @@ def check_record_block(
     for name in first_seen:
         if name in RECORD_FIELD_INDEX and counts[name] > 1:
             lines = ", ".join(
-                str(entry.line) for entry in block.fields if entry.name == name
+                str(field_entry.line) for field_entry in block.fields if field_entry.name == name
             )
             defects.append(
                 "%s: %s: повторённое обязательное поле записи закрытия (%d раза; "
@@ -896,7 +896,7 @@ def check_record_block(
                 % (row_id, entry.name)
             )
 
-    values = {entry.name: entry.value for entry in block.fields}
+    values = {field_entry.name: field_entry.value for field_entry in block.fields}
 
     if counts.get("Строка") == 1 and values["Строка"]:
         value = values["Строка"]
@@ -1688,7 +1688,7 @@ def record_is_complete(block: RecordBlock) -> bool:
         if counts.get(name) != 1:
             return False
     values = {entry.name: entry.value for entry in block.fields}
-    return all(values[name] for name in RECORD_FIELDS)
+    return all(values[required] for required in RECORD_FIELDS)
 
 
 def check_record_content(
@@ -2080,14 +2080,14 @@ OBLIGATION_FORMS = (
 
 def _check_inventory_obligation(
     position: str,
-    field: str,
+    field_match,
     value: str,
     dump_family: Optional[str],
     dump_tail: Optional[str],
     ctx: ContentContext,
 ) -> List[str]:
     """Check one obligation of an inventory position (R8)."""
-    prefix = "%s: %s" % (position, field)
+    prefix = "%s: %s" % (position, field_match)
     text = value.strip()
     if not text:
         # The empty value is reported by the field check of the position.
@@ -2138,10 +2138,10 @@ def _check_inventory_position(block: InventoryBlock, ctx: ContentContext) -> Lis
                 % (position, name)
             )
 
-    def single_value(name: str) -> Optional[str]:
+    def single_value(field_name) -> Optional[str]:
         """The value of a field present exactly once and non-empty, else None."""
-        if counts.get(name) == 1 and values.get(name, "").strip():
-            return values[name]
+        if counts.get(field_name) == 1 and values.get(field_name, "").strip():
+            return values[field_name]
         return None
 
     dump_family, dump_tail, identity_defects = _check_inventory_identity(
@@ -2784,17 +2784,17 @@ def _mutate_record(fixture: SelfTestFixture, row_id: str,
     fixture.write_matrix("\n".join(lines[:start] + block + lines[end:]) + "\n")
 
 
-def _remove_record_field(fixture: SelfTestFixture, row_id: str, field: str) -> None:
-    prefix = "- **%s:**" % field
+def _remove_record_field(fixture: SelfTestFixture, row_id: str, field_match) -> None:
+    prefix = "- **%s:**" % field_match
     _mutate_record(
         fixture, row_id,
         lambda block: [line for line in block if not line.startswith(prefix)],
     )
 
 
-def _set_record_field(fixture: SelfTestFixture, row_id: str, field: str,
+def _set_record_field(fixture: SelfTestFixture, row_id: str, field_match,
                       value: str) -> None:
-    prefix = "- **%s:**" % field
+    prefix = "- **%s:**" % field_match
 
     def transform(block: List[str]) -> List[str]:
         out: List[str] = []
@@ -2815,18 +2815,18 @@ def _replace_matrix(fixture: SelfTestFixture, old: str, new: str) -> None:
     fixture.write_matrix(text.replace(old, new, 1))
 
 
-def _set_inventory_field(fixture: SelfTestFixture, field: str, value: str) -> None:
-    prefix = "- **%s:**" % field
+def _set_inventory_field(fixture: SelfTestFixture, field_match, value: str) -> None:
+    prefix = "- **%s:**" % field_match
     line = "%s %s" % (prefix, value) if value else prefix
     lines = fixture.read_inventory().splitlines()
     if not any(item.startswith(prefix) for item in lines):
-        raise AssertionError("self-test fixture: inventory field not found: %s" % field)
+        raise AssertionError("self-test fixture: inventory field not found: %s" % field_match)
     out = [line if item.startswith(prefix) else item for item in lines]
     fixture.write_inventory("\n".join(out) + "\n")
 
 
-def _remove_inventory_field(fixture: SelfTestFixture, field: str) -> None:
-    prefix = "- **%s:**" % field
+def _remove_inventory_field(fixture: SelfTestFixture, field_match) -> None:
+    prefix = "- **%s:**" % field_match
     lines = fixture.read_inventory().splitlines()
     fixture.write_inventory(
         "\n".join(item for item in lines if not item.startswith(prefix)) + "\n"
@@ -2872,8 +2872,8 @@ def _self_test_report_failures(name: str, report: CheckReport, expected_code: in
 
 
 def _self_test_scenario_pair(name: str, mutate: Callable[[SelfTestFixture], None],
-                               expected_code: int,
-                               markers: Sequence[str]) -> List[Tuple[str, Callable[[], List[str]]]]:
+                             expected_code: int,
+                             markers: Sequence[str]) -> List[Tuple[str, Callable[[], List[str]]]]:
     """One `mutation -> defect` check and its `revert -> expected code` pair."""
 
     def mutation_check() -> List[str]:
@@ -3044,8 +3044,8 @@ def _self_test_scenario_checks() -> List[Tuple[str, Callable[[], List[str]]]]:
         checks.extend(
             _self_test_scenario_pair(
                 "запись G1.1 без обязательного поля `%s`" % field_name,
-                lambda fixture, field_name=field_name: _remove_record_field(
-                    fixture, "G1.1", field_name
+                lambda fixture, target_field=field_name: _remove_record_field(
+                    fixture, "G1.1", target_field
                 ),
                 EXIT_DEFECT,
                 ("G1.1", field_name),
