@@ -43,9 +43,16 @@ public:
         SHARED_HEAP
     };
 
+    enum class DeviceMemoryTier : uint8_t {
+        TIER_DEFAULT,
+        TIER_6G
+    };
+
     EcmaParamConfiguration() = default;
-    EcmaParamConfiguration(HeapType heapType, size_t poolSize, size_t heapSize = 1_MB)
+    EcmaParamConfiguration(HeapType heapType, size_t poolSize, size_t heapSize = 1_MB,
+                           DeviceMemoryTier tier = DeviceMemoryTier::TIER_DEFAULT)
     {
+        deviceMemoryTier_ = tier;
         switch (heapType) {
             case HeapType::WORKER_HEAP:
                 if (heapSize >= LOW_MEMORY && heapSize < MAX_WORKER_HEAP_SIZE) {
@@ -85,6 +92,10 @@ public:
         if (maxHeapSize_ < LOW_MEMORY) {
             LOG_ECMA(FATAL) << "this branch is unreachable";
             UNREACHABLE();
+        }
+        if (deviceMemoryTier_ == DeviceMemoryTier::TIER_6G) {
+            InitializeFor6GDevice();
+            return;
         }
         if (maxHeapSize_ < MEDIUM_MEMORY) { // 64_MB ~ 128_MB
             minSemiSpaceSize_ = 2_MB;
@@ -175,6 +186,45 @@ public:
             maxNativeSizeInc_ = 1_GB;
             fragmentationLimitForSharedFullGC_ = 5_MB;
         }
+    }
+
+    void InitializeFor6GDevice()
+    {
+        minSemiSpaceSize_ = 2_MB;
+        maxSemiSpaceSize_ = 16_MB;
+        minSlotSpaceSize_ = 4_MB;
+        defaultReadOnlySpaceSize_ = 256_KB;
+        defaultNonMovableSpaceSize_ = 64_MB;
+        defaultSnapshotSpaceSize_ = 4_MB;
+        defaultMachineCodeSpaceSize_ = 8_MB;
+        defaultGlobalAllocLimit_ = 20_MB;
+        semiSpaceTriggerConcurrentMark_ = 1_MB;
+        semiSpaceStepOvershootSize_ = 2_MB;
+        oldSpaceStepOvershootSize_ = 4_MB;
+        oldSpaceMaxOvershootSize_ = 8_MB;
+        slotSpaceTriggerConcurrentMark_ = 1.5_MB;
+        outOfMemoryOvershootSize_ = 2_MB;
+        minAllocLimitGrowingStep_ = 8_MB;
+        minNativeLimitGrowingStep_ = 32_MB;
+        minGrowingStep_ = 8_MB;
+        maxStackSize_ = 128_KB;
+        maxJSSerializerSize_ = 16_MB;
+        sharedHeapLimitGrowingFactor_ = SHARED_HEAP_GROWING_FACTOR_6G;
+        sharedHeapLimitGrowingStep_ = 20_MB;
+        sIncObjSizeThresholdInSensitive_ = 80_MB;
+        incObjSizeThresholdInSensitive_ = 20_MB;
+        semiSpaceCommittedSizeThresholdForCmsInSensitive_ = 100_MB;
+        stepNativeSizeInc_ = 256_MB;
+        nativeSizeOvershoot_ = 100_MB;
+        asyncClearNativePointerThreshold_ = 500_MB;
+        maxNativeSizeInc_ = 768_MB;
+        fragmentationLimitForSharedFullGC_ = 5_MB;
+        sharedConcurrentMarkRate_ = SHARED_CONCURRENT_MARK_RATE_6G;
+        LOG_ECMA(DEBUG) << "InitializeFor6GDevice: 6G GC params applied, growingFactor="
+            << sharedHeapLimitGrowingFactor_ << ", growingStep=" << (sharedHeapLimitGrowingStep_ / 1_MB)
+            << "MB, stepNativeSizeInc=" << (stepNativeSizeInc_ / 1_MB)
+            << "MB, minNativeLimitGrowingStep=" << (minNativeLimitGrowingStep_ / 1_MB)
+            << "MB, concurrentMarkRate=" << sharedConcurrentMarkRate_;
     }
 
     void SetMaxHeapSize(size_t heapSize)
@@ -272,9 +322,14 @@ public:
         return minGrowingStep_;
     }
 
-    size_t GetSharedHeapLimitGrowingFactor() const
+    double GetSharedHeapLimitGrowingFactor() const
     {
         return sharedHeapLimitGrowingFactor_;
+    }
+
+    double GetSharedConcurrentMarkRate() const
+    {
+        return sharedConcurrentMarkRate_;
     }
 
     size_t GetSharedHeapLimitGrowingStep() const
@@ -347,7 +402,7 @@ public:
         return maxJSSerializerSize_;
     }
 
-    void SetSharedHeapLimitGrowingFactor(size_t value)
+    void SetSharedHeapLimitGrowingFactor(double value)
     {
         sharedHeapLimitGrowingFactor_ = value;
     }
@@ -379,8 +434,12 @@ private:
     static constexpr size_t DEFAULT_STACK_SIZE = 992_KB;
     static constexpr size_t ALLOWED_UPPER_STACK_DIFF = 4_KB;
     static constexpr size_t DEFAULT_RESERVED_STACK_SIZE = 16_KB;
+    static constexpr double SHARED_HEAP_GROWING_FACTOR_6G = 1.5; // 6G device shared heap growing factor (default 2.0)
+    static constexpr double SHARED_CONCURRENT_MARK_RATE_DEFAULT = 0.75; // shared concurrent mark trigger rate, default
+    static constexpr double SHARED_CONCURRENT_MARK_RATE_6G = 0.8; // 6G device shared concurrent mark trigger rate
 
     size_t maxHeapSize_ {0};
+    DeviceMemoryTier deviceMemoryTier_ {DeviceMemoryTier::TIER_DEFAULT};
     size_t minSemiSpaceSize_ {0};
     size_t maxSemiSpaceSize_ {0};
     size_t minSlotSpaceSize_ {0};
@@ -398,7 +457,8 @@ private:
     size_t minAllocLimitGrowingStep_ {0};
     size_t minNativeLimitGrowingStep_ {0};
     size_t minGrowingStep_ {0};
-    size_t sharedHeapLimitGrowingFactor_ {0};
+    double sharedHeapLimitGrowingFactor_ {0.0};
+    double sharedConcurrentMarkRate_ {SHARED_CONCURRENT_MARK_RATE_DEFAULT};
     size_t sharedHeapLimitGrowingStep_ {0};
     size_t incObjSizeThresholdInSensitive_ {0};
     size_t sIncObjSizeThresholdInSensitive_ {0};

@@ -266,4 +266,31 @@ HWTEST_F_L0(EcmaVMTest, TestInitConfigurableParam)
 #endif
 }
 
+HWTEST_F_L0(EcmaVMTest, InitializeFor6GDeviceParams)
+{
+    EcmaParamConfiguration cfg6g(EcmaParamConfiguration::HeapType::DEFAULT_HEAP, MAX_HEAP_SIZE, MAX_HEAP_SIZE,
+                                 EcmaParamConfiguration::DeviceMemoryTier::TIER_6G);
+    EXPECT_DOUBLE_EQ(cfg6g.GetSharedHeapLimitGrowingFactor(), 1.5);
+    EXPECT_EQ(cfg6g.GetSharedHeapLimitGrowingStep(), 20_MB);
+    EXPECT_EQ(cfg6g.GetStepNativeSizeInc(), 256_MB);
+    EXPECT_EQ(cfg6g.GetMinNativeLimitGrowingStep(), 32_MB);
+    EXPECT_DOUBLE_EQ(cfg6g.GetSharedConcurrentMarkRate(), 0.8);
+    EXPECT_EQ(cfg6g.GetSemiSpaceTriggerConcurrentMark(), 1_MB);
+    EXPECT_EQ(cfg6g.GetOldSpaceStepOvershootSize(), 4_MB);
+    EXPECT_EQ(cfg6g.GetOldSpaceMaxOvershootSize(), 8_MB);
+    EXPECT_EQ(cfg6g.GetSlotSpaceTriggerConcurrentMark(), 1.5_MB);
+    EXPECT_EQ(cfg6g.GetMinGrowingStep(), 8_MB);
+    EXPECT_EQ(cfg6g.GetIncObjSizeThresholdInSensitive(), 20_MB);
+    EXPECT_EQ(cfg6g.GetSIncObjSizeThresholdInSensitive(), 80_MB);
+    EXPECT_EQ(cfg6g.GetSemiSpaceCommittedSizeThresholdForCmsInSensitive(), 100_MB);
+
+    EcmaParamConfiguration cfgDefault(EcmaParamConfiguration::HeapType::DEFAULT_HEAP, MAX_HEAP_SIZE, MAX_HEAP_SIZE,
+                                      EcmaParamConfiguration::DeviceMemoryTier::TIER_DEFAULT);
+    EXPECT_DOUBLE_EQ(cfgDefault.GetSharedHeapLimitGrowingFactor(), 2.0);
+    EXPECT_EQ(cfgDefault.GetSharedHeapLimitGrowingStep(), 40_MB);
+    EXPECT_EQ(cfgDefault.GetStepNativeSizeInc(), 300_MB);
+    EXPECT_EQ(cfgDefault.GetMinNativeLimitGrowingStep(), 64_MB);
+    EXPECT_DOUBLE_EQ(cfgDefault.GetSharedConcurrentMarkRate(), 0.75);
+}
+
 }  // namespace panda::ecmascript
