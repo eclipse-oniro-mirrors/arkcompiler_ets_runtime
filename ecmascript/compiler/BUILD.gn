@@ -330,7 +330,7 @@ ohos_source_set("libark_jsoptimizer_set") {
   }
   public_configs = [
     "$js_root:include_llvm",
-    "$js_root:ark_jsruntime_compiler_config",
+    "$js_root:ark_jsruntime_common_config",
     "$js_root:ark_jsruntime_public_config",
     ":libark_jsoptimizer_set_config",
   ]
@@ -407,7 +407,7 @@ ohos_source_set("libark_jsoptimizer_set_with_maple") {
   public_configs = [
     "$js_root:include_llvm",
     ":include_maple",
-    "$js_root:ark_jsruntime_compiler_config",
+    "$js_root:ark_jsruntime_common_config",
     "$js_root:ark_jsruntime_public_config",
     ":libark_jsoptimizer_set_config",
     ":enable_maple_config",
@@ -563,7 +563,7 @@ ohos_executable("ark_stub_compiler") {
 
   configs = [
     "$js_root:include_llvm",
-    "$js_root:ark_jsruntime_compiler_config",
+    "$js_root:ark_jsruntime_common_config",
     "$js_root:ark_jsruntime_public_config",
   ]
 
@@ -628,7 +628,7 @@ ohos_executable("ark_aot_compiler") {
   configs = [
     "$js_root:include_llvm",
     ":include_maple",
-    "$js_root:ark_jsruntime_compiler_config",
+    "$js_root:ark_jsruntime_common_config",
     "$js_root:ark_jsruntime_public_config",
   ]
 
