@@ -12,12 +12,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_write_1* 1
+//! EXEC_COUNT_GE *array_write_1* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_write_1(arr: number[]): void
 {
     arr[0] = 42;
 }
 
 ArkTools.arkSteedCompileSync(array_write_1);
+ArkTools.waitJitCompileFinish(array_write_1);
 
 
 let arr = [0];

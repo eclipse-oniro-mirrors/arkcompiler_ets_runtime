@@ -1364,16 +1364,20 @@ void BytecodeInfo::InitBytecodeInfo(BytecodeInfo &info, const uint8_t *pc,
             break;
         }
         case EcmaOpcode::NEWOBJRANGE_IMM8_IMM8_V8: {
+            uint16_t slotId = READ_INST_8_0();
             uint16_t numArgs = READ_INST_8_1();
             uint16_t firstArgRegIdx = READ_INST_8_2();
+            info.slotId = ICSlotId(slotId);
             for (uint16_t i = 0; i < numArgs; ++i) {
                 info.inputs.emplace_back(VirtualRegister(firstArgRegIdx + i));
             }
             break;
         }
         case EcmaOpcode::NEWOBJRANGE_IMM16_IMM8_V8: {
+            uint16_t slotId = READ_INST_16_0();
             uint16_t numArgs = READ_INST_8_2();
             uint16_t firstArgRegIdx = READ_INST_8_3();
+            info.slotId = ICSlotId(slotId);
             for (uint16_t i = 0; i < numArgs; ++i) {
                 info.inputs.emplace_back(VirtualRegister(firstArgRegIdx + i));
             }
@@ -1732,19 +1736,25 @@ void BytecodeInfo::InitBytecodeInfo(BytecodeInfo &info, const uint8_t *pc,
             break;
         }
         case EcmaOpcode::STOWNBYINDEX_IMM8_V8_IMM16: {
+            uint16_t slotId = READ_INST_8_0();
             uint8_t v0 = READ_INST_8_1();
             uint16_t index = READ_INST_16_2();
+            info.inputs.emplace_back(ICSlotId(slotId));
             info.inputs.emplace_back(VirtualRegister(v0));
             info.inputs.emplace_back(Immediate(index));
             break;
         }
         case EcmaOpcode::STOWNBYINDEX_IMM16_V8_IMM16: {
+            uint16_t slotId = READ_INST_16_0();
             uint8_t v0 = READ_INST_8_2();
             uint16_t index = READ_INST_16_3();
+            info.inputs.emplace_back(ICSlotId(slotId));
             info.inputs.emplace_back(VirtualRegister(v0));
             info.inputs.emplace_back(Immediate(index));
             break;
         }
+        // No IC slot in WIDE_STOWNBYINDEX encoding: [pref][op][v0][index], and no
+        // execution engine records feedback for it.
         case EcmaOpcode::WIDE_STOWNBYINDEX_PREF_V8_IMM32: {
             uint32_t v0 = READ_INST_8_1();
             uint32_t index = READ_INST_32_2();
@@ -2321,11 +2331,25 @@ void BytecodeInfo::InitBytecodeInfo(BytecodeInfo &info, const uint8_t *pc,
         case EcmaOpcode::INC_IMM8:
         case EcmaOpcode::DEC_IMM8:
         case EcmaOpcode::NOT_IMM8:
-        case EcmaOpcode::NEG_IMM8: {
+        case EcmaOpcode::NEG_IMM8:
+        case EcmaOpcode::TONUMBER_IMM8:
+        case EcmaOpcode::TONUMERIC_IMM8: {
             info.slotId = ICSlotId(READ_INST_8_0());
             break;
         }
-        case EcmaOpcode::TONUMERIC_IMM8:
+        case EcmaOpcode::CALLRUNTIME_ISTRUE_PREF_IMM8:
+        case EcmaOpcode::CALLRUNTIME_ISFALSE_PREF_IMM8: {
+            info.slotId = ICSlotId(READ_INST_8_1());
+            break;
+        }
+        case EcmaOpcode::CREATEEMPTYARRAY_IMM8: {
+            info.slotId = ICSlotId(READ_INST_8_0());
+            break;
+        }
+        case EcmaOpcode::CREATEEMPTYARRAY_IMM16: {
+            info.slotId = ICSlotId(READ_INST_16_0());
+            break;
+        }
         case EcmaOpcode::JMP_IMM8:
         case EcmaOpcode::JMP_IMM16:
         case EcmaOpcode::JMP_IMM32:
@@ -2351,18 +2375,13 @@ void BytecodeInfo::InitBytecodeInfo(BytecodeInfo &info, const uint8_t *pc,
         case EcmaOpcode::ASYNCFUNCTIONENTER:
         case EcmaOpcode::TYPEOF_IMM8:
         case EcmaOpcode::TYPEOF_IMM16:
-        case EcmaOpcode::TONUMBER_IMM8:
         case EcmaOpcode::THROW_PREF_NONE:
         case EcmaOpcode::GETPROPITERATOR:
         case EcmaOpcode::GETRESUMEMODE:
-        case EcmaOpcode::CREATEEMPTYARRAY_IMM8:
-        case EcmaOpcode::CREATEEMPTYARRAY_IMM16:
         case EcmaOpcode::CREATEEMPTYOBJECT:
         case EcmaOpcode::DEBUGGER:
         case EcmaOpcode::ISTRUE:
         case EcmaOpcode::ISFALSE:
-        case EcmaOpcode::CALLRUNTIME_ISTRUE_PREF_IMM8:
-        case EcmaOpcode::CALLRUNTIME_ISFALSE_PREF_IMM8:
         case EcmaOpcode::NOP:
         case EcmaOpcode::GETITERATOR_IMM8:
         case EcmaOpcode::GETITERATOR_IMM16:

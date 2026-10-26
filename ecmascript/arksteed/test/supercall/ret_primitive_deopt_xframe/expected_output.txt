@@ -1,0 +1,2 @@
+inner: function is non-constructor outer: undefinedsub-class must call super before use 'this'
+leaf-deopted: true mid-deopted: true bad-deopted: false

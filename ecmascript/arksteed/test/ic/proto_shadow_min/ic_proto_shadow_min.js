@@ -42,4 +42,14 @@ let obj = new B();
 
 print(`${"before:"} ${Test(obj, false)}`);
 print(ArkTools.arkSteedCompileSync(Test));
+
+// G11.2 auxiliary change candidate: `Test` is installed after the unshadowed
+// read, then called with the write that sets `obj.__proto__.x`. The prototype
+// shadow invalidates the registered prototype dependency of the installed code
+// and the lazy transition restores interpreter execution, which returns the
+// shadowed value 2.
+//! COMPILE_COUNT_GE *Test* 1
+//! EXEC_COUNT_GE *Test* 1
+//! DEOPT_COUNT_GE Lazy Deoptimize* 1
+
 print(`${"after:"} ${Test(obj, true)}`);

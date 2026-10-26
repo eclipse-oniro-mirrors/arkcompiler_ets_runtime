@@ -17,8 +17,8 @@
 
 #include "code_data_accessor-inl.h"  // IWYU pragma: keep
 #include "ecmascript/arksteed/arksteed_vreg.h"
-#include "ecmascript/jit/jit_profiler.h"
 #include "ecmascript/interpreter/interpreter-inl.h"
+#include "ecmascript/jit/jit.h"
 #include "method_data_accessor-inl.h"  // IWYU pragma: keep
 
 namespace panda::ecmascript::arksteed {
@@ -28,6 +28,169 @@ using BasicBlockInfo = BytecodePreprocessor::BasicBlockInfo;
 
 #define BLOCK_INDEX_FROM_PTR(ptr) (static_cast<uint32_t>(reinterpret_cast<uintptr_t>(ptr)))
 #define BLOCK_INDEX_TO_PTR(index) (reinterpret_cast<BasicBlockInfo *>(static_cast<uintptr_t>(index)))
+
+namespace {
+// Decides for every bytecode of the compiled method whether it was never executed
+// ("insufficient profile") by inspecting the IC slot values of the method's ProfileTypeInfo.
+// It replaces the per-offset flags previously produced by JITProfiler::ProfileBytecode()
+// and keeps its exact semantics:
+//  - bytecodes with one IC slot are insufficient iff that slot holds undefined;
+//  - name/value property access bytecodes occupy two adjacent IC slots and are
+//    insufficient iff both slots hold undefined;
+//  - bytecodes whose IC kind was not covered by the profiler keep the "executed" default;
+//  - an incomplete ProfileTypeInfo (its first IC slot is still undefined, i.e. the method
+//    never ran far enough to populate any IC) suppresses marking entirely.
+class InsufficientProfileResolver {
+public:
+    static constexpr uint8_t INVALID_UINT8_SLOT_INDEX = 0xFF;
+
+    explicit InsufficientProfileResolver(JitCompilationEnv *env)
+    {
+        if (!env->GetJSOptions().IsEnableJITPGO()) {
+            return;
+        }
+        JSHandle<ProfileTypeInfo> profileTypeInfo = env->GetProfileTypeInfo();
+        JSTaggedValue value = profileTypeInfo.GetTaggedValue();
+        if (profileTypeInfo.GetTaggedType() == 0 || !value.IsProfileTypeInfo()) {
+            return;
+        }
+        profileTypeInfo_ = ProfileTypeInfo::Cast(value.GetTaggedObject());
+        thread_ = env->GetJSThread();
+        incompleteFlag_ = SlotValueIsUndefined(0);
+    }
+
+    bool IsInsufficientProfile(const uint8_t *pc)
+    {
+        if (profileTypeInfo_ == nullptr) {
+            return false;
+        }
+        switch (kungfu::Bytecodes::GetOpcode(pc)) {
+            // Name/value property ICs occupy two adjacent slots.
+            case EcmaOpcode::LDTHISBYNAME_IMM8_ID16:
+            case EcmaOpcode::LDOBJBYNAME_IMM8_ID16:
+            case EcmaOpcode::LDOBJBYVALUE_IMM8_V8:
+            case EcmaOpcode::LDTHISBYVALUE_IMM8:
+            case EcmaOpcode::STOBJBYNAME_IMM8_ID16_V8:
+            case EcmaOpcode::STTHISBYNAME_IMM8_ID16:
+            case EcmaOpcode::STOBJBYVALUE_IMM8_V8_V8:
+            case EcmaOpcode::STOWNBYINDEX_IMM8_V8_IMM16:
+            case EcmaOpcode::STTHISBYVALUE_IMM8_V8: {
+                uint8_t slotId = READ_INST_8_0();
+                return slotId != INVALID_UINT8_SLOT_INDEX && IsNeverExecuted(slotId, true);
+            }
+
+            case EcmaOpcode::LDTHISBYNAME_IMM16_ID16:
+            case EcmaOpcode::LDOBJBYNAME_IMM16_ID16:
+            case EcmaOpcode::LDOBJBYVALUE_IMM16_V8:
+            case EcmaOpcode::LDTHISBYVALUE_IMM16:
+            case EcmaOpcode::STOBJBYNAME_IMM16_ID16_V8:
+            case EcmaOpcode::STTHISBYNAME_IMM16_ID16:
+            case EcmaOpcode::STOBJBYVALUE_IMM16_V8_V8:
+            case EcmaOpcode::STOWNBYINDEX_IMM16_V8_IMM16:
+            case EcmaOpcode::STTHISBYVALUE_IMM16_V8: {
+                return IsNeverExecuted(READ_INST_16_0(), true);
+            }
+
+            // All other profiled bytecodes occupy a single IC slot.
+            case EcmaOpcode::TRYLDGLOBALBYNAME_IMM8_ID16: {
+                uint8_t slotId = READ_INST_8_0();
+                return slotId != INVALID_UINT8_SLOT_INDEX && IsNeverExecuted(slotId, false);
+            }
+
+            case EcmaOpcode::TRYLDGLOBALBYNAME_IMM16_ID16: {
+                return IsNeverExecuted(READ_INST_16_0(), false);
+            }
+
+            case EcmaOpcode::ADD2_IMM8_V8:
+            case EcmaOpcode::SUB2_IMM8_V8:
+            case EcmaOpcode::MUL2_IMM8_V8:
+            case EcmaOpcode::DIV2_IMM8_V8:
+            case EcmaOpcode::MOD2_IMM8_V8:
+            case EcmaOpcode::SHL2_IMM8_V8:
+            case EcmaOpcode::SHR2_IMM8_V8:
+            case EcmaOpcode::AND2_IMM8_V8:
+            case EcmaOpcode::OR2_IMM8_V8:
+            case EcmaOpcode::XOR2_IMM8_V8:
+            case EcmaOpcode::ASHR2_IMM8_V8:
+            case EcmaOpcode::NEG_IMM8:
+            case EcmaOpcode::NOT_IMM8:
+            case EcmaOpcode::INC_IMM8:
+            case EcmaOpcode::DEC_IMM8:
+            case EcmaOpcode::EQ_IMM8_V8:
+            case EcmaOpcode::NOTEQ_IMM8_V8:
+            case EcmaOpcode::LESS_IMM8_V8:
+            case EcmaOpcode::LESSEQ_IMM8_V8:
+            case EcmaOpcode::GREATER_IMM8_V8:
+            case EcmaOpcode::GREATEREQ_IMM8_V8:
+            case EcmaOpcode::STRICTNOTEQ_IMM8_V8:
+            case EcmaOpcode::STRICTEQ_IMM8_V8:
+            case EcmaOpcode::EXP_IMM8_V8:
+            case EcmaOpcode::TONUMBER_IMM8:
+            case EcmaOpcode::TONUMERIC_IMM8:
+            case EcmaOpcode::CALLARG0_IMM8:
+            case EcmaOpcode::CALLARG1_IMM8_V8:
+            case EcmaOpcode::CALLARGS2_IMM8_V8_V8:
+            case EcmaOpcode::CALLARGS3_IMM8_V8_V8_V8:
+            case EcmaOpcode::CALLRANGE_IMM8_IMM8_V8:
+            case EcmaOpcode::CALLTHIS0_IMM8_V8:
+            case EcmaOpcode::CALLTHIS1_IMM8_V8_V8:
+            case EcmaOpcode::CALLTHIS2_IMM8_V8_V8_V8:
+            case EcmaOpcode::CALLTHIS3_IMM8_V8_V8_V8_V8:
+            case EcmaOpcode::CALLTHISRANGE_IMM8_IMM8_V8:
+            case EcmaOpcode::CALLTHIS0WITHNAME_IMM8_ID16_V8:
+            case EcmaOpcode::CALLTHIS1WITHNAME_IMM8_ID16_V8_V8:
+            case EcmaOpcode::CALLTHIS2WITHNAME_IMM8_ID16_V8_V8_V8:
+            case EcmaOpcode::CALLTHIS3WITHNAME_IMM8_ID16_V8_V8_V8_V8:
+            case EcmaOpcode::CALLTHISRANGEWITHNAME_IMM8_IMM8_ID16_V8:
+            case EcmaOpcode::SUPERCALLTHISRANGE_IMM8_IMM8_V8:
+            case EcmaOpcode::NEWOBJRANGE_IMM8_IMM8_V8:
+            case EcmaOpcode::CREATEOBJECTWITHBUFFER_IMM8_ID16:
+            case EcmaOpcode::CREATEARRAYWITHBUFFER_IMM8_ID16:
+            case EcmaOpcode::CREATEEMPTYARRAY_IMM8: {
+                uint8_t slotId = READ_INST_8_0();
+                return slotId != INVALID_UINT8_SLOT_INDEX && IsNeverExecuted(slotId, false);
+            }
+
+            case EcmaOpcode::CALLRUNTIME_ISTRUE_PREF_IMM8:
+            case EcmaOpcode::CALLRUNTIME_ISFALSE_PREF_IMM8: {
+                uint8_t slotId = READ_INST_8_1();
+                return slotId != INVALID_UINT8_SLOT_INDEX && IsNeverExecuted(slotId, false);
+            }
+
+            case EcmaOpcode::NEWOBJRANGE_IMM16_IMM8_V8:
+            case EcmaOpcode::CREATEOBJECTWITHBUFFER_IMM16_ID16:
+            case EcmaOpcode::CREATEARRAYWITHBUFFER_IMM16_ID16:
+            case EcmaOpcode::CREATEEMPTYARRAY_IMM16: {
+                return IsNeverExecuted(READ_INST_16_0(), false);
+            }
+
+            default:
+                return false;
+        }
+    }
+
+private:
+    bool IsNeverExecuted(uint32_t slotId, bool alsoCheckNextSlot) const
+    {
+        if (incompleteFlag_) {
+            return false;
+        }
+        if (!SlotValueIsUndefined(slotId)) {
+            return false;
+        }
+        return !alsoCheckNextSlot || SlotValueIsUndefined(slotId + 1);
+    }
+
+    bool SlotValueIsUndefined(uint32_t slotId) const
+    {
+        return profileTypeInfo_->GetICSlot(thread_, slotId).IsUndefined();
+    }
+
+    ProfileTypeInfo *profileTypeInfo_ {nullptr};
+    JSThread *thread_ {nullptr};
+    bool incompleteFlag_ {false};
+};
+}  // namespace
 
 BytecodePreprocessor::BytecodePreprocessor(JitCompilationEnv *env, Chunk *chunk)
     : env_(env),
@@ -39,6 +202,8 @@ BytecodePreprocessor::BytecodePreprocessor(JitCompilationEnv *env, Chunk *chunk)
       basicBlocks_(chunk),
       bytecodes_(chunk),
       rpoList_(chunk),
+      loopInfos_(chunk),
+      loopInfosByHeaderRpo_(chunk),
       bcOffsets_(chunk),
       bcBlockIndices_(chunk),
       bcIndexOfOffset_(chunk),
@@ -60,7 +225,103 @@ bool BytecodePreprocessor::Run()
     LoopAnalysis();
     MakeRPO();
     ClearDeadPredecessors();
+    BuildLoopInfos();
     return true;
+}
+
+void BytecodePreprocessor::BuildLoopInfos()
+{
+    loopInfosByHeaderRpo_.resize(rpoList_.size(), nullptr);
+    for (const BasicBlockInfo *header : rpoList_) {
+        if (!header->IsLoopHeader()) {
+            continue;
+        }
+
+        auto *loop = GetChunk()->New<BytecodeLoopInfo>(GetChunk());
+        loop->header = header;
+        loop->latch = header->loopBackBlock;
+        ASSERT(!header->IsSynthetic());
+        loop->loopStartOffset = bcOffsets_[header->startBcIndex];
+        loopInfosByHeaderRpo_[header->rpoIndex] = loop;
+        loopInfos_.push_back(loop);
+    }
+
+    for (BytecodeLoopInfo *loop : loopInfos_) {
+        if (loop->header->loopHeaderBlock != nullptr) {
+            loop->parent = TryGetLoopInfo(loop->header->loopHeaderBlock);
+            ASSERT(loop->parent != nullptr);
+            const_cast<BytecodeLoopInfo *>(loop->parent)->innermost = false;
+        }
+    }
+
+    auto innermostLoopOf = [this](const BasicBlockInfo *block) -> BytecodeLoopInfo* {
+        if (block == nullptr) {
+            return nullptr;
+        }
+        const BasicBlockInfo *header = block->IsLoopHeader() ? block : block->loopHeaderBlock;
+        return const_cast<BytecodeLoopInfo *>(TryGetLoopInfo(header));
+    };
+    for (const BasicBlockInfo *block : rpoList_) {
+        BytecodeLoopInfo *innermostLoop = innermostLoopOf(block);
+        if (innermostLoop == nullptr) {
+            continue;
+        }
+
+        bool resumable = false;
+        uint32_t blockEndOffset = 0;
+        if (!block->IsSynthetic()) {
+            uint32_t endIndex = block->endBcIndex + 1;
+            blockEndOffset = endIndex < bcOffsets_.size() ? bcOffsets_[endIndex] : bcSizeBytes_;
+            for (uint32_t bcIndex = block->startBcIndex; bcIndex <= block->endBcIndex; ++bcIndex) {
+                resumable |= bytecodes_[bcIndex].IsBc(EcmaOpcode::RESUMEGENERATOR) ||
+                             bytecodes_[bcIndex].IsBc(EcmaOpcode::DEPRECATED_RESUMEGENERATOR_PREF_V8);
+            }
+        }
+
+        for (BytecodeLoopInfo *loop = innermostLoop; loop != nullptr;
+             loop = const_cast<BytecodeLoopInfo *>(loop->parent)) {
+            loop->members.push_back(block);
+            loop->resumable |= resumable;
+            if (!block->IsSynthetic()) {
+                loop->loopEndOffset = std::max(loop->loopEndOffset, blockEndOffset);
+            }
+        }
+    }
+
+    auto belongsTo = [&innermostLoopOf](const BasicBlockInfo *block, const BytecodeLoopInfo *expected) {
+        for (const BytecodeLoopInfo *loop = innermostLoopOf(block); loop != nullptr; loop = loop->parent) {
+            if (loop == expected) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (BytecodeLoopInfo *loop : loopInfos_) {
+        ASSERT(!loop->members.empty() && loop->loopStartOffset < loop->loopEndOffset);
+        for (const BasicBlockInfo *predecessor : loop->header->jumpPredecessors) {
+            if (!belongsTo(predecessor, loop)) {
+                if (loop->preheader != nullptr) {
+                    loop->preheader = nullptr;
+                    break;
+                }
+                loop->preheader = predecessor;
+            }
+        }
+    }
+
+    std::sort(loopInfos_.begin(), loopInfos_.end(), [](const BytecodeLoopInfo *lhs, const BytecodeLoopInfo *rhs) {
+        return lhs->loopStartOffset < rhs->loopStartOffset;
+    });
+}
+
+const BytecodePreprocessor::BytecodeLoopInfo *BytecodePreprocessor::TryGetLoopInfo(
+    const BasicBlockInfo *header) const
+{
+    if (header == nullptr) {
+        return nullptr;
+    }
+    ASSERT(header->rpoIndex < loopInfosByHeaderRpo_.size());
+    return loopInfosByHeaderRpo_[header->rpoIndex];
 }
 
 uint32_t BytecodePreprocessor::JumpTargetBcIndexOfBytecode(uint32_t bcIndex, uint32_t bcOffset)
@@ -137,19 +398,18 @@ bool BytecodePreprocessor::CollectBytecodeInfo()
     BytecodeInstruction bcInsLast = bcIns.JumpTo(bcSizeBytes_);
 
     VRegIDType envVRegIndex = VRegOfLexicalEnv(numLocalVRegs_, numParamVRegs_);
-    auto jitProfiler = env_->GetPGOProfiler()->GetJITProfile();
 
-    auto makeBytecodeDetails = [startPc, envVRegIndex, jitProfiler](uint32_t curOffset) {
+    Jit::JitLockHolder jitLockHolder(env_->GetJSThread());
+    InsufficientProfileResolver profileResolver(env_);
+
+    auto makeBytecodeDetails = [startPc, envVRegIndex, &profileResolver](uint32_t curOffset) {
         kungfu::BytecodeInfo res;
         res.SetMetaData(g_bytecodes.GetBytecodeMetaData(startPc + curOffset));
         // For jump instructions, only the opcode metadata is loaded
         if (!res.GetMetaData().IsJump()) {
             kungfu::BytecodeInfo::InitBytecodeInfo(res, startPc + curOffset, curOffset, envVRegIndex);
         }
-        if (jitProfiler != nullptr) {
-            bool insufficientFlag = jitProfiler->BoolMapContains(static_cast<int32_t>(curOffset));
-            res.SetInsufficientProfile(insufficientFlag);
-        }
+        res.SetInsufficientProfile(profileResolver.IsInsufficientProfile(startPc + curOffset));
         return res;
     };
 
@@ -732,9 +992,8 @@ void BytecodePreprocessor::MakeRPO()
         // that RPO index of blocks in a loop will be continuous.
         if (fallthroughs && jumps) {
             const BasicBlockInfo *curLoop = curBlock->IsLoopHeader() ? curBlock : curBlock->loopHeaderBlock;
-            if (jumpBlock->loopHeaderBlock != curLoop) {
-                // Jumps out of current loop (note: we assume that multi-level break does not exist in input)
-                ASSERT(fallthroughBlock->loopHeaderBlock == curLoop);
+            if (jumpBlock->loopHeaderBlock != curLoop && fallthroughBlock->loopHeaderBlock == curLoop) {
+                // Visit the outside edge first so loop-body blocks tend to stay together in RPO.
                 dfs(dfs, jumpBlock);
                 dfs(dfs, fallthroughBlock);
             } else {

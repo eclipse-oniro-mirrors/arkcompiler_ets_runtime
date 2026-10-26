@@ -18,6 +18,9 @@
 //! HAS StoreEnvSlot
 //! HAS SetValueWithBarrier
 //! COUNT_LE LoadTaggedField 5          # Store-to-load forwarding avoids a second slot read after the store.
+//! COMPILE_COUNT_GE *write* 1
+//! EXEC_COUNT_GE *write* 1
+//! DEOPT_COUNT *Deoptimize* 0
 
 function createWriter()
 {

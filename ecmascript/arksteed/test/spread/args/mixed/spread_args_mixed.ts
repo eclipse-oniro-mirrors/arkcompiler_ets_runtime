@@ -12,6 +12,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *spread_args_mixed_helper* 1
+//! EXEC_COUNT_GE *spread_args_mixed_helper* 1
+//! COMPILE_COUNT_GE spread_args_mixed 1
+//! EXEC_COUNT_GE *spread_args_mixed 1
+//! DEOPT_COUNT *Deoptimize* 0
+
+//! METHOD spread_args_mixed_helper
+//! HAS CallRuntime OptCopyRestArgs
 function spread_args_mixed_helper(sep: string, ...nums: number[]): string {
     let result = "";
     for (let i = 0; i < nums.length; i++) {
@@ -21,6 +30,9 @@ function spread_args_mixed_helper(sep: string, ...nums: number[]): string {
     return result;
 }
 
+//! METHOD spread_args_mixed
+//! HAS CallRuntime CallSpread
+//! HAS CallRuntime StArraySpread
 function spread_args_mixed(): string {
     let r = "";
     r += spread_args_mixed_helper("-", ...[10, 20, 30]);

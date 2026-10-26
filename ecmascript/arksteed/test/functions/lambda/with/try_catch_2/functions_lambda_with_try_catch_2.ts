@@ -13,6 +13,30 @@
  * limitations under the License.
  */
 
+// G11.6 (P0) additive call evidence for `functions/lambda`
+// (`arksteed-g116-call-closure-and-additive-evidence` C1/C3/C4; S11; V1/V2).
+// `call_compiled_lambda_with_try_catch_2` compiles and invokes the
+// function-expression closure `compute`, whose class `InnerCalc` supplies the
+// static transform; the closure reads no captured binding. `compute` is installed
+// before its first invocation, so the call site lowers to the generic `Call`
+// vertex observed in the caller dump. `COMPILE_COUNT_GE`/`EXEC_COUNT_GE`
+// attribute compilation and entry of each claimed method; `DEOPT_COUNT
+// *Deoptimize* 0` rules out a silent deopt into the interpreter. The pre-existing
+// computed results and the expectation are unchanged.
+
+//! PARAMS --compiler-jit-hotness-threshold=60000
+
+//! METHOD call_compiled_lambda_with_try_catch_2
+//! HAS Call
+//! COMPILE_COUNT_GE *call_compiled_lambda_with_try_catch_2* 1
+//! EXEC_COUNT_GE *call_compiled_lambda_with_try_catch_2* 1
+
+//! METHOD compute
+//! COMPILE_COUNT_GE *compute* 1
+//! EXEC_COUNT_GE *compute* 1
+
+//! DEOPT_COUNT *Deoptimize* 0
+
 // poplexenv inside compiled lambda: class defined inside the lambda itself
 let compiled = false;
 

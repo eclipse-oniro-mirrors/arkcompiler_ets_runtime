@@ -1,0 +1,11 @@
+poly precondition: poly
+distinct warm shapes: 4
+warm-up calls: 400
+PASS
+10000
+10
+20
+30
+40
+99
+10

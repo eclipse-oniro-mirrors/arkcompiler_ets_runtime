@@ -15,11 +15,14 @@
 
 #include "ecmascript/compiler/common_stubs.h"
 
+#include <limits>
+
 #include "ecmascript/compiler/barrier_stub_builder.h"
 #include "ecmascript/compiler/access_object_stub_builder.h"
 #include "ecmascript/compiler/builtins/builtins_array_stub_builder.h"
 #include "ecmascript/compiler/builtins/builtins_collection_iterator_stub_builder.h"
 #include "ecmascript/compiler/builtins/builtins_proxy_stub_builder.h"
+#include "ecmascript/compiler/builtins/builtins_string_stub_builder.h"
 #include "ecmascript/compiler/builtins/linked_hashtable_stub_builder.h"
 #include "ecmascript/compiler/call_signature.h"
 #include "ecmascript/compiler/call_stub_builder.h"
@@ -27,11 +30,16 @@
 #include "ecmascript/compiler/new_object_stub_builder.h"
 #include "ecmascript/compiler/operations_stub_builder.h"
 #include "ecmascript/compiler/share_gate_meta_data.h"
+#include "ecmascript/global_env.h"
+#include "ecmascript/js_function.h"
+#include "ecmascript/js_primitive_ref.h"
 #include "ecmascript/js_set.h"
 #include "ecmascript/lexical_env.h"
 #include "ecmascript/js_set_iterator.h"
 #include "ecmascript/linked_hash_table.h"
+#include "ecmascript/mem/machine_code.h"
 #include "ecmascript/mem/tagged_object.h"
+#include "ecmascript/message_string.h"
 #include "ecmascript/runtime_call_id.h"
 #include "ecmascript/global_env_constants.h"
 
@@ -911,6 +919,18 @@ void EnsurePropertiesCapacityStubBuilder::GenerateCircuit()
     Return(*properties);
 }
 
+void CopyCOWElementsStubBuilder::GenerateCircuit()
+{
+    GateRef glue = PtrArgument(0);
+    GateRef receiver = TaggedArgument(1);
+    GateRef oldElements = GetElementsArray(glue, receiver);
+    GateRef length = GetLengthOfTaggedArray(oldElements);
+    NewObjectStubBuilder newBuilder(this);
+    GateRef elements = newBuilder.CopyArray(glue, oldElements, length, length);
+    SetElementsArray(VariableType::JS_POINTER(), glue, receiver, elements);
+    Return(elements);
+}
+
 void GetPropertyByNameWithMegaStubBuilder::GenerateCircuit()
 {
     GateRef glue = PtrArgument(0);
@@ -1418,6 +1438,77 @@ void ConstructorCheckStubBuilder::GenerateCircuit()
     GateRef value = TaggedArgument(2); // 2 : 3rd para
     GateRef thisObj = TaggedArgument(3); // 3 : 4th para
     Return(ConstructorCheck(glue, ctor, value, thisObj));
+}
+
+// Base-variant [[Construct]] result tail for the arksteed super-call lazy-deopt
+// continuation: an explicit EcmaObject return replaces this, any other value keeps
+// the bound this. The only live undefined path is a base constructor's explicit
+// `return undefined` (the frontend emits implicit returns as `lda a2; return`),
+// so unlike ConstructorCheck this needs no ctor and never throws or allocates.
+void BaseConstructResultCheckStubBuilder::GenerateCircuit()
+{
+    auto env = GetEnvironment();
+    GateRef glue = PtrArgument(0);
+    GateRef value = TaggedArgument(1); // 1 : 2nd para, raw [[Construct]] result
+    GateRef thisObj = TaggedArgument(2); // 2 : 3rd para, bound this of the base variant
+    Label entry(env);
+    Label isHeapObject(env);
+    Label isEcmaObj(env);
+    Label notEcmaObj(env);
+    Label exit(env);
+    env->SubCfgEntry(&entry);
+    DEFVARIABLE(result, VariableType::JS_ANY(), thisObj);
+    BRANCH(TaggedIsHeapObject(value), &isHeapObject, &notEcmaObj);
+    Bind(&isHeapObject);
+    BRANCH(TaggedObjectIsEcmaObject(glue, value), &isEcmaObj, &notEcmaObj);
+    Bind(&isEcmaObj);
+    {
+        result = value;
+        Jump(&exit);
+    }
+    Bind(&notEcmaObj);
+    {
+        Jump(&exit);
+    }
+    Bind(&exit);
+    auto ret = *result;
+    env->SubCfgExit();
+    Return(ret);
+}
+
+// Derived-variant [[Construct]] result tail for the arksteed super-call lazy-deopt
+// continuation: the frontend guarantees a derived constructor never returns
+// undefined across the call boundary (its returns are rewritten to `return this`
+// in bytecode), so any non-object here is a primitive and throws.
+void DerivedConstructResultCheckStubBuilder::GenerateCircuit()
+{
+    auto env = GetEnvironment();
+    GateRef glue = PtrArgument(0);
+    GateRef value = TaggedArgument(1); // 1 : 2nd para, raw [[Construct]] result
+    Label entry(env);
+    Label isHeapObject(env);
+    Label isEcmaObj(env);
+    Label notEcmaObj(env);
+    Label exit(env);
+    env->SubCfgEntry(&entry);
+    DEFVARIABLE(result, VariableType::JS_ANY(), Exception());
+    BRANCH(TaggedIsHeapObject(value), &isHeapObject, &notEcmaObj);
+    Bind(&isHeapObject);
+    BRANCH(TaggedObjectIsEcmaObject(glue, value), &isEcmaObj, &notEcmaObj);
+    Bind(&isEcmaObj);
+    {
+        result = value;
+        Jump(&exit);
+    }
+    Bind(&notEcmaObj);
+    {
+        CallRuntime(glue, RTSTUB_ID(ThrowNonConstructorException), {});
+        Jump(&exit);
+    }
+    Bind(&exit);
+    auto ret = *result;
+    env->SubCfgExit();
+    Return(ret);
 }
 
 void CreateEmptyArrayStubBuilder::GenerateCircuit()
@@ -2035,6 +2126,156 @@ void StLexVarStubBuilder::GenerateCircuit()
     GateRef valueIndex = Int32Add(slot, Int32(LexicalEnv::RESERVED_ENV_LENGTH));
     SetValueToTaggedArray(VariableType::JS_ANY(), glue, *currentEnv, valueIndex, value);
     Return(*currentEnv);
+}
+
+void ArkSteedStringToNumberStubBuilder::GenerateCircuit()
+{
+    auto env = GetEnvironment();
+    GateRef glue = PtrArgument(0);
+    // The caller proves this is a string. Conversion cannot invoke user JS.
+    GateRef string = TaggedArgument(1);
+    Label lineString(env);
+    Label compressedString(env);
+    Label nonEmptyString(env);
+    Label parseInteger(env);
+    Label integer(env);
+    Label slowPath(env);
+
+    BRANCH(IsLineString(glue, string), &lineString, &slowPath);
+    Bind(&lineString);
+    BRANCH(IsUtf8String(string), &compressedString, &slowPath);
+    Bind(&compressedString);
+    GateRef length = GetLengthFromString(string);
+    BRANCH(Int32Equal(length, Int32(0)), &slowPath, &nonEmptyString);
+    Bind(&nonEmptyString);
+    // StringDataToUint accumulates in int64 before checking the result. Bound the
+    // input to ten decimal digits so its intermediate arithmetic cannot overflow.
+    constexpr int32_t MAX_INTEGER_LENGTH = 10;
+    BRANCH(Int32UnsignedLessThanOrEqual(length, Int32(MAX_INTEGER_LENGTH)), &parseInteger, &slowPath);
+    Bind(&parseInteger);
+    BuiltinsStringStubBuilder stringBuilder(this);
+    GateRef data = PtrAdd(string, IntPtr(LineString::DATA_OFFSET));
+    GateRef value = stringBuilder.StringDataToUint(data, length, std::numeric_limits<int32_t>::max());
+    BRANCH(Int64NotEqual(value, Int64(-1)), &integer, &slowPath);
+    Bind(&integer);
+    Return(Int64ToTaggedIntPtr(value));
+
+    Bind(&slowPath);
+    // Preserve Number(string) semantics, including -0, fractions and exponents.
+    // RTSTUB_ID(StringToNumber) implements parseInt and is not equivalent.
+    Return(CallRuntime(glue, RTSTUB_ID(ToNumber), {string}));
+}
+
+void ArkSteedNewObjectFromPrimitiveStubBuilder::GenerateCircuit()
+{
+    auto env = GetEnvironment();
+    GateRef glue = PtrArgument(0);
+    // The caller excludes objects and guards the canonical Object constructor.
+    // Null/undefined create an empty object, unlike the abstract ToObject operation.
+    GateRef value = TaggedArgument(1);
+    GateRef globalEnv = TaggedArgument(2);  // 2: 3rd argument
+    NewObjectStubBuilder newBuilder(this, globalEnv);
+    DEFVARIABLE(ctor, VariableType::JS_ANY(), Undefined());
+    Label number(env);
+    Label notNumber(env);
+    Label boolean(env);
+    Label notBoolean(env);
+    Label nullish(env);
+    Label notNullish(env);
+    Label heap(env);
+    Label string(env);
+    Label notString(env);
+    Label symbol(env);
+    Label notSymbol(env);
+    Label bigInt(env);
+    Label wrap(env);
+    Label initializeValue(env);
+    Label allocationException(env);
+    Label invalid(env);
+
+    BRANCH(TaggedIsNumber(value), &number, &notNumber);
+    Bind(&number);
+    ctor = GetGlobalEnvValue(VariableType::JS_ANY(), glue, globalEnv, GlobalEnv::NUMBER_FUNCTION_INDEX);
+    Jump(&wrap);
+    Bind(&notNumber);
+    BRANCH(TaggedIsBoolean(value), &boolean, &notBoolean);
+    Bind(&boolean);
+    ctor = GetGlobalEnvValue(VariableType::JS_ANY(), glue, globalEnv, GlobalEnv::BOOLEAN_FUNCTION_INDEX);
+    Jump(&wrap);
+    Bind(&notBoolean);
+    BRANCH(TaggedIsUndefinedOrNull(value), &nullish, &notNullish);
+    Bind(&nullish);
+    GateRef emptyHClass =
+        GetGlobalEnvValue(VariableType::JS_ANY(), glue, globalEnv, GlobalEnv::OBJECT_FUNCTION_CLASS_INDEX);
+    Return(newBuilder.NewJSObject(glue, emptyHClass));
+
+    Bind(&notNullish);
+    BRANCH(TaggedIsHeapObject(value), &heap, &invalid);
+    Bind(&heap);
+    BRANCH(TaggedIsString(glue, value), &string, &notString);
+    Bind(&string);
+    // String wrappers also require their own length property and its attributes.
+    Return(CallRuntime(glue, RTSTUB_ID(PrimitiveStringCreate), {value}));
+    Bind(&notString);
+    BRANCH(TaggedIsSymbol(glue, value), &symbol, &notSymbol);
+    Bind(&symbol);
+    ctor = GetGlobalEnvValue(VariableType::JS_ANY(), glue, globalEnv, GlobalEnv::SYMBOL_FUNCTION_INDEX);
+    Jump(&wrap);
+    Bind(&notSymbol);
+    BRANCH(TaggedIsBigInt(glue, value), &bigInt, &invalid);
+    Bind(&bigInt);
+    ctor = GetGlobalEnvValue(VariableType::JS_ANY(), glue, globalEnv, GlobalEnv::BIGINT_FUNCTION_INDEX);
+    Jump(&wrap);
+
+    Bind(&wrap);
+    GateRef hclass = Load(VariableType::JS_ANY(), glue, *ctor, IntPtr(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
+    GateRef result = newBuilder.NewJSObject(glue, hclass);
+    BRANCH(TaggedIsException(result), &allocationException, &initializeValue);
+    Bind(&allocationException);
+    Return(result);
+    Bind(&initializeValue);
+    // value stays a tagged GC root across allocation; heap primitives need the write barrier.
+    Store(VariableType::JS_ANY(), glue, result, IntPtr(JSPrimitiveRef::VALUE_OFFSET), value);
+    Return(result);
+
+    Bind(&invalid);
+    GateRef message = Int32(GET_MESSAGE_STRING_ID(CanNotConvertNotNullObject));
+    CallRuntime(glue, RTSTUB_ID(ThrowTypeError), {IntToTaggedInt(message)});
+    Return(Exception());
+}
+
+void ArkSteedCallConstructorBodyStubBuilder::GenerateCircuit()
+{
+    using Inputs = ArkSteedCallConstructorBodyInputs;
+    GateRef glue = PtrArgument(Inputs::GLUE);
+    GateRef argc = Int64Argument(Inputs::ARGC);
+    GateRef target = TaggedArgument(Inputs::TARGET);
+    GateRef newTarget = TaggedArgument(Inputs::NEW_TARGET);
+    GateRef receiver = TaggedArgument(Inputs::RECEIVER);
+    GateRef argv = PtrArgument(Inputs::ARGV);
+    // The caller has checked the constructor and roots argv until this stub returns.
+    // Return the raw body result: caller completion and lazy deopt share that contract.
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    auto env = GetEnvironment();
+    Label generic(env);
+    Label compiled(env);
+    Label strongCode(env);
+    Label steed(env);
+    BRANCH(JudgeAotAndFastCall(target, CircuitBuilder::JudgeMethodType::HAS_AOT), &compiled, &generic);
+    Bind(&compiled);
+    GateRef code = Load(VariableType::JS_ANY(), glue, target, IntPtr(JSFunction::MACHINECODE_OFFSET));
+    BRANCH(BitAnd(TaggedIsHeapObject(code), BoolNot(TaggedIsWeak(code))), &strongCode, &generic);
+    Bind(&strongCode);
+    GateRef bits = LoadPrimitive(VariableType::INT8(), code, IntPtr(MachineCode::BIT_FIELD_OFFSET));
+    GateRef isSteed =
+        Int32NotEqual(Int32And(ZExtInt8ToInt32(bits), Int32(MachineCode::IsArkSteedCodeBits::Mask())), Int32(0));
+    BRANCH(isSteed, &steed, &generic);
+    Bind(&steed);
+    Return(
+        CallNGCRuntime(glue, RTSTUB_ID(SteedCallWithArgVAndPushArgv), {glue, argc, target, newTarget, receiver, argv}));
+    Bind(&generic);
+#endif
+    Return(CallNGCRuntime(glue, RTSTUB_ID(SuperCallWithArgV), {glue, argc, target, newTarget, receiver, argv}));
 }
 
 CallSignature CommonStubCSigns::callSigns_[CommonStubCSigns::NUM_OF_STUBS];

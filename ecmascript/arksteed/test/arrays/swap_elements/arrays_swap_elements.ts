@@ -12,6 +12,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_swap_elements* 1
+//! EXEC_COUNT_GE *array_swap_elements* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_swap_elements(arr: number[], i: number, j: number): void
 {
     let temp = arr[i];
@@ -20,6 +24,7 @@ function array_swap_elements(arr: number[], i: number, j: number): void
 }
 
 ArkTools.arkSteedCompileSync(array_swap_elements);
+ArkTools.waitJitCompileFinish(array_swap_elements);
 
 
 let arr: number[] = [1, 2, 3, 4, 5];

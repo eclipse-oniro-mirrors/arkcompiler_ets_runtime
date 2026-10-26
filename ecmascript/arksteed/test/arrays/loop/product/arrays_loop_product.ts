@@ -12,6 +12,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_loop_product* 1
+//! EXEC_COUNT_GE *array_loop_product* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_loop_product(arr: number[]): number
 {
     let product = 1;
@@ -25,6 +29,7 @@ function array_loop_product(arr: number[]): number
 }
 
 ArkTools.arkSteedCompileSync(array_loop_product);
+ArkTools.waitJitCompileFinish(array_loop_product);
 
 
 let arr: number[] = [1, 2, 3, 4, 5];

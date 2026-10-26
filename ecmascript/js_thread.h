@@ -60,6 +60,7 @@ class EcmaVM;
 class GlobalIndex;
 class HeapRegionAllocator;
 class JSThread;
+class JitThread;
 class PropertiesCache;
 class MegaICCache;
 class ModuleLogger;
@@ -444,7 +445,7 @@ public:
     {
         glueData_.exception_ = JSTaggedValue::Hole();
     }
-    
+
     void ClearExceptionAndExtraErrorMessage()
     {
         glueData_.extraErrorMessage_ = JSTaggedValue::Hole();
@@ -1903,13 +1904,13 @@ public:
             return GetOffset<static_cast<size_t>(Index::isMultiContextTriggeredIndex)>(
                 isArch32);
         }
-        
+
         static size_t GetExtraErrorMessageOffset(bool isArch32)
         {
             return GetOffset<static_cast<size_t>(Index::ExtraErrorMessageIndex)>(
                 isArch32);
         }
-        
+
         static size_t GetJsonErrorPositionOffset(bool isArch32)
         {
             return GetOffset<static_cast<size_t>(Index::JsonErrorPositionIndex)>(
@@ -2276,7 +2277,7 @@ public:
         }
     }
 
-    void SuspendThread(bool internalSuspend, SuspendBarrier* barrier = nullptr);
+    void SuspendThread(bool internalSuspend, SuspendBarrier *barrier = nullptr, bool jitLocalGC = false);
     void ResumeThread(bool internalSuspend);
     void WaitSuspension();
     static bool IsMainThread();
@@ -2348,6 +2349,16 @@ public:
     {
         return &jitMutex_;
     }
+
+    // Registration is per compilation task, while the compiler is native.
+    // jitMutex_ stabilizes this list for a local safepoint; ordinary heap reads
+    // use only the compiler's existing thread state, not this mutex.
+    PUBLIC_API void RegisterJitThread(JitThread *compiler);
+    PUBLIC_API void UnregisterJitThread(JitThread *compiler);
+    PUBLIC_API void LockJitMutex(JSThread *current);
+    // Called under jitMutex_. Local and shared GC request the SAME thread state.
+    PUBLIC_API void SuspendJitThreads();
+    PUBLIC_API void ResumeJitThreads();
 
     RecursiveMutex &GetIcAccessorLock()
     {
@@ -2621,6 +2632,9 @@ private:
     int32_t suspendCount_ {0};
     ConditionVariable suspendCondVar_;
     SuspendBarrier *suspendBarrier_ {nullptr};
+    // Local and shared GC may await the same compiler concurrently. Both
+    // acknowledgements share SUSPEND_REQUEST/ACTIVE_BARRIER and suspendCount_.
+    SuspendBarrier *jitSuspendBarrier_{nullptr};
 
     Closure *flipFunction_ {nullptr};
     Mutex flipMutex_ {};
@@ -2630,6 +2644,8 @@ private:
 
     ThreadType threadType_ {ThreadType::JS_THREAD};
     RecursiveMutex jitMutex_;
+    JitThread *jitThreads_{nullptr};
+    uint32_t jitSuspendDepth_{0}; // Nested exclusive scopes, NOT active heap readers.
     bool machineCodeLowMemory_ {false};
     RecursiveMutex icAccessorLockMutex_;
     DateUtils *dateUtils_ {nullptr};

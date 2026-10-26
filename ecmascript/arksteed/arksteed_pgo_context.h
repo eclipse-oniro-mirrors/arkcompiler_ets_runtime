@@ -33,11 +33,6 @@ public:
                                          const_cast<ArkSteedHeapBroker *>(&broker_));
     }
 
-    ArkSteedHeapBroker::SerializingScope CreateSerializingScope(CString message) const
-    {
-        return ArkSteedHeapBroker::SerializingScope(&broker_, message);
-    }
-
     ArkSteedHeapBroker *GetBroker()
     {
         return &broker_;
@@ -61,6 +56,14 @@ public:
         CallFeedback feedback;
         ArkSteedFeedbackReader reader(compilerThread_, bytecodeInfo, &broker_);
         broker_.GetFeedbackForCall(reader, &feedback);
+        return feedback;
+    }
+
+    ConstructorFeedback ReadConstructorFeedback(const kungfu::BytecodeInfo &bytecodeInfo)
+    {
+        ConstructorFeedback feedback;
+        ArkSteedFeedbackReader reader(compilerThread_, bytecodeInfo, &broker_);
+        broker_.GetFeedbackForConstructor(reader, &feedback);
         return feedback;
     }
 

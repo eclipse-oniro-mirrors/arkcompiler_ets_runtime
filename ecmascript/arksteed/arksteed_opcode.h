@@ -17,6 +17,7 @@
 #define ECMASCRIPT_ARKSTEED_OPCODE_H
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <type_traits>
 #include <utility>
@@ -32,8 +33,10 @@
 #include "ecmascript/compiler/deopt_type.h"
 #include "ecmascript/compiler/rt_call_signature.h"
 #include "ecmascript/js_hclass.h"
+#include "ecmascript/js_object.h"
 #include "ecmascript/mem/chunk_containers.h"
 #include "ecmascript/on_heap.h"
+#include "ecmascript/tagged_array.h"
 
 namespace panda::ecmascript::arksteed {
 using CommonStubID = kungfu::CommonStubCSigns::ID;
@@ -324,6 +327,12 @@ public:
     {
         ASSERT(lazyDeoptFrameState_ != nullptr);
         return *lazyDeoptFrameState_;
+    }
+
+    void AppendLazyDeoptFrameValue(int32_t vreg, ValueVertex *value, DeoptTranslationKind kind)
+    {
+        ASSERT(lazyDeoptFrameState_ != nullptr);
+        lazyDeoptFrameState_->emplace_back(static_cast<VRegIDType>(vreg), value, kind);
     }
 
     uint32_t GetBytecodeOffset() const
@@ -620,6 +629,24 @@ public:
     static constexpr VertexPropertyFlag PROPERTIES = {};
 
     explicit ActualArgcVertex() : FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
+// Loads one user argument from the current JS frame by its zero-based index.
+class LoadActualArgumentVertex : public FixedInputVertexMixin<ValueVertex, LoadActualArgumentVertex> {
+public:
+    enum Indices : uint32_t {
+        INDEX_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT32,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_READ;
+
+    explicit LoadActualArgumentVertex() : FixedInputVertexMixin() {}
 
     void SetValueLocationConstraints();
 };
@@ -954,7 +981,17 @@ private:
     bool isOnHeap_;
 };
 
-class LoadPrototypeFromObjectVertex : public FixedInputVertexMixin<ValueVertex, LoadPrototypeFromObjectVertex> {
+/**
+ * LoadPrototypeFromNonJSProxyObject vertex - loads the [[Prototype]] of an object
+ * that is statically known not to be a JSProxy, via the two-load sequence
+ * (object -> hclass -> hclass->prototype). The precondition is part of the
+ * contract: a JSProxy's [[GetPrototypeOf]] is a trap, so the raw field load
+ * would silently return the wrong value; the graph builder must guarantee the
+ * input cannot be a proxy (e.g. it is the enclosing JSFunction, whose
+ * [[Prototype]] is the super constructor of a derived class).
+ */
+class LoadPrototypeFromNonJSProxyObjectVertex
+    : public FixedInputVertexMixin<ValueVertex, LoadPrototypeFromNonJSProxyObjectVertex> {
 public:
     enum Indices : uint32_t {
         OBJECT_INDEX = 0,
@@ -966,7 +1003,7 @@ public:
     };
     static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_READ;
 
-    explicit LoadPrototypeFromObjectVertex() : FixedInputVertexMixin() {}
+    explicit LoadPrototypeFromNonJSProxyObjectVertex() : FixedInputVertexMixin() {}
 
     void SetValueLocationConstraints();
 };
@@ -1349,9 +1386,32 @@ public:
     void SetValueLocationConstraints();
 };
 
-class PrepareSharedStoreFieldVertex : public VertexMixin<ValueVertex, PrepareSharedStoreFieldVertex>,
-                                      public ThrowableMixin,
-                                      public LazyDeoptimizableMixin {
+class EnsureWritableElementsVertex : public FixedInputVertexMixin<ValueVertex, EnsureWritableElementsVertex> {
+public:
+    enum Indices : uint32_t {
+        ELEMENTS_INDEX = 0,
+        OBJECT_INDEX = 1,
+        NUM_INPUTS = 2,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_ALLOCATE |
+        VertexPropertyFlag::CAN_WRITE |
+        VertexPropertyFlag::IS_DEFERRED_CALL;
+
+    explicit EnsureWritableElementsVertex() : FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
+class PrepareSharedStoreFieldVertex
+    : public VertexMixin<ValueVertex, PrepareSharedStoreFieldVertex>,
+      public ThrowableMixin,
+      public LazyDeoptimizableMixin {
 public:
     enum Indices : uint32_t {
         VALUE_INDEX = 0,
@@ -1423,6 +1483,89 @@ public:
 
 private:
     int32_t fieldIndex_ {0};
+};
+
+// The result aliases allocation and is the first complete, publishable object value.
+class InitializeEmptyObjectVertex : public FixedInputVertexMixin<ValueVertex, InitializeEmptyObjectVertex> {
+public:
+    enum Indices : uint32_t {
+        ALLOCATION_INDEX = 0,
+        GLUE_INDEX = 1,
+        HCLASS_INDEX = 2,
+        SIZE_INDEX = 3,
+        NUM_INPUTS = 4,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::INT_PTR,
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::INT64,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES
+        = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::IS_NOT_IDEMPOTENT;
+
+    explicit InitializeEmptyObjectVertex(uint32_t objectSize): FixedInputVertexMixin(), objectSize_(objectSize) {}
+
+    uint32_t GetObjectSize() const
+    {
+        return objectSize_;
+    }
+
+    void SetValueLocationConstraints();
+
+private:
+    uint32_t objectSize_ {0};
+};
+
+// Only non-reference field bits survive serialization; the literal itself is a heap-constant input.
+struct CreateObjectWithBufferInfo {
+    uint32_t objectSize {0};
+    uint32_t fieldCount {0};
+    // The graph's Chunk owns tagged primitives or raw numeric bits, never unregistered heap references.
+    Span<const uint64_t> fieldValues {};
+};
+
+// Field snapshots contain no heap references. All dynamic references are explicit tagged inputs.
+class InitializeObjectWithBufferVertex
+    : public FixedInputVertexMixin<ValueVertex, InitializeObjectWithBufferVertex> {
+public:
+    enum Indices : uint32_t {
+        ALLOCATION_INDEX = 0,
+        GLUE_INDEX = 1,
+        LITERAL_INDEX = 2,
+        HCLASS_INDEX = 3,
+        NUM_INPUTS = 4,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::INT_PTR,
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES
+        = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::IS_NOT_IDEMPOTENT;
+
+    explicit InitializeObjectWithBufferVertex(const CreateObjectWithBufferInfo& info)
+        : FixedInputVertexMixin(), info_(info)
+    {
+        ASSERT(info_.fieldValues.size() == info_.fieldCount);
+        ASSERT(info_.fieldCount == 0 || info_.fieldValues.data() != nullptr);
+        ASSERT(info_.objectSize >= JSObject::SIZE);
+        ASSERT(info_.objectSize % JSTaggedValue::TaggedTypeSize() == 0);
+        ASSERT(info_.fieldCount <= (info_.objectSize - JSObject::SIZE) / JSTaggedValue::TaggedTypeSize());
+    }
+
+    const CreateObjectWithBufferInfo& GetInfo() const
+    {
+        return info_;
+    }
+
+    void SetValueLocationConstraints();
+
+private:
+    CreateObjectWithBufferInfo info_;
 };
 
 class StoreInt32FieldVertex : public FixedInputVertexMixin<NonControlVertex, StoreInt32FieldVertex>,
@@ -1650,11 +1793,36 @@ public:
         return sideEffectKind_;
     }
 
+    // Installing an HClass does not initialize the remaining object fields.
+    bool ReturnsUninitializedAllocation() const
+    {
+        return GetRuntimeStubID() == RTSTUB_ID(AllocateInYoung);
+    }
+
     void SetValueLocationConstraints();
 
     void VerifyInputs() const
     {
-        ASSERT(GetArgCount() == GetInputCount());
+        if (ReturnsUninitializedAllocation()) {
+            // 2 : See below
+            ASSERT((GetArgCount() == 1 || GetArgCount() == 2) && "Allocation requires size and an optional HClass");
+            ASSERT(GetInput(0)->GetValueRepresentation() == ValueRepresentation::TAGGED
+                   && "Allocation requires a tagged size");
+            if (GetArgCount() == 2) {  // 2: size plus HClass
+                ASSERT(GetInput(1)->GetValueRepresentation() == ValueRepresentation::TAGGED
+                       && "Allocation requires a tagged HClass");
+            }
+            if (auto* constant = GetInput(0)->TryCast<TaggedConstantVertex>()) {
+                auto size = JSTaggedValue(constant->GetValue());
+                ASSERT(size.IsInt());
+                ASSERT(size.GetLargeUInt() >= TaggedArray::DATA_OFFSET
+                       && size.GetLargeUInt() % JSTaggedValue::TaggedTypeSize() == 0);
+            }
+            // The graph verifier proves that the tagged payload is the exact
+            // checked INT64 size, including the dynamic encoding chain.
+            ASSERT(!HasLazyDeoptFrameState() && !HasCatchBlock() && !HasExceptionLazyDeopt()
+                   && "Allocation must proceed directly to initialization");
+        }
     }
 
 private:
@@ -1695,6 +1863,128 @@ public:
 
 private:
     uint32_t actualArgc_;
+};
+
+class NewObjRangeCallInfo {
+public:
+    enum class CallStrategy : uint8_t { INLINE_DISPATCH, COMMON_STUB };
+    enum Indices : uint32_t {
+        TARGET_INDEX = 0,
+        NEW_TARGET_INDEX = 1,
+        THIS_INDEX = 2,
+        RECEIVER_INDEX = THIS_INDEX,
+        FIRST_ARG_INDEX = 3,
+    };
+
+    NewObjRangeCallInfo(uint32_t actualArgc, uint32_t expectedParameterCount, bool hasKnownExpectedParameterCount,
+                        CallStrategy strategy)
+        : actualArgc_(actualArgc),
+          expectedParameterCount_(expectedParameterCount),
+          hasKnownExpectedParameterCount_(hasKnownExpectedParameterCount),
+          strategy_(strategy)
+    {}
+
+    bool UsesCommonStub() const
+    {
+        return strategy_ == CallStrategy::COMMON_STUB;
+    }
+
+    uint32_t GetActualArgc() const
+    {
+        return actualArgc_;
+    }
+
+    uint32_t GetExpectedParameterCount() const
+    {
+        ASSERT(hasKnownExpectedParameterCount_);
+        return expectedParameterCount_;
+    }
+
+    bool HasKnownExpectedParameterCount() const
+    {
+        return hasKnownExpectedParameterCount_;
+    }
+
+private:
+    uint32_t actualArgc_;
+    uint32_t expectedParameterCount_;
+    bool hasKnownExpectedParameterCount_;
+    CallStrategy strategy_;
+};
+
+class CallNewObjRangeBaseVertex : public VertexMixin<ValueVertex, CallNewObjRangeBaseVertex>,
+                                  public ThrowableMixin,
+                                  public LazyDeoptimizableMixin,
+                                  public NewObjRangeCallInfo {
+public:
+    static constexpr bool IS_BASE_CONSTRUCTOR = true;
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::IS_CALL | VertexPropertyFlag::CAN_READ |
+                                                     VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::CAN_ALLOCATE |
+                                                     VertexPropertyFlag::CAN_LAZY_DEOPT | VertexPropertyFlag::CAN_THROW;
+
+    CallNewObjRangeBaseVertex(uint32_t actualArgc, uint32_t expectedParameterCount, bool hasKnownExpectedParameterCount,
+                              CallStrategy strategy)
+        : VertexMixin(),
+          NewObjRangeCallInfo(actualArgc, expectedParameterCount, hasKnownExpectedParameterCount, strategy)
+    {}
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == FIRST_ARG_INDEX + GetActualArgc());
+        for (uint32_t index = 0; index < GetInputCount(); ++index) {
+            ASSERT(GetInput(index)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        }
+    }
+};
+
+class CallNewObjRangeDerivedVertex : public VertexMixin<ValueVertex, CallNewObjRangeDerivedVertex>,
+                                     public ThrowableMixin,
+                                     public LazyDeoptimizableMixin,
+                                     public NewObjRangeCallInfo {
+public:
+    static constexpr bool IS_BASE_CONSTRUCTOR = false;
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::IS_CALL | VertexPropertyFlag::CAN_READ |
+                                                     VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::CAN_ALLOCATE |
+                                                     VertexPropertyFlag::CAN_LAZY_DEOPT | VertexPropertyFlag::CAN_THROW;
+
+    CallNewObjRangeDerivedVertex(uint32_t actualArgc, uint32_t expectedParameterCount,
+                                 bool hasKnownExpectedParameterCount, CallStrategy strategy)
+        : VertexMixin(),
+          NewObjRangeCallInfo(actualArgc, expectedParameterCount, hasKnownExpectedParameterCount, strategy)
+    {}
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == FIRST_ARG_INDEX + GetActualArgc());
+        for (uint32_t index = 0; index < GetInputCount(); ++index) {
+            ASSERT(GetInput(index)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        }
+    }
+};
+
+class LoadBuiltinObjectVertex : public FixedInputVertexMixin<ValueVertex, LoadBuiltinObjectVertex> {
+public:
+    static constexpr uint32_t NUM_INPUTS = 1;
+    static constexpr uint32_t GLUE_INDEX = 0;
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {ValueRepresentation::INT_PTR};
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_READ | VertexPropertyFlag::IS_NOT_IDEMPOTENT;
+    explicit LoadBuiltinObjectVertex(size_t builtinIndex) : FixedInputVertexMixin(), builtinIndex_(builtinIndex) {}
+    size_t GetBuiltinIndex() const
+    {
+        return builtinIndex_;
+    }
+    void SetValueLocationConstraints();
+
+private:
+    size_t builtinIndex_;
 };
 
 class CallKnownJSFunctionVertex : public VertexMixin<ValueVertex, CallKnownJSFunctionVertex>,
@@ -1813,7 +2103,7 @@ public:
         ASSERT(builtinId_ < kungfu::BuiltinsStubCSigns::ID::NUM_OF_BUILTINS_ID);
         ASSERT(entryKind_ == BuiltinCallEntryKind::FAST_STUB ||
                entryKind_ == BuiltinCallEntryKind::NATIVE_CPP);
-        ASSERT(!UsesFastStub() || actualArgc_ <= 3U);
+        ASSERT(!UsesFastStub() || actualArgc_ <= 3U);  // 3U: fast stubs accept at most three actual arguments
     }
 
 private:
@@ -1885,6 +2175,282 @@ private:
     uint32_t expectedParameterCount_;
 };
 
+// Reads the current allocation protocol and unsigned bump capacity, returning
+// tagged true or false without allocating. The result is a transient snapshot:
+// each allocation needs a fresh check, even when glue and size are unchanged.
+class CanAllocateInYoungVertex : public FixedInputVertexMixin<ValueVertex, CanAllocateInYoungVertex> {
+public:
+    enum Indices : uint32_t { GLUE_INDEX = 0, SIZE_INDEX = 1, NUM_INPUTS = 2 };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT_PTR,
+        ValueRepresentation::INT64,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES
+        = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::IS_NOT_IDEMPOTENT;
+
+    CanAllocateInYoungVertex() = default;
+    void SetValueLocationConstraints();
+};
+
+// The fast allocation path performs the bump allocation on the true edge of
+// BranchIfTrue(CanAllocateInYoung). It cannot call, throw, or deopt; the
+// matching initializer follows the allocation merge Phi.
+class AllocateInYoungVertex : public FixedInputVertexMixin<ValueVertex, AllocateInYoungVertex> {
+public:
+    enum Indices : uint32_t { GLUE_INDEX = 0, SIZE_INDEX = 1, NUM_INPUTS = 2 };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT_PTR,
+        ValueRepresentation::INT64,
+    };
+    // The fast path has ordinary register constraints; the slow node carries the call ABI.
+    static constexpr VertexPropertyFlag PROPERTIES
+        = VertexPropertyFlag::CAN_ALLOCATE | VertexPropertyFlag::IS_NOT_IDEMPOTENT;
+
+    AllocateInYoungVertex() = default;
+    void SetValueLocationConstraints();
+};
+
+inline bool IsUninitializedAllocation(const Vertex* vertex)
+{
+    auto* call = vertex->TryCast<CallRuntimeVertex>();
+    return vertex->Is<AllocateInYoungVertex>() || (call != nullptr && call->ReturnsUninitializedAllocation());
+}
+
+// The realm is a protected input: glue's current environment need not belong to this function.
+class InitializeEmptyArrayVertex : public FixedInputVertexMixin<ValueVertex, InitializeEmptyArrayVertex> {
+public:
+    enum Indices : uint32_t {
+        ALLOCATION_INDEX = 0,
+        GLUE_INDEX = 1,
+        GLOBAL_ENV_INDEX = 2,
+        HCLASS_INDEX = 3,
+        NUM_INPUTS = 4
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {ValueRepresentation::TAGGED,
+                                                                         ValueRepresentation::INT_PTR,
+                                                                         ValueRepresentation::TAGGED,
+                                                                         ValueRepresentation::TAGGED};
+    static constexpr VertexPropertyFlag PROPERTIES
+        = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::IS_NOT_IDEMPOTENT;
+
+    explicit InitializeEmptyArrayVertex(uint32_t objectSize): objectSize_(objectSize) {}
+    uint32_t GetObjectSize() const
+    {
+        return objectSize_;
+    }
+    void SetValueLocationConstraints();
+
+private:
+    uint32_t objectSize_;
+};
+
+class InitializeArrayWithBufferVertex : public FixedInputVertexMixin<ValueVertex, InitializeArrayWithBufferVertex> {
+public:
+    enum Indices : uint32_t {
+        ALLOCATION_INDEX = 0,
+        GLUE_INDEX = 1,
+        LITERAL_INDEX = 2,
+        HCLASS_INDEX = 3,
+        NUM_INPUTS = 4
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {ValueRepresentation::TAGGED,
+                                                                         ValueRepresentation::INT_PTR,
+                                                                         ValueRepresentation::TAGGED,
+                                                                         ValueRepresentation::TAGGED};
+    static constexpr VertexPropertyFlag PROPERTIES
+        = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::IS_NOT_IDEMPOTENT;
+
+    explicit InitializeArrayWithBufferVertex(uint32_t objectSize): objectSize_(objectSize) {}
+    uint32_t GetObjectSize() const
+    {
+        return objectSize_;
+    }
+    void SetValueLocationConstraints();
+
+private:
+    uint32_t objectSize_;
+};
+
+/**
+ * Installs the read-only TaggedArray HClass without a barrier and initializes
+ * a raw allocation as the elements array for unmapped arguments.
+ */
+class InitializeUnmappedArgumentsElementsVertex
+    : public FixedInputVertexMixin<ValueVertex, InitializeUnmappedArgumentsElementsVertex> {
+public:
+    enum Indices : uint32_t {
+        NUM_ARGS_INDEX = 0,
+        ALLOCATION_INDEX = 1,
+        HCLASS_INDEX = 2,
+        NUM_INPUTS = 3,
+    };
+
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT64,
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_READ |
+        VertexPropertyFlag::CAN_WRITE;
+
+    explicit InitializeUnmappedArgumentsElementsVertex() : FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
+/**
+ * Installs the HClass and initializes a separately allocated JSArguments
+ * object. Fixed reference fields are stored through write barriers emitted by
+ * this node; deferred barrier calls are non-GC calls and preserve the node's
+ * working registers.
+ */
+class InitializeUnmappedArgumentsVertex
+    : public FixedInputVertexMixin<ValueVertex, InitializeUnmappedArgumentsVertex> {
+public:
+    enum Indices : uint32_t {
+        GLUE_INDEX = 0,
+        NUM_ARGS_INDEX = 1,
+        ALLOCATION_INDEX = 2,
+        ELEMENTS_INDEX = 3,
+        GLOBAL_ENV_INDEX = 4,
+        HCLASS_INDEX = 5,
+        NUM_INPUTS = 6,
+    };
+
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT_PTR,
+        ValueRepresentation::INT64,
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_READ |
+        VertexPropertyFlag::CAN_WRITE |
+        VertexPropertyFlag::IS_DEFERRED_CALL;
+
+    explicit InitializeUnmappedArgumentsVertex() : FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
+/**
+ * CallBaseConstructor vertex - a [[Construct]] call to a BASE super constructor,
+ * carrying the caller's real newTarget. The graph builder emits it on the
+ * BranchIfBase true-arm (the same arm whose FastSuperAllocateThis produced the
+ * bound this) and guarantees the target is a constructible JSFunction (the
+ * BranchIfJSConstructorFunction guard, or the speculation identity deopt in the
+ * monomorphic shape); the codegen enters compiled supers directly with the steed
+ * frame convention and routes uncompiled ones (builtin or interpreted
+ * constructors) to the generic [[Construct]] trampoline (JSCallNew).
+ *
+ * The inline result normalization is a pure select — an explicit EcmaObject
+ * return replaces this, any other value keeps this — so it cannot throw and has
+ * no cold path. The only live undefined path is the callee's explicit
+ * `return undefined` (the frontend compiles a base constructor's implicit return
+ * as `lda a2; return`, i.e. this, an object); null and other primitives ride the
+ * same fallback. The this input must survive the embedded call (the not-object
+ * arm reads it after the call clobbers every register) and doubles as the deopt
+ * pseudo-vreg BASE_CONSTRUCTOR_THIS_INDEX, so it is slot-constrained.
+ */
+class CallBaseConstructorVertex : public VertexMixin<ValueVertex, CallBaseConstructorVertex>,
+                                  public ThrowableMixin,
+                                  public LazyDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        TARGET_INDEX = 0,
+        NEW_TARGET_INDEX = 1,
+        THIS_INDEX = 2,
+        FIRST_ARG_INDEX = 3,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::IS_CALL |
+        VertexPropertyFlag::CAN_READ |
+        VertexPropertyFlag::CAN_WRITE |
+        VertexPropertyFlag::CAN_ALLOCATE |
+        VertexPropertyFlag::CAN_LAZY_DEOPT |
+        VertexPropertyFlag::CAN_THROW;
+
+    explicit CallBaseConstructorVertex(uint32_t actualArgc) : VertexMixin(), actualArgc_(actualArgc) {}
+
+    uint32_t GetActualArgc() const
+    {
+        return actualArgc_;
+    }
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == FIRST_ARG_INDEX + actualArgc_);
+    }
+
+private:
+    uint32_t actualArgc_;
+};
+
+/**
+ * CallDerivedConstructor vertex - a [[Construct]] call to a DERIVED (or builtin)
+ * super constructor, carrying the caller's real newTarget. The graph builder
+ * emits it on the BranchIfBase false-arm with an undefined placeholder this
+ * (no allocation; the callee's own super chain re-initializes this).
+ *
+ * The inline result normalization is a single check — an explicit EcmaObject
+ * return passes through, anything else throws TypeError on the cold path —
+ * because the frontend guarantees a derived constructor never returns undefined
+ * across the call boundary: all its return shapes are rewritten in bytecode
+ * (implicit and `return undefined` become `return this`; the stricteq guard in
+ * explicit returns only swaps undefined), so only a raw non-undefined primitive
+ * can arrive here. Consequently the this input is pure call-argument forwarding
+ * (never read after the call) and the deopt bundle carries no pseudo vregs
+ * beyond the constant kind marker.
+ */
+class CallDerivedConstructorVertex : public VertexMixin<ValueVertex, CallDerivedConstructorVertex>,
+                                     public ThrowableMixin,
+                                     public LazyDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        TARGET_INDEX = 0,
+        NEW_TARGET_INDEX = 1,
+        THIS_INDEX = 2,
+        FIRST_ARG_INDEX = 3,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::IS_CALL |
+        VertexPropertyFlag::CAN_READ |
+        VertexPropertyFlag::CAN_WRITE |
+        VertexPropertyFlag::CAN_ALLOCATE |
+        VertexPropertyFlag::CAN_LAZY_DEOPT |
+        VertexPropertyFlag::CAN_THROW;
+
+    explicit CallDerivedConstructorVertex(uint32_t actualArgc) : VertexMixin(), actualArgc_(actualArgc) {}
+
+    uint32_t GetActualArgc() const
+    {
+        return actualArgc_;
+    }
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == FIRST_ARG_INDEX + actualArgc_);
+    }
+
+private:
+    uint32_t actualArgc_;
+};
+
 /**
  * CallCommonStub vertex - for common stub calls
  */
@@ -1922,6 +2488,47 @@ public:
 
 private:
     SideEffectKind sideEffectKind_;
+};
+
+/**
+ * FastSuperAllocateThis vertex - allocates the this object for a super call whose super
+ * constructor is a base constructor (graph-builder-guarded by BranchIfNewTargetHClassReady
+ * on newTarget and BranchIfTaggedHeapObject / BranchIfJSConstructorFunction / BranchIfBase
+ * on the super constructor before reaching this vertex; a monomorphic call slot
+ * replaces the middle two with one identity eager deopt, the profiled slot value
+ * being constructor-checked by the interpreter before it was recorded).
+ * TODO: A dedicated vertex instead of a generic CallCommonStubVertex: the current codegen is a
+ * plain call to the FastSuperAllocateThis common stub, but the allocation can be lowered
+ * inline inside this vertex without touching the graph builder again.
+ */
+class FastSuperAllocateThisVertex : public VertexMixin<ValueVertex, FastSuperAllocateThisVertex> {
+public:
+    enum Indices : uint32_t {
+        GLUE_INDEX = 0,
+        SUPER_CTOR_INDEX = 1,
+        NEW_TARGET_INDEX = 2,
+        NUM_INPUTS = 3,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::IS_CALL |
+        VertexPropertyFlag::CAN_READ |
+        VertexPropertyFlag::CAN_WRITE |
+        VertexPropertyFlag::CAN_ALLOCATE;
+
+    FastSuperAllocateThisVertex() : VertexMixin() {}
+
+    size_t GetArgCount() const
+    {
+        return GetInputCount();
+    }
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+    }
 };
 
 class LineStringLoadElementVertex : public FixedInputVertexMixin<ValueVertex, LineStringLoadElementVertex> {
@@ -2046,6 +2653,108 @@ public:
     explicit F64ConditionCheckVertex(Condition condition) : FixedInputVertexMixin(), ConditionMixin(condition) {}
 
     void SetValueLocationConstraints();
+};
+
+class Float64ToBooleanVertex : public FixedInputVertexMixin<ValueVertex, Float64ToBooleanVertex> {
+public:
+    enum Indices : uint32_t {
+        INPUT_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::FLOAT64,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    explicit Float64ToBooleanVertex(bool trueIfNonZero)
+        : FixedInputVertexMixin(), trueIfNonZero_(trueIfNonZero)
+    {}
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+        ASSERT(GetInput(INPUT_INDEX)->GetValueRepresentation() == ValueRepresentation::FLOAT64);
+    }
+
+    bool IsTrueIfNonZero() const
+    {
+        return trueIfNonZero_;
+    }
+
+private:
+    bool trueIfNonZero_;
+};
+
+class TaggedNumberToBooleanVertex : public VertexMixin<ValueVertex, TaggedNumberToBooleanVertex>,
+                                    public EagerDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        INPUT_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::IS_NOT_IDEMPOTENT |
+        VertexPropertyFlag::CAN_EAGER_DEOPT;
+
+    TaggedNumberToBooleanVertex(Chunk *chunk, uint32_t bytecodeOffset, bool trueIfNonZero)
+        : VertexMixin(), EagerDeoptimizableMixin(chunk, bytecodeOffset), trueIfNonZero_(trueIfNonZero)
+    {}
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+        ASSERT(GetInput(INPUT_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+    }
+
+    bool IsTrueIfNonZero() const
+    {
+        return trueIfNonZero_;
+    }
+
+private:
+    bool trueIfNonZero_;
+};
+
+class TaggedDoubleToBooleanVertex : public VertexMixin<ValueVertex, TaggedDoubleToBooleanVertex>,
+                                     public EagerDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        INPUT_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::IS_NOT_IDEMPOTENT |
+        VertexPropertyFlag::CAN_EAGER_DEOPT;
+
+    TaggedDoubleToBooleanVertex(Chunk *chunk, uint32_t bytecodeOffset, bool trueIfNonZero)
+        : VertexMixin(), EagerDeoptimizableMixin(chunk, bytecodeOffset), trueIfNonZero_(trueIfNonZero)
+    {}
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+        ASSERT(GetInput(INPUT_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+    }
+
+    bool IsTrueIfNonZero() const
+    {
+        return trueIfNonZero_;
+    }
+
+private:
+    bool trueIfNonZero_;
 };
 
 class TaggedEqualVertex : public FixedInputVertexMixin<ValueVertex, TaggedEqualVertex> {
@@ -2251,6 +2960,7 @@ public:
     {
         ASSERT(GetInputCount() == NUM_INPUTS);
         ASSERT(GetInput(INPUT_INDEX)->GetValueRepresentation() == ValueRepresentation::INT32);
+        // |divisor| >= 2: 0 and +-1 divisors are excluded from the signed-magic lowering
         ASSERT(divisor_ <= -2 || divisor_ >= 2);
     }
 
@@ -3023,6 +3733,78 @@ public:
     }
 };
 
+class DeoptIfNotBooleanVertex : public VertexMixin<NonControlVertex, DeoptIfNotBooleanVertex>,
+                                public EagerDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        VALUE_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_EAGER_DEOPT;
+
+    explicit DeoptIfNotBooleanVertex(Chunk *chunk, uint32_t bytecodeOffset)
+        : VertexMixin(),
+          EagerDeoptimizableMixin(chunk, bytecodeOffset)
+    {}
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+        ASSERT(GetInput(VALUE_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+    }
+};
+
+class DeoptIfNotBigIntVertex : public VertexMixin<NonControlVertex, DeoptIfNotBigIntVertex>,
+                               public EagerDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        VALUE_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_EAGER_DEOPT;
+
+    explicit DeoptIfNotBigIntVertex(Chunk *chunk, uint32_t bytecodeOffset)
+        : VertexMixin(),
+          EagerDeoptimizableMixin(chunk, bytecodeOffset)
+    {}
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+        ASSERT(GetInput(VALUE_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+    }
+};
+
+class DeoptIfNotUndefinedOrNullVertex : public VertexMixin<NonControlVertex, DeoptIfNotUndefinedOrNullVertex>,
+                                        public EagerDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        VALUE_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_EAGER_DEOPT;
+
+    explicit DeoptIfNotUndefinedOrNullVertex(Chunk *chunk, uint32_t bytecodeOffset)
+        : VertexMixin(),
+          EagerDeoptimizableMixin(chunk, bytecodeOffset)
+    {}
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+        ASSERT(GetInput(VALUE_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+    }
+};
+
 class DeoptIfNotHeapObjectVertex : public VertexMixin<NonControlVertex, DeoptIfNotHeapObjectVertex>,
                                    public EagerDeoptimizableMixin {
 public:
@@ -3044,6 +3826,37 @@ public:
         ASSERT(GetInputCount() == NUM_INPUTS);
         ASSERT(GetInput(VALUE_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
     }
+};
+
+class DeoptIfNotJSHClassVertex : public VertexMixin<NonControlVertex, DeoptIfNotJSHClassVertex>,
+                                 public EagerDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        VALUE_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::CAN_EAGER_DEOPT;
+
+    DeoptIfNotJSHClassVertex(Chunk *chunk, uint32_t bytecodeOffset, kungfu::DeoptType deoptType)
+        : VertexMixin(), EagerDeoptimizableMixin(chunk, bytecodeOffset), deoptType_(deoptType)
+    {}
+
+    kungfu::DeoptType GetDeoptType() const
+    {
+        return deoptType_;
+    }
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+        ASSERT(GetInput(VALUE_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(deoptType_ != kungfu::DeoptType::NONE);
+    }
+
+private:
+    kungfu::DeoptType deoptType_;
 };
 
 class DeoptIfArrayBufferDetachedVertex : public VertexMixin<NonControlVertex, DeoptIfArrayBufferDetachedVertex>,
@@ -3079,7 +3892,7 @@ private:
     OnHeapMode onHeapMode_ {OnHeapMode::NONE};
 };
 
-class DeoptIfCOWElementsVertex : public VertexMixin<NonControlVertex, DeoptIfCOWElementsVertex>,
+class DeoptIfCOWElementsVertex : public FixedInputVertexMixin<NonControlVertex, DeoptIfCOWElementsVertex>,
                                  public EagerDeoptimizableMixin {
 public:
     enum Indices : uint32_t {
@@ -3087,19 +3900,15 @@ public:
         NUM_INPUTS = 1,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
-    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_EAGER_DEOPT | VertexPropertyFlag::CAN_READ;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {ValueRepresentation::TAGGED};
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_EAGER_DEOPT | VertexPropertyFlag::CAN_READ;
 
-    explicit DeoptIfCOWElementsVertex(Chunk *chunk, uint32_t bytecodeOffset)
-        : VertexMixin(), EagerDeoptimizableMixin(chunk, bytecodeOffset)
+    DeoptIfCOWElementsVertex(Chunk *chunk, uint32_t bytecodeOffset)
+        : FixedInputVertexMixin(), EagerDeoptimizableMixin(chunk, bytecodeOffset)
     {}
 
     void SetValueLocationConstraints();
-
-    void VerifyInputs() const
-    {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-        ASSERT(GetInput(ELEMENTS_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
-    }
 };
 
 class DeoptIfElementsUnstableVertex : public VertexMixin<NonControlVertex, DeoptIfElementsUnstableVertex>,
@@ -3248,6 +4057,40 @@ public:
     static constexpr VertexPropertyFlag PROPERTIES = {};
 
     BranchIfTrueVertex(BB *ifTrue, BB *ifFalse) : BranchControlVertexT(ifTrue, ifFalse) {}
+
+    void SetValueLocationConstraints();
+};
+
+class BranchIfTaggedNumberVertex : public BranchControlVertexT<BranchIfTaggedNumberVertex> {
+public:
+    enum Indices : uint32_t {
+        VALUE_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    BranchIfTaggedNumberVertex(BB *ifTrue, BB *ifFalse) : BranchControlVertexT(ifTrue, ifFalse) {}
+
+    void SetValueLocationConstraints();
+};
+
+class BranchIfTaggedBooleanVertex : public BranchControlVertexT<BranchIfTaggedBooleanVertex> {
+public:
+    enum Indices : uint32_t {
+        VALUE_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    BranchIfTaggedBooleanVertex(BB *ifTrue, BB *ifFalse) : BranchControlVertexT(ifTrue, ifFalse) {}
 
     void SetValueLocationConstraints();
 };
@@ -3415,6 +4258,16 @@ public:
     void SetValueLocationConstraints();
 };
 
+class BranchIfECMAObjectVertex : public BranchControlVertexT<BranchIfECMAObjectVertex> {
+public:
+    static constexpr uint32_t NUM_INPUTS = 1;
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {ValueRepresentation::TAGGED};
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+    BranchIfECMAObjectVertex(BB *ifTrue, BB *ifFalse) : BranchControlVertexT(ifTrue, ifFalse) {}
+    void SetValueLocationConstraints();
+};
+
 class BranchIfObjectTypeVertex : public BranchControlVertexT<BranchIfObjectTypeVertex> {
 public:
     enum Indices : uint32_t {
@@ -3460,6 +4313,85 @@ public:
     static constexpr VertexPropertyFlag PROPERTIES = {};
 
     BranchIfTaggedHeapObjectVertex(BB *ifTrue, BB *ifFalse) : BranchControlVertexT(ifTrue, ifFalse) {}
+
+    void SetValueLocationConstraints();
+};
+
+/**
+ * BranchIfJSConstructorFunction vertex - jumps to if_true when the value is a
+ * constructor JSFunction (JSType within [JS_FUNCTION_FIRST, JS_FUNCTION_LAST] and
+ * the hclass constructor bit set). Both checks read the same hclass bitfield, so a
+ * single vertex loads it once. Guard for the super-call fast path; requires the value
+ * to be a heap object (BranchIfTaggedHeapObject first).
+ */
+class BranchIfJSConstructorFunctionVertex : public BranchControlVertexT<BranchIfJSConstructorFunctionVertex> {
+public:
+    enum Indices : uint32_t {
+        VALUE_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    BranchIfJSConstructorFunctionVertex(BB *ifTrue, BB *ifFalse)
+        : BranchControlVertexT(ifTrue, ifFalse)
+    {}
+
+    void SetValueLocationConstraints();
+};
+
+/**
+ * BranchIfNewTargetHClassReady vertex - jumps to if_true when the value is a JSFunction
+ * whose proto-or-hclass slot holds a JSHClass describing JS_OBJECT instances: exactly
+ * the inline-path condition set of the FastSuperAllocateThis stub, so on the arksteed
+ * super-call path the stub's reentrant CallRuntime fallback is unreachable. An undefined
+ * newTarget never reaches the guard's dereference: class constructor frames are only
+ * entered through [[Construct]].
+ */
+class BranchIfNewTargetHClassReadyVertex : public BranchControlVertexT<BranchIfNewTargetHClassReadyVertex> {
+public:
+    enum Indices : uint32_t {
+        VALUE_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    BranchIfNewTargetHClassReadyVertex(BB *ifTrue, BB *ifFalse)
+        : BranchControlVertexT(ifTrue, ifFalse)
+    {}
+
+    void SetValueLocationConstraints();
+};
+
+/**
+ * BranchIfBase vertex - jumps to if_true when the value is a base constructor
+ * (method FunctionKind <= CLASS_CONSTRUCTOR). Splits the super-call fast path into
+ * the allocating arm (base super) and the undefined-this arm (derived or builtin
+ * super); requires the value to be a constructor JSFunction
+ * (the BranchIfJSConstructorFunction guard or the speculated identity first).
+ */
+class BranchIfBaseVertex : public BranchControlVertexT<BranchIfBaseVertex> {
+public:
+    enum Indices : uint32_t {
+        VALUE_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    BranchIfBaseVertex(BB *ifTrue, BB *ifFalse)
+        : BranchControlVertexT(ifTrue, ifFalse)
+    {}
 
     void SetValueLocationConstraints();
 };
@@ -3638,6 +4570,12 @@ public:
 
     void SetValueLocationConstraints();
 
+    void ReduceToSinglePredecessor()
+    {
+        ASSERT(GetInputCount() == 2);  // 2: inputs before the reduction
+        SetInputCountForTransform(1);
+    }
+
     // VerifyInputs: Variable-input vertex must validate input count and type consistency
     void VerifyInputs() const
     {
@@ -3670,6 +4608,21 @@ public:
     void SetValueLocationConstraints();
 };
 
+class U32ToTaggedNumberVertex : public FixedInputVertexMixin<ValueVertex, U32ToTaggedNumberVertex> {
+public:
+    enum Indices : uint32_t {
+        INPUT_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {ValueRepresentation::INT32};
+
+    explicit U32ToTaggedNumberVertex() : FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
 class RawI64ToTaggedVertex : public FixedInputVertexMixin<ValueVertex, RawI64ToTaggedVertex> {
 public:
     enum Indices : uint32_t {
@@ -3696,6 +4649,69 @@ public:
     explicit TaggedToRawI64Vertex() : FixedInputVertexMixin() {}
 
     void SetValueLocationConstraints();
+};
+
+class I64AddVertex : public FixedInputVertexMixin<ValueVertex, I64AddVertex> {
+public:
+    enum Indices : uint32_t {
+        LEFT_INDEX = 0,
+        RIGHT_INDEX = 1,
+        NUM_INPUTS = 2,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::INT64;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT64,
+        ValueRepresentation::INT64,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    explicit I64AddVertex() : FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
+class I64SubVertex : public FixedInputVertexMixin<ValueVertex, I64SubVertex> {
+public:
+    enum Indices : uint32_t {
+        LEFT_INDEX = 0,
+        RIGHT_INDEX = 1,
+        NUM_INPUTS = 2,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::INT64;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT64,
+        ValueRepresentation::INT64,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    explicit I64SubVertex() : FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
+class I64ShiftLeftVertex : public FixedInputVertexMixin<ValueVertex, I64ShiftLeftVertex> {
+public:
+    enum Indices : uint32_t {
+        INPUT_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::INT64;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT64,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    explicit I64ShiftLeftVertex(uint32_t shift) : FixedInputVertexMixin(), shift_(shift) {}
+
+    uint32_t GetShift() const
+    {
+        return shift_;
+    }
+
+    void SetValueLocationConstraints();
+
+private:
+    uint32_t shift_;
 };
 
 class I64BitwiseBinaryVertex : public FixedInputVertexMixin<ValueVertex, I64BitwiseBinaryVertex> {

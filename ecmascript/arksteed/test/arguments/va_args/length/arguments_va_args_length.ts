@@ -12,6 +12,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+//! METHOD      va_args_length
+//! HAS         Call
+//! HAS         CallRuntime  OptCopyRestArgs
+//! COMPILE_COUNT_GE *va_args_length* 1
+//! EXEC_COUNT_GE *va_args_length* 1
+//! METHOD      invokeLengthTarget
+//! HAS         CallKnownJSFunction
+//! COMPILE_COUNT_GE *invokeLengthTarget* 1
+//! EXEC_COUNT_GE *invokeLengthTarget* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function va_args_length(...args: number[]) {
     print(args.length);
 }
@@ -22,3 +32,22 @@ ArkTools.arkSteedCompileSync(va_args_length);
 va_args_length();
 va_args_length(1);
 va_args_length(1, 2, 3);
+
+// Additive G11.6 evidence: silent same-domain callers invoke each compiled
+// original target through a known-JS call plan (the call arity matches the
+// target's compiled parameter count), so this leaf's own dump carries the
+// actual invocation form. stdout is suppressed while the callers are warmed and
+// entered and `print` is restored afterwards, so every original probe and every
+// expectation byte is preserved.
+function invokeLengthTarget() {
+    return va_args_length(0);
+}
+let savedPrint = print;
+print = function () {};
+for (let round = 0; round < 4; round++) {
+    invokeLengthTarget();
+}
+ArkTools.arkSteedCompileSync(invokeLengthTarget);
+invokeLengthTarget();
+
+print = savedPrint;

@@ -109,6 +109,7 @@ JSHandle<JSTaggedValue> StoreHandler::StoreProperty(const JSThread *thread, cons
     SFieldTypeBitSet(thread, op, receiver, &handler);
     if (op.IsElement()) {
         SOutOfBoundsBit::Set<uint64_t>(op.GetElementOutOfBounds(), &handler);
+        SHandleCOWBit::Set<uint64_t>(op.GetElementsWereCOW(), &handler);
         return StoreElement(thread, op.GetReceiver(), handler);
     }
     JSTaggedValue val = op.GetValue();

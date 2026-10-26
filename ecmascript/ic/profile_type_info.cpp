@@ -25,6 +25,46 @@
 
 namespace panda::ecmascript {
 
+namespace {
+
+JSTaggedValue GetElementStoreHandlerInfo(JSThread *thread, JSTaggedValue handler)
+{
+    if (handler.IsTransitionHandler()) {
+        return TransitionHandler::Cast(handler.GetTaggedObject())->GetHandlerInfo(thread);
+    }
+    if (handler.IsTransWithProtoHandler()) {
+        return TransWithProtoHandler::Cast(handler.GetTaggedObject())->GetHandlerInfo(thread);
+    }
+    if (handler.IsPrototypeHandler()) {
+        return PrototypeHandler::Cast(handler.GetTaggedObject())->GetHandlerInfo(thread);
+    }
+    return handler;
+}
+
+JSTaggedValue MergeElementStoreMode(JSThread *thread, JSTaggedValue oldHandler, JSTaggedValue handler)
+{
+    JSTaggedValue oldInfo = GetElementStoreHandlerInfo(thread, oldHandler);
+    JSTaggedValue newInfo = GetElementStoreHandlerInfo(thread, handler);
+    if (!oldInfo.IsInt() || !newInfo.IsInt()) {
+        return handler;
+    }
+    constexpr uint64_t modeMask = (1ULL << HandlerBase::SHandleCOWBit::START_BIT) |
+                                  (1ULL << HandlerBase::SOutOfBoundsBit::START_BIT);
+    auto merged = JSTaggedValue(newInfo.GetRawData() | (oldInfo.GetLargeUInt() & modeMask));
+    if (handler.IsTransitionHandler()) {
+        TransitionHandler::Cast(handler.GetTaggedObject())->SetHandlerInfo(thread, merged);
+    } else if (handler.IsTransWithProtoHandler()) {
+        TransWithProtoHandler::Cast(handler.GetTaggedObject())->SetHandlerInfo(thread, merged);
+    } else if (handler.IsPrototypeHandler()) {
+        PrototypeHandler::Cast(handler.GetTaggedObject())->SetHandlerInfo(thread, merged);
+    } else {
+        return merged;
+    }
+    return handler;
+}
+
+}  // namespace
+
 inline void ProfileTypeInfoNexus::SetMultiIcSlotLocked(uint32_t firstIdx, const JSTaggedValue &firstValue,
                                                        uint32_t secondIdx, const JSTaggedValue &secondValue) const
 {
@@ -58,6 +98,29 @@ void ProfileTypeInfoNexus::AddElementHandler(JSHandle<JSTaggedValue> hclass, JSH
         SetMultiIcSlotLocked(index, GetWeakRef(hclass.GetTaggedValue()),
             index + 1, handler.GetTaggedValue());
         return;
+    }
+    if (kind_ == ICKind::StoreIC) {
+        // A newly observed store mode updates its case; it must not add a duplicate HClass.
+        if (profileData == GetWeakRef(hclass.GetTaggedValue())) {
+            IcAccessorLockScope accessorLockScope(thread_);
+            JSTaggedValue merged = MergeElementStoreMode(
+                thread_, pti_->GetICSlot(thread_, index + 1), handler.GetTaggedValue());
+            pti_->SetICSlot(thread_, index + 1, merged);
+            return;
+        }
+        if (!profileData.IsWeak() && profileData.IsTaggedArray()) {
+            IcAccessorLockScope accessorLockScope(thread_);
+            auto *cases = TaggedArray::Cast(profileData.GetTaggedObject());
+            constexpr uint32_t caseSize = 2;
+            for (uint32_t i = 0; i < cases->GetLength(); i += caseSize) {
+                if (cases->Get(thread_, i) == GetWeakRef(hclass.GetTaggedValue())) {
+                    JSTaggedValue merged = MergeElementStoreMode(
+                        thread_, cases->Get(thread_, i + 1), handler.GetTaggedValue());
+                    cases->Set(thread_, i + 1, merged);
+                    return;
+                }
+            }
+        }
     }
     AddHandlerWithoutKey(hclass, handler);
 }

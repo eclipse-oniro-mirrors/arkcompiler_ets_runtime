@@ -12,6 +12,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+//! METHOD readGlobal
+//! HAS LoadTaggedField
+//! COMPILE_COUNT_GE *readGlobal* 1
+//! EXEC_COUNT_GE *readGlobal* 1
+//! DEOPT_COUNT *Deoptimize* 0
 
 declare function print(str: number):string;
 

@@ -20,6 +20,9 @@
 //! HAS DeoptIfHClassMismatch
 //! HAS LoadTaggedField
 //! HAS_NOT CallCommonStub GetPropertyByValue
+//! COMPILE_COUNT_GE *foo* 1
+//! EXEC_COUNT_GE *foo* 1
+//! DEOPT_COUNT *Deoptimize* 0
 declare function print(arg: any): string;
 
 let a = {x:1, y:2};

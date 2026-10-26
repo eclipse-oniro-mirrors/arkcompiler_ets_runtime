@@ -15,11 +15,13 @@
 
 #include "ecmascript/arksteed/arksteed_compiler.h"
 
+#include "ecmascript/ecma_macros.h"
 #include <limits>
 #include <utility>
 #include <vector>
 
 #include "ecmascript/arksteed/arksteed_assembler.h"
+#include "ecmascript/arksteed/arksteed_pipeline_statistics.h"
 #include "ecmascript/arksteed/arksteed_deopt_helper.h"
 #include "ecmascript/arksteed/arksteed_graph_builder.h"
 #include "ecmascript/arksteed/arksteed_codegen.h"
@@ -33,7 +35,6 @@
 #include "ecmascript/arksteed/arksteed_task.h"
 #include "ecmascript/compiler/jit_compiler.h"
 #include "ecmascript/jit/jit.h"
-#include "ecmascript/jit/jit_profiler.h"
 #include "ecmascript/jspandafile/method_literal.h"
 #include "ecmascript/mem/machine_code.h"
 
@@ -47,10 +48,20 @@
 
 namespace panda::ecmascript::arksteed {
 
-static void VerifyGraph(Graph *graph)
+namespace {
+
+CString ParseMethodNameFromEnv(JitCompilationEnv *env)
+{
+    MethodLiteral *method = env->GetMethodLiteral();
+    return MethodLiteral::ParseFunctionNameToCString(env->GetJSPandaFile(), method->GetMethodId());
+}
+
+}  // namespace
+
+static void VerifyGraph(Graph* graph, bool afterRegalloc = false)
 {
 #ifndef NDEBUG
-    GraphProcessor<ArkSteedGraphVerifier> verifier(graph->GetChunk());
+    GraphProcessor<ArkSteedGraphVerifier> verifier(graph->GetChunk(), afterRegalloc);
     verifier.Run(graph);
 #endif
 }
@@ -106,6 +117,10 @@ ArkSteedCompilerTask::~ArkSteedCompilerTask()
         delete safepointTableBuilder_;
         safepointTableBuilder_ = nullptr;
     }
+    if (positionTableBuilder_ != nullptr) {
+        delete positionTableBuilder_;
+        positionTableBuilder_ = nullptr;
+    }
     if (translationBuilder_ != nullptr) {
         delete translationBuilder_;
         translationBuilder_ = nullptr;
@@ -123,77 +138,89 @@ ArkSteedCompilerTask *ArkSteedCompilerTask::CreateJitCompilerTask(ArkSteedTask *
 
 void ArkSteedCompilerTask::DebugLogOnCompilationStart()
 {
-    if (!common::Log::LogIsLoggable(Level::INFO, Component::COMPILER)) {
-        return;
+    if (common::Log::LogIsLoggable(Level::INFO, Component::COMPILER)) {
+        LOG_COMPILER(INFO) << "======== ArkSteedCompilerTask: Starts compiling: "
+                           << GetCompiledMethodName() << " ========";
     }
-    JitCompilationEnv *env = jitCompilationEnv_.get();
-    MethodLiteral *method = env->GetMethodLiteral();
-    LOG_COMPILER(INFO) << "======== ArkSteedCompilerTask: Starts compiling: "
-                       << MethodLiteral::ParseFunctionName(env->GetJSPandaFile(), method->GetMethodId()) << " ========";
 }
 
 void ArkSteedCompilerTask::DebugLogOnCompilationDone()
 {
-    if (!common::Log::LogIsLoggable(Level::INFO, Component::COMPILER)) {
-        return;
+    if (common::Log::LogIsLoggable(Level::INFO, Component::COMPILER)) {
+        LOG_COMPILER(INFO) << "======== ArkSteedCompilerTask: Finished compiling: "
+                           << GetCompiledMethodName() << " ========";
     }
-    JitCompilationEnv *env = jitCompilationEnv_.get();
-    MethodLiteral *method = env->GetMethodLiteral();
-    LOG_COMPILER(INFO) << "======== ArkSteedCompilerTask: Finished compiling: "
-                       << MethodLiteral::ParseFunctionName(env->GetJSPandaFile(), method->GetMethodId()) << " ========";
+}
+
+CString ArkSteedCompilerTask::GetCompiledMethodName() const
+{
+    return ParseMethodNameFromEnv(jitCompilationEnv_.get());
+}
+
+bool ArkSteedCompilerTask::ShouldEnablePipelineStatistics(ArkSteedTask *arkSteedTask, JitCompilationEnv *env)
+{
+    const JSRuntimeOptions &options = arkSteedTask->GetHostVM()->GetJSOptions();
+    if (!options.GetCompilerArkSteedPassTrace()) {
+        return false;
+    }
+    const std::string filter = options.GetCompilerArkSteedPassTraceMethods();
+    if (filter.empty()) {
+        return true;
+    }
+    return MatchMethodName(filter, ParseMethodNameFromEnv(env));
 }
 
 bool ArkSteedCompilerTask::BuildGraph(JSThread *compilerThread, uintptr_t hostGlueAddr)
 {
     JitCompilationEnv *env = jitCompilationEnv_.get();
-    if (env->GetJSOptions().IsEnableJITPGO()) {
-        auto jitProfiler = env->GetPGOProfiler()->GetJITProfile();
-        if (jitProfiler != nullptr) {
-            MethodLiteral *method = env->GetMethodLiteral();
-            const JSPandaFile *jsPandaFile = env->GetJSPandaFile();
-            jitProfiler->SetCompilationEnv(env);
-            jitProfiler->InitChunk(chunk_.get());
-            jitProfiler->ProfileBytecode(env->GetJSThread(), profileTypeInfo_, method->GetMethodId(),
-                                         env->GetMethodAbcId(), env->GetMethodPcStart(),
-                                         method->GetCodeSize(jsPandaFile, method->GetMethodId()),
-                                         jsPandaFile->GetPandaFile()->GetHeader(), jsFunction_, env->GetGlobalEnv());
+
+    // Raw heap temporaries are confined to one bytecode/read operation. The
+    // builder polls between bytecodes; broker reads never park or acquire a lock.
+    if (g_isEnableCMCGC) {
+        return false;
+    }
+    JitHeapAccessScope heapAccess(compilerThread);
+    DISALLOW_HEAP_ALLOC;
+    BytecodePreprocessor preproc(env, chunk_.get());
+    {
+        ArkSteedPipelineStatistics stats(pipelineStatistics_, "BytecodePreprocessor");
+        if (!preproc.Run()) {
+            LOG_COMPILER(WARN) << "JIT compilation halts due to bytecode preprocessing error.";
+            return false;
+        }
+    }
+    static_cast<JitThread *>(compilerThread)->HeapSafepoint();
+    BytecodeAnalysis analysis(&preproc);
+    {
+        ArkSteedPipelineStatistics stats(pipelineStatistics_, "BytecodeAnalysis");
+        if (!analysis.Run()) {
+            LOG_COMPILER(WARN) << "JIT compilation halts due to bytecode analysis error.";
+            return false;
         }
     }
 
-    BytecodePreprocessor preproc(env, chunk_.get());
-    if (!preproc.Run()) {
-        LOG_COMPILER(WARN) << "JIT compilation halts due to bytecode preprocessing error.";
-        return false;
-    }
-    BytecodeAnalysis analysis(&preproc);
-    if (!analysis.Run()) {
-        LOG_COMPILER(WARN) << "JIT compilation halts due to bytecode analysis error.";
-        return false;
-    }
-    GraphBuilder graphBuilder(compilerThread, graph_, hostGlueAddr, &preproc, &analysis);
-    if (!graphBuilder.Run()) {
-        LOG_COMPILER(WARN) << "JIT compilation halts due to graph building error.";
-        return false;
+    static_cast<JitThread *>(compilerThread)->HeapSafepoint();
+    {
+        ArkSteedPipelineStatistics stats(pipelineStatistics_, "GraphBuilder");
+        bool isOSR = arkSteedTask_->IsOsrTask();
+        GraphBuilder graphBuilder(compilerThread, graph_, hostGlueAddr, &preproc, &analysis, isOSR);
+        if (!graphBuilder.Run()) {
+            LOG_COMPILER(WARN) << "JIT compilation halts due to graph building error.";
+            return false;
+        }
     }
     return true;
 }
 
 void ArkSteedCompilerTask::RunPreRegallocProcessors()
 {
-    // VertexInfoAllocateProcessor - allocate regalloc info for all vertices
-    GraphProcessor<VertexInfoAllocateProcessor> processor;
-    processor.Run(graph_);
-    // ValueLocationConstraintProcessor - set input/output location constraints
-    GraphProcessor<ValueLocationConstraintProcessor> constraintProcessor;
-    constraintProcessor.Run(graph_);
+    // The following preprocessing passes are lightweight enough to combine their statistics data.
+    ArkSteedPipelineStatistics statsScope(pipelineStatistics_, "PreRegallocProcessors");
 
-    // MaxCallDepthProcessor - compute max call stack args
-    GraphProcessor<MaxCallDepthProcessor> callDepthProcessor;
-    callDepthProcessor.Run(graph_);
-
-    // LivenessProcessor - track live ranges and next use
-    GraphProcessor<LivenessProcessor> liveRangeProcessor;
-    liveRangeProcessor.Run(graph_);
+    GraphProcessor<VertexInfoAllocateProcessor>().Run(graph_);
+    GraphProcessor<ValueLocationConstraintProcessor>().Run(graph_);
+    GraphProcessor<MaxCallDepthProcessor>().Run(graph_);
+    GraphProcessor<LivenessProcessor>().Run(graph_);
 }
 
 bool ArkSteedCompilerTask::Compile()
@@ -201,8 +228,12 @@ bool ArkSteedCompilerTask::Compile()
     DebugLogOnCompilationStart();
 
     ArkSteedCompileTimeScope totalScope(arkSteedTask_);
+    ArkSteedPipelineStatisticsSummary statsSummary(
+        pipelineStatistics_, pipelineStatistics_.Enabled() ? GetCompiledMethodName() : "");
+
     NativeAreaAllocator *allocator = arkSteedTask_->GetCompilerVM()->GetNativeAreaAllocator();
-    chunk_ = std::make_unique<Chunk>(allocator);
+    chunk_ = std::make_unique<Chunk>(allocator, pipelineStatistics_.Enabled());
+    pipelineStatistics_.AttachChunk(chunk_.get());
     graph_ = Graph::New(chunk_.get());
 
     // Allocate FuncEntryDes from chunk (persists until ArkSteedCompilerTask destroyed)
@@ -222,11 +253,14 @@ bool ArkSteedCompilerTask::Compile()
         return false;
     }
 
-    WriteBarrierValueKindPass writeBarrierValueKindPass(graph_);
-    writeBarrierValueKindPass.Run();
-
-    // Verify graph integrity
+    {
+        ArkSteedPipelineStatistics stats(pipelineStatistics_, "WriteBarrierValueKindPass");
+        WriteBarrierValueKindPass writeBarrierValueKindPass(graph_);
+        writeBarrierValueKindPass.Run();
+    }
+#ifndef NDEBUG
     VerifyGraph(graph_);
+#endif
     RunPreRegallocProcessors();
 
     // Print graph with labeller if option is enabled
@@ -239,29 +273,46 @@ bool ArkSteedCompilerTask::Compile()
     }
 
     // Register allocation
-    graph_->SetReuseStackSlots(arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedReuseStackSlots());
-    ArkSteedRegisterAllocator registerAllocator(graph_);
+    {
+        ArkSteedPipelineStatistics stats(pipelineStatistics_, "RegisterAllocation");
+        graph_->SetReuseStackSlots(arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedReuseStackSlots());
+        ArkSteedRegisterAllocator registerAllocator(graph_);
+    }
+
+#ifndef NDEBUG
+    // RA may insert only register moves/reloads between allocation and initialization.
+    // Recheck the final scheduled IR before code generation introduces machine instructions.
+    VerifyGraph(graph_, true);
+#endif
 
     // Code generation
-    assembler_ = new ArkSteedAssembler(chunk_.get(), compilerThread, hostThread);
-    if (arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedEnableCodeComment()) {
-        assembler_->EnableComments(true);
-    }
+    {
+        ArkSteedPipelineStatistics stats(pipelineStatistics_, "CodeGeneration");
+        assembler_ = new ArkSteedAssembler(chunk_.get(), compilerThread, hostThread);
+        if (arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedEnableCodeComment()) {
+            assembler_->EnableComments(true);
+        }
 #ifdef JIT_ENABLE_CODE_SIGN
-    EnableCodeSign();
+        EnableCodeSign();
 #endif
-    safepointTableBuilder_ = new ArkSteedSafepointTableBuilder(chunk_.get());
-    translationBuilder_ = new DeoptTranslationBuilder();
-    deoptLiteralTableBuilder_ = new DeoptLiteralTableBuilder();
-    bool withColors = arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedPrintWithColors();
-    ArkSteedCodeGenerator codegen(assembler_, graph_, safepointTableBuilder_, translationBuilder_,
-                                  deoptLiteralTableBuilder_, withColors);
-    codegen.Generate();
-    if (arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedPrintCode()) {
-        LogAsm(assembler_);
+        safepointTableBuilder_ = new ArkSteedSafepointTableBuilder(chunk_.get());
+        if (arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedSourcePositionTable()) {
+            positionTableBuilder_ = new SourcePositionTableBuilder(chunk_.get());
+        }
+        translationBuilder_ = new DeoptTranslationBuilder();
+        deoptLiteralTableBuilder_ = new DeoptLiteralTableBuilder();
+        bool withColors = arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedPrintWithColors();
+        ArkSteedCodeGenerator codegen(assembler_, graph_, safepointTableBuilder_, translationBuilder_,
+            deoptLiteralTableBuilder_, positionTableBuilder_, withColors);
+        codegen.Generate();
+
+        if (arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedPrintCode()) {
+            LogAsm(assembler_);
+        }
     }
 
     DebugLogOnCompilationDone();
+    statsSummary.MarkSuccess();
     return true;
 }
 
@@ -301,15 +352,63 @@ void ArkSteedCompilerTask::FillCodeDesc(MachineCodeDesc &codeDesc)
     // Safepoint table
     safepointTableBuilder_->SetFrameSlots(graph_->GetTaggedStackSlots(), graph_->GetUntaggedStackSlots());
     size_t safepointSize = safepointTableBuilder_->GetTableSize();
-    if (safepointSize > 0) {
-        uint8_t *safepointBuffer = safepointTableBuilder_->EmitToNewBuffer();
-        codeDesc.stackMapOrOffsetTableAddr = reinterpret_cast<uintptr_t>(safepointBuffer);
-        codeDesc.stackMapOrOffsetTableSize = safepointSize;
+    std::unique_ptr<uint8_t[]> safepointBuffer;
+    safepointBuffer.reset(safepointTableBuilder_->EmitToNewBuffer());
+
+    LOG_COMPILER(DEBUG) << safepointTableBuilder_->DumpMemoryUsage();
+
+    // Build position table (if enabled and has entries)
+    size_t positionSize = 0;
+    std::unique_ptr<uint8_t[]> positionBuffer;
+    if (positionTableBuilder_ != nullptr && positionTableBuilder_->GetNumEntries() > 0) {
+        positionBuffer = positionTableBuilder_->EmitToNewBuffer();
+        if (positionBuffer != nullptr) {
+            positionSize = positionTableBuilder_->GetSize();
+        }
+    }
+
+    // Wrap safepoint table + position table in a section container:
+    //   [header][safepoint table][position table]
+    constexpr size_t HEADER_SIZE = ArkSteedTableContainerHeader::SIZE;
+    size_t containerSize = HEADER_SIZE + safepointSize + positionSize;
+    if (containerSize > 0) {
+        auto containerBuffer = std::make_unique<uint8_t[]>(containerSize);
+        auto *header = reinterpret_cast<ArkSteedTableContainerHeader *>(containerBuffer.get());
+        header->magic = ArkSteedTableContainerHeader::MAGIC;
+        header->version = ArkSteedTableContainerHeader::VERSION;
+        header->safepointOffset = static_cast<uint32_t>(HEADER_SIZE);
+        header->safepointSize = static_cast<uint32_t>(safepointSize);
+        if (positionSize > 0) {
+            header->positionOffset = static_cast<uint32_t>(HEADER_SIZE + safepointSize);
+            header->positionSize = static_cast<uint32_t>(positionSize);
+        } else {
+            header->positionOffset = 0;
+            header->positionSize = 0;
+        }
+        if (safepointSize > 0) {
+            if (memcpy_s(containerBuffer.get() + HEADER_SIZE, safepointSize,
+                         safepointBuffer.get(), safepointSize) != EOK) {
+                LOG_COMPILER(ERROR) << "memcpy fail in copy safepoint table to container";
+                codeDesc.stackMapOrOffsetTableAddr = 0;
+                codeDesc.stackMapOrOffsetTableSize = 0;
+                return;
+            }
+        }
+        if (positionSize > 0) {
+            if (memcpy_s(containerBuffer.get() + HEADER_SIZE + safepointSize, positionSize,
+                         positionBuffer.get(), positionSize) != EOK) {
+                LOG_COMPILER(ERROR) << "memcpy fail in copy position table to container";
+                codeDesc.stackMapOrOffsetTableAddr = 0;
+                codeDesc.stackMapOrOffsetTableSize = 0;
+                return;
+            }
+        }
+        codeDesc.stackMapOrOffsetTableAddr = reinterpret_cast<uintptr_t>(containerBuffer.release());
+        codeDesc.stackMapOrOffsetTableSize = containerSize;
     } else {
         codeDesc.stackMapOrOffsetTableAddr = 0;
         codeDesc.stackMapOrOffsetTableSize = 0;
     }
-    LOG_COMPILER(DEBUG) << safepointTableBuilder_->DumpMemoryUsage();
 
 #if ECMASCRIPT_ENABLE_ARK_STEED
     arkSteedTask_->SetDeoptTranslationData(translationBuilder_->Encode());

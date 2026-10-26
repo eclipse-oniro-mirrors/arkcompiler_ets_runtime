@@ -18,6 +18,7 @@
 #include "ecmascript/jit/jit.h"
 #include "ecmascript/mem/hole_memory.h"
 #include "ecmascript/mem/mem_map_allocator.h"
+#include "ecmascript/platform/map.h"
 #include "ecmascript/runtime.h"
 #include "ecmascript/runtime_lock.h"
 
@@ -57,6 +58,9 @@ Region *HeapRegionAllocator::AllocateAlignedRegion(Space *space, size_t capacity
         flags == RegionSpaceFlag::IN_SHARED_READ_ONLY_SPACE;
     bool isMachineCode = (flags == RegionSpaceFlag::IN_MACHINE_CODE_SPACE ||
         flags == RegionSpaceFlag::IN_HUGE_MACHINE_CODE_SPACE);
+#if defined(PANDA_TARGET_MACOS)
+    JIT_WRITE_SCOPE(jitWriteScope, isMachineCode);
+#endif
     JSThread::ThreadId tid = 0;
     bool shouldPageTag = AllocateRegionShouldPageTag(space);
     if (enablePageTagThreadId_) {
@@ -140,6 +144,10 @@ Region *HeapRegionAllocator::AllocateAlignedRegion(Space *space, size_t capacity
 template<bool asyncFreeMem>
 void HeapRegionAllocator::FreeRegion(Region *region, size_t cachedSize, bool skipCache)
 {
+#if defined(PANDA_TARGET_MACOS)
+    const bool isMachineCode = region->InMachineCodeSpace() || region->InHugeMachineCodeSpace();
+    JIT_WRITE_SCOPE(jitWriteScope, isMachineCode);
+#endif
     auto size = region->GetCapacity();
     bool isRegular = !region->InHugeObjectSpace() && !region->InHugeMachineCodeSpace() &&
         !region->InSharedHugeObjectSpace();
@@ -162,6 +170,18 @@ void HeapRegionAllocator::FreeRegion(Region *region, size_t cachedSize, bool ski
         LOG_FULL(FATAL) << "memset_s failed";
         UNREACHABLE();
     }
+#endif
+#if defined(PANDA_TARGET_MACOS)
+    if (isMachineCode) {
+        // Match the AsyncFree convention ("MemUsage has been decreased for
+        // async free mem"): asyncFreeMem regions (huge machine code) were
+        // already accounted off by HugeObjectSpace::Sweep -> DecreaseMemMapUsage,
+        // so only decrease the total here for synchronous frees.
+        if constexpr (!asyncFreeMem) {
+            MemMapAllocator::GetInstance()->DecreaseMemMapTotalSize(size);
+        }
+        PageUnmap(MemMap(ToVoidPtr(allocateBase), size));
+    } else
 #endif
     if constexpr (asyncFreeMem) {
         MemMapAllocator::GetInstance()->AsyncFree(ToVoidPtr(allocateBase), size, isRegular, isCompress, shouldPageTag);

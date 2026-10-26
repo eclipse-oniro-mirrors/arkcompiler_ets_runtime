@@ -67,11 +67,5 @@ function function_call_test()
 
 ArkTools.arkSteedCompileSync(function_call_test);
 
-// Spin loop: A temporary approach to wait for ArkSteed JIT compiler
-
-// TODO: Replace the spin loop above to:
-// let res = ArkTools.waitJitCompileFinish(function_call_test);
-// print(res);
-
 let output = function_call_test();
 print(output);

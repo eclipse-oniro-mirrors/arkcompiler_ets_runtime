@@ -1,0 +1,6 @@
+compiled:true
+template-roots-after-full-gc:true
+young-gc-survivors:true
+full-gc-survivors:true
+retained-object-stores:true
+fresh-after-gc:true

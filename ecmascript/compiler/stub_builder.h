@@ -1070,6 +1070,8 @@ public:
     GateRef FastToBoolean(GateRef glue, GateRef value, bool flag = true);
     GateRef FastToBooleanWithProfile(GateRef glue, GateRef value, ProfileOperation callback, bool flag = true);
     GateRef FastToBooleanWithProfileBaseline(GateRef glue, GateRef value, ProfileOperation callback, bool flag = true);
+    void ProfileNonNumberOpType(GateRef glue, GateRef value, ProfileOperation callback);
+    void ProfileNonNumericOpType(GateRef glue, GateRef value, ProfileOperation callback);
 
     // Add SpecialContainer
     GateRef JSAPIContainerGet(GateRef glue, GateRef receiver, GateRef index);
@@ -1461,6 +1463,7 @@ protected:
 
 private:
     using BinaryOperation = std::function<GateRef(Environment*, GateRef, GateRef)>;
+    void ProfileNonNumberOpTypeImpl(GateRef glue, GateRef value, ProfileOperation callback, bool includeBigInt);
     template<OpCode Op>
     GateRef FastAddSubAndMul(GateRef glue, GateRef left, GateRef right, ProfileOperation callback);
     GateRef FastIntDiv(GateRef left, GateRef right, Label *bailout, ProfileOperation callback);

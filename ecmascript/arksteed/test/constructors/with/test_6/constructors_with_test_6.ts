@@ -32,9 +32,27 @@ function constructor_with_return_6() {
     return p(100, 10);
 }
 
+// G11.6 additive evidence (arksteed-g116-call-closure-and-additive-evidence#C1,#C3):
+// every compiled target of this leaf (constructors and the compiled caller)
+// carries its own compile/entry counters, and the actual construction form
+// is annotated in the compiled caller's own dump. Output is unchanged.
+//! COMPILE_COUNT_GE Point 1
+//! EXEC_COUNT_GE *Point 1
+//! COMPILE_COUNT_GE innerProduct 1
+//! EXEC_COUNT_GE *innerProduct 1
+//! COMPILE_COUNT_GE constructor_with_return_6 1
+//! EXEC_COUNT_GE *constructor_with_return_6 1
+//! DEOPT_COUNT *Deoptimize* 0
+//! METHOD constructor_with_return_6
+//! HAS CallRuntime OptNewObjRange
+//! HAS Call
+
 ArkTools.arkSteedCompileSync(Point);
+ArkTools.waitJitCompileFinish(Point);
 ArkTools.arkSteedCompileSync(Point.prototype.innerProduct);
+ArkTools.waitJitCompileFinish(Point.prototype.innerProduct);
 ArkTools.arkSteedCompileSync(constructor_with_return_6);
+ArkTools.waitJitCompileFinish(constructor_with_return_6);
 
 
 print(constructor_with_return_6());

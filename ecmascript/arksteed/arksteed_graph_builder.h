@@ -26,21 +26,52 @@
 namespace panda::ecmascript::arksteed {
 class CompileInfoFacts;
 class Graph;
+class LoopEffects;
+struct SideEffectDescriptor;
 
 class GraphBuilder {
 public:
-    GraphBuilder(JSThread *compilerThread, Graph *destGraph, uintptr_t glueAddr, BytecodePreprocessor *preproc,
-                 BytecodeAnalysis *analysis);
+    GraphBuilder(JSThread *compilerThread,
+                 Graph *destGraph,
+                 uintptr_t glueAddr,
+                 BytecodePreprocessor *preproc,
+                 BytecodeAnalysis *analysis,
+                 bool isOsr);
 
     bool Run();
 
 private:
     using BasicBlockInfo = BytecodePreprocessor::BasicBlockInfo;
+    using BytecodeLoopInfo = BytecodePreprocessor::BytecodeLoopInfo;
     using CommonStubID = kungfu::CommonStubCSigns::ID;
     using RuntimeStubID = kungfu::RuntimeStubCSigns::ID;
 
     struct CatchBlockInputData;
     struct BytecodeVisitor;
+
+    enum class LoopPeelingStage : uint8_t {
+        NONE,
+        PEELED_ITERATION,
+        OPTIMISTIC_LOOP,
+        CONSERVATIVE_LOOP,
+    };
+
+    struct LoopExitEdge {
+        uint32_t sourceRpoIndex;
+        uint32_t targetRpoIndex;
+        BB *landing;
+        BB *target;
+    };
+
+    struct LoopEffectScope {
+        const BytecodeLoopInfo *source;
+        LoopEffects *effects;
+    };
+
+    struct OutgoingBlockState {
+        CondensedBCFrameState frameState;
+        CompileInfoFacts *facts {nullptr};
+    };
 
     VRegIDType LexicalEnvIndex() const
     {
@@ -67,7 +98,22 @@ private:
     void ProcessBasicBlock(SharedBCFrameState frameState, uint32_t rpoIndex);
     void ProcessCatchBlockHead(SharedBCFrameState frameState, uint32_t rpoIndex);
     void FinishDeadLoopBackEdge(BB *owner, uint32_t rpoIndex);
-    BB *VisitBytecodesOfBasicBlock(SharedBCFrameState frameState, uint32_t rpoIndex);
+    BB *VisitBytecodesOfBasicBlock(SharedBCFrameState frameState, uint32_t rpoIndex,
+                                   CompileInfoFacts **outFacts);
+
+    void InitializeLoopPeeling();
+    bool IsEligibleForLoopPeeling(const BytecodeLoopInfo *loop) const;
+    void BuildPeeledLoop(const BytecodeLoopInfo *loop);
+    void ResetLoopBuildState(const BytecodeLoopInfo *loop);
+    void FinishLoopBackedge(BB *owner, SharedBCFrameState frameState, CompileInfoFacts *facts,
+                            uint32_t targetRpoIndex);
+    bool IsOptimisticBackedgeCompatible(SharedBCFrameState frameState, CompileInfoFacts *facts) const;
+    void TurnOptimisticLoopIntoPeeledIteration();
+    void SynchronizeLoopEffects(const BytecodeLoopInfo *loop);
+    void BeginLoopEffects(const BytecodeLoopInfo *loop);
+    LoopEffects *EndLoopEffects();
+    void FinalizeLoopExitEdges(uint32_t sourceRpoIndex);
+    BB *GetOrCreateLoopExitLanding(uint32_t sourceRpoIndex, uint32_t targetRpoIndex, BB *target);
 
     void InitFrameState(SharedBCFrameState framestate, uint32_t rpoIndex);
     void InitFrameStateForLoopHeader(SharedBCFrameState framestate, uint32_t rpoIndex);
@@ -75,14 +121,20 @@ private:
 
     void InitCompileInfoFacts(uint32_t rpoIndex);
     void InitCompileInfoFactsForCatchBlock(uint32_t rpoIndex);
-    bool HasEmittedNormalEdge(uint32_t predRpoIndex, uint32_t targetRpoIndex) const;
     void WriteBackFrameStateToLoopHeader(SharedBCFrameState current, uint32_t rpoIndex);
-    void MergeFrameState(SharedBCFrameState dest, uint32_t rpoIndex, uint32_t predRpoIndex, uint32_t actualPredIndex,
-                         uint32_t actualNumPreds);
+    void MergeFrameState(SharedBCFrameState dest, uint32_t rpoIndex, const OutgoingBlockState &incoming,
+                         uint32_t actualPredIndex, uint32_t actualNumPreds);
+    void RecordOutgoingBlockState(uint32_t rpoIndex, SharedBCFrameState frameState);
 
     PhiVertex *NewPhiVertex(BB *owner, uint32_t numPredecessors, VRegIDType vreg);
     template <class InputRange = std::initializer_list<ValueVertex *>>
     PhiVertex *NewPhiVertexWith(BB *owner, const InputRange &inputs, VRegIDType vreg);
+
+    // Populate Vertex bytecode offset: mixin-provided value takes priority; vertices without a
+    // mixin offset fall back to the offset of the bytecode currently being processed, so that
+    // every vertex emitted by codegen carries an offset for SourcePositionTable boundaries.
+    template <class VertexT>
+    void PopulateVertexBytecodeOffset(VertexT *vertex);
 
     // VertexT should be neither control vertex nor Phi
     template <class VertexT, class InputRange = std::initializer_list<ValueVertex *>, class... Args>
@@ -90,6 +142,9 @@ private:
 
     template <class VertexT, class InputRange = std::initializer_list<ValueVertex *>, class... Args>
     VertexT *NewVertex(CompileInfoFacts *compileInfoFacts, BB *owner, const InputRange &inputs, Args &&...args);
+
+    template <class VertexT, class InputRange = std::initializer_list<ValueVertex *>, class... Args>
+    VertexT *NewVertexImpl(BB *owner, const InputRange &inputs, Args &&...args);
 
     JumpVertex *FinishBlockWithJump(BB *owner, BB *target);
     JumpLoopVertex *FinishBlockWithJumpLoop(BB *owner, BB *target);
@@ -106,9 +161,16 @@ private:
     VertexT *FinishBlockWith(BB *owner, const InputRange &inputs, Args &&...args);
 
     BB *NewBlock();
+    LoopEffects *CurrentLoopEffects();
     BB *ActivateNonCatchBlock(uint32_t rpoIndex);
     BB *ActivateCatchBlock(CatchBlockInputData **inputData, uint32_t rpoIndex);
     LoadTaggedFieldVertex *ActivateGlobalEnv();
+
+    BB *&BlockAt(uint32_t rpoIndex);
+    BB *&ExitBlockAt(uint32_t rpoIndex);
+    CompileInfoFacts *&CompileInfoFactsAt(uint32_t rpoIndex);
+    CatchBlockInputData *&CatchBlockInputsAt(uint32_t rpoIndex);
+    const OutgoingBlockState &GetOutgoingBlockState(BB *block) const;
 
     Graph *graph_;
     JSThread *compilerThread_;
@@ -121,6 +183,7 @@ private:
     // Frequently used fields. Cached for performance.
     uint32_t numLocal_;   // Equivalent to preproc_->GetNumLocalRegs()
     uint32_t numParams_;  // Equivalent to preproc_->GetNumParamRegs()
+    bool isOsr_;
     Chunk *chunk_;        // Equivalent to preproc_->GetChunk()
 
     // Constants frequently used
@@ -136,9 +199,24 @@ private:
     ChunkVector<BB *> blocks_;
     // Entry blocks are stable CFG targets; exit blocks track the final block after any subgraph lowering.
     ChunkVector<BB *> exitBlocks_;
-    ChunkVector<CondensedBCFrameState> frameStates_;
     ChunkVector<CompileInfoFacts *> compileInfoFacts_;
     ChunkVector<CatchBlockInputData *> catchBlockInputs_;
+    ChunkMap<BB *, OutgoingBlockState> outgoingBlockStates_;
+    ChunkVector<uint8_t> loopHeadersToPeel_;
+    ChunkVector<uint8_t> handledSourceBlocks_;
+    ChunkVector<LoopEffectScope> loopEffectsStack_;
+    ChunkVector<LoopExitEdge> loopExitEdges_;
+    const BytecodeLoopInfo *activePeeledLoop_ {nullptr};
+    CompileInfoFacts *optimisticHeaderFacts_ {nullptr};
+    LoopEffects *peeledLoopEffects_ {nullptr};
+    BB *nextLoopHeader_ {nullptr};
+    LoopPeelingStage loopPeelingStage_ {LoopPeelingStage::NONE};
+    uint32_t currentSourceRpoIndex_ {BytecodePreprocessor::NULL_INDEX};
+
+    // Bytecode offset currently being processed by BytecodeVisitor. Updated at Visit() entry;
+    // consumed as the fallback source of Vertex::bytecodeOffset_ for vertices created without
+    // an eager/lazy deopt mixin offset.
+    uint32_t currentBytecodeOffset_ {0};
 };
 }  // namespace panda::ecmascript::arksteed
 

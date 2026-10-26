@@ -13,11 +13,24 @@
  * limitations under the License.
  */
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
+#include <thread>
 
 #include "securec.h"
 #include "ecmascript/dfx/stackinfo/tests/js_stackinfo_test.h"
+// defines ECMASCRIPT_ENABLE_ARK_STEED; must be visible before the #if below
+// (the test header chain does not pull it in)
+#include "ecmascript/base/config.h"
+
+#if ECMASCRIPT_ENABLE_ARK_STEED
+#include "ecmascript/arksteed/arksteed_safepoint_table.h"
+#include "ecmascript/js_function.h"
+#include "ecmascript/mem/machine_code.h"
+#include "ecmascript/method.h"
+#endif
 
 #include "assembler/assembly-emitter.h"
 #include "assembler/assembly-parser.h"
@@ -28,6 +41,12 @@
 #include "ecmascript/tests/test_helper.h"
 
 using namespace panda::ecmascript;
+
+namespace panda::ecmascript {
+// Internal (non-exported) frame geometry helper of js_stackinfo.cpp under test.
+bool GetTypeOffsetAndPrevOffsetFromFrameType(uintptr_t frameType, uintptr_t &typeOffset,
+                                             uintptr_t &prevOffset);
+}
 
 namespace panda::test {
 class JsStackInfoTest : public testing::Test {
@@ -103,6 +122,42 @@ bool SafeReadMemFuncForJit(void *ctx, uintptr_t addr, uintptr_t *value)
     // For invalid addresses (like Hole().GetRawData() + offset), return default value
     *value = safeCtx ? safeCtx->readValue : 0;
     return false;
+}
+
+/**
+ * @tc.name: GetTypeOffsetAndPrevOffsetFromFrameType
+ * @tc.desc: STEED_FUNCTION_FRAME frame geometry must be supported with offsets from
+ *   SteedFunctionFrame compile-time constants; existing frame types stay unchanged.
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(JsStackInfoTest, TestGetTypeOffsetAndPrevOffsetFromFrameType)
+{
+    // STEED frame geometry (G1 fix): frame walking must proceed across STEED frames.
+    uintptr_t typeOffset = 0;
+    uintptr_t prevOffset = 0;
+    bool ret = GetTypeOffsetAndPrevOffsetFromFrameType(ToUintPtr(FrameType::STEED_FUNCTION_FRAME),
+                                                         typeOffset, prevOffset);
+    EXPECT_TRUE(ret);
+    EXPECT_EQ(typeOffset, SteedFunctionFrame::GetTypeOffset());
+    EXPECT_EQ(prevOffset, SteedFunctionFrame::GetPrevOffset());
+
+    // Existing FASTJIT frame geometry unchanged.
+    ret = GetTypeOffsetAndPrevOffsetFromFrameType(ToUintPtr(FrameType::FASTJIT_FUNCTION_FRAME),
+                                                  typeOffset, prevOffset);
+    EXPECT_TRUE(ret);
+    EXPECT_EQ(typeOffset, FASTJITFunctionFrame::GetTypeOffset());
+    EXPECT_EQ(prevOffset, FASTJITFunctionFrame::GetPrevOffset());
+
+    // Interpreter frame geometry unchanged.
+    ret = GetTypeOffsetAndPrevOffsetFromFrameType(ToUintPtr(FrameType::INTERPRETER_FRAME),
+                                                  typeOffset, prevOffset);
+    EXPECT_TRUE(ret);
+    EXPECT_EQ(typeOffset, InterpretedFrame::GetTypeOffset());
+    EXPECT_EQ(prevOffset, InterpretedFrame::GetPrevOffset());
+
+    // Unsupported frame type value still returns false.
+    EXPECT_FALSE(GetTypeOffsetAndPrevOffsetFromFrameType(0x12345678, typeOffset, prevOffset));
 }
 
 /**
@@ -1565,7 +1620,7 @@ HWTEST_F_L0(JsStackInfoTest, TestStepArk_026)
 {
     size_t size = 1;  // 1: unknown tpye
     JSTaggedType frame[size];
-    frame[0] = static_cast<JSTaggedType>(FrameType::BASELINE_BUILTIN_FRAME) + 1; // 0: type
+    frame[0] = static_cast<JSTaggedType>(FrameType::BASELINE_BUILTIN_FRAME) + 0x100; // 0: type
 
     uintptr_t fp  = reinterpret_cast<uintptr_t>(&frame[0]) + 8; // 0: type addr
     uintptr_t sp  = 0;
@@ -1771,6 +1826,1094 @@ HWTEST_F_L0(JsStackInfoTest, TestStepArkWithRecordJit_002)
     EXPECT_TRUE(*arkUnwindParam.isJsFrame == true);
 }
 #endif
+
+#if ECMASCRIPT_ENABLE_ARK_STEED
+
+// ============================================================================
+// Out-of-process STEED pc resolution tests (spec VM-1/VM-2/VM-3):
+//   - PC state machine: first-frame fault PC, cross-frame callee returnAddr,
+//     interleaved-context isolation;
+//   - degradation chain: position hit -> safepoint fallback -> 0;
+//   - defensive reads: corrupt MAGIC / size caps / read failures only degrade
+//     a single frame, never break the unwind.
+// Lookup convention (FindBcOffsetByPCOffset): the position table is keyed at
+// the call vertex's start (pcBefore) and queried with pc-1, while the
+// safepoint table is keyed at the raw return address. Query pcs and return-
+// address markers below are therefore one past the recorded boundary.
+// ============================================================================
+
+namespace {
+void AppendU32(std::vector<uint8_t> &out, uint32_t v)
+{
+    for (int i = 0; i < 4; i++) {
+        out.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xFF));  // 8: bits per byte; 0xFF: low-byte mask
+    }
+}
+
+void AppendSleb128(std::vector<uint8_t> &out, int64_t v)
+{
+    bool more = true;
+    while (more) {
+        uint8_t byte = static_cast<uint8_t>(v & 0x7F);  // 0x7F: 7 payload bits per VLQ byte
+        v >>= 7;  // 7: payload bits per byte
+        bool signBit = (byte & 0x40) != 0;  // 0x40: VLQ sign bit
+        more = !((v == 0 && !signBit) || (v == -1 && signBit));
+        if (more) {
+            byte |= 0x80;  // 0x80: VLQ continuation bit
+        }
+        out.push_back(byte);
+    }
+}
+
+template<typename T>
+void PutField(std::vector<uint8_t> &obj, size_t offset, T value)
+{
+    memcpy(obj.data() + offset, &value, sizeof(T));
+}
+
+// Fake out-of-process world of one STEED-compiled function: text, ASTB
+// container and the JSFunction/Method/MachineCode objects the offline reader
+// walks through. All memory is plain test buffers registered in a
+// SafeMemContext.
+struct SteedFuncWorld {
+    static constexpr uint32_t TEXT_SIZE = 64;
+    uintptr_t bytecodeArray = 0x00000000BC00DE00ULL;  // bytecode-space base
+
+    std::vector<uint8_t> text;
+    std::vector<uint8_t> jsFuncObj;
+    std::vector<uint8_t> methodObj;
+    std::vector<uint8_t> machineCodeObj;
+    uintptr_t funcAddr = 0;
+    uintptr_t machineCode = 0;
+    uintptr_t jsFunc = 0;
+    uintptr_t method = 0;
+    uintptr_t containerAddr = 0;
+
+    void Build(bool jitFortLayout, bool withPosition, bool withSafepoint,
+               uint32_t posPc, uint32_t posBc, uint32_t sfpPc, uint32_t sfpBc,
+               uint32_t posPc2 = 0, uint32_t posBc2 = 0, uint32_t methodId = 0x1234)
+    {
+        text.assign(TEXT_SIZE, 0x90);  // 0x90: filler byte for the machine-code text
+
+        // ASTB container: 24B directory header + safepoint section + position
+        // section. All sizes/offsets below are body-relative first, then the
+        // directory entries get the +header bias (the reader validates them
+        // container-relative).
+        std::vector<uint8_t> body;
+        uint32_t sfpSize = 0;
+        if (withSafepoint) {
+            // safepoint table: 16B header + one 12B entry whose deopt data
+            // carries a CONSTANT PC_OFFSET_INDEX (-2) with sfpBc
+            AppendU32(body, 1);  // numEntries
+            AppendU32(body, 0);  // numTaggedSlots
+            AppendU32(body, 0);  // numUntaggedSlots
+            AppendU32(body, 0);  // deoptLiteralCount
+            AppendU32(body, sfpPc);
+            AppendU32(body, 16 + 12);  // 16: header bytes; 12: entry bytes; deoptOffset right after the entry
+            body.push_back(0);
+            body.push_back(0);          // extraSpillSlotsAndFlags
+            body.push_back(0);
+            body.push_back(2);          // deoptNum = 2 (one vreg entry)
+            AppendSleb128(body, -2 * 4 + 0);  // vreg=-2 (PC_OFFSET), kind=CONSTANT
+            AppendSleb128(body, sfpBc);        // the bcOffset constant
+            sfpSize = static_cast<uint32_t>(body.size());
+        }
+        uint32_t posBodyOff = static_cast<uint32_t>(body.size());
+        uint32_t posSize = 0;
+        if (withPosition) {
+            // position table: uint32 numEntries + (pcOffset, bcOffset) pairs;
+            // a second (non-zero) entry models adjacent call-site boundaries.
+            // The reader binary-searches the table, so keep the entries in
+            // ascending pc order exactly like the real builder's
+            // RecordBoundary ASSERT demands.
+            if (posPc2 != 0 && posPc2 < posPc) {
+                std::swap(posPc, posPc2);
+                std::swap(posBc, posBc2);
+            }
+            uint32_t numEntries = (posPc2 != 0 || posBc2 != 0) ? 2 : 1;
+            AppendU32(body, numEntries);
+            AppendU32(body, posPc);
+            AppendU32(body, posBc);
+            if (numEntries == 2) {  // 2: the second position entry is present
+                AppendU32(body, posPc2);
+                AppendU32(body, posBc2);
+            }
+            posSize = static_cast<uint32_t>(body.size()) - posBodyOff;
+        }
+        constexpr uint32_t HEADER_SIZE = arksteed::ArkSteedTableContainerHeader::SIZE;
+        std::vector<uint8_t> container;
+        AppendU32(container, arksteed::ArkSteedTableContainerHeader::MAGIC);
+        AppendU32(container, arksteed::ArkSteedTableContainerHeader::VERSION);
+        AppendU32(container, HEADER_SIZE);              // safepointOffset
+        AppendU32(container, sfpSize);
+        AppendU32(container, HEADER_SIZE + posBodyOff); // positionOffset
+        AppendU32(container, posSize);
+        container.insert(container.end(), body.begin(), body.end());
+
+        // fake MachineCode object; the container goes either into the JitFort
+        // NonText region (right after the object) or right after the text
+        size_t mcSize = MachineCode::SIZE + container.size() + 64;  // 64: tail slack so word-wise reads stay in bounds
+        machineCodeObj.assign(mcSize, 0);
+        machineCode = reinterpret_cast<uintptr_t>(machineCodeObj.data());
+        PutField<uint32_t>(machineCodeObj, MachineCode::INSTRSIZ_OFFSET, TEXT_SIZE);
+        PutField<uint32_t>(machineCodeObj, MachineCode::STACKMAP_OR_OFFSETTABLE_SIZE_OFFSET,
+                           static_cast<uint32_t>(container.size()));
+        PutField<uint32_t>(machineCodeObj, MachineCode::PAYLOADSIZE_OFFSET,
+                           static_cast<uint32_t>(container.size()));
+        if (jitFortLayout) {
+            containerAddr = machineCode + MachineCode::SIZE;
+            memcpy(machineCodeObj.data() + MachineCode::SIZE, container.data(), container.size());
+            // pad keeps every word-wise read past the text end in-bounds
+            text.insert(text.end(), 32, 0xAA);
+        } else {
+            text.insert(text.end(), container.begin(), container.end());
+            text.insert(text.end(), 32, 0xAA);  // 32: pad bytes past the text end; 0xAA: filler pattern
+        }
+        // take funcAddr only after the text vector reached its final size
+        // (the inserts above may reallocate it)
+        funcAddr = reinterpret_cast<uintptr_t>(text.data());
+        if (!jitFortLayout) {
+            containerAddr = funcAddr + TEXT_SIZE;
+        }
+        PutField<uint64_t>(machineCodeObj, MachineCode::FUNCADDR_OFFSET, funcAddr);
+
+        // fake Method object: bytecodeArray behind the native-pointer field and
+        // the methodId encoded in literalInfo (the record-jit map key source)
+        methodObj.assign(Method::LITERAL_INFO_OFFSET + sizeof(uint64_t), 0);
+        method = reinterpret_cast<uintptr_t>(methodObj.data());
+        PutField<uint64_t>(methodObj, Method::NATIVE_POINTER_OR_BYTECODE_ARRAY_OFFSET, bytecodeArray);
+        PutField<uint64_t>(methodObj, Method::LITERAL_INFO_OFFSET,
+                           MethodLiteral::MethodIdBits::Update(uint64_t(0), methodId));
+
+        // fake JSFunction object: method + machineCode pointers
+        size_t jsSize = std::max(JSFunction::METHOD_OFFSET, JSFunction::MACHINECODE_OFFSET) + 16;
+        jsFuncObj.assign(jsSize, 0);
+        jsFunc = reinterpret_cast<uintptr_t>(jsFuncObj.data());
+        PutField<uint64_t>(jsFuncObj, JSFunction::METHOD_OFFSET, method);
+        PutField<uint64_t>(jsFuncObj, JSFunction::MACHINECODE_OFFSET, machineCode);
+    }
+
+    void Register(SafeMemContext &ctx) const
+    {
+        ctx.AddRange(funcAddr, funcAddr + text.size());
+        ctx.AddRange(jsFunc, jsFunc + jsFuncObj.size());
+        ctx.AddRange(method, method + methodObj.size());
+        ctx.AddRange(machineCode, machineCode + machineCodeObj.size());
+    }
+};
+
+// One STEED stack frame: [0] lexicalEnv [1] jsFunc [2] type [3] prevFp
+// [4] returnAddr (at fp + sizeof(uintptr_t), fp = &slots[3]).
+struct SteedFrameMem {
+    JSTaggedType slots[5];  // 5: lexicalEnv, jsFunc, type, prevFp, returnAddr
+    SteedFrameMem(uintptr_t jsFunc, uintptr_t prevFp, uintptr_t returnAddr)
+    {
+        slots[0] = 0;
+        slots[1] = static_cast<JSTaggedType>(jsFunc);
+        slots[2] = static_cast<JSTaggedType>(FrameType::STEED_FUNCTION_FRAME);  // 2: frame-type slot
+        slots[3] = static_cast<JSTaggedType>(prevFp);  // 3: prevFp slot
+        slots[4] = static_cast<JSTaggedType>(returnAddr);  // 4: return-address slot
+    }
+    uintptr_t Fp() const
+    {
+        return reinterpret_cast<uintptr_t>(&slots[2]) + sizeof(uintptr_t);  // 2: type slot; fp = &slots[3]
+    }
+};
+
+// A fake middle frame of an arbitrary type, placed by the frame type's own
+// compile-time geometry: frame base at the buffer start, type at
+// base + typeOffset, prev-fp at base + prevOffset (the unwinder's fp),
+// return address at base + retAddrOffset. Every other slot carries a
+// recognizable sentinel: a wrong-slot read yields an invalid candidate that
+// degrades the frame, so a precise resolution proves the right slot was used.
+struct MiddleFrameMem {
+    static constexpr size_t NUM_SLOTS = 16;
+    static constexpr uint64_t SENTINEL = 0x5A5A5A5A5A5A5A5AULL;
+    static constexpr size_t NO_RETURN_ADDR = static_cast<size_t>(-1);
+    JSTaggedType slots[NUM_SLOTS];
+
+    MiddleFrameMem(uintptr_t frameTypeValue, size_t typeOffset, size_t prevOffset, size_t retAddrOffset,
+                   uintptr_t prevFp, uintptr_t marker)
+    {
+        for (size_t i = 0; i < NUM_SLOTS; i++) {
+            slots[i] = static_cast<JSTaggedType>(SENTINEL);
+        }
+        uintptr_t base = reinterpret_cast<uintptr_t>(&slots[0]);
+        PutAt(base + typeOffset, frameTypeValue);
+        PutAt(base + prevOffset, prevFp);
+        if (retAddrOffset != NO_RETURN_ADDR) {
+            PutAt(base + retAddrOffset, marker);
+        }
+    }
+    static void PutAt(uintptr_t addr, uintptr_t value)
+    {
+        *reinterpret_cast<uintptr_t *>(addr) = value;
+    }
+    template<typename T>
+    void Poke(size_t offsetFromBase, T value)
+    {
+        PutAt(reinterpret_cast<uintptr_t>(&slots[0]) + offsetFromBase,
+              static_cast<uintptr_t>(value));
+    }
+    uintptr_t Fp(size_t typeOffset) const
+    {
+        // the frame chain convention is universal: the sp/fp handed to the
+        // unwinder sits right above the type slot (GetFrameType reads fp-8)
+        return reinterpret_cast<uintptr_t>(&slots[0]) + typeOffset + sizeof(FrameType);
+    }
+};
+
+// An entry-style boundary frame (ArkFrameCheck): no frame advance happens;
+// the epilogue reads the next fp/pc from the slots right above the type slot.
+struct EntryFrameMem {
+    static constexpr size_t NUM_SLOTS = 8;
+    static constexpr uint64_t SENTINEL = 0x5A5A5A5A5A5A5A5AULL;
+    JSTaggedType slots[NUM_SLOTS];
+    EntryFrameMem(uintptr_t nextFp, uintptr_t nextPc)
+    {
+        for (size_t i = 0; i < NUM_SLOTS; i++) {
+            slots[i] = static_cast<JSTaggedType>(SENTINEL);
+        }
+        slots[2] = static_cast<JSTaggedType>(FrameType::ASM_INTERPRETER_ENTRY_FRAME);  // 2: frame-type slot
+        slots[3] = static_cast<JSTaggedType>(nextFp);  // 3: nextFp slot
+        slots[4] = static_cast<JSTaggedType>(nextPc);  // 4: nextPc slot
+    }
+    uintptr_t Fp() const
+    {
+        return reinterpret_cast<uintptr_t>(&slots[2]) + sizeof(uintptr_t);  // 2: type slot; fp = &slots[3]
+    }
+};
+
+// The production continuity state is keyed by the ctx pointer alone (the
+// driver passes a constant frameIndex), so every test sequence must use a
+// ctx address no earlier sequence ever used: stack/heap reuse would make a
+// fresh sequence accidentally continue a stale one. Pool-allocate contexts
+// (never freed) to keep every sequence start deterministic.
+SafeMemContext &NewSteedCtx()
+{
+    static std::mutex mutex;
+    static std::vector<std::unique_ptr<SafeMemContext>> pool;
+    std::lock_guard<std::mutex> lock(mutex);
+    pool.push_back(std::make_unique<SafeMemContext>());
+    return *pool.back();
+}
+
+// Drive one step_ark_with_record_jit call (one frame of a sequence). The
+// real driver passes a constant frameIndex of 0, so continuity is keyed by
+// the ctx alone; the helper mirrors that.
+// methodIdIn only seeds the caller's method-id slot (the runtime overwrites it
+// with the id resolved from the frame's Method); the record-jit map key comes
+// from the world's fake Method.literalInfo, so parallel sequences key apart
+// via each world's own Build(..., methodId).
+bool SteedStep(SafeMemContext &ctx, uintptr_t fp, uintptr_t pcIn,
+               uintptr_t &fpOut, uintptr_t &pcOut, uintptr_t methodIdIn = 0)
+{
+    uintptr_t fpv = fp;
+    uintptr_t sp = 0;
+    uintptr_t pc = pcIn;
+    uintptr_t methodId = methodIdIn;
+    bool isJsFrame = true;
+    StepFrameType ft = StepFrameType::JS_FRAME;
+    std::vector<uintptr_t> jitCache;
+    ArkUnwindParam param(&ctx, SafeReadMemFuncForJit, &fpv, &sp, &pc, &methodId,
+                         &isJsFrame, &ft, 0, jitCache);
+    bool ok = step_ark_with_record_jit(&param) == 1;
+    fpOut = fpv;
+    pcOut = pc;
+    return ok;
+}
+}  // namespace
+
+/**
+ * @tc.name: SteedPcStateMachine_FirstFrameFaultPc
+ * @tc.desc: The first STEED frame of a sequence resolves with the unwinder's
+ *   input fault PC (kept, never cleared) via the position table.
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(JsStackInfoTest, SteedPcStateMachine_FirstFrameFaultPc)
+{
+    SteedFuncWorld world;
+    world.Build(true /* jitFort layout */, true /* position */, false /* safepoint */,
+                32 /* posPc */, 400 /* posBc */, 0, 0);
+    SteedFrameMem frame(world.jsFunc, 0, 0x1111);
+
+    SafeMemContext &ctx = NewSteedCtx();
+    world.Register(ctx);
+    ctx.AddRange(reinterpret_cast<uintptr_t>(&frame.slots[0]),
+                  reinterpret_cast<uintptr_t>(&frame.slots[5]));  // 5: one past the last frame slot
+
+    uintptr_t fpOut = 0;
+    uintptr_t pcOut = 0;
+    ASSERT_TRUE(SteedStep(ctx, frame.Fp(), world.funcAddr + 33, fpOut, pcOut));
+    EXPECT_EQ(pcOut, world.bytecodeArray + 400);
+    JsStackInfo::machineCodeMap.clear();
+}
+
+/**
+ * @tc.name: SteedPcStateMachine_CrossFrameReturnAddr
+ * @tc.desc: The second STEED frame (caller) resolves with its callee's return
+ *   address, mirroring the in-process Advance() semantics.
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(JsStackInfoTest, SteedPcStateMachine_CrossFrameReturnAddr)
+{
+    // callee (visited first): fault pc inside its text
+    SteedFuncWorld callee;
+    callee.Build(true, true, false, 16 /* posPc */, 200 /* posBc */, 0, 0);
+    // caller (visited second): the callee's return address points into it
+    SteedFuncWorld caller;
+    caller.Build(true, true, false, 40 /* posPc */, 600 /* posBc */, 0, 0);
+    uintptr_t callSiteInCaller = caller.funcAddr + 41;
+
+    SteedFrameMem callerFrame(caller.jsFunc, 0, 0);
+    SteedFrameMem calleeFrame(callee.jsFunc,
+                              // 3: prevFp slot of the caller frame (its fp)
+                              reinterpret_cast<uintptr_t>(&callerFrame.slots[3]),
+                              callSiteInCaller);
+
+    SafeMemContext &ctx = NewSteedCtx();
+    callee.Register(ctx);
+    caller.Register(ctx);
+    ctx.AddRange(reinterpret_cast<uintptr_t>(&callerFrame.slots[0]),
+                  reinterpret_cast<uintptr_t>(&callerFrame.slots[5]));  // 5: one past the last frame slot
+    ctx.AddRange(reinterpret_cast<uintptr_t>(&calleeFrame.slots[0]),
+                  reinterpret_cast<uintptr_t>(&calleeFrame.slots[5]));  // 5: one past the last frame slot
+
+    // step 1: callee resolves with the fault pc
+    uintptr_t fpOut = 0;
+    uintptr_t pcOut = 0;
+    ASSERT_TRUE(SteedStep(ctx, calleeFrame.Fp(), callee.funcAddr + 17, fpOut, pcOut));
+    EXPECT_EQ(pcOut, callee.bytecodeArray + 200);
+    // 3: prevFp slot of the caller frame (its fp)
+    EXPECT_EQ(fpOut, reinterpret_cast<uintptr_t>(&callerFrame.slots[3]));
+
+    // step 2: caller resolves with the callee's captured return address
+    ASSERT_TRUE(SteedStep(ctx, fpOut, pcOut, fpOut, pcOut));
+    EXPECT_EQ(pcOut, caller.bytecodeArray + 600);
+    JsStackInfo::machineCodeMap.clear();
+}
+
+/**
+ * @tc.name: SteedPcStateMachine_InterleavedContexts
+ * @tc.desc: Interleaved sequences on the same thread never share candidates:
+ *   after another ctx runs in between, the resumed frame degrades instead of
+ *   consuming the foreign return address.
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(JsStackInfoTest, SteedPcStateMachine_InterleavedContexts)
+{
+    SteedFuncWorld worldA1;
+    worldA1.Build(true, true, false, 8 /* posPc */, 100 /* posBc */, 0, 0);
+    SteedFuncWorld worldA2;
+    worldA2.Build(true, true, false, 24 /* posPc */, 300 /* posBc */, 0, 0);
+    SteedFuncWorld worldB;
+    worldB.Build(true, true, false, 16 /* posPc */, 500 /* posBc */, 0, 0);
+
+    SteedFrameMem frameA1(worldA1.jsFunc, 0, 0x1111);
+    SteedFrameMem frameA2(worldA2.jsFunc, 0, 0x2222);
+    SteedFrameMem frameB(worldB.jsFunc, 0, 0x3333);
+
+    SafeMemContext &ctxA = NewSteedCtx();
+    worldA1.Register(ctxA);
+    worldA2.Register(ctxA);
+    ctxA.AddRange(reinterpret_cast<uintptr_t>(&frameA1.slots[0]),
+                  reinterpret_cast<uintptr_t>(&frameA1.slots[5]));  // 5: one past the last frame slot
+    ctxA.AddRange(reinterpret_cast<uintptr_t>(&frameA2.slots[0]),
+                  reinterpret_cast<uintptr_t>(&frameA2.slots[5]));  // 5: one past the last frame slot
+    SafeMemContext &ctxB = NewSteedCtx();
+    worldB.Register(ctxB);
+    ctxB.AddRange(reinterpret_cast<uintptr_t>(&frameB.slots[0]),
+                  reinterpret_cast<uintptr_t>(&frameB.slots[5]));  // 5: one past the last frame slot
+
+    // sequence A step 0
+    uintptr_t fpOut = 0;
+    uintptr_t pcA = 0;
+    ASSERT_TRUE(SteedStep(ctxA, frameA1.Fp(), worldA1.funcAddr + 9, fpOut, pcA));
+    EXPECT_EQ(pcA, worldA1.bytecodeArray + 100);
+
+    // sequence B interleaves on the same thread
+    uintptr_t pcB = 0;
+    ASSERT_TRUE(SteedStep(ctxB, frameB.Fp(), worldB.funcAddr + 17, fpOut, pcB));
+    EXPECT_EQ(pcB, worldB.bytecodeArray + 500);
+
+    // sequence A resumes: the foreign candidate must not be consumed; the frame
+    // degrades to function-first-line instead of misreporting
+    ASSERT_TRUE(SteedStep(ctxA, frameA2.Fp(), pcA, fpOut, pcA));
+    EXPECT_EQ(pcA, worldA2.bytecodeArray);
+    JsStackInfo::machineCodeMap.clear();
+}
+
+/**
+ * @tc.name: SteedPcDegradationChain
+ * @tc.desc: Resolution degrades per the priority chain: safepoint table
+ *   fallback when no position table; bcOffset 0 (function first line) when
+ *   neither exists or the fault pc is out of range.
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(JsStackInfoTest, SteedPcDegradationChain)
+{
+    // safepoint fallback (no position table)
+    {
+        SteedFuncWorld world;
+        world.Build(true, false, true, 0, 0, 24 /* sfpPc */, 300 /* sfpBc */);
+        SteedFrameMem frame(world.jsFunc, 0, 0x1111);
+        SafeMemContext &ctx = NewSteedCtx();
+        world.Register(ctx);
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&frame.slots[0]),
+                      reinterpret_cast<uintptr_t>(&frame.slots[5]));  // 5: one past the last frame slot
+        uintptr_t fpOut = 0;
+        uintptr_t pcOut = 0;
+        ASSERT_TRUE(SteedStep(ctx, frame.Fp(), world.funcAddr + 24, fpOut, pcOut));
+        EXPECT_EQ(pcOut, world.bytecodeArray + 300);
+        JsStackInfo::machineCodeMap.clear();
+    }
+    // neither table: bcOffset 0 (function first bytecode is a legal value)
+    {
+        SteedFuncWorld world;
+        world.Build(true, false, false, 0, 0, 0, 0);
+        SteedFrameMem frame(world.jsFunc, 0, 0x1111);
+        SafeMemContext &ctx = NewSteedCtx();
+        world.Register(ctx);
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&frame.slots[0]),
+                      reinterpret_cast<uintptr_t>(&frame.slots[5]));  // 5: one past the last frame slot
+        uintptr_t fpOut = 0;
+        uintptr_t pcOut = 0;
+        ASSERT_TRUE(SteedStep(ctx, frame.Fp(), world.funcAddr + 8, fpOut, pcOut));
+        EXPECT_EQ(pcOut, world.bytecodeArray);
+        JsStackInfo::machineCodeMap.clear();
+    }
+    // fault pc out of range (e.g. lazy-deopt trampoline): degrade, no misreport
+    {
+        SteedFuncWorld world;
+    world.Build(true, true, false, 32 /* posPc */, 400 /* posBc */, 0, 0);
+        SteedFrameMem frame(world.jsFunc, 0, 0x1111);
+        SafeMemContext &ctx = NewSteedCtx();
+        world.Register(ctx);
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&frame.slots[0]),
+                      reinterpret_cast<uintptr_t>(&frame.slots[5]));  // 5: one past the last frame slot
+        uintptr_t fpOut = 0;
+        uintptr_t pcOut = 0;
+        ASSERT_TRUE(SteedStep(ctx, frame.Fp(), 0x7FFF0000, fpOut, pcOut));  // 0x7FFF0000: pc outside the function text
+        EXPECT_EQ(pcOut, world.bytecodeArray);
+        JsStackInfo::machineCodeMap.clear();
+    }
+}
+
+/**
+ * @tc.name: SteedPcDefensiveReads
+ * @tc.desc: Corrupt crash-process metadata (bad MAGIC, inconsistent sizes,
+ *   oversized fields, neighbouring-field garbage, unreadable container) only
+ *   degrades the frame pc; the unwind never breaks and 32-bit fields are
+ *   normalized against high-half garbage.
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(JsStackInfoTest, SteedPcDefensiveReads)
+{
+    // bad MAGIC on both layouts: degrade
+    {
+        SteedFuncWorld world;
+    world.Build(true, true, false, 32 /* posPc */, 400 /* posBc */, 0, 0);
+        SteedFrameMem frame(world.jsFunc, 0, 0x1111);
+        SafeMemContext &ctx = NewSteedCtx();
+        world.Register(ctx);
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&frame.slots[0]),
+                      reinterpret_cast<uintptr_t>(&frame.slots[5]));
+        // corrupt the JitFort candidate header; the after-text candidate is
+        // unreadable in this layout (not registered), so both drop out
+        uint32_t bad = 0xDEADBEEF;
+        memcpy(world.machineCodeObj.data() + MachineCode::SIZE, &bad, sizeof(bad));
+        uintptr_t fpOut = 0;
+        uintptr_t pcOut = 0;
+        ASSERT_TRUE(SteedStep(ctx, frame.Fp(), world.funcAddr + 33, fpOut, pcOut));
+        EXPECT_EQ(pcOut, world.bytecodeArray);
+        JsStackInfo::machineCodeMap.clear();
+    }
+    // stackmapSize > payloadSize: degrade without huge allocation
+    {
+        SteedFuncWorld world;
+        world.Build(true, true, false, 32, 400, 0, 0);
+        PutField<uint32_t>(world.machineCodeObj, MachineCode::STACKMAP_OR_OFFSETTABLE_SIZE_OFFSET,
+                           static_cast<uint32_t>(world.machineCodeObj.size()));
+        SteedFrameMem frame(world.jsFunc, 0, 0x1111);
+        SafeMemContext &ctx = NewSteedCtx();
+        world.Register(ctx);
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&frame.slots[0]),
+                      reinterpret_cast<uintptr_t>(&frame.slots[5]));
+        uintptr_t fpOut = 0;
+        uintptr_t pcOut = 0;
+        ASSERT_TRUE(SteedStep(ctx, frame.Fp(), world.funcAddr + 33, fpOut, pcOut));
+        EXPECT_EQ(pcOut, world.bytecodeArray);
+        JsStackInfo::machineCodeMap.clear();
+    }
+    // stackmapSize over the 16 MiB hard cap: degrade
+    {
+        SteedFuncWorld world;
+        world.Build(true, true, false, 32, 400, 0, 0);
+        PutField<uint32_t>(world.machineCodeObj, MachineCode::STACKMAP_OR_OFFSETTABLE_SIZE_OFFSET,
+                           17 * 1024 * 1024);
+        PutField<uint32_t>(world.machineCodeObj, MachineCode::PAYLOADSIZE_OFFSET, 0xFFFFFFFF);
+        SteedFrameMem frame(world.jsFunc, 0, 0x1111);
+        SafeMemContext &ctx = NewSteedCtx();
+        world.Register(ctx);
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&frame.slots[0]),
+                      reinterpret_cast<uintptr_t>(&frame.slots[5]));
+        uintptr_t fpOut = 0;
+        uintptr_t pcOut = 0;
+        ASSERT_TRUE(SteedStep(ctx, frame.Fp(), world.funcAddr + 33, fpOut, pcOut));
+        EXPECT_EQ(pcOut, world.bytecodeArray);
+        JsStackInfo::machineCodeMap.clear();
+    }
+    // garbage in the high half of the 32-bit instrsiz word (neighbouring field):
+    // normalization keeps the resolution exact
+    {
+        SteedFuncWorld world;
+        world.Build(false /* after-text layout */, true, false, 32, 400, 0, 0);
+        // InstructionsAddr (the field right after InstructionsSize) carries
+        // garbage in its low half, which lands in the high half of the
+        // word-wise instrsiz read
+        PutField<uint32_t>(world.machineCodeObj, MachineCode::INSTRADDR_OFFSET, 0x5A5A5A5A);
+        SteedFrameMem frame(world.jsFunc, 0, 0x1111);
+        SafeMemContext &ctx = NewSteedCtx();
+        world.Register(ctx);
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&frame.slots[0]),
+                      reinterpret_cast<uintptr_t>(&frame.slots[5]));
+        uintptr_t fpOut = 0;
+        uintptr_t pcOut = 0;
+        ASSERT_TRUE(SteedStep(ctx, frame.Fp(), world.funcAddr + 33, fpOut, pcOut));
+        EXPECT_EQ(pcOut, world.bytecodeArray + 400);
+        JsStackInfo::machineCodeMap.clear();
+    }
+}
+
+/**
+ * @tc.name: SteedPcStateMachine_ParallelThreads
+ * @tc.desc: INV-1: parallel unwind sequences on separate threads never share
+ *   or corrupt each other's pc continuity state (thread-local isolation). The
+ *   record-jit map is keyed apart per thread (its unsynchronized cross-thread
+ *   access is a pre-existing production concern, noted in the plan).
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(JsStackInfoTest, SteedPcStateMachine_ParallelThreads)
+{
+    constexpr int ITERATIONS = 64;
+    // each world's fake Method carries its own methodId: the runtime resolves
+    // the record-jit map key from it, so both threads only ever assign to the
+    // pre-created entries below (no structural map mutation while running)
+    const uintptr_t methodIdA = 0xAAAA;
+    const uintptr_t methodIdB = 0xBBBB;
+    SteedFuncWorld worldA;
+    worldA.Build(true, true, false, 8, 100, 0, 0, 0, 0, static_cast<uint32_t>(methodIdA));
+    SteedFrameMem frameA(worldA.jsFunc, 0, 0x1111);
+    SteedFuncWorld worldB;
+    worldB.Build(true, true, false, 16, 500, 0, 0, 0, 0, static_cast<uint32_t>(methodIdB));
+    SteedFrameMem frameB(worldB.jsFunc, 0, 0x2222);
+
+    // pre-create the per-thread record-jit map entries so both threads only
+    // assign to their own key (no structural map mutation while running)
+    JsStackInfo::machineCodeMap[EntityId(methodIdA)] = {};
+    JsStackInfo::machineCodeMap[EntityId(methodIdB)] = {};
+
+    auto runSequence = [](SteedFuncWorld *world, SteedFrameMem *frame, uintptr_t faultPc,
+                          uintptr_t expectedPc, uintptr_t methodId, bool *ok) {
+        for (int i = 0; i < ITERATIONS; i++) {
+            // every iteration is a fresh sequence: pooled ctxs guarantee a
+            // never-reused address, so each step re-initializes deterministically
+            SafeMemContext &ctx = NewSteedCtx();
+            world->Register(ctx);
+            ctx.AddRange(reinterpret_cast<uintptr_t>(&frame->slots[0]),
+                          reinterpret_cast<uintptr_t>(&frame->slots[5]));
+            uintptr_t fpOut = 0;
+            uintptr_t pcOut = 0;
+            if (!SteedStep(ctx, frame->Fp(), faultPc, fpOut, pcOut, methodId) ||
+                pcOut != expectedPc) {
+                *ok = false;
+                return;
+            }
+        }
+        *ok = true;
+    };
+
+    bool okA = false;
+    bool okB = false;
+    // both threads hammer their own sequences at the same time; a process-wide
+    // pc stash would cross-contaminate within a few iterations
+    std::thread threadA(runSequence, &worldA, &frameA, worldA.funcAddr + 9,
+                        worldA.bytecodeArray + 100, methodIdA, &okA);
+    std::thread threadB(runSequence, &worldB, &frameB, worldB.funcAddr + 17,
+                        worldB.bytecodeArray + 500, methodIdB, &okB);
+    threadA.join();
+    threadB.join();
+    EXPECT_TRUE(okA);
+    EXPECT_TRUE(okB);
+    JsStackInfo::machineCodeMap.clear();
+}
+
+/**
+ * @tc.name: SteedRecordJit_MethodIdResolution
+ * @tc.desc: The record-jit map key is the abc methodId resolved from
+ *   JSFunction -> Method -> literalInfo, never the caller's slot (faultloggerd
+ *   keeps it 0): the resolved id is written back, EntityId(0) never appears,
+ *   and an unresolvable Method only skips the code recording while the frame
+ *   itself is still stepped and resolved.
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(JsStackInfoTest, SteedRecordJit_MethodIdResolution)
+{
+    // (a) resolved: fake Method carries methodId 0x5678 in its literalInfo
+    {
+        constexpr uintptr_t kMethodId = 0x5678;
+        SteedFuncWorld world;
+        world.Build(true, true, false, 8, 100, 0, 0, 0, 0, static_cast<uint32_t>(kMethodId));
+        SteedFrameMem frame(world.jsFunc, 0, 0x1111);
+        SafeMemContext &ctx = NewSteedCtx();
+        world.Register(ctx);
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&frame.slots[0]),
+                     reinterpret_cast<uintptr_t>(&frame.slots[5]));
+
+        uintptr_t fp = frame.Fp();
+        uintptr_t sp = 0;
+        uintptr_t pc = world.funcAddr + 9;
+        uintptr_t methodId = 0;  // simulates faultloggerd's always-0 slot
+        bool isJsFrame = true;
+        StepFrameType ft = StepFrameType::JS_FRAME;
+        std::vector<uintptr_t> jitCache;
+        ArkUnwindParam param(&ctx, SafeReadMemFuncForJit, &fp, &sp, &pc, &methodId,
+                             &isJsFrame, &ft, 0, jitCache);
+        ASSERT_TRUE(step_ark_with_record_jit(&param) == 1);
+        EXPECT_EQ(pc, world.bytecodeArray + 100);
+        // resolved id is written back to the caller's slot and used as the key
+        EXPECT_EQ(methodId, kMethodId);
+        ASSERT_EQ(jitCache.size(), 1U);
+        EXPECT_EQ(jitCache[0], kMethodId);
+        EXPECT_EQ(JsStackInfo::machineCodeMap.count(EntityId(kMethodId)), 1U);
+        EXPECT_EQ(JsStackInfo::machineCodeMap.count(EntityId(0)), 0U);
+        EXPECT_EQ(JsStackInfo::machineCodeMap[EntityId(kMethodId)].size(),
+                  static_cast<size_t>(SteedFuncWorld::TEXT_SIZE));
+        JsStackInfo::machineCodeMap.clear();
+    }
+    // (b) degraded: literalInfo carries no methodId -> no recording, the frame
+    // itself is still stepped, resolved and reported
+    {
+        SteedFuncWorld world;
+        world.Build(true, true, false, 8, 100, 0, 0, 0, 0, 0);
+        SteedFrameMem frame(world.jsFunc, 0, 0x1111);
+        SafeMemContext &ctx = NewSteedCtx();
+        world.Register(ctx);
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&frame.slots[0]),
+                     reinterpret_cast<uintptr_t>(&frame.slots[5]));
+
+        uintptr_t fp = frame.Fp();
+        uintptr_t sp = 0;
+        uintptr_t pc = world.funcAddr + 9;
+        uintptr_t methodId = 0;
+        bool isJsFrame = true;
+        StepFrameType ft = StepFrameType::JS_FRAME;
+        std::vector<uintptr_t> jitCache;
+        ArkUnwindParam param(&ctx, SafeReadMemFuncForJit, &fp, &sp, &pc, &methodId,
+                             &isJsFrame, &ft, 0, jitCache);
+        ASSERT_TRUE(step_ark_with_record_jit(&param) == 1);
+        EXPECT_EQ(pc, world.bytecodeArray + 100);
+        EXPECT_EQ(methodId, 0U);  // slot untouched
+        EXPECT_TRUE(jitCache.empty());
+        EXPECT_TRUE(JsStackInfo::machineCodeMap.empty());
+        JsStackInfo::machineCodeMap.clear();
+    }
+}
+
+/**
+ * @tc.name: SteedPcStateMachine_ReadFailureCleanup
+ * @tc.desc: A failed cross-process read only degrades the current frame; a
+ *   failed frame-type read ends the sequence and clears the continuity state,
+ *   so a subsequent sequence starts with clean first-frame semantics (INV-1).
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(JsStackInfoTest, SteedPcStateMachine_ReadFailureCleanup)
+{
+    // (a) container copy fails halfway (unmapped page inside the ASTB): the
+    // whole candidate is dropped (no partial results) and the frame degrades
+    {
+        SteedFuncWorld world;
+        world.Build(true, true, false, 32, 400, 0, 0);
+        SteedFrameMem frame(world.jsFunc, 0, 0x1111);
+        SafeMemContext &ctx = NewSteedCtx();
+        // machine code object registered only through the container header
+        // plus one word: the header parses, the body copy then fails
+        ctx.AddRange(world.machineCode, world.machineCode + MachineCode::SIZE +
+                      arksteed::ArkSteedTableContainerHeader::SIZE + sizeof(uintptr_t));
+        ctx.AddRange(world.jsFunc, world.jsFunc + world.jsFuncObj.size());
+        ctx.AddRange(world.method, world.method + world.methodObj.size());
+        ctx.AddRange(world.funcAddr, world.funcAddr + world.text.size());
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&frame.slots[0]),
+                      reinterpret_cast<uintptr_t>(&frame.slots[5]));
+        uintptr_t fpOut = 0;
+        uintptr_t pcOut = 0;
+        ASSERT_TRUE(SteedStep(ctx, frame.Fp(), world.funcAddr + 33, fpOut, pcOut));
+        EXPECT_EQ(pcOut, world.bytecodeArray);
+        JsStackInfo::machineCodeMap.clear();
+    }
+    // (b) unreadable frame type: the step fails, the state is cleared; a
+    // same-ctx continuation afterwards proves the reset (without it the stale
+    // candidate would degrade the frame instead)
+    {
+        SteedFuncWorld world;
+        world.Build(true, true, false, 16, 200, 0, 0);
+        SteedFrameMem frame(world.jsFunc, 0, 0x1111);
+        SteedFrameMem ghost(world.jsFunc, 0, 0x3333);  // not registered anywhere
+        SafeMemContext &ctx = NewSteedCtx();
+        world.Register(ctx);
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&frame.slots[0]),
+                      reinterpret_cast<uintptr_t>(&frame.slots[5]));
+        uintptr_t fpOut = 0;
+        uintptr_t pcOut = 0;
+        ASSERT_TRUE(SteedStep(ctx, frame.Fp(), world.funcAddr + 17, fpOut, pcOut));
+        EXPECT_EQ(pcOut, world.bytecodeArray + 200);
+
+        // fp in unregistered memory: the frame-type read fails, the step fails
+        EXPECT_FALSE(SteedStep(ctx, ghost.Fp(), pcOut, fpOut, pcOut));
+
+        // the failure path cleared the state: this continuation reuses the
+        // same ctx and must resolve via its own fault pc
+        ASSERT_TRUE(SteedStep(ctx, frame.Fp(), world.funcAddr + 17, fpOut, pcOut));
+        EXPECT_EQ(pcOut, world.bytecodeArray + 200);
+        JsStackInfo::machineCodeMap.clear();
+    }
+}
+
+/**
+ * @tc.name: SteedPcStateMachine_NoDumpNoCrosstalk
+ * @tc.desc: A sequence that ends without ark_write_jit_code leaves no usable
+ *   state behind: a new sequence with a new ctx re-initializes (first-frame
+ *   fault pc semantics), never a stale candidate.
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(JsStackInfoTest, SteedPcStateMachine_NoDumpNoCrosstalk)
+{
+    SteedFuncWorld worldCallee;
+    worldCallee.Build(true, true, false, 8, 100, 0, 0);
+    // caller world has two entries: 40 -> 600 (captured return address) and
+    // 20 -> 200 (the new sequence's own fault pc)
+    SteedFuncWorld worldCaller;
+    worldCaller.Build(true, true, false, 40, 600, 0, 0, 20, 200);
+    SteedFrameMem callerFrame(worldCaller.jsFunc, 0, 0x9999);
+    SteedFrameMem calleeFrame(worldCallee.jsFunc, callerFrame.Fp(), worldCaller.funcAddr + 41);
+    SteedFrameMem freshFrame(worldCaller.jsFunc, 0, 0x1234);
+
+    SafeMemContext &ctxA = NewSteedCtx();
+    worldCallee.Register(ctxA);
+    worldCaller.Register(ctxA);
+    ctxA.AddRange(reinterpret_cast<uintptr_t>(&callerFrame.slots[0]),
+                  reinterpret_cast<uintptr_t>(&callerFrame.slots[5]));
+    ctxA.AddRange(reinterpret_cast<uintptr_t>(&calleeFrame.slots[0]),
+                  reinterpret_cast<uintptr_t>(&calleeFrame.slots[5]));
+
+    // sequence A: two frames, ends WITHOUT ark_write_jit_code
+    uintptr_t fpOut = 0;
+    uintptr_t pcOut = 0;
+    ASSERT_TRUE(SteedStep(ctxA, calleeFrame.Fp(), worldCallee.funcAddr + 9, fpOut, pcOut));
+    EXPECT_EQ(pcOut, worldCallee.bytecodeArray + 100);
+    ASSERT_TRUE(SteedStep(ctxA, fpOut, pcOut, fpOut, pcOut));
+    EXPECT_EQ(pcOut, worldCaller.bytecodeArray + 600);
+
+    // sequence B (a new ctx): must re-initialize and resolve via its own fault
+    // pc (boundary 20 -> 200); a stale candidate (the caller frame's 0x9999
+    // garbage) would degrade the frame to bc 0 instead
+    SafeMemContext &ctxB = NewSteedCtx();
+    worldCaller.Register(ctxB);
+    ctxB.AddRange(reinterpret_cast<uintptr_t>(&freshFrame.slots[0]),
+                  reinterpret_cast<uintptr_t>(&freshFrame.slots[5]));
+    ASSERT_TRUE(SteedStep(ctxB, freshFrame.Fp(), worldCaller.funcAddr + 21, fpOut, pcOut));
+    EXPECT_EQ(pcOut, worldCaller.bytecodeArray + 200);
+    JsStackInfo::machineCodeMap.clear();
+}
+
+/**
+ * @tc.name: SteedPcStateMachine_ReturnAddrFrameTypes
+ * @tc.desc: The per-frame-type return-address capture reads each frame type's
+ *   own slot (leave/builtin/bridge/optimized/fastjit geometry with sentinels
+ *   in every other slot); interpreter-style and entry frames invalidate the
+ *   candidate so the next STEED caller degrades instead of misreporting.
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(JsStackInfoTest, SteedPcStateMachine_ReturnAddrFrameTypes)
+{
+    struct SlotCase {
+        FrameType type;
+        size_t typeOffset;
+        size_t prevOffset;
+        size_t retAddrOffset;  // MiddleFrameMem::NO_RETURN_ADDR = invalidating
+        bool needsFunctionSlot;  // FASTJIT: record-jit reads the function slot
+    };
+    const SlotCase cases[] = {
+        { FrameType::BUILTIN_FRAME, BuiltinFrame::GetTypeOffset(), BuiltinFrame::GetPrevOffset(),
+          BuiltinFrame::GetReturnAddrOffset(), false },
+        { FrameType::LEAVE_FRAME, OptimizedLeaveFrame::GetTypeOffset(), OptimizedLeaveFrame::GetPrevOffset(),
+          OptimizedLeaveFrame::GetReturnAddrOffset(), false },
+        { FrameType::ASM_INTERPRETER_BRIDGE_FRAME, AsmInterpretedBridgeFrame::GetTypeOffset(),
+          AsmInterpretedBridgeFrame::GetPrevOffset(),
+          AsmInterpretedBridgeFrame::GetReturnAddrOffset(false), false },
+        { FrameType::OPTIMIZED_JS_FUNCTION_FRAME, OptimizedJSFunctionFrame::GetTypeOffset(),
+          OptimizedJSFunctionFrame::GetPrevOffset(), OptimizedJSFunctionFrame::GetReturnAddrOffset(), false },
+        { FrameType::FASTJIT_FUNCTION_FRAME, FASTJITFunctionFrame::GetTypeOffset(),
+          FASTJITFunctionFrame::GetPrevOffset(),
+          FASTJITFunctionFrame::GetPrevOffset() + sizeof(uintptr_t), true },
+        { FrameType::ASM_INTERPRETER_FRAME, AsmInterpretedFrame::GetTypeOffset(),
+          AsmInterpretedFrame::GetPrevOffset(), MiddleFrameMem::NO_RETURN_ADDR, false },
+        { FrameType::INTERPRETER_FRAME, InterpretedFrame::GetTypeOffset(),
+          InterpretedFrame::GetPrevOffset(), MiddleFrameMem::NO_RETURN_ADDR, false },
+    };
+
+    for (const auto &slotCase : cases) {
+        // first STEED frame's world; the second STEED frame's world has two
+        // entries: the marker (40 -> 600) and the stale-looking candidate
+        // (24 -> 300, used as the first frame's return address)
+        SteedFuncWorld worldX;
+        worldX.Build(true, true, false, 8, 100, 0, 0);
+        SteedFuncWorld worldY;
+        worldY.Build(true, true, false, 40, 600, 0, 0, 24, 300);
+        // one past the 24 boundary, so a consumed stale candidate would
+        // resolve to 300 under the pc-1 lookup
+        const uintptr_t stale = worldY.funcAddr + 25;
+
+        SteedFrameMem steedY(worldY.jsFunc, 0, 0x6666);
+        MiddleFrameMem middle(static_cast<uintptr_t>(slotCase.type), slotCase.typeOffset,
+                              slotCase.prevOffset, slotCase.retAddrOffset, steedY.Fp(),
+                              slotCase.retAddrOffset != MiddleFrameMem::NO_RETURN_ADDR
+                                  ? worldY.funcAddr + 41  // 41: arbitrary pc; marker resolves to 600
+                                  : 0);
+        if (slotCase.needsFunctionSlot) {
+            // keep the record-jit path happy: a real (fake-world) function
+            middle.Poke(FASTJITFunctionFrame::GetFunctionOffset(), worldY.jsFunc);
+        }
+        SteedFrameMem steedX(worldX.jsFunc, middle.Fp(slotCase.typeOffset), stale);
+
+        SafeMemContext &ctx = NewSteedCtx();
+        worldX.Register(ctx);
+        worldY.Register(ctx);
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&middle.slots[0]),
+                      reinterpret_cast<uintptr_t>(&middle.slots[MiddleFrameMem::NUM_SLOTS]));
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&steedX.slots[0]),
+                      reinterpret_cast<uintptr_t>(&steedX.slots[5]));
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&steedY.slots[0]),
+                      reinterpret_cast<uintptr_t>(&steedY.slots[5]));
+
+        // step 0: the first STEED frame resolves via the sequence fault pc
+        uintptr_t fpOut = 0;
+        uintptr_t pcOut = 0;
+        ASSERT_TRUE(SteedStep(ctx, steedX.Fp(), worldX.funcAddr + 9, fpOut, pcOut))
+            << "frame type " << static_cast<uintptr_t>(slotCase.type);
+        EXPECT_EQ(pcOut, worldX.bytecodeArray + 100);
+
+        // step 1: the middle frame; its return-address slot (if any) feeds
+        // the candidate for the next STEED caller
+        ASSERT_TRUE(SteedStep(ctx, fpOut, pcOut, fpOut, pcOut))
+            << "frame type " << static_cast<uintptr_t>(slotCase.type);
+
+        // step 2: the second STEED frame consumes the candidate
+        ASSERT_TRUE(SteedStep(ctx, steedY.Fp(), pcOut, fpOut, pcOut))
+            << "frame type " << static_cast<uintptr_t>(slotCase.type);
+        if (slotCase.retAddrOffset != MiddleFrameMem::NO_RETURN_ADDR) {
+            // the marker from the middle frame's own return-address slot was
+            // captured (a wrong-slot sentinel read would degrade to 0, a stale
+            // candidate would resolve to 300)
+            EXPECT_EQ(pcOut, worldY.bytecodeArray + 600)
+                << "frame type " << static_cast<uintptr_t>(slotCase.type);
+        } else {
+            // interpreter-style frame: the candidate was invalidated, so the
+            // caller degrades to its first bytecode (never the stale 300)
+            EXPECT_EQ(pcOut, worldY.bytecodeArray)
+                << "frame type " << static_cast<uintptr_t>(slotCase.type);
+        }
+        JsStackInfo::machineCodeMap.clear();
+    }
+
+    // entry-style boundary frame (ArkFrameCheck): no native return address, so
+    // it invalidates the candidate for the next STEED caller
+    {
+        SteedFuncWorld worldX;
+        worldX.Build(true, true, false, 8, 100, 0, 0);
+        SteedFuncWorld worldY;
+        worldY.Build(true, true, false, 40, 600, 0, 0, 24, 300);
+        SteedFrameMem steedY(worldY.jsFunc, 0, 0x6666);
+        EntryFrameMem entry(steedY.Fp(), 0x7777);
+        // one past the 24 boundary: a consumed stale candidate would resolve
+        // to 300 instead of the expected degradation
+        SteedFrameMem steedX(worldX.jsFunc, entry.Fp(), worldY.funcAddr + 25);
+
+        SafeMemContext &ctx = NewSteedCtx();
+        worldX.Register(ctx);
+        worldY.Register(ctx);
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&entry.slots[0]),
+                      reinterpret_cast<uintptr_t>(&entry.slots[EntryFrameMem::NUM_SLOTS]));
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&steedX.slots[0]),
+                      reinterpret_cast<uintptr_t>(&steedX.slots[5]));
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&steedY.slots[0]),
+                      reinterpret_cast<uintptr_t>(&steedY.slots[5]));
+
+        uintptr_t fpOut = 0;
+        uintptr_t pcOut = 0;
+        ASSERT_TRUE(SteedStep(ctx, steedX.Fp(), worldX.funcAddr + 9, fpOut, pcOut));
+        EXPECT_EQ(pcOut, worldX.bytecodeArray + 100);
+        // the entry frame step succeeds and hands the next fp/pc to the driver
+        ASSERT_TRUE(SteedStep(ctx, fpOut, pcOut, fpOut, pcOut));
+        ASSERT_TRUE(SteedStep(ctx, fpOut, pcOut, fpOut, pcOut));
+        // candidate invalidated by the entry frame: degrade, not the stale 300
+        EXPECT_EQ(pcOut, worldY.bytecodeArray);
+        JsStackInfo::machineCodeMap.clear();
+    }
+}
+
+/**
+ * @tc.name: SteedPcBoundaryPositions
+ * @tc.desc: Adjacent position-table boundaries under the pc-1 lookup
+ *   convention (the table is keyed at the call vertex's start, like
+ *   FindBcOffsetByPCOffset): a return address one past a boundary resolves
+ *   to that call's own entry, a return address exactly at the next boundary
+ *   still resolves to the earlier entry (the call instruction ended right at
+ *   the boundary), and a pc whose pc-1 falls before the first entry degrades
+ *   to the function first line (bc 0 is a legal value, not an error).
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(JsStackInfoTest, SteedPcBoundaryPositions)
+{
+    // entries: (32 -> 400) and (36 -> 500)
+    SteedFuncWorld world;
+    world.Build(true, true, false, 32, 400, 0, 0, 36, 500);
+    SteedFrameMem frame(world.jsFunc, 0, 0x1111);
+
+    struct QueryCase {
+        uintptr_t faultPc;
+        uintptr_t expectedPc;
+    };
+    const QueryCase queries[] = {
+        { 32, 0 },    // exactly at the first boundary: pc-1 before the first entry -> degrade
+        { 33, 400 },  // one past the first boundary: the call's own entry
+        { 34, 400 },  // between boundaries: the earlier entry (continuation)
+        { 36, 400 },  // exactly at the next boundary: still the earlier entry
+        { 37, 500 },  // one past the next boundary: the next entry
+        { 60, 500 },  // past the last boundary: the last entry
+        { 4, 0 },     // before the first entry: degrade to the first bytecode
+    };
+    for (const auto &query : queries) {
+        // every query is an independent one-frame sequence (fresh ctx)
+        SafeMemContext &ctx = NewSteedCtx();
+        world.Register(ctx);
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&frame.slots[0]),
+                      reinterpret_cast<uintptr_t>(&frame.slots[5]));
+        uintptr_t fpOut = 0;
+        uintptr_t pcOut = 0;
+        ASSERT_TRUE(SteedStep(ctx, frame.Fp(), world.funcAddr + query.faultPc, fpOut, pcOut));
+        EXPECT_EQ(pcOut, world.bytecodeArray + query.expectedPc);
+    }
+    JsStackInfo::machineCodeMap.clear();
+}
+
+/**
+ * @tc.name: SteedPcDefensiveReads_PageBoundary
+ * @tc.desc: Page-boundary shaped reads against the crash memory: the ASTB
+ *   header starting at the end of a mapped region, the container body
+ *   crossing into an unmapped page, a corrupted position-table byte stream
+ *   and an odd-size container tail (shorter than one machine word) all
+ *   degrade safely or resolve exactly (word-chunked copy with tail trim).
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(JsStackInfoTest, SteedPcDefensiveReads_PageBoundary)
+{
+    // (a) container header starts at the end of a mapped region (the first
+    // ASTB word crosses into an unmapped page): the candidate is dropped
+    {
+        SteedFuncWorld world;
+        world.Build(true, true, false, 32, 400, 0, 0);
+        SteedFrameMem frame(world.jsFunc, 0, 0x1111);
+        SafeMemContext &ctx = NewSteedCtx();
+        // machine code object readable only up to the object end: the JitFort
+        // candidate's first header word is unreadable; the after-text
+        // candidate reads the 0xAA padding and fails the MAGIC check
+        ctx.AddRange(world.machineCode, world.machineCode + MachineCode::SIZE);
+        ctx.AddRange(world.jsFunc, world.jsFunc + world.jsFuncObj.size());
+        ctx.AddRange(world.method, world.method + world.methodObj.size());
+        ctx.AddRange(world.funcAddr, world.funcAddr + world.text.size());
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&frame.slots[0]),
+                      reinterpret_cast<uintptr_t>(&frame.slots[5]));
+        uintptr_t fpOut = 0;
+        uintptr_t pcOut = 0;
+        ASSERT_TRUE(SteedStep(ctx, frame.Fp(), world.funcAddr + 33, fpOut, pcOut));
+        EXPECT_EQ(pcOut, world.bytecodeArray);
+        JsStackInfo::machineCodeMap.clear();
+    }
+    // (b) container body crosses into an unmapped page halfway: the whole
+    // candidate is dropped, no partial results are consumed
+    {
+        SteedFuncWorld world;
+        world.Build(true, true, false, 32, 400, 0, 0);
+        SteedFrameMem frame(world.jsFunc, 0, 0x1111);
+        SafeMemContext &ctx = NewSteedCtx();
+        // header plus exactly one body word readable
+        ctx.AddRange(world.machineCode, world.machineCode + MachineCode::SIZE +
+                      arksteed::ArkSteedTableContainerHeader::SIZE + sizeof(uintptr_t));
+        ctx.AddRange(world.jsFunc, world.jsFunc + world.jsFuncObj.size());
+        ctx.AddRange(world.method, world.method + world.methodObj.size());
+        ctx.AddRange(world.funcAddr, world.funcAddr + world.text.size());
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&frame.slots[0]),
+                      reinterpret_cast<uintptr_t>(&frame.slots[5]));
+        uintptr_t fpOut = 0;
+        uintptr_t pcOut = 0;
+        ASSERT_TRUE(SteedStep(ctx, frame.Fp(), world.funcAddr + 33, fpOut, pcOut));
+        EXPECT_EQ(pcOut, world.bytecodeArray);
+        JsStackInfo::machineCodeMap.clear();
+    }
+    // (c) corrupted position-table byte stream (numEntries overflow): the
+    // lookup rejects it and the frame degrades instead of misreporting
+    {
+        SteedFuncWorld world;
+        world.Build(true, true, false, 32, 400, 0, 0);
+        // position table (no safepoint section) starts right after the
+        // 24-byte container header; smash its numEntries field
+        PutField<uint32_t>(world.machineCodeObj, MachineCode::SIZE +
+                           arksteed::ArkSteedTableContainerHeader::SIZE, 0xFFFFFFFF);
+        SteedFrameMem frame(world.jsFunc, 0, 0x1111);
+        SafeMemContext &ctx = NewSteedCtx();
+        world.Register(ctx);
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&frame.slots[0]),
+                      reinterpret_cast<uintptr_t>(&frame.slots[5]));
+        uintptr_t fpOut = 0;
+        uintptr_t pcOut = 0;
+        ASSERT_TRUE(SteedStep(ctx, frame.Fp(), world.funcAddr + 33, fpOut, pcOut));
+        EXPECT_EQ(pcOut, world.bytecodeArray);
+        JsStackInfo::machineCodeMap.clear();
+    }
+    // (d) odd-size container (tail shorter than one machine word): the
+    // word-chunked copy trims the tail and the resolution stays exact
+    {
+        SteedFuncWorld world;
+        // safepoint-only body: 16B header + 12B entry + 1B vreg SLEB + 2B
+        // bc SLEB (bc >= 128 needs two bytes) = 31 bytes, so the container
+        // size is 24 + 31 = 55 (not a multiple of the machine word)
+        world.Build(true, false, true, 0, 0, 24, 300);
+        SteedFrameMem frame(world.jsFunc, 0, 0x1111);
+        SafeMemContext &ctx = NewSteedCtx();
+        world.Register(ctx);
+        ctx.AddRange(reinterpret_cast<uintptr_t>(&frame.slots[0]),
+                      reinterpret_cast<uintptr_t>(&frame.slots[5]));
+        uintptr_t fpOut = 0;
+        uintptr_t pcOut = 0;
+        ASSERT_TRUE(SteedStep(ctx, frame.Fp(), world.funcAddr + 24, fpOut, pcOut));
+        EXPECT_EQ(pcOut, world.bytecodeArray + 300);
+        JsStackInfo::machineCodeMap.clear();
+    }
+}
+#endif  // ECMASCRIPT_ENABLE_ARK_STEED
 
 HWTEST_F_L0(JsStackInfoTest, MatchLineAndRevisedOffset) {
     const std::string fileName = STACKINFO_TEST_ABC_FILES_DIR"index.abc";

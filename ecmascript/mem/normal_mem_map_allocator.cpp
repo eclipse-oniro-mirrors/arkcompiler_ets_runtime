@@ -168,6 +168,17 @@ MemMap MemMapAllocator::Allocate(const uint32_t threadId, size_t size, size_t al
     }
     PageTagType type = isMachineCode ? PageTagType::MACHINE_CODE : PageTagType::HEAP;
 
+#if defined(PANDA_TARGET_MACOS)
+    // Keep all macOS machine-code mappings out of the ordinary heap pools:
+    // MAP_JIT is required both for regular and huge executable regions.
+    if (isMachineCode) {
+        MemMap mem = PageMap(size, PAGE_PROT_EXEC_READWRITE, alignment);
+        InitialMemPool(mem, threadId, size, spaceName, isMachineCode, isEnableJitFort, shouldPageTag, type);
+        IncreaseMemMapTotalSize(size);
+        return mem;
+    }
+#endif
+
     if (regular) {
         if (isCompress) {
             // GC do not allocate NonMovable or ReadOnly object

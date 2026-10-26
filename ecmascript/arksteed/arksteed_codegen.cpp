@@ -20,20 +20,26 @@
 #include <optional>
 #include <sstream>
 
-#include "ecmascript/arksteed/arksteed_assembler-inl.h"  // IWYU pragma: keep
+#include "ecmascript/arksteed/arksteed_assembler-inl.h" // IWYU pragma: keep
 #include "ecmascript/arksteed/arksteed_deopt_helper.h"
 #include "ecmascript/arksteed/arksteed_dump_helper.h"
 #include "ecmascript/arksteed/arksteed_register_merge_state.h"
 #include "ecmascript/arksteed/arksteed_safepoint_table.h"
 #include "ecmascript/arksteed/arksteed_write_barrier.h"
+#include "ecmascript/base/config.h"
 #include "ecmascript/base/number_helper.h"
+#include "ecmascript/builtin_entries.h"
 #include "ecmascript/byte_array.h"
 #include "ecmascript/compiler/common_stub_csigns.h"
 #include "ecmascript/deoptimizer/deoptimizer.h"
+#include "ecmascript/global_env.h"
 #include "ecmascript/global_env_constants.h"
 #include "ecmascript/ic/ic_handler.h"
+#include "ecmascript/ic/property_box.h"
 #include "ecmascript/ic/proto_change_details.h"
+#include "ecmascript/js_array.h"
 #include "ecmascript/js_arraybuffer.h"
+#include "ecmascript/js_arguments.h"
 #include "ecmascript/js_function.h"
 #include "ecmascript/js_hclass.h"
 #include "ecmascript/js_native_pointer.h"
@@ -41,14 +47,100 @@
 #include "ecmascript/js_tagged_value.h"
 #include "ecmascript/js_tagged_value_internals.h"
 #include "ecmascript/js_typed_array.h"
-#include "ecmascript/message_string.h"
+#include "ecmascript/layout_info.h"
+#include "ecmascript/mem/machine_code.h"
+#include "ecmascript/mem/mem.h"
 #include "ecmascript/mem/tagged_object.h"
+#include "ecmascript/message_string.h"
+#include "ecmascript/string/base_string.h"
 #include "ecmascript/tagged_array.h"
 
 namespace panda::ecmascript::arksteed {
+#define __ assembler_->
+
 constexpr JSTaggedType HCLASS_ADDRESS_MASK = ~JSTaggedValueInternals::TAG_MARK;
 
-#define __ assembler_->
+namespace {
+
+class DeferredCopyCOWElements final : public ArkSteedDeferredCode {
+public:
+    DeferredCopyCOWElements(ArkSteedRegister object, ArkSteedRegister result,
+                            const DeferredRegisterSnapshot &snapshot,
+                            ArkSteedSafepointTableBuilder *safepointBuilder)
+        : object_(object), result_(result), snapshot_(snapshot), safepointBuilder_(safepointBuilder)
+    {}
+
+    Label *GetReturnLabel()
+    {
+        return &returnLabel_;
+    }
+
+    void Generate(ArkSteedAssembler *assembler) override
+    {
+        // The result replaces the first input. RA preserves that input elsewhere if it is still live.
+        snapshot_.liveRegisters.Clear(result_);
+        snapshot_.liveTaggedRegisters.Clear(result_);
+        ArkSteedRegList untagged = snapshot_.liveRegisters - snapshot_.liveTaggedRegisters;
+        // Keep raw integers/doubles above the GC root range, with a padding slot at the frame boundary.
+        // Each area has an even slot count so the call remains 16-byte aligned.
+        // 2: padding slots at the tagged/untagged frame boundary
+        int32_t untaggedSlots = (untagged.Count() + snapshot_.liveDoubleRegisters.Count() + 2) & ~1;
+        int32_t taggedSlots = (snapshot_.liveTaggedRegisters.Count() + 1) & ~1;
+        int32_t totalSlots = untaggedSlots + taggedSlots;
+        assembler->ReserveCallArgSlots(totalSlots);
+
+        int32_t slot = taggedSlots;
+        for (ArkSteedRegister reg : untagged) {
+            assembler->MoveRepr(MachineRepresentation::Word64, assembler->GetCallArgSlot(slot++), reg);
+        }
+        for (ArkSteedDoubleRegister reg : snapshot_.liveDoubleRegisters) {
+            assembler->StoreFloat64(assembler->GetCallArgSlot(slot++), reg);
+        }
+        slot = 0;
+        for (ArkSteedRegister reg : snapshot_.liveTaggedRegisters) {
+            assembler->MoveRepr(MachineRepresentation::Tagged, assembler->GetCallArgSlot(slot++), reg);
+        }
+
+        // Save all live registers before setting up the stub ABI; the input may overlap either argument.
+        assembler->Move(ArkSteedAssembler::GetParameterRegister(1), object_);
+        assembler->LoadGlue(ArkSteedAssembler::GetParameterRegister(0));
+        if (slot < taggedSlots) {
+            TemporaryRegisterScope scope(assembler);
+            ArkSteedRegister scratch = scope.AcquireScratch();
+            assembler->LoadTaggedValue(scratch, JSTaggedValue::VALUE_UNDEFINED);
+            assembler->MoveRepr(MachineRepresentation::Tagged, assembler->GetCallArgSlot(slot), scratch);
+        }
+        assembler->RecordComment("CopyCOWElements deferred call");
+        assembler->CallCommonStub(kungfu::CommonStubCSigns::CopyCOWElements);
+        // Steed's range scanner ends one slot below the local frame before subtracting extra slots.
+        // Subtract untaggedSlots - 1 to exclude raw saves and scan only tagged saves during GC.
+        safepointBuilder_->DefineSafepoint(assembler->GetPcOffset()).SetNumExtraSpillSlots(untaggedSlots - 1);
+        assembler->Move(result_, kReturnRegister);
+
+        slot = 0;
+        for (ArkSteedRegister reg : snapshot_.liveTaggedRegisters) {
+            assembler->MoveRepr(MachineRepresentation::Tagged, reg, assembler->GetCallArgSlot(slot++));
+        }
+        slot = taggedSlots;
+        for (ArkSteedRegister reg : untagged) {
+            assembler->MoveRepr(MachineRepresentation::Word64, reg, assembler->GetCallArgSlot(slot++));
+        }
+        for (ArkSteedDoubleRegister reg : snapshot_.liveDoubleRegisters) {
+            assembler->LoadFloat64(reg, assembler->GetCallArgSlot(slot++));
+        }
+        assembler->FreeCallArgSlots(totalSlots);
+        assembler->Jump(&returnLabel_);
+    }
+
+private:
+    ArkSteedRegister object_;
+    ArkSteedRegister result_;
+    DeferredRegisterSnapshot snapshot_;
+    ArkSteedSafepointTableBuilder *safepointBuilder_;
+    Label returnLabel_;
+};
+
+}  // namespace
 
 class GapMoveResolver {
 public:
@@ -580,7 +672,8 @@ int64_t GetConstantForDeopt(const ValueVertex *value, int32_t vregId)
         case VertexOpcode::Float64Constant: {
             ASSERT(vregId != static_cast<int32_t>(SpecVregIndex::PC_OFFSET_INDEX));
             ASSERT(vregId != static_cast<int32_t>(SpecVregIndex::INLINE_DEPTH));
-            uint64_t raw = static_cast<uint64_t>(GetFloat64RawBits(value->Cast<Float64ConstantVertex>()->GetValue()));
+            uint64_t raw = static_cast<uint64_t>(
+                GetFloat64RawBits(value->Cast<Float64ConstantVertex>()->GetValue()));
             if (raw >= static_cast<uint64_t>(JSTaggedValue::TAG_INT - JSTaggedValue::DOUBLE_ENCODE_OFFSET)) {
                 return static_cast<int64_t>(JSTaggedValue(base::NAN_VALUE).GetRawData());
             }
@@ -592,8 +685,8 @@ int64_t GetConstantForDeopt(const ValueVertex *value, int32_t vregId)
 }
 
 void AppendDeoptSource(std::vector<ArkSteedDeoptValue> *deopts,
-                       const LazyDeoptimizableMixin::LazyDeoptFrameValue &frameValue, ArkSteedAssembler *assembler,
-                       DeoptLiteralTableBuilder *literalTableBuilder)
+                       const LazyDeoptimizableMixin::LazyDeoptFrameValue &frameValue,
+                       ArkSteedAssembler *assembler, DeoptLiteralTableBuilder *literalTableBuilder)
 {
     const InstructionOperand &operand = frameValue.sourceLocation.GetOperand();
     if (operand.IsConstant()) {
@@ -605,8 +698,8 @@ void AppendDeoptSource(std::vector<ArkSteedDeoptValue> *deopts,
                 literalTableBuilder->GetOrAdd(heapConstant->GetHandleIndex()),
             });
         } else {
-            deopts->push_back(
-                MakeConstantDeopt(frameValue.vreg, GetConstantForDeopt(frameValue.value, frameValue.vreg)));
+            deopts->push_back(MakeConstantDeopt(
+                frameValue.vreg, GetConstantForDeopt(frameValue.value, frameValue.vreg)));
         }
         return;
     }
@@ -622,7 +715,8 @@ void AppendDeoptSource(std::vector<ArkSteedDeoptValue> *deopts,
     });
 }
 
-void AppendDeoptSources(std::vector<ArkSteedDeoptValue> *deopts, const LazyDeoptimizableMixin *lazy,
+void AppendDeoptSources(std::vector<ArkSteedDeoptValue> *deopts,
+                        const LazyDeoptimizableMixin *lazy,
                         ArkSteedAssembler *assembler, DeoptLiteralTableBuilder *literalTableBuilder)
 {
     if (lazy == nullptr || !lazy->HasLazyDeoptFrameState()) {
@@ -631,6 +725,34 @@ void AppendDeoptSources(std::vector<ArkSteedDeoptValue> *deopts, const LazyDeopt
     for (const auto &frameValue : lazy->GetLazyDeoptFrameState()) {
         AppendDeoptSource(deopts, frameValue, assembler, literalTableBuilder);
     }
+}
+
+void AppendBaseConstructorSources(std::vector<ArkSteedDeoptValue> *deopts,
+                                  const CallBaseConstructorVertex *call, ArkSteedAssembler *assembler)
+{
+    deopts->push_back(MakeConstantDeopt(
+        static_cast<int32_t>(SpecVregIndex::DEOPT_CONTINUATION_KIND_INDEX),
+        static_cast<int64_t>(EncodeDeoptContinuationKind(DeoptContinuationKind::BASE_CTOR))));
+    const InstructionOperand &thisOperand = call->GetInputLocation(CallBaseConstructorVertex::THIS_INDEX)->GetOperand();
+    ASSERT(thisOperand.IsAnyStackSlot());
+    auto thisSlot = AllocatedState::Cast(thisOperand);
+    deopts->push_back({
+        static_cast<kungfu::LLVMStackMapType::VRegId>(SpecVregIndex::BASE_CONSTRUCTOR_THIS_INDEX),
+        ArkSteedDeoptValueKind::STACK_SLOT,
+        EncodeLazyDeoptOffset(
+            assembler->GetFramePointerOffsetForStackSlot(thisSlot.GetIndex(), thisSlot.GetRepresentation()),
+            DeoptTranslationKind::TAGGED),
+        static_cast<kungfu::LLVMStackMapType::DwarfRegType>(GCStackMapRegisters::FP),
+    });
+}
+
+void AppendDerivedConstructorSources(std::vector<ArkSteedDeoptValue> *deopts,
+                                     const CallDerivedConstructorVertex *call)
+{
+    (void)call;
+    deopts->push_back(MakeConstantDeopt(
+        static_cast<int32_t>(SpecVregIndex::DEOPT_CONTINUATION_KIND_INDEX),
+        static_cast<int64_t>(EncodeDeoptContinuationKind(DeoptContinuationKind::DERIVED_CTOR))));
 }
 
 template <class NodeT>
@@ -645,9 +767,9 @@ bool HasLazyDeoptSafepointFor(const NodeT *vertex)
 bool HasLazyDeoptSafepoint(const Vertex *vertex)
 {
     switch (vertex->GetOpcode()) {
-#define CHECK_LAZY_DEOPT_INPUTS(type) \
-    case VertexOpcode::type:          \
-        return HasLazyDeoptSafepointFor(vertex->Cast<type##Vertex>());
+#define CHECK_LAZY_DEOPT_INPUTS(type)                   \
+        case VertexOpcode::type:                        \
+            return HasLazyDeoptSafepointFor(vertex->Cast<type##Vertex>());
         ALL_VERTEX_LIST(CHECK_LAZY_DEOPT_INPUTS)
 #undef CHECK_LAZY_DEOPT_INPUTS
         default:
@@ -656,7 +778,8 @@ bool HasLazyDeoptSafepoint(const Vertex *vertex)
 }
 
 template <class NodeT>
-void EmitLazyDeoptSafepoint(ArkSteedAssembler *assembler, ArkSteedSafepointTableBuilder *safepointBuilder,
+void EmitLazyDeoptSafepoint(ArkSteedAssembler *assembler,
+                            ArkSteedSafepointTableBuilder *safepointBuilder,
                             DeoptLiteralTableBuilder *literalTableBuilder, const NodeT *vertex)
 {
     static_assert(std::is_base_of_v<LazyDeoptimizableMixin, NodeT>);
@@ -665,8 +788,16 @@ void EmitLazyDeoptSafepoint(ArkSteedAssembler *assembler, ArkSteedSafepointTable
     ASSERT(lazy->HasLazyDeoptFrameState());
 
     std::vector<ArkSteedDeoptValue> deopts;
+    // 3: INLINE_DEPTH plus at most two base-constructor sources
+    deopts.reserve(lazy->GetLazyDeoptFrameState().size() + 3);
     deopts.emplace_back(MakeConstantDeopt(static_cast<int32_t>(SpecVregIndex::INLINE_DEPTH), 0));
     AppendDeoptSources(&deopts, lazy, assembler, literalTableBuilder);
+    if constexpr (std::is_same_v<NodeT, CallBaseConstructorVertex>) {
+        AppendBaseConstructorSources(&deopts, vertex, assembler);
+    }
+    if constexpr (std::is_same_v<NodeT, CallDerivedConstructorVertex>) {
+        AppendDerivedConstructorSources(&deopts, vertex);
+    }
 
     ExceptionHandlerKind exceptionHandlerKind = ExceptionHandlerKind::NONE;
     if constexpr (std::is_base_of_v<ThrowableMixin, NodeT>) {
@@ -709,7 +840,8 @@ Condition OrderedFloat64Condition(Condition condition)
     }
 }
 
-void EmitTaggedBooleanFromFloat64Compare(ArkSteedAssembler *assembler_, ArkSteedRegister dst, Condition condition)
+void EmitTaggedBooleanFromFloat64Compare(ArkSteedAssembler *assembler_, ArkSteedRegister dst,
+                                         Condition condition)
 {
     Label trueLabel;
     Label falseLabel;
@@ -745,7 +877,8 @@ void BranchOnFloat64Compare(ArkSteedAssembler *assembler_, Condition condition, 
 }
 }  // namespace
 
-Label *ArkSteedCodeGenerator::RecordEagerDeoptTarget(const EagerDeoptimizableMixin *vertex, kungfu::DeoptType type)
+Label *ArkSteedCodeGenerator::RecordEagerDeoptTarget(
+    const EagerDeoptimizableMixin *vertex, kungfu::DeoptType type)
 {
     ASSERT(safepointBuilder_ != nullptr);
     ASSERT(translationBuilder_ != nullptr);
@@ -767,13 +900,14 @@ Label *ArkSteedCodeGenerator::RecordEagerDeoptTarget(const EagerDeoptimizableMix
     return &target->label;
 }
 
-void ArkSteedCodeGenerator::BranchToEagerDeoptTarget(Condition condition, const EagerDeoptimizableMixin *vertex,
-                                                     kungfu::DeoptType type)
+void ArkSteedCodeGenerator::BranchToEagerDeoptTarget(
+    Condition condition, const EagerDeoptimizableMixin *vertex, kungfu::DeoptType type)
 {
     __ JumpIf(condition, RecordEagerDeoptTarget(vertex, type));
 }
 
-void ArkSteedCodeGenerator::EmitEagerDeoptExit(const EagerDeoptimizableMixin *vertex, kungfu::DeoptType type)
+void ArkSteedCodeGenerator::EmitEagerDeoptExit(
+    const EagerDeoptimizableMixin *vertex, kungfu::DeoptType type)
 {
     __ Jump(RecordEagerDeoptTarget(vertex, type));
 }
@@ -814,8 +948,10 @@ void ArkSteedCodeGenerator::EmitQueuedEagerDeoptExits()
     EmitEagerDeoptStackOverflow();
 
     constexpr uint32_t exitSize = ARKSTEED_EAGER_DEOPT_EXIT_SIZE;
-    CHECK(eagerDeoptTargetsById_.size() <= static_cast<size_t>(std::numeric_limits<uint32_t>::max() / exitSize));
-    uint32_t exitClusterSize = static_cast<uint32_t>(eagerDeoptTargetsById_.size() * exitSize);
+    CHECK(eagerDeoptTargetsById_.size() <=
+          static_cast<size_t>(std::numeric_limits<uint32_t>::max() / exitSize));
+    uint32_t exitClusterSize =
+        static_cast<uint32_t>(eagerDeoptTargetsById_.size() * exitSize);
 #if defined(PANDA_TARGET_ARM64)
     // No pool may be emitted inside the fixed-size exit cluster.
     __ CheckCodePools(false, exitClusterSize);
@@ -826,7 +962,8 @@ void ArkSteedCodeGenerator::EmitQueuedEagerDeoptExits()
         EagerDeoptTarget *target = eagerDeoptTargetsById_[index];
         ASSERT(target->deoptId.value == static_cast<uint32_t>(index));
         __ Bind(&target->label);
-        CHECK(target->label.GetPos() == exitStartOffset + static_cast<uint32_t>(index) * exitSize);
+        CHECK(target->label.GetPos() ==
+              exitStartOffset + static_cast<uint32_t>(index) * exitSize);
         uint32_t before = __ GetPcOffset();
         __ Call(&deoptVeneer);
         CHECK(__ GetPcOffset() - before == exitSize);
@@ -845,7 +982,8 @@ void ArkSteedCodeGenerator::VisitNonControlVertex(VertexT *vertex)
 
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<PhiVertex>(PhiVertex *vertex)
-{}
+{
+}
 
 // ========================================= Common Value Opcode =========================================
 
@@ -927,7 +1065,8 @@ int ArkSteedCodeGenerator::PrepareRuntimeStubStackArguments(const Vertex *callVe
     }
 
     for (int paramIdx = 0; paramIdx < argCount; paramIdx++) {
-        ArkSteedAssembler::MemoryOperand destMem = __ GetCallArgSlot(paramIdx + CALL_ARG2);
+        ArkSteedAssembler::MemoryOperand destMem =
+            __ GetCallArgSlot(paramIdx + CALL_ARG2);
         StoreStubStackArgument(callVertex, paramIdx, destMem);
     }
     return reservedSlotCount;
@@ -938,10 +1077,12 @@ void ArkSteedCodeGenerator::LoadSteedExpectedArgc(ArkSteedRegister target, ArkSt
     __ LoadField(expectedArgc, target, JSFunction::METHOD_OFFSET);
     __ LoadField(expectedArgc, expectedArgc, Method::CALL_FIELD_OFFSET);
     __ Lsr(expectedArgc, Method::NumArgsBits::START_BIT);
-    __ And(expectedArgc, static_cast<int64_t>(Method::NumArgsBits::Mask() >> Method::NumArgsBits::START_BIT));
+    __ And(expectedArgc, static_cast<int64_t>(
+        Method::NumArgsBits::Mask() >> Method::NumArgsBits::START_BIT));
 }
 
-void ArkSteedCodeGenerator::ComputeSteedCallSlotCount(CallVertex *call, ArkSteedRegister slotCount)
+template <typename CallVertexT>
+void ArkSteedCodeGenerator::ComputeSteedCallSlotCount(CallVertexT *call, ArkSteedRegister slotCount)
 {
     uint32_t userArgc = call->GetActualArgc();
 
@@ -956,7 +1097,8 @@ void ArkSteedCodeGenerator::ComputeSteedCallSlotCount(CallVertex *call, ArkSteed
     __ And(slotCount, static_cast<int32_t>(~1));
 }
 
-void ArkSteedCodeGenerator::PrepareArkSteedCall(CallVertex *call, ArkSteedRegister target, ArkSteedRegister scratch)
+template <typename CallVertexT>
+void ArkSteedCodeGenerator::PrepareArkSteedCall(CallVertexT *call, ArkSteedRegister target, ArkSteedRegister scratch)
 {
     const uint32_t userArgc = call->GetActualArgc();
     const uint32_t totalArgc = userArgc + NUM_MANDATORY_JSFUNC_ARGS;
@@ -967,107 +1109,75 @@ void ArkSteedCodeGenerator::PrepareArkSteedCall(CallVertex *call, ArkSteedRegist
     __ Sub(scratch, static_cast<int32_t>(NUM_MANDATORY_JSFUNC_ARGS + 1 + userArgc));
     __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0), scratch);
 
-    StoreStubStackArgument(call, CallVertex::TARGET_INDEX, __ GetCallArgSlot(CallVertex::TARGET_INDEX + CALL_ARG1));
-    StoreStubStackArgument(call, CallVertex::NEW_TARGET_INDEX,
-                           __ GetCallArgSlot(CallVertex::NEW_TARGET_INDEX + CALL_ARG1));
-    StoreStubStackArgument(call, CallVertex::THIS_INDEX, __ GetCallArgSlot(CallVertex::THIS_INDEX + CALL_ARG1));
+    StoreStubStackArgument(call, CallVertexT::TARGET_INDEX,
+                           __ GetCallArgSlot(CallVertexT::TARGET_INDEX + CALL_ARG1));
+    StoreStubStackArgument(call, CallVertexT::NEW_TARGET_INDEX,
+                           __ GetCallArgSlot(CallVertexT::NEW_TARGET_INDEX + CALL_ARG1));
+    StoreStubStackArgument(call, CallVertexT::THIS_INDEX,
+                           __ GetCallArgSlot(CallVertexT::THIS_INDEX + CALL_ARG1));
     for (uint32_t i = 0; i < userArgc; i++) {
-        StoreStubStackArgument(call, CallVertex::FIRST_ARG_INDEX + i,
-                               __ GetCallArgSlot(CallVertex::FIRST_ARG_INDEX + CALL_ARG1 + i));
+        StoreStubStackArgument(call, CallVertexT::FIRST_ARG_INDEX + i,
+                               __ GetCallArgSlot(CallVertexT::FIRST_ARG_INDEX + CALL_ARG1 + i));
     }
 
     __ MoveRepr(MachineRepresentation::Word64, target, __ GetCallArgSlot(CALL_ARG0));
     __ PushUndefinedForSteedCall(target, userArgc);
     __ Move(target, static_cast<uint64_t>(totalArgc));
     __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0), target);
-    __ MoveRepr(MachineRepresentation::Tagged, target, __ GetCallArgSlot(CallVertex::TARGET_INDEX + CALL_ARG1));
+    __ MoveRepr(MachineRepresentation::Tagged, target, __ GetCallArgSlot(CallVertexT::TARGET_INDEX + CALL_ARG1));
+}
+
+void ArkSteedCodeGenerator::PrepareKnownCallArguments(const Vertex *call, uint32_t actualArgc, uint32_t expectedArgc,
+                                                      uint32_t firstArgIndex)
+{
+    // 5U: argc slot plus target/newTarget/this slots, rounded up to even
+    const uint32_t reservedSlots = (std::max(actualArgc, expectedArgc) + 5U) & ~1U;
+    __ ReserveCallArgSlots(static_cast<int32_t>(reservedSlots));
+    {
+        TemporaryRegisterScope scope(assembler_);
+        ArkSteedRegister scratch = scope.AcquireScratch();
+        __ Move(scratch, static_cast<uint64_t>(actualArgc + NUM_MANDATORY_JSFUNC_ARGS));
+        __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(0), scratch);
+    }
+    // All three known-call forms have target, newTarget and this in inputs 0..2.
+    for (uint32_t index = 0; index < NUM_MANDATORY_JSFUNC_ARGS; ++index) {
+        StoreStubStackArgument(call, index, __ GetCallArgSlot(index + 1U));
+    }
+    for (uint32_t index = 0; index < actualArgc; ++index) {
+        // 4U: first user-arg slot, after argc + target/newTarget/this
+        StoreStubStackArgument(call, firstArgIndex + index, __ GetCallArgSlot(index + 4U));
+    }
+    if (actualArgc + 4U < reservedSlots) {  // 4U: argc + target/newTarget/this slots
+        TemporaryRegisterScope scope(assembler_);
+        ArkSteedRegister scratch = scope.AcquireScratch();
+        __ Move(scratch, static_cast<int64_t>(JSTaggedValue::VALUE_UNDEFINED));
+        for (uint32_t slot = actualArgc + 4U; slot < reservedSlots; ++slot) {  // 4U: argc + target/newTarget/this slots
+            __ MoveRepr(MachineRepresentation::Tagged, __ GetCallArgSlot(slot), scratch);
+        }
+    }
 }
 
 void ArkSteedCodeGenerator::PrepareArkSteedSelfCall(CallSelfVertex *call)
 {
-    const uint32_t userArgc = call->GetActualArgc();
-    const uint32_t expectedParameterCount = call->GetExpectedParameterCount();
-    const uint32_t totalArgc = userArgc + NUM_MANDATORY_JSFUNC_ARGS;
-    const uint32_t reservedSlotCount = call->GetReservedCallSlotCount();
-    __ ReserveCallArgSlots(static_cast<int32_t>(reservedSlotCount));
-
-    {
-        TemporaryRegisterScope scope(assembler_);
-        ArkSteedRegister scratch = scope.AcquireScratch();
-        __ Move(scratch, static_cast<uint64_t>(totalArgc));
-        __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0), scratch);
-    }
-
-    StoreStubStackArgument(call, CallSelfVertex::TARGET_INDEX,
-                           __ GetCallArgSlot(CallSelfVertex::TARGET_INDEX + CALL_ARG1));
-    StoreStubStackArgument(call, CallSelfVertex::NEW_TARGET_INDEX,
-                           __ GetCallArgSlot(CallSelfVertex::NEW_TARGET_INDEX + CALL_ARG1));
-    StoreStubStackArgument(call, CallSelfVertex::RECEIVER_INDEX,
-                           __ GetCallArgSlot(CallSelfVertex::RECEIVER_INDEX + CALL_ARG1));
-    for (uint32_t index = 0; index < userArgc; index++) {
-        StoreStubStackArgument(call, CallSelfVertex::FIRST_ARG_INDEX + index,
-                               __ GetCallArgSlot(CallVertex::FIRST_ARG_INDEX + CALL_ARG1 + index));
-    }
-
-    const uint32_t userSlotCount = std::max(userArgc, expectedParameterCount);
-    const uint32_t firstUnusedSlot = CallVertex::FIRST_ARG_INDEX + CALL_ARG1 + userArgc;
-    const uint32_t logicalSlotCount = CallVertex::FIRST_ARG_INDEX + CALL_ARG1 + userSlotCount;
-    if (firstUnusedSlot < reservedSlotCount) {
-        TemporaryRegisterScope scope(assembler_);
-        ArkSteedRegister scratch = scope.AcquireScratch();
-        __ Move(scratch, static_cast<int64_t>(JSTaggedValue::VALUE_UNDEFINED));
-        for (uint32_t slot = firstUnusedSlot; slot < logicalSlotCount; slot++) {
-            __ MoveRepr(MachineRepresentation::Tagged, __ GetCallArgSlot(slot), scratch);
-        }
-        for (uint32_t slot = logicalSlotCount; slot < reservedSlotCount; slot++) {
-            __ MoveRepr(MachineRepresentation::Tagged, __ GetCallArgSlot(slot), scratch);
-        }
-    }
+    PrepareKnownCallArguments(call, call->GetActualArgc(), call->GetExpectedParameterCount(),
+                              CallSelfVertex::FIRST_ARG_INDEX);
 }
 
 void ArkSteedCodeGenerator::PrepareKnownCall(CallKnownJSFunctionVertex *call)
 {
-    const uint32_t userArgc = call->GetActualArgc();
-    const uint32_t totalArgc = userArgc + NUM_MANDATORY_JSFUNC_ARGS;
-    const uint32_t reservedSlotCount = call->GetReservedCallSlotCount();
-    __ ReserveCallArgSlots(static_cast<int32_t>(reservedSlotCount));
-
-    {
-        TemporaryRegisterScope scope(assembler_);
-        ArkSteedRegister scratch = scope.AcquireScratch();
-        __ Move(scratch, static_cast<uint64_t>(totalArgc));
-        __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0), scratch);
-    }
-
-    StoreStubStackArgument(call, CallKnownJSFunctionVertex::TARGET_INDEX,
-                           __ GetCallArgSlot(CallVertex::TARGET_INDEX + CALL_ARG1));
-    StoreStubStackArgument(call, CallKnownJSFunctionVertex::NEW_TARGET_INDEX,
-                           __ GetCallArgSlot(CallVertex::NEW_TARGET_INDEX + CALL_ARG1));
-    StoreStubStackArgument(call, CallKnownJSFunctionVertex::RECEIVER_INDEX,
-                           __ GetCallArgSlot(CallVertex::THIS_INDEX + CALL_ARG1));
-    for (uint32_t index = 0; index < userArgc; index++) {
-        StoreStubStackArgument(call, CallKnownJSFunctionVertex::FIRST_ARG_INDEX + index,
-                               __ GetCallArgSlot(CallVertex::FIRST_ARG_INDEX + CALL_ARG1 + index));
-    }
-
-    const uint32_t firstUnusedSlot = CallVertex::FIRST_ARG_INDEX + CALL_ARG1 + userArgc;
-    if (firstUnusedSlot < reservedSlotCount) {
-        TemporaryRegisterScope scope(assembler_);
-        ArkSteedRegister scratch = scope.AcquireScratch();
-        __ Move(scratch, static_cast<int64_t>(JSTaggedValue::VALUE_UNDEFINED));
-        for (uint32_t slot = firstUnusedSlot; slot < reservedSlotCount; slot++) {
-            __ MoveRepr(MachineRepresentation::Tagged, __ GetCallArgSlot(slot), scratch);
-        }
-    }
+    PrepareKnownCallArguments(call, call->GetActualArgc(), call->GetActualArgc(),
+                              CallKnownJSFunctionVertex::FIRST_ARG_INDEX);
 }
 
-void ArkSteedCodeGenerator::FreeArkSteedCallFrame(CallVertex *call)
+template <typename CallVertexT>
+void ArkSteedCodeGenerator::FreeArkSteedCallFrame(CallVertexT *call)
 {
     (void)call;
     __ RestoreStackPointerToFrameBottom(graph_);
 }
 
-void ArkSteedCodeGenerator::EmitCallArkSteed(CallVertex *call, ArkSteedRegister target, ArkSteedRegister scratch,
+template <typename CallVertexT>
+void ArkSteedCodeGenerator::EmitCallArkSteed(CallVertexT *call, ArkSteedRegister target, ArkSteedRegister scratch,
                                              Label *exit)
 {
     PrepareArkSteedCall(call, target, scratch);
@@ -1105,6 +1215,21 @@ void ArkSteedCodeGenerator::EmitCallGeneric(CallKnownJSFunctionVertex *call, Ark
         CallKnownJSFunctionVertex::NEW_TARGET_INDEX, CallKnownJSFunctionVertex::RECEIVER_INDEX,
         CallKnownJSFunctionVertex::FIRST_ARG_INDEX, scratch);
     __ CallTrampoline(RTSTUB_ID(JSCall));
+    if (HasLazyDeoptSafepoint(call)) {
+        EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
+    } else {
+        safepointBuilder_->DefineSafepoint(__ GetPcOffset());
+    }
+    __ FreeCallArgSlots(stackArgCount);
+}
+
+template <typename CallVertexT>
+void ArkSteedCodeGenerator::EmitCallConstructorGeneric(CallVertexT *call, ArkSteedRegister scratch)
+{
+    int stackArgCount = PrepareTrampolineArguments(
+        call, call->GetActualArgc(), CallVertexT::TARGET_INDEX, CallVertexT::NEW_TARGET_INDEX,
+        CallVertexT::THIS_INDEX, CallVertexT::FIRST_ARG_INDEX, scratch);
+    __ CallTrampoline(RTSTUB_ID(JSCallNew));
     if (HasLazyDeoptSafepoint(call)) {
         EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
     } else {
@@ -1253,8 +1378,8 @@ int ArkSteedCodeGenerator::PrepareKnownBuiltinNativeArguments(CallKnownBuiltinVe
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<CallRuntimeVertex>(CallRuntimeVertex *callRuntime)
 {
-    int stackArgCount = PrepareRuntimeStubStackArguments(callRuntime, callRuntime->GetArgCount(),
-                                                         static_cast<int>(callRuntime->GetRuntimeStubID()));
+    int stackArgCount = PrepareRuntimeStubStackArguments(
+        callRuntime, callRuntime->GetArgCount(), static_cast<int>(callRuntime->GetRuntimeStubID()));
     __ CallRuntime(callRuntime->GetRuntimeStubID());
     if (HasLazyDeoptSafepoint(callRuntime)) {
         EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, callRuntime);
@@ -1270,15 +1395,513 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CallVertex>(CallVertex *call)
     Label callGeneric;
     Label exit;
     ArkSteedRegister target = GetInputRegister(call, CallVertex::TARGET_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister scratch = scope.Acquire();
     __ JumpIfNotTaggedHeapObject(target, &callGeneric);
     __ JumpIfNotJSFunction(target, &callGeneric);
     __ JumpIfClassConstructor(target, &callGeneric);
-    __ JumpIfNotArkSteedEntry(target, &callGeneric);
-    TemporaryRegisterScope scope(assembler_);
-    ArkSteedRegister scratch = scope.Acquire();
+    __ JumpIfFunctionNotCompiled(target, &callGeneric);
     EmitCallArkSteed(call, target, scratch, &exit);
     __ Bind(&callGeneric);
     EmitCallGeneric(call, scratch);
+    __ Bind(&exit);
+}
+
+template<>
+void ArkSteedCodeGenerator::VisitNonControlVertex<CanAllocateInYoungVertex>(CanAllocateInYoungVertex* vertex)
+{
+    auto glue = GetInputRegister(vertex, CanAllocateInYoungVertex::GLUE_INDEX);
+    auto size = GetInputRegister(vertex, CanAllocateInYoungVertex::SIZE_INDEX);
+    auto result = GetResultRegister(vertex);
+    TemporaryRegisterScope scope(assembler_);
+    auto top = scope.Acquire();
+    auto end = scope.Acquire();
+    Label done;
+    __ RecordComment("CanAllocateInYoung capacity predicate");
+    // Unsupported allocation protocols return false before reading bump pointers.
+    __ LoadTaggedValue(result, JSTaggedValue::False().GetRawData());
+#if defined(ARK_ASAN_ON)
+    return;
+#endif
+    __ JumpIfCMSGCEnabled(&done);
+    __ JumpIfCMCGCEnabled(glue, top, &done);
+#ifdef ECMASCRIPT_SUPPORT_HEAPSAMPLING
+    __ JumpIfHeapSamplingActive(glue, top, &done);
+#endif
+    // Bound the full INT64 size before adding it to a heap address. Huge
+    // objects use the runtime allocator even when the bump region has space.
+    static_assert(MAX_REGULAR_HEAP_OBJECT_SIZE <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+    __ Compare(size, static_cast<int32_t>(MAX_REGULAR_HEAP_OBJECT_SIZE));
+    __ JumpIf(Condition::ABOVE, &done);
+    __ LoadField(top, glue, static_cast<int32_t>(JSThread::GlueData::GetNewSpaceAllocationTopAddressOffset(false)));
+    __ LoadField(top, top, 0);
+    __ LoadField(end, glue, static_cast<int32_t>(JSThread::GlueData::GetNewSpaceAllocationEndAddressOffset(false)));
+    __ LoadField(end, end, 0);
+    // A trusted regular-object size cannot overflow a valid heap address.
+    __ Add(top, size);
+    __ Compare(top, end);
+    EmitTaggedBooleanFromCondition(assembler_, result, Condition::BELOW_OR_EQUAL);
+    __ Bind(&done);
+}
+
+template<>
+void ArkSteedCodeGenerator::VisitNonControlVertex<AllocateInYoungVertex>(AllocateInYoungVertex* vertex)
+{
+    ArkSteedRegister glue = GetInputRegister(vertex, AllocateInYoungVertex::GLUE_INDEX);
+    ArkSteedRegister size = GetInputRegister(vertex, AllocateInYoungVertex::SIZE_INDEX);
+    ArkSteedRegister result = GetResultRegister(vertex);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister temp = scope.Acquire();
+    ASSERT(glue != size);
+    ASSERT(glue != result);
+    ASSERT(glue != temp);
+    ASSERT(size != result);
+    ASSERT(size != temp);
+    ASSERT(result != temp);
+
+    __ RecordComment("AllocateInYoung bump allocation");
+    // BranchIfTrue consumed a fresh CanAllocateInYoung predicate proving that
+    // top + size fits into the bump region. Only this thread advances top, and
+    // no call or safepoint separates the check from the commit below.
+    __ LoadField(result, glue, static_cast<int32_t>(JSThread::GlueData::GetNewSpaceAllocationTopAddressOffset(false)));
+    __ LoadField(result, result, 0);
+    // Match the interpreter allocator: the trusted regular-object size cannot overflow a valid heap address.
+    __ Add(result, size);
+    // Publishing top commits the allocation. Initialize immediately without calls, safepoints or deopt.
+    __ LoadField(temp, glue, static_cast<int32_t>(JSThread::GlueData::GetNewSpaceAllocationTopAddressOffset(false)));
+    __ StoreField(result, temp, 0);
+    __ Sub(result, size);
+}
+
+template<>
+void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeEmptyObjectVertex>(InitializeEmptyObjectVertex* vertex)
+{
+    ArkSteedRegister glue = GetInputRegister(vertex, InitializeEmptyObjectVertex::GLUE_INDEX);
+    ArkSteedRegister hclass = GetInputRegister(vertex, InitializeEmptyObjectVertex::HCLASS_INDEX);
+    ArkSteedRegister result = GetResultRegister(vertex);
+    ASSERT(result == GetInputRegister(vertex, InitializeEmptyObjectVertex::ALLOCATION_INDEX));
+    uint32_t objectSize = vertex->GetObjectSize();
+    ASSERT(objectSize >= JSObject::SIZE && objectSize % JSTaggedValue::TaggedTypeSize() == 0);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister temp = scope.Acquire();
+    __ Move(temp, static_cast<uint64_t>(JSTaggedValue::VALUE_UNDEFINED));
+    for (uint32_t offset = JSObject::SIZE; offset < objectSize; offset += JSTaggedValue::TaggedTypeSize()) {
+        __ StoreField(temp, result, static_cast<int32_t>(offset));
+    }
+    __ InitializeObjectHeader(glue, result, temp);
+    __ StoreHeaderRelease(hclass, result);
+}
+
+template<>
+void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeObjectWithBufferVertex>(
+    InitializeObjectWithBufferVertex* vertex)
+{
+    ArkSteedRegister glue = GetInputRegister(vertex, InitializeObjectWithBufferVertex::GLUE_INDEX);
+    ArkSteedRegister hclass = GetInputRegister(vertex, InitializeObjectWithBufferVertex::HCLASS_INDEX);
+    ArkSteedRegister result = GetResultRegister(vertex);
+    ASSERT(result == GetInputRegister(vertex, InitializeObjectWithBufferVertex::ALLOCATION_INDEX));
+    const auto& info = vertex->GetInfo();
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister temp = scope.Acquire();
+    __ Move(temp, static_cast<uint64_t>(JSTaggedValue::VALUE_UNDEFINED));
+    for (uint32_t offset = JSObject::SIZE + info.fieldCount * JSTaggedValue::TaggedTypeSize();
+         offset < info.objectSize;
+         offset += JSTaggedValue::TaggedTypeSize()) {
+        __ StoreField(temp, result, static_cast<int32_t>(offset));
+    }
+    __ InitializeObjectHeader(glue, result, temp);
+    for (uint32_t i = 0; i < info.fieldCount; ++i) {
+        __ Move(temp, info.fieldValues[i]);
+        __ StoreField(temp, result, static_cast<int32_t>(JSObject::SIZE + i * JSTaggedValue::TaggedTypeSize()));
+    }
+    __ StoreHeaderRelease(hclass, result);
+}
+
+template<>
+void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeEmptyArrayVertex>(InitializeEmptyArrayVertex* vertex)
+{
+    ArkSteedRegister result = GetResultRegister(vertex);
+    ASSERT(result == GetInputRegister(vertex, InitializeEmptyArrayVertex::ALLOCATION_INDEX));
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister hclass = GetInputRegister(vertex, InitializeEmptyArrayVertex::HCLASS_INDEX);
+    ArkSteedRegister value = scope.Acquire();
+    __ InitializeArrayFields(
+        GetInputRegister(vertex, InitializeEmptyArrayVertex::GLUE_INDEX), result, vertex->GetObjectSize(), value);
+    __ StoreHeaderRelease(hclass, result);
+}
+
+template<>
+void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeArrayWithBufferVertex>(
+    InitializeArrayWithBufferVertex* vertex)
+{
+    ArkSteedRegister result = GetResultRegister(vertex);
+    ArkSteedRegister literal = GetInputRegister(vertex, InitializeArrayWithBufferVertex::LITERAL_INDEX);
+    ASSERT(result == GetInputRegister(vertex, InitializeArrayWithBufferVertex::ALLOCATION_INDEX));
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister hclass = GetInputRegister(vertex, InitializeArrayWithBufferVertex::HCLASS_INDEX);
+    ArkSteedRegister value = scope.Acquire();
+    __ InitializeArrayFields(GetInputRegister(vertex, InitializeArrayWithBufferVertex::GLUE_INDEX),
+                             result,
+                             vertex->GetObjectSize(),
+                             value);
+    __ LoadField(value, literal, JSObject::ELEMENTS_OFFSET);
+    __ StoreField(value, result, static_cast<int32_t>(JSObject::ELEMENTS_OFFSET));
+    __ LoadInt32Field(value, literal, JSArray::LENGTH_OFFSET);
+    __ StoreInt32Field(value, result, static_cast<int32_t>(JSArray::LENGTH_OFFSET));
+    __ StoreHeaderRelease(hclass, result);
+}
+
+template<>
+void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeUnmappedArgumentsElementsVertex>(
+    InitializeUnmappedArgumentsElementsVertex *initialize)
+{
+#ifndef NDEBUG
+    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << initialize->GetId()
+                        << ": InitializeUnmappedArgumentsElementsVertex";
+#endif
+    ArkSteedRegister result = GetResultRegister(initialize);
+    ArkSteedRegister argc =
+        GetInputRegister(initialize, InitializeUnmappedArgumentsElementsVertex::NUM_ARGS_INDEX);
+    ArkSteedRegister rawAddress
+        = GetInputRegister(initialize, InitializeUnmappedArgumentsElementsVertex::ALLOCATION_INDEX);
+    ArkSteedRegister hclass =
+        GetInputRegister(initialize, InitializeUnmappedArgumentsElementsVertex::HCLASS_INDEX);
+
+    constexpr int32_t mandatoryArgc = NUM_MANDATORY_JSFUNC_ARGS;
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister value = scope.Acquire();
+    ASSERT(value != argc);
+    ASSERT(value != rawAddress);
+    ASSERT(value != hclass);
+
+    __ Move(value, argc);
+    __ Sub(value, mandatoryArgc);
+    __ StoreInt32Field(value, rawAddress, static_cast<int32_t>(TaggedArray::LENGTH_OFFSET));
+    __ Move(value, 0);
+    __ StoreInt32Field(value, rawAddress, static_cast<int32_t>(TaggedArray::EXTRA_LENGTH_OFFSET));
+
+    // TAGGED_ARRAY_CLASS_INDEX is allocated in shared read-only space, so
+    // installing it does not require a write barrier.
+    __ StoreHeaderRelease(hclass, rawAddress);
+
+    // Define the result only after all inputs have been consumed, so the
+    // register allocator may safely reuse an input register for the result.
+    __ Move(result, rawAddress);
+    RecordComment("InitializeUnmappedArgumentsElements");
+}
+
+void ArkSteedCodeGenerator::EmitInitializeHClassWithBarrier(
+    const DeferredRegisterSnapshot &snapshot, ArkSteedRegister glue, ArkSteedRegister object,
+    ArkSteedRegister hclass)
+{
+    // Acquire the barrier work registers from the temporaries declared by the current vertex.
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister objectRegionScratch = scope.Acquire();
+    ArkSteedRegister hclassRegionScratch = scope.Acquire();
+    ASSERT(objectRegionScratch != hclassRegionScratch);
+    ASSERT(objectRegionScratch != glue);
+    ASSERT(objectRegionScratch != object);
+    ASSERT(objectRegionScratch != hclass);
+    ASSERT(hclassRegionScratch != glue);
+    ASSERT(hclassRegionScratch != object);
+    ASSERT(hclassRegionScratch != hclass);
+
+    DeferredRegisterSnapshot barrierSnapshot = snapshot;
+    barrierSnapshot.liveRegisters.Set(objectRegionScratch);
+    barrierSnapshot.liveRegisters.Set(hclassRegionScratch);
+    ArkSteedWriteBarrierEmitter(assembler_, graph_->GetChunk(), &deferredCode_, barrierSnapshot)
+        .InitializeHClass(glue, object, hclass, objectRegionScratch, hclassRegionScratch);
+}
+
+void ArkSteedCodeGenerator::EmitStoreTaggedFieldWithBarrier(
+    const DeferredRegisterSnapshot &snapshot, ArkSteedRegister glue, ArkSteedRegister object,
+    ArkSteedRegister value, int32_t offset, ArkSteedWriteBarrierValueKind valueKind)
+{
+    // Acquire the barrier work registers from the temporaries declared by the current vertex.
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister objectRegionScratch = scope.Acquire();
+    ArkSteedRegister valueRegionScratch = scope.Acquire();
+    ASSERT(objectRegionScratch != valueRegionScratch);
+    ASSERT(objectRegionScratch != glue);
+    ASSERT(objectRegionScratch != object);
+    ASSERT(objectRegionScratch != value);
+    ASSERT(valueRegionScratch != glue);
+    ASSERT(valueRegionScratch != object);
+    ASSERT(valueRegionScratch != value);
+
+    DeferredRegisterSnapshot barrierSnapshot = snapshot;
+    barrierSnapshot.liveRegisters.Set(objectRegionScratch);
+    barrierSnapshot.liveRegisters.Set(valueRegionScratch);
+    ArkSteedWriteBarrierEmitter(assembler_, graph_->GetChunk(), &deferredCode_, barrierSnapshot)
+        .StoreTaggedField(glue, object, value, offset, ArkSteedWriteBarrierKind::GENERIC_BARRIER,
+                          objectRegionScratch, valueRegionScratch, valueKind);
+}
+
+template<>
+void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeUnmappedArgumentsVertex>(
+    InitializeUnmappedArgumentsVertex *initialize)
+{
+#ifndef NDEBUG
+    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << initialize->GetId()
+                        << ": InitializeUnmappedArgumentsVertex";
+#endif
+    ArkSteedRegister result = GetResultRegister(initialize);
+    ArkSteedRegister glue =
+        GetInputRegister(initialize, InitializeUnmappedArgumentsVertex::GLUE_INDEX);
+    ArkSteedRegister argc =
+        GetInputRegister(initialize, InitializeUnmappedArgumentsVertex::NUM_ARGS_INDEX);
+    ArkSteedRegister rawAddress = GetInputRegister(initialize, InitializeUnmappedArgumentsVertex::ALLOCATION_INDEX);
+    ArkSteedRegister elements =
+        GetInputRegister(initialize, InitializeUnmappedArgumentsVertex::ELEMENTS_INDEX);
+    ArkSteedRegister globalEnv =
+        GetInputRegister(initialize, InitializeUnmappedArgumentsVertex::GLOBAL_ENV_INDEX);
+    ArkSteedRegister hclass =
+        GetInputRegister(initialize, InitializeUnmappedArgumentsVertex::HCLASS_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister value = scope.Acquire();
+    ASSERT(value != glue);
+    ASSERT(value != argc);
+    ASSERT(value != rawAddress);
+    ASSERT(value != elements);
+    ASSERT(value != globalEnv);
+    ASSERT(value != hclass);
+
+    // RA records liveness at the node boundary. This composite node has
+    // several deferred barriers and continues reading its own inputs and work
+    // registers between them, so preserve those physical registers explicitly.
+    DeferredRegisterSnapshot snapshot = initialize->GetRegallocInfo()->GetDeferredRegisterSnapshot();
+    for (ArkSteedRegister reg : {glue, argc, rawAddress, elements, globalEnv, hclass, value}) {
+        snapshot.liveRegisters.Set(reg);
+    }
+
+    constexpr int32_t mandatoryArgc = NUM_MANDATORY_JSFUNC_ARGS;
+    constexpr int32_t lengthOffset =
+        static_cast<int32_t>(JSArguments::GetInlinedPropertyOffset(JSArguments::LENGTH_INLINE_PROPERTY_INDEX));
+    constexpr int32_t iteratorOffset =
+        static_cast<int32_t>(JSArguments::GetInlinedPropertyOffset(JSArguments::ITERATOR_INLINE_PROPERTY_INDEX));
+    constexpr int32_t callerOffset =
+        static_cast<int32_t>(JSArguments::GetInlinedPropertyOffset(JSArguments::CALLER_INLINE_PROPERTY_INDEX));
+    constexpr int32_t calleeOffset =
+        static_cast<int32_t>(JSArguments::GetInlinedPropertyOffset(JSArguments::CALLEE_INLINE_PROPERTY_INDEX));
+    constexpr size_t emptyArrayOffset =
+        static_cast<size_t>(ConstantIndex::EMPTY_ARRAY_OBJECT_INDEX) * JSTaggedValue::TaggedTypeSize();
+    constexpr size_t iteratorValueOffset =
+        GlobalEnv::HEADER_SIZE +
+        static_cast<size_t>(GlobalEnv::ARRAY_PROTO_VALUES_FUNCTION_INDEX) * JSTaggedValue::TaggedTypeSize();
+    constexpr size_t callerAccessorOffset =
+        GlobalEnv::HEADER_SIZE +
+        static_cast<size_t>(GlobalEnv::ARGUMENTS_CALLER_ACCESSOR) * JSTaggedValue::TaggedTypeSize();
+    constexpr size_t calleeAccessorOffset =
+        GlobalEnv::HEADER_SIZE +
+        static_cast<size_t>(GlobalEnv::ARGUMENTS_CALLEE_ACCESSOR) * JSTaggedValue::TaggedTypeSize();
+    static_assert(emptyArrayOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+    static_assert(iteratorValueOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+    static_assert(callerAccessorOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+    static_assert(calleeAccessorOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+
+    __ Move(value, static_cast<uint64_t>(JSTaggedValue::VALUE_ZERO));
+    __ StoreField(value, rawAddress, static_cast<int32_t>(ECMAObject::HASH_OFFSET));
+    __ LoadField(value, glue, static_cast<int32_t>(JSThread::GlueData::GetGlobalConstOffset(false)));
+    __ LoadField(value, value, static_cast<int32_t>(emptyArrayOffset));
+    __ StoreField(value, rawAddress, static_cast<int32_t>(JSObject::PROPERTIES_OFFSET));
+
+    __ Move(value, argc);
+    __ Sub(value, mandatoryArgc);
+    __ Or(value, static_cast<int64_t>(JSTaggedValue::TAG_INT));
+    __ StoreField(value, rawAddress, lengthOffset);
+
+    EmitInitializeHClassWithBarrier(snapshot, glue, rawAddress, hclass);
+
+    EmitStoreTaggedFieldWithBarrier(snapshot, glue, rawAddress, elements,
+                                    static_cast<int32_t>(JSObject::ELEMENTS_OFFSET),
+                                    ArkSteedWriteBarrierValueKind::HeapObject);
+    __ LoadField(value, globalEnv, static_cast<int32_t>(iteratorValueOffset));
+    EmitStoreTaggedFieldWithBarrier(snapshot, glue, rawAddress, value, iteratorOffset,
+                                    ArkSteedWriteBarrierValueKind::HeapObject);
+    __ LoadField(value, globalEnv, static_cast<int32_t>(callerAccessorOffset));
+    EmitStoreTaggedFieldWithBarrier(snapshot, glue, rawAddress, value, callerOffset,
+                                    ArkSteedWriteBarrierValueKind::HeapObject);
+    __ LoadField(value, globalEnv, static_cast<int32_t>(calleeAccessorOffset));
+    EmitStoreTaggedFieldWithBarrier(snapshot, glue, rawAddress, value, calleeOffset,
+                                    ArkSteedWriteBarrierValueKind::HeapObject);
+
+    // Define the result only after all inputs have been consumed. This keeps
+    // the node safe when the result reuses an input register.
+    __ Move(result, rawAddress);
+    RecordComment("InitializeUnmappedArgumentsObject");
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<LoadBuiltinObjectVertex>(LoadBuiltinObjectVertex *load)
+{
+    auto result = GetResultRegister(load);
+    auto glue = GetInputRegister(load, LoadBuiltinObjectVertex::GLUE_INDEX);
+    size_t offset = JSThread::GlueData::GetBuiltinEntriesOffset(false) +
+                    BuiltinIndex::GetInstance().GetBuiltinBoxOffset(load->GetBuiltinIndex());
+    ASSERT(offset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+    __ LoadField(result, glue, static_cast<int32_t>(offset));
+    __ LoadField(result, result, static_cast<int32_t>(PropertyBox::VALUE_OFFSET));
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitControlVertex<BranchIfECMAObjectVertex>(BranchIfECMAObjectVertex *branch)
+{
+    __ JumpIfNotECMAObject(GetInputRegister(branch, 0), branch->IfFalse()->GetLabel());
+    if (!IsNextBlockInLayout(branch->IfTrue())) {
+        __ Jump(branch->IfTrue()->GetLabel());
+    }
+}
+
+template <typename ConstructorVertexT>
+void ArkSteedCodeGenerator::EmitConstructorBodyStubCall(ConstructorVertexT *call)
+{
+    using Inputs = kungfu::ArkSteedCallConstructorBodyInputs;
+    static_assert(Inputs::NUM_INPUTS <= ArkSteedAssembler::NUM_ARG_REGISTERS);
+    const uint32_t argc = call->GetActualArgc();
+    const uint32_t reservedSlots = (argc + 1U) & ~1U;
+    __ ReserveCallArgSlots(static_cast<int32_t>(reservedSlots));
+    // Complete the rooted argv before clobbering registers holding any user
+    // arguments.
+    for (uint32_t index = 0; index < argc; index++) {
+        StoreStubStackArgument(call, ConstructorVertexT::FIRST_ARG_INDEX + index,
+                               __ GetCallArgSlot(static_cast<int32_t>(index)));
+    }
+    if (reservedSlots > argc) {
+        TemporaryRegisterScope scope(assembler_);
+        ArkSteedRegister scratch = scope.AcquireScratch();
+        __ Move(scratch, static_cast<int64_t>(JSTaggedValue::VALUE_UNDEFINED));
+        __ MoveRepr(MachineRepresentation::Tagged, __ GetCallArgSlot(static_cast<int32_t>(argc)), scratch);
+    }
+    if constexpr (ConstructorVertexT::IS_BASE_CONSTRUCTOR) {
+        const auto &receiverOperand = call->GetInputLocation(ConstructorVertexT::THIS_INDEX)->GetOperand();
+        ASSERT(receiverOperand.IsAnyStackSlot());
+        __ MoveRepr(MachineRepresentation::Tagged, ArkSteedAssembler::GetParameterRegister(Inputs::RECEIVER),
+                    __ GetStackSlot(AllocatedState::Cast(receiverOperand)));
+    }
+    __ LoadGlue(ArkSteedAssembler::GetParameterRegister(Inputs::GLUE));
+    __ Move(ArkSteedAssembler::GetParameterRegister(Inputs::ARGC), static_cast<uint64_t>(argc));
+    ArkSteedRegister argv = ArkSteedAssembler::GetParameterRegister(Inputs::ARGV);
+    if (argc == 0) {
+        __ Move(argv, static_cast<uint64_t>(0));
+    } else {
+        __ LoadCallArgv(argv);
+    }
+    __ CallCommonStub(CommonStubID::ArkSteedCallConstructorBody);
+    // This PC still receives a raw body result, including when the caller was
+    // invalidated in the body.
+    EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
+    __ FreeCallArgSlots(static_cast<int32_t>(reservedSlots));
+}
+
+template <typename ConstructorVertexT>
+void ArkSteedCodeGenerator::EmitNewObjRangeConstructorBodyCall(ConstructorVertexT *call)
+{
+    if (call->UsesCommonStub()) {
+        EmitConstructorBodyStubCall(call);
+        return;
+    }
+    Label callGeneric;
+    Label exit;
+    ArkSteedRegister target = GetInputRegister(call, ConstructorVertexT::TARGET_INDEX);
+    ASSERT(target == ArkSteedAssembler::CALLEE_TARGET_REGISTER);
+    // A stale MachineCode can survive invalidation. Check both the entry and its
+    // ABI.
+    __ JumpIfFunctionNotCompiled(target, &callGeneric);
+    {
+        TemporaryRegisterScope scope(assembler_);
+        ArkSteedRegister code = scope.Acquire();
+        __ LoadField(code, target, JSFunction::MACHINECODE_OFFSET);
+        __ JumpIfNotStrongHeapObject(code, &callGeneric);
+        ArkSteedRegister bits = scope.Acquire();
+        // JSFunction::MachineCode is initialized to Undefined and published only as
+        // MachineCode by SetJitCompiledFuncEntry/InstallCodeByCompilerTier. The
+        // weak cache is a different field on ProfileTypeInfoCell. After the
+        // strong-value check no HClass type load is needed.
+        __ LoadUint8Field(bits, code, MachineCode::BIT_FIELD_OFFSET);
+        __ Int32And(bits, MachineCode::IsArkSteedCodeBits::Mask());
+        __ Compare(bits, 0);
+        __ JumpIf(Condition::EQUAL, &callGeneric);
+    }
+    {
+        if (call->HasKnownExpectedParameterCount() && call->GetExpectedParameterCount() == call->GetActualArgc()) {
+            PrepareKnownCallArguments(call, call->GetActualArgc(), call->GetExpectedParameterCount(),
+                                      ConstructorVertexT::FIRST_ARG_INDEX);
+        } else {
+            TemporaryRegisterScope scope(assembler_);
+            ArkSteedRegister scratch = scope.Acquire();
+            PrepareArkSteedCall(call, target, scratch);
+        }
+    }
+    __ LoadField(ArkSteedAssembler::CALLEE_CONTEXT_REGISTER, target, JSFunction::LEXICAL_ENV_OFFSET);
+    {
+        TemporaryRegisterScope scope(assembler_);
+        ArkSteedRegister entry = scope.AcquireScratch();
+        __ LoadField(entry, target, JSFunction::CODE_ENTRY_OFFSET);
+        __ Call(entry);
+    }
+    EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
+    __ RestoreStackPointerToFrameBottom(graph_);
+    __ Jump(&exit);
+
+    __ Bind(&callGeneric);
+    TemporaryRegisterScope scope(assembler_);
+    int stackArgCount = PrepareTrampolineArguments(
+        call, call->GetActualArgc(), ConstructorVertexT::TARGET_INDEX, ConstructorVertexT::NEW_TARGET_INDEX,
+        ConstructorVertexT::RECEIVER_INDEX, ConstructorVertexT::FIRST_ARG_INDEX, scope.Acquire());
+    // JSCallNew preserves the supplied receiver and returns the raw bytecode
+    // result.
+    __ CallTrampoline(RTSTUB_ID(JSCallNew));
+    EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
+    __ FreeCallArgSlots(stackArgCount);
+    __ Bind(&exit);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<CallNewObjRangeBaseVertex>(CallNewObjRangeBaseVertex *call)
+{
+    EmitNewObjRangeConstructorBodyCall(call);
+    // Keep the result normalization aligned with PR98's corresponding constructor
+    // tail.
+    ArkSteedRegister result = GetResultRegister(call);
+    const InstructionOperand &thisOperand = call->GetInputLocation(CallNewObjRangeBaseVertex::THIS_INDEX)->GetOperand();
+    ASSERT(thisOperand.IsAnyStackSlot());
+    ArkSteedAssembler::MemoryOperand thisSlot = __ GetStackSlot(AllocatedState::Cast(thisOperand));
+    Label notObject;
+    Label exit;
+    __ JumpIfNotTaggedHeapObject(result, &notObject);
+    __ JumpIfNotEcmaObject(result, &notObject);
+    __ Jump(&exit);  // result already holds the value
+    __ Bind(&notObject);
+    __ MoveRepr(MachineRepresentation::Tagged, result, thisSlot);
+    __ Bind(&exit);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<CallNewObjRangeDerivedVertex>(CallNewObjRangeDerivedVertex *call)
+{
+    EmitNewObjRangeConstructorBodyCall(call);
+    // Keep the result normalization aligned with PR98's corresponding constructor
+    // tail.
+    ArkSteedRegister result = GetResultRegister(call);
+    Label notObject;
+    Label exit;
+    __ JumpIfNotTaggedHeapObject(result, &notObject);
+    __ JumpIfNotEcmaObject(result, &notObject);
+    __ Jump(&exit);  // result already holds the value
+    __ Bind(&notObject);
+    // Cold arm: throw TypeError. The throw runtime takes no JS arguments; the
+    // exception dispatch matches the parked pc exactly, so this call site needs
+    // its own lazy-deopt kind (an exception settlement skips the continuation
+    // branch, and the derived variant carries no ctor/this sources anyway).
+    int stackArgCount =
+        PrepareRuntimeStubStackArguments(call, 0, static_cast<int>(RTSTUB_ID(ThrowNonConstructorException)));
+    __ CallRuntime(RTSTUB_ID(ThrowNonConstructorException));
+    if (HasLazyDeoptSafepoint(call)) {
+        EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
+    } else {
+        safepointBuilder_->DefineSafepoint(__ GetPcOffset());
+    }
+    __ FreeCallArgSlots(stackArgCount);
     __ Bind(&exit);
 }
 
@@ -1288,7 +1911,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CallKnownJSFunctionVertex>(Cal
     Label callGeneric;
     Label exit;
     ArkSteedRegister target = GetInputRegister(call, CallKnownJSFunctionVertex::TARGET_INDEX);
-    __ JumpIfNotArkSteedEntry(target, &callGeneric);
+    __ JumpIfFunctionNotCompiled(target, &callGeneric);
     ArkSteedRegister context = GetInputRegister(call, CallKnownJSFunctionVertex::CONTEXT_INDEX);
     ASSERT(target == ArkSteedAssembler::CALLEE_TARGET_REGISTER);
     ASSERT(context == ArkSteedAssembler::CALLEE_CONTEXT_REGISTER);
@@ -1371,6 +1994,101 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfReferenceNotEqualVertex
 }
 
 template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<CallBaseConstructorVertex>(CallBaseConstructorVertex *call)
+{
+    Label callConstructor;
+    Label checkDone;
+    ArkSteedRegister target = GetInputRegister(call, CallBaseConstructorVertex::TARGET_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister scratch = scope.Acquire();
+    // The graph builder has already guaranteed the target is a base constructor
+    // (the BranchIfBase split, with the BranchIfJSConstructorFunction guard or the
+    // speculation identity deopt in the monomorphic shape before it) and produced
+    // the bound this object, so unlike CallVertex no callee-type guards are needed;
+    // only the compiled-code state stays runtime variable. Uncompiled supers
+    // (builtin constructors, interpreted callees) take the generic [[Construct]]
+    // fallback, which already returns a normalized result.
+    __ JumpIfFunctionNotCompiled(target, &callConstructor);
+    EmitCallArkSteed(call, target, scratch, &checkDone);
+    __ Bind(&callConstructor);
+    EmitCallConstructorGeneric(call, scratch);
+    // Inline the base-variant result tail (what JSFunction::ConstructInternal and
+    // the BaseConstructResultCheck stub implement for base targets): an explicit
+    // EcmaObject return replaces this, any other value keeps thisObj. The only live
+    // undefined path is the callee's explicit `return undefined` (the frontend
+    // compiles a base constructor's implicit return as `lda a2; return`, i.e. this);
+    // null and other primitives ride the same fallback, so the tree is a pure
+    // select: no ctor read, no kind check, no cold path — it cannot throw. The raw
+    // result sits in the result register; thisObj is read from its spill slot (the
+    // calls clobber every register), so the fast path costs two tests and one
+    // slot load on the fallback arm — no moves on the object arm.
+    __ Bind(&checkDone);
+    ArkSteedRegister result = GetResultRegister(call);
+    const InstructionOperand &thisOperand =
+        call->GetInputLocation(CallBaseConstructorVertex::THIS_INDEX)->GetOperand();
+    ASSERT(thisOperand.IsAnyStackSlot());
+    ArkSteedAssembler::MemoryOperand thisSlot = __ GetStackSlot(AllocatedState::Cast(thisOperand));
+    Label notObject;
+    Label exit;
+    __ JumpIfNotTaggedHeapObject(result, &notObject);
+    __ JumpIfNotEcmaObject(result, &notObject);
+    __ Jump(&exit);  // result already holds the value
+    __ Bind(&notObject);
+    __ MoveRepr(MachineRepresentation::Tagged, result, thisSlot);
+    __ Bind(&exit);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<CallDerivedConstructorVertex>(CallDerivedConstructorVertex *call)
+{
+    Label callConstructor;
+    Label checkDone;
+    ArkSteedRegister target = GetInputRegister(call, CallDerivedConstructorVertex::TARGET_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister scratch = scope.Acquire();
+    // The graph builder has already guaranteed the target is a derived (or builtin)
+    // constructor (the BranchIfBase split, with the BranchIfJSConstructorFunction
+    // guard or the speculation identity deopt in the monomorphic shape before it)
+    // and passed an undefined placeholder this (the callee's own super chain
+    // re-initializes it), so unlike CallVertex no callee-type guards are needed;
+    // only the compiled-code state stays runtime variable. Uncompiled supers take
+    // the generic [[Construct]] fallback, which already returns a normalized result.
+    __ JumpIfFunctionNotCompiled(target, &callConstructor);
+    EmitCallArkSteed(call, target, scratch, &checkDone);
+    __ Bind(&callConstructor);
+    EmitCallConstructorGeneric(call, scratch);
+    // Inline the derived-variant result tail: an explicit EcmaObject return passes
+    // through, anything else throws. There is no undefined arm and no this fallback
+    // because the frontend guarantees a derived constructor never returns undefined
+    // across the call boundary (implicit returns and `return undefined` are
+    // rewritten to `return this` in bytecode; the stricteq guard in explicit returns
+    // only swaps undefined), so the only values reaching the throw arm are raw
+    // primitives. The fast path is two tests and a jump; the cold arm throws.
+    __ Bind(&checkDone);
+    ArkSteedRegister result = GetResultRegister(call);
+    Label notObject;
+    Label exit;
+    __ JumpIfNotTaggedHeapObject(result, &notObject);
+    __ JumpIfNotEcmaObject(result, &notObject);
+    __ Jump(&exit);  // result already holds the value
+    __ Bind(&notObject);
+    // Cold arm: throw TypeError. The throw runtime takes no JS arguments; the
+    // exception dispatch matches the parked pc exactly, so this call site needs
+    // its own lazy-deopt kind (an exception settlement skips the continuation
+    // branch, and the derived variant carries no ctor/this sources anyway).
+    int stackArgCount = PrepareRuntimeStubStackArguments(
+        call, 0, static_cast<int>(RTSTUB_ID(ThrowNonConstructorException)));
+    __ CallRuntime(RTSTUB_ID(ThrowNonConstructorException));
+    if (HasLazyDeoptSafepoint(call)) {
+        EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
+    } else {
+        safepointBuilder_->DefineSafepoint(__ GetPcOffset());
+    }
+    __ FreeCallArgSlots(stackArgCount);
+    __ Bind(&exit);
+}
+
+template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfHClassMismatchVertex>(DeoptIfHClassMismatchVertex *checkHClass)
 {
     constexpr int RECEIVER_INDEX = static_cast<int>(DeoptIfHClassMismatchVertex::RECEIVER_INDEX);
@@ -1393,7 +2111,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfHClassMismatchVertex>(D
     __ JumpIf(Condition::NOT_EQUAL, deopt);
 
     __ LoadField(actualHClass, receiver, TaggedObject::HCLASS_OFFSET);
-    __ Move(expectedHClass, HCLASS_ADDRESS_MASK);
+    __ Move(expectedHClass, TaggedStateWord::ADDRESS_MASK);
     __ And(actualHClass, expectedHClass);
     __ MoveEmbeddedTagged(expectedHClass, checkHClass->GetExpectedHClassHandleIndex());
     __ Compare(actualHClass, expectedHClass);
@@ -1428,7 +2146,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfHClassNotInVertex>(Deop
     __ JumpIf(Condition::NOT_EQUAL, &deopt);
 
     __ LoadField(actualHClass, receiver, TaggedObject::HCLASS_OFFSET);
-    __ Move(expectedHClass, HCLASS_ADDRESS_MASK);
+    __ Move(expectedHClass, TaggedStateWord::ADDRESS_MASK);
     __ And(actualHClass, expectedHClass);
     for (uint32_t i = 0; i < checkHClass->GetExpectedHClassCount(); ++i) {
         __ MoveEmbeddedTagged(expectedHClass, checkHClass->GetExpectedHClassHandleIndex(i));
@@ -1447,7 +2165,8 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfPrototypeChangedVertex>
     DeoptIfPrototypeChangedVertex *checkPrototype)
 {
 #ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << checkPrototype->GetId() << ": DeoptIfPrototypeChangedVertex";
+    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << checkPrototype->GetId()
+                        << ": DeoptIfPrototypeChangedVertex";
 #endif
     TemporaryRegisterScope scope(assembler_);
     ArkSteedRegister current = scope.Acquire();
@@ -1459,7 +2178,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfPrototypeChangedVertex>
 
     auto loadHClassAddress = [this, scratch](ArkSteedRegister dst, ArkSteedRegister object) {
         __ LoadField(dst, object, TaggedObject::HCLASS_OFFSET);
-        __ Move(scratch, HCLASS_ADDRESS_MASK);
+        __ Move(scratch, TaggedStateWord::ADDRESS_MASK);
         __ And(dst, scratch);
     };
 
@@ -1488,8 +2207,9 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfPrototypeChangedVertex>
         __ JumpIf(Condition::NOT_EQUAL, &protoMarkerDeopt);
 
         __ LoadInt32Field(current, current, static_cast<int32_t>(ProtoChangeMarker::BIT_FIELD_OFFSET));
-        constexpr int32_t invalidatingChangeMask = (1U << (ProtoChangeMarker::HAS_CHANGED_BITS - 1U)) |
-                                                   (1U << ProtoChangeMarker::AccessorHasChangedBits::START_BIT);
+        constexpr int32_t invalidatingChangeMask =
+            (1U << (ProtoChangeMarker::HAS_CHANGED_BITS - 1U)) |
+            (1U << ProtoChangeMarker::AccessorHasChangedBits::START_BIT);
         __ And(current, invalidatingChangeMask);
         __ Compare(current, 0);
         __ JumpIf(Condition::NOT_EQUAL, &protoMarkerDeopt);
@@ -1508,7 +2228,8 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfPrototypeChangedVertex>
 }
 
 template <>
-void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfTaggedConditionVertex>(DeoptIfTaggedConditionVertex *check)
+void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfTaggedConditionVertex>(
+    DeoptIfTaggedConditionVertex *check)
 {
     auto left = GetInputRegister(check, DeoptIfTaggedConditionVertex::LEFT_INDEX);
     auto right = GetInputRegister(check, DeoptIfTaggedConditionVertex::RIGHT_INDEX);
@@ -1526,7 +2247,8 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfInt32ConditionVertex>(D
 }
 
 template <>
-void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfFloat64ConditionVertex>(DeoptIfFloat64ConditionVertex *check)
+void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfFloat64ConditionVertex>(
+    DeoptIfFloat64ConditionVertex *check)
 {
 #ifndef NDEBUG
     LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << check->GetId() << ": DeoptIfFloat64ConditionVertex";
@@ -1580,6 +2302,94 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfNotNumberVertex>(DeoptI
 }
 
 template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfNotBooleanVertex>(DeoptIfNotBooleanVertex *check)
+{
+    auto value = GetInputRegister(check, DeoptIfNotBooleanVertex::VALUE_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister bits = scope.Acquire();
+#if defined(PANDA_TARGET_AMD64)
+    Label *deopt = RecordEagerDeoptTarget(check, kungfu::DeoptType::NOTBOOL1);
+#else
+    Label deoptLabel;
+    Label *deopt = &deoptLabel;
+#endif
+    Label done;
+    // (value | 1) == VALUE_TRUE accepts exactly {VALUE_FALSE, VALUE_TRUE}: the
+    // OR-immediate replaces the movabs+AND mask sequence and also rejects
+    // internal sentinels (VALUE_EXCEPTION, VALUE_OPTIMIZED_OUT) that share the
+    // boolean tag bits.
+    __ Move(bits, value);
+    __ Or(bits, 1);
+    __ Compare(bits, static_cast<int32_t>(JSTaggedValue::VALUE_TRUE));
+    __ JumpIf(Condition::NOT_EQUAL, deopt);
+#if !defined(PANDA_TARGET_AMD64)
+    __ Jump(&done);
+    __ Bind(deopt);
+    EmitEagerDeoptExit(check, kungfu::DeoptType::NOTBOOL1);
+#endif
+    __ Bind(&done);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfNotBigIntVertex>(DeoptIfNotBigIntVertex *check)
+{
+    auto value = GetInputRegister(check, DeoptIfNotBigIntVertex::VALUE_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister scratch = scope.Acquire();
+#if defined(PANDA_TARGET_AMD64)
+    Label *deopt = RecordEagerDeoptTarget(check, kungfu::DeoptType::NOT_BIG_INT);
+#else
+    Label deoptLabel;
+    Label *deopt = &deoptLabel;
+#endif
+    Label done;
+    // The Compare after And is required on arm64: AND does not set NZCV there.
+    __ Move(scratch, value);
+    __ And(scratch, static_cast<int64_t>(JSTaggedValue::TAG_HEAPOBJECT_MASK));
+    __ Compare(scratch, 0);
+    __ JumpIf(Condition::NOT_EQUAL, deopt);
+    LoadObjectType(assembler_, scratch, value);
+    __ Compare(scratch, static_cast<int32_t>(JSType::BIGINT));
+    __ JumpIf(Condition::NOT_EQUAL, deopt);
+#if !defined(PANDA_TARGET_AMD64)
+    __ Jump(&done);
+    __ Bind(deopt);
+    EmitEagerDeoptExit(check, kungfu::DeoptType::NOT_BIG_INT);
+#endif
+    __ Bind(&done);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfNotUndefinedOrNullVertex>(
+    DeoptIfNotUndefinedOrNullVertex *check)
+{
+    auto value = GetInputRegister(check, DeoptIfNotUndefinedOrNullVertex::VALUE_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister bits = scope.Acquire();
+#if defined(PANDA_TARGET_AMD64)
+    Label *deopt = RecordEagerDeoptTarget(check, kungfu::DeoptType::NOT_UNDEFINED_OR_NULL);
+#else
+    Label deoptLabel;
+    Label *deopt = &deoptLabel;
+#endif
+    Label done;
+    // (value | 1) == VALUE_NULL accepts exactly {VALUE_UNDEFINED, VALUE_NULL}:
+    // the OR-immediate replaces the movabs+AND mask sequence and also rejects
+    // internal sentinels (VALUE_EXCEPTION, VALUE_OPTIMIZED_OUT) that share the
+    // special tag bits.
+    __ Move(bits, value);
+    __ Or(bits, 1);
+    __ Compare(bits, static_cast<int32_t>(JSTaggedValue::VALUE_NULL));
+    __ JumpIf(Condition::NOT_EQUAL, deopt);
+#if !defined(PANDA_TARGET_AMD64)
+    __ Jump(&done);
+    __ Bind(deopt);
+    EmitEagerDeoptExit(check, kungfu::DeoptType::NOT_UNDEFINED_OR_NULL);
+#endif
+    __ Bind(&done);
+}
+
+template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfNotHeapObjectVertex>(DeoptIfNotHeapObjectVertex *check)
 {
 #ifndef NDEBUG
@@ -1603,11 +2413,39 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfNotHeapObjectVertex>(De
 }
 
 template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfNotJSHClassVertex>(DeoptIfNotJSHClassVertex *check)
+{
+    auto value = GetInputRegister(check, DeoptIfNotJSHClassVertex::VALUE_INDEX);
+#if defined(PANDA_TARGET_AMD64)
+    Label *deopt = RecordEagerDeoptTarget(check, check->GetDeoptType());
+#else
+    Label deoptLabel;
+    Label *deopt = &deoptLabel;
+#endif
+    Label done;
+    __ JumpIfNotStrongHeapObject(value, deopt);
+    TemporaryRegisterScope scope(assembler_);
+    auto hclass = scope.Acquire();
+    __ LoadField(hclass, value, TaggedObject::HCLASS_OFFSET);
+    __ And(hclass, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    __ LoadUint8Field(hclass, hclass, JSHClass::BIT_FIELD_OFFSET);
+    __ Compare(hclass, static_cast<int32_t>(JSType::HCLASS));
+    __ JumpIf(Condition::NOT_EQUAL, deopt);
+    __ Jump(&done);
+#if !defined(PANDA_TARGET_AMD64)
+    __ Bind(deopt);
+    EmitEagerDeoptExit(check, check->GetDeoptType());
+#endif
+    __ Bind(&done);
+}
+
+template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfArrayBufferDetachedVertex>(
     DeoptIfArrayBufferDetachedVertex *check)
 {
 #ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << check->GetId() << ": DeoptIfArrayBufferDetachedVertex";
+    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << check->GetId()
+                        << ": DeoptIfArrayBufferDetachedVertex";
 #endif
     auto receiver = GetInputRegister(check, DeoptIfArrayBufferDetachedVertex::RECEIVER_INDEX);
     TemporaryRegisterScope scope(assembler_);
@@ -1631,33 +2469,24 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfArrayBufferDetachedVert
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfCOWElementsVertex>(DeoptIfCOWElementsVertex *check)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << check->GetId() << ": DeoptIfCOWElementsVertex";
-#endif
     auto elements = GetInputRegister(check, DeoptIfCOWElementsVertex::ELEMENTS_INDEX);
     TemporaryRegisterScope scope(assembler_);
     ArkSteedRegister objectType = scope.Acquire();
-#if defined(PANDA_TARGET_AMD64)
-    Label *deopt = RecordEagerDeoptTarget(check, kungfu::DeoptType::INCONSISTENTELEMENTSKIND);
-#else
-    Label deoptLabel;
-    Label *deopt = &deoptLabel;
-#endif
-    Label done;
     LoadObjectType(assembler_, objectType, elements);
-    __ Compare(objectType, static_cast<int32_t>(JSType::COW_TAGGED_ARRAY));
-    __ JumpIf(Condition::EQUAL, deopt);
-    __ Compare(objectType, static_cast<int32_t>(JSType::COW_MUTANT_TAGGED_ARRAY));
-    __ JumpIf(Condition::NOT_EQUAL, &done);
-#if !defined(PANDA_TARGET_AMD64)
-    __ Bind(deopt);
+    __ Compare(objectType, static_cast<int32_t>(JSType::TAGGED_ARRAY));
+#if defined(PANDA_TARGET_AMD64)
+    __ JumpIf(Condition::NOT_EQUAL, RecordEagerDeoptTarget(check, kungfu::DeoptType::INCONSISTENTELEMENTSKIND));
+#else
+    Label done;
+    __ JumpIf(Condition::EQUAL, &done);
     EmitEagerDeoptExit(check, kungfu::DeoptType::INCONSISTENTELEMENTSKIND);
-#endif
     __ Bind(&done);
+#endif
 }
 
 template <>
-void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfElementsUnstableVertex>(DeoptIfElementsUnstableVertex *check)
+void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfElementsUnstableVertex>(
+    DeoptIfElementsUnstableVertex *check)
 {
 #ifndef NDEBUG
     LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << check->GetId() << ": DeoptIfElementsUnstableVertex";
@@ -1692,13 +2521,24 @@ void ArkSteedCodeGenerator::VisitControlVertex<DeoptVertex>(DeoptVertex *deopt)
 
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<InitialValueVertex>(InitialValueVertex *initialValue)
-{}
+{
+}
 
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<ActualArgcVertex>(ActualArgcVertex *actualArgc)
 {
     auto dst = GetResultRegister(actualArgc);
     __ LoadActualArgc(dst);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<LoadActualArgumentVertex>(LoadActualArgumentVertex *load)
+{
+    auto dst = GetResultRegister(load);
+    auto index = GetInputRegister(load, LoadActualArgumentVertex::INDEX_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    auto scratch = scope.Acquire();
+    __ LoadActualArgument(dst, index, scratch);
 }
 
 // ========================================= Slow Value Opcode =========================================
@@ -1786,16 +2626,17 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<LoadSingleCharTableElementVert
 }
 
 template <>
-void ArkSteedCodeGenerator::VisitNonControlVertex<LoadPrototypeFromObjectVertex>(
-    LoadPrototypeFromObjectVertex *loadPrototype)
+void ArkSteedCodeGenerator::VisitNonControlVertex<LoadPrototypeFromNonJSProxyObjectVertex>(
+    LoadPrototypeFromNonJSProxyObjectVertex *loadPrototype)
 {
 #ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << loadPrototype->GetId() << ": LoadPrototypeFromObjectVertex";
+    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << loadPrototype->GetId()
+                        << ": LoadPrototypeFromNonJSProxyObjectVertex";
 #endif
     auto dst = GetResultRegister(loadPrototype);
-    auto obj = GetInputRegister(loadPrototype, LoadPrototypeFromObjectVertex::OBJECT_INDEX);
+    auto obj = GetInputRegister(loadPrototype, LoadPrototypeFromNonJSProxyObjectVertex::OBJECT_INDEX);
     __ LoadField(dst, obj, TaggedObject::HCLASS_OFFSET);
-    __ And(dst, static_cast<int64_t>(HCLASS_ADDRESS_MASK));
+    __ And(dst, static_cast<int64_t>(TaggedStateWord::ADDRESS_MASK));
     __ LoadField(dst, dst, JSHClass::PROTOTYPE_OFFSET);
 }
 
@@ -1804,7 +2645,8 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<LoadPrototypeHolderByHClassVer
     LoadPrototypeHolderByHClassVertex *loadHolder)
 {
 #ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << loadHolder->GetId() << ": LoadPrototypeHolderByHClassVertex";
+    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << loadHolder->GetId()
+                        << ": LoadPrototypeHolderByHClassVertex";
 #endif
     constexpr int RECEIVER_INDEX = static_cast<int>(LoadPrototypeHolderByHClassVertex::RECEIVER_INDEX);
     ASSERT(safepointBuilder_ != nullptr);
@@ -1818,19 +2660,19 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<LoadPrototypeHolderByHClassVer
     Label pass;
 
     __ LoadField(currentHClass, receiver, TaggedObject::HCLASS_OFFSET);
-    __ And(currentHClass, static_cast<int64_t>(HCLASS_ADDRESS_MASK));
+    __ And(currentHClass, static_cast<int64_t>(TaggedStateWord::ADDRESS_MASK));
     __ LoadField(holder, currentHClass, JSHClass::PROTOTYPE_OFFSET);
 
     __ Move(expectedHClass, static_cast<int64_t>(JSTaggedValue::VALUE_NULL));
     __ Compare(holder, expectedHClass);
     __ JumpIf(Condition::EQUAL, &deopt);
     __ LoadField(currentHClass, holder, TaggedObject::HCLASS_OFFSET);
-    __ And(currentHClass, static_cast<int64_t>(HCLASS_ADDRESS_MASK));
+    __ And(currentHClass, static_cast<int64_t>(TaggedStateWord::ADDRESS_MASK));
     __ LoadField(expectedHClass, currentHClass, JSHClass::PROTO_CHANGE_MARKER_OFFSET);
     __ Move(currentHClass, static_cast<int64_t>(JSTaggedValue::VALUE_NULL));
     __ Compare(expectedHClass, currentHClass);
     __ JumpIf(Condition::EQUAL, &protoChanged);
-    __ And(expectedHClass, static_cast<int64_t>(HCLASS_ADDRESS_MASK));
+    __ And(expectedHClass, static_cast<int64_t>(TaggedStateWord::ADDRESS_MASK));
     __ LoadField(currentHClass, expectedHClass, ProtoChangeMarker::BIT_FIELD_OFFSET);
     __ And(currentHClass, static_cast<int64_t>((1LLU << (ProtoChangeMarker::HAS_CHANGED_BITS - 1))));
     __ Compare(currentHClass, 0);
@@ -1841,7 +2683,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<LoadPrototypeHolderByHClassVer
         __ Compare(holder, expectedHClass);
         __ JumpIf(Condition::EQUAL, &deopt);
         __ LoadField(currentHClass, holder, TaggedObject::HCLASS_OFFSET);
-        __ And(currentHClass, static_cast<int64_t>(HCLASS_ADDRESS_MASK));
+        __ And(currentHClass, static_cast<int64_t>(TaggedStateWord::ADDRESS_MASK));
         __ MoveEmbeddedTagged(expectedHClass, loadHolder->GetExpectedHClassHandleIndex(i));
         __ Compare(currentHClass, expectedHClass);
         __ JumpIf(Condition::NOT_EQUAL, &protoChanged);
@@ -1860,7 +2702,8 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<LoadPrototypeHolderByHClassVer
 }
 
 template <>
-void ArkSteedCodeGenerator::VisitNonControlVertex<ConvertHoleToUndefinedVertex>(ConvertHoleToUndefinedVertex *convert)
+void ArkSteedCodeGenerator::VisitNonControlVertex<ConvertHoleToUndefinedVertex>(
+    ConvertHoleToUndefinedVertex *convert)
 {
 #ifndef NDEBUG
     LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << convert->GetId() << ": ConvertHoleToUndefinedVertex";
@@ -1887,7 +2730,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<LoadHClassAddressVertex>(LoadH
     ArkSteedRegister mask = scope.Acquire();
     ASSERT(dst != mask);
     __ LoadField(dst, object, static_cast<int32_t>(TaggedObject::HCLASS_OFFSET));
-    __ Move(mask, HCLASS_ADDRESS_MASK);
+    __ Move(mask, TaggedStateWord::ADDRESS_MASK);
     __ And(dst, mask);
 }
 
@@ -1905,6 +2748,31 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<StoreI32ToAddressVertex>(Store
     auto obj = GetInputRegister(storeField, StoreI32ToAddressVertex::OBJECT_INDEX);
     auto value = GetInputRegister(storeField, StoreI32ToAddressVertex::VALUE_INDEX);
     __ StoreField(value, obj, storeField->GetOffset());
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<EnsureWritableElementsVertex>(EnsureWritableElementsVertex *ensure)
+{
+    ArkSteedRegister elements = GetInputRegister(ensure, EnsureWritableElementsVertex::ELEMENTS_INDEX);
+    ArkSteedRegister object = GetInputRegister(ensure, EnsureWritableElementsVertex::OBJECT_INDEX);
+    ASSERT(GetResultRegister(ensure) == elements);
+    // RA rounds local tagged slots to odd and untagged slots to even, so the frame has no extra padding.
+    ASSERT((graph_->GetTaggedStackSlots() & 1U) != 0);
+    ASSERT((graph_->GetUntaggedStackSlots() & 1U) == 0);
+    auto *copy = graph_->GetChunk()->New<DeferredCopyCOWElements>(
+        object, elements, ensure->GetRegallocInfo()->GetDeferredRegisterSnapshot(), safepointBuilder_);
+    deferredCode_.push_back(copy);
+
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister objectType = scope.Acquire();
+    __ LoadField(objectType, elements, static_cast<int32_t>(TaggedObject::HCLASS_OFFSET));
+    __ And(objectType, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    __ LoadField(objectType, objectType, static_cast<int32_t>(JSHClass::BIT_FIELD_OFFSET));
+    static_assert(JSHClass::ObjectTypeBits::START_BIT == 0);
+    __ And(objectType, static_cast<int32_t>((1U << JSHClass::ObjectTypeBits::SIZE) - 1));
+    __ Compare(objectType, static_cast<int32_t>(JSType::TAGGED_ARRAY));
+    __ JumpIf(Condition::NOT_EQUAL, copy->GetEntryLabel());
+    __ Bind(copy->GetReturnLabel());
 }
 
 template <>
@@ -2052,7 +2920,8 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<TransitionHClassWithBarrierVer
     TransitionHClassWithBarrierVertex *transition)
 {
 #ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << transition->GetId() << ": TransitionHClassWithBarrierVertex";
+    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << transition->GetId()
+                        << ": TransitionHClassWithBarrierVertex";
 #endif
     auto glue = GetInputRegister(transition, TransitionHClassWithBarrierVertex::GLUE_INDEX);
     auto object = GetInputRegister(transition, TransitionHClassWithBarrierVertex::OBJECT_INDEX);
@@ -2071,7 +2940,8 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<PrepareSharedStoreFieldVertex>
     PrepareSharedStoreFieldVertex *prepareField)
 {
 #ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << prepareField->GetId() << ": PrepareSharedStoreFieldVertex";
+    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << prepareField->GetId()
+                        << ": PrepareSharedStoreFieldVertex";
 #endif
     uint64_t handlerInfo = prepareField->GetHandlerInfo();
     ASSERT(HandlerBase::IsStoreShared(handlerInfo));
@@ -2181,7 +3051,8 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<PrepareSharedStoreFieldVertex>
     __ Jump(&typeMismatch);
 
     __ Bind(&publishTreeString);
-    int stackArgCount = PrepareRuntimeStubStackArguments(prepareField, 1, RTSTUB_ID(SlowSharedObjectStoreBarrier));
+    int stackArgCount = PrepareRuntimeStubStackArguments(
+        prepareField, 1, RTSTUB_ID(SlowSharedObjectStoreBarrier));
     __ CallRuntime(RTSTUB_ID(SlowSharedObjectStoreBarrier));
     if (HasLazyDeoptSafepoint(prepareField)) {
         EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, prepareField);
@@ -2200,7 +3071,8 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<PrepareSharedStoreFieldVertex>
     __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0), scratch);
     __ Move(scratch, static_cast<int64_t>(runtimeArgCount));
     __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG1), scratch);
-    __ LoadTaggedValue(scratch, JSTaggedValue(GET_MESSAGE_STRING_ID(SetTypeMismatchedSharedProperty)).GetRawData());
+    __ LoadTaggedValue(
+        scratch, JSTaggedValue(GET_MESSAGE_STRING_ID(SetTypeMismatchedSharedProperty)).GetRawData());
     __ MoveRepr(MachineRepresentation::Tagged, __ GetCallArgSlot(CALL_ARG2), scratch);
     __ CallRuntime(RTSTUB_ID(ThrowTypeError));
     if (HasLazyDeoptSafepoint(prepareField)) {
@@ -2239,7 +3111,8 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<StoreInt32FieldWithRepVertex>(
     StoreInt32FieldWithRepVertex *storeField)
 {
 #ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << storeField->GetId() << ": StoreInt32FieldWithRepVertex";
+    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << storeField->GetId()
+                        << ": StoreInt32FieldWithRepVertex";
 #endif
     auto storeTarget = GetInputRegister(storeField, StoreInt32FieldWithRepVertex::STORE_TARGET_INDEX);
     auto value = GetInputRegister(storeField, StoreInt32FieldWithRepVertex::VALUE_INDEX);
@@ -2270,7 +3143,8 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<StoreDoubleFieldWithRepVertex>
     StoreDoubleFieldWithRepVertex *storeField)
 {
 #ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << storeField->GetId() << ": StoreDoubleFieldWithRepVertex";
+    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << storeField->GetId()
+                        << ": StoreDoubleFieldWithRepVertex";
 #endif
     auto storeTarget = GetInputRegister(storeField, StoreDoubleFieldWithRepVertex::STORE_TARGET_INDEX);
     auto value = GetInputRegister(storeField, StoreDoubleFieldWithRepVertex::VALUE_INDEX);
@@ -2317,7 +3191,8 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<EnsurePropertiesCapacityVertex
     EnsurePropertiesCapacityVertex *ensureCapacity)
 {
 #ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << ensureCapacity->GetId() << ": EnsurePropertiesCapacityVertex";
+    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << ensureCapacity->GetId()
+                        << ": EnsurePropertiesCapacityVertex";
 #endif
     auto object = GetInputRegister(ensureCapacity, EnsurePropertiesCapacityVertex::OBJECT_INDEX);
     auto result = GetResultRegister(ensureCapacity);
@@ -2355,7 +3230,8 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<StoreTaggedFieldByHClassVertex
     StoreTaggedFieldByHClassVertex *storeByHClass)
 {
 #ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << storeByHClass->GetId() << ": StoreTaggedFieldByHClassVertex";
+    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << storeByHClass->GetId()
+                        << ": StoreTaggedFieldByHClassVertex";
 #endif
     auto object = GetInputRegister(storeByHClass, StoreTaggedFieldByHClassVertex::OBJECT_INDEX);
     auto value = GetInputRegister(storeByHClass, StoreTaggedFieldByHClassVertex::VALUE_INDEX);
@@ -2379,7 +3255,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<StoreTaggedFieldByHClassVertex
     __ JumpIf(Condition::NOT_EQUAL, &deopt);
 
     __ LoadField(actualHClass, object, static_cast<int32_t>(TaggedObject::HCLASS_OFFSET));
-    __ Move(expectedHClass, HCLASS_ADDRESS_MASK);
+    __ Move(expectedHClass, TaggedStateWord::ADDRESS_MASK);
     __ And(actualHClass, expectedHClass);
     for (size_t i = 0; i < storeByHClass->GetCases().size(); ++i) {
         __ MoveEmbeddedTagged(expectedHClass, storeByHClass->GetCases()[i].expectedHClassHandleIndex);
@@ -2402,8 +3278,8 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<StoreTaggedFieldByHClassVertex
         ArkSteedWriteBarrierEmitter(assembler_, graph_->GetChunk(), &deferredCode_,
                                     storeByHClass->GetRegallocInfo()->GetDeferredRegisterSnapshot())
             .StoreTaggedField(glue, storeTarget, value, storeCase.fieldOffset,
-                              ArkSteedWriteBarrierKind::GENERIC_BARRIER, expectedHClass, valueRegionScratch,
-                              storeByHClass->GetValueKind());
+                              ArkSteedWriteBarrierKind::GENERIC_BARRIER, expectedHClass,
+                              valueRegionScratch, storeByHClass->GetValueKind());
         __ Jump(&done);
     }
     __ Bind(&done);
@@ -2482,6 +3358,27 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<I32ToTaggedIntVertex>(I32ToTag
 }
 
 template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<U32ToTaggedNumberVertex>(U32ToTaggedNumberVertex *convert)
+{
+    auto dst = GetResultRegister(convert);
+    auto src = GetInputRegister(convert, U32ToTaggedNumberVertex::INPUT_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedDoubleRegister number = scope.AcquireDouble();
+    Label asDouble;
+    Label done;
+    __ SignExtendInt32ToInt64(dst, src);
+    __ Compare(dst, 0);
+    __ JumpIf(Condition::LESS_THAN, &asDouble);
+    __ Or(dst, static_cast<int64_t>(JSTaggedValue::TAG_INT));
+    __ Jump(&done);
+    __ Bind(&asDouble);
+    __ Uint32ToFloat64(number, src);
+    __ Move(dst, number);
+    __ Add(dst, static_cast<int64_t>(JSTaggedValue::DOUBLE_ENCODE_OFFSET));
+    __ Bind(&done);
+}
+
+template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<RawI64ToTaggedVertex>(RawI64ToTaggedVertex *toTagged)
 {
     auto dst = GetResultRegister(toTagged);
@@ -2499,6 +3396,35 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<TaggedToRawI64Vertex>(TaggedTo
     if (dst != src) {
         __ Move(dst, src);
     }
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<I64AddVertex>(I64AddVertex *op)
+{
+    auto dst = GetResultRegister(op);
+    auto left = GetInputRegister(op, I64AddVertex::LEFT_INDEX);
+    auto right = GetInputRegister(op, I64AddVertex::RIGHT_INDEX);
+    ASSERT(dst == left);
+    __ Add(dst, right);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<I64SubVertex>(I64SubVertex *op)
+{
+    auto dst = GetResultRegister(op);
+    auto left = GetInputRegister(op, I64SubVertex::LEFT_INDEX);
+    auto right = GetInputRegister(op, I64SubVertex::RIGHT_INDEX);
+    ASSERT(dst == left);
+    __ Sub(dst, right);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<I64ShiftLeftVertex>(I64ShiftLeftVertex *op)
+{
+    auto dst = GetResultRegister(op);
+    auto input = GetInputRegister(op, I64ShiftLeftVertex::INPUT_INDEX);
+    ASSERT(dst == input);
+    __ ShiftLeft(dst, op->GetShift());
 }
 
 template <>
@@ -2584,6 +3510,35 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CheckedTaggedStringVertex>(Che
 }
 
 template <>
+void ArkSteedCodeGenerator::VisitControlVertex<BranchIfTaggedNumberVertex>(BranchIfTaggedNumberVertex *jumpIf)
+{
+    auto value = GetInputRegister(jumpIf, BranchIfTaggedNumberVertex::VALUE_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister bits = scope.Acquire();
+    Label *ifTrue = jumpIf->IfTrue()->GetLabel();
+    Label *ifFalse = jumpIf->IfFalse()->GetLabel();
+
+    __ Move(bits, value);
+    __ And(bits, static_cast<int64_t>(JSTaggedValue::TAG_MARK));
+    __ Compare(bits, static_cast<int64_t>(JSTaggedValue::TAG_OBJECT));
+    __ Branch(Condition::NOT_EQUAL, ifTrue, IsNextBlockInLayout(jumpIf->IfTrue()), ifFalse,
+              IsNextBlockInLayout(jumpIf->IfFalse()));
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitControlVertex<BranchIfTaggedBooleanVertex>(BranchIfTaggedBooleanVertex *jumpIf)
+{
+    auto value = GetInputRegister(jumpIf, BranchIfTaggedBooleanVertex::VALUE_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister bits = scope.Acquire();
+    __ Move(bits, value);
+    __ Or(bits, 1);
+    __ Compare(bits, static_cast<int32_t>(JSTaggedValue::VALUE_TRUE));
+    __ JumpIf(Condition::EQUAL, jumpIf->IfTrue()->GetLabel());
+    __ Jump(jumpIf->IfFalse()->GetLabel());
+}
+
+template <>
 void ArkSteedCodeGenerator::VisitControlVertex<BranchIfTaggedStringVertex>(BranchIfTaggedStringVertex *jumpIf)
 {
     auto value = GetInputRegister(jumpIf, BranchIfTaggedStringVertex::VALUE_INDEX);
@@ -2608,9 +3563,9 @@ template <>
 void ArkSteedCodeGenerator::VisitControlVertex<BranchIfHClassInVertex>(BranchIfHClassInVertex *jumpIf)
 {
 #ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << jumpIf->GetId() << ": BranchIfHClassInVertex to BB #"
-                        << jumpIf->IfTrue()->GetId() << " if true; to BB #" << jumpIf->IfFalse()->GetId()
-                        << " if false.";
+    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << jumpIf->GetId()
+                        << ": BranchIfHClassInVertex to BB #" << jumpIf->IfTrue()->GetId()
+                        << " if true; to BB #" << jumpIf->IfFalse()->GetId() << " if false.";
 #endif
     auto value = GetInputRegister(jumpIf, BranchIfHClassInVertex::VALUE_INDEX);
     TemporaryRegisterScope scope(assembler_);
@@ -2626,7 +3581,7 @@ void ArkSteedCodeGenerator::VisitControlVertex<BranchIfHClassInVertex>(BranchIfH
         __ Compare(actualHClass, 0);
         __ JumpIf(Condition::NOT_EQUAL, ifFalse->GetLabel());
         __ LoadField(actualHClass, value, TaggedObject::HCLASS_OFFSET);
-        __ Move(expectedHClass, HCLASS_ADDRESS_MASK);
+        __ Move(expectedHClass, TaggedStateWord::ADDRESS_MASK);
         __ And(actualHClass, expectedHClass);
     }
     for (uint32_t i = 0; i < jumpIf->GetExpectedHClassCount(); ++i) {
@@ -2655,6 +3610,134 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<F64ConditionCheckVertex>(F64Co
     auto right = GetInputDoubleRegister(check, F64ConditionCheckVertex::RIGHT_INDEX);
     __ CompareFloat64(left, right);
     EmitTaggedBooleanFromFloat64Compare(assembler_, dst, check->GetCondition());
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<Float64ToBooleanVertex>(Float64ToBooleanVertex *op)
+{
+    auto dst = GetResultRegister(op);
+    auto src = GetInputDoubleRegister(op, Float64ToBooleanVertex::INPUT_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister bits = scope.Acquire();
+    // Branchless ToBoolean for a double: with u the raw bits and m = u & 0x7fff'ffff
+    // 'ffff'ffff, the value is falsy exactly when m == 0 (+/-0.0) or m > 0x7ff0'0000
+    // '0000'0000 (NaN). Tracking 2m via the shift: d = 2m - 2 wraps to all-ones for
+    // m == 0 and is 0 for m == 1, so v = d >>> 52 gives falsy <=> v + 2 >= 0x1000 and
+    // f = (v + 2) >>> 12 is 1 exactly on the falsy set. VALUE_TRUE (0x07) and
+    // VALUE_FALSE (0x06) differ only in bit 0, so the tagged result is 7 - f for
+    // IsTrue and 6 + f for IsFalse - no conditional instruction is needed.
+    __ Move(bits, src);                  // u
+    __ ShiftLeft(bits, 1);               // 2m
+    __ Sub(bits, 2);                     // d = 2m - 2
+    __ ShiftRightLogical(bits, 52);      // v = d >>> 52
+    __ Add(bits, 2);                     // v + 2
+    __ ShiftRightLogical(bits, 12);      // f: 1 = falsy (bit 12)
+    if (op->IsTrueIfNonZero()) {
+        __ Move(dst, static_cast<int32_t>(JSTaggedValue::VALUE_TRUE));
+        __ Sub(dst, bits);
+    } else {
+        __ Move(dst, static_cast<int32_t>(JSTaggedValue::VALUE_FALSE));
+        __ Add(dst, bits);
+    }
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<TaggedNumberToBooleanVertex>(TaggedNumberToBooleanVertex *op)
+{
+    auto dst = GetResultRegister(op);
+    auto input = GetInputRegister(op, TaggedNumberToBooleanVertex::INPUT_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister bits = scope.Acquire();
+    ArkSteedRegister scratch = scope.Acquire();
+    Label intCase;
+    Label done;
+
+    // The tag dispatch doubles as the NOTNUMBER1 guard, mirroring
+    // CheckedNumberToF64Vertex: high16 == 0xFFFF is a TaggedInt, high16 == 0x0000
+    // is a non-number and deopts, anything else is a TaggedDouble.
+    __ Move(bits, input);
+    __ Move(scratch, JSTaggedValue::TAG_MARK);
+    __ Word64And(bits, scratch);
+    __ Compare(bits, scratch);
+    __ JumpIf(Condition::EQUAL, &intCase);
+    __ Compare(bits, static_cast<int64_t>(JSTaggedValue::TAG_OBJECT));
+    BranchToEagerDeoptTarget(Condition::EQUAL, op, kungfu::DeoptType::NOTNUMBER1);
+
+    // TaggedDouble arm: decode in place (subtract DOUBLE_ENCODE_OFFSET) and run
+    // the branchless magnitude trick of Float64ToBooleanVertex on the raw bits.
+    __ Move(bits, input);
+    __ Move(scratch, static_cast<uint64_t>(JSTaggedValue::DOUBLE_ENCODE_OFFSET));
+    __ Sub(bits, scratch);                // decoded double bits
+    __ ShiftLeft(bits, 1);                // 2m
+    __ Sub(bits, 2);                      // 2m - 2
+    __ ShiftRightLogical(bits, 52);       // v: value bits (bit 52)
+    __ Add(bits, 2);                      // v + 2
+    __ ShiftRightLogical(bits, 12);       // f: 1 = falsy (bit 12)
+    if (op->IsTrueIfNonZero()) {
+        __ Move(dst, static_cast<int32_t>(JSTaggedValue::VALUE_TRUE));
+        __ Sub(dst, bits);                // 7 - f
+    } else {
+        __ Move(dst, static_cast<int32_t>(JSTaggedValue::VALUE_FALSE));
+        __ Add(dst, bits);                // 6 + f
+    }
+    __ Jump(&done);
+
+    // TaggedInt arm: the answer is a property of the raw encoding - falsy
+    // exactly when the low 32 bits are zero (the tag and sign extension never
+    // touch them). (v | -v) >>> 31 is 1 exactly for v != 0, so this arm never
+    // leaves the GPR domain and pays no int-to-double conversion.
+    __ Bind(&intCase);
+    __ Move(bits, input);
+    __ Int32Neg(bits, bits);
+    __ Int32Or(bits, input);
+    __ ShiftRightLogical32(bits, 31);     // t: 1 = truthy (bit 31)
+    if (op->IsTrueIfNonZero()) {
+        __ Move(dst, static_cast<int32_t>(JSTaggedValue::VALUE_FALSE));
+        __ Add(dst, bits);                // 6 + t
+    } else {
+        __ Move(dst, static_cast<int32_t>(JSTaggedValue::VALUE_TRUE));
+        __ Sub(dst, bits);                // 7 - t
+    }
+
+    __ Bind(&done);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<TaggedDoubleToBooleanVertex>(TaggedDoubleToBooleanVertex *op)
+{
+    auto dst = GetResultRegister(op);
+    auto input = GetInputRegister(op, TaggedDoubleToBooleanVertex::INPUT_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister bits = scope.Acquire();
+    ArkSteedRegister scratch = scope.Acquire();
+
+    // The tag check is the NOTDOUBLE1 guard: high16 == 0xFFFF is a TaggedInt and
+    // high16 == 0x0000 is a heap object - both deopt, anything else is a TaggedDouble.
+    __ Move(bits, input);
+    __ Move(scratch, JSTaggedValue::TAG_MARK);
+    __ Word64And(bits, scratch);
+    __ Compare(bits, scratch);
+    BranchToEagerDeoptTarget(Condition::EQUAL, op, kungfu::DeoptType::NOTDOUBLE1);
+    __ Compare(bits, static_cast<int64_t>(JSTaggedValue::TAG_OBJECT));
+    BranchToEagerDeoptTarget(Condition::EQUAL, op, kungfu::DeoptType::NOTDOUBLE1);
+
+    // Decode in place (subtract DOUBLE_ENCODE_OFFSET) and run the branchless
+    // magnitude trick of Float64ToBooleanVertex on the raw bits.
+    __ Move(bits, input);
+    __ Move(scratch, static_cast<uint64_t>(JSTaggedValue::DOUBLE_ENCODE_OFFSET));
+    __ Sub(bits, scratch);                // decoded double bits
+    __ ShiftLeft(bits, 1);                // 2m
+    __ Sub(bits, 2);                      // 2m - 2
+    __ ShiftRightLogical(bits, 52);       // v: value bits (bit 52)
+    __ Add(bits, 2);                      // v + 2
+    __ ShiftRightLogical(bits, 12);       // f: 1 = falsy (bit 12)
+    if (op->IsTrueIfNonZero()) {
+        __ Move(dst, static_cast<int32_t>(JSTaggedValue::VALUE_TRUE));
+        __ Sub(dst, bits);                // 7 - f
+    } else {
+        __ Move(dst, static_cast<int32_t>(JSTaggedValue::VALUE_FALSE));
+        __ Add(dst, bits);                // 6 + f
+    }
 }
 
 template <>
@@ -2698,41 +3781,55 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<StringEqualVertex>(StringEqual
     __ Bind(&done);
 }
 
-#define DEFINE_I32_WITH_OVERFLOW_CODEGEN(Name, Op)                                                                   \
-    template <>                                                                                                      \
-    void ArkSteedCodeGenerator::VisitNonControlVertex<I32##Name##WithOverflowVertex>(I32##Name##WithOverflowVertex * \
-                                                                                     op)                             \
-    {                                                                                                                \
-        auto dst = GetResultRegister(op);                                                                            \
-        auto left = GetInputRegister(op, I32##Name##WithOverflowVertex::LEFT_INDEX);                                 \
-        auto right = GetInputRegister(op, I32##Name##WithOverflowVertex::RIGHT_INDEX);                               \
-        __ Op(dst, left, right);                                                                                     \
-        ASSERT(!EagerDeoptUsesRegister(op, dst));                                                                    \
-        BranchToEagerDeoptTarget(Condition::OVERFLOWED, op, kungfu::DeoptType::INT32OVERFLOW1);                      \
+#define DEFINE_I32_WITH_OVERFLOW_CODEGEN(Name, Op)                                                      \
+    template <>                                                                                         \
+    void ArkSteedCodeGenerator::VisitNonControlVertex<I32##Name##WithOverflowVertex>(                   \
+        I32##Name##WithOverflowVertex *op)                                                              \
+    {                                                                                                   \
+        auto dst = GetResultRegister(op);                                                               \
+        auto left = GetInputRegister(op, I32##Name##WithOverflowVertex::LEFT_INDEX);                    \
+        auto right = GetInputRegister(op, I32##Name##WithOverflowVertex::RIGHT_INDEX);                  \
+        __ Op(dst, left, right);                                                                        \
+        ASSERT(!EagerDeoptUsesRegister(op, dst));                                                       \
+        BranchToEagerDeoptTarget(Condition::OVERFLOWS, op, kungfu::DeoptType::INT32OVERFLOW1);          \
     }
 
 DEFINE_I32_WITH_OVERFLOW_CODEGEN(Add, Int32Add)
 DEFINE_I32_WITH_OVERFLOW_CODEGEN(Sub, Int32Sub)
 #undef DEFINE_I32_WITH_OVERFLOW_CODEGEN
 
-#define DEFINE_I32_CODEGEN(Name, Op)                                                             \
-    template <>                                                                                  \
-    void ArkSteedCodeGenerator::VisitNonControlVertex<I32##Name##Vertex>(I32##Name##Vertex * op) \
-    {                                                                                            \
-        auto dst = GetResultRegister(op);                                                        \
-        auto left = GetInputRegister(op, I32##Name##Vertex::LEFT_INDEX);                         \
-        auto right = GetInputRegister(op, I32##Name##Vertex::RIGHT_INDEX);                       \
-        __ Op(dst, left, right);                                                                 \
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<I32AddVertex>(I32AddVertex *op)
+{
+    auto dst = GetResultRegister(op);
+    auto left = GetInputRegister(op, I32AddVertex::LEFT_INDEX);
+    if (std::optional<int32_t> immediate = TryGetInt32ConstantInput(op, I32AddVertex::RIGHT_INDEX)) {
+        __ Int32Add(dst, left, *immediate);
+        return;
     }
+    __ Int32Add(dst, left, GetInputRegister(op, I32AddVertex::RIGHT_INDEX));
+}
 
-DEFINE_I32_CODEGEN(Add, Int32Add)
-DEFINE_I32_CODEGEN(Sub, Int32Sub)
-#undef DEFINE_I32_CODEGEN
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<I32SubVertex>(I32SubVertex *op)
+{
+    auto dst = GetResultRegister(op);
+    auto left = GetInputRegister(op, I32SubVertex::LEFT_INDEX);
+    if (std::optional<int32_t> immediate = TryGetInt32ConstantInput(op, I32SubVertex::RIGHT_INDEX)) {
+        __ Int32Sub(dst, left, *immediate);
+        return;
+    }
+    __ Int32Sub(dst, left, GetInputRegister(op, I32SubVertex::RIGHT_INDEX));
+}
 
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<I32MulVertex>(I32MulVertex *op)
 {
     auto dst = GetResultRegister(op);
+    if (std::optional<int32_t> immediate = TryGetInt32ConstantInput(op, I32MulVertex::RIGHT_INDEX)) {
+        __ Int32Mul(dst, *immediate);
+        return;
+    }
     auto right = GetInputRegister(op, I32MulVertex::RIGHT_INDEX);
     ASSERT(dst == GetInputRegister(op, I32MulVertex::LEFT_INDEX));
     __ Int32Mul(dst, right);
@@ -2772,7 +3869,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<I32MulWithOverflowVertex>(I32M
 #else
     __ Int32Mul(dst, right);
     ASSERT(!EagerDeoptUsesRegister(op, dst));
-    BranchToEagerDeoptTarget(Condition::OVERFLOWED, op, kungfu::DeoptType::INT32OVERFLOW1);
+    BranchToEagerDeoptTarget(Condition::OVERFLOWS, op, kungfu::DeoptType::INT32OVERFLOW1);
 #endif
     __ CompareInt32(dst, 0);
     __ JumpIf(Condition::NOT_EQUAL, &success);
@@ -3012,7 +4109,8 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CheckedI32ModVertex>(CheckedI3
 #endif
     __ CompareInt32(dst, 0);
 #if defined(PANDA_TARGET_AMD64)
-    BranchToEagerDeoptTarget(Condition::EQUAL, mod, kungfu::DeoptType::REMAINDERISNEGATIVEZERO);
+    BranchToEagerDeoptTarget(
+        Condition::EQUAL, mod, kungfu::DeoptType::REMAINDERISNEGATIVEZERO);
 #else
     __ JumpIf(Condition::EQUAL, &negativeZero);
     __ Jump(&done);
@@ -3258,42 +4356,42 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DoubleToInt32CallVertex>(Doubl
 }
 
 #if defined(PANDA_TARGET_AMD64)
-#define DEFINE_I32_UNARY_WITH_OVERFLOW_CODEGEN(Name, AsmOp, DeoptType, NeedZeroCheck)                                \
-    template <>                                                                                                      \
-    void ArkSteedCodeGenerator::VisitNonControlVertex<I32##Name##WithOverflowVertex>(I32##Name##WithOverflowVertex * \
-                                                                                     op)                             \
-    {                                                                                                                \
-        auto dst = GetResultRegister(op);                                                                            \
-        auto input = GetInputRegister(op, I32##Name##WithOverflowVertex::VALUE_INDEX);                               \
-        if constexpr (NeedZeroCheck) {                                                                               \
-            __ CompareInt32(input, 0);                                                                               \
-            BranchToEagerDeoptTarget(Condition::EQUAL, op, DeoptType);                                               \
-        }                                                                                                            \
-        __ AsmOp(dst, input);                                                                                        \
-        ASSERT(!EagerDeoptUsesRegister(op, dst));                                                                    \
-        BranchToEagerDeoptTarget(Condition::OVERFLOWED, op, DeoptType);                                              \
+#define DEFINE_I32_UNARY_WITH_OVERFLOW_CODEGEN(Name, AsmOp, DeoptType, NeedZeroCheck)                 \
+    template <>                                                                                       \
+    void ArkSteedCodeGenerator::VisitNonControlVertex<I32##Name##WithOverflowVertex>(                 \
+        I32##Name##WithOverflowVertex *op)                                                            \
+    {                                                                                                 \
+        auto dst = GetResultRegister(op);                                                             \
+        auto input = GetInputRegister(op, I32##Name##WithOverflowVertex::VALUE_INDEX);                \
+        if constexpr (NeedZeroCheck) {                                                                \
+            __ CompareInt32(input, 0);                                                                \
+            BranchToEagerDeoptTarget(Condition::EQUAL, op, DeoptType);                                \
+        }                                                                                             \
+        __ AsmOp(dst, input);                                                                         \
+        ASSERT(!EagerDeoptUsesRegister(op, dst));                                                     \
+        BranchToEagerDeoptTarget(Condition::OVERFLOWS, op, DeoptType);                                \
     }
 #else
-#define DEFINE_I32_UNARY_WITH_OVERFLOW_CODEGEN(Name, AsmOp, DeoptType, NeedZeroCheck)                                \
-    template <>                                                                                                      \
-    void ArkSteedCodeGenerator::VisitNonControlVertex<I32##Name##WithOverflowVertex>(I32##Name##WithOverflowVertex * \
-                                                                                     op)                             \
-    {                                                                                                                \
-        auto dst = GetResultRegister(op);                                                                            \
-        auto input = GetInputRegister(op, I32##Name##WithOverflowVertex::VALUE_INDEX);                               \
-        Label deopt;                                                                                                 \
-        Label done;                                                                                                  \
-        if constexpr (NeedZeroCheck) {                                                                               \
-            __ CompareInt32(input, 0);                                                                               \
-            __ JumpIf(Condition::EQUAL, &deopt);                                                                     \
-        }                                                                                                            \
-        __ AsmOp(dst, input);                                                                                        \
-        ASSERT(!EagerDeoptUsesRegister(op, dst));                                                                    \
-        __ JumpIf(Condition::OVERFLOWED, &deopt);                                                                    \
-        __ Jump(&done);                                                                                              \
-        __ Bind(&deopt);                                                                                             \
-        EmitEagerDeoptExit(op, DeoptType);                                                                           \
-        __ Bind(&done);                                                                                              \
+#define DEFINE_I32_UNARY_WITH_OVERFLOW_CODEGEN(Name, AsmOp, DeoptType, NeedZeroCheck)                 \
+    template <>                                                                                       \
+    void ArkSteedCodeGenerator::VisitNonControlVertex<I32##Name##WithOverflowVertex>(                 \
+        I32##Name##WithOverflowVertex *op)                                                            \
+    {                                                                                                 \
+        auto dst = GetResultRegister(op);                                                             \
+        auto input = GetInputRegister(op, I32##Name##WithOverflowVertex::VALUE_INDEX);                \
+        Label deopt;                                                                                  \
+        Label done;                                                                                   \
+        if constexpr (NeedZeroCheck) {                                                                \
+            __ CompareInt32(input, 0);                                                                \
+            __ JumpIf(Condition::EQUAL, &deopt);                                                      \
+        }                                                                                             \
+        __ AsmOp(dst, input);                                                                         \
+        ASSERT(!EagerDeoptUsesRegister(op, dst));                                                     \
+        __ JumpIf(Condition::OVERFLOWS, &deopt);                                                      \
+        __ Jump(&done);                                                                               \
+        __ Bind(&deopt);                                                                              \
+        EmitEagerDeoptExit(op, DeoptType);                                                            \
+        __ Bind(&done);                                                                               \
     }
 #endif
 
@@ -3336,14 +4434,14 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<F64ToTaggedDoubleVertex>(F64To
     __ Bind(&done);
 }
 
-#define DEFINE_F64_BINOP_CODEGEN(Name, Op)                                                       \
-    template <>                                                                                  \
-    void ArkSteedCodeGenerator::VisitNonControlVertex<F64##Name##Vertex>(F64##Name##Vertex * op) \
-    {                                                                                            \
-        auto dst = GetResultDoubleRegister(op);                                                  \
-        auto right = GetInputDoubleRegister(op, F64##Name##Vertex::RIGHT_INDEX);                 \
-        ASSERT(dst == GetInputDoubleRegister(op, F64##Name##Vertex::LEFT_INDEX));                \
-        __ Op(dst, right);                                                                       \
+#define DEFINE_F64_BINOP_CODEGEN(Name, Op)                                                        \
+    template <>                                                                                    \
+    void ArkSteedCodeGenerator::VisitNonControlVertex<F64##Name##Vertex>(F64##Name##Vertex *op)   \
+    {                                                                                              \
+        auto dst = GetResultDoubleRegister(op);                                                    \
+        auto right = GetInputDoubleRegister(op, F64##Name##Vertex::RIGHT_INDEX);                   \
+        ASSERT(dst == GetInputDoubleRegister(op, F64##Name##Vertex::LEFT_INDEX));                  \
+        __ Op(dst, right);                                                                \
     }
 
 DEFINE_F64_BINOP_CODEGEN(Add, Float64Add)
@@ -3362,6 +4460,15 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CallCommonStubVertex>(CallComm
     } else {
         safepointBuilder_->DefineSafepoint(__ GetPcOffset());
     }
+    __ FreeCallArgSlots(stackArgCount);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<FastSuperAllocateThisVertex>(FastSuperAllocateThisVertex *call)
+{
+    int stackArgCount = PrepareCommonStubStackArguments(call, call->GetArgCount());
+    __ CallCommonStub(CommonStubID::FastSuperAllocateThis);
+    safepointBuilder_->DefineSafepoint(__ GetPcOffset());
     __ FreeCallArgSlots(stackArgCount);
 }
 
@@ -3517,7 +4624,10 @@ void ArkSteedCodeGenerator::VisitControlVertex<BranchIfTrueVertex>(BranchIfTrueV
     __ LoadTaggedValue(scratch, JSTaggedValue::True().GetRawData());
     __ Compare(cond, scratch);
 
-    __ Branch(Condition::ZERO, ifTrue->GetLabel(), trueBranchIsFallthrough, ifFalse->GetLabel(),
+    __ Branch(Condition::ZERO,
+              ifTrue->GetLabel(),
+              trueBranchIsFallthrough,
+              ifFalse->GetLabel(),
               falseBranchIsFallthrough);
 }
 
@@ -3530,9 +4640,15 @@ void ArkSteedCodeGenerator::VisitControlVertex<BranchIfInt32CompareVertex>(Branc
     bool falseBranchIsFallthrough = IsNextBlockInLayout(ifFalse);
 
     auto left = GetInputRegister(jumpIf, BranchIfInt32CompareVertex::LEFT_INDEX);
-    auto right = GetInputRegister(jumpIf, BranchIfInt32CompareVertex::RIGHT_INDEX);
-    __ CompareInt32(left, right);
-    __ Branch(jumpIf->GetCondition(), ifTrue->GetLabel(), trueBranchIsFallthrough, ifFalse->GetLabel(),
+    if (std::optional<int32_t> immediate = TryGetInt32ConstantInput(jumpIf, BranchIfInt32CompareVertex::RIGHT_INDEX)) {
+        __ CompareInt32(left, *immediate);
+    } else {
+        __ CompareInt32(left, GetInputRegister(jumpIf, BranchIfInt32CompareVertex::RIGHT_INDEX));
+    }
+    __ Branch(jumpIf->GetCondition(),
+              ifTrue->GetLabel(),
+              trueBranchIsFallthrough,
+              ifFalse->GetLabel(),
               falseBranchIsFallthrough);
 }
 
@@ -3547,7 +4663,10 @@ void ArkSteedCodeGenerator::VisitControlVertex<BranchIfInt64CompareVertex>(Branc
     auto left = GetInputRegister(jumpIf, BranchIfInt64CompareVertex::LEFT_INDEX);
     auto right = GetInputRegister(jumpIf, BranchIfInt64CompareVertex::RIGHT_INDEX);
     __ Compare(left, right);
-    __ Branch(jumpIf->GetCondition(), ifTrue->GetLabel(), trueBranchIsFallthrough, ifFalse->GetLabel(),
+    __ Branch(jumpIf->GetCondition(),
+              ifTrue->GetLabel(),
+              trueBranchIsFallthrough,
+              ifFalse->GetLabel(),
               falseBranchIsFallthrough);
 }
 
@@ -3577,8 +4696,49 @@ void ArkSteedCodeGenerator::VisitControlVertex<BranchIfTaggedHeapObjectVertex>(B
     __ Move(scratch, value);
     __ And(scratch, static_cast<int64_t>(JSTaggedValue::TAG_HEAPOBJECT_MASK));
     __ Compare(scratch, 0);
-    __ Branch(Condition::EQUAL, ifTrue->GetLabel(), trueBranchIsFallthrough, ifFalse->GetLabel(),
+    __ Branch(Condition::EQUAL,
+              ifTrue->GetLabel(),
+              trueBranchIsFallthrough,
+              ifFalse->GetLabel(),
               falseBranchIsFallthrough);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitControlVertex<BranchIfJSConstructorFunctionVertex>(
+    BranchIfJSConstructorFunctionVertex *jumpIf)
+{
+    BB *ifTrue = jumpIf->IfTrue();
+    BB *ifFalse = jumpIf->IfFalse();
+    auto value = GetInputRegister(jumpIf, BranchIfJSConstructorFunctionVertex::VALUE_INDEX);
+    __ JumpIfNotJSConstructorFunction(value, ifFalse->GetLabel());
+    if (!IsNextBlockInLayout(ifTrue)) {
+        __ Jump(ifTrue->GetLabel());
+    }
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitControlVertex<BranchIfNewTargetHClassReadyVertex>(
+    BranchIfNewTargetHClassReadyVertex *jumpIf)
+{
+    BB *ifTrue = jumpIf->IfTrue();
+    BB *ifFalse = jumpIf->IfFalse();
+    auto value = GetInputRegister(jumpIf, BranchIfNewTargetHClassReadyVertex::VALUE_INDEX);
+    __ JumpIfNewTargetHClassNotReady(value, ifFalse->GetLabel());
+    if (!IsNextBlockInLayout(ifTrue)) {
+        __ Jump(ifTrue->GetLabel());
+    }
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitControlVertex<BranchIfBaseVertex>(BranchIfBaseVertex *jumpIf)
+{
+    BB *ifTrue = jumpIf->IfTrue();
+    BB *ifFalse = jumpIf->IfFalse();
+    auto value = GetInputRegister(jumpIf, BranchIfBaseVertex::VALUE_INDEX);
+    __ JumpIfConstructorIsBase(value, ifTrue->GetLabel());
+    if (!IsNextBlockInLayout(ifFalse)) {
+        __ Jump(ifFalse->GetLabel());
+    }
 }
 
 template <>
@@ -3586,14 +4746,12 @@ void ArkSteedCodeGenerator::VisitControlVertex<BranchIfReferenceEqualVertex>(Bra
 {
     BB *ifTrue = jumpIf->IfTrue();
     BB *ifFalse = jumpIf->IfFalse();
-    bool trueBranchIsFallthrough = IsNextBlockInLayout(ifTrue);
-    bool falseBranchIsFallthrough = IsNextBlockInLayout(ifFalse);
-
     auto left = GetInputRegister(jumpIf, BranchIfReferenceEqualVertex::LEFT_INDEX);
     auto right = GetInputRegister(jumpIf, BranchIfReferenceEqualVertex::RIGHT_INDEX);
     __ Compare(left, right);
-    __ Branch(Condition::EQUAL, ifTrue->GetLabel(), trueBranchIsFallthrough, ifFalse->GetLabel(),
-              falseBranchIsFallthrough);
+    __ Branch(Condition::EQUAL,
+              ifTrue->GetLabel(), IsNextBlockInLayout(ifTrue),
+              ifFalse->GetLabel(), IsNextBlockInLayout(ifFalse));
 }
 
 template <>
@@ -3637,8 +4795,8 @@ void ArkSteedCodeGenerator::VisitControlVertex<BranchIfObjectTypeVertex>(BranchI
     static_assert(JSHClass::ObjectTypeBits::START_BIT == 0);
     __ And(objectType, static_cast<int32_t>((1U << JSHClass::ObjectTypeBits::SIZE) - 1));
     __ Compare(objectType, static_cast<int32_t>(jumpIf->GetExpectedType()));
-    __ Branch(Condition::EQUAL, ifTrue->GetLabel(), trueBranchIsFallthrough, ifFalse->GetLabel(),
-              falseBranchIsFallthrough);
+    __ Branch(Condition::EQUAL, ifTrue->GetLabel(), trueBranchIsFallthrough,
+              ifFalse->GetLabel(), falseBranchIsFallthrough);
 }
 
 template <>
@@ -3782,10 +4940,10 @@ void ArkSteedCodeGenerator::ProcessNonControlVertex(NonControlVertex *vertex)
     temporaryScope.IncludeSpecificDouble(vertex->GetRegallocInfo()->GetRequiredSpecificFPRs());
 
     switch (vertex->GetOpcode()) {
-#define PROCESS_VERTEX_CASE(Type)                            \
-    case VertexOpcode::Type:                                 \
-        VisitNonControlVertex(vertex->Cast<Type##Vertex>()); \
-        break;
+#define PROCESS_VERTEX_CASE(Type)                                \
+        case VertexOpcode::Type:                                 \
+            VisitNonControlVertex(vertex->Cast<Type##Vertex>()); \
+            break;
         NON_CONTROL_VERTEX_LIST(PROCESS_VERTEX_CASE)
 #undef PROCESS_VERTEX_CASE
         default:
@@ -3799,11 +4957,14 @@ void ArkSteedCodeGenerator::ProcessNonControlVertex(NonControlVertex *vertex)
         ProcessValueVertex(valueVertex);
     }
 
-    if (vertex->CanThrow() || vertex->IsCall()) {
+    // Allocation returns an uninitialized object, even when its HClass is installed.
+    // Do not add an exit before initialization; reentry recovery is outside this contract.
+    if ((vertex->CanThrow() || vertex->IsCall()) && !IsUninitializedAllocation(vertex)) {
         if (HasExceptionLazyDeopt(vertex)) {
             ASSERT(CatchBlockOf(vertex) == nullptr);
             if (__ GetPcOffset() > pcBefore) {
                 RecordVertexComment(pcBefore, vertex);
+                RecordPositionBoundary(pcBefore, vertex->BytecodeOffset());
             }
             return;
         }
@@ -3820,6 +4981,7 @@ void ArkSteedCodeGenerator::ProcessNonControlVertex(NonControlVertex *vertex)
 
     if (__ GetPcOffset() > pcBefore) {
         RecordVertexComment(pcBefore, vertex);
+        RecordPositionBoundary(pcBefore, vertex->BytecodeOffset());
     }
 }
 
@@ -3833,10 +4995,10 @@ void ArkSteedCodeGenerator::ProcessControlVertex(ControlVertex *vertex)
     temporaryScope.IncludeSpecificDouble(vertex->GetRegallocInfo()->GetRequiredSpecificFPRs());
 
     switch (vertex->GetOpcode()) {
-#define PROCESS_VERTEX_CASE(Type)                         \
-    case VertexOpcode::Type:                              \
-        VisitControlVertex(vertex->Cast<Type##Vertex>()); \
-        break;
+#define PROCESS_VERTEX_CASE(Type)                             \
+        case VertexOpcode::Type:                              \
+            VisitControlVertex(vertex->Cast<Type##Vertex>()); \
+            break;
         CONTROL_VERTEX_LIST(PROCESS_VERTEX_CASE)
 #undef PROCESS_VERTEX_CASE
         default:
@@ -3846,6 +5008,7 @@ void ArkSteedCodeGenerator::ProcessControlVertex(ControlVertex *vertex)
 
     if (__ GetPcOffset() > pcBefore) {
         RecordVertexComment(pcBefore, vertex);
+        RecordPositionBoundary(pcBefore, vertex->BytecodeOffset());
     }
 }
 
@@ -3856,12 +5019,13 @@ void ArkSteedCodeGenerator::DeconstructPhisInSuccessor(BB *successor, uint32_t p
     }
     // Gap moves are part of the current block's code (preparing for jump to successor)
     // so we use the current block color, not the successor's color
-    std::ostringstream gapMovesSs;
-    WITH_ANSI_COLOR_SCOPE(NthBrightColor(gapMovesSs, currentBlockColorIndex_, withColors_))
-    {
-        gapMovesSs << "--   Gap moves:";
+    if (__ IsCommentEnabled()) {
+        std::ostringstream gapMovesSs;
+        WITH_ANSI_COLOR_SCOPE(NthBrightColor(gapMovesSs, currentBlockColorIndex_, withColors_)) {
+            gapMovesSs << "--   Gap moves:";
+        }
+        RecordComment(gapMovesSs.str().c_str());
     }
-    RecordComment(gapMovesSs.str().c_str());
     TemporaryRegisterScope scope(assembler_);
     ArkSteedRegister scratchGPR = scope.AcquireScratch();
     ArkSteedDoubleRegister scratchFPR = scope.AcquireDoubleScratch();
@@ -3871,30 +5035,42 @@ void ArkSteedCodeGenerator::DeconstructPhisInSuccessor(BB *successor, uint32_t p
     ChunkVector<std::pair<AllocatedState, ValueVertex *>> constantMoves(graph_->GetChunk());
     ArkSteedRegList registersSetByPhis;
     ArkDoubleRegList doubleRegistersSetByPhis;
-    CollectPhiMoves(&generalResolver, &doubleResolver, successor, predecessorId, &registersSetByPhis,
-                    &doubleRegistersSetByPhis, &constantMoves);
-    CollectRegisterStateMoves(&generalResolver, &doubleResolver, successor, predecessorId, registersSetByPhis,
-                              doubleRegistersSetByPhis, &constantMoves);
+    CollectPhiMoves(&generalResolver, &doubleResolver, successor, predecessorId,
+                    &registersSetByPhis, &doubleRegistersSetByPhis,
+                    &constantMoves);
+    CollectRegisterStateMoves(&generalResolver, &doubleResolver, successor, predecessorId,
+                              registersSetByPhis, doubleRegistersSetByPhis, &constantMoves);
 
     generalResolver.Resolve(
         [&](AllocatedState dest, AllocatedState src) {
             RecordGapMoveComment(src, dest, nullptr);
             ExecuteGapMove(dest, src, &scratchGPR, &scratchFPR);
         },
-        [&](AllocatedState) { __ Push(scratchGPR); }, [&](AllocatedState) { __ Pop(scratchGPR); });
+        [&](AllocatedState) {
+            __ Push(scratchGPR);
+        },
+        [&](AllocatedState) {
+            __ Pop(scratchGPR);
+        });
     doubleResolver.Resolve(
         [&](AllocatedState dest, AllocatedState src) {
             RecordGapMoveComment(src, dest, nullptr);
             ExecuteGapMove(dest, src, &scratchGPR, &scratchFPR);
         },
-        [&](AllocatedState) { __ Push(scratchFPR); }, [&](AllocatedState) { __ Pop(scratchFPR); });
+        [&](AllocatedState) {
+            __ Push(scratchFPR);
+        },
+        [&](AllocatedState) {
+            __ Pop(scratchFPR);
+        });
     for (auto [dest, constVertex] : constantMoves) {
         ExecuteConstantMove(dest, constVertex, &scratchGPR, &scratchFPR);
     }
 }
 
 void ArkSteedCodeGenerator::CollectPhiMoves(GapMoveResolver *generalResolver, GapMoveResolver *doubleResolver,
-                                            BB *successor, int predecessorId, ArkSteedRegList *registersSetByPhis,
+                                            BB *successor, int predecessorId,
+                                            ArkSteedRegList *registersSetByPhis,
                                             ArkDoubleRegList *doubleRegistersSetByPhis,
                                             ChunkVector<std::pair<AllocatedState, ValueVertex *>> *constantMoves)
 {
@@ -3930,8 +5106,8 @@ void ArkSteedCodeGenerator::CollectPhiMoves(GapMoveResolver *generalResolver, Ga
     }
 }
 
-void ArkSteedCodeGenerator::CollectRegisterStateMoves(
-    GapMoveResolver *generalResolver, GapMoveResolver *doubleResolver, BB *successor, int predecessorId,
+void ArkSteedCodeGenerator::CollectRegisterStateMoves(GapMoveResolver *generalResolver, GapMoveResolver *doubleResolver,
+    BB *successor, int predecessorId,
     const ArkSteedRegList &registersSetByPhis, const ArkDoubleRegList &doubleRegistersSetByPhis,
     ChunkVector<std::pair<AllocatedState, ValueVertex *>> *constantMoves)
 {
@@ -4049,7 +5225,8 @@ void ArkSteedCodeGenerator::ExecuteConstantMove(const AllocatedState &dest, Valu
 }
 
 void ArkSteedCodeGenerator::ExecuteGapMove(const InstructionOperand &dest, const InstructionOperand &src,
-                                           const ArkSteedRegister *scratchGPR, const ArkSteedDoubleRegister *scratchFPR)
+                                           const ArkSteedRegister *scratchGPR,
+                                           const ArkSteedDoubleRegister *scratchFPR)
 {
     ASSERT(dest.IsAllocated() && src.IsAllocated());
     const AllocatedState &destOp = AllocatedState::Cast(dest);
@@ -4122,8 +5299,7 @@ void ArkSteedCodeGenerator::RecordBlockComment(BB *block)
     // Set current block color for subsequent IR lines
     currentBlockColorIndex_ = GetBlockColorIndex(block->GetId());
     std::ostringstream ss;
-    WITH_ANSI_COLOR_SCOPE(NthBrightColor(ss, currentBlockColorIndex_, withColors_))
-    {
+    WITH_ANSI_COLOR_SCOPE(NthBrightColor(ss, currentBlockColorIndex_, withColors_)) {
         ss << "-- Block b" << block->GetId();
         if (block->IsDeferred()) {
             ss << " (deferred)";
@@ -4137,8 +5313,7 @@ void ArkSteedCodeGenerator::RecordBlockComment(BB *block)
                 for (size_t i = 0; i < predecessors.size(); ++i) {
                     // Use predecessor's color for the block reference
                     int colorIndex = GetBlockColorIndex(predecessors[i]->GetId());
-                    WITH_ANSI_COLOR_SCOPE(NthBrightColor(ss, colorIndex, withColors_))
-                    {
+                    WITH_ANSI_COLOR_SCOPE(NthBrightColor(ss, colorIndex, withColors_)) {
                         ss << "b" << predecessors[i]->GetId();
                     }
                     ss << ", ";
@@ -4160,8 +5335,7 @@ void ArkSteedCodeGenerator::RecordVertexComment(uint32_t pcBefore, Vertex *verte
         return;
     }
     std::ostringstream ss;
-    WITH_ANSI_COLOR_SCOPE(NthBrightColor(ss, currentBlockColorIndex_, withColors_))
-    {
+    WITH_ANSI_COLOR_SCOPE(NthBrightColor(ss, currentBlockColorIndex_, withColors_)) {
         ss << "--   ";
     }
     ss << vertex->Dump(withColors_);
@@ -4177,8 +5351,7 @@ void ArkSteedCodeGenerator::AppendVertexSuccessorInfo(std::ostringstream *ss, Ve
     ControlVertex *control = vertex->Cast<ControlVertex>();
     auto blockRef = [this, ss](BB *block) {
         int colorIndex = GetBlockColorIndex(block->GetId());
-        WITH_ANSI_COLOR_SCOPE(NthBrightColor(*ss, colorIndex, withColors_))
-        {
+        WITH_ANSI_COLOR_SCOPE(NthBrightColor(*ss, colorIndex, withColors_)) {
             *ss << "b" << block->GetId();
         }
     };
@@ -4212,8 +5385,7 @@ void ArkSteedCodeGenerator::RecordGapMoveComment(const InstructionOperand &src, 
         return;
     }
     std::ostringstream ss;
-    WITH_ANSI_COLOR_SCOPE(NthBrightColor(ss, currentBlockColorIndex_, withColors_))
-    {
+    WITH_ANSI_COLOR_SCOPE(NthBrightColor(ss, currentBlockColorIndex_, withColors_)) {
         ss << "--   * " << src.Description() << " -> " << dest.Description();
         if (phi != nullptr) {
             std::string label = FormatVertexLabel(phi);
@@ -4229,8 +5401,7 @@ void ArkSteedCodeGenerator::RecordSpillComment()
 {
     if (__ IsCommentEnabled()) {
         std::ostringstream ss;
-        WITH_ANSI_COLOR_SCOPE(NthBrightColor(ss, currentBlockColorIndex_, withColors_))
-        {
+        WITH_ANSI_COLOR_SCOPE(NthBrightColor(ss, currentBlockColorIndex_, withColors_)) {
             ss << "--   Spill:";
         }
         RecordComment(ss.str().c_str());
@@ -4337,6 +5508,16 @@ void ArkSteedCodeGenerator::AssignBlockColors(const std::vector<std::vector<int>
 
         blockColorAssignment_[blockId] = color % AnsiColorScope::NUM_BRIGHT_COLORS;
     }
+}
+
+void ArkSteedCodeGenerator::RecordPositionBoundary(uint32_t pcBefore, uint32_t bcOffset)
+{
+    if (positionTableBuilder_ == nullptr || bcOffset == 0) {
+        return;
+    }
+    // Only record when code was actually emitted at this pcBefore.
+    // This avoids recording boundaries for vertices that produced no code.
+    positionTableBuilder_->RecordBoundary(pcBefore, bcOffset);
 }
 
 #undef __

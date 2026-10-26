@@ -42,7 +42,26 @@ enum class SpecVregIndex: int {
     NEWTARGET_INDEX = -6,
     THIS_OBJECT_INDEX = -7,
     ACTUAL_ARGC_INDEX = -8,
+    DEOPT_CONTINUATION_KIND_INDEX = -9,
+    BASE_CONSTRUCTOR_THIS_INDEX = -10,
 };
+
+// Which special post-linking continuation a lazy-deopt site must apply. The
+// mechanism (publish kind + payload in the stack context, trampoline dispatches
+// on it after the frames are linked) is generic.
+enum class DeoptContinuationKind : int32_t {
+    DEFAULT = 0,
+    BASE_CTOR = 1,
+    DERIVED_CTOR = 2,
+};
+
+// The kind constant travels through the deopt bundle as a deopt value.
+// Encode it as a proper tagged int at emission and decode with
+// GetInt() on read.
+inline JSTaggedType EncodeDeoptContinuationKind(DeoptContinuationKind kind)
+{
+    return JSTaggedValue(static_cast<int32_t>(kind)).GetRawData();
+}
 
 struct Context {
     uintptr_t callsiteSp;
@@ -51,20 +70,26 @@ struct Context {
 };
 
 //   |--------------------------| ---------------
-//   |        callerFp_         |               ^
+//   |      baseCtorThis_       |               ^
+//   |   continuationResumePc_  |               |
+//   |    continuationKind_     |               |
+//   |     isFrameLazyDeopt_    |               |
+//   |      hasException_       |          stackContext
+//   |       callerFp_          |               |
 //   |       returnAddr_        |               |
-//   |      callFrameTop_       |          stackContext
-//   |       inlineDepth_       |               |
-//   |       hasException_      |               |
-//   |      isFrameLazyDeopt_   |               v
+//   |      callFrameTop_       |               |
+//   |       inlineDepth_       |               v  (Index 0, pushed last = context base)
 //   |--------------------------| ---------------
-struct AsmStackContext : public base::AlignedStruct<base::AlignedPointer::Size(),
+struct AsmStackContext : public base::AlignedStruct<JSTaggedValue::TaggedTypeSize(),
                                                     base::AlignedPointer,
                                                     base::AlignedPointer,
                                                     base::AlignedPointer,
                                                     base::AlignedPointer,
                                                     base::AlignedBool,
-                                                    base::AlignedBool> {
+                                                    base::AlignedBool,
+                                                    base::AlignedPointer,
+                                                    base::AlignedPointer,
+                                                    base::AlignedPointer> {
     enum class Index : size_t {
         INLINE_DEPTH_INDEX = 0,
         CALLFRAME_TOP_INDEX,
@@ -72,6 +97,9 @@ struct AsmStackContext : public base::AlignedStruct<base::AlignedPointer::Size()
         CALLERFRAME_POINTER_INDEX,
         HAS_EXCEPTION_INDEX,
         IS_FRAME_LAZY_DEOPT_INDEX,
+        DEOPT_CONTINUATION_KIND_INDEX,
+        CONTINUATION_RESUME_PC_INDEX,
+        BASE_CTOR_THIS_INDEX,
         NUM_OF_MEMBER
     };
 
@@ -107,6 +135,21 @@ struct AsmStackContext : public base::AlignedStruct<base::AlignedPointer::Size()
         return GetOffset<static_cast<size_t>(Index::IS_FRAME_LAZY_DEOPT_INDEX)>(isArch32);
     }
 
+    static size_t GetContinuationResumePcOffset(bool isArch32)
+    {
+        return GetOffset<static_cast<size_t>(Index::CONTINUATION_RESUME_PC_INDEX)>(isArch32);
+    }
+
+    static size_t GetBaseCtorThisOffset(bool isArch32)
+    {
+        return GetOffset<static_cast<size_t>(Index::BASE_CTOR_THIS_INDEX)>(isArch32);
+    }
+
+    static size_t GetContinuationKindOffset(bool isArch32)
+    {
+        return GetOffset<static_cast<size_t>(Index::DEOPT_CONTINUATION_KIND_INDEX)>(isArch32);
+    }
+
     static constexpr size_t GetSize(bool isArch32)
     {
         return isArch32 ? AsmStackContext::SizeArch32 : AsmStackContext::SizeArch64;
@@ -118,6 +161,9 @@ struct AsmStackContext : public base::AlignedStruct<base::AlignedPointer::Size()
     alignas(EAS) uintptr_t callerFp_{0};
     alignas(EAS) bool hasException_{false};
     alignas(EAS) bool isFrameLazyDeopt_{false};
+    alignas(EAS) uintptr_t continuationKind_{0};
+    alignas(EAS) uintptr_t continuationResumePc_{0};
+    alignas(EAS) JSTaggedType baseCtorThis_{0};
     // out put data
 };
 
@@ -233,6 +279,9 @@ private:
     uint32_t type_ {static_cast<uint32_t>(DeoptType::NONE)};
     bool isRecursiveCall_ {false};
     bool isArkSteedFrame_ {false};
+    uintptr_t continuationKind_ {0};
+    uintptr_t continuationResumePc_ {0};
+    JSTaggedType baseCtorThis_ {0};
 };
 
 }  // namespace panda::ecmascript

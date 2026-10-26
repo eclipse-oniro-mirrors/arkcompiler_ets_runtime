@@ -12,6 +12,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE GrandParent 1
+//! EXEC_COUNT_GE *GrandParent 1
+//! COMPILE_COUNT_GE Parent 1
+//! EXEC_COUNT_GE *[!d]Parent 1 # matches the Parent entry, not the GrandParent one
+//! COMPILE_COUNT_GE *Child* 1
+//! EXEC_COUNT_GE *Child* 1
+//! COMPILE_COUNT_GE *spread_constructor_inheritance_4* 1
+//! EXEC_COUNT_GE *spread_constructor_inheritance_4 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 class GrandParent {
     a: number;
     b: number;
@@ -22,6 +33,8 @@ class GrandParent {
     }
 }
 
+//! METHOD Parent
+//! HAS CallRuntime OptSuperCall
 class Parent extends GrandParent {
     c: number;
 
@@ -31,6 +44,8 @@ class Parent extends GrandParent {
     }
 }
 
+//! METHOD Child
+//! HAS CallRuntime OptSuperCall
 class Child extends Parent {
     d: number;
 
@@ -44,6 +59,10 @@ class Child extends Parent {
     }
 }
 
+//! METHOD spread_constructor_inheritance_4
+//! HAS CallRuntime NewObjApply
+//! HAS CallRuntime StArraySpread
+//! HAS Call
 function spread_constructor_inheritance_4(coords: [number, number, number, number]): number {
     const c = new Child(...coords);
     return c.total();

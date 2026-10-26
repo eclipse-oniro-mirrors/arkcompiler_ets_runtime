@@ -14,6 +14,17 @@
  */
 
 // @ts-nocheck
+// G11.1 additive evidence: an explicit hotness threshold keeps the 1000-call
+// warm-up in the interpreter, so the installation performed by the existing
+// `ArkTools.arkSteedCompileSync` call is deterministic and the positive entry
+// counter is attributable to the generated code of `foo` (V2). Existing
+// assertions and printed values are unchanged.
+//! PARAMS --compiler-jit-hotness-threshold=10000
+//! METHOD foo
+//! HAS LoadTaggedField
+//! COMPILE_COUNT_GE *foo* 1
+//! EXEC_COUNT_GE *foo* 1
+//! DEOPT_COUNT *Deoptimize* 0
 declare function print(arg: any): string;
 let A = {cc:1, cc2:2};
 function B() {};

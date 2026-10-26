@@ -39,13 +39,14 @@ namespace panda::ecmascript::arksteed {
 
 uint32_t DeoptLiteralTableBuilder::GetOrAdd(uint32_t handleIndex)
 {
-    auto existing = std::find(handleIndexByLiteralIndex_.begin(), handleIndexByLiteralIndex_.end(), handleIndex);
-    if (existing != handleIndexByLiteralIndex_.end()) {
-        return static_cast<uint32_t>(std::distance(handleIndexByLiteralIndex_.begin(), existing));
+    auto it = literalIndexByHandle_.find(handleIndex);
+    if (it != literalIndexByHandle_.end()) {
+        return it->second;
     }
     ASSERT(handleIndexByLiteralIndex_.size() < std::numeric_limits<uint32_t>::max());
     uint32_t literalIndex = static_cast<uint32_t>(handleIndexByLiteralIndex_.size());
     handleIndexByLiteralIndex_.push_back(handleIndex);
+    literalIndexByHandle_.emplace(handleIndex, literalIndex);
     return literalIndex;
 }
 
@@ -250,7 +251,7 @@ uint64_t GetTranslationHeaderKey(uint32_t bodyId, kungfu::DeoptType type)
 bool IsValidDeoptType(uint8_t type)
 {
     return type >= static_cast<uint8_t>(kungfu::DeoptType::LAZYDEOPT) &&
-           type <= static_cast<uint8_t>(kungfu::DeoptType::HOTRELOAD_PATCHMAIN);
+           type < static_cast<uint8_t>(kungfu::DeoptType::COUNT);
 }
 
 bool IsTaggedSpecial(const JSTaggedValue &value)
@@ -998,8 +999,12 @@ bool ReadDeoptLiteral(const MachineCode *machineCode, uint32_t literalIndex, uin
     if (machineCode == nullptr || raw == nullptr) {
         return false;
     }
-    ArkSteedSafepointTable safepointTable(machineCode->GetStackMapOrOffsetTableAddress(),
-                                          machineCode->GetStackMapOrOffsetTableSize());
+    size_t safepointTableSize = 0;
+    const uint8_t *safepointTableData = GetArkSteedSafepointTable(
+        machineCode->GetStackMapOrOffsetTableAddress(),
+        machineCode->GetStackMapOrOffsetTableSize(),
+        &safepointTableSize);
+    ArkSteedSafepointTable safepointTable(safepointTableData, safepointTableSize);
     uint32_t literalCount = safepointTable.IsValid() ? safepointTable.GetDeoptLiteralCount() : 0;
     if (literalIndex >= literalCount ||
         static_cast<size_t>(literalCount) * sizeof(uint64_t) > machineCode->GetHeapConstantTableSize()) {

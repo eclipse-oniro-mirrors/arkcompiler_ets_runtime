@@ -1385,7 +1385,6 @@ void OptimizedCall::DeoptEnterAsmInterpOrBaseline(ExtendedAssembler *assembler)
     Register tempRegister = rax;
     Register opRegister = r10;
     Register outputCount = rdx;
-    Register frameStateBase = rcx;
     Register depth = r11;
     Register hasExceptionRegister = r15;
     Label loopBegin;
@@ -1394,33 +1393,111 @@ void OptimizedCall::DeoptEnterAsmInterpOrBaseline(ExtendedAssembler *assembler)
     Label pushArgv;
     __ Movq(Operand(context, AsmStackContext::GetHasExceptionOffset(false)), hasExceptionRegister);
     __ Movq(Operand(context, AsmStackContext::GetInlineDepthOffset(false)), depth);
+    __ Movq(context, rbx); // context walks up per frame during linking; keep the base
     __ Leaq(Operand(context, AsmStackContext::GetSize(false)), context);
     __ Movq(Immediate(0), r12);
     __ Bind(&loopBegin);
-    __ Movq(Operand(context, 0), outputCount);
-    __ Leaq(Operand(context, FRAME_SLOT_SIZE), frameStateBase);
-    __ Cmpq(0, r12);
-    __ Je(&pushArgv);
-    __ Movq(rsp, r8);
-    __ Addq(AsmInterpretedFrame::GetSize(false), r8);
-    __ Leaq(Operand(frameStateBase, AsmInterpretedFrame::GetBaseOffset(false)), r10);
-    __ Movq(r8, Operand(r10, InterpretedFrameBase::GetPrevOffset(false)));
-    __ Testq(15, rsp);  // 15: low 4 bits must be 0b0000
-    __ Jnz(&pushArgv);
-    __ PushAlignBytes();
-    __ Bind(&pushArgv);
-    // update fp
-    __ Movq(rsp, Operand(frameStateBase, AsmInterpretedFrame::GetFpOffset(false)));
-    PushArgsWithArgvAndCheckStack(assembler, glueRegister, outputCount,
-        frameStateBase, tempRegister, opRegister, &stackOverflow);
-    __ Leaq(Operand(context, outputCount, Scale::Times8, FRAME_SLOT_SIZE), context);
-    __ Addq(1, r12);
-    __ Cmpq(r12, depth);
-    __ Jae(&loopBegin);
+    {
+        // frameStateBase walks the deopt image (the C++-written source blocks) as the
+        // copy source of the linking loop; it — and the image — die when this scope closes.
+        Register frameStateBase = rcx;
+        __ Movq(Operand(context, 0), outputCount);
+        __ Leaq(Operand(context, FRAME_SLOT_SIZE), frameStateBase);
+        __ Cmpq(0, r12);
+        __ Je(&pushArgv);
+        __ Movq(rsp, r8);
+        __ Addq(AsmInterpretedFrame::GetSize(false), r8);
+        __ Leaq(Operand(frameStateBase, AsmInterpretedFrame::GetBaseOffset(false)), r10);
+        __ Movq(r8, Operand(r10, InterpretedFrameBase::GetPrevOffset(false)));
+        __ Testq(15, rsp);  // 15: low 4 bits must be 0b0000
+        __ Jnz(&pushArgv);
+        __ PushAlignBytes();
+        __ Bind(&pushArgv);
+        // update fp
+        __ Movq(rsp, Operand(frameStateBase, AsmInterpretedFrame::GetFpOffset(false)));
+        PushArgsWithArgvAndCheckStack(assembler, glueRegister, outputCount,
+            frameStateBase, tempRegister, opRegister, &stackOverflow);
+        __ Leaq(Operand(context, outputCount, Scale::Times8, FRAME_SLOT_SIZE), context);
+        __ Addq(1, r12);
+        __ Cmpq(r12, depth);
+        __ Jae(&loopBegin);
+    }
+    // The linking loop has copied every image block (frame struct + vregs + args)
+    // into the linked frames below rsp. From here on the image is DEAD: it sits
+    // above the frame chain and is never visited or updated by the GC. Every
+    // value the continuation and the dispatch consume must come from the live
+    // frames (rsp-relative) — an image read after the continuation's GC-capable
+    // stub call would be a moved-object hazard. frameStateBase is scoped to the
+    // loop above for exactly this reason. The stack context outlives the image
+    // only for the continuation payload: kind and bound-this are consumed before
+    // the stub call, the non-tagged resume pc after it.
+
+    // Lazy-deopt [[Construct]] result-check continuation: frames are linked now, so the
+    // shared common stubs may allocate and throw (the derived variant does). continuationKind_
+    // (NONE sentinel) is set by ProcessLazyDeopt for a CallBase/CallDerivedConstructor
+    // safepoint, whose raw acc is normalized here: the base variant selects the bound this
+    // for any non-object return, the derived variant throws for any non-object (the
+    // frontend guarantees a derived constructor never returns undefined across the call
+    // boundary, so only raw primitives reach its throw arm).
+    Label skipContinuation;
+    Label continuationThrew;
+    __ Movq(Operand(rbx, AsmStackContext::GetContinuationKindOffset(false)), r10);
+    __ Cmpq(0, r10);
+    __ Je(&skipContinuation);
+    __ Cmpq(0, hasExceptionRegister);
+    __ Jne(&skipContinuation);
+    {
+        Label derivedStub;
+        Label stubLoaded;
+        Label continuationCallAligned;
+        Label continuationCallDone;
+        // root the GC walk and rbp chain at the innermost reconstructed frame: the stub's
+        // runtime call re-roots below it and chains back through the saved rbp
+        __ Leaq(Operand(rsp, AsmInterpretedFrame::GetSize(false)), r12);
+        __ Movq(r12, Operand(glueRegister, JSThread::GlueData::GetLeaveFrameOffset(false)));
+        __ Movq(r12, rbp);
+        // glue survives the call in a callee-saved reg
+        __ Movq(glueRegister, r13);
+        __ Movq(Operand(rsp, AsmInterpretedFrame::GetAccOffset(false)), rsi); // raw acc
+        __ Movq(Operand(rbx, AsmStackContext::GetBaseCtorThisOffset(false)), rdx); // bound this
+        Register stubId = r11;
+        __ Cmpq(static_cast<int64_t>(DeoptContinuationKind::BASE_CTOR), r10);
+        __ Jne(&derivedStub);
+        __ Movq(kungfu::CommonStubCSigns::BaseConstructResultCheck, stubId);
+        __ Jmp(&stubLoaded);
+        __ Bind(&derivedStub);
+        __ Movq(kungfu::CommonStubCSigns::DerivedConstructResultCheck, stubId);
+        __ Bind(&stubLoaded);
+        __ Movq(Operand(glueRegister, stubId, Scale::Times8,
+            JSThread::GlueData::GetCOStubEntriesOffset(false)), rax);
+        __ Movq(Immediate(0), r12);
+        __ Testq(15, rsp);  // 15: mask of rsp low 4 bits for the 16-byte alignment check
+        __ Jz(&continuationCallAligned);
+        __ Movq(Immediate(8), r12);  // 8: alignment padding bytes pushed when misaligned
+        __ PushAlignBytes();
+        __ Bind(&continuationCallAligned);
+        __ Callq(rax);
+        __ Cmpq(0, r12);
+        __ Je(&continuationCallDone);
+        __ Addq(FRAME_SLOT_SIZE, rsp);
+        __ Bind(&continuationCallDone);
+        __ Movq(r13, glueRegister);
+        __ Cmpq(JSTaggedValue::VALUE_EXCEPTION, rax);
+        __ Je(&continuationThrew);
+        // normalized acc / resume pc go to the linked innermost frame — the live,
+        // GC-maintained copy; the image is dead (see the comment above the continuation)
+        __ Movq(rax, Operand(rsp, AsmInterpretedFrame::GetAccOffset(false)));
+        __ Movq(Operand(rbx, AsmStackContext::GetContinuationResumePcOffset(false)), r10);
+        __ Movq(r10, Operand(rsp, AsmInterpretedFrame::GetPcOffset(false)));
+        __ Jmp(&skipContinuation);
+        __ Bind(&continuationThrew);
+        __ Movq(Immediate(1), hasExceptionRegister);
+    }
+    __ Bind(&skipContinuation);
 
     Register callTargetRegister = r8;
     Register methodRegister = r9;
-    __ Movq(Operand(frameStateBase, AsmInterpretedFrame::GetFunctionOffset(false)), callTargetRegister);
+    __ Movq(Operand(rsp, AsmInterpretedFrame::GetFunctionOffset(false)), callTargetRegister);
     // get baseline code
     __ Movq(Operand(callTargetRegister, JSFunction::BASELINECODE_OFFSET), opRegister);
     Label baselineCodeUndefined;
@@ -1432,6 +1509,9 @@ void OptimizedCall::DeoptEnterAsmInterpOrBaseline(ExtendedAssembler *assembler)
     {
         Register newSpRegister = r11; // r11 is free
         __ Leaq(Operand(rsp, AsmInterpretedFrame::GetSize(false)), newSpRegister);
+        // get bytecode pc from the live frame before the sp alignment shifts rsp
+        Register bytecodePc = opRegister;
+        __ Movq(Operand(rsp, AsmInterpretedFrame::GetPcOffset(false)), bytecodePc);
         Label stackAligned;
         // align 16 bytes
         __ Testq(15, rsp);  // 15: low 4 bits must be 0b0000
@@ -1439,9 +1519,6 @@ void OptimizedCall::DeoptEnterAsmInterpOrBaseline(ExtendedAssembler *assembler)
         __ PushAlignBytes();
         __ Bind(&stackAligned);
 
-        Register bytecodePc = opRegister;
-        // get bytecode pc
-        __ Movq(Operand(frameStateBase, AsmInterpretedFrame::GetPcOffset(false)), bytecodePc);
         // get func
         Register func = callTargetRegister;
         // save glue
@@ -1487,9 +1564,9 @@ void OptimizedCall::DeoptEnterAsmInterpOrBaseline(ExtendedAssembler *assembler)
     {
         // r13, rbp, r12, rbx,      r14,     rsi
         // glue sp   pc  constpool  profile  acc
-        __ Movq(Operand(frameStateBase, AsmInterpretedFrame::GetFunctionOffset(false)), callTargetRegister);
-        __ Movq(Operand(frameStateBase, AsmInterpretedFrame::GetPcOffset(false)), r12);
-        __ Movq(Operand(frameStateBase, AsmInterpretedFrame::GetAccOffset(false)), rsi);
+        __ Movq(Operand(rsp, AsmInterpretedFrame::GetFunctionOffset(false)), callTargetRegister);
+        __ Movq(Operand(rsp, AsmInterpretedFrame::GetPcOffset(false)), r12);
+        __ Movq(Operand(rsp, AsmInterpretedFrame::GetAccOffset(false)), rsi);
         __ Movq(Operand(callTargetRegister, JSFunctionBase::METHOD_OFFSET), methodRegister);
 
         __ Leaq(Operand(rsp, AsmInterpretedFrame::GetSize(false)), opRegister);

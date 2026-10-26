@@ -12,6 +12,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *Test* 1
+//! EXEC_COUNT_GE *Test* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function Test() {
   let array = [0, /* hole */, 0];
   print("array for of:")
@@ -22,5 +26,6 @@ function Test() {
 
 Test();
 ArkTools.arkSteedCompileSync(Test);
+ArkTools.waitJitCompileFinish(Test);
 print(true);
 Test();

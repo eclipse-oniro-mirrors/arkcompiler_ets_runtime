@@ -12,6 +12,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+//! METHOD      VaArgsMethod
+//! COMPILE_COUNT_GE *VaArgsMethod* 1
+//! EXEC_COUNT_GE *VaArgsMethod* 1
+//! METHOD      constructTargetObject
+//! COUNT       CallNewObjRangeBase 1
+//! COUNT       CallNewObjRangeDerived 1
+//! HAS_NOT     CallRuntime OptNewObjRange
+//! COMPILE_COUNT_GE *constructTargetObject* 1
+//! EXEC_COUNT_GE *constructTargetObject* 1
+//! DEOPT_COUNT *Deoptimize* 0
 class VaArgsMethod {
     factor: number;
 
@@ -35,3 +45,15 @@ let worker = new VaArgsMethod(2);
 print(worker.compute());
 print(worker.compute(3));
 print(worker.compute(1, 2, 3));
+
+// Additive G11.6 evidence: a silent caller of the same domain proves the actual
+// construction form of the compiled original target in this case's own dump.
+function constructTargetObject() {
+    return new VaArgsMethod(2);
+}
+
+for (let round = 0; round < 4; round++) {
+    constructTargetObject();
+}
+ArkTools.arkSteedCompileSync(constructTargetObject);
+constructTargetObject();

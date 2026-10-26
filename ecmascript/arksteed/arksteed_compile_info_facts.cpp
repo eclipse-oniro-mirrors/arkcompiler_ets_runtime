@@ -19,6 +19,7 @@
 #include <tuple>
 
 #include "ecmascript/arksteed/arksteed_opcode.h"
+#include "ecmascript/arksteed/arksteed_loop_effects.h"
 #include "ecmascript/mem/tagged_object.h"
 
 namespace panda::ecmascript::arksteed {
@@ -284,6 +285,33 @@ bool NodeInfo::MergeWith(const NodeInfo &other)
     return !NoInfoAvailable();
 }
 
+bool NodeInfo::IsCompatibleWith(const NodeInfo &expected) const
+{
+    if (!NodeTypeIs(type_, expected.type_)) {
+        return false;
+    }
+    if (expected.possibleHClassesAreStale_) {
+        return true;
+    }
+    bool expectedHasUnstableHClass = std::any_of(
+        expected.possibleHClasses_.begin(), expected.possibleHClasses_.end(),
+        [](const PossibleHClassInfo &info) { return !info.isStable; });
+    if (!expectedHasUnstableHClass) {
+        return true;
+    }
+    if (possibleHClasses_.empty() || possibleHClassesAreStale_) {
+        return false;
+    }
+    for (const PossibleHClassInfo &actual : possibleHClasses_) {
+        auto expectedIt = std::find_if(expected.possibleHClasses_.begin(), expected.possibleHClasses_.end(),
+            [&actual](const PossibleHClassInfo &candidate) { return candidate.hclass == actual.hclass; });
+        if (expectedIt == expected.possibleHClasses_.end() || (expectedIt->isStable && !actual.isStable)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void NodeInfo::AddPossibleHClass(JSHClass *hclass, bool isStable)
 {
     if (hclass == nullptr) {
@@ -306,12 +334,13 @@ void NodeInfo::IntersectTypeWithPossibleHClasses()
     if (possibleHClasses_.empty()) {
         return;
     }
-    IntersectType(NodeType::JS_RECEIVER);
+    // Strings, symbols and bigints have HClasses too, but are not JS receivers.
+    IntersectType(NodeType::ANY_HEAP_OBJECT);
     NodeType possibleType = NodeType::NONE;
     for (const PossibleHClassInfo &info : possibleHClasses_) {
         possibleType = UnionNodeType(possibleType, NodeTypeFromHClass(info.hclass));
     }
-    possibleType = IntersectNodeType(possibleType, NodeType::JS_RECEIVER);
+    possibleType = IntersectNodeType(possibleType, NodeType::ANY_HEAP_OBJECT);
     if (!IsEmptyNodeType(possibleType)) {
         IntersectType(possibleType);
     }
@@ -392,9 +421,100 @@ CompileInfoFacts *CompileInfoFacts::CloneForLoopHeader() const
     copy->CopyEnvSlots(copy->loadedEnvConstants_, loadedEnvConstants_);
     copy->effectEpoch_ = effectEpoch_;
     copy->IncrementEffectEpoch();
+    copy->CopyAvailableExpressionsForLoopHeader(*this);
     copy->envSlotAliasMode_ = EnvSlotAliasMode::NONE;
     copy->freshUnstableHClassesRequireInvalidation_ = false;
     return copy;
+}
+
+CompileInfoFacts *CompileInfoFacts::CloneForOptimisticLoopHeader(const LoopEffects &effects) const
+{
+    auto *copy = chunk_->New<CompileInfoFacts>(chunk_);
+    copy->nodeInfos_.insert(nodeInfos_.begin(), nodeInfos_.end());
+    if (effects.ClearsUnstableNodeInfo()) {
+        for (auto it = copy->nodeInfos_.begin(); it != copy->nodeInfos_.end();) {
+            it->second.MarkUnstableHClassesStale();
+            if (it->second.NoInfoAvailable()) {
+                it = copy->nodeInfos_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    for (const auto &entry : loadedProperties_) {
+        const LoadedPropertyKey &key = entry.first;
+        if (!effects.InvalidatesPropertyKey(key.GetPropertyKey()) && !effects.WritesReceiver(key.GetReceiver())) {
+            copy->loadedProperties_.emplace(entry);
+        }
+    }
+    copy->CopyLoadedProperties(copy->loadedConstantProperties_, loadedConstantProperties_);
+
+    if (!effects.InvalidatesAllEnvSlots() && !effects.ClearsUnstableNodeInfo()) {
+        for (const auto &entry : loadedEnvSlots_) {
+            if (!effects.WritesEnvSlot(entry.first.GetEnv(), entry.first.GetSlot())) {
+                copy->loadedEnvSlots_.emplace(entry);
+            }
+        }
+        if (!copy->loadedEnvSlots_.empty()) {
+            copy->envSlotAliasMode_ = effects.MayHaveAliasingEnvs() ? EnvSlotAliasMode::MAY_ALIAS : envSlotAliasMode_;
+        }
+    }
+    copy->CopyEnvSlots(copy->loadedEnvConstants_, loadedEnvConstants_);
+
+    const auto &transitionSources = effects.GetElementsKindTransitionSources();
+    if (!transitionSources.empty()) {
+        // Reuse the straight-line alias rules after copying properties, before invalidating the source maps.
+        copy->MarkHClassesStaleForElementsKindTransition(
+            NodeInfo::PossibleHClasses(transitionSources.begin(), transitionSources.end()));
+    }
+    copy->RecomputeFreshUnstableHClassesRequireInvalidation();
+    copy->effectEpoch_ = effectEpoch_;
+    copy->IncrementEffectEpoch();
+    copy->CopyAvailableExpressionsForLoopHeader(*this);
+    return copy;
+}
+
+bool CompileInfoFacts::IsCompatibleWithLoopHeader(const CompileInfoFacts &headerFacts, const BB *loopHeader) const
+{
+    if (!headerFacts.loadedEnvSlots_.empty() && headerFacts.envSlotAliasMode_ != EnvSlotAliasMode::MAY_ALIAS &&
+        headerFacts.envSlotAliasMode_ != envSlotAliasMode_ && envSlotAliasMode_ != EnvSlotAliasMode::NONE) {
+        return false;
+    }
+    bool hadEffects = effectEpoch_ != headerFacts.effectEpoch_;
+    for (const auto &entry : headerFacts.nodeInfos_) {
+        auto *phi = entry.first->TryCast<PhiVertex>();
+        if (phi != nullptr && static_cast<ValueVertex *>(phi)->GetOwner() == loopHeader) {
+            continue;
+        }
+        auto it = nodeInfos_.find(entry.first);
+        if (it == nodeInfos_.end()) {
+            return false;
+        }
+        bool compatible = hadEffects
+            ? it->second.IsCompatibleWith(entry.second)
+            : NodeInfo::NodeTypeIs(it->second.GetType(), entry.second.GetType());
+        if (!compatible) {
+            return false;
+        }
+    }
+    if (!hadEffects) {
+        return true;
+    }
+    auto containsSameEntries = [](const auto &actual, const auto &expected) {
+        for (const auto &entry : expected) {
+            auto it = actual.find(entry.first);
+            if (it == actual.end() || it->second != entry.second) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!containsSameEntries(loadedProperties_, headerFacts.loadedProperties_) ||
+        !containsSameEntries(loadedEnvSlots_, headerFacts.loadedEnvSlots_)) {
+        return false;
+    }
+    return true;
 }
 
 void CompileInfoFacts::Merge(const CompileInfoFacts &other)
@@ -636,8 +756,11 @@ void CompileInfoFacts::ClearLoadedProperties()
     loadedProperties_.clear();
 }
 
-void CompileInfoFacts::ClearLoadedPropertiesForReceiver(ValueVertex *receiver)
+void CompileInfoFacts::ClearLoadedPropertiesForReceiver(ValueVertex *receiver, LoopEffects *effects)
 {
+    if (effects != nullptr) {
+        effects->RecordReceiverWrite(receiver);
+    }
     for (auto it = loadedProperties_.begin(); it != loadedProperties_.end();) {
         if (it->first.MatchesReceiver(receiver)) {
             it = loadedProperties_.erase(it);
@@ -647,14 +770,25 @@ void CompileInfoFacts::ClearLoadedPropertiesForReceiver(ValueVertex *receiver)
     }
 }
 
-void CompileInfoFacts::ClearLoadedPropertiesForKey(PropertyKey key)
+void CompileInfoFacts::ClearLoadedPropertiesForKey(PropertyKey key, LoopEffects *effects)
 {
+    if (effects != nullptr) {
+        effects->RecordPropertyWrite(key);
+    }
     if (key.GetKind() == PropertyKey::Kind::UNKNOWN) {
         ClearLoadedProperties();
         return;
     }
     for (auto it = loadedProperties_.begin(); it != loadedProperties_.end();) {
-        if (it->first.MatchesPropertyKey(key)) {
+        PropertyKey cachedKey = it->first.GetPropertyKey();
+        // Named keys from different representations may refer to the same property.
+        bool mayAliasNamedKey = key.GetKind() == PropertyKey::Kind::CONST_DATA_ID &&
+            (cachedKey.GetKind() == PropertyKey::Kind::HEAP_CONSTANT ||
+             cachedKey.GetKind() == PropertyKey::Kind::NAMED || cachedKey.GetKind() == PropertyKey::Kind::INDEX);
+        if (it->first.MatchesPropertyKey(key) || mayAliasNamedKey) {
+            if (effects != nullptr) {
+                effects->RecordPropertyWrite(cachedKey);
+            }
             it = loadedProperties_.erase(it);
         } else {
             ++it;
@@ -757,6 +891,23 @@ void CompileInfoFacts::AddExpression(uint32_t hash, ValueVertex *node, const Exp
                                         });
 }
 
+void CompileInfoFacts::CopyAvailableExpressionsForLoopHeader(const CompileInfoFacts &source)
+{
+    for (const auto &entry : source.availableExpressions_) {
+        const AvailableExpression &expression = entry.second;
+        if (expression.effectEpoch < effectEpoch_) {
+            continue;
+        }
+        availableExpressions_.emplace(entry.first, AvailableExpression {
+                                                       expression.node,
+                                                       expression.opcode,
+                                                       CopyExpressionInputs(*expression.inputs),
+                                                       CopyExpressionOptions(*expression.options),
+                                                       expression.effectEpoch,
+                                                   });
+    }
+}
+
 ValueVertex *CompileInfoFacts::FindExpression(uint32_t hash, VertexOpcode opcode, const ExpressionInputs &inputs,
                                               const ExpressionOptions &options, bool needsEpochCheck)
 {
@@ -777,35 +928,46 @@ void CompileInfoFacts::ClearAvailableExpressions()
     availableExpressions_.clear();
 }
 
-void CompileInfoFacts::MarkPossibleSideEffect(const SideEffectDescriptor &effect)
+void CompileInfoFacts::MarkPossibleSideEffect(const SideEffectDescriptor &effect, LoopEffects *loopEffects)
 {
+    if (loopEffects != nullptr && effect.kind != SideEffectKind::FIELD_WRITE &&
+        effect.kind != SideEffectKind::ELEMENTS_WRITE) {
+        loopEffects->Record(effect);
+    }
     switch (effect.kind) {
         case SideEffectKind::NO_SIDE_EFFECT:
             return;
         case SideEffectKind::FIELD_WRITE:
-            ClearLoadedPropertiesForKey(effect.propertyKey);
+            ClearLoadedPropertiesForKey(effect.propertyKey, loopEffects);
             IncrementEffectEpoch();
             return;
         case SideEffectKind::ELEMENTS_WRITE:
-            ClearLoadedPropertiesForKey(PropertyKey::Elements());
-            ClearLoadedPropertiesForKey(PropertyKey::Length());
-            if (effect.receiver != nullptr) {
-                ClearLoadedPropertiesForReceiver(effect.receiver);
+            // A backing-store slot write does not replace elements or change array length.
+            // Element value loads still depend on the memory effect epoch.
+            IncrementEffectEpoch();
+            return;
+        case SideEffectKind::ENV_SLOT_WRITE: {
+            ClearedEnvSlotKeys aliased = ClearAliasedEnvSlotsFor(effect.env, effect.envSlot, effect.envSlotValue);
+            if (loopEffects != nullptr) {
+                loopEffects->RecordAliasedEnvSlots(aliased);
             }
             IncrementEffectEpoch();
             return;
-        case SideEffectKind::ENV_SLOT_WRITE:
-            ClearAliasedEnvSlotsFor(effect.env, effect.envSlot, effect.envSlotValue);
-            IncrementEffectEpoch();
-            return;
+        }
         case SideEffectKind::MAP_TRANSITION:
             MarkHClassesStaleForTransition(effect.receiver);
             ClearLoadedProperties();
             IncrementEffectEpoch();
             return;
+        case SideEffectKind::ELEMENTS_KIND_TRANSITION:
+            ASSERT(effect.transitionSources != nullptr);
+            MarkHClassesStaleForElementsKindTransition(*effect.transitionSources);
+            IncrementEffectEpoch();
+            return;
         case SideEffectKind::UNKNOWN_CALL:
             OnSideEffect();
             return;
+        case SideEffectKind::TYPED_ARRAY_WRITE:
         case SideEffectKind::SAFE_CALL:
             IncrementEffectEpoch();
             return;
@@ -851,8 +1013,21 @@ void CompileInfoFacts::MarkHClassesStaleForTransition(ValueVertex *receiver)
 
 void CompileInfoFacts::MarkHClassesStaleForElementsKindTransition(const NodeInfo::PossibleHClasses &sourceHClasses)
 {
-    if (sourceHClasses.empty()) {
-        return;
+    ASSERT(!sourceHClasses.empty());
+    for (auto it = loadedProperties_.begin(); it != loadedProperties_.end();) {
+        if (!(it->first.GetPropertyKey() == PropertyKey::Elements())) {
+            ++it;
+            continue;
+        }
+        const NodeInfo *info = TryGetInfoFor(it->first.GetReceiver());
+        bool mayAlias = info == nullptr || !info->HasFreshPossibleHClasses() ||
+            std::any_of(sourceHClasses.begin(), sourceHClasses.end(),
+                [info](JSHClass *source) { return info->ContainsPossibleHClass(source); });
+        if (mayAlias) {
+            it = loadedProperties_.erase(it);
+        } else {
+            ++it;
+        }
     }
     for (auto &entry : nodeInfos_) {
         entry.second.MarkHClassesStaleForElementsKindTransition(sourceHClasses);
@@ -910,6 +1085,9 @@ NodeInfo::NodeType CompileInfoFacts::GetStaticNodeType(ValueVertex *node) const
     }
     if (node->Is<Int32ConstantVertex>() || node->IsAnyInt32()) {
         return NodeInfo::NodeType::INT;
+    }
+    if (node->Is<U32ToTaggedNumberVertex>()) {
+        return NodeInfo::NodeType::NUMBER;
     }
     if (node->Is<Float64ConstantVertex>() || node->IsAnyFloat64()) {
         return NodeInfo::NodeType::DOUBLE;

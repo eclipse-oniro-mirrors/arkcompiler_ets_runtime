@@ -12,6 +12,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *spread_args_helper* 1
+//! EXEC_COUNT_GE *spread_args_helper* 1
+//! COMPILE_COUNT_GE *spread_args_basic_3* 1
+//! EXEC_COUNT_GE *spread_args_basic_3 1
+//! DEOPT_COUNT *Deoptimize* 0
+
+//! METHOD spread_args_helper
+//! HAS CallRuntime OptCopyRestArgs
 function spread_args_helper(...args: number[]): number {
     let sum = 0;
     for (let i = 0; i < args.length; i++) {
@@ -20,6 +29,9 @@ function spread_args_helper(...args: number[]): number {
     return sum;
 }
 
+//! METHOD spread_args_basic_3
+//! HAS CallRuntime CallSpread
+//! HAS CallRuntime StArraySpread
 function spread_args_basic_3(): number {
     let r = 0;
     r += spread_args_helper(...[]);

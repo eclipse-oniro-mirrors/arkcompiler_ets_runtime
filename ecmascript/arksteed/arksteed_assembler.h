@@ -96,6 +96,7 @@ public:
 
     // Get memory operand for C calling convention stack argument slot (SP-relative)
     inline MemoryOperand GetCallArgSlot(int32_t slotIndex);
+    void LoadCallArgv(ArkSteedRegister dst);
     void ReserveCallArgSlots(int32_t slotCount);
     void FreeCallArgSlots(int32_t slotCount);
     void ReserveCallArgSlots(ArkSteedRegister slotCount);
@@ -145,6 +146,7 @@ public:
 
     void LoadField(ArkSteedRegister dst, ArkSteedRegister base, int32_t offset);
     void LoadInt32Field(ArkSteedRegister dst, ArkSteedRegister base, int32_t offset);
+    void LoadUint8Field(ArkSteedRegister dst, ArkSteedRegister base, int32_t offset);
     void LoadTaggedElement(ArkSteedRegister dst, ArkSteedRegister elements, ArkSteedRegister index);
     void StoreTaggedElement(ArkSteedRegister elements, ArkSteedRegister index, ArkSteedRegister value,
                             ArkSteedRegister scratch);
@@ -164,10 +166,15 @@ public:
     void StoreInt16Field(ArkSteedRegister src, ArkSteedRegister base, int32_t offset);
     void StoreInt32Field(ArkSteedRegister src, ArkSteedRegister base, int32_t offset);
     void StoreInt32FieldRelease(ArkSteedRegister src, ArkSteedRegister base, int32_t offset);
+    // Store a full-width HClass word at the zero-offset object header with
+    // release ordering.
+    void StoreHeaderRelease(ArkSteedRegister src, ArkSteedRegister object);
     void StoreFloat64Field(ArkSteedDoubleRegister src, ArkSteedRegister base, int32_t offset);
     void StoreFloat32Field(ArkSteedDoubleRegister src, ArkSteedDoubleRegister scratch, ArkSteedRegister base,
                            int32_t offset);
     void LoadActualArgc(ArkSteedRegister dst);
+    // Load the current frame's user argument at a zero-based dynamic index.
+    void LoadActualArgument(ArkSteedRegister dst, ArkSteedRegister index, ArkSteedRegister scratch);
 
     void LoadFloat64(ArkSteedDoubleRegister dst, MemoryOperand srcOp);
     void StoreFloat64(MemoryOperand dstOp, ArkSteedDoubleRegister src);
@@ -186,8 +193,11 @@ public:
     void Sub(ArkSteedRegister dst, int32_t immediate);
     void SignExtendInt32ToInt64(ArkSteedRegister dst, ArkSteedRegister src);
     void Int32Add(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
+    void Int32Add(ArkSteedRegister dst, ArkSteedRegister left, int32_t immediate);
     void Int32Sub(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
+    void Int32Sub(ArkSteedRegister dst, ArkSteedRegister left, int32_t immediate);
     void Int32Mul(ArkSteedRegister dst, ArkSteedRegister src);
+    void Int32Mul(ArkSteedRegister dst, int32_t immediate);
     void Int32MulWide(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
     void Int32MulHigh(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
     void Int32Div(ArkSteedRegister dst, ArkSteedRegister dividend, ArkSteedRegister divisor);
@@ -195,6 +205,7 @@ public:
                               ArkSteedRegister divisor);
     void PositiveInt32Mod(ArkSteedRegister dst, ArkSteedRegister dividend, ArkSteedRegister divisor);
     void Int32ToFloat64(ArkSteedDoubleRegister dst, ArkSteedRegister src);
+    void Uint32ToFloat64(ArkSteedDoubleRegister dst, ArkSteedRegister src);
     void Float64Add(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister src);
     void Float64Sub(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister src);
     void Float64Mul(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister src);
@@ -257,9 +268,15 @@ public:
 #endif
     void JumpIf(Condition condition, Label *target);
     void JumpIfNotTaggedHeapObject(ArkSteedRegister value, Label *target);
+    void JumpIfNotStrongHeapObject(ArkSteedRegister value, Label *target);
+    void JumpIfNotECMAObject(ArkSteedRegister value, Label *target);
     void JumpIfNotJSFunction(ArkSteedRegister value, Label *target);
+    void JumpIfNotEcmaObject(ArkSteedRegister value, Label *target);
+    void JumpIfNotJSConstructorFunction(ArkSteedRegister value, Label *target);
+    void JumpIfNewTargetHClassNotReady(ArkSteedRegister value, Label *target);
+    void JumpIfConstructorIsBase(ArkSteedRegister jsFunc, Label *target);
     void JumpIfClassConstructor(ArkSteedRegister jsFunc, Label *target);
-    void JumpIfNotArkSteedEntry(ArkSteedRegister jsFunc, Label *target);
+    void JumpIfFunctionNotCompiled(ArkSteedRegister jsFunc, Label *target);
     void Bind(Label *label);
 #if defined(PANDA_TARGET_ARM64)
     void CheckCodePools(bool precedingCodeCanFallThrough, size_t protectedCodeSize = 0U);
@@ -267,6 +284,19 @@ public:
 #endif
     inline void Branch(Condition condition, Label *ifTrue, bool fallthroughWhenTrue, Label *ifFalse,
                        bool fallthroughWhenFalse);
+
+    // =========================================================================
+    // Allocation
+    // =========================================================================
+
+    // Work registers are supplied by the caller; these helpers acquire no RA temporaries.
+    // Runtime-mode checks preserve glue and clobber temp.
+    inline void InitializeObjectHeader(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister temp);
+    inline void InitializeArrayFields(ArkSteedRegister glue, ArkSteedRegister object,
+                                      uint32_t objectSize, ArkSteedRegister value);
+    inline void JumpIfCMSGCEnabled(Label* target);
+    inline void JumpIfCMCGCEnabled(ArkSteedRegister glue, ArkSteedRegister temp, Label* target);
+    inline void JumpIfHeapSamplingActive(ArkSteedRegister glue, ArkSteedRegister temp, Label* target);
 
     // =========================================================================
     // Call/Return

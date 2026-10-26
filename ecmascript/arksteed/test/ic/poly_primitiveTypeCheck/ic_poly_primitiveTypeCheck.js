@@ -32,5 +32,14 @@ function Test() {
 
 Test()
 ArkTools.arkSteedCompileSync(foo);
+
+// G11.2 auxiliary poly candidate: `foo` reads `this.f` on the object receiver
+// and on the number receiver whose prototype provides the property. The site is
+// installed after that warm-up and re-entered twice with the same receivers, so
+// the recorded state is unchanged and the target produces no deopt event.
+//! COMPILE_COUNT_GE *foo* 1
+//! EXEC_COUNT_GE *foo* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 print(true);
 Test()

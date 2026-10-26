@@ -14,6 +14,7 @@
  */
 
 // @ts-nocheck
+//! PARAMS --compiler-jit-hotness-threshold=60000
 declare function print(arg: any): string;
 
 let a = true;
@@ -30,6 +31,15 @@ for (let i = 0; i < 1000; i++) {
     visit(c);
 }
 ArkTools.arkSteedCompileSync(visit);
+
+// G11.2 auxiliary poly candidate: the named-access site is warmed with the
+// boolean primitive, the number and the object receiver. After the code is
+// installed the site is entered with the same three receivers, so the warm-up
+// state is unchanged and the compiled path produces no deopt event.
+//! COMPILE_COUNT_GE *visit* 1
+//! EXEC_COUNT_GE *visit* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 print(true);
 print(visit(a));
 print(visit(b));

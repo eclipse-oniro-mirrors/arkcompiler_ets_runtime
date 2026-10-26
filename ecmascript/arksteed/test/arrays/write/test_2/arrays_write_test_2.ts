@@ -12,6 +12,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_write_2* 1
+//! EXEC_COUNT_GE *array_write_2* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_write_2(arr: number[]): void
 {
     arr[0] = 100;
@@ -22,6 +26,7 @@ function array_write_2(arr: number[]): void
 }
 
 ArkTools.arkSteedCompileSync(array_write_2);
+ArkTools.waitJitCompileFinish(array_write_2);
 
 
 let arr: number[] = [0, 0, 0, 0, 0];

@@ -59,6 +59,7 @@ struct RegListRegisterTraits<x64::XMMRegister> {
 
 struct DeferredRegisterSnapshot {
     ArkSteedRegList liveRegisters;
+    ArkSteedRegList liveTaggedRegisters;
     ArkDoubleRegList liveDoubleRegisters;
 };
 
@@ -321,6 +322,11 @@ public:
     bool IsUsedAtStart() const
     {
         return LifetimeField::Decode(value_) == static_cast<unsigned>(LifetimeFlag::USED_AT_START);
+    }
+
+    bool IsUsedAtEnd() const
+    {
+        return LifetimeField::Decode(value_) == static_cast<unsigned>(LifetimeFlag::USED_AT_END);
     }
 
     bool IsFixedSlotPolicy() const
@@ -651,7 +657,7 @@ public:
         return &nextUseId_;
     }
 
-private:
+  private:
     VertexId nextUseId_ = INVALID_VERTEX_ID;
 };
 

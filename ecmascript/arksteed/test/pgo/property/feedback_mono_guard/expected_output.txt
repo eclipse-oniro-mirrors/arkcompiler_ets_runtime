@@ -1,0 +1,7 @@
+mono precondition: mono
+distinct warm shapes: 1
+warm-up calls: 100
+PASS
+700
+123
+456

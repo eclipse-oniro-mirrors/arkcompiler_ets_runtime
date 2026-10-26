@@ -12,6 +12,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_create_init* 1
+//! EXEC_COUNT_GE *array_create_init* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_create_init(size: number): number[]
 {
     let arr: number[] = [];
@@ -22,6 +26,7 @@ function array_create_init(size: number): number[]
 }
 
 ArkTools.arkSteedCompileSync(array_create_init);
+ArkTools.waitJitCompileFinish(array_create_init);
 
 
 let arr = array_create_init(5);

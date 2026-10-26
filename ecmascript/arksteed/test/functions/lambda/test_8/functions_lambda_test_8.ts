@@ -13,6 +13,38 @@
  * limitations under the License.
  */
 
+// G11.6 (P0) additive call evidence for `functions/lambda`
+// (`arksteed-g116-call-closure-and-additive-evidence` C1/C3/C4; S11; V1/V2).
+// `call_compiled_lambda_8` compiles the nested closures `level1`, `level2` and
+// `level3`, which share the read-only captured `outerFactor`; `level1` invokes
+// `level2` and `level2` invokes `level3`. All three are installed before their
+// first invocation, so the call sites lower to the generic `Call` vertices
+// observed in the caller dump. `COMPILE_COUNT_GE`/`EXEC_COUNT_GE` attribute
+// compilation and entry of each claimed method; `DEOPT_COUNT *Deoptimize* 0`
+// rules out a silent deopt into the interpreter. The pre-existing computed
+// results and the expectation are unchanged.
+
+//! PARAMS --compiler-jit-hotness-threshold=60000
+
+//! METHOD call_compiled_lambda_8
+//! HAS Call
+//! COMPILE_COUNT_GE *call_compiled_lambda_8* 1
+//! EXEC_COUNT_GE *call_compiled_lambda_8* 1
+
+//! METHOD level1
+//! COMPILE_COUNT_GE *level1* 1
+//! EXEC_COUNT_GE *level1* 1
+
+//! METHOD level2
+//! COMPILE_COUNT_GE *level2* 1
+//! EXEC_COUNT_GE *level2* 1
+
+//! METHOD level3
+//! COMPILE_COUNT_GE *level3* 1
+//! EXEC_COUNT_GE *level3* 1
+
+//! DEOPT_COUNT *Deoptimize* 0
+
 // Deeply nested lambdas: 3 levels at same scope, all capturing outerFactor via closure
 let compiled = false;
 

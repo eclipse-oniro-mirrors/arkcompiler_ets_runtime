@@ -12,6 +12,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// G11.1 additive evidence: the warmed site resolves the element access for one
+// key kind; the second observed call passes a string key, the compiled key
+// check fails and the eager transition resumes the interpreter with the same
+// value. The leaf therefore carries its actual transition direction, not an
+// arbitrary zero-deopt assertion (V1).
+//! METHOD test
+//! HAS LoadTaggedField
+//! COMPILE_COUNT_GE *test* 1
+//! EXEC_COUNT_GE *test* 1
+//! DEOPT_COUNT_GE *Deoptimize* 1
 
 function test(str, index) {
     return str[index] == '0';

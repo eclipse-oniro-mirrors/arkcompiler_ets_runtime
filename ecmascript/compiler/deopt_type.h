@@ -137,13 +137,15 @@ namespace panda::ecmascript::kungfu {
     V(CallTargetNotCompiled,           CALLTARGETNOTCOMPILED)          \
     V(PropertyBoxInvalid,              PROPERTYBOXINVALID)             \
     V(KeyMissmatch,                    KEYMISSMATCH)                   \
-    V(HotReloadPatchMain,              HOTRELOAD_PATCHMAIN)
+    V(HotReloadPatchMain,              HOTRELOAD_PATCHMAIN)            \
+    V(NotUndefinedOrNull,              NOT_UNDEFINED_OR_NULL)
 
 enum class DeoptType : uint8_t {
     NONE = 0,
 #define DECLARE_DEOPT_TYPE(NAME, TYPE) TYPE,
     GATE_META_DATA_DEOPT_REASON(DECLARE_DEOPT_TYPE)
 #undef DECLARE_DEOPT_TYPE
+    COUNT,
 };
 
 static_assert(static_cast<uint32_t>(DeoptType::LAZYDEOPT) == 1);

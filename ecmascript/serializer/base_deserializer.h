@@ -276,7 +276,7 @@ private:
         }
     }
 
-    void UpdateMaybeWeakOrCompressedNoBarrier(uintptr_t objAddr, uintptr_t fieldOffset, uintptr_t valueAddr,
+    void UpdateMaybeWeakOrCompressedNoBarrier(uintptr_t objAddr, uintptr_t fieldOffset, JSTaggedType valueAddr,
                                               FieldType fieldType)
     {
         // fixme: compressed pointer : support weak for compressed pointer

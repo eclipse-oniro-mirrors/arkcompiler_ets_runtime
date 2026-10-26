@@ -222,9 +222,7 @@ uint32_t JitCompilationEnv::RecordHeapConstant(
     if (itr != heapConstantInfo_.constPoolHeapConstant2Index.end()) {
         return itr->second;
     }
-    heapConstantInfo_.heapConstantTable.push_back(heapObj);
-    ASSERT(heapConstantInfo_.heapConstantTable.size() < INVALID_HEAP_CONSTANT_INDEX);
-    uint32_t index = static_cast<uint32_t>(heapConstantInfo_.heapConstantTable.size() - 1);
+    uint32_t index = RecordHeapConstant(heapObj);
     heapConstantInfo_.constPoolHeapConstant2Index.insert(
         std::pair<ConstantPoolHeapConstant, uint32_t>(heapConstant, index));
     return index;

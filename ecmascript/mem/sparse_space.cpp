@@ -18,16 +18,19 @@
 #include "ecmascript/base/config.h"
 #include "ecmascript/js_hclass-inl.h"
 #include "ecmascript/mem/heap-inl.h"
+#include "ecmascript/platform/map.h"
 
 namespace panda::ecmascript {
 
 void SparseSpace::PrepareForIterate() const
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     allocator_->FillBumpPointer();
 }
 
 void SparseSpace::RebuildFreeList()
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     allocator_->RebuildFreeList();
 }
 
@@ -44,6 +47,7 @@ SparseSpace::SparseSpace(Heap *heap, MemSpaceType type, size_t initialCapacity, 
 
 void SparseSpace::Initialize()
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     JSThread *thread = localHeap_->GetJSThread();
     Region *region = heapRegionAllocator_->AllocateAlignedRegion(this, DEFAULT_REGION_SIZE, thread, localHeap_);
     AddRegion(region);
@@ -53,6 +57,7 @@ void SparseSpace::Initialize()
 
 void SparseSpace::Reset()
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     allocator_->RebuildFreeList();
     ReclaimRegions();
     liveObjectSize_ = 0;
@@ -60,11 +65,13 @@ void SparseSpace::Reset()
 
 void SparseSpace::ResetTopPointer(uintptr_t top)
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     allocator_->ResetTopPointer(top);
 }
 
 uintptr_t SparseSpace::Allocate(size_t size, bool allowGC)
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     ASSERT(spaceType_ != MemSpaceType::OLD_SPACE);
 #if ECMASCRIPT_ENABLE_THREAD_STATE_CHECK
     if (UNLIKELY(!localHeap_->GetJSThread()->IsInRunningStateOrProfiling())) { // LOCV_EXCL_BR_LINE
@@ -101,6 +108,7 @@ uintptr_t SparseSpace::Allocate(size_t size, bool allowGC)
 
 bool SparseSpace::Expand()
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     if (CommittedSizeExceed()) {
         LOG_ECMA_MEM(INFO) << "Expand::Committed size " << committedSize_ << " of Sparse Space is too big. ";
         return false;
@@ -114,6 +122,7 @@ bool SparseSpace::Expand()
 
 uintptr_t SparseSpace::AllocateAfterSweepingCompleted(size_t size)
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     ASSERT(sweepState_ == SweepState::SWEEPING);
     if (TryFillSweptRegion()) {
         auto object = allocator_->Allocate(size);
@@ -128,6 +137,7 @@ uintptr_t SparseSpace::AllocateAfterSweepingCompleted(size_t size)
 
 void SparseSpace::PrepareSweeping()
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     liveObjectSize_ = 0;
     ASSERT(GetSweepingRegionSafe() == nullptr);
     ASSERT(GetSweptRegionSafe() == nullptr);
@@ -153,6 +163,7 @@ void SparseSpace::PrepareSweeping()
 
 void SparseSpace::AsyncSweep(bool isMain, bool releaseMemory)
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     Region *current = GetSweepingRegionSafe();
     while (current != nullptr) {
         if (releaseMemory) {
@@ -173,6 +184,7 @@ void SparseSpace::AsyncSweep(bool isMain, bool releaseMemory)
 
 void SparseSpace::Sweep()
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     liveObjectSize_ = 0;
     allocator_->RebuildFreeList();
     EnumerateRegions([this](Region *current) {
@@ -187,6 +199,7 @@ void SparseSpace::Sweep()
 
 bool SparseSpace::TryFillSweptRegion()
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     if (sweptList_.empty()) {
         return false;
     }
@@ -202,6 +215,7 @@ bool SparseSpace::TryFillSweptRegion()
 
 bool SparseSpace::FinishFillSweptRegion()
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     bool ret = TryFillSweptRegion();
     sweepState_ = SweepState::SWEPT;
     return ret;
@@ -889,6 +903,7 @@ MachineCodeSpace::MachineCodeSpace(Heap *heap, size_t initialCapacity, size_t ma
 void MachineCodeSpace::PrepareSweeping()
 {
     ASSERT(!g_isEnableCMCGC);
+    JIT_WRITE_SCOPE(jitWriteScope, true);
     // fill free obj before sparse space prepare sweeping rebuild freelist, as may fail set free obj
     // when iterate machine code space in GetMachineCodeObject
     allocator_->FillBumpPointer();
@@ -960,6 +975,7 @@ uintptr_t MachineCodeSpace::Allocate(size_t size, bool allowGC)
 uintptr_t MachineCodeSpace::Allocate(size_t size, MachineCodeDesc *desc, bool allowGC)
 {
     ASSERT(!g_isEnableCMCGC);
+    JIT_WRITE_SCOPE(jitWriteScope, true);
 #if ECMASCRIPT_ENABLE_THREAD_STATE_CHECK
     if (UNLIKELY(!localHeap_->GetJSThread()->IsInRunningStateOrProfiling())) { // LOCV_EXCL_BR_LINE
         LOG_ECMA(FATAL) << "Allocate must be in jsthread running state";
@@ -1028,6 +1044,7 @@ uintptr_t MachineCodeSpace::GetMachineCodeObject(uintptr_t pc)
     }
     uintptr_t machineCode = 0;
     LockHolder holder(asyncSweepMutex_);
+    JIT_WRITE_SCOPE(jitWriteScope, true);
     allocator_->FillBumpPointer();
 
     EnumerateRegions([&](Region *region) {

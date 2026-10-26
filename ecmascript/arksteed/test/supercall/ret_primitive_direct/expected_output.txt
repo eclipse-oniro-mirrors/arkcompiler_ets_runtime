@@ -1,0 +1,4 @@
+direct-int: true int
+direct-undef: true undef
+direct-obj: false 1 obj
+direct-derived: caught true function is non-constructor

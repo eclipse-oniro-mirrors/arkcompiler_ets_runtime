@@ -12,12 +12,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_nested_get* 1
+//! EXEC_COUNT_GE *array_nested_get* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_nested_get(arr: number[][], i: number, j: number): number
 {
     return arr[i][j];
 }
 
 ArkTools.arkSteedCompileSync(array_nested_get);
+ArkTools.waitJitCompileFinish(array_nested_get);
 
 
 let arr: number[][] = [[1, 2], [3, 4], [5, 6]];

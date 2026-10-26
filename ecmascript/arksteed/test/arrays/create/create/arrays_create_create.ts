@@ -12,12 +12,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_create* 1
+//! EXEC_COUNT_GE *array_create* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_create(n: number): number[]
 {
     return [n];
 }
 
 ArkTools.arkSteedCompileSync(array_create);
+ArkTools.waitJitCompileFinish(array_create);
 
 
 const arr = array_create(42);

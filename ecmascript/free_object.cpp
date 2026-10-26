@@ -18,10 +18,18 @@
 #include "ecmascript/mem/heap.h"
 #include "ecmascript/mem/tagged_object-inl.h"
 #include "ecmascript/global_env_constants-inl.h"
+#include "ecmascript/platform/map.h"
 
 namespace panda::ecmascript {
 FreeObject *FreeObject::FillFreeObject(BaseHeap *heap, uintptr_t address, size_t size)
 {
+    // Machine-code regions are backed by MAP_JIT on macOS. This is the
+    // innermost write point used by allocation, sweeping and deoptimization;
+    // protect it even when reached through a path that has no outer scope.
+#if defined(PANDA_TARGET_MACOS)
+    Region *region = Region::ObjectAddressToRange(address);
+    JIT_WRITE_SCOPE(jitWriteScope, region->InMachineCodeSpace() || region->InHugeMachineCodeSpace());
+#endif
     ASAN_UNPOISON_MEMORY_REGION(reinterpret_cast<void *>(address), size);
     auto globalConst = heap->GetGlobalConst();
     FreeObject *object = nullptr;

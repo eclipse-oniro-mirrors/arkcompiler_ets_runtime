@@ -24,6 +24,13 @@
 //! HAS LoadInt32Field
 //! HAS I32BitwiseBinary
 //! HAS DeoptIfInt32Condition
+// G11.1 additive evidence: the leaf probes string elements of several kinds and
+// indices after the number-specialized installation, so the observed entry of
+// the generated code is followed by the real eager transitions of those
+// probes; the actual direction is asserted instead of a zero-deopt bound (V1).
+//! COMPILE_COUNT_GE *loadStringElement* 1
+//! EXEC_COUNT_GE *loadStringElement* 1
+//! DEOPT_COUNT_GE *Deoptimize* 1
 declare function print(arg: any): string;
 
 function loadStringElement(value, index) {

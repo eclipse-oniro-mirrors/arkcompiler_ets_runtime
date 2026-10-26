@@ -297,6 +297,7 @@
       panda::ecmascript::JSTaggedValue::IsInSharedHeap*;
       panda::ecmascript::JITProfiler::ProfileBytecode*;
       panda::ecmascript::JitThread::GetHostThread*;
+      panda::ecmascript::JitThread::*;
       panda::ecmascript::Jit::TimeScope::TimeScope*;
       panda::ecmascript::Jit::TimeScope::~TimeScope*;
       panda::ecmascript::Jit::GetInstance*;
@@ -326,6 +327,7 @@
       panda::ecmascript::MethodLiteral::Initialize*;
       panda::ecmascript::MethodLiteral::MethodLiteral*;
       panda::ecmascript::MethodLiteral::ParseFunctionName*;
+      panda::ecmascript::ModuleManager::CheckModuleValueOutterResolved*;
       panda::ecmascript::ModuleManager::GetRecordName*;
       panda::ecmascript::ModuleManager::HostGetImportedModule*;
       panda::ecmascript::ModuleResolver::HostResolveImportedModule*;
@@ -398,6 +400,7 @@
       panda::ecmascript::base::NumberHelper::StringToBigInt*;
       panda::ecmascript::base::NumberHelper::TruncateDouble*;
       panda::ecmascript::base::Utf8JsonParser::Parse*;
+      panda::ecmascript::builtins::BuiltinsTypedArray::GetLength*;
       panda::ecmascript::kungfu::AOTSnapshot::StoreConstantPoolInfo*;
       panda::ecmascript::kungfu::ArkStackMapBuilder::Collect*;
       panda::ecmascript::kungfu::ArkStackMapBuilder::GenerateArkStackMap*;
@@ -441,6 +444,7 @@
       panda::ecmascript::kungfu::LazyDeoptAllDependencies::DependOnStableHClass*;
       panda::ecmascript::kungfu::LazyDeoptAllDependencies::DependOnStableProtoChain*;
       panda::ecmascript::kungfu::LazyDeoptAllDependencies::DependOnNotHotReloadPatchMain*;
+      panda::ecmascript::arksteed::SourcePositionTableBuilder::*;
       panda::ecmascript::arksteed::ArkSteedSafepointTableBuilder::DefineSafepoint*;
       panda::ecmascript::arksteed::ArkSteedSafepointTableBuilder::DefineDeoptSafepoint*;
       panda::ecmascript::arksteed::ArkSteedSafepointTableBuilder::DumpMemoryUsage*;

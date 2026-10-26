@@ -19,6 +19,7 @@
 
 #include "ecmascript/arksteed/arksteed_dump_helper.h"
 #include "ecmascript/arksteed/arksteed_graph.h"
+#include "ecmascript/arksteed/arksteed_loop_effects.h"
 #include "ecmascript/arksteed/arksteed_opcode.h"
 #include "ecmascript/arksteed/arksteed_opcode_list.h"
 
@@ -272,10 +273,20 @@ void GraphPrinter::PreProcessBlock(BB *block)
     LOG_COMPILER(INFO) << GetArrowColumn(nullptr)
                        << "------------------------------------------------------------------------";
 
-    const char *blockTypeName = block->IsLoopHeader()         ? "Loop Header"
-                                : block->IsExceptionHandler() ? "Exception Handler"
-                                                              : "Other";
-    LOG_COMPILER(INFO) << PrintBlockArrows(block) << "Block " << block->GetId() << " (" << blockTypeName << ')';
+    const char *blockTypeName =
+        block->IsLoopHeader() ? "Loop Header" : block->IsExceptionHandler() ? "Exception Handler" : "Other";
+    LOG_COMPILER(INFO) << PrintBlockArrows(block) << "Block " << block->GetId()
+                       << " (" << blockTypeName << ')';
+    if (block->IsLoopHeader() && block->GetLoopEffects() != nullptr) {
+        const LoopEffects &effects = *block->GetLoopEffects();
+        LOG_COMPILER(INFO) << GetArrowColumn(nullptr) << "  LoopInfo: peeled=" << block->HasPeeledIteration();
+        LOG_COMPILER(INFO) << GetArrowColumn(nullptr) << "  LoopEffects: propertyKeys="
+                           << effects.InvalidatedPropertyKeyCount()
+                           << ", receivers=" << effects.WrittenReceiverCount()
+                           << ", envSlots=" << effects.WrittenEnvSlotCount()
+                           << ", unknownCall=" << effects.HasUnknownCall()
+                           << ", mapTransition=" << effects.HasMapTransition();
+    }
     if (block->HasRegisterMergeState()) {
         PrintPredecessors(block);
     }

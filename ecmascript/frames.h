@@ -2425,6 +2425,12 @@ public:
     }
 
 private:
+    // Single source of truth for the in-process STEED bytecode-offset
+    // resolution: the iterator-cached MachineCode plus GetOptimizedReturnAddr
+    // fed into the shared pure-byte parsing priority chain. Shared by
+    // GetStackTraceInfos and the vector-based GetBytecodeOffset.
+    uint32_t GetSteedFrameBcOffset() const;
+
     JSTaggedType *current_ {nullptr};
     const JSThread *thread_ {nullptr};
     const kungfu::ArkStackMapParser *arkStackMapParser_ {nullptr};

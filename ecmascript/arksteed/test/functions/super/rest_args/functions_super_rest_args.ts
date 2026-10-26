@@ -12,6 +12,32 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+// G11.6 additive evidence (arksteed-g116-call-closure-and-additive-evidence#C1,#C3,#C4):
+// the original probes and the byte-identical expectation of this leaf are unchanged.
+// The existing installation of `CallSuperRestArgsBase` stays. The spread super call lives in
+// the derived constructor `CallSuperRestArgsDerived`, which is additionally compiled as
+// bounded, silent same-domain preparation, so the leaf's own dump carries the actually reached
+// super-call form `CallRuntime OptSuperCallSpread` instead of a borrowed one; a `Call`
+// substitution for that runtime form is not claimed. The `CallRuntime StArraySpread` form of
+// the forwarded rest array is annotated from that same dump.
+// `COMPILE_COUNT_GE`/`EXEC_COUNT_GE` attribute compilation and entry of the claimed
+// methods (E1/E2), and `DEOPT_COUNT *Deoptimize* 0` asserts that the normal path does not
+// silently fall back into the interpreter.
+// The targets write no captured variable (the leaf creates no closure), so the conditional
+// `LoadTaggedField`/`StoreEnvSlot` slot annotation is not applicable and is not fabricated;
+// the `LoadTaggedField` nodes of these dumps are the function-context and property loads
+// that C3 excludes from captured-binding evidence. No `CallSelf`/`CallKnownBuiltin` is
+// reached here, and none was transferred to the pair.
+//! COMPILE_COUNT_GE CallSuperRestArgsBase 1
+//! EXEC_COUNT_GE *CallSuperRestArgsBase 1
+//! COMPILE_COUNT_GE CallSuperRestArgsDerived 1
+//! EXEC_COUNT_GE *CallSuperRestArgsDerived 1
+//! DEOPT_COUNT *Deoptimize* 0
+//! METHOD CallSuperRestArgsDerived
+//! HAS CallRuntime OptSuperCallSpread
+//! HAS CallRuntime StArraySpread
+
 class CallSuperRestArgsBase {
     make: string;
     model: string;
@@ -31,6 +57,9 @@ class CallSuperRestArgsDerived extends CallSuperRestArgsBase {
 }
 
 ArkTools.arkSteedCompileSync(CallSuperRestArgsBase);
+ArkTools.waitJitCompileFinish(CallSuperRestArgsBase);
+ArkTools.arkSteedCompileSync(CallSuperRestArgsDerived);
+ArkTools.waitJitCompileFinish(CallSuperRestArgsDerived);
 
 
 let car1 = new CallSuperRestArgsDerived();

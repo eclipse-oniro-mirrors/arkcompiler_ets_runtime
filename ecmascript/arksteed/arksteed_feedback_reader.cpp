@@ -105,6 +105,57 @@ bool ArkSteedFeedbackReader::ReadCallFeedback(CallFeedback *feedback) const
     return true;
 }
 
+bool ArkSteedFeedbackReader::ReadConstructorFeedback(ConstructorFeedback *feedback) const
+{
+    if (feedback == nullptr) {
+        return false;
+    }
+    *feedback = {};
+
+    uint32_t slotId = 0;
+    if (!TryGetFeedbackSlotId(&slotId)) {
+        return false;
+    }
+
+    ProfileTypeInfo *profileTypeArray = nullptr;
+    if (!broker_->TryGetProfileTypeInfo(&profileTypeArray)) {
+        return false;
+    }
+    uint32_t slotLength = profileTypeArray->GetICSlotLength();
+    if (slotId >= slotLength) {
+        return false;
+    }
+
+    JSTaggedValue target = profileTypeArray->GetICSlot(compilerThread_, slotId);
+    if (target.IsUndefined()) {
+        return true;
+    }
+    if (target.IsInt()) {
+        int64_t encodedBuiltinId = static_cast<int64_t>(target.GetInt());
+        if (encodedBuiltinId < 0) {
+            int64_t builtinId = -encodedBuiltinId;
+            if (builtinId > kungfu::BuiltinsStubCSigns::NONE &&
+                builtinId < kungfu::BuiltinsStubCSigns::ID::NUM_OF_BUILTINS_ID) {
+                feedback->kind = ConstructorFeedbackKind::MONOMORPHIC_BUILTIN;
+                feedback->builtinId = static_cast<kungfu::BuiltinsStubCSigns::ID>(builtinId);
+                return true;
+            }
+        }
+        return true;
+    }
+    if (!target.IsJSFunction()) {
+        return true;
+    }
+
+    feedback->target = broker_->MakeFunctionRef(target);
+    if (!feedback->target.IsSafeForCompile()) {
+        *feedback = {};
+        return false;
+    }
+    feedback->kind = ConstructorFeedbackKind::MONOMORPHIC_JS_FUNCTION;
+    return true;
+}
+
 bool ArkSteedFeedbackReader::TryGetConstDataId(int index, uint16_t *constDataId) const
 {
     if (index < 0 || static_cast<size_t>(index) >= bytecodeInfo_.inputs.size()) {
@@ -452,6 +503,12 @@ ArkSteedOperationHint ArkSteedFeedbackReader::MakeOperationHint(uint32_t rawBits
             return ArkSteedOperationHint::STRING;
         case pgo::PGOSampleType::Type::NUMBER_OR_STRING:
             return ArkSteedOperationHint::NUMBER_OR_STRING;
+        case pgo::PGOSampleType::Type::BOOLEAN:
+            return ArkSteedOperationHint::BOOLEAN;
+        case pgo::PGOSampleType::Type::UNDEFINED_OR_NULL:
+            return ArkSteedOperationHint::UNDEFINED_OR_NULL;
+        case pgo::PGOSampleType::Type::BIG_INT:
+            return ArkSteedOperationHint::BIG_INT;
         default:
             break;
     }

@@ -12,6 +12,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_sum_at_indices* 1
+//! EXEC_COUNT_GE *array_sum_at_indices* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_sum_at_indices(arr: number[], indices: number[]): number
 {
     let sum = 0;
@@ -23,6 +27,7 @@ function array_sum_at_indices(arr: number[], indices: number[]): number
 }
 
 ArkTools.arkSteedCompileSync(array_sum_at_indices);
+ArkTools.waitJitCompileFinish(array_sum_at_indices);
 
 
 let arr: number[] = [10, 20, 30, 40, 50];

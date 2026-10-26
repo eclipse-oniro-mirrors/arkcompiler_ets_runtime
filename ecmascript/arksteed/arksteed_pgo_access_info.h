@@ -30,6 +30,26 @@ static constexpr uint32_t MAX_IC_POLY_CASES = 4;
 static constexpr uint32_t MAX_NAMED_IC_POLY_CASES = MAX_IC_POLY_CASES;
 static constexpr uint32_t MAX_ELEMENT_IC_POLY_CASES = MAX_IC_POLY_CASES;
 
+inline bool IsFixedLengthTypedArrayType(JSType type)
+{
+    switch (type) {
+        case JSType::JS_INT8_ARRAY:
+        case JSType::JS_UINT8_ARRAY:
+        case JSType::JS_UINT8_CLAMPED_ARRAY:
+        case JSType::JS_INT16_ARRAY:
+        case JSType::JS_UINT16_ARRAY:
+        case JSType::JS_INT32_ARRAY:
+        case JSType::JS_UINT32_ARRAY:
+        case JSType::JS_FLOAT32_ARRAY:
+        case JSType::JS_FLOAT64_ARRAY:
+        case JSType::JS_BIGINT64_ARRAY:
+        case JSType::JS_BIGUINT64_ARRAY:
+            return true;
+        default:
+            return false;
+    }
+}
+
 enum class AccessMode : uint8_t {
     NAMED_LOAD,
     NAMED_STORE,
@@ -94,6 +114,7 @@ enum class AccessFieldRepresentation : uint8_t {
     UNKNOWN,
     TAGGED,
     INT32,
+    UINT32,
     DOUBLE,
 };
 
@@ -295,6 +316,7 @@ struct ElementStoreAccessInfo {
     ElementStoreKind kind {ElementStoreKind::UNSUPPORTED};
     JSType typedArrayType {JSType::INVALID};
     OnHeapMode onHeapMode {OnHeapMode::NONE};
+    bool handlesCOW {false};
 
     bool IsJSArray() const
     {

@@ -327,11 +327,13 @@ public:
 
     void SetGCFlag(RegionGCFlags flag)
     {
+        JIT_WRITE_SCOPE(jitWriteScope, InMachineCodeSpace() || InHugeMachineCodeSpace());
         packedData_.flags_.gcFlags_ |= flag;
     }
 
     void ClearGCFlag(RegionGCFlags flag)
     {
+        JIT_WRITE_SCOPE(jitWriteScope, InMachineCodeSpace() || InHugeMachineCodeSpace());
         // NOLINTNEXTLINE(hicpp-signed-bitwise)
         packedData_.flags_.gcFlags_ &= ~flag;
     }
@@ -637,6 +639,7 @@ public:
 
     void SetRegionTypeFlag(RegionTypeFlag typeFlag)
     {
+        JIT_WRITE_SCOPE(jitWriteScope, InMachineCodeSpace() || InHugeMachineCodeSpace());
         packedData_.typeFlag_ = typeFlag;
     }
 
@@ -720,6 +723,7 @@ public:
 
     void SetHighWaterMark(uintptr_t mark)
     {
+        JIT_WRITE_SCOPE(jitWriteScope, InMachineCodeSpace() || InHugeMachineCodeSpace());
         ASSERT(InRange(mark));
         highWaterMark_ = mark;
     }
@@ -737,11 +741,13 @@ public:
 
     void IncreaseAliveObject(size_t size)
     {
+        JIT_WRITE_SCOPE(jitWriteScope, InMachineCodeSpace() || InHugeMachineCodeSpace());
         aliveObject_.fetch_add(size, std::memory_order_relaxed);
     }
 
     void ResetAliveObject()
     {
+        JIT_WRITE_SCOPE(jitWriteScope, InMachineCodeSpace() || InHugeMachineCodeSpace());
         aliveObject_ = 0;
     }
 

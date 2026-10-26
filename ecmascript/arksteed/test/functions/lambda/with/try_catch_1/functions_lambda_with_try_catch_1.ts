@@ -13,6 +13,37 @@
  * limitations under the License.
  */
 
+// G11.6 (P0) additive call evidence for `functions/lambda`
+// (`arksteed-g116-call-closure-and-additive-evidence` C1/C3/C4; S11; V1/V2).
+// `call_compiled_lambda_with_try_catch_1` compiles the class `LocalMath` and its
+// static method `apply`, together with the closure `doubler`, and invokes
+// `doubler`; `doubler` invokes the static `apply`. The class constructor is
+// compiled through the existing `ArkTools.arkSteedCompileSync(LocalMath)` call
+// but is never constructed, so it has no entry evidence and is not claimed; the
+// invoked static `apply` is. The claimed methods are installed before their first
+// invocation, so the call sites lower to the generic `Call` vertices observed in
+// the caller dump. `COMPILE_COUNT_GE`/`EXEC_COUNT_GE` attribute compilation and
+// entry of each claimed method; `DEOPT_COUNT *Deoptimize* 0` rules out a silent
+// deopt into the interpreter. The pre-existing computed results and the
+// expectation are unchanged.
+
+//! PARAMS --compiler-jit-hotness-threshold=60000
+
+//! METHOD call_compiled_lambda_with_try_catch_1
+//! HAS Call
+//! COMPILE_COUNT_GE *call_compiled_lambda_with_try_catch_1* 1
+//! EXEC_COUNT_GE *call_compiled_lambda_with_try_catch_1* 1
+
+//! METHOD doubler
+//! COMPILE_COUNT_GE *doubler* 1
+//! EXEC_COUNT_GE *doubler* 1
+
+//! METHOD apply
+//! COMPILE_COUNT_GE *apply* 1
+//! EXEC_COUNT_GE *apply* 1
+
+//! DEOPT_COUNT *Deoptimize* 0
+
 // poplexenv inside compiled function: class defined inside function scope
 let compiled = false;
 

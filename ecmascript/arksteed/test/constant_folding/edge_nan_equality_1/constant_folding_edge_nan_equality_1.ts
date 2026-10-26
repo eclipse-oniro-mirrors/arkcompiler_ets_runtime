@@ -13,6 +13,17 @@
  * limitations under the License.
  */
 
+// G10.2 (P0) additive evidence (arksteed-jsts-p0-semantic-rows#S3): the folded
+// NaN/abstract-equality semantics and the expected output of this case are
+// unchanged; the added annotations only confirm that the target is compiled,
+// entered and leaves no deopt behind. `NaN === NaN` is the preserved false
+// observation of the row; the computed-sign oracle lives in
+// `arithmetic/float64_ieee754`.
+
+//! COMPILE_COUNT_GE *constant_folding_edge_nan_equality_1* 1
+//! EXEC_COUNT_GE *constant_folding_edge_nan_equality_1* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function constant_folding_edge_nan_equality_1(x: number)
 {
     const NAN_VAL: number = NaN;

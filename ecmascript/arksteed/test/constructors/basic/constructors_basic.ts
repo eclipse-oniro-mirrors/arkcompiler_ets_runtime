@@ -26,10 +26,33 @@ class Person {
     }
 }
 
+// G11.6 additive evidence (arksteed-g116-call-closure-and-additive-evidence#C1,#C3):
+// the original target `Person` keeps its own compilation and entry evidence, and
+// the silent same-domain caller `probeBasicConstruction` carries the actual
+// construction form of this leaf in its own dump. Program output is unchanged.
+//! COMPILE_COUNT_GE Person 1
+//! EXEC_COUNT_GE *Person 1
+//! COMPILE_COUNT_GE probeBasicConstruction 1
+//! EXEC_COUNT_GE *probeBasicConstruction 1
+//! DEOPT_COUNT *Deoptimize* 0
+//! METHOD probeBasicConstruction
+//! HAS CallRuntime OptNewObjRange
+
 ArkTools.arkSteedCompileSync(Person);
+ArkTools.waitJitCompileFinish(Person);
+
+function probeBasicConstruction(name: string, age: number) {
+    return new Person(name, age);
+}
+ArkTools.arkSteedCompileSync(probeBasicConstruction);
+ArkTools.waitJitCompileFinish(probeBasicConstruction);
 
 
 let person = new Person("Alice", 30);
 print(person.name);
 print(person.age);
 print(person.greet());
+
+// Bounded silent preparation: one more construction through the compiled
+// same-domain caller. It prints nothing and changes no earlier observation.
+probeBasicConstruction("Bob", 40);

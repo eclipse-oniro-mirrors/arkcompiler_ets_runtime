@@ -13,6 +13,12 @@
  * limitations under the License.
  */
 
+//! METHOD LoadScore
+//! HAS LoadTaggedField
+//! COMPILE_COUNT_GE *LoadScore* 1
+//! EXEC_COUNT_GE *LoadScore* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function LoadScore(obj)
 {
     return obj.score;

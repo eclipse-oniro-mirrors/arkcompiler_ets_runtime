@@ -14,6 +14,23 @@
  */
 declare function print(arg: string): string;
 
+// G1.1 (P0): entry into the ArkSteed-compiled code of the target method, not
+// only the installation of its machine code. `ArkTools.arkSteedCompileSync`
+// remains the existing installation path of this case; the evidence
+// annotations confirm the compilation of the target method and its entry into
+// generated code through the E1 marker `>>> Running method: <record>.<method>`
+// (E1/E2). The address constraint confirms the marker vertex in the CFG of
+// this ordinary (non-OSR) compilation, and `DEOPT_COUNT *Deoptimize* 0` rules
+// out a silent deopt into the interpreter after the entry.
+
+//! PARAMS --compiler-jit-hotness-threshold=60000
+
+//! METHOD call_compiled_function_5
+//! HAS CallRuntime PrintMethodName
+//! COMPILE_COUNT_GE *call_compiled_function_5* 1
+//! EXEC_COUNT_GE *call_compiled_function_5* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function foo(x: number): string {
     return (x ** 3).toString();
 }

@@ -12,12 +12,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_access_first* 1
+//! EXEC_COUNT_GE *array_access_first* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_access_first(arr: number[]): number
 {
     return arr[0];
 }
 
 ArkTools.arkSteedCompileSync(array_access_first);
+ArkTools.waitJitCompileFinish(array_access_first);
 
 
 let arr: number[] = [10, 20, 30, 40, 50];

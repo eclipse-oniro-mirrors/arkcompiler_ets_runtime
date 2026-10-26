@@ -33,6 +33,10 @@ public:
                           ArkSteedWriteBarrierKind barrierKind, ArkSteedRegister objectRegionScratch,
                           ArkSteedRegister valueRegionScratch,
                           ArkSteedWriteBarrierValueKind valueKind = ArkSteedWriteBarrierValueKind::Unknown);
+    // Installs a complete HClass header and emits the default post-write barrier.
+    // SATB and CMS/CMC header-state handling are intentionally not supported here.
+    void InitializeHClass(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister hclass,
+                          ArkSteedRegister objectRegionScratch, ArkSteedRegister hclassRegionScratch);
     void TransitionHClass(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister hclass,
                           ArkSteedRegister objectRegionScratch, ArkSteedRegister hclassRegionScratch);
 
@@ -40,7 +44,8 @@ public:
                             ArkSteedRegister value, ArkSteedRegister scratch, ArkSteedWriteBarrierValueKind valueKind);
 
 private:
-    void EmitFastWriteBarrier(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister value, int32_t offset);
+    void EmitFastWriteBarrier(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister value,
+                              int32_t offset);
     void EmitWriteBarrier(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister value, int32_t offset,
                           ArkSteedWriteBarrierKind barrierKind, ArkSteedRegister objectRegionScratch,
                           ArkSteedRegister valueRegionScratch);
@@ -50,8 +55,9 @@ private:
     void EmitPostStoreWriteBarrier(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister value,
                                    int32_t offset, ArkSteedWriteBarrierKind barrierKind,
                                    ArkSteedRegister objectRegionScratch, ArkSteedRegister valueRegionScratch);
-    void CallBarrierRuntime(kungfu::RuntimeStubCSigns::ID runtimeId, ArkSteedRegister glue, ArkSteedRegister object,
-                            int32_t offset, ArkSteedRegister value, bool preserveInputs);
+    void CallBarrierRuntime(kungfu::RuntimeStubCSigns::ID runtimeId, ArkSteedRegister glue,
+                            ArkSteedRegister object, int32_t offset, ArkSteedRegister value,
+                            bool preserveInputs);
 
     ArkSteedAssembler *assembler_ {nullptr};
     Chunk *chunk_ {nullptr};

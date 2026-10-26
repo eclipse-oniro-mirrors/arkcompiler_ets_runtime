@@ -13,6 +13,26 @@
  * limitations under the License.
  */
 
+// G10.4 (S5) additive evidence on the existing constant-folding bitwise case:
+// the folded oracle and the expected output are unchanged; the annotations add
+// the compilation of the target method, its entry into generated code and a
+// whole-process zero-deopt counter. The constant operands are folded at graph
+// build time, so this case stays auxiliary evidence of the folded result, not
+// a substitute for the compiled `I32BitwiseBinary`/`I32BNot` path of
+// `arithmetic/bitwise_int32`. The required positive evidence is the lower
+// bound `COMPILE_COUNT_GE *constant_folding_bitwise_1 1` plus
+// `EXEC_COUNT_GE *constant_folding_bitwise_1 1`; the construction bounds the
+// multiplicity exactly (the synchronous compilation happens before the first
+// call and the case then invokes the target exactly twice with zero deopts),
+// so the exact `COMPILE_COUNT`/`EXEC_COUNT` counters are kept beside the lower
+// bounds as additional bounded evidence (V2).
+
+//! COMPILE_COUNT_GE *constant_folding_bitwise_1 1
+//! EXEC_COUNT_GE *constant_folding_bitwise_1 1
+//! COMPILE_COUNT *constant_folding_bitwise_1 1
+//! EXEC_COUNT *constant_folding_bitwise_1 2
+//! DEOPT_COUNT *Deoptimize* 0
+
 function constant_folding_bitwise_1(x: number)
 {
     const A: number = 0xFF;   // 255

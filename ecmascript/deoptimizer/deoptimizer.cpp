@@ -704,16 +704,22 @@ std::string Deoptimizier::DisplayItems(DeoptType type)
 //   |--------------------------| --------------> start(n-1)
 //   |       ......             |
 //   +--------------------------+ ---------------
-//   |        callerFp_         |               ^
+//   |      baseCtorThis_       |               ^
+//   |   continuationResumePc_  |               |
+//   |    continuationKind_     |               |
+//   |      isFrameLazyDeopt_   |          stackContext
+//   |      hasException_       |               |
+//   |       callerFp_          |               |
 //   |       returnAddr_        |               |
-//   |      callFrameTop_       |          stackContext
-//   |       inlineDepth_       |               |
-//   |       hasException_      |               |
-//   |      isFrameLazyDeopt_   |               v
+//   |      callFrameTop_       |               |
+//   |       inlineDepth_       |               v
 //   |--------------------------| ---------------
 
 JSTaggedType Deoptimizier::ConstructAsmInterpretFrame(JSHandle<JSTaggedValue> maybeAcc, bool isArkSteedEagerDeopt)
 {
+    continuationKind_ = static_cast<uintptr_t>(DeoptContinuationKind::DEFAULT);
+    continuationResumePc_ = 0;
+    baseCtorThis_ = 0;
     FrameWriter frameWriter(this, isArkSteedEagerDeopt);
     // Push asm interpreter frame
     for (int32_t curDepth = static_cast<int32_t>(inlineDepth_); curDepth >= 0; curDepth--) {
@@ -765,6 +771,9 @@ JSTaggedType Deoptimizier::ConstructAsmInterpretFrame(JSHandle<JSTaggedValue> ma
 
     RelocateCalleeSave();
 
+    frameWriter.PushRawValue(baseCtorThis_);
+    frameWriter.PushRawValue(continuationResumePc_);
+    frameWriter.PushRawValue(continuationKind_);
     frameWriter.PushRawValue(stackContext_.isFrameLazyDeopt_);
     frameWriter.PushRawValue(thread_->HasPendingException());
     frameWriter.PushRawValue(stackContext_.callerFp_);
@@ -960,8 +969,12 @@ bool Deoptimizier::PrepareForExceptionLazyDeopt(JSThread *thread, JSTaggedType *
             continue;
         }
         MachineCode *machineCode = MachineCode::Cast(codeValue.GetTaggedObject());
-        arksteed::ArkSteedSafepointTable table(
-            machineCode->GetStackMapOrOffsetTableAddress(), machineCode->GetStackMapOrOffsetTableSize());
+        size_t safepointTableSize = 0;
+        const uint8_t *safepointTableData = arksteed::GetArkSteedSafepointTable(
+            machineCode->GetStackMapOrOffsetTableAddress(),
+            machineCode->GetStackMapOrOffsetTableSize(),
+            &safepointTableSize);
+        arksteed::ArkSteedSafepointTable table(safepointTableData, safepointTableSize);
         uint32_t returnPcOffset = static_cast<uint32_t>(it.GetOptimizedReturnAddr());
 
         constexpr auto LAZY_DEOPT = arksteed::ExceptionHandlerKind::LAZY_DEOPT;
@@ -1043,6 +1056,26 @@ void Deoptimizier::ProcessLazyDeopt(JSHandle<JSTaggedValue> maybeAcc, const uint
     if (!hasPendingException) {
         if (NeedOverwriteAcc(resumePc)) {
             statePtr->acc = maybeAcc.GetTaggedValue();
+        }
+        // A CallConstructor lazy-deopt safepoint is glued to the raw call, before the compiled
+        // inline [[Construct]] result normalization; its bundle carries a constant kind marker
+        // (which split-variant the site is) plus, for the base variant, the bound-this spill
+        // slot as a pseudo vreg. Leave pc at the supercall bytecode and publish kind/this/
+        // resume pc in the stack context: the deopt trampoline applies the variant's result
+        // check on the raw acc after the frames are linked (base: object? result : this;
+        // derived: object? result : throw), instead of normalizing here where allocation
+        // is forbidden.
+        constexpr int32_t kindIndex = static_cast<int32_t>(SpecVregIndex::DEOPT_CONTINUATION_KIND_INDEX);
+        if (HasDeoptValue(inlineDepth_, kindIndex)) {
+            continuationKind_ = static_cast<uintptr_t>(GetDeoptValue(inlineDepth_, kindIndex).GetInt());
+            if (continuationKind_ == static_cast<uintptr_t>(DeoptContinuationKind::BASE_CTOR)) {
+                ASSERT(HasDeoptValue(inlineDepth_, static_cast<int32_t>(SpecVregIndex::BASE_CONSTRUCTOR_THIS_INDEX)));
+                baseCtorThis_ = GetDeoptValue(
+                    inlineDepth_, static_cast<int32_t>(SpecVregIndex::BASE_CONSTRUCTOR_THIS_INDEX)).GetRawData();
+            }
+            continuationResumePc_ = reinterpret_cast<uintptr_t>(
+                resumePc + BytecodeInstruction::Size(kungfu::Bytecodes::GetOpcode(resumePc)));
+            return;
         }
         EcmaOpcode curOpcode = kungfu::Bytecodes::GetOpcode(resumePc);
         resumePc += (BytecodeInstruction::Size(curOpcode));

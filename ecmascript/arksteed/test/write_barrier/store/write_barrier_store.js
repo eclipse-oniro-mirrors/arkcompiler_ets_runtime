@@ -13,7 +13,30 @@
  * limitations under the License.
  */
 
-//! PARAMS --enable-force-gc=true
+//! PARAMS --enable-force-gc=true --compiler-jit-hotness-threshold=60000
+
+// G4.3j: a store of a freshly allocated heap object retains the barrier, so the
+// compiled method keeps `StoreTaggedFieldWithBarrier`. The compile and entry
+// counters are exact (`COMPILE_COUNT`/`EXEC_COUNT`, not lower bounds), because
+// the construction fixes their multiplicity: the hotness threshold 60000
+// prevents premature compilation, the single synchronous
+// `ArkTools.arkSteedCompileSync` installs the method once, and the post-install
+// loop calls it a fixed 2000 times. This leaf stays on its force-GC scenario
+// (`--enable-force-gc=true`) and therefore asserts no `GC_COUNT_GE` bound: in
+// the Debug process the hook collects on almost every allocation, so the volume
+// of per-collection records follows the allocation count instead of a bounded
+// window. Both counter forms are declared: the exact `COMPILE_COUNT`/
+// `EXEC_COUNT` forms required for the construction-fixed multiplicity and the
+// `COMPILE_COUNT_GE`/`EXEC_COUNT_GE` lower-bound forms explicitly named by the
+// store-leaf acceptance criterion; the lower bounds hold because the exact
+// counts are 1 compilation and 2000 entries.
+//! METHOD storeFresh
+//! HAS StoreTaggedFieldWithBarrier
+//! COMPILE_COUNT *storeFresh* 1
+//! COMPILE_COUNT_GE *storeFresh* 1
+//! EXEC_COUNT *storeFresh* 2000
+//! EXEC_COUNT_GE *storeFresh* 2000
+//! DEOPT_COUNT *Deoptimize* 0
 
 class Holder {
     constructor() {
@@ -56,6 +79,13 @@ for (let i = 0; i < 20000; i++) {
 
 forceFullGC();
 let storeICState = ArkTools.getICState(storeFresh, 0, 1);
+// One more explicit full collection before the synchronous installation: the
+// IC read above allocates and leaves a forced collection pending, and the
+// synchronous ArkSteed compile of this leaf deadlocks in that state while both
+// deopt traces (implied by DEOPT_COUNT) are enabled. The extra collection is
+// additive: the scenario stays a force-GC scenario and both collections sit in
+// the same phase of the case.
+forceFullGC();
 ArkTools.arkSteedCompileSync(storeFresh);
 ArkTools.waitJitCompileFinish(storeFresh);
 

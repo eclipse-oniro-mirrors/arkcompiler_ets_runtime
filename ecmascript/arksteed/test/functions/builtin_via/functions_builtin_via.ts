@@ -12,6 +12,30 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+// G11.6 additive evidence (arksteed-g116-call-closure-and-additive-evidence
+// #C1/#C3/#C4): the invoked builtin is reached through `Function.prototype.call`,
+// and this leaf keeps its tier boundary - `ArkTools.arkSteedCompileSync` installs
+// `call_builtin_function_via_call` before its first call, so the call sites carry
+// no monomorphic target feedback at compilation time. The leaf's own dump of that
+// method therefore shows the generic `Call` invocation form for those sites, and
+// the address annotation names exactly the form present in the dump instead of an
+// invented `CallKnownBuiltin`. The builtin invocation form has its own carrier:
+// the T1 pair `functions/call/call_closure_env_slot`.
+// `COMPILE_COUNT_GE`/`EXEC_COUNT_GE` attribute compilation and entry of the
+// claimed target method (E1/E2), and `DEOPT_COUNT *Deoptimize* 0` asserts that the
+// normal path does not silently fall back into the interpreter.
+// The target writes no captured variable: its dump contains no `StoreEnvSlot`
+// node and no lexical-environment slot load, and its only `LoadTaggedField` nodes
+// are the function-context and object-property loads that C3 excludes from
+// captured-binding evidence. The conditional captured-slot annotation is
+// therefore not applicable and is not fabricated.
+//! METHOD call_builtin_function_via_call
+//! HAS Call
+//! COMPILE_COUNT_GE *call_builtin_function_via_call* 1
+//! EXEC_COUNT_GE *call_builtin_function_via_call* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function call_builtin_function_via_call() {
     print(Array.prototype.push.call([], 10));
 

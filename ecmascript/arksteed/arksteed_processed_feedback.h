@@ -21,6 +21,7 @@
 #include "ecmascript/arksteed/arksteed_pgo_access_info.h"
 #include "ecmascript/compiler/builtins/builtins_call_signature.h"
 #include "ecmascript/js_tagged_value_wrapper.h"
+#include "ecmascript/pgo_profiler/types/pgo_profiler_type.h"
 
 namespace panda::ecmascript::arksteed {
 
@@ -44,6 +45,12 @@ enum class CallFeedbackKind : uint8_t {
     MONOMORPHIC_BUILTIN,
 };
 
+enum class ConstructorFeedbackKind : uint8_t {
+    INSUFFICIENT,
+    MONOMORPHIC_JS_FUNCTION,
+    MONOMORPHIC_BUILTIN,
+};
+
 enum class ArkSteedOperationHint : uint8_t {
     NONE,
     INT,
@@ -51,6 +58,9 @@ enum class ArkSteedOperationHint : uint8_t {
     STRING,
     NUMBER_OR_STRING,
     ANY,
+    BOOLEAN,
+    UNDEFINED_OR_NULL,
+    BIG_INT,
 };
 
 struct ProcessedFeedbackBase {
@@ -74,6 +84,12 @@ struct OperationFeedback {
     {
         return hint == ArkSteedOperationHint::NONE;
     }
+
+    // The slot only ever recorded TaggedDouble inputs.
+    bool IsDoubleOnly() const
+    {
+        return rawTypeBits == static_cast<uint32_t>(pgo::PGOSampleType::Type::DOUBLE);
+    }
 };
 
 struct CallFeedback {
@@ -90,6 +106,22 @@ struct CallFeedback {
     bool IsMonomorphicBuiltin() const
     {
         return kind == CallFeedbackKind::MONOMORPHIC_BUILTIN;
+    }
+};
+
+struct ConstructorFeedback {
+    ConstructorFeedbackKind kind {ConstructorFeedbackKind::INSUFFICIENT};
+    ArkSteedFunctionRef target {};
+    kungfu::BuiltinsStubCSigns::ID builtinId {kungfu::BuiltinsStubCSigns::ID::NONE};
+
+    bool IsMonomorphicJSFunction() const
+    {
+        return kind == ConstructorFeedbackKind::MONOMORPHIC_JS_FUNCTION;
+    }
+
+    bool IsMonomorphicBuiltin() const
+    {
+        return kind == ConstructorFeedbackKind::MONOMORPHIC_BUILTIN;
     }
 };
 

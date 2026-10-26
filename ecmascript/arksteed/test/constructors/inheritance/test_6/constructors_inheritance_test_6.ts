@@ -63,14 +63,53 @@ class L3 extends L2 {
     }
 }
 
-ArkTools.arkSteedCompileSync(L0);
-ArkTools.arkSteedCompileSync(L1);
-ArkTools.arkSteedCompileSync(L2);
-ArkTools.arkSteedCompileSync(L3);
+// G11.6 additive evidence (arksteed-g116-call-closure-and-additive-evidence#C1,#C3):
+// every compiled target of this leaf keeps its own compile/entry counters;
+// the super-call form is annotated in the derived constructor's own dump and
+// the actual construction form in the compiled same-domain caller's dump.
+// The deliberately compiled class roles and all printed output are unchanged.
+//! COMPILE_COUNT_GE L0 1
+//! EXEC_COUNT_GE *L0 1
+//! COMPILE_COUNT_GE L1 1
+//! EXEC_COUNT_GE *L1 1
+//! COMPILE_COUNT_GE L2 1
+//! EXEC_COUNT_GE *L2 1
+//! COMPILE_COUNT_GE L3 1
+//! EXEC_COUNT_GE *L3 1
+//! COMPILE_COUNT_GE probeInheritanceConstruction 1
+//! EXEC_COUNT_GE *probeInheritanceConstruction 1
+//! DEOPT_COUNT *Deoptimize* 0
+//! METHOD L1
+//! HAS CallRuntime OptSuperCall
+//! METHOD L2
+//! HAS CallRuntime OptSuperCall
+//! METHOD L3
+//! HAS CallRuntime OptSuperCall
+//! METHOD probeInheritanceConstruction
+//! HAS CallRuntime OptNewObjRange
 
+ArkTools.arkSteedCompileSync(L0);
+ArkTools.waitJitCompileFinish(L0);
+ArkTools.arkSteedCompileSync(L1);
+ArkTools.waitJitCompileFinish(L1);
+ArkTools.arkSteedCompileSync(L2);
+ArkTools.waitJitCompileFinish(L2);
+ArkTools.arkSteedCompileSync(L3);
+ArkTools.waitJitCompileFinish(L3);
+
+
+function probeInheritanceConstruction() {
+    return new L3(1, 2, 3, 4);
+}
+ArkTools.arkSteedCompileSync(probeInheritanceConstruction);
+ArkTools.waitJitCompileFinish(probeInheritanceConstruction);
 
 let obj = new L3(1, 2, 3, 4);
 print(obj.getA());
 print(obj.getB());
 print(obj.getC());
 print(obj.total());
+
+// Bounded silent preparation: the leaf's construction(s) once more through the
+// compiled same-domain caller. It prints nothing and changes no earlier observation.
+probeInheritanceConstruction();

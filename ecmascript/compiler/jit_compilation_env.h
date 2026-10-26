@@ -165,14 +165,37 @@ public:
 
     JSHandle<JSFunction> GetJsFunctionByMethodOffset(uint32_t methodOffset) const;
 
-    uint32_t RecordHeapConstant(const JSHandle<JSTaggedValue> &heapObj)
+    // The caller protects heap access. Compare current rooted values, never cached addresses:
+    // moving GC updates the slots while the append-only table preserves their indices.
+    uint32_t FindHeapConstantIndex(JSTaggedValue heapObj) const
     {
-        auto it = std::find_if(heapConstantInfo_.heapConstantTable.begin(), heapConstantInfo_.heapConstantTable.end(),
-            [&heapObj](const JSHandle<JSTaggedValue> &value) {
-                return value.GetTaggedType() == heapObj.GetTaggedType();
-        });
+        auto it =
+            std::find_if(heapConstantInfo_.heapConstantTable.begin(), heapConstantInfo_.heapConstantTable.end(),
+                         [heapObj](const JSHandle<JSTaggedValue> &value) { return value.GetTaggedValue() == heapObj; });
         if (it != heapConstantInfo_.heapConstantTable.end()) {
             return std::distance(heapConstantInfo_.heapConstantTable.begin(), it);
+        }
+        return INVALID_HEAP_CONSTANT_INDEX;
+    }
+
+    uint32_t RecordHeapConstant(JSTaggedValue heapObj)
+    {
+        ASSERT(heapObj.IsHeapObject() && !heapObj.IsWeak());
+        uint32_t index = FindHeapConstantIndex(heapObj);
+        if (index != INVALID_HEAP_CONSTANT_INDEX) {
+            return index;
+        }
+        // Allocate a sustaining slot only on a miss, including refs created from feedback.
+        heapConstantInfo_.heapConstantTable.push_back(NewJSHandle(heapObj));
+        ASSERT(heapConstantInfo_.heapConstantTable.size() < INVALID_HEAP_CONSTANT_INDEX);
+        return static_cast<uint32_t>(heapConstantInfo_.heapConstantTable.size() - 1);
+    }
+
+    uint32_t RecordHeapConstant(const JSHandle<JSTaggedValue> &heapObj)
+    {
+        uint32_t existing = FindHeapConstantIndex(heapObj.GetTaggedValue());
+        if (existing != INVALID_HEAP_CONSTANT_INDEX) {
+            return existing;
         }
         heapConstantInfo_.heapConstantTable.push_back(heapObj);
         ASSERT(heapConstantInfo_.heapConstantTable.size() < INVALID_HEAP_CONSTANT_INDEX);

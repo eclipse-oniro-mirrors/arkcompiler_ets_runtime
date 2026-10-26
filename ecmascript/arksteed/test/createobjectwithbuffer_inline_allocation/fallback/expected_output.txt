@@ -1,0 +1,7 @@
+compiled:true
+string-fallback:true
+methods-env-and-home-object:true
+accessors-env-and-descriptors:true
+elements-fallback:true
+cold-template-fallback:true
+still-compiled:true

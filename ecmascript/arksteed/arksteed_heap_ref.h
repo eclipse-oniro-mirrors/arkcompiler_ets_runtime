@@ -19,42 +19,65 @@
 #include "ecmascript/js_handle.h"
 #include "ecmascript/js_tagged_value_wrapper.h"
 
+namespace panda::ecmascript {
+class JitCompilationEnv;
+}
+
 namespace panda::ecmascript::arksteed {
 
 class ArkSteedHeapRef {
 public:
     ArkSteedHeapRef() = default;
-    explicit ArkSteedHeapRef(JSTaggedValue value) : value_(value) {}
-    ArkSteedHeapRef(JSTaggedValue value, bool stable) : value_(value), stable_(stable) {}
-    explicit ArkSteedHeapRef(JSHandle<JSTaggedValue> handle) : handle_(handle), stable_(true) {}
+
+    // Heap refs can only be created by the broker, after rooting and canonicalization.
+    static ArkSteedHeapRef FromImmediate(JSTaggedValue value)
+    {
+        if (value.IsHeapObject()) {
+            return {};
+        }
+        ArkSteedHeapRef ref;
+        ref.value_ = value;
+        ref.kind_ = Kind::IMMEDIATE;
+        return ref;
+    }
 
     ArkSteedHeapRef &operator=(JSTaggedValue value) = delete;
 
     JSTaggedValue Value() const
     {
-        ASSERT(!HasHandle());
+        ASSERT(IsImmediate());
         return value_;
     }
 
-    bool HasHandle() const
+    bool HasHandle() const { return IsHeapObject(); }
+
+    // These predicates inspect serialized metadata, never a handle or the heap.
+    bool IsImmediate() const { return kind_ == Kind::IMMEDIATE; }
+    bool IsHeapObject() const { return kind_ >= Kind::HEAP_OBJECT; }
+    bool IsUndefined() const { return IsImmediate() && value_.IsUndefined(); }
+    bool IsInt() const { return IsImmediate() && value_.IsInt(); }
+    bool IsJSHClass() const { return kind_ == Kind::HCLASS; }
+    bool IsJSFunction() const { return kind_ == Kind::FUNCTION; }
+    bool IsString() const { return kind_ == Kind::STRING; }
+    bool IsSymbol() const { return kind_ == Kind::SYMBOL; }
+    bool IsName() const { return IsString() || IsSymbol(); }
+    bool IsProtoCell() const { return kind_ == Kind::PROTO_CELL; }
+
+    bool IsStable() const { return IsSafeForCompile(); }
+
+    bool IsSafeForCompile() const { return kind_ != Kind::INVALID; }
+
+    // Object identity, not JavaScript value equality. Indices are local to a compilation.
+    // Invalid refs are not identities; even two invalid refs do not compare equal.
+    bool Equals(const ArkSteedHeapRef &other) const
     {
-        return handle_.GetAddress() != 0U;
-    }
-
-    bool IsUndefined() const = delete;
-
-    bool IsHeapObject() const = delete;
-
-    bool IsInt() const = delete;
-
-    bool IsStable() const
-    {
-        return stable_;
-    }
-
-    bool IsSafeForCompile() const
-    {
-        return stable_;
+        if (!IsSafeForCompile() || !other.IsSafeForCompile()) {
+            return false;
+        }
+        if (IsImmediate() || other.IsImmediate()) {
+            return IsImmediate() && other.IsImmediate() && value_ == other.value_;
+        }
+        return owner_ == other.owner_ && index_ == other.index_;
     }
 
     bool IsSafeToEmbed() const = delete;
@@ -68,21 +91,30 @@ public:
     operator JSTaggedValue() const = delete;
 
 private:
-    JSTaggedValue ValueAllowHandleDeref() const
-    {
-        if (HasHandle()) {
-            return handle_.GetTaggedValue();
-        }
-        return value_;
-    }
+  enum class Kind : uint8_t {
+      INVALID,
+      IMMEDIATE,
+      HEAP_OBJECT,
+      HCLASS,
+      FUNCTION,
+      STRING,
+      SYMBOL,
+      PROTO_CELL,
+  };
+
+    ArkSteedHeapRef(const JitCompilationEnv *owner, uint32_t index, Kind kind)
+        : owner_(owner), index_(index), kind_(kind)
+    {}
 
     JSTaggedValue value_ {JSTaggedValue::Undefined()};
-    JSHandle<JSTaggedValue> handle_ {};
-    bool stable_ {false};
+    const JitCompilationEnv *owner_{nullptr};
+    uint32_t index_{0};
+    Kind kind_{Kind::INVALID};
 
     friend class ArkSteedHeapBroker;
 };
 
+// Role names share a representation; broker factories validate their types.
 using ArkSteedObjectRef = ArkSteedHeapRef;
 using ArkSteedFunctionRef = ArkSteedHeapRef;
 using ArkSteedHClassRef = ArkSteedHeapRef;

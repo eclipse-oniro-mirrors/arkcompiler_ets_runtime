@@ -12,6 +12,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *spread_string_helper* 1
+//! EXEC_COUNT_GE *spread_string_helper* 1
+//! COMPILE_COUNT_GE *spread_string_2* 1
+//! EXEC_COUNT_GE *spread_string_2* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
+//! METHOD spread_string_helper
+//! HAS CallRuntime OptCopyRestArgs
 function spread_string_helper(...chars: string[]): string {
     let result = "";
     for (let i = 0; i < chars.length; i++) {
@@ -20,6 +29,9 @@ function spread_string_helper(...chars: string[]): string {
     return result;
 }
 
+//! METHOD spread_string_2
+//! HAS CallRuntime CallSpread
+//! HAS CallRuntime StArraySpread
 function spread_string_2(s: string): string {
     return spread_string_helper(...s);
 }

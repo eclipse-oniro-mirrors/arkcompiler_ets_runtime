@@ -14,6 +14,17 @@
  */
 
 // @ts-nocheck
+// G11.1 additive evidence: the explicit hotness threshold keeps the warm-up
+// interpreted and makes the `ArkTools.arkSteedCompileSync` installation
+// deterministic; without it the installation of this 1000-call warm-up is not
+// reproducible across runs (V2). Existing assertions and printed values are
+// unchanged.
+//! PARAMS --compiler-jit-hotness-threshold=10000
+//! METHOD test
+//! HAS LoadTaggedField
+//! COMPILE_COUNT_GE *test* 1
+//! EXEC_COUNT_GE *test* 1
+//! DEOPT_COUNT *Deoptimize* 0
 declare function print(arg: any): string;
 class Person {
     constructor(name) {

@@ -140,6 +140,9 @@ enum CommandValues {
     OPTION_COMPILER_ARKSTEED_PRINT_WITH_COLORS,
     OPTION_COMPILER_ARKSTEED_REUSE_STACK_SLOTS,
     OPTION_COMPILER_ARKSTEED_DEOPT_ON_INSUFFICIENT_PROFILE,
+    OPTION_COMPILER_ARKSTEED_SOURCE_POSITION_TABLE,
+    OPTION_COMPILER_ARKSTEED_PASS_TRACE,
+    OPTION_COMPILER_ARKSTEED_PASS_TRACE_METHODS,
     OPTION_COMPILER_TYPE_THRESHOLD,
     OPTION_ENABLE_RUNTIME_STAT,
     OPTION_COMPILER_LOG_SNAPSHOT,
@@ -1035,6 +1038,36 @@ public:
     bool GetCompilerArkSteedDeoptOnInsufficientProfile() const
     {
         return compilerArkSteedDeoptOnInsufficientProfile_;
+    }
+
+    void SetCompilerArkSteedSourcePositionTable(bool value)
+    {
+        compilerArkSteedSourcePositionTable_ = value;
+    }
+
+    bool GetCompilerArkSteedSourcePositionTable() const
+    {
+        return compilerArkSteedSourcePositionTable_;
+    }
+
+    void SetCompilerArkSteedPassTrace(bool value)
+    {
+        compilerArkSteedPassTrace_ = value;
+    }
+
+    bool GetCompilerArkSteedPassTrace() const
+    {
+        return compilerArkSteedPassTrace_;
+    }
+
+    void SetCompilerArkSteedPassTraceMethods(std::string value)
+    {
+        compilerArkSteedPassTraceMethods_ = std::move(value);
+    }
+
+    std::string GetCompilerArkSteedPassTraceMethods() const
+    {
+        return compilerArkSteedPassTraceMethods_;
     }
 
     void SetCompilerLogSnapshot(bool value)
@@ -2827,6 +2860,9 @@ private:
     bool compilerArkSteedPrintWithColors_ {false};
     bool compilerArkSteedReuseStackSlots_ {true};
     bool compilerArkSteedDeoptOnInsufficientProfile_ {true};
+    bool compilerArkSteedSourcePositionTable_ {false};
+    bool compilerArkSteedPassTrace_ {false};
+    std::string compilerArkSteedPassTraceMethods_ {""};
     bool compilerLogSnapshot_ {false};
     bool compilerLogTime_ {false};
     bool enableCompilerLogAllMethodsTime_ {false};

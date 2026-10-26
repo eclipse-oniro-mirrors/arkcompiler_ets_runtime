@@ -12,6 +12,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+//! METHOD      va_args_sum
+//! HAS         Call
+//! HAS         CallRuntime  OptCopyRestArgs
+//! COMPILE_COUNT_GE *va_args_sum* 1
+//! EXEC_COUNT_GE *va_args_sum* 1
+//! METHOD      invokeSumTarget
+//! HAS         CallKnownJSFunction
+//! COMPILE_COUNT_GE *invokeSumTarget* 1
+//! EXEC_COUNT_GE *invokeSumTarget* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function va_args_sum(...args: number[]) {
     let sum = 0;
     for (let i = 0; i < args.length; i++) {
@@ -26,3 +36,22 @@ ArkTools.arkSteedCompileSync(va_args_sum);
 va_args_sum();
 va_args_sum(4);
 va_args_sum(1, 2, 3, 4);
+
+// Additive G11.6 evidence: silent same-domain callers invoke each compiled
+// original target through a known-JS call plan (the call arity matches the
+// target's compiled parameter count), so this leaf's own dump carries the
+// actual invocation form. stdout is suppressed while the callers are warmed and
+// entered and `print` is restored afterwards, so every original probe and every
+// expectation byte is preserved.
+function invokeSumTarget() {
+    return va_args_sum(0);
+}
+let savedPrint = print;
+print = function () {};
+for (let round = 0; round < 4; round++) {
+    invokeSumTarget();
+}
+ArkTools.arkSteedCompileSync(invokeSumTarget);
+invokeSumTarget();
+
+print = savedPrint;

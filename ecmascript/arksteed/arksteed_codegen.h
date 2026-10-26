@@ -30,18 +30,22 @@ class ArkSteedSafepointTableBuilder;
 class DeoptLiteralTableBuilder;
 class DeoptTranslationBuilder;
 class GapMoveResolver;
+class SourcePositionTableBuilder;
 
 class ArkSteedCodeGenerator {
 public:
     ArkSteedCodeGenerator(ArkSteedAssembler *assembler, Graph *graph,
                           ArkSteedSafepointTableBuilder *safepointBuilder = nullptr,
                           DeoptTranslationBuilder *translationBuilder = nullptr,
-                          DeoptLiteralTableBuilder *deoptLiteralTableBuilder = nullptr, bool withColors = false)
+                          DeoptLiteralTableBuilder *deoptLiteralTableBuilder = nullptr,
+                          SourcePositionTableBuilder *positionTableBuilder = nullptr,
+                          bool withColors = false)
         : assembler_(assembler),
           graph_(graph),
           safepointBuilder_(safepointBuilder),
           translationBuilder_(translationBuilder),
           deoptLiteralTableBuilder_(deoptLiteralTableBuilder),
+          positionTableBuilder_(positionTableBuilder),
           eagerDeoptTargetsById_(graph->GetChunk()),
           blockColorAssignment_(graph->GetChunk()),
           deferredCode_(graph->GetChunk()),
@@ -90,21 +94,39 @@ private:
     int PrepareCommonStubStackArguments(const Vertex *callVertex, int argCount);
     int PrepareRuntimeStubStackArguments(const Vertex *callVertex, int argCount, int runtimeId);
     void LoadSteedExpectedArgc(ArkSteedRegister target, ArkSteedRegister expectedArgc);
-    void ComputeSteedCallSlotCount(CallVertex *call, ArkSteedRegister slotCount);
-    void PrepareArkSteedCall(CallVertex *call, ArkSteedRegister target, ArkSteedRegister scratch);
+    template <typename CallVertexT>
+    void ComputeSteedCallSlotCount(CallVertexT *call, ArkSteedRegister slotCount);
+    template <typename CallVertexT>
+    void PrepareArkSteedCall(CallVertexT *call, ArkSteedRegister target, ArkSteedRegister scratch);
     void PrepareArkSteedSelfCall(CallSelfVertex *call);
     void PrepareKnownCall(CallKnownJSFunctionVertex *call);
-    void FreeArkSteedCallFrame(CallVertex *call);
-    void EmitCallArkSteed(CallVertex *call, ArkSteedRegister target, ArkSteedRegister scratch, Label *exit);
+    template <typename CallVertexT>
+    void FreeArkSteedCallFrame(CallVertexT *call);
+    template <typename CallVertexT>
+    void EmitCallArkSteed(CallVertexT *call, ArkSteedRegister target, ArkSteedRegister scratch, Label *exit);
     void EmitCallGeneric(CallVertex *call, ArkSteedRegister scratch);
     void EmitCallGeneric(CallKnownJSFunctionVertex *call, ArkSteedRegister scratch);
+    template <typename CallVertexT>
+    void EmitCallConstructorGeneric(CallVertexT *call, ArkSteedRegister scratch);
     void EmitReturnWithPendingException();
     void EmitReturnIfPendingException();
     int PrepareTrampolineArguments(const Vertex *call, uint32_t actualArgc, uint32_t targetIndex,
                                    uint32_t newTargetIndex, uint32_t receiverIndex, uint32_t firstArgIndex,
                                    ArkSteedRegister scratch);
+    void PrepareKnownCallArguments(const Vertex *call, uint32_t actualArgc, uint32_t expectedArgc,
+                                   uint32_t firstArgIndex);
+    template <typename ConstructorVertexT>
+    void EmitConstructorBodyStubCall(ConstructorVertexT *call);
+    template <typename ConstructorVertexT>
+    void EmitNewObjRangeConstructorBodyCall(ConstructorVertexT *call);
     int PrepareKnownBuiltinStubArguments(CallKnownBuiltinVertex *call);
     int PrepareKnownBuiltinNativeArguments(CallKnownBuiltinVertex *call);
+
+    void EmitInitializeHClassWithBarrier(const DeferredRegisterSnapshot &snapshot, ArkSteedRegister glue,
+                                         ArkSteedRegister object, ArkSteedRegister hclass);
+    void EmitStoreTaggedFieldWithBarrier(const DeferredRegisterSnapshot &snapshot, ArkSteedRegister glue,
+                                         ArkSteedRegister object, ArkSteedRegister value, int32_t offset,
+                                         ArkSteedWriteBarrierValueKind valueKind);
 
     template <class VertexT>
     void VisitNonControlVertex(VertexT *vertex);
@@ -141,11 +163,14 @@ private:
     void AssignBlockColors(const std::vector<std::vector<int>> &adjacentBlocks);
     int GetBlockColorIndex(int blockId) const;
 
+    void RecordPositionBoundary(uint32_t pcBefore, uint32_t bcOffset);
+
     ArkSteedAssembler *assembler_;
     Graph *graph_;
     ArkSteedSafepointTableBuilder *safepointBuilder_;
     DeoptTranslationBuilder *translationBuilder_;
     DeoptLiteralTableBuilder *deoptLiteralTableBuilder_;
+    SourcePositionTableBuilder *positionTableBuilder_;
     Label entryLabel_;
     ChunkVector<EagerDeoptTarget *> eagerDeoptTargetsById_;
     int currentBlockColorIndex_ = 0;

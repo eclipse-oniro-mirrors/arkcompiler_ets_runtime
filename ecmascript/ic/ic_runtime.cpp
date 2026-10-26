@@ -435,6 +435,9 @@ JSTaggedValue StoreICRuntime::StoreMiss(JSHandle<JSTaggedValue> receiver, JSHand
     }
 
     ObjectOperator op(GetThread(), receiver, key, isOwn ? OperatorType::OWN : OperatorType::PROTOTYPE_CHAIN);
+    // Capture COW before the store replaces the backing array with a writable copy.
+    op.SetElementsWereCOW(op.IsElement() && receiver->IsJSArray() &&
+                         JSHandle<JSObject>::Cast(receiver)->GetElements(thread_).IsCOWArray());
     if (!op.IsFound()) {
         if (kind == ICKind::NamedGlobalStoreIC) {
             PropertyAttributes attr = PropertyAttributes::Default(true, true, false);

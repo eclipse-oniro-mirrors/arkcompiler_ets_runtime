@@ -12,6 +12,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+//! METHOD tdz_class_ref_throws
+//! HAS LoadTaggedField
+//! COMPILE_COUNT_GE *tdz_class_ref_throws* 1
+//! EXEC_COUNT_GE *tdz_class_ref_throws* 1
+//! DEOPT_COUNT *Deoptimize* 0
 
 // Test: throw.undefinedifholewithname THROWS for class reference via ldlexvar before class definition.
 // The function tdz_class_ref_throws accesses Counter via lexical env.

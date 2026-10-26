@@ -28,7 +28,7 @@ class PUBLIC_API Chunk {
 public:
     static constexpr size_t MEM_ALIGN = 8U;
 
-    explicit Chunk(NativeAreaAllocator *allocator);
+    explicit Chunk(NativeAreaAllocator *allocator, bool enableStatistics = false);
     Chunk() = default;
     ~Chunk()
     {
@@ -47,8 +47,19 @@ public:
         } else {
             ptr_ += size;
         }
+        if (UNLIKELY(enableStatistics_)) {
+            allocatedSize_ += size;
+        }
 
         return reinterpret_cast<void *>(result);
+    }
+
+    // Total bytes allocated from this chunk so far (aligned request sizes, both
+    // bump-pointer and Expand paths). Bump semantics have no free: Chunk::Free
+    // does not deduct from this counter. Measurement infrastructure, always on.
+    size_t GetAllocatedSize() const
+    {
+        return allocatedSize_;
     }
 
     template<class T>
@@ -94,6 +105,8 @@ private:
     void ReleaseMemory();
 
     EcmaList<Area> areaList_ {};
+    size_t allocatedSize_ {0};
+    bool enableStatistics_ {false};
 };
 
 class PUBLIC_API ChunkObject {

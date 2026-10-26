@@ -162,7 +162,7 @@ public:
     void SyncModuleExecuteMode(JSThread *thread);
 
     // fast path ldexternalmodulevar for jit
-    static bool CheckModuleValueOutterResolved(JSThread *thread, int32_t index, JSFunction *jsFunc);
+    PUBLIC_API static bool CheckModuleValueOutterResolved(JSThread *thread, int32_t index, JSFunction *jsFunc);
     static JSTaggedValue GetExternalModuleVarFastPathForJIT(JSThread *thread, int32_t index, JSFunction *jsFunc);
 
     // for ut

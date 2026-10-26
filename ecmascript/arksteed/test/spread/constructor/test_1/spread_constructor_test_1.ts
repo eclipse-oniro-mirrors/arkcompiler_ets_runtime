@@ -12,6 +12,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *Point* 1
+//! EXEC_COUNT_GE *Point* 1
+//! COMPILE_COUNT_GE *spread_constructor_1* 1
+//! EXEC_COUNT_GE *spread_constructor_1* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 class Point {
     x: number;
     y: number;
@@ -28,6 +35,10 @@ class Point {
     }
 }
 
+//! METHOD spread_constructor_1
+//! HAS CallRuntime NewObjApply
+//! HAS CallRuntime StArraySpread
+//! HAS Call
 function spread_constructor_1(coords: [number, number, number]): number {
     const p = new Point(...coords);
     return p.sum();

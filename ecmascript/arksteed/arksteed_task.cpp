@@ -31,6 +31,7 @@
 #include "ecmascript/mem/machine_code.h"
 #include "ecmascript/mem/region.h"
 #include "ecmascript/method.h"
+#include "ecmascript/platform/map.h"
 
 namespace panda::ecmascript::arksteed {
 namespace {
@@ -136,6 +137,10 @@ void ArkSteedTask::InstallCode()
         return;
     }
 
+#if defined(PANDA_TARGET_MACOS)
+    std::optional<JitWriteScope> jitWriteScope;
+    jitWriteScope.emplace();
+#endif
     JSHandle<MachineCode> machineCodeObj;
     if (Jit::GetInstance()->IsEnableJitFort()) {
         TaggedObject *machineCode = hostThread->GetEcmaVM()->GetFactory()->NewMachineCodeObject(size, codeDesc);
@@ -211,11 +216,16 @@ void ArkSteedTask::InstallCode()
         JSFunction::SetProfileTypeInfo(hostThread, jsFunction, undefinedValue);
     }
 
-    InstallCodeByCompilerTier(machineCodeObj, methodHandle);
-
     uintptr_t codeAddr = machineCodeObj->GetFuncAddr();
     uintptr_t codeAddrEnd = codeAddr + machineCodeObj->GetInstructionsSize();
     __builtin___clear_cache(reinterpret_cast<char *>(codeAddr), reinterpret_cast<char *>(codeAddrEnd));
+
+    // Never publish an entry point while MAP_JIT write protection is disabled:
+    // Apple silicon raises SIGBUS when executing a writable JIT page.
+#if defined(PANDA_TARGET_MACOS)
+    jitWriteScope.reset();
+#endif
+    InstallCodeByCompilerTier(machineCodeObj, methodHandle);
 
     if (Jit::GetInstance()->IsEnableJitFort()) {
         auto *jitFort = heap->GetOrCreateJitFort();
@@ -257,7 +267,7 @@ bool ArkSteedTask::AsyncTask::Run(uint32_t threadIndex)
 
         MachineCodeDesc codeDesc = task_->GetMachineCodeDesc();
         size_t instrSize = codeDesc.codeSizeAlign;
-        CString sizeInfo = "text size : ";
+        CString sizeInfo = ", text size : ";
         sizeInfo.append(std::to_string(instrSize)).append("bytes");
         scope.appendMessage(sizeInfo);
 

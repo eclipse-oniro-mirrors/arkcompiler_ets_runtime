@@ -18,6 +18,7 @@
 #include "common_components/taskpool/taskpool.h"
 #include "ecmascript/mem/heap-inl.h"
 #include "ecmascript/mem/region-inl.h"
+#include "ecmascript/platform/map.h"
 #include "ecmascript/runtime_call_id.h"
 
 namespace panda::ecmascript {
@@ -263,6 +264,7 @@ void ConcurrentSweeper::ClearRSetInRange(Region *current, uintptr_t freeStart, u
 
 bool ConcurrentSweeper::SweeperTask::Run([[maybe_unused]] uint32_t threadIndex)
 {
+    JIT_WRITE_SCOPE(jitWriteScope, true);
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "ConcurrentSweeper::Sweep", "");
     uint32_t sweepTypeNum = endSpaceType_ - startSpaceType_ + 1;
     for (size_t i = 0; i < sweepTypeNum; i++) {

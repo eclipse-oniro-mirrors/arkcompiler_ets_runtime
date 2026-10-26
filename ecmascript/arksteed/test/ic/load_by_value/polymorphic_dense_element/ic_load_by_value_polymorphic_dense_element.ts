@@ -36,6 +36,16 @@ for (let i = 0; i < 1000; i++) {
 }
 
 ArkTools.arkSteedCompileSync(loadPolymorphicDense);
+
+// G11.2 additive change candidate: the element site is warmed with the two
+// dense receivers whose shapes are recorded as a poly snapshot and is then
+// supplied with a third receiver outside that set. The membership check of the
+// recorded HClasses fails and the eager transition restores interpreter
+// execution, whose value is specified by the element load.
+//! COMPILE_COUNT_GE *loadPolymorphicDense* 1
+//! EXEC_COUNT_GE *loadPolymorphicDense* 1
+//! DEOPT_COUNT_GE *Deoptimize* 1
+
 print(loadPolymorphicDense(polymorphicDenseA, 1));
 print(loadPolymorphicDense(polymorphicDenseB, 1));
 print(loadPolymorphicDense({1: "fallback"}, 1));

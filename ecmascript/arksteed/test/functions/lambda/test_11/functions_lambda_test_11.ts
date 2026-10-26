@@ -13,6 +13,30 @@
  * limitations under the License.
  */
 
+// G11.6 (P0) additive call evidence for `functions/lambda`
+// (`arksteed-g116-call-closure-and-additive-evidence` C1/C3/C4; S11; V1/V2).
+// `call_compiled_lambda_11` compiles and invokes the memoizing closure `fib`,
+// which reads the captured array `memo`; the capture itself is not reassigned, so
+// there is no captured-slot store to attribute. `fib` is installed before its
+// first invocation, so the call site lowers to the generic `Call` vertex observed
+// in the caller dump. `COMPILE_COUNT_GE`/`EXEC_COUNT_GE` attribute compilation and
+// entry of each claimed method; `DEOPT_COUNT *Deoptimize* 0` rules out a silent
+// deopt into the interpreter. The pre-existing computed results and the
+// expectation are unchanged.
+
+//! PARAMS --compiler-jit-hotness-threshold=60000
+
+//! METHOD call_compiled_lambda_11
+//! HAS Call
+//! COMPILE_COUNT_GE *call_compiled_lambda_11* 1
+//! EXEC_COUNT_GE *call_compiled_lambda_11* 1
+
+//! METHOD fib
+//! COMPILE_COUNT_GE *fib* 1
+//! EXEC_COUNT_GE *fib* 1
+
+//! DEOPT_COUNT *Deoptimize* 0
+
 // Fibonacci with closure-based memoization
 let compiled = false;
 

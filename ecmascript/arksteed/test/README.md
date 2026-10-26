@@ -8,9 +8,17 @@ Each leaf sub-directory contains a test case consisting of the following files:
 
 `./run_arksteed_tests.py` is the test case runner which collects all the test cases by traversing the directory tree and then run them.
 
-Special comments of JS/TS files starting with `//!` are *annotations* specifying the runtime options and constraints to the compiled CFG (which IR nodes are expected to appear, not to appear, etc.) of this test case. The CFGs are dumped via compiler log and then parsed by the test case runner.
+Comments starting with `//!` in JS/TS files specify runtime options, CFG constraints, bytecode counts, and generated-code comment counts. The runner parses CFGs and code comments from compiler logs, and bytecode instructions from `.abc` disassembly.
 
-Beside the `//!` IR constraints, the runner verifies the live range correctness of every dumped CFG: no value's live range may end before one of its uses starts, and every value used as a (allocated) Phi input must have a live range.
+Besides the annotation constraints, the runner verifies the live range correctness of every dumped CFG: no value's live range may end before one of its uses starts, and every value used as an allocated Phi input must have a live range.
+An `ark_disasm` failure is diagnostic-only unless a bytecode constraint is present, in which case the test fails.
+
+## Literal Allocation Coverage
+
+* `empty_literal_capacity_gc` shares warmup, pressure, and explicit young/full GC between empty objects and arrays. Each creator is called directly and has its own METHOD, bytecode, CFG, and slow-path codegen constraints; force-GC remains enabled.
+* `createobjectwithbuffer_inline_allocation/basic` covers primitive values (including false/undefined), Map identity, independent external properties on two instances, deletion, preventExtensions, and derived reads.
+* `createobjectwithbuffer_inline_allocation/metadata` owns descriptor, prototype, and type-change isolation on separate clones, including tiny nonzero numbers and post-GC rechecks.
+* `allocate_initialize_split` and `allocation_slowpath` retain separate structural and allocation-pressure coverage. Native initialization-verifier and template tests remain separate from JS behavior tests.
 
 ## Test Case Runner
 
@@ -53,16 +61,27 @@ Annotations start with `//!`. In-line comments to annotations (starting with `#`
 * `PARAMS <params>`: Which runtime options shall be passed to the ArkTS runtime (i.e. the `ark_js_vm` executable) for this test case.
     * Example: `//! PARAMS --enable-force-gc=true --compiler-jit-hotness-threshold=100` passes these 2 parameters to `ark_js_vm`.
     * A parameter replaces the runner default of the same option (e.g. `--enable-force-gc=true` overrides the default `=false`).
+    * `--enable-force-gc=true` only forces collection in a debug VM; the relevant runtime hooks are compiled out in release builds. A release test must create enough natural allocation pressure instead of relying on this option.
     * The following options are core to the runner and **can not** be overriden by `PARAMS` annotation. An error will occur if you attempt to override them:
         * `--log-level`
         * `--log-components`
         * All `--compiler-arksteed-print-*` options
         * `--compiler-arksteed-enable-code-comment`
+        * `--compiler-trace-deopt` and `--compiler-enable-lazy-deopt-trace` (the deopt traces counted by `DEOPT_COUNT`/`DEOPT_COUNT_GE`)
         * `--stub-file`
         * `--icu-data-path`
     * `PARAM` annotation shall appear at most once in each test case.
-* `METHOD <function>`: Leads the IR constraints to the method specified;
-    * Example: All the annotations after `//! METHOD foo` (and nefore the next `METHOD`) are the IR constraints of `function foo()`.
+* `METHOD <function>`: Leads the IR, bytecode, and codegen constraints to the method specified;
+    * Example: All method-scoped annotations after `//! METHOD foo` (and before the next `METHOD`) apply to `function foo()`.
+* `BYTECODE_COUNT <mnemonic> [<operand-pattern>] <n>`: Requires exactly `n` matching instructions in the current method.
+    * The optional operand pattern is matched against the complete, whitespace-normalized operand string using shell-style wildcards.
+    * Omitting the operand pattern counts every instruction with that mnemonic.
+    * Example: `//! BYTECODE_COUNT createemptyarray 0x3 1` checks an IMM8-sized slot value.
+    * Example: `//! BYTECODE_COUNT createemptyarray 0x11a 1` checks an IMM16-sized slot value.
+* `CODEGEN_COUNT <comment-pattern> <n>`: Requires exactly `n` matching ArkSteed generated-code comments in the current method.
+    * The comment pattern uses shell-style wildcards. Tests with this constraint automatically enable generated-code printing and comments.
+    * Example: `//! CODEGEN_COUNT AllocateJSArray inline success 1` verifies that the inline-success body reached code generation without depending on architecture-specific instruction spelling.
+    * These counts verify that code-generation comments were emitted, not that the corresponding path executed or that its ABI and GC behavior are correct.
 * `HAS <opcode>`: Specifies an IR opcode which is expected to appear at least once.
     * Example: `//! HAS I32Mul` requires that the compiled CFG of current method should contain at least one IR node of type `I32Mul`.
 * `HAS_NOT <opcode>`: Specifies an IR opcode which is expected *not* to appear.
@@ -79,6 +98,30 @@ Constraints on `CallCommonStub` and `CallRuntime` **must** be followed by a stub
 * Example: `//! HAS_NOT CallCommonStub GetPropertyByName` requires that no `CallCommonStub` node calling `COStub_GetPropertyByName` appears, while e.g. `COStub_Add` calls are unaffected.
 * Example: `//! COUNT CallRuntime Throw* 1` requires exactly one `CallRuntime` node whose stub name starts with `Throw`.
 
+### Evidence annotations (case-scoped, matched against captured stdout)
+
+These annotations count events in the case's captured stdout. `<pattern>` is a shell-style wildcard matched against the useful part of the relevant log line (the text after the `[<component>] ` prefix). `<n>=0` is allowed and asserts the absence of matching events. A violation reports the actual value; an unknown keyword is a case configuration error.
+
+* `COMPILE_COUNT <pattern> <n>`: exactly `n` `ArkSteedCompilerTask: Starts compiling` markers for methods whose name matches `<pattern>` (aggregated over recompilations).
+* `COMPILE_COUNT_GE <pattern> <n>`: at least `n` such markers.
+* `EXEC_COUNT <pattern> <n>`: exactly `n` `>>> Running method:` execution markers whose `<record>.<method>` matches `<pattern>`. Implies `--compiler-arksteed-print-method-name=true` for the case.
+* `EXEC_COUNT_GE <pattern> <n>`: at least `n` such markers. Implies the same option.
+* `DEOPT_COUNT <pattern> <n>`: exactly `n` deopt events matching `<pattern>` (e.g. `Deoptimize*`, `Lazy Deoptimize*`, `*Deoptimize*`). Implies `--compiler-trace-deopt=true` **and** `--compiler-enable-lazy-deopt-trace=true` for the case; neither option can be set through `PARAMS`, so the observation the annotation asserts cannot be disabled.
+* `DEOPT_COUNT_GE <pattern> <n>`: at least `n` such events. Implies the same options.
+* `GC_COUNT_GE <pattern> <n>`: at least `n` `gc`-component lines matching `<pattern>`. Implies enabling the `gc` log component for the case.
+
+Only deopt events are deopt evidence; every other compiler-component line is not. Exactly three line forms are counted, one record per event:
+
+* eager with a JS stack trace: `Deoptimize    at <fn> (<file>:<line>:<col>)`;
+* eager on the ArkSteed path, which skips the GC-capable stack trace: `Eager deopt disables GC; skip GC-capable JS stack trace construction.`; this record also matches the normalized `Deoptimize Eager deopt disables GC*` spelling, so the `Deoptimize*` family counts every eager event;
+* lazy: `Lazy Deoptimize    at <fn> (<file>:<line>:<col>)`.
+
+Compilation markers (`Starts compiling: DeoptimizeTarget`), execution markers of such a method, CFG dumps (`v14: DeoptIfNotBoolean`), debug-level codegen comments and the resume bytecode instruction that follows an eager event carry no deopt identity and are never counted. A record is counted once even when a pattern matches more than one of its spellings.
+
+Normal paths are expected to carry `DEOPT_COUNT <pattern> 0` for the target method, so a silent deopt into the interpreter after entering compiled code is never reported as JIT execution.
+
+The annotation behaviour is covered by `python3 ./runner_self_test.py` (no VM needed), which checks the deopt-evidence classification, the conflicting-`PARAMS` configuration error and the option implication. The in-tree regression cases are `deopt/deopt_count_compile_name`, `deopt/deopt_count_eager` and `deopt/deopt_count_lazy`.
+
 Example:
 
 ```js
@@ -86,12 +129,15 @@ Example:
 //! PARAMS  --enable-force-gc=true --compiler-jit-hotness-threshold=60000
 
 //! METHOD      foo
+//! BYTECODE_COUNT createemptyarray 0x3 1
 //! HAS         CallCommonStub  GetPropertyByName
 //! HAS_NOT     I32Mul
 //! COUNT_GE    InitialValue    4
 //! COUNT_LE    InitialValue    5
+//! CODEGEN_COUNT AllocateJSArray inline success 1
 
 //! METHOD  bar
+//! BYTECODE_COUNT createemptyarray 0x11a 1
 //! HAS     LoadTaggedField             # Loads GlobalEnv from LexicalEnv
 //! COUNT   Call            1
 ```

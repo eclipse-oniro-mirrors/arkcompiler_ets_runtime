@@ -3440,9 +3440,17 @@ DECLARE_ASM_HANDLER(HandleTonumberImm8)
     DEFVARIABLE(varAcc, VariableType::JS_ANY(), acc);
     GateRef value = *varAcc;
     IR_IF (TaggedIsNumber(value)) {
+        if (!callback.IsEmpty()) {
+            IR_IF (TaggedIsInt(value)) {
+                callback.ProfileOpType(TaggedInt(PGOSampleType::IntType()));
+            } IR_ELSE {
+                callback.ProfileOpType(TaggedInt(PGOSampleType::DoubleType()));
+            }
+        }
         varAcc = value;
         DISPATCH_WITH_ACC(TONUMBER_IMM8);
     } IR_ELSE {
+        ProfileNonNumberOpType(glue, value, callback);
         GateRef currentEnv = GetEnvFromFrame(glue, GetFrame(sp));
         GateRef res = CallRuntimeWithCurrentEnv(glue, currentEnv, RTSTUB_ID(ToNumber), { value });
         CHECK_EXCEPTION_WITH_VARACC(res, INT_PTR(TONUMBER_IMM8));
@@ -3520,11 +3528,14 @@ DECLARE_ASM_HANDLER(HandleTonumericImm8)
                 } IR_ELSE {
                     callback.ProfileOpType(TaggedInt(PGOSampleType::DoubleType()));
                 }
+            } IR_ELSE {
+                callback.ProfileOpType(TaggedInt(PGOSampleType::BigIntType()));
             }
         }
         varAcc = value;
         DISPATCH_WITH_ACC(TONUMERIC_IMM8);
     } IR_ELSE {
+        ProfileNonNumericOpType(glue, value, callback);
         GateRef currentEnv = GetEnvFromFrame(glue, GetFrame(sp));
         GateRef res = CallRuntimeWithCurrentEnv(glue, currentEnv, RTSTUB_ID(ToNumeric), { value });
         CHECK_EXCEPTION_WITH_VARACC(res, INT_PTR(TONUMERIC_IMM8));

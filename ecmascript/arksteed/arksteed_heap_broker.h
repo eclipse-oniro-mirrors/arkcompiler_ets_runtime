@@ -18,6 +18,9 @@
 
 #include <array>
 #include <optional>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 #include "ecmascript/global_env_constants.h"
 #include "ecmascript/arksteed/arksteed_heap_ref.h"
@@ -25,12 +28,14 @@
 #include "ecmascript/compiler/jit_compilation_env.h"
 #include "ecmascript/ic/profile_type_info.h"
 #include "ecmascript/jit/jit.h"
+#include "ecmascript/js_array.h"
 #include "ecmascript/js_thread.h"
 #include "ecmascript/js_tagged_value_wrapper.h"
 
 namespace panda::ecmascript::arksteed {
 
 class ArkSteedFeedbackReader;
+struct CreateObjectWithBufferInfo;
 
 enum class ArkSteedBrokerMode : uint8_t {
     DISABLED,
@@ -40,32 +45,67 @@ enum class ArkSteedBrokerMode : uint8_t {
 };
 
 class ArkSteedHeapBroker {
-public:
-    class SerializingScope {
-    public:
-        SerializingScope(const ArkSteedHeapBroker *broker, CString message) : broker_(broker)
+  private:
+    friend class ArkSteedHeapBrokerTestAccess;
+
+    class NoGCScope {
+      public:
+        explicit NoGCScope(const ArkSteedHeapBroker *broker) : broker_(broker)
         {
+            ASSERT(broker_->compilerThread_ != nullptr && broker_->compilerThread_->IsJitThread());
+            ASSERT(broker_->compilerThread_->IsInRunningState());
             if (!broker_->SerializingAllowed()) {
-                lock_.emplace(broker_->env_, message);
                 broker_->StartSerializing();
                 ownsSerializing_ = true;
             }
         }
 
-        ~SerializingScope()
+        ~NoGCScope()
         {
             if (ownsSerializing_) {
                 broker_->StopSerializing();
             }
         }
 
-        NO_COPY_SEMANTIC(SerializingScope);
-        NO_MOVE_SEMANTIC(SerializingScope);
+        NO_COPY_SEMANTIC(NoGCScope);
+        NO_MOVE_SEMANTIC(NoGCScope);
 
-    private:
+      private:
         const ArkSteedHeapBroker *broker_ {nullptr};
-        std::optional<Jit::JitLockHolder> lock_ {};
+        ALLOW_HANDLE_ALLOC;
+        ALLOW_DEREF_HANDLE;
+        DISALLOW_HEAP_ALLOC;
+        DISALLOW_GARBAGE_COLLECTION;
         bool ownsSerializing_ {false};
+    };
+
+  public:
+    struct KnownConstructInfo {
+        uint32_t formalArgc{0};
+        ArkSteedHClassRef initialHClass{};
+        uint32_t objectSize{0};
+        bool canAllocateDirectly{false};
+    };
+
+    struct StoreHandlerData {
+        uint64_t handlerInfo{0};
+        ArkSteedHClassRef transitionHClass{};
+        ArkSteedHClassRef holderHClass{};
+        ArkSteedObjectRef holder{};
+        ArkSteedProtoCellRef protoCell{};
+        bool holderIsReceiver{true};
+        bool hasTransitionHClass{false};
+        bool hasProtoCell{false};
+    };
+
+    struct LoadHandlerData {
+        uint64_t handlerInfo{0};
+        ArkSteedHClassRef holderHClass{};
+        ArkSteedObjectRef holder{};
+        ArkSteedProtoCellRef protoCell{};
+        uint32_t holderDepth{0};
+        bool holderIsReceiver{true};
+        bool hasProtoCell{false};
     };
 
     ArkSteedHeapBroker(JSThread *compilerThread, JitCompilationEnv *env) : compilerThread_(compilerThread), env_(env) {}
@@ -110,24 +150,75 @@ public:
         return true;
     }
 
+    bool TryGetArrayCreationHClass(uint32_t slotId, ArkSteedHClassRef *hclassRef) const
+    {
+        if (hclassRef == nullptr) {
+            return false;
+        }
+        NoGCScope scope(this);
+        ProfileTypeInfo *profileTypeInfo = nullptr;
+        if (!TryGetProfileTypeInfo(&profileTypeInfo) || slotId >= profileTypeInfo->GetICSlotLength()) {
+            return false;
+        }
+        JSTaggedValue slotValue = profileTypeInfo->GetICSlot(compilerThread_, slotId);
+        if (!slotValue.IsTrackInfoObject()) {
+            return false;
+        }
+        TrackInfo *trackInfo = TrackInfo::Cast(slotValue.GetTaggedObject());
+        ElementsKind kind = trackInfo->GetElementsKind();
+        if (kind == ElementsKind::NONE || Elements::IsGeneric(kind)) {
+            return false;
+        }
+        JSHClass *hclass = env_->GetHostThread()->GetArrayInstanceHClass(
+            env_->GetGlobalEnv(), kind, false, JSThread::ThreadKind::JitThread);
+        if (hclass == nullptr) {
+            return false;
+        }
+        *hclassRef = MakeHClassRef(JSTaggedValue(hclass));
+        return hclassRef->IsSafeForCompile();
+    }
+
+    // Raw values require an active NoGCScope. The handle overload opens a
+    // no-safepoint read operation; callers must already be in JitHeapAccessScope.
     ArkSteedObjectRef MakeObjectRef(JSTaggedValue value) const
     {
         return MakeStableHeapRef(value, false);
     }
 
+    template <typename T> ArkSteedObjectRef MakeObjectRef(const JSHandle<T> &handle) const
+    {
+        if (handle.GetAddress() == 0U) {
+            return {};
+        }
+        NoGCScope scope(this);
+        return MakeObjectRef(handle.GetTaggedValue());
+    }
+
     ArkSteedHClassRef MakeHClassRef(JSTaggedValue value) const
     {
-        return MakeStableHeapRef(value, false);
+        ASSERT(SerializingAllowed());
+        if (value.IsWeak() || !value.IsJSHClass()) {
+            return {};
+        }
+        return MakeObjectRef(value);
     }
 
     ArkSteedHClassRef MakeWeakHClassRef(JSTaggedValue weakValue) const
     {
-        return MakeStableHeapRef(JSTaggedValue(weakValue.GetWeakReferent()), false);
+        ASSERT(SerializingAllowed());
+        if (!weakValue.IsWeak()) {
+            return {};
+        }
+        return MakeHClassRef(JSTaggedValue(weakValue.GetWeakReferent()));
     }
 
     ArkSteedProtoCellRef MakeProtoCellRef(JSTaggedValue value) const
     {
-        return MakeStableHeapRef(value, false);
+        ASSERT(SerializingAllowed());
+        if (value.IsWeak() || !value.IsProtoChangeMarker()) {
+            return {};
+        }
+        return MakeObjectRef(value);
     }
 
     ArkSteedHandlerRef MakeHandlerRef(JSTaggedValue value) const
@@ -137,14 +228,19 @@ public:
 
     ArkSteedNameRef MakeNameRef(JSTaggedValue value) const
     {
-        return MakeStableHeapRef(value, false);
+        ASSERT(SerializingAllowed());
+        if (value.IsWeak() || (!value.IsString() && !value.IsSymbol())) {
+            return {};
+        }
+        return MakeObjectRef(value);
     }
 
     bool TryGetGlobalConstantRef(ConstantIndex index, ArkSteedNameRef *name) const
     {
-        if (!SerializingAllowed()) {
+        if (name == nullptr) {
             return false;
         }
+        NoGCScope scope(this);
         JSThread *hostThread = env_->GetHostThread();
         JSTaggedValue value = hostThread->GlobalConstants()->GetGlobalConstantObject(static_cast<size_t>(index));
         if (!value.IsString()) {
@@ -156,7 +252,8 @@ public:
 
     ArkSteedFunctionRef MakeFunctionRef(JSTaggedValue value) const
     {
-        if (!value.IsJSFunction()) {
+        ASSERT(SerializingAllowed());
+        if (value.IsWeak() || !value.IsJSFunction()) {
             return ArkSteedFunctionRef();
         }
         return MakeStableHeapRef(value, false);
@@ -164,9 +261,10 @@ public:
 
     bool TryGetNameFromConstantPool(uint16_t cpIdx, ArkSteedNameRef *name) const
     {
-        if (!SerializingAllowed()) {
+        if (name == nullptr || env_->GetMethodLiteral() == nullptr) {
             return false;
         }
+        NoGCScope scope(this);
         uint32_t methodOffset = env_->GetMethodLiteral()->GetMethodId().GetOffset();
         JSTaggedValue nameValue = env_->GetStringFromConstantPool(methodOffset, cpIdx, false);
         if (nameValue.IsUndefined()) {
@@ -176,12 +274,15 @@ public:
         return name->IsSafeForCompile();
     }
 
+    bool TryGetBuiltinIndexFromConstantPool(uint16_t cpIdx, size_t *index) const;
+
     bool TryGetMethodFromConstantPool(uint16_t cpIdx, ArkSteedObjectRef *method) const
     {
         ASSERT(method != nullptr);
-        if (!SerializingAllowed() || env_->GetMethodLiteral() == nullptr) {
+        if (env_->GetMethodLiteral() == nullptr) {
             return false;
         }
+        NoGCScope scope(this);
         uint32_t methodOffset = env_->GetMethodLiteral()->GetMethodId().GetOffset();
         JSTaggedValue constpool = env_->GetConstantPoolByMethodOffset(methodOffset);
         if (!constpool.IsConstantPool()) {
@@ -195,42 +296,110 @@ public:
         return method->IsSafeForCompile();
     }
 
-    bool TryRecordHeapConstant(const ArkSteedHeapRef &ref, uint32_t *handleIndex, JSTaggedValue *currentValue) const
+    bool TryGetEmptyArrayLayout(ArkSteedObjectRef* globalEnv, uint32_t* objectSize) const;
+    bool TryGetEmptyObjectLayout(ArkSteedHClassRef* hclass, uint32_t* objectSize) const;
+    bool TryGetArrayLiteralFromConstantPool(uint16_t cpIdx, ArkSteedObjectRef* literal, uint32_t* objectSize) const;
+
+    bool TryGetObjectLiteralFromConstantPool(uint16_t cpIdx,
+                                             Chunk* chunk,
+                                             ArkSteedObjectRef* literal,
+                                             CreateObjectWithBufferInfo* info) const;
+
+    // Ref creation has already registered the constant. No heap access is needed.
+    bool TryGetHeapConstantIndex(const ArkSteedHeapRef &ref, uint32_t *handleIndex) const
     {
-        ASSERT(handleIndex != nullptr);
-        ASSERT(currentValue != nullptr);
-        if (!SerializingAllowed() || !ref.IsSafeForCompile()) {
+        if (handleIndex == nullptr || !OwnsRef(ref) || !ref.IsHeapObject()) {
             return false;
         }
-        JSTaggedValue value = ref.ValueAllowHandleDeref();
-        if (!value.IsHeapObject()) {
-            return false;
-        }
-        JSHandle<JSTaggedValue> handle = ref.HasHandle() ? ref.handle_ : env_->NewJSHandle(value);
-        *handleIndex = env_->RecordHeapConstant(handle);
-        *currentValue = value;
+        *handleIndex = ref.index_;
         return true;
     }
 
+    // Low-level helper for feedback/access-info readers with an active scope.
+    // General callers should use the concrete read/compare interfaces below.
     bool TryResolveRef(const ArkSteedHeapRef &ref, JSTaggedValue *value) const
     {
-        if (!ref.IsSafeForCompile() || value == nullptr) {
+        if (!OwnsRef(ref) || value == nullptr) {
             return false;
         }
-        SerializingScope scope(this, "ArkSteedHeapBroker::TryResolveRef");
-        *value = ref.ValueAllowHandleDeref();
+        ASSERT((SerializingAllowed() || ref.IsImmediate()) && "Resolving a heap object requires an active NoGCScope");
+        *value = ref.IsImmediate() ? ref.value_ : env_->GetHeapConstantHandle(ref.index_).GetTaggedValue();
         return true;
+    }
+
+    // These reads require an outer JitHeapAccessScope. They never park, change
+    // thread state, or lock. NoGCScope checks that raw temporaries cannot cross
+    // a safepoint; callers receive copied data or rooted refs.
+    bool CanCallFunction(const ArkSteedFunctionRef &ref, uint32_t actualArgc) const;
+    bool TryGetKnownConstructInfo(const ArkSteedFunctionRef &ref, KnownConstructInfo *info) const;
+    uint32_t GetArgumentsObjectSize() const;
+    bool CanLoadExternalModuleVar(int32_t index, bool installDependency) const;
+    ArkSteedObjectRef GetBuiltinMethod(uint16_t builtinId, uint32_t globalEnvIndex) const;
+    ArkSteedHClassRef GetEmptyObjectHClass(uint32_t *objectSize) const;
+    bool TryGetObjectType(const ArkSteedHeapRef &ref, JSType *type, bool *callable = nullptr) const;
+    bool TryGetStringLength(const ArkSteedHeapRef &ref, uint32_t *length) const;
+    bool TryGetStringChar(const ArkSteedHeapRef &ref, uint32_t index, uint16_t *character) const;
+
+    // Non-CMC compiler facts already retain HClass pointers. Only non-moving,
+    // rooted HClasses may escape a scope; layout/prototype reads stay inside it.
+    JSHClass *TryGetHClass(const ArkSteedHClassRef &ref) const;
+    JSHClass *TryGetObjectHClass(const ArkSteedHeapRef &ref) const;
+    ArkSteedHClassRef MakeHClassRef(JSHClass *hclass) const;
+    std::optional<PropertyLookupResult> TryLookupProperty(JSHClass *hclass, const ArkSteedNameRef &name) const;
+    bool TryGetPrototypeHClasses(const ArkSteedHClassRef &receiver, const ArkSteedHClassRef &holder,
+                                 std::vector<ArkSteedHClassRef> *chain) const;
+    JSHClass *TryGetGenericInitialArrayHClass(JSHClass *receiver, ArkSteedHClassRef *ref) const;
+    bool TryInstallStableHClassDependency(JSHClass *hclass, bool *installed) const;
+    bool TryInstallNotPrototypeDependency(JSHClass *hclass) const;
+
+    // Each operation forbids safepoints and returns only data or rooted refs.
+    bool TryReadStoreHandler(const ArkSteedHandlerRef &handler, StoreHandlerData *result) const;
+    bool TryReadLoadHandler(const ArkSteedHandlerRef &handler, LoadHandlerData *result) const;
+    bool IsJSArrayLengthAccessor(const ArkSteedHClassRef &receiver, const ArkSteedNameRef &name) const;
+    bool IsTypedArrayLengthAccessor(const ArkSteedHClassRef &receiver, const LoadHandlerData &parsed,
+                                    const ArkSteedNameRef &name) const;
+    bool CanTransitionElementsKind(JSHClass *source, JSHClass *target) const;
+
+    bool CheckStableHClass(const ArkSteedHClassRef &ref) const;
+    bool DependOnStableHClass(const ArkSteedHClassRef &ref) const;
+    bool DependOnStableProtoChain(const ArkSteedHClassRef &receiver, const ArkSteedHClassRef *holder = nullptr) const;
+    bool DependOnNotPrototype(const ArkSteedHClassRef &receiver) const;
+    bool DependOnArrayDetector() const;
+
+    // The callback must not retain raw heap values/pointers, or allocate on the host heap.
+    // Only copied scalar facts or broker-created refs may outlive it. Returning bool
+    // prevents accidentally using a raw pointer as the result of this interface.
+    template <typename Reader> bool TryReadRef(const ArkSteedHeapRef &ref, Reader &&reader) const
+    {
+        static_assert(std::is_same_v<std::invoke_result_t<Reader, JSTaggedValue>, bool>);
+        if (!OwnsRef(ref)) {
+            return false;
+        }
+        if (ref.IsImmediate()) {
+            return std::forward<Reader>(reader)(ref.value_);
+        }
+        NoGCScope scope(this);
+        JSTaggedValue value;
+        return TryResolveRef(ref, &value) && std::forward<Reader>(reader)(value);
+    }
+
+    // For a live host object versus feedback. A raw JSTaggedValue overload would
+    // obscure the lifetime of the input, so accept a rooted handle only.
+    template <typename T> bool TryIsSameObject(const ArkSteedHeapRef &ref, const JSHandle<T> &object, bool *same) const
+    {
+        if (same == nullptr || object.GetAddress() == 0U || !OwnsRef(ref) || !ref.IsHeapObject()) {
+            return false;
+        }
+        return TryReadRef(ref, [&](JSTaggedValue value) {
+            *same = value == object.GetTaggedValue();
+            return true;
+        });
     }
 
     bool IsSameFunction(const ArkSteedFunctionRef &ref) const
     {
-        if (!ref.IsSafeForCompile()) {
-            return false;
-        }
-        SerializingScope scope(this, "ArkSteedHeapBroker::IsSameFunction");
-        JSTaggedValue target = ref.ValueAllowHandleDeref();
-        JSHandle<JSFunction> currentFunction = env_->GetJsFunction();
-        return target.IsJSFunction() && target == currentFunction.GetTaggedValue();
+        bool same = false;
+        return ref.IsJSFunction() && TryIsSameObject(ref, env_->GetJsFunction(), &same) && same;
     }
 
     JSThread *GetCompilerThread() const
@@ -250,6 +419,8 @@ public:
     bool GetFeedbackForOperation(const ArkSteedFeedbackReader &reader, OperationFeedback *feedback) const;
 
     bool GetFeedbackForCall(const ArkSteedFeedbackReader &reader, CallFeedback *feedback) const;
+
+    bool GetFeedbackForConstructor(const ArkSteedFeedbackReader &reader, ConstructorFeedback *feedback) const;
 
     bool TryGetCachedNamedAccessFeedback(AccessFeedbackSource source, NamedAccessFeedback *feedback) const
     {
@@ -316,13 +487,32 @@ private:
 
     ArkSteedHeapRef MakeStableHeapRef(JSTaggedValue value, bool allowPrimitive) const
     {
-        if (!SerializingAllowed()) {
-            return ArkSteedHeapRef();
-        }
+        ASSERT(SerializingAllowed());
         if (!value.IsHeapObject()) {
-            return allowPrimitive ? ArkSteedHeapRef(value, true) : ArkSteedHeapRef();
+            return allowPrimitive ? ArkSteedHeapRef::FromImmediate(value) : ArkSteedHeapRef();
         }
-        return ArkSteedHeapRef(env_->NewJSHandle(value));
+        if (value.IsWeak()) {
+            return {};
+        }
+        using Kind = ArkSteedHeapRef::Kind;
+        Kind kind = Kind::HEAP_OBJECT;
+        if (value.IsJSHClass()) {
+            kind = Kind::HCLASS;
+        } else if (value.IsJSFunction()) {
+            kind = Kind::FUNCTION;
+        } else if (value.IsString()) {
+            kind = Kind::STRING;
+        } else if (value.IsSymbol()) {
+            kind = Kind::SYMBOL;
+        } else if (value.IsProtoChangeMarker()) {
+            kind = Kind::PROTO_CELL;
+        }
+        return ArkSteedHeapRef(env_, env_->RecordHeapConstant(value), kind);
+    }
+
+    bool OwnsRef(const ArkSteedHeapRef &ref) const
+    {
+        return ref.IsSafeForCompile() && (ref.IsImmediate() || ref.owner_ == env_);
     }
 
     JSThread *compilerThread_ {nullptr};

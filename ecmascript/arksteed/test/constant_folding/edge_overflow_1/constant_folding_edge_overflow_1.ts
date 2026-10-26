@@ -13,6 +13,17 @@
  * limitations under the License.
  */
 
+// G10.1 additive evidence (A2, no weakened assertion): `MAX + 1` is lowered
+// to the checked increment of the constant boundary, so the compiled method
+// carries the overflow vertex and its observed double result comes from the
+// eager overflow exit after the generated code was entered.
+
+//! METHOD constant_folding_edge_overflow_1
+//! HAS I32IncWithOverflow
+//! COMPILE_COUNT_GE *constant_folding_edge_overflow_1* 1
+//! EXEC_COUNT_GE *constant_folding_edge_overflow_1* 1
+//! DEOPT_COUNT_GE *Deoptimize* 1
+
 function constant_folding_edge_overflow_1(x: number)
 {
     const MAX: number = 2147483647;

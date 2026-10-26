@@ -15,7 +15,11 @@
 
 //! PARAMS --compiler-jit-hotness-threshold=10000
 //! METHOD read
+//! HAS LoadTaggedField             # The env-slot half of the read is an actual LoadTaggedField on the env object.
 //! COUNT_LE LoadTaggedField 6      # Each read currently lowering TDZ checks and a slot load.
+//! COMPILE_COUNT_GE *read* 1
+//! EXEC_COUNT_GE *read* 1
+//! DEOPT_COUNT *Deoptimize* 0
 
 function createReader()
 {

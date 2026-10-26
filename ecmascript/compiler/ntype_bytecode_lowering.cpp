@@ -72,8 +72,10 @@ void NTypeBytecodeLowering::Lower(GateRef gate)
             break;
         case EcmaOpcode::STOWNBYINDEX_IMM8_V8_IMM16:
         case EcmaOpcode::STOWNBYINDEX_IMM16_V8_IMM16:
+            LowerNTypedStownByIndex(gate, true);
+            break;
         case EcmaOpcode::WIDE_STOWNBYINDEX_PREF_V8_IMM32:
-            LowerNTypedStownByIndex(gate);
+            LowerNTypedStownByIndex(gate, false);
             break;
         case EcmaOpcode::THROW_UNDEFINEDIFHOLEWITHNAME_PREF_ID16:
             LowerThrowUndefinedIfHoleWithName(gate);
@@ -255,13 +257,13 @@ void NTypeBytecodeLowering::LowerNTypedGetUnmappedArgs(GateRef gate)
     ReplaceGateWithPendingException(gate, builder_.GetState(), builder_.GetDepend(), arguments);
 }
 
-void NTypeBytecodeLowering::LowerNTypedStownByIndex(GateRef gate)
+void NTypeBytecodeLowering::LowerNTypedStownByIndex(GateRef gate, bool hasIcSlot)
 {
-    // 3: number of value inputs
-    ASSERT(acc_.GetNumValueIn(gate) == 3);
-    GateRef receiver = acc_.GetValueIn(gate, 0);
-    GateRef index = acc_.GetValueIn(gate, 1);
-    GateRef value = acc_.GetValueIn(gate, 2);
+    // 4: value inputs with the IC slot (ICSlotId, receiver, index, acc); 3: without it
+    ASSERT(acc_.GetNumValueIn(gate) == (hasIcSlot ? 4 : 3));
+    GateRef receiver = acc_.GetValueIn(gate, hasIcSlot ? 1 : 0);
+    GateRef index = acc_.GetValueIn(gate, hasIcSlot ? 2 : 1);  // 2: index input with IC slot; 1: without
+    GateRef value = acc_.GetValueIn(gate, hasIcSlot ? 3 : 2);  // 3: value input with IC slot; 2: without
     if (acc_.GetOpCode(receiver) != OpCode::CREATE_ARRAY &&
         acc_.GetOpCode(receiver) != OpCode::CREATE_ARRAY_WITH_BUFFER) {
         return;

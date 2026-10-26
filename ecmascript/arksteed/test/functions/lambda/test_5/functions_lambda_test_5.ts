@@ -13,6 +13,36 @@
  * limitations under the License.
  */
 
+// G11.6 (P0) additive call evidence for `functions/lambda`
+// (`arksteed-g116-call-closure-and-additive-evidence` C1/C3/C4; S11; V1/V2).
+// `call_compiled_lambda_5` declares the captured binding `acc` and compiles and
+// invokes the function-expression closure `add`, which reads and writes that
+// binding. In `add` the read lowers to `LoadTaggedField` on the lexical
+// environment at `GetLexicalEnvSlotOffset(0)` and the write lowers to
+// `StoreEnvSlot` at the same offset; in the caller the initialization of `acc`
+// lowers to `StoreEnvSlot`. The closure is installed before its first invocation,
+// so the call site lowers to the generic `Call` vertex observed in the caller
+// dump. `COMPILE_COUNT_GE`/`EXEC_COUNT_GE` attribute compilation and entry of each
+// claimed method; `DEOPT_COUNT *Deoptimize* 0` rules out a silent deopt into the
+// interpreter. The pre-existing computed results and the expectation are
+// unchanged.
+
+//! PARAMS --compiler-jit-hotness-threshold=60000
+
+//! METHOD call_compiled_lambda_5
+//! HAS Call
+//! HAS StoreEnvSlot        # StoreEnvSlot offset 40: the captured binding `acc`
+//! COMPILE_COUNT_GE *call_compiled_lambda_5* 1
+//! EXEC_COUNT_GE *call_compiled_lambda_5* 1
+
+//! METHOD add
+//! HAS LoadTaggedField     # captured read of `acc` (offset 40)
+//! HAS StoreEnvSlot        # captured write of `acc` (offset 40)
+//! COMPILE_COUNT_GE *add* 1
+//! EXEC_COUNT_GE *add* 1
+
+//! DEOPT_COUNT *Deoptimize* 0
+
 // Closure: lambda captures and mutates outer variable
 let compiled = false;
 

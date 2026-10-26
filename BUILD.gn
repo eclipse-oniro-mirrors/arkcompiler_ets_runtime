@@ -238,7 +238,10 @@ group("ark_js_unittest_suit") {
   }
   if ((current_cpu == "arm64" || current_cpu == "amd64") &&
       !ets_runtime_test_enable_dfx) {
-    deps += [ "ecmascript/jit/tests:unittest" ]
+    deps += [
+      "ecmascript/arksteed/unittests:unittest",
+      "ecmascript/jit/tests:unittest",
+    ]
   }
 }
 
@@ -302,6 +305,9 @@ group("ark_unittest") {
         "ecmascript/compiler/tests:host_unittest",
         "ecmascript/ohos/tests:host_unittest",
       ]
+      if (ets_runtime_enable_ark_steed) {
+        deps += [ "ecmascript/arksteed/unittests:arksteed_host_unittest" ]
+      }
     }
   }
 
@@ -1393,7 +1399,7 @@ if (ets_runtime_enable_ark_steed) {
     "ecmascript/arksteed/arksteed_deopt_helper.cpp",
     "ecmascript/arksteed/arksteed_safepoint_table.cpp",
     "ecmascript/arksteed/arksteed_task.cpp",
-    "ecmascript/mem/embedded_code_ref_set.cpp",
+    "ecmascript/mem/embedded_code_ref_set.cpp"
   ]
 }
 

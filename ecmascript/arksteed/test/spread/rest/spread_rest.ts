@@ -13,6 +13,68 @@
  * limitations under the License.
  */
 
+//! PARAMS --compiler-jit-hotness-threshold=60000
+//! COMPILE_COUNT_GE *spreadArrayBasic* 1
+//! EXEC_COUNT_GE *spreadArrayBasic* 1
+//! COMPILE_COUNT_GE *spreadArrayWithElements* 1
+//! EXEC_COUNT_GE *spreadArrayWithElements* 1
+//! COMPILE_COUNT_GE *spreadArrayCopy* 1
+//! EXEC_COUNT_GE *spreadArrayCopy* 1
+//! COMPILE_COUNT_GE *spreadString* 1
+//! EXEC_COUNT_GE *spreadString* 1
+//! COMPILE_COUNT_GE *spreadFunctionCall* 1
+//! EXEC_COUNT_GE *spreadFunctionCall* 1
+//! COMPILE_COUNT_GE *spreadMathMax* 1
+//! EXEC_COUNT_GE *spreadMathMax* 1
+//! COMPILE_COUNT_GE *spreadSetDedup* 1
+//! EXEC_COUNT_GE *spreadSetDedup* 1
+//! COMPILE_COUNT_GE *spreadWithExpressions* 1
+//! EXEC_COUNT_GE *spreadWithExpressions* 1
+//! COMPILE_COUNT_GE *spreadNestedArray* 1
+//! EXEC_COUNT_GE *spreadNestedArray* 1
+//! COMPILE_COUNT_GE *spreadObjectBasic* 1
+//! EXEC_COUNT_GE *spreadObjectBasic* 1
+//! COMPILE_COUNT_GE *spreadObjectOverride* 1
+//! EXEC_COUNT_GE *spreadObjectOverride* 1
+//! COMPILE_COUNT_GE *spreadObjectNewProps* 1
+//! EXEC_COUNT_GE *spreadObjectNewProps* 1
+//! COMPILE_COUNT_GE *spreadObjectCopy* 1
+//! EXEC_COUNT_GE *spreadObjectCopy* 1
+//! COMPILE_COUNT_GE *spreadObjectNested* 1
+//! EXEC_COUNT_GE *spreadObjectNested* 1
+//! COMPILE_COUNT_GE *spreadObjectComputed* 1
+//! EXEC_COUNT_GE *spreadObjectComputed* 1
+//! COMPILE_COUNT_GE *spreadObjectOrder* 1
+//! EXEC_COUNT_GE *spreadObjectOrder* 1
+//! COMPILE_COUNT_GE *restBasic* 1
+//! EXEC_COUNT_GE *restBasic* 1
+//! COMPILE_COUNT_GE *restWithLeading* 1
+//! EXEC_COUNT_GE *restWithLeading* 1
+//! COMPILE_COUNT_GE *restLength* 1
+//! EXEC_COUNT_GE *restLength* 1
+//! COMPILE_COUNT_GE *restMixedTypes* 1
+//! EXEC_COUNT_GE *restMixedTypes* 1
+//! COMPILE_COUNT_GE *restWithDestructure* 1
+//! EXEC_COUNT_GE *restWithDestructure* 1
+//! COMPILE_COUNT_GE *restObjectDestructure* 1
+//! EXEC_COUNT_GE *restObjectDestructure* 1
+//! COMPILE_COUNT_GE *restNested* 1
+//! EXEC_COUNT_GE *restNested* 1
+//! COMPILE_COUNT_GE *spreadRestCombined* 1
+//! EXEC_COUNT_GE *spreadRestCombined* 1
+//! COMPILE_COUNT_GE *cloneExtendArray* 1
+//! EXEC_COUNT_GE *cloneExtendArray* 1
+//! COMPILE_COUNT_GE *cloneExtendObject* 1
+//! EXEC_COUNT_GE *cloneExtendObject* 1
+//! COMPILE_COUNT_GE *testSpreadConstructor* 1
+//! EXEC_COUNT_GE *testSpreadConstructor* 1
+//! COMPILE_COUNT_GE *spreadMethodCall* 1
+//! EXEC_COUNT_GE *spreadMethodCall* 1
+//! COMPILE_COUNT_GE *restCallback* 1
+//! EXEC_COUNT_GE *restCallback* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
+
 declare function print(arg: any): string;
 declare const ArkTools: {
     arkSteedCompileSync(args: any): boolean;
@@ -22,6 +84,9 @@ declare const ArkTools: {
 // ==================== Array Spread ====================
 
 // Basic array spread
+//! METHOD spreadArrayBasic
+//! HAS CallRuntime StArraySpread
+//! HAS Call
 function spreadArrayBasic(): string {
     const arr1 = [1, 2, 3];
     const arr2 = [4, 5, 6];
@@ -30,6 +95,8 @@ function spreadArrayBasic(): string {
 }
 
 // Array spread with elements
+//! METHOD spreadArrayWithElements
+//! HAS CallRuntime StArraySpread
 function spreadArrayWithElements(): string {
     const arr = [2, 3, 4];
     const result = [1, ...arr, 5, 6];
@@ -37,6 +104,8 @@ function spreadArrayWithElements(): string {
 }
 
 // Array copy using spread
+//! METHOD spreadArrayCopy
+//! HAS CallRuntime StArraySpread
 function spreadArrayCopy(): string {
     const original = [1, 2, 3];
     const copy = [...original];
@@ -45,6 +114,8 @@ function spreadArrayCopy(): string {
 }
 
 // Spread string into array
+//! METHOD spreadString
+//! HAS CallRuntime StArraySpread
 function spreadString(): string {
     const str = "hello";
     const chars = [...str];
@@ -52,6 +123,9 @@ function spreadString(): string {
 }
 
 // Spread in function call
+//! METHOD spreadFunctionCall
+//! HAS CallRuntime CallSpread
+//! HAS CallRuntime StArraySpread
 function spreadFunctionCall(): string {
     const args = [1, 2, 3];
     const sum = (a: number, b: number, c: number) => a + b + c;
@@ -59,6 +133,9 @@ function spreadFunctionCall(): string {
 }
 
 // Spread Math.max
+//! METHOD spreadMathMax
+//! HAS CallRuntime CallSpread
+//! HAS CallRuntime StArraySpread
 function spreadMathMax(): string {
     const numbers = [5, 2, 8, 1, 9, 3];
     const max = Math.max(...numbers);
@@ -67,6 +144,10 @@ function spreadMathMax(): string {
 }
 
 // Spread with Set (deduplication)
+//! METHOD spreadSetDedup
+//! HAS CallRuntime StArraySpread
+//! COUNT CallKnownBuiltin 1
+//! HAS_NOT CallRuntime OptNewObjRange
 function spreadSetDedup(): string {
     const arr = [1, 2, 2, 3, 3, 3, 4];
     const unique = [...new Set(arr)];
@@ -74,6 +155,8 @@ function spreadSetDedup(): string {
 }
 
 // Spread in array literal with expressions
+//! METHOD spreadWithExpressions
+//! HAS CallRuntime StArraySpread
 function spreadWithExpressions(): string {
     const getArr = () => [4, 5, 6];
     const result = [1, 2, 3, ...getArr()];
@@ -81,6 +164,8 @@ function spreadWithExpressions(): string {
 }
 
 // Nested array spread
+//! METHOD spreadNestedArray
+//! HAS CallRuntime StArraySpread
 function spreadNestedArray(): string {
     const nested = [[1, 2], [3, 4]];
     const flat = [...nested[0], ...nested[1]];
@@ -90,6 +175,8 @@ function spreadNestedArray(): string {
 // ==================== Object Spread ====================
 
 // Basic object spread
+//! METHOD spreadObjectBasic
+//! HAS CallRuntime CopyDataProperties
 function spreadObjectBasic(): string {
     const obj1 = { a: 1, b: 2 };
     const obj2 = { c: 3, d: 4 };
@@ -98,6 +185,8 @@ function spreadObjectBasic(): string {
 }
 
 // Object spread with override
+//! METHOD spreadObjectOverride
+//! HAS CallRuntime CopyDataProperties
 function spreadObjectOverride(): string {
     const defaults = { x: 0, y: 0, z: 0 };
     const custom = { x: 10, y: 20 };
@@ -106,6 +195,8 @@ function spreadObjectOverride(): string {
 }
 
 // Object spread with new properties
+//! METHOD spreadObjectNewProps
+//! HAS CallRuntime CopyDataProperties
 function spreadObjectNewProps(): string {
     const base = { a: 1 };
     const extended = { ...base, b: 2, c: 3 };
@@ -113,6 +204,8 @@ function spreadObjectNewProps(): string {
 }
 
 // Object copy using spread
+//! METHOD spreadObjectCopy
+//! HAS CallRuntime CopyDataProperties
 function spreadObjectCopy(): string {
     const original = { x: 10, y: 20 };
     const copy = { ...original };
@@ -121,6 +214,8 @@ function spreadObjectCopy(): string {
 }
 
 // Nested object spread (shallow)
+//! METHOD spreadObjectNested
+//! HAS CallRuntime CopyDataProperties
 function spreadObjectNested(): string {
     const obj = { a: 1, nested: { b: 2 } };
     const copy = { ...obj };
@@ -129,6 +224,8 @@ function spreadObjectNested(): string {
 }
 
 // Spread with computed properties
+//! METHOD spreadObjectComputed
+//! HAS CallRuntime CopyDataProperties
 function spreadObjectComputed(): string {
     const key = 'dynamic';
     const base = { a: 1 };
@@ -137,6 +234,8 @@ function spreadObjectComputed(): string {
 }
 
 // Spread order matters
+//! METHOD spreadObjectOrder
+//! HAS CallRuntime CopyDataProperties
 function spreadObjectOrder(): string {
     const result = { a: 1, ...{ a: 2 }, ...{ a: 3 } };
     return `${result.a}`;
@@ -145,21 +244,30 @@ function spreadObjectOrder(): string {
 // ==================== Rest Parameters ====================
 
 // Basic rest parameters
+//! METHOD restBasic
+//! HAS CallRuntime OptCopyRestArgs
 function restBasic(...args: number[]): string {
     return args.join(',');
 }
 
 // Rest with leading params
+//! METHOD restWithLeading
+//! HAS CallRuntime OptCopyRestArgs
 function restWithLeading(first: number, second: number, ...rest: number[]): string {
     return `${first},${second},${rest.join('-')}`;
 }
 
 // Rest parameter length
+//! METHOD restLength
+//! HAS CallRuntime OptCopyRestArgs
 function restLength(...args: any[]): string {
     return `${args.length}`;
 }
 
 // Rest with different types
+//! METHOD restMixedTypes
+//! HAS CallRuntime OptCopyRestArgs
+//! HAS CallKnownBuiltin
 function restMixedTypes(...args: (number | string)[]): string {
     return args.map(a => typeof a).join(',');
 }
@@ -170,11 +278,17 @@ const restArrow = (...nums: number[]): string => {
 };
 
 // Rest with destructuring
+//! METHOD restWithDestructure
+//! HAS CallKnownBuiltin
+//! HAS Call
 function restWithDestructure([first, ...rest]: number[]): string {
     return `${first}:${rest.join(',')}`;
 }
 
 // Object rest in destructuring
+//! METHOD restObjectDestructure
+//! HAS CallRuntime OptCreateObjectWithExcludedKeys
+//! HAS CallKnownBuiltin
 function restObjectDestructure(): string {
     const obj = { a: 1, b: 2, c: 3, d: 4 };
     const { a, ...rest } = obj;
@@ -182,6 +296,8 @@ function restObjectDestructure(): string {
 }
 
 // Nested rest
+//! METHOD restNested
+//! HAS CallRuntime OptCopyRestArgs
 function restNested(...arrays: number[][]): string {
     const flattened = arrays.flat();
     return flattened.join(',');
@@ -190,6 +306,8 @@ function restNested(...arrays: number[][]): string {
 // ==================== Combined Patterns ====================
 
 // Spread and rest together
+//! METHOD spreadRestCombined
+//! HAS Call
 function spreadRestCombined(): string {
     const collectAndSpread = (...args: number[]) => [...args, ...args];
     const result = collectAndSpread(1, 2, 3);
@@ -197,6 +315,8 @@ function spreadRestCombined(): string {
 }
 
 // Clone and extend array
+//! METHOD cloneExtendArray
+//! HAS CallRuntime StArraySpread
 function cloneExtendArray(): string {
     const original = [1, 2, 3];
     const extended = [...original, 4, 5];
@@ -204,6 +324,9 @@ function cloneExtendArray(): string {
 }
 
 // Clone and extend object
+//! METHOD cloneExtendObject
+//! HAS CallRuntime CopyDataProperties
+//! HAS CallKnownBuiltin
 function cloneExtendObject(): string {
     const original = { a: 1 };
     const extended = { ...original, b: 2 };
@@ -221,12 +344,20 @@ class SpreadConstructor {
     }
 }
 
+//! METHOD testSpreadConstructor
+//! COUNT CallNewObjRangeBase 1
+//! COUNT CallNewObjRangeDerived 1
+//! HAS_NOT CallRuntime OptNewObjRange
+//! HAS CallKnownJSFunction
 function testSpreadConstructor(): string {
     const obj = new SpreadConstructor(1, 2, 3, 4, 5);
     return obj.getValues();
 }
 
 // Spread in method call
+//! METHOD spreadMethodCall
+//! HAS CallRuntime CallSpread
+//! HAS CallRuntime StArraySpread
 function spreadMethodCall(): string {
     const arr = [1, 2, 3, 4, 5];
     const result = arr.concat(...[[6, 7], [8, 9]]);
@@ -234,6 +365,8 @@ function spreadMethodCall(): string {
 }
 
 // Rest in callback
+//! METHOD restCallback
+//! HAS Call
 function restCallback(): string {
     const process = (callback: (...args: number[]) => number) => {
         return callback(1, 2, 3, 4, 5);

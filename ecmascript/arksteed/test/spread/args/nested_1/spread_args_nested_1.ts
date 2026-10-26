@@ -12,11 +12,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *spread_args_nested_helper* 1
+//! EXEC_COUNT_GE *spread_args_nested_helper* 1
+//! COMPILE_COUNT_GE *spread_args_nested_1* 1
+//! EXEC_COUNT_GE *spread_args_nested_1 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function spread_args_nested_helper(
     a: number, b: number, c: number, d: number, e: number, f: number): number {
     return a + 10 * b + 100 * c + 1000 * d + 10000 * e + 100000 * f;
 }
 
+//! METHOD spread_args_nested_1
+//! HAS CallRuntime CallSpread
+//! HAS CallRuntime StArraySpread
 function spread_args_nested_1(): number {
     const inner: [number, number] = [3, 4];
     const outer: [number, number, number, number] = [1, 2, ...inner];

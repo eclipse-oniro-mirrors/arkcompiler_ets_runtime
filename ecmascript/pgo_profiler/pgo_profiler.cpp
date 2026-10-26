@@ -803,6 +803,7 @@ void PGOProfiler::ProfileBytecode(ApEntityId abcId, const CString& recordName, J
             case EcmaOpcode::GREATEREQ_IMM8_V8:
             case EcmaOpcode::STRICTNOTEQ_IMM8_V8:
             case EcmaOpcode::STRICTEQ_IMM8_V8:
+            case EcmaOpcode::TONUMBER_IMM8:
             case EcmaOpcode::TONUMERIC_IMM8: {
                 uint8_t slotId = READ_INST_8_0();
                 CHECK_SLOTID_BREAK(slotId);

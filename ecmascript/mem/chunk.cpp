@@ -18,12 +18,14 @@
 #include "native_area_allocator.h"
 
 namespace panda::ecmascript {
-Chunk::Chunk(NativeAreaAllocator *allocator) : allocator_(allocator) {}
+Chunk::Chunk(NativeAreaAllocator *allocator, bool enableStatistics)
+    : allocator_(allocator), enableStatistics_(enableStatistics)
+{}
 
 Area *Chunk::NewArea(size_t size)
 {
     auto area = allocator_->AllocateArea(size);
-    if (area == nullptr) { // LOCV_EXCL_BR_LINE
+    if (area == nullptr) {  // LOCV_EXCL_BR_LINE
         LOG_ECMA_MEM(FATAL) << "OOM Chunk : NewArea area is nullptr";
         UNREACHABLE();
     }
@@ -53,13 +55,13 @@ uintptr_t Chunk::Expand(size_t size)
         newSize = std::max(minNewSize, MAX_CHUNK_AREA_SIZE);
     }
 
-    if (newSize > static_cast<size_t>(std::numeric_limits<int>::max())) { // LOCV_EXCL_BR_LINE
-        LOG_ECMA_MEM(FATAL) << "OOM chunk : newSize is "<< newSize << ", size is " << size;
+    if (newSize > static_cast<size_t>(std::numeric_limits<int>::max())) {  // LOCV_EXCL_BR_LINE
+        LOG_ECMA_MEM(FATAL) << "OOM chunk : newSize is " << newSize << ", size is " << size;
         UNREACHABLE();
     }
 
     Area *area = NewArea(newSize);
-    if (area == nullptr) { // LOCV_EXCL_BR_LINE
+    if (area == nullptr) {  // LOCV_EXCL_BR_LINE
         LOG_ECMA_MEM(FATAL) << "OOM chunk : NewArea area is nullptr";
         UNREACHABLE();
     }

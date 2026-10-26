@@ -12,6 +12,23 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// G11.6 additive evidence (S11/C1/C3/C4): the compiled invocation carrier
+// `callDefaultParamBranch` performs this leaf's omitted, partially supplied
+// and fully supplied invocations, so its own dump carries the actual generic
+// `Call` form of those call sites instead of the callee-internal print calls.
+// The original target keeps its own positive compile/entry evidence, the
+// probes and the output bytes are unchanged, and the normal path must not
+// deopt. The `_GE` lower bound allows the installation and recompilation
+// multiplicity of the same method.
+//! METHOD callDefaultParamBranch
+//! HAS Call
+//! COMPILE_COUNT_GE callDefaultParamBranch 1
+//! EXEC_COUNT_GE *callDefaultParamBranch* 1
+//! METHOD default_param_branch
+//! COMPILE_COUNT_GE default_param_branch 1
+//! EXEC_COUNT_GE *default_param_branch* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function default_param_branch(score: number = 60, bonus: number = 5) {
     let total = score + bonus;
     if (total >= 90) {
@@ -24,9 +41,13 @@ function default_param_branch(score: number = 60, bonus: number = 5) {
     print(total);
 }
 
+function callDefaultParamBranch(): void {
+    default_param_branch();
+    default_param_branch(70);
+    default_param_branch(88, 4);
+}
+
 ArkTools.arkSteedCompileSync(default_param_branch);
+ArkTools.arkSteedCompileSync(callDefaultParamBranch);
 
-
-default_param_branch();
-default_param_branch(70);
-default_param_branch(88, 4);
+callDefaultParamBranch();

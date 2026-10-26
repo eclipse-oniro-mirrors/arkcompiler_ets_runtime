@@ -12,6 +12,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+//! METHOD compute
+//! HAS LoadTaggedField
+//! COMPILE_COUNT_GE *compute* 1
+//! EXEC_COUNT_GE *compute* 1
+//! DEOPT_COUNT *Deoptimize* 0
 
 // Test: throw.undefinedifholewithname generated for multiple lexical variables in one closure.
 // The inner function compute() accesses a, b, c from the enclosing scope.

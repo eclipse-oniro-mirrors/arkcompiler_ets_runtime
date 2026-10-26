@@ -12,6 +12,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_double* 1
+//! EXEC_COUNT_GE *array_double* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_double(src: number[], dest: number[]): void
 {
     let len = src.length;
@@ -21,6 +25,7 @@ function array_double(src: number[], dest: number[]): void
 }
 
 ArkTools.arkSteedCompileSync(array_double);
+ArkTools.waitJitCompileFinish(array_double);
 
 
 let src: number[] = [1, 2, 3, 4, 5];

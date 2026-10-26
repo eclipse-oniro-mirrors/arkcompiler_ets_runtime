@@ -1,0 +1,7 @@
+interpreted:true
+compiled:true
+split-results:true
+independent-and-cow:true
+allocation-pressure:true
+young-gc:true
+full-gc:true

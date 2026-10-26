@@ -95,14 +95,14 @@ void ArkSteedAssembler::Move(ArkSteedRegister dst, int64_t immediate)
         assembler_.Movz(arm64Dst, static_cast<uint64_t>(immediate), 0);
     } else {
         uint64_t uimm = static_cast<uint64_t>(immediate);
-        assembler_.Movz(arm64Dst, uimm & 0xFFFF, 0);               // 0xFFFF: lower 16 bits mask
-        if ((uimm >> 16) & 0xFFFF) {                               // 16: shift to extract bits [16, 31]
+        assembler_.Movz(arm64Dst, uimm & 0xFFFF, 0);  // 0xFFFF: lower 16 bits mask
+        if ((uimm >> 16) & 0xFFFF) {  // 16: shift to extract bits [16, 31]
             assembler_.Movk(arm64Dst, (uimm >> 16) & 0xFFFF, 16);  // 16: LSL shift amount for bits [16, 31]
         }
-        if ((uimm >> 32) & 0xFFFF) {                               // 32: shift to extract bits [32, 47]
+        if ((uimm >> 32) & 0xFFFF) {  // 32: shift to extract bits [32, 47]
             assembler_.Movk(arm64Dst, (uimm >> 32) & 0xFFFF, 32);  // 32: LSL shift amount for bits [32, 47]
         }
-        if ((uimm >> 48) & 0xFFFF) {                               // 48: shift to extract bits [48, 63]
+        if ((uimm >> 48) & 0xFFFF) {  // 48: shift to extract bits [48, 63]
             assembler_.Movk(arm64Dst, (uimm >> 48) & 0xFFFF, 48);  // 48: LSL shift amount for bits [48, 63]
         }
     }
@@ -197,6 +197,11 @@ void ArkSteedAssembler::LoadField(ArkSteedRegister dst, ArkSteedRegister base, i
     LoadRegisterWithOperand(dst, operand);
 }
 
+void ArkSteedAssembler::LoadUint8Field(ArkSteedRegister dst, ArkSteedRegister base, int32_t offset)
+{
+    assembler_.Ldrb(dst.W(), aarch64::MemoryOperand(base, offset));
+}
+
 void ArkSteedAssembler::LoadInt32Field(ArkSteedRegister dst, ArkSteedRegister base, int32_t offset)
 {
     aarch64::MemoryOperand operand(base, offset, aarch64::AddrMode::OFFSET);
@@ -210,8 +215,8 @@ void ArkSteedAssembler::LoadTaggedElement(ArkSteedRegister dst, ArkSteedRegister
     LoadField(dst, dst, static_cast<int32_t>(TaggedArray::DATA_OFFSET));
 }
 
-void ArkSteedAssembler::StoreTaggedElement(ArkSteedRegister elements, ArkSteedRegister index, ArkSteedRegister value,
-                                           ArkSteedRegister scratch)
+void ArkSteedAssembler::StoreTaggedElement(ArkSteedRegister elements, ArkSteedRegister index,
+                                           ArkSteedRegister value, ArkSteedRegister scratch)
 {
     constexpr uint8_t TAGGED_SIZE_SHIFT = 3;
     assembler_.Add(scratch, elements, aarch64::Operand(index, aarch64::UXTW, TAGGED_SIZE_SHIFT));
@@ -303,8 +308,8 @@ void ArkSteedAssembler::LoadTypedArrayDoubleElement(ArkSteedDoubleRegister dst, 
     }
 }
 
-void ArkSteedAssembler::StoreTypedArrayIntElement(ArkSteedRegister value, ArkSteedRegister data, ArkSteedRegister index,
-                                                  JSType elementType)
+void ArkSteedAssembler::StoreTypedArrayIntElement(ArkSteedRegister value, ArkSteedRegister data,
+                                                  ArkSteedRegister index, JSType elementType)
 {
     switch (elementType) {
         case JSType::JS_INT8_ARRAY:
@@ -358,6 +363,19 @@ void ArkSteedAssembler::StoreInt32FieldRelease(ArkSteedRegister src, ArkSteedReg
     assembler_.Stlr(src.W(), operand);
 }
 
+void ArkSteedAssembler::StoreHeaderRelease(ArkSteedRegister src,
+                                           ArkSteedRegister object)
+{
+    static_assert(TaggedObject::HCLASS_OFFSET == 0);
+    // AssemblerAarch64::Stlr currently only encodes the W-register form.
+    // HClass headers are full tagged words, so emit STLR Xt, [Xn] directly.
+    ASSERT(src.IsX());
+    ASSERT(object.IsX());
+    constexpr uint32_t STLR_X = 0xc89ffc00;
+    constexpr uint32_t RN_SHIFT = 5;
+    assembler_.EmitU32(STLR_X | (object.GetId() << RN_SHIFT) | src.GetId());
+}
+
 void ArkSteedAssembler::StoreFloat64Field(ArkSteedDoubleRegister src, ArkSteedRegister base, int32_t offset)
 {
     StoreFloat64(aarch64::MemoryOperand(base, offset, aarch64::AddrMode::OFFSET), src);
@@ -376,6 +394,18 @@ void ArkSteedAssembler::LoadActualArgc(ArkSteedRegister dst)
     // 2: argc is stored at fp + 2 * FRAME_SLOT_SIZE
     aarch64::MemoryOperand operand(kFramePointerRegister, 2 * FRAME_SLOT_SIZE, aarch64::AddrMode::OFFSET);
     assembler_.Ldr(dst, operand);
+}
+
+void ArkSteedAssembler::LoadActualArgument(ArkSteedRegister dst, ArkSteedRegister index,
+                                           ArkSteedRegister scratch)
+{
+    // 3: skip saved fp, return address, and argc; then skip mandatory JS-function arguments.
+    constexpr int32_t FIRST_USER_ARG_SLOT = 3 + NUM_MANDATORY_JSFUNC_ARGS;
+    constexpr uint8_t TAGGED_SIZE_SHIFT = 3;
+    static_assert(JSTaggedValue::TaggedTypeSize() == (1U << TAGGED_SIZE_SHIFT));
+    assembler_.Add(scratch, kFramePointerRegister,
+                   aarch64::Operand(index, aarch64::UXTW, TAGGED_SIZE_SHIFT));
+    LoadField(dst, scratch, FIRST_USER_ARG_SLOT * FRAME_SLOT_SIZE);
 }
 
 void ArkSteedAssembler::LoadFloat64(ArkSteedDoubleRegister dst, MemoryOperand srcOp)
@@ -520,14 +550,56 @@ void ArkSteedAssembler::Int32Add(ArkSteedRegister dst, ArkSteedRegister left, Ar
     assembler_.Adds(dst.W(), left.W(), aarch64::Operand(right.W()));
 }
 
+void ArkSteedAssembler::Int32Add(ArkSteedRegister dst, ArkSteedRegister left, int32_t immediate)
+{
+    int64_t value = immediate;
+    if (value >= 0 && FitsAddSubImmediate(static_cast<uint64_t>(value))) {
+        EmitAddSubImmediate(dst.W(), left.W(), static_cast<uint64_t>(value), AddSubImmediateOp::ADD);
+        return;
+    }
+    if (value < 0 && FitsAddSubImmediate(static_cast<uint64_t>(-value))) {
+        EmitAddSubImmediate(dst.W(), left.W(), static_cast<uint64_t>(-value), AddSubImmediateOp::SUB);
+        return;
+    }
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister scratch = scope.AcquireScratch();
+    Move(scratch, value);
+    Int32Add(dst, left, scratch);
+}
+
 void ArkSteedAssembler::Int32Sub(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right)
 {
     assembler_.Subs(dst.W(), left.W(), aarch64::Operand(right.W()));
 }
 
+void ArkSteedAssembler::Int32Sub(ArkSteedRegister dst, ArkSteedRegister left, int32_t immediate)
+{
+    int64_t value = immediate;
+    if (value >= 0 && FitsAddSubImmediate(static_cast<uint64_t>(value))) {
+        EmitAddSubImmediate(dst.W(), left.W(), static_cast<uint64_t>(value), AddSubImmediateOp::SUB);
+        return;
+    }
+    if (value < 0 && FitsAddSubImmediate(static_cast<uint64_t>(-value))) {
+        EmitAddSubImmediate(dst.W(), left.W(), static_cast<uint64_t>(-value), AddSubImmediateOp::ADD);
+        return;
+    }
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister scratch = scope.AcquireScratch();
+    Move(scratch, value);
+    Int32Sub(dst, left, scratch);
+}
+
 void ArkSteedAssembler::Int32Mul(ArkSteedRegister dst, ArkSteedRegister src)
 {
     assembler_.Mul(dst.W(), dst.W(), src.W());
+}
+
+void ArkSteedAssembler::Int32Mul(ArkSteedRegister dst, int32_t immediate)
+{
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister scratch = scope.AcquireScratch();
+    Move(scratch, immediate);
+    Int32Mul(dst, scratch);
 }
 
 void ArkSteedAssembler::Int32MulWide(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right)
@@ -569,6 +641,14 @@ void ArkSteedAssembler::Int32ToFloat64(ArkSteedDoubleRegister dst, ArkSteedRegis
 void ArkSteedAssembler::Float64Add(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister src)
 {
     assembler_.Fadd(dst, dst, src);
+}
+
+void ArkSteedAssembler::Uint32ToFloat64(ArkSteedDoubleRegister dst, ArkSteedRegister src)
+{
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister scratch = scope.AcquireScratch();
+    assembler_.Mov(scratch.W(), src.W());
+    assembler_.Scvtf(dst, scratch);
 }
 
 void ArkSteedAssembler::Float64Sub(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister src)
@@ -881,17 +961,17 @@ bool ArkSteedAssembler::IsVeneerBranchInRange(uint32_t instruction, int64_t disp
     }
     if (IsVeneerBranchOrCall(instruction)) {
         constexpr int64_t minDisplacement = -(1LL << 27U);  // imm26 scaled by 4: -128 MiB.
-        constexpr int64_t maxDisplacement = 1LL << 27U;     // imm26 scaled by 4: +128 MiB, exclusive.
+        constexpr int64_t maxDisplacement = 1LL << 27U;  // imm26 scaled by 4: +128 MiB, exclusive.
         return displacement >= minDisplacement && displacement < maxDisplacement;
     }
     if (IsVeneerConditionOrCompareBranch(instruction)) {
         constexpr int64_t minDisplacement = -(1LL << 20U);  // imm19 scaled by 4: -1 MiB.
-        constexpr int64_t maxDisplacement = 1LL << 20U;     // imm19 scaled by 4: +1 MiB, exclusive.
+        constexpr int64_t maxDisplacement = 1LL << 20U;  // imm19 scaled by 4: +1 MiB, exclusive.
         return displacement >= minDisplacement && displacement < maxDisplacement;
     }
     if (IsVeneerTestBranch(instruction)) {
         constexpr int64_t minDisplacement = -(1LL << 15U);  // imm14 scaled by 4: -32 KiB.
-        constexpr int64_t maxDisplacement = 1LL << 15U;     // imm14 scaled by 4: +32 KiB, exclusive.
+        constexpr int64_t maxDisplacement = 1LL << 15U;  // imm14 scaled by 4: +32 KiB, exclusive.
         return displacement >= minDisplacement && displacement < maxDisplacement;
     }
     LOG_COMPILER(FATAL) << "Unsupported ARM64 veneer branch instruction: " << std::hex << instruction;
@@ -935,11 +1015,14 @@ void ArkSteedAssembler::UpdateEmbeddedLiteralPoolCheck(uint32_t loadOffset, size
 {
     // A literal's position is the pool prefix followed by its index in the current pool.
     uint64_t literalOffsetInPool = static_cast<uint64_t>(literalIndex) * EMBEDDED_LITERAL_SIZE;
-    uint64_t reserve = EMBEDDED_LITERAL_DISTANCE_MARGIN + EMBEDDED_LITERAL_POOL_PREFIX_RESERVE + literalOffsetInPool;
-    uint64_t maximumPoolPosition = static_cast<uint64_t>(loadOffset) + EMBEDDED_LITERAL_MAX_FORWARD_DISPLACEMENT;
+    uint64_t reserve = EMBEDDED_LITERAL_DISTANCE_MARGIN + EMBEDDED_LITERAL_POOL_PREFIX_RESERVE +
+                       literalOffsetInPool;
+    uint64_t maximumPoolPosition = static_cast<uint64_t>(loadOffset) +
+                                   EMBEDDED_LITERAL_MAX_FORWARD_DISPLACEMENT;
     uint64_t deadline = maximumPoolPosition > reserve ? maximumPoolPosition - reserve : 0;
     nextEmbeddedLiteralPoolCheck_ = std::min(
-        nextEmbeddedLiteralPoolCheck_, static_cast<uint32_t>(std::min(deadline, static_cast<uint64_t>(UINT32_MAX))));
+        nextEmbeddedLiteralPoolCheck_,
+        static_cast<uint32_t>(std::min(deadline, static_cast<uint64_t>(UINT32_MAX))));
 }
 
 uint64_t ArkSteedAssembler::GetEmbeddedLiteralPoolMaxSize() const
@@ -971,21 +1054,20 @@ void ArkSteedAssembler::EmitEmbeddedLiteralPool(bool precedingCodeCanFallThrough
     for (const auto &literal : pendingEmbeddedLiterals_) {
         uint32_t literalOffset = GetPcOffset();
         ASSERT(literalOffset % EMBEDDED_LITERAL_SIZE == 0);
-        ASSERT(
-            std::all_of(literal->loadOffsets.begin(), literal->loadOffsets.end(), [literalOffset](uint32_t loadOffset) {
-                int64_t displacement = static_cast<int64_t>(literalOffset) - static_cast<int64_t>(loadOffset);
-                return displacement >= 0 && displacement <= EMBEDDED_LITERAL_MAX_FORWARD_DISPLACEMENT &&
-                       displacement % sizeof(uint32_t) == 0;
-            }));
+#ifndef NDEBUG
+        for (uint32_t loadOffset : literal->loadOffsets) {
+            int64_t displacement = static_cast<int64_t>(literalOffset) - static_cast<int64_t>(loadOffset);
+            ASSERT(displacement >= 0);
+            ASSERT(displacement <= EMBEDDED_LITERAL_MAX_FORWARD_DISPLACEMENT);
+            ASSERT(displacement % sizeof(uint32_t) == 0);
+        }
+#endif
         assembler_.Bind(&literal->label);
-        embeddedRefRelocations_.push_back(
-            {literalOffset, literal->handleIndex, EmbeddedCodeRefRelocKind::ARM64_LITERAL64, RELOC_WIDTH});
-        // EmitU64 bypasses the JIT CodeSign AppendData path. Emit two 32-bit words so CodeSign records the
-        // complete embedded literal while preserving its 64-bit layout.
-        constexpr uint32_t WORD_BITS = 32U;
-        uint64_t placeholder = JSTaggedValue::VALUE_HOLE;
-        assembler_.EmitU32(static_cast<uint32_t>(placeholder));
-        assembler_.EmitU32(static_cast<uint32_t>(placeholder >> WORD_BITS));
+        embeddedRefRelocations_.push_back({literalOffset,
+                                          literal->handleIndex,
+                                          EmbeddedCodeRefRelocKind::ARM64_LITERAL64,
+                                          RELOC_WIDTH});
+        assembler_.EmitU64(JSTaggedValue::VALUE_HOLE);
     }
 
     if (precedingCodeCanFallThrough) {
@@ -1005,12 +1087,13 @@ void ArkSteedAssembler::CheckCodePools(bool precedingCodeCanFallThrough, size_t 
     uint64_t protectedCodeEnd = static_cast<uint64_t>(GetPcOffset()) + protectedCodeSize;
     uint64_t potentialVeneerPoolSize = GetPotentialVeneerPoolSize();
     bool emitLiteralPool = !pendingEmbeddedLiterals_.empty() &&
-                           protectedCodeEnd + potentialVeneerPoolSize >= nextEmbeddedLiteralPoolCheck_;
+        protectedCodeEnd + potentialVeneerPoolSize >= nextEmbeddedLiteralPoolCheck_;
     if (emitLiteralPool) {
         // Veneers emitted before this pool also consume displacement from pending literal loads.
         uint64_t literalPoolSize = GetEmbeddedLiteralPoolMaxSize();
         ASSERT(literalPoolSize <= std::numeric_limits<size_t>::max() - protectedCodeSize);
-        CheckVeneerPool(precedingCodeCanFallThrough, protectedCodeSize + static_cast<size_t>(literalPoolSize));
+        CheckVeneerPool(precedingCodeCanFallThrough,
+                        protectedCodeSize + static_cast<size_t>(literalPoolSize));
         EmitEmbeddedLiteralPool(precedingCodeCanFallThrough);
     }
     CheckVeneerPool(precedingCodeCanFallThrough, protectedCodeSize);
@@ -1035,8 +1118,8 @@ void ArkSteedAssembler::RecordVeneerBranch(uint32_t branchPc, Label *target)
     if (inserted && nextVeneerPoolCheck_ != UINT32_MAX) {
         uint32_t additionalReserve = VENEER_INSTRUCTION_SIZE;
         nextVeneerPoolCheck_ = nextVeneerPoolCheck_ > additionalReserve
-                                   ? nextVeneerPoolCheck_ - additionalReserve
-                                   : 0;  // 0: force a full check at the next safe codegen boundary.
+            ? nextVeneerPoolCheck_ - additionalReserve
+            : 0;  // 0: force a full check at the next safe codegen boundary.
     }
     uint32_t deadline = GetVeneerBranchDeadline(branchPc, assembler_.GetU32(branchPc));
     nextVeneerPoolCheck_ = std::min(nextVeneerPoolCheck_, deadline);
@@ -1120,8 +1203,9 @@ void ArkSteedAssembler::CheckVeneerPool(bool precedingCodeCanFallThrough, size_t
         UpdateVeneerPoolCheck();
         return;
     }
-    std::sort(candidates.begin(), candidates.end(),
-              [](const auto &left, const auto &right) { return left.first < right.first; });
+    std::sort(candidates.begin(), candidates.end(), [](const auto &left, const auto &right) {
+        return left.first < right.first;
+    });
 
     emittingVeneerPool_ = true;
     uint32_t guardPc = UINT32_MAX;  // Sentinel used when fallthrough does not require a guard.
@@ -1252,6 +1336,21 @@ void ArkSteedAssembler::JumpIfNotJSFunction(ArkSteedRegister value, Label *targe
     JumpIf(Condition::GREATER_THAN, target);
 }
 
+void ArkSteedAssembler::JumpIfNotEcmaObject(ArkSteedRegister value, Label *target)
+{
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister hclass = scope.Acquire();
+    ArkSteedRegister objectType = scope.Acquire();
+    LoadField(hclass, value, TaggedObject::HCLASS_OFFSET);
+    And(hclass, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    LoadField(objectType, hclass, JSHClass::BIT_FIELD_OFFSET);
+    And(objectType, static_cast<int32_t>((1U << JSHClass::TYPE_BITFIELD_NUM) - 1));
+    Compare(objectType, static_cast<int32_t>(JSType::ECMA_OBJECT_FIRST));
+    JumpIf(Condition::LESS_THAN, target);
+    Compare(objectType, static_cast<int32_t>(JSType::ECMA_OBJECT_LAST));
+    JumpIf(Condition::GREATER_THAN, target);
+}
+
 void ArkSteedAssembler::JumpIfClassConstructor(ArkSteedRegister jsFunc, Label *target)
 {
     TemporaryRegisterScope scope(this);
@@ -1266,24 +1365,86 @@ void ArkSteedAssembler::JumpIfClassConstructor(ArkSteedRegister jsFunc, Label *t
     Bind(&notClassConstructor);
 }
 
-void ArkSteedAssembler::JumpIfNotArkSteedEntry(ArkSteedRegister jsFunc, Label *target)
+void ArkSteedAssembler::JumpIfNotJSConstructorFunction(ArkSteedRegister value, Label *target)
 {
     TemporaryRegisterScope scope(this);
+    ArkSteedRegister bitfield = scope.Acquire();
+    LoadField(bitfield, value, TaggedObject::HCLASS_OFFSET);
+    And(bitfield, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    LoadField(bitfield, bitfield, JSHClass::BIT_FIELD_OFFSET);
+    // Constructor bit first: the type mask below clears the rest of the bitfield.
+    TestAndBranchIfZero(bitfield, JSHClass::ConstructorBit::START_BIT, target);
+    And(bitfield, static_cast<int32_t>((1U << JSHClass::TYPE_BITFIELD_NUM) - 1));
+    Compare(bitfield, static_cast<int32_t>(JSType::JS_FUNCTION_FIRST));
+    JumpIf(Condition::LESS_THAN, target);
+    Compare(bitfield, static_cast<int32_t>(JSType::JS_FUNCTION_LAST));
+    JumpIf(Condition::GREATER_THAN, target);
+}
+
+void ArkSteedAssembler::JumpIfNewTargetHClassNotReady(ArkSteedRegister value, Label *target)
+{
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister protoOrHClass = scope.Acquire();
     ArkSteedRegister scratch = scope.Acquire();
-    LoadInt32Field(scratch, jsFunc, JSFunctionBase::BIT_FIELD_OFFSET);
-    TestAndBranchIfZero(scratch, JSFunctionBase::IsArkSteedEntryBit::START_BIT, target);
+    // Mirrors the FastSuperAllocateThis stub's inline conditions: JSFunction first (the
+    // proto-or-hclass load dereferences newTarget), tag bits before the slot content is
+    // dereferenced, then JSHClass, then a JS_OBJECT instance type.
+    LoadField(scratch, value, TaggedObject::HCLASS_OFFSET);
+    And(scratch, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    LoadField(scratch, scratch, JSHClass::BIT_FIELD_OFFSET);
+    And(scratch, static_cast<int32_t>((1U << JSHClass::TYPE_BITFIELD_NUM) - 1));
+    Compare(scratch, static_cast<int32_t>(JSType::JS_FUNCTION_FIRST));
+    JumpIf(Condition::LESS_THAN, target);
+    Compare(scratch, static_cast<int32_t>(JSType::JS_FUNCTION_LAST));
+    JumpIf(Condition::GREATER_THAN, target);
+    LoadField(protoOrHClass, value, JSFunction::PROTO_OR_DYNCLASS_OFFSET);
+    Move(scratch, protoOrHClass);
+    And(scratch, static_cast<int64_t>(JSTaggedValue::TAG_HEAPOBJECT_MASK));
+    Compare(scratch, 0);
+    JumpIf(Condition::NOT_EQUAL, target);
+    LoadField(scratch, protoOrHClass, TaggedObject::HCLASS_OFFSET);
+    And(scratch, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    LoadField(scratch, scratch, JSHClass::BIT_FIELD_OFFSET);
+    And(scratch, static_cast<int32_t>((1U << JSHClass::TYPE_BITFIELD_NUM) - 1));
+    Compare(scratch, static_cast<int32_t>(JSType::HCLASS));
+    JumpIf(Condition::NOT_EQUAL, target);
+    LoadField(scratch, protoOrHClass, JSHClass::BIT_FIELD_OFFSET);
+    And(scratch, static_cast<int32_t>((1U << JSHClass::TYPE_BITFIELD_NUM) - 1));
+    Compare(scratch, static_cast<int32_t>(JSType::JS_OBJECT));
+    JumpIf(Condition::NOT_EQUAL, target);
+}
+
+void ArkSteedAssembler::JumpIfConstructorIsBase(ArkSteedRegister jsFunc, Label *target)
+{
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister method = scope.Acquire();
+    ArkSteedRegister kind = scope.Acquire();
+    // Base super constructors carry FunctionKind <= CLASS_CONSTRUCTOR in the method's
+    // extra literal info; derived and builtin constructors sort above it.
+    LoadField(method, jsFunc, JSFunctionBase::METHOD_OFFSET);
+    LoadField(kind, method, Method::EXTRA_LITERAL_INFO_OFFSET);
+    Lsr(kind, Method::FunctionKindBits::START_BIT);
+    And(kind, static_cast<int64_t>(
+        Method::FunctionKindBits::Mask() >> Method::FunctionKindBits::START_BIT));
+    Compare(kind, static_cast<int32_t>(FunctionKind::CLASS_CONSTRUCTOR));
+    JumpIf(Condition::LESS_THAN_OR_EQUAL, target);
+}
+
+void ArkSteedAssembler::JumpIfFunctionNotCompiled(ArkSteedRegister jsFunc, Label *target)
+{
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister bitfield = scope.Acquire();
+    LoadField(bitfield, jsFunc, JSFunctionBase::BIT_FIELD_OFFSET);
+    TestAndBranchIfZero(bitfield, JSFunctionBase::IsCompiledCodeBit::START_BIT, target);
 }
 
 void ArkSteedAssembler::BranchIfNoPendingException(Label *target)
 {
     TemporaryRegisterScope scope(this);
     ArkSteedRegister scratch = scope.AcquireScratch();
-    PushPair(aarch64::xzr, aarch64::x0);
-    Move(aarch64::x0, static_cast<uint64_t>(entryThread_->GetGlueAddr()));
-    LoadField(scratch, aarch64::x0, static_cast<int32_t>(JSThread::GlueData::GetExceptionOffset(false)));
-    Move(aarch64::x0, JSTaggedValue::Hole().GetRawData());
-    Compare(scratch, aarch64::x0);
-    PopPair(aarch64::xzr, aarch64::x0);
+    Move(scratch, static_cast<uint64_t>(entryThread_->GetGlueAddr()));
+    LoadField(scratch, scratch, static_cast<int32_t>(JSThread::GlueData::GetExceptionOffset(false)));
+    Compare(scratch, static_cast<int32_t>(JSTaggedValue::VALUE_HOLE));
     JumpIf(Condition::EQUAL, target);
 }
 
@@ -1455,6 +1616,11 @@ void ArkSteedAssembler::ReserveCallArgSlots(int32_t slotCount)
     }
 }
 
+void ArkSteedAssembler::LoadCallArgv(ArkSteedRegister dst)
+{
+    assembler_.Mov(dst, aarch64::sp);
+}
+
 void ArkSteedAssembler::FreeCallArgSlots(int32_t slotCount)
 {
     if (slotCount > 0) {
@@ -1613,7 +1779,7 @@ aarch64::Condition ArkSteedAssembler::ToPhysicalCondition(Condition condition) c
             return aarch64::Condition::EQ;
         case Condition::NOT_ZERO:
             return aarch64::Condition::NE;
-        case Condition::OVERFLOWED:
+        case Condition::OVERFLOWS:
             return aarch64::Condition::VS;
         case Condition::NOT_OVERFLOW:
             return aarch64::Condition::VC;

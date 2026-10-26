@@ -44,6 +44,7 @@
 #include "ecmascript/mem/thread_local_allocation_buffer.h"
 #include "ecmascript/mem/barriers-inl.h"
 #include "ecmascript/mem/mem_map_allocator.h"
+#include "ecmascript/platform/map.h"
 #include "ecmascript/runtime.h"
 #include "libpandabase/macros.h"
 
@@ -978,6 +979,11 @@ void Heap::ReclaimRegions(TriggerGCType gcType, bool cmsGC)
         clearActiveSemiSpace(true);
     }
     EnumerateNonNewSpaceRegionsWithRecord([] (Region *region) {
+        // Region metadata (mark bits, remembered sets and flags) lives in the
+        // same MAP_JIT allocation as machine-code objects on macOS.  GC clear
+        // tasks run on worker threads, so open the per-thread write window at
+        // the actual mutation point.
+        JIT_WRITE_SCOPE(jitWriteScope, region->InMachineCodeSpace() || region->InHugeMachineCodeSpace());
         if constexpr (!G_USE_STICKY_CMS_GC) {
             region->ClearMarkGCBitset();
             region->ClearCrossRegionRSet();

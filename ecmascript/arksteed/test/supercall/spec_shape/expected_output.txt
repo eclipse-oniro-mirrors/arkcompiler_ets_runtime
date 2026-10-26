@@ -1,0 +1,7 @@
+base-prim: wp true wp true
+ret-undefined: 1 true true
+identity-holds: true
+null-proto: caught true | Constructor is false
+object-proto: caught true | Constructor is false
+arrow-proto: caught true | Constructor is false
+ctor-swap: true 9

@@ -12,6 +12,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_create_transpose* 1
+//! EXEC_COUNT_GE *array_create_transpose* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_create_transpose(mat: number[][]): number[][]
 {
     let result: number[][] = [[0, 0], [0, 0]];
@@ -24,6 +28,7 @@ function array_create_transpose(mat: number[][]): number[][]
 }
 
 ArkTools.arkSteedCompileSync(array_create_transpose);
+ArkTools.waitJitCompileFinish(array_create_transpose);
 
 
 let mat: number[][] = [[1, 2], [3, 4]];

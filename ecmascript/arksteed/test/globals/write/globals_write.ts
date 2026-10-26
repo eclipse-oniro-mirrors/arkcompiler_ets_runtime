@@ -12,6 +12,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+//! METHOD writeGlobal
+//! HAS StoreEnvSlot
+//! COMPILE_COUNT_GE *writeGlobal* 1
+//! EXEC_COUNT_GE *writeGlobal* 1
+//! DEOPT_COUNT *Deoptimize* 0
 
 declare function print(str: number):string;
 

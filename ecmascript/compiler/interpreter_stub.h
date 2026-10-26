@@ -207,6 +207,7 @@ public:
 
     template <bool needPrint>
     void DebugPrintInstruction();
+
 private:
     template<typename... Args>
     void DispatchBase(GateRef target, GateRef glue, Args... args);

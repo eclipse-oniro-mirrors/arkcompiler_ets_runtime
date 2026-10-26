@@ -1,0 +1,5 @@
+base-num: true num
+base-str: true str
+base-null: true nul
+derived-num: caught true function is non-constructor
+derived-null: caught true function is non-constructor

@@ -12,6 +12,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_accumulate* 1
+//! EXEC_COUNT_GE *array_accumulate* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_accumulate(src: number[], dest: number[]): void
 {
     let len = src.length;
@@ -23,6 +27,7 @@ function array_accumulate(src: number[], dest: number[]): void
 }
 
 ArkTools.arkSteedCompileSync(array_accumulate);
+ArkTools.waitJitCompileFinish(array_accumulate);
 
 
 let src: number[] = [1, 2, 3, 4, 5];

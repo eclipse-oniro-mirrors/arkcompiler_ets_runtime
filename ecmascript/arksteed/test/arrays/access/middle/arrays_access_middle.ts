@@ -12,6 +12,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! COMPILE_COUNT_GE *array_access_middle* 1
+//! EXEC_COUNT_GE *array_access_middle* 1
+//! DEOPT_COUNT *Deoptimize* 0
 function array_access_middle(arr: number[]): number
 {
     let len = arr.length;
@@ -19,6 +23,7 @@ function array_access_middle(arr: number[]): number
 }
 
 ArkTools.arkSteedCompileSync(array_access_middle);
+ArkTools.waitJitCompileFinish(array_access_middle);
 
 
 let arr: number[] = [10, 20, 30, 40, 50];

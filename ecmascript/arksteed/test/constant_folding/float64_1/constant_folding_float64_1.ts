@@ -13,6 +13,16 @@
  * limitations under the License.
  */
 
+// G10.2 (P0) additive evidence (arksteed-jsts-p0-semantic-rows#S3): the folded
+// double constants of this case keep their semantics and their expected output;
+// the added annotations only confirm that the target is compiled, entered and
+// leaves no deopt behind. The folded constants never carry a sign of their own,
+// so this case is supporting evidence, not the negative-zero oracle of the row.
+
+//! COMPILE_COUNT_GE *constant_folding_float64_1* 1
+//! EXEC_COUNT_GE *constant_folding_float64_1* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
 function constant_folding_float64_1(x: number)
 {
     const A = 2.5;
