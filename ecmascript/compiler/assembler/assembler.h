@@ -218,6 +218,15 @@ public:
     void EmitU64(uint64_t v)
     {
         buffer_.EmitU64(v);
+#ifdef JIT_ENABLE_CODE_SIGN
+        if (doCodeSign && kungfu::JitSignCode::GetInstance()->GetCodeSigner() != nullptr) {
+            int err = AppendData(kungfu::JitSignCode::GetInstance()->GetCodeSigner(),
+                                 reinterpret_cast<const uint8_t *>(&v), sizeof(v));
+            if (err != 0) {
+                LOG_BASELINEJIT(ERROR) << "AppendData for EmitU64 failed, err = " << std::hex << err;
+            }
+        }
+#endif
     }
 
     void PutI8(size_t offset, int8_t data)
