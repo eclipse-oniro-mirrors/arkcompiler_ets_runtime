@@ -44,7 +44,7 @@ public:
         GateRef hclass, Label *exit, Label *slowPath);
 
     void FastCreateSharedArrayWithLen(GateRef glue, Variable *res, GateRef len,
-        GateRef initValue, GateRef hclass, Label *exit, Label *slowPath);
+        GateRef initValue, GateRef hclass, Label *exit);
 
     GateRef NewSharedArrayWithHClass(GateRef glue, GateRef hclass);
 
@@ -66,6 +66,18 @@ public:
     void IndexOf(GateRef glue, GateRef thisValue,
         GateRef numArgs, Variable *result, Label *exit, Label *slowPath);
 
+    void ForEach(GateRef glue, GateRef thisValue,
+        GateRef numArgs, Variable *result, Label *exit, Label *slowPath);
+
+    void Map(GateRef glue, GateRef thisValue,
+        GateRef numArgs, Variable *result, Label *exit, Label *slowPath);
+
+    void Filter(GateRef glue, GateRef thisValue,
+        GateRef numArgs, Variable *result, Label *exit, Label *slowPath);
+
+    void Reduce(GateRef glue, GateRef thisValue,
+        GateRef numArgs, Variable *result, Label *exit, Label *slowPath);
+
     GateRef GrowElementsCapacity(GateRef glue, GateRef thisValue, GateRef capacity);
 
     using ComparisonType = JSStableArray::ComparisonType;
@@ -78,9 +90,24 @@ public:
         MAY_BE_ANY,
     };
 private:
+    // IR equivalent of BuiltinsSharedArray::GetElementByKey: reads the element at index;
+    // out-of-bounds reads return undefined.
+    GateRef GetElementByKey(GateRef glue, GateRef thisValue, GateRef index);
+
+    // Combined receiver + species guard for array-creating methods (map/filter).
+    // Self-contained (safe on any tagged value): JSSharedArray receiver AND the C++
+    // ArraySpeciesCreate fast-path conditions (!hclass->HasConstructor() &&
+    // proto.IsJSSharedArray()); every other receiver shape falls back to the C++ slow
+    // path, which performs the full species-constructor lookup.
+    void CheckSpeciesCreateFastPath(GateRef glue, GateRef thisValue, Label *fastLabel, Label *slowPath);
+
     GateRef PushImpl(GateRef glue, GateRef thisValue, GateRef numArgs);
     GateRef PopImpl(GateRef glue, GateRef thisValue);
     GateRef FindImpl(GateRef glue, GateRef thisValue, GateRef numArgs);
+    GateRef ForEachImpl(GateRef glue, GateRef thisValue, GateRef numArgs);
+    GateRef MapImpl(GateRef glue, GateRef thisValue, GateRef numArgs);
+    GateRef FilterImpl(GateRef glue, GateRef thisValue, GateRef numArgs);
+    GateRef ReduceImpl(GateRef glue, GateRef thisValue, GateRef numArgs);
     void IndexOfOptimised(GateRef glue, GateRef thisValue, GateRef numArgs,
         Variable *result, Label *exit, Label *slowPath, IndexOfOptions options);
     GateRef IndexOfImpl(GateRef glue, GateRef thisValue,

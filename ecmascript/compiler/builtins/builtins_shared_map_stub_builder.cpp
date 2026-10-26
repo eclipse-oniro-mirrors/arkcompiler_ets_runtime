@@ -321,4 +321,216 @@ GateRef BuiltinsSharedMapStubBuilder::DeleteImpl(GateRef glue, GateRef thisValue
     return res;
 }
 
+// @ref panda::ecmascript::builtins::BuiltinsSharedMap::ForEach()
+void BuiltinsSharedMapStubBuilder::ForEach(GateRef glue, GateRef thisValue,
+    GateRef numArgs, Variable *result, Label *exit, Label *slowPath)
+{
+    auto env = GetEnvironment();
+    Label isSharedMap(env);
+
+    // Step 1: Check this is JSSharedMap.
+    BRANCH(TaggedIsJSSharedMap(glue, thisValue), &isSharedMap, slowPath);
+    Bind(&isSharedMap);
+
+    // Step 2: acquire the READ scope
+    Label canReadExit(env);
+    Label readDoneExit(env);
+    Label scopeRelease(env);
+    Label hasScopeException(env);
+    Label notScopeException(env);
+    Label callbackIsCallable(env);
+    Label notCallable(env);
+    DEFVARIABLE(res, VariableType::JS_ANY(), Undefined());
+    DEFVARIABLE(expectModRecord, VariableType::INT32(), Int32(0));
+    DEFVARIABLE(desiredModRecord, VariableType::INT32(), Int32(0));
+    DEFVARIABLE(scopeEntered, VariableType::BOOL(), False());
+
+    ConcurrentApiScopeCanRead<JSSharedMap>(glue, thisValue, expectModRecord,
+        desiredModRecord, scopeEntered, &canReadExit);
+    Bind(&canReadExit);
+
+    BRANCH(HasPendingException(glue), &hasScopeException, &notScopeException);
+    Bind(&hasScopeException);
+    {
+        res = Exception();
+        Jump(&scopeRelease);
+    }
+    Bind(&notScopeException);
+    {
+        // Step 3: callable check
+        GateRef callbackFnHandle = GetCallArg0(numArgs);
+        BRANCH_LIKELY(TaggedIsCallable(glue, callbackFnHandle), &callbackIsCallable, &notCallable);
+        Bind(&callbackIsCallable);
+        {
+            // Step 4: iterate the LinkedHashMap in original insertion order, skipping
+            // deleted (hole) entries, calling func(value, key, map) for each.
+            GateRef thisArg = GetCallArg1(numArgs);
+            GateRef linkedMapOffset = IntPtr(JSSharedMap::LINKED_MAP_OFFSET);
+            GateRef linkedTable = Load(VariableType::JS_ANY(), glue, thisValue, linkedMapOffset);
+            LinkedHashTableStubBuilder<LinkedHashMap, LinkedHashMapObject> linkedHashTableStubBuilder(
+                this, glue, GetCurrentGlobalEnv(), true);
+            res = linkedHashTableStubBuilder.SendableForEach(thisValue, linkedTable, callbackFnHandle, thisArg);
+            Jump(&scopeRelease);
+        }
+        Bind(&notCallable);
+        {
+            // @ref: THROW_TYPE_ERROR_AND_RETURN "obj is not Callable"
+            IR_IF (HasPendingException(glue)) {
+                res = Exception();
+            } IR_ELSE {
+                CallRuntime(glue, RTSTUB_ID(ThrowTypeError),
+                    { IntToTaggedInt(Int32(GET_MESSAGE_STRING_ID(ObjIsNotCallable))) });
+                res = Exception();
+            }
+            Jump(&scopeRelease);
+        }
+    }
+    Bind(&scopeRelease);
+    // Release the read scope on every path, matching the C++ RAII destructor.
+    ConcurrentApiScopeReadDone<JSSharedMap>(glue, thisValue, expectModRecord,
+        desiredModRecord, scopeEntered, &readDoneExit);
+    Bind(&readDoneExit);
+
+    // Step 5: propagate result
+    *result = *res;
+    Jump(exit);
+}
+
+// @ref panda::ecmascript::builtins::BuiltinsSharedMap::Clear()
+void BuiltinsSharedMapStubBuilder::Clear(GateRef glue, GateRef thisValue,
+    GateRef numArgs, Variable *result, Label *exit, Label *slowPath)
+{
+    auto env = GetEnvironment();
+    Label isSharedMap(env);
+
+    // Step 1: Check this is JSSharedMap.
+    // If !self->IsJSSharedMap(), throw BIND_ERROR "The clear method cannot be bound."
+    BRANCH(TaggedIsJSSharedMap(glue, thisValue), &isSharedMap, slowPath);
+    Bind(&isSharedMap);
+
+    // Step 2: LinkedHashMap::Clear + SetLinkedMap inside the WRITE scope.
+    ClearImpl(glue, thisValue);
+
+    // Step 3: return undefined
+    *result = Undefined();
+    Jump(exit);
+}
+
+// @ref panda::ecmascript::JSSharedMap::Clear()
+void BuiltinsSharedMapStubBuilder::ClearImpl(GateRef glue, GateRef thisValue)
+{
+    auto env = GetEnvironment();
+    Label entry(env);
+    env->SubCfgEntry(&entry);
+
+    Label canWriteExit(env);
+    Label writeDoneExit(env);
+    Label scopeRelease(env);
+    DEFVARIABLE(scopeEntered, VariableType::BOOL(), False());
+
+    // ConcurrentApiScope<JSSharedMap, ModType::WRITE>: acquire the write scope.
+    ConcurrentApiScopeCanWrite<JSSharedMap>(glue, thisValue, scopeEntered, &canWriteExit);
+    Bind(&canWriteExit);
+
+    Label hasScopeException(env);
+    Label notScopeException(env);
+    BRANCH(HasPendingException(glue), &hasScopeException, &notScopeException);
+    Bind(&hasScopeException);
+    {
+        Jump(&scopeRelease);
+    }
+    Bind(&notScopeException);
+    {
+        // Read the linked table, clear it, and store the new table back.
+        GateRef linkedMapOffset = IntPtr(JSSharedMap::LINKED_MAP_OFFSET);
+        GateRef linkedTable = Load(VariableType::JS_ANY(), glue, thisValue, linkedMapOffset);
+        LinkedHashTableStubBuilder<LinkedHashMap, LinkedHashMapObject> linkedHashTableStubBuilder(
+            this, glue, GetCurrentGlobalEnv(), true);
+        GateRef newTable = linkedHashTableStubBuilder.Clear(linkedTable);
+        Store(VariableType::JS_ANY(), glue, thisValue, linkedMapOffset, newTable);
+        Jump(&scopeRelease);
+    }
+    Bind(&scopeRelease);
+    ConcurrentApiScopeWriteDone<JSSharedMap>(glue, thisValue, scopeEntered, &writeDoneExit);
+    Bind(&writeDoneExit);
+    env->SubCfgExit();
+}
+
+// @ref panda::ecmascript::builtins::BuiltinsSharedMap::Entries()
+void BuiltinsSharedMapStubBuilder::Entries(GateRef glue, GateRef thisValue,
+    GateRef numArgs, Variable *result, Label *exit, Label *slowPath)
+{
+    auto env = GetEnvironment();
+    Label isSharedMap(env);
+
+    // Step 1: Check this is JSSharedMap.
+    // If !self->IsJSSharedMap(), throw BIND_ERROR "The entries method cannot be bound."
+    BRANCH(TaggedIsJSSharedMap(glue, thisValue), &isSharedMap, slowPath);
+    Bind(&isSharedMap);
+
+    // Step 2: create a JSSharedMapIterator with IterationKind::KEY_AND_VALUE
+    NewObjectStubBuilder newBuilder(this);
+    newBuilder.SetParameters(glue, IntPtr(JSSharedMapIterator::SIZE));
+    GateRef kind = Int32(static_cast<int32_t>(IterationKind::KEY_AND_VALUE));
+    newBuilder.CreateJSSharedMapIterator(result, exit, thisValue, kind);
+}
+
+// @ref panda::ecmascript::builtins::BuiltinsSharedMap::GetSize()
+void BuiltinsSharedMapStubBuilder::GetSize(GateRef glue, GateRef thisValue,
+    GateRef numArgs, Variable *result, Label *exit, Label *slowPath)
+{
+    auto env = GetEnvironment();
+    Label isSharedMap(env);
+
+    // Step 1: Check this is JSSharedMap.
+    // If !self->IsJSSharedMap(), throw TYPE_ERROR "obj is not SharedMap".
+    BRANCH(TaggedIsJSSharedMap(glue, thisValue), &isSharedMap, slowPath);
+    Bind(&isSharedMap);
+
+    // Step 2: LinkedHashMap::NumberOfElements inside the READ scope.
+    Label canReadExit(env);
+    Label readDoneExit(env);
+    Label scopeRelease(env);
+    DEFVARIABLE(res, VariableType::JS_ANY(), IntToTaggedPtr(Int32(0)));
+    DEFVARIABLE(expectModRecord, VariableType::INT32(), Int32(0));
+    DEFVARIABLE(desiredModRecord, VariableType::INT32(), Int32(0));
+    DEFVARIABLE(scopeEntered, VariableType::BOOL(), False());
+
+    // ConcurrentApiScope<JSSharedMap>: acquire the read scope.
+    ConcurrentApiScopeCanRead<JSSharedMap>(glue, thisValue, expectModRecord,
+        desiredModRecord, scopeEntered, &canReadExit);
+    Bind(&canReadExit);
+
+    // RETURN_VALUE_IF_ABRUPT_COMPLETION(thread, 0): on scope failure return 0.
+    Label hasScopeException(env);
+    Label notScopeException(env);
+    BRANCH(HasPendingException(glue), &hasScopeException, &notScopeException);
+    Bind(&hasScopeException);
+    {
+        res = IntToTaggedPtr(Int32(0));
+        Jump(&scopeRelease);
+    }
+    Bind(&notScopeException);
+    {
+        // Read the NumberOfElements slot of the linked table. The hashtable builder's
+        // GetNumberOfElements is private, so read the count via the public tagged-array
+        // primitive, exactly as the private helper does.
+        GateRef linkedMapOffset = IntPtr(JSSharedMap::LINKED_MAP_OFFSET);
+        GateRef linkedTable = Load(VariableType::JS_ANY(), glue, thisValue, linkedMapOffset);
+        GateRef elementsIndex = Int32(LinkedHashMap::NUMBER_OF_ELEMENTS_INDEX);
+        GateRef numElements = TaggedGetInt(GetValueFromTaggedArray(glue, linkedTable, elementsIndex));
+        res = IntToTaggedPtr(numElements);
+        Jump(&scopeRelease);
+    }
+    Bind(&scopeRelease);
+    ConcurrentApiScopeReadDone<JSSharedMap>(glue, thisValue, expectModRecord,
+        desiredModRecord, scopeEntered, &readDoneExit);
+    Bind(&readDoneExit);
+
+    // Step 3: return the size as a tagged int
+    // @ref GetSize: return JSTaggedValue(size)
+    *result = *res;
+    Jump(exit);
+}
+
 }  // namespace panda::ecmascript::kungfu

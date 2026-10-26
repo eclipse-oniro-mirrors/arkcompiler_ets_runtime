@@ -25,15 +25,15 @@
 //       kungfu::BuiltinsStubCSigns::stubIndex refers to the builtin stub index, or INVALID if no stub available.
 #define BUILTIN_MAP_PROTOTYPE_FUNCTIONS(V)                      \
     /* Map.prototype.clear ( ) */                               \
-    V("clear",   Clear,   0, MapClear)                          \
-    /* Map.prototype.containsValue ( value ) */                  \
-    V("containsValue", ContainsValue, 1, INVALID)                \
+    V("clear",   Clear,   0, SharedMapClear)                    \
+    /* Map.prototype.containsValue ( value ) */                 \
+    V("containsValue", ContainsValue, 1, INVALID)               \
     /* Map.prototype.delete ( key ) */                          \
     V("delete",  Delete,  1, SharedMapDelete)                   \
     /* Map.prototype.entries ( ) */                             \
-    V("entries", Entries, 0, MapEntries)                        \
+    V("entries", Entries, 0, SharedMapEntries)                  \
     /* Map.prototype.forEach ( callbackfn [ , thisArg ] ) */    \
-    V("forEach", ForEach, 1, MapForEach)                        \
+    V("forEach", ForEach, 1, SharedMapForEach)                  \
     /* Map.prototype.get ( key ) */                             \
     V("get",     Get,     1, SharedMapGet)                      \
     /* Map.prototype.has ( key ) */                             \

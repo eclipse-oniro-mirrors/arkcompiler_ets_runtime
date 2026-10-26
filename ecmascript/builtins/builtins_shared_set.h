@@ -27,19 +27,19 @@
 //   - Set.prototype.keys ( ), which is strictly equal to Set.prototype.values
 #define BUILTIN_SET_PROTOTYPE_FUNCTIONS(V)                      \
     /* Set.prototype.add ( value ) */                           \
-    V("add",     Add,     1, SetAdd)                            \
+    V("add",     Add,     1, SharedSetAdd)                      \
     /* Set.prototype.clear ( ) */                               \
-    V("clear",   Clear,   0, SetClear)                          \
+    V("clear",   Clear,   0, SharedSetClear)                    \
     /* Set.prototype.delete ( value ) */                        \
-    V("delete",  Delete,  1, SetDelete)                         \
+    V("delete",  Delete,  1, SharedSetDelete)                   \
     /* Set.prototype.entries ( ) */                             \
-    V("entries", Entries, 0, SetEntries)                        \
+    V("entries", Entries, 0, SharedSetEntries)                  \
     /* Set.prototype.forEach ( callbackfn [ , thisArg ] ) */    \
-    V("forEach", ForEach, 1, SetForEach)                        \
+    V("forEach", ForEach, 1, SharedSetForEach)                  \
     /* Set.prototype.has ( value ) */                           \
-    V("has",     Has,     1, SetHas)                            \
+    V("has",     Has,     1, SharedSetHas)                      \
     /* Set.prototype.values ( ) */                              \
-    V("values",  Values,  0, SetValues)
+    V("values",  Values,  0, SharedSetValues)
 
 namespace panda::ecmascript::builtins {
 class BuiltinsSharedSet : public base::BuiltinsBase {

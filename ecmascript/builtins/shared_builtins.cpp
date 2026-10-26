@@ -245,7 +245,7 @@ void Builtins::InitializeSSet(const JSHandle<GlobalEnv> &env, const JSHandle<JSO
 
     // 23.1.3.10get SharedSet.prototype.size
     JSHandle<JSTaggedValue> sizeGetter = CreateSGetterSetter(env, BuiltinsSharedSet::GetSize, "size",
-        FunctionLength::ZERO);
+        FunctionLength::ZERO, BUILTINS_STUB_ID(SharedSetGetSize));
     SetSAccessor(setPrototype, fieldIndex++, sizeGetter, globalConst->GetHandledUndefined());
 
     // %SetPrototype% [ @@iterator ]
@@ -303,7 +303,7 @@ void Builtins::InitializeSMap(const JSHandle<GlobalEnv> &env, const JSHandle<JSO
 
     // 23.1.3.10get SharedMap.prototype.size
     JSHandle<JSTaggedValue> sizeGetter = CreateSGetterSetter(env, BuiltinsSharedMap::GetSize, "size",
-        FunctionLength::ZERO);
+        FunctionLength::ZERO, BUILTINS_STUB_ID(SharedMapGetSize));
     SetSAccessor(mapPrototype, fieldIndex++, sizeGetter, globalConst->GetHandledUndefined());
 
     // %MapPrototype% [ @@iterator ]
@@ -892,10 +892,11 @@ void Builtins::SetSAccessor(const JSHandle<JSObject> &obj, uint32_t index,
 }
 
 JSHandle<JSTaggedValue> Builtins::CreateSGetterSetter(const JSHandle<GlobalEnv> &env, EcmaEntrypoint func,
-                                                      std::string_view name, int length) const
+                                                      std::string_view name, int length,
+                                                      kungfu::BuiltinsStubCSigns::ID builtinId) const
 {
     JSHandle<JSTaggedValue> funcName(factory_->NewFromUtf8ReadOnly(name));
-    JSHandle<JSFunction> function = NewSFunction(env, funcName, func, length);
+    JSHandle<JSFunction> function = NewSFunction(env, funcName, func, length, builtinId);
     return JSHandle<JSTaggedValue>(function);
 }
 
@@ -1078,9 +1079,9 @@ void Builtins::InitializeS##Type(const JSHandle<GlobalEnv> &env, const JSHandle<
     JSHandle<JSTaggedValue> arrFuncPrototypeValue(arrFuncPrototype);                                            \
     /* %SharedTypedArray%.prototype_or_hclass */                                                                \
     JSHandle<JSHClass> arrFuncInstanceHClass = factory_->NewSEcmaHClass(                                        \
-        JSSharedTypedArray::SIZE, 0, JSType::JS_SHARED_##TYPE, arrFuncPrototypeValue, emptySLayout);            \
+        JSSharedTypedArray::SIZE, 0, JSType::JS_SHARED_##TYPE##_ARRAY, arrFuncPrototypeValue, emptySLayout);    \
     JSHandle<JSHClass> arrFuncInstanceHClassOnHeap = factory_->NewSEcmaHClass(                                  \
-        JSSharedTypedArray::SIZE, 0, JSType::JS_SHARED_##TYPE, arrFuncPrototypeValue, emptySLayout);            \
+        JSSharedTypedArray::SIZE, 0, JSType::JS_SHARED_##TYPE##_ARRAY, arrFuncPrototypeValue, emptySLayout);    \
     arrFuncInstanceHClassOnHeap->SetIsOnHeap(true);                                                             \
     arrFuncInstanceHClass->SetHasConstructor(false);                                                            \
     /* %SharedTypedArray% = new Function() */                                                                   \
@@ -1088,7 +1089,8 @@ void Builtins::InitializeS##Type(const JSHandle<GlobalEnv> &env, const JSHandle<
         env->GetSharedSpecificTypedArrayFunctionClass());                                                       \
     JSHandle<JSFunction> arrayFunction = factory_->NewSFunctionByHClass(                                        \
         reinterpret_cast<void *>(BuiltinsSharedTypedArray::Type##Constructor), specificTypedArrayFuncClass,     \
-        FunctionKind::BUILTIN_CONSTRUCTOR);                                                                     \
+        FunctionKind::BUILTIN_CONSTRUCTOR,                                                                     \
+        BUILTINS_STUB_ID(ctorName##Constructor));                                                              \
     InitializeSCtor(arrFuncInstanceHClass, arrayFunction, #sendableName, FunctionLength::THREE);                \
     JSHandle<JSObject> globalObject(thread_, env->GetGlobalObject());                                           \
     JSHandle<JSTaggedValue> nameString(factory_->NewFromUtf8ReadOnly(#sendableName));                           \

@@ -899,3 +899,96 @@ try {
 }
 
 print("===Class inheritance test end ===");
+
+// IR-ization UT supplement for the forEach/clear/entries/size stubs:
+// fresh/empty boundaries, deleted-entry skipping, @@iterator alias, and
+// callback exception propagation with scope release.
+function mapEdgeCases(): void {
+    print("===map edge cases begin===");
+
+    // Fresh map: size 0; entries() on empty -> done immediately.
+    const fresh = new SendableMap<number, string>();
+    print("fresh map size: " + fresh.size);
+    const emptyIter = fresh.entries();
+    const emptyNext = emptyIter.next();
+    print("empty entries done: " + emptyNext.done + ", value: " + emptyNext.value);
+
+    // @@iterator is an alias of entries.
+    print("iterator alias: " + (fresh[Symbol.iterator] === fresh.entries));
+
+    // forEach skips pre-deleted entries.
+    const skipMap = new SendableMap<number, string>();
+    skipMap.set(1, "a");
+    skipMap.set(2, "b");
+    skipMap.set(3, "c");
+    skipMap.delete(2);
+    skipMap.forEach((v: string, k: number) => {
+        print("skip forEach: " + k + "=" + v);
+    });
+
+    // forEach: callback exception propagates; map remains usable (scope released).
+    try {
+        skipMap.forEach((v: string, k: number) => {
+            if (k == 3) {
+                throw new Error("map forEach cb throw");
+            }
+        });
+    } catch (err) {
+        print("map forEach cb exception: " + err);
+    }
+    print("map after exception size: " + skipMap.size);
+
+    // clear on an empty map: no error, size stays 0.
+    fresh.clear();
+    print("clear empty size: " + fresh.size);
+
+    // size across set / delete(missing) / clear.
+    const mix = new SendableMap<number, string>();
+    mix.set(1, "a");
+    mix.set(2, "b");
+    print("mix size: " + mix.size);
+    mix.delete(1);
+    mix.delete(99);
+    print("mix size after delete: " + mix.size);
+    mix.clear();
+    print("mix size after clear: " + mix.size);
+
+    print("===map edge cases end===");
+}
+mapEdgeCases();
+
+// IR-ization UT supplement: same-key set during forEach (write scope),
+// set on an existing key, and subclass receiver for the clear/size/has stubs.
+function mapSubclassEdgeCases(): void {
+    print("===map subclass edge cases begin===");
+
+    // set on an existing key: value updated, size unchanged.
+    const upd = new SendableMap<number, string>();
+    upd.set(1, "a");
+    upd.set(1, "b");
+    print("set existing size: " + upd.size + ", value: " + upd.get(1));
+
+    // set the SAME key during forEach: still a write scope -> 10200201.
+    const sameKey = new SendableMap<number, string>();
+    sameKey.set(1, "a");
+    sameKey.set(2, "b");
+    try {
+        sameKey.forEach((v: string, k: number) => {
+            sameKey.set(1, "x");
+        });
+    } catch (e) {
+        print("Same-key Set Scenario[forEach]: " + e + ", errCode: " + e.code);
+    }
+
+    // Subclass receiver: clear + size + has round-trip.
+    const subEx = new SubSendableMap<number, string>();
+    subEx.set(1, "one");
+    subEx.set(2, "two");
+    print("submap size: " + subEx.size);
+    subEx.clear();
+    print("submap cleared size: " + subEx.size);
+    print("submap has after clear: " + subEx.has(1));
+
+    print("===map subclass edge cases end===");
+}
+mapSubclassEdgeCases();

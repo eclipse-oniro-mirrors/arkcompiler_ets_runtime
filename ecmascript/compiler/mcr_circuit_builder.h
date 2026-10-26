@@ -583,6 +583,21 @@ GateRef CircuitBuilder::TaggedIsJSArray(GateRef glue, GateRef x)
     return LogicAndBuilder(env_).And(TaggedIsHeapObject(x)).And(IsJsType(glue, x, JSType::JS_ARRAY)).Done();
 }
 
+GateRef CircuitBuilder::TaggedIsJSSharedArray(GateRef glue, GateRef x)
+{
+    return LogicAndBuilder(env_).And(TaggedIsHeapObject(x)).And(IsJsType(glue, x, JSType::JS_SHARED_ARRAY)).Done();
+}
+
+GateRef CircuitBuilder::TaggedIsJSSharedMap(GateRef glue, GateRef x)
+{
+    return LogicAndBuilder(env_).And(TaggedIsHeapObject(x)).And(IsJsType(glue, x, JSType::JS_SHARED_MAP)).Done();
+}
+
+GateRef CircuitBuilder::TaggedIsJSSharedSet(GateRef glue, GateRef x)
+{
+    return LogicAndBuilder(env_).And(TaggedIsHeapObject(x)).And(IsJsType(glue, x, JSType::JS_SHARED_SET)).Done();
+}
+
 GateRef CircuitBuilder::TaggedIsJSProxy(GateRef glue, GateRef x)
 {
     return LogicAndBuilder(env_).And(TaggedIsHeapObject(x)).And(IsJsType(glue, x, JSType::JS_PROXY)).Done();

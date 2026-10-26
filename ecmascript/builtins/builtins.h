@@ -505,7 +505,9 @@ private:
                       const JSHandle<JSTaggedValue> &getter, const JSHandle<JSTaggedValue> &setter) const;
 
     JSHandle<JSTaggedValue> CreateSGetterSetter(const JSHandle<GlobalEnv> &env, EcmaEntrypoint func,
-                                                std::string_view name, int length) const;
+                                                std::string_view name, int length,
+                                                kungfu::BuiltinsStubCSigns::ID builtinId =
+                                                BUILTINS_STUB_ID(INVALID)) const;
     void SharedStrictModeForbiddenAccessCallerArguments(const JSHandle<GlobalEnv> &env, uint32_t &index,
                                                         const JSHandle<JSObject> &prototype) const;
     JSHandle<JSTaggedValue> CreateArrayUnscopables(JSThread *thread) const;

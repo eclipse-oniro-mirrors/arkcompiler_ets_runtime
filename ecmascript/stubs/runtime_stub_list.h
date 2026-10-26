@@ -368,6 +368,8 @@ namespace panda::ecmascript {
     V(ToIndex)                                                 \
     V(NewJSObjectByConstructor)                                \
     V(AllocateTypedArrayBuffer)                                \
+    V(AllocateSharedTypedArrayBuffer)                          \
+    V(CopyArrayToSharedTypedArrayForCtor)                      \
     V(ToNumber)                                                \
     V(CreateEmptyObject)                                       \
     V(GetUnmapedArgs)                                          \

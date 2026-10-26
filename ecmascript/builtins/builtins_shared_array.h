@@ -46,19 +46,19 @@
     /* SharedArray.prototype.fill ( value [ , start [ , end ] ] ) */             \
     V("fill", Fill, 1, INVALID)                                                  \
     /* SharedArray.prototype.filter ( callbackfn [ , thisArg ] ) */              \
-    V("filter", Filter, 1, INVALID)                                              \
+    V("filter", Filter, 1, SharedArrayFilter)                                    \
     /* SharedArray.prototype.find ( predicate [ , thisArg ] ) */                 \
     V("find", Find, 1, SharedArrayFind)                                          \
     /* SharedArray.prototype.findIndex ( predicate [ , thisArg ] ) */            \
     V("findIndex", FindIndex, 1, INVALID)                                        \
     /* SharedArray.prototype.forEach ( callbackfn [ , thisArg ] ) */             \
-    V("forEach", ForEach, 1, INVALID)                                            \
+    V("forEach", ForEach, 1, SharedArrayForEach)                                 \
     /* SharedArray.prototype.includes ( searchElement [ , fromIndex ] ) */       \
     V("includes", Includes, 1, INVALID)                                          \
     /* SharedArray.prototype.containsAll ( elements ) */                         \
-    V("containsAll", ContainsAll, 1, INVALID)                                     \
+    V("containsAll", ContainsAll, 1, INVALID)                                    \
     /* SharedArray.prototype.retainAll ( elements | predicate ) */               \
-    V("retainAll", RetainAll, 1, INVALID)                                         \
+    V("retainAll", RetainAll, 1, INVALID)                                        \
     /* SharedArray.prototype.indexOf ( searchElement [ , fromIndex ] ) */        \
     V("indexOf", IndexOf, 1, SharedArrayIndexOf)                                 \
     /* SharedArray.prototype.join ( separator ) */                               \
@@ -66,13 +66,13 @@
     /* SharedArray.prototype.keys ( ) */                                         \
     V("keys", Keys, 0, INVALID)                                                  \
     /* SharedArray.prototype.map ( callbackfn [ , thisArg ] ) */                 \
-    V("map", Map, 1, INVALID)                                                    \
+    V("map", Map, 1, SharedArrayMap)                                             \
     /* SharedArray.prototype.pop ( ) */                                          \
-    V("pop", Pop, 0, SharedArrayPop)                                              \
+    V("pop", Pop, 0, SharedArrayPop)                                             \
     /* SharedArray.prototype.push ( ...items ) */                                \
     V("push", Push, 1, SharedArrayPush)                                          \
     /* SharedArray.prototype.reduce ( callbackfn [ , initialValue ] ) */         \
-    V("reduce", Reduce, 1, INVALID)                                              \
+    V("reduce", Reduce, 1, SharedArrayReduce)                                    \
     /* SharedArray.prototype.shift ( ) */                                        \
     V("shift", Shift, 0, INVALID)                                                \
     /* SharedArray.prototype.slice ( start, end ) */                             \

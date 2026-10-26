@@ -44,6 +44,7 @@
     BUILTINS_WITH_ARRAY_STUB_BUILDER(V)             \
     BUILTINS_WITH_SHARED_ARRAY_STUB_BUILDER(V)      \
     BUILTINS_WITH_SHARED_MAP_STUB_BUILDER(V)        \
+    BUILTINS_WITH_SHARED_SET_STUB_BUILDER(V)        \
     BUILTINS_WITH_SET_STUB_BUILDER(D)               \
     BUILTINS_WITH_MAP_STUB_BUILDER(D)               \
     BUILTINS_WITH_FUNCTION_STUB_BUILDER(V)          \
@@ -143,7 +144,11 @@
     V(Pop,                 SharedArray,   Undefined(),   SHARED_ARRAY_POP)                       \
     V(Find,                SharedArray,   Undefined(),   SHARED_ARRAY_FIND)                      \
     V(LastIndexOf,         SharedArray,   Undefined(),   SHARED_ARRAY_LAST_INDEX_OF)             \
-    V(IndexOf,             SharedArray,   Undefined(),   SHARED_ARRAY_INDEX_OF)
+    V(IndexOf,             SharedArray,   Undefined(),   SHARED_ARRAY_INDEX_OF)                  \
+    V(ForEach,             SharedArray,   Undefined(),   SHARED_ARRAY_FOREACH)                   \
+    V(Map,                 SharedArray,   Undefined(),   SHARED_ARRAY_MAP)                       \
+    V(Filter,              SharedArray,   Undefined(),   SHARED_ARRAY_FILTER)                    \
+    V(Reduce,              SharedArray,   Undefined(),   SHARED_ARRAY_REDUCE)
 
 // SharedMap builtin stubs - separate from regular Map stubs per design requirement
 #define BUILTINS_WITH_SHARED_MAP_STUB_BUILDER(V)                                                \
@@ -152,7 +157,22 @@
     V(Set,                 SharedMap,    Undefined(),   SHARED_MAP_SET)                         \
     V(Get,                 SharedMap,    Undefined(),   SHARED_MAP_GET)                         \
     V(Has,                 SharedMap,    Undefined(),   SHARED_MAP_HAS)                         \
-    V(Delete,              SharedMap,    Undefined(),   SHARED_MAP_DELETE)
+    V(Delete,              SharedMap,    Undefined(),   SHARED_MAP_DELETE)                      \
+    V(ForEach,             SharedMap,    Undefined(),   SHARED_MAP_FOREACH)                     \
+    V(Clear,               SharedMap,    Undefined(),   SHARED_MAP_CLEAR)                       \
+    V(Entries,             SharedMap,    Undefined(),   SHARED_MAP_ENTRIES)                     \
+    V(GetSize,             SharedMap,    Undefined(),   SHARED_MAP_GET_SIZE)
+
+// SharedSet builtin stubs
+#define BUILTINS_WITH_SHARED_SET_STUB_BUILDER(V)                                                \
+    V(Add,                 SharedSet,    Undefined(),   SHARED_SET_ADD)                         \
+    V(Delete,              SharedSet,    TaggedFalse(), SHARED_SET_DELETE)                      \
+    V(Has,                 SharedSet,    TaggedFalse(), SHARED_SET_HAS)                         \
+    V(Clear,               SharedSet,    Undefined(),   SHARED_SET_CLEAR)                       \
+    V(Values,              SharedSet,    Undefined(),   SHARED_SET_VALUES)                      \
+    V(Entries,             SharedSet,    Undefined(),   SHARED_SET_ENTRIES)                     \
+    V(ForEach,             SharedSet,    Undefined(),   SHARED_SET_FOREACH)                     \
+    V(GetSize,             SharedSet,    Undefined(),   SHARED_SET_GET_SIZE)
 
 #define BUILTINS_WITH_MAP_STUB_BUILDER(V)                                                        \
     V(Clear,    Map,   Undefined(),    MAP_CLEAR)                                                \
@@ -305,7 +325,18 @@
     V(BigUint64ArrayConstructor)                    \
     V(SharedArrayConstructor)                       \
     V(SharedSetConstructor)                         \
-    V(SharedMapConstructor)
+    V(SharedMapConstructor)                        \
+    V(SharedInt8ArrayConstructor)                  \
+    V(SharedUint8ArrayConstructor)                 \
+    V(SharedUint8ClampedArrayConstructor)          \
+    V(SharedInt16ArrayConstructor)                 \
+    V(SharedUint16ArrayConstructor)                \
+    V(SharedInt32ArrayConstructor)                 \
+    V(SharedUint32ArrayConstructor)                \
+    V(SharedFloat32ArrayConstructor)               \
+    V(SharedFloat64ArrayConstructor)               \
+    V(SharedBigInt64ArrayConstructor)              \
+    V(SharedBigUint64ArrayConstructor)
 
 // NEXT_AOT_AND_BUILTINS_STUB_LIST: List of functions that is optimized for Next
 #define NEXT_AOT_AND_BUILTINS_STUB_LIST(V)          \

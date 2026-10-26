@@ -864,6 +864,9 @@ public:
     inline GateRef TaggedIsJSGlobalObject(GateRef glue, GateRef x);
     inline GateRef TaggedIsGeneratorObject(GateRef glue, GateRef x);
     inline GateRef TaggedIsJSArray(GateRef glue, GateRef x);
+    inline GateRef TaggedIsJSSharedArray(GateRef glue, GateRef x);
+    inline GateRef TaggedIsJSSharedMap(GateRef glue, GateRef x);
+    inline GateRef TaggedIsJSSharedSet(GateRef glue, GateRef x);
     inline GateRef TaggedIsJSProxy(GateRef glue, GateRef x);
     inline GateRef TaggedIsPropertyBox(GateRef glue, GateRef x);
     inline GateRef TaggedIsWeak(GateRef x);

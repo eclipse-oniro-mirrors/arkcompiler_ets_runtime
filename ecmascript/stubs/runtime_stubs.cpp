@@ -50,6 +50,7 @@
 #include "ecmascript/js_stable_array.h"
 #include "ecmascript/jspandafile/js_pandafile_executor.h"
 #include "ecmascript/stubs/runtime_stubs.h"
+#include "ecmascript/shared_objects/js_sendable_arraybuffer.h"
 #include "ecmascript/linked_hash_table.h"
 #include "ecmascript/builtins/builtins_object.h"
 #if ECMASCRIPT_ENABLE_ARK_STEED
@@ -2614,6 +2615,29 @@ DEF_RUNTIME_STUBS(AllocateTypedArrayBuffer)
     JSTaggedValue length = GetArg(argv, argc, 1);  // 1: means the first parameter
     return base::TypedArrayHelper::AllocateTypedArrayBuffer(thread, obj, length.GetNumber(),
         base::TypedArrayHelper::GetType(JSHandle<JSTypedArray>(obj))).GetTaggedValue().GetRawData();
+}
+
+// @ref panda::ecmascript::base::TypedArrayHelper::AllocateTypedArrayBuffer<TypedArrayKind::SHARED>
+DEF_RUNTIME_STUBS(AllocateSharedTypedArrayBuffer)
+{
+    RUNTIME_STUBS_HEADER(AllocateSharedTypedArrayBuffer);
+    JSHandle<JSObject> obj = GetHArg<JSObject>(argv, argc, 0);  // 0: the typed array shell
+    JSTaggedValue length = GetArg(argv, argc, 1);  // 1: element length
+    return base::TypedArrayHelper::AllocateTypedArrayBuffer<base::TypedArrayKind::SHARED>(
+        thread, obj, static_cast<uint64_t>(static_cast<int64_t>(length.GetNumber())),
+        base::TypedArrayHelper::GetType(JSHandle<JSTypedArray>(obj))).GetTaggedValue().GetRawData();
+}
+
+// @ref TypedArrayHelper::FastCopyElementFromArrayForCtor<TypedArrayKind::SHARED>
+DEF_RUNTIME_STUBS(CopyArrayToSharedTypedArrayForCtor)
+{
+    RUNTIME_STUBS_HEADER(CopyArrayToSharedTypedArrayForCtor);
+    JSHandle<JSTypedArray> target = GetHArg<JSTypedArray>(argv, argc, 0);  // 0: the shared typed array
+    JSTaggedValue srcLength = GetArg(argv, argc, 1);  // 1: source length
+    JSHandle<JSObject> array = GetHArg<JSObject>(argv, argc, 2);  // 2: the stable source array
+    return JSStableArray::CopyArrayToTypedArrayForCtor<base::TypedArrayKind::SHARED>(
+        thread, target, base::TypedArrayHelper::GetType(target), 0,
+        static_cast<uint32_t>(static_cast<int64_t>(srcLength.GetNumber())), array).GetRawData();
 }
 
 DEF_RUNTIME_STUBS(ToNumber)

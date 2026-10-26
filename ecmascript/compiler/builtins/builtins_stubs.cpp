@@ -24,6 +24,8 @@
 #include "ecmascript/compiler/builtins/builtins_reflect_stub_builder.h"
 #include "ecmascript/compiler/builtins/builtins_shared_array_stub_builder.h"
 #include "ecmascript/compiler/builtins/builtins_shared_map_stub_builder.h"
+#include "ecmascript/compiler/builtins/builtins_shared_set_stub_builder.h"
+#include "ecmascript/compiler/builtins/builtins_shared_typedarray_stub_builder.h"
 #include "ecmascript/compiler/builtins/builtins_typedarray_stub_builder.h"
 #include "ecmascript/compiler/builtins/containers_arraylist_stub_builder.h"
 #include "ecmascript/compiler/builtins/containers_deque_stub_builder.h"
@@ -645,4 +647,18 @@ DECLARE_BUILTINS(type##ArrayConstructor)                                        
 }
 BUILTIN_COMPILER_TYPED_ARRAY_TYPES(DECLARE_BUILTINS_TYPED_ARRAY_STUB_BUILDER)
 #undef DECLARE_BUILTINS_TYPED_ARRAY_STUB_BUILDER
+
+#define DECLARE_BUILTINS_SHARED_TYPED_ARRAY_STUB_BUILDER(Type, ctorName, TYPE, ...)                  \
+DECLARE_BUILTINS(ctorName##Constructor)                                                             \
+{                                                                                                   \
+    GateRef globalEnv = GetGlobalEnvFromFunction(glue, func);                                       \
+    BuiltinsSharedTypedArrayStubBuilder builder(this, globalEnv);                                   \
+    builder.GenSharedTypedArrayConstructor(glue, nativeCode, func, newTarget, thisValue, numArgs,    \
+        GlobalEnv::SHARED_##TYPE##_ARRAY_FUNCTION_INDEX,                                            \
+        GlobalEnv::SHARED_##TYPE##_ARRAY_ROOT_HCLASS_INDEX,                                         \
+        GlobalEnv::SHARED_##TYPE##_ARRAY_ROOT_HCLASS_ON_HEAP_INDEX,                                 \
+        DataViewType::TYPE);                                                                       \
+}
+BUILTIN_SHARED_TYPED_ARRAY_TYPES(DECLARE_BUILTINS_SHARED_TYPED_ARRAY_STUB_BUILDER)
+#undef DECLARE_BUILTINS_SHARED_TYPED_ARRAY_STUB_BUILDER
 }  // namespace panda::ecmascript::kungfu

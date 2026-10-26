@@ -160,7 +160,7 @@ void BuiltinsSharedArrayStubBuilder::FastCreateSharedArrayWithArgv(GateRef glue,
 
 // len and initValue should be valid
 void BuiltinsSharedArrayStubBuilder::FastCreateSharedArrayWithLen(GateRef glue, Variable *res, GateRef len,
-    GateRef initValue, GateRef hclass, Label *exit, Label *slowPath)
+    GateRef initValue, GateRef hclass, Label *exit)
 {
     auto env = GetEnvironment();
     NewObjectStubBuilder newBuilder(this);
@@ -400,7 +400,7 @@ void BuiltinsSharedArrayStubBuilder::Create(GateRef glue, GateRef thisValue,
                 Bind(&arrayCreated);
                 GateRef initialHClass = Load(VariableType::JS_ANY(), glue, sharedArrayFunc,
                     IntPtr(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
-                FastCreateSharedArrayWithLen(glue, result, *arrayLength, initValue, initialHClass, exit, slowPath);
+                FastCreateSharedArrayWithLen(glue, result, *arrayLength, initValue, initialHClass, exit);
             }
         }
     }
@@ -1085,4 +1085,634 @@ GateRef BuiltinsSharedArrayStubBuilder::IndexOfImpl(GateRef glue, GateRef thisVa
     env->SubCfgExit();
     return ret;
 }
+
+// Combined receiver + species guard for array-creating methods (map/filter).
+void BuiltinsSharedArrayStubBuilder::CheckSpeciesCreateFastPath(GateRef glue, GateRef thisValue,
+    Label *fastLabel, Label *slowPath)
+{
+    auto env = GetEnvironment();
+    // Step 1 — receiver type guard: thisValue must be a heap object with the JS_SHARED_ARRAY
+    // JSType before its hclass fields may be read. This also corresponds to the first C++
+    // ArraySpeciesCreate condition (hclass->IsJSSharedArray()).
+    Label isSharedArray(env);
+    BRANCH_LIKELY(TaggedIsJSSharedArray(glue, thisValue), &isSharedArray, slowPath);
+    Bind(&isSharedArray);
+    {
+        // Step 2 — remaining C++ ArraySpeciesCreate fast-path conditions:
+        // !hclass->HasConstructor() && proto.IsJSSharedArray().
+        GateRef hclass = LoadHClass(glue, thisValue);
+        GateRef hasNoConstructor = BoolNot(HasConstructorByHClass(hclass));
+        GateRef proto = GetPrototypeFromHClass(glue, hclass);
+        GateRef protoIsSharedArray = TaggedIsJSSharedArray(glue, proto);
+        GateRef speciesFast = LogicAndBuilder(env)
+            .And(hasNoConstructor)
+            .And(protoIsSharedArray)
+            .Done();
+        BRANCH(speciesFast, fastLabel, slowPath);
+    }
+}
+
+// IR equivalent of BuiltinsSharedArray::GetElementByKey: reads the element at index;
+// out-of-bounds reads return undefined.
+GateRef BuiltinsSharedArrayStubBuilder::GetElementByKey(GateRef glue, GateRef thisValue,
+    GateRef index)
+{
+    auto env = GetEnvironment();
+    Label entry(env);
+    env->SubCfgEntry(&entry);
+    DEFVARIABLE(result, VariableType::JS_ANY(), Undefined());
+
+    // GetElementByKey reads the elements TaggedArray directly; a read beyond the current
+    // elements length returns undefined instead of accessing garbage memory.
+    GateRef elements = GetElementsArray(glue, thisValue);
+    GateRef elementsLen = GetLengthOfTaggedArray(elements);
+    IR_IF_UNLIKELY (Int32LessThanOrEqual(elementsLen, index)) {
+        result = Undefined();
+    } IR_ELSE {
+        result = GetTaggedValueWithElementsKind(glue, thisValue, index);
+    }
+
+    auto ret = *result;
+    env->SubCfgExit();
+    return ret;
+}
+
+// @ref panda::ecmascript::builtins::BuiltinsSharedArray::ForEach()
+void BuiltinsSharedArrayStubBuilder::ForEach(GateRef glue, GateRef thisValue,
+    GateRef numArgs, Variable *result, Label *exit, Label *slowPath)
+{
+    auto env = GetEnvironment();
+    Label isSharedArray(env);
+
+    BRANCH_LIKELY(TaggedIsJSSharedArray(glue, thisValue), &isSharedArray, slowPath);
+    Bind(&isSharedArray);
+
+    *result = ForEachImpl(glue, thisValue, numArgs);
+    Jump(exit);
+}
+
+// @ref panda::ecmascript::builtins::BuiltinsSharedArray::ForEach()
+GateRef BuiltinsSharedArrayStubBuilder::ForEachImpl(GateRef glue, GateRef thisValue,
+    GateRef numArgs)
+{
+    auto env = GetEnvironment();
+    Label entry(env);
+    env->SubCfgEntry(&entry);
+
+    Label canReadExit(env);
+    Label readDoneExit(env);
+    Label scopeRelease(env);
+    Label hasScopeException(env);
+    Label notScopeException(env);
+    Label callbackIsCallable(env);
+    Label notCallable(env);
+    DEFVARIABLE(res, VariableType::JS_ANY(), Undefined());
+    DEFVARIABLE(expectModRecord, VariableType::INT32(), Int32(0));
+    DEFVARIABLE(desiredModRecord, VariableType::INT32(), Int32(0));
+    DEFVARIABLE(scopeEntered, VariableType::BOOL(), False());
+
+    ConcurrentApiScopeCanRead<JSSharedArray>(glue, thisValue, expectModRecord,
+        desiredModRecord, scopeEntered, &canReadExit);
+    Bind(&canReadExit);
+
+    BRANCH(HasPendingException(glue), &hasScopeException, &notScopeException);
+    Bind(&hasScopeException);
+    {
+        res = Exception();
+        Jump(&scopeRelease);
+    }
+    Bind(&notScopeException);
+    {
+        GateRef len = GetSharedArrayLength(thisValue);
+
+        GateRef callbackFnHandle = GetCallArg0(numArgs);
+        BRANCH_LIKELY(TaggedIsCallable(glue, callbackFnHandle), &callbackIsCallable, &notCallable);
+        Bind(&callbackIsCallable);
+        {
+            GateRef thisArgHandle = GetCallArg1(numArgs);
+            DEFVARIABLE(k, VariableType::INT32(), Int32(0));
+
+            IR_WHILE (Int32LessThan(*k, len)) {
+                GateRef kValue = GetElementByKey(glue, thisValue, *k);
+
+                IR_IF_UNLIKELY (HasPendingException(glue)) {
+                    res = Exception();
+                    Jump(&scopeRelease);
+                }
+
+                GateRef key = IntToTaggedPtr(*k);
+
+                JSCallArgs callArgs(JSCallMode::CALL_THIS_ARG3_WITH_RETURN);
+                callArgs.callThisArg3WithReturnArgs = { thisArgHandle, kValue, key, thisValue };
+                CallStubBuilder callBuilder(this, glue, callbackFnHandle,
+                    Int32(NUM_MANDATORY_JSFUNC_ARGS), 0, nullptr, callArgs);
+                GateRef funcResult = callBuilder.JSCallDispatch();
+
+                // @ref RETURN_VALUE_IF_ABRUPT_COMPLETION(thread, funcResult)
+                IR_IF_UNLIKELY (HasPendingException(glue)) {
+                    res = funcResult;
+                    Jump(&scopeRelease);
+                }
+
+                k = Int32Add(*k, Int32(1));
+            }
+            // Return undefined on normal completion (res keeps its initial value).
+            Jump(&scopeRelease);
+        }
+        Bind(&notCallable);
+        {
+            // @ref THROW_TYPE_ERROR_AND_RETURN "the callbackfun is not callable."
+            IR_IF (HasPendingException(glue)) {
+                res = Exception();
+            } IR_ELSE {
+                CallRuntime(glue, RTSTUB_ID(ThrowTypeError),
+                    { IntToTaggedInt(Int32(GET_MESSAGE_STRING_ID(CallbackfunNotCallable))) });
+                res = Exception();
+            }
+            Jump(&scopeRelease);
+        }
+    }
+    Bind(&scopeRelease);
+    ConcurrentApiScopeReadDone<JSSharedArray>(glue, thisValue, expectModRecord,
+        desiredModRecord, scopeEntered, &readDoneExit);
+    Bind(&readDoneExit);
+    auto ret = *res;
+    env->SubCfgExit();
+    return ret;
+}
+
+// @ref panda::ecmascript::builtins::BuiltinsSharedArray::Map()
+void BuiltinsSharedArrayStubBuilder::Map(GateRef glue, GateRef thisValue,
+    GateRef numArgs, Variable *result, Label *exit, Label *slowPath)
+{
+    auto env = GetEnvironment();
+    Label speciesFast(env);
+
+    CheckSpeciesCreateFastPath(glue, thisValue, &speciesFast, slowPath);
+    Bind(&speciesFast);
+
+    *result = MapImpl(glue, thisValue, numArgs);
+    Jump(exit);
+}
+
+// @ref panda::ecmascript::builtins::BuiltinsSharedArray::Map()
+GateRef BuiltinsSharedArrayStubBuilder::MapImpl(GateRef glue, GateRef thisValue,
+    GateRef numArgs)
+{
+    auto env = GetEnvironment();
+    Label entry(env);
+    env->SubCfgEntry(&entry);
+
+    Label canReadExit(env);
+    Label readDoneExit(env);
+    Label scopeRelease(env);
+    Label hasScopeException(env);
+    Label notScopeException(env);
+    Label callbackIsCallable(env);
+    Label notCallable(env);
+    Label newArrayReady(env);
+    DEFVARIABLE(expectModRecord, VariableType::INT32(), Int32(0));
+    DEFVARIABLE(desiredModRecord, VariableType::INT32(), Int32(0));
+    DEFVARIABLE(scopeEntered, VariableType::BOOL(), False());
+    DEFVARIABLE(k, VariableType::INT32(), Int32(0));
+    DEFVARIABLE(res, VariableType::JS_ANY(), Undefined());
+
+    // @ref Map: ConcurrentApiScope<JSSharedArray> scope(thread, thisHandle)
+    ConcurrentApiScopeCanRead<JSSharedArray>(glue, thisValue, expectModRecord,
+        desiredModRecord, scopeEntered, &canReadExit);
+    Bind(&canReadExit);
+
+    // @ref Map: RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread)
+    BRANCH(HasPendingException(glue), &hasScopeException, &notScopeException);
+    Bind(&hasScopeException);
+    {
+        res = Exception();
+        Jump(&scopeRelease);
+    }
+    Bind(&notScopeException);
+    {
+        GateRef len = GetSharedArrayLength(thisValue);
+        GateRef callbackFnHandle = GetCallArg0(numArgs);
+
+        // @ref Map: callbackFnHandle->IsCallable check
+        BRANCH_LIKELY(TaggedIsCallable(glue, callbackFnHandle), &callbackIsCallable, &notCallable);
+        Bind(&callbackIsCallable);
+        {
+            GateRef thisArgHandle = GetCallArg1(numArgs);
+            // create result array of capacity len, all elements undefined
+            GateRef globalEnv = GetCurrentGlobalEnv();
+            auto sharedArrayFunc = GetGlobalEnvValue(VariableType::JS_ANY(), glue, globalEnv,
+                GlobalEnv::SHARED_ARRAY_FUNCTION_INDEX);
+            GateRef initialHClass =
+                Load(VariableType::JS_ANY(), glue, sharedArrayFunc, IntPtr(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
+            FastCreateSharedArrayWithLen(glue, &res, len, Undefined(), initialHClass, &newArrayReady);
+            Bind(&newArrayReady);
+            {
+                // Exception check after the result-array creation (as the C++ does after
+                // ArraySpeciesCreate). IsECMAObject is NOT re-checked here: the C++ check
+                // guards the slow species path whose constructor may return a non-object,
+                // while FastCreateSharedArrayWithLen always yields a NewSObject result.
+                IR_IF_UNLIKELY (HasPendingException(glue)) {
+                    res = Exception();
+                    Jump(&scopeRelease);
+                }
+
+                GateRef newArray = *res;
+                GateRef newElements = GetElementsArray(glue, newArray);
+                IR_WHILE (Int32LessThan(*k, len)) {
+                    GateRef kValue = GetElementByKey(glue, thisValue, *k);
+                    IR_IF_UNLIKELY (HasPendingException(glue)) {
+                        res = Exception();
+                        Jump(&scopeRelease);
+                    }
+
+                    GateRef key = IntToTaggedPtr(*k);
+                    JSCallArgs callArgs(JSCallMode::CALL_THIS_ARG3_WITH_RETURN);
+                    callArgs.callThisArg3WithReturnArgs = { thisArgHandle, kValue, key, thisValue };
+                    CallStubBuilder callBuilder(this, glue, callbackFnHandle,
+                        Int32(NUM_MANDATORY_JSFUNC_ARGS), 0, nullptr, callArgs);
+                    GateRef mapResult = callBuilder.JSCallDispatch();
+
+                    IR_IF (TaggedIsSharedType(glue, mapResult)) {
+                        IR_IF_UNLIKELY (HasPendingException(glue)) {
+                            res = Exception();
+                            Jump(&scopeRelease);
+                        }
+
+                        SetValueToTaggedArray(VariableType::JS_ANY(), glue, newElements, *k, mapResult);
+                        IR_IF_UNLIKELY (HasPendingException(glue)) {
+                            res = Exception();
+                            Jump(&scopeRelease);
+                        }
+                    } IR_ELSE {
+                        CallRuntime(glue, RTSTUB_ID(ThrowContainerBusinessError),
+                            { IntToTaggedInt(Int32(static_cast<int32_t>(containers::ErrorFlag::TYPE_ERROR))),
+                              IntToTaggedInt(Int32(GET_MESSAGE_STRING_ID(OnlyAcceptSendableValue1))) });
+                        res = Exception();
+                        Jump(&scopeRelease);
+                    }
+
+                    k = Int32Add(*k, Int32(1));
+                }
+                // res already holds either the result array or Exception().
+                Jump(&scopeRelease);
+            }
+        }
+        Bind(&notCallable);
+        {
+            // @ref Map: THROW_TYPE_ERROR_AND_RETURN "the callbackfun is not callable."
+            Label alreadyPending(env);
+            Label throwNow(env);
+            BRANCH(HasPendingException(glue), &alreadyPending, &throwNow);
+            Bind(&alreadyPending);
+            {
+                res = Exception();
+                Jump(&scopeRelease);
+            }
+            Bind(&throwNow);
+            {
+                CallRuntime(glue, RTSTUB_ID(ThrowTypeError),
+                    { IntToTaggedInt(Int32(GET_MESSAGE_STRING_ID(CallbackfunNotCallable))) });
+                res = Exception();
+                Jump(&scopeRelease);
+            }
+        }
+    }
+    Bind(&scopeRelease);
+    ConcurrentApiScopeReadDone<JSSharedArray>(glue, thisValue, expectModRecord,
+        desiredModRecord, scopeEntered, &readDoneExit);
+    Bind(&readDoneExit);
+    auto ret = *res;
+    env->SubCfgExit();
+    return ret;
+}
+
+// @ref panda::ecmascript::builtins::BuiltinsSharedArray::Filter()
+void BuiltinsSharedArrayStubBuilder::Filter(GateRef glue, GateRef thisValue,
+    GateRef numArgs, Variable *result, Label *exit, Label *slowPath)
+{
+    auto env = GetEnvironment();
+    Label speciesFast(env);
+
+    // Combined receiver + species guard
+    CheckSpeciesCreateFastPath(glue, thisValue, &speciesFast, slowPath);
+    Bind(&speciesFast);
+
+    *result = FilterImpl(glue, thisValue, numArgs);
+    Jump(exit);
+}
+
+// @ref panda::ecmascript::builtins::BuiltinsSharedArray::FilterArray()
+GateRef BuiltinsSharedArrayStubBuilder::FilterImpl(GateRef glue, GateRef thisValue,
+    GateRef numArgs)
+{
+    auto env = GetEnvironment();
+    Label entry(env);
+    env->SubCfgEntry(&entry);
+
+    Label canReadExit(env);
+    Label readDoneExit(env);
+    Label scopeRelease(env);
+    Label hasScopeException(env);
+    Label notScopeException(env);
+    Label callbackIsCallable(env);
+    Label notCallable(env);
+    Label newArrayReady(env);
+    DEFVARIABLE(expectModRecord, VariableType::INT32(), Int32(0));
+    DEFVARIABLE(desiredModRecord, VariableType::INT32(), Int32(0));
+    DEFVARIABLE(scopeEntered, VariableType::BOOL(), False());
+    DEFVARIABLE(k, VariableType::INT32(), Int32(0));
+    DEFVARIABLE(toIndex, VariableType::INT32(), Int32(0));
+    DEFVARIABLE(res, VariableType::JS_ANY(), Undefined());
+
+    // @ref Filter: ConcurrentApiScope<JSSharedArray> scope(thread, thisHandle)
+    ConcurrentApiScopeCanRead<JSSharedArray>(glue, thisValue, expectModRecord,
+        desiredModRecord, scopeEntered, &canReadExit);
+    Bind(&canReadExit);
+
+    // @ref Filter: RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread)
+    BRANCH(HasPendingException(glue), &hasScopeException, &notScopeException);
+    Bind(&hasScopeException);
+    {
+        res = Exception();
+        Jump(&scopeRelease);
+    }
+    Bind(&notScopeException);
+    {
+        GateRef len = GetSharedArrayLength(thisValue);
+        GateRef callbackFnHandle = GetCallArg0(numArgs);
+
+        // @ref Filter: callbackFnHandle->IsCallable check
+        BRANCH_LIKELY(TaggedIsCallable(glue, callbackFnHandle), &callbackIsCallable, &notCallable);
+        Bind(&callbackIsCallable);
+        {
+            GateRef thisArgHandle = GetCallArg1(numArgs);
+            // @ref FilterArray: NewTaggedArray(len, Undefined, SHARED_OLD_SPACE)
+            GateRef globalEnv = GetCurrentGlobalEnv();
+            auto sharedArrayFunc = GetGlobalEnvValue(VariableType::JS_ANY(), glue, globalEnv,
+                GlobalEnv::SHARED_ARRAY_FUNCTION_INDEX);
+            GateRef initialHClass =
+                Load(VariableType::JS_ANY(), glue, sharedArrayFunc, IntPtr(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
+            FastCreateSharedArrayWithLen(glue, &res, len, Undefined(), initialHClass, &newArrayReady);
+            Bind(&newArrayReady);
+            {
+                IR_IF_UNLIKELY (HasPendingException(glue)) {
+                    res = Exception();
+                    Jump(&scopeRelease);
+                }
+
+                GateRef newArray = *res;
+                GateRef newElements = GetElementsArray(glue, newArray);
+                IR_WHILE (Int32LessThan(*k, len)) {
+                    GateRef kValue = GetElementByKey(glue, thisValue, *k);
+                    IR_IF_UNLIKELY (HasPendingException(glue)) {
+                        res = Exception();
+                        Jump(&scopeRelease);
+                    }
+
+                    GateRef key = IntToTaggedPtr(*k);
+                    JSCallArgs callArgs(JSCallMode::CALL_THIS_ARG3_WITH_RETURN);
+                    callArgs.callThisArg3WithReturnArgs = { thisArgHandle, kValue, key, thisValue };
+                    CallStubBuilder callBuilder(this, glue, callbackFnHandle,
+                        Int32(NUM_MANDATORY_JSFUNC_ARGS), 0, nullptr, callArgs);
+                    GateRef callResult = callBuilder.JSCallDispatch();
+
+                    // @ref RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread)
+                    IR_IF_UNLIKELY (HasPendingException(glue)) {
+                        res = Exception();
+                        Jump(&scopeRelease);
+                    }
+
+                    GateRef keep = TaggedIsTrue(FastToBoolean(glue, callResult));
+                    IR_IF (keep) {
+                        SetValueToTaggedArray(VariableType::JS_ANY(), glue, newElements,
+                            *toIndex, kValue);
+                        IR_IF_UNLIKELY (HasPendingException(glue)) {
+                            res = Exception();
+                            Jump(&scopeRelease);
+                        }
+                        toIndex = Int32Add(*toIndex, Int32(1));
+                    }
+
+                    k = Int32Add(*k, Int32(1));
+                }
+
+                // @ref TaggedArray::ShouldTrim check
+                GateRef unused = Int32Sub(len, *toIndex);
+                IR_IF (Int32GreaterThan(unused, Int32(TaggedArray::MAX_END_UNUSED))) {
+                    CallNGCRuntime(glue, RTSTUB_ID(ArrayTrim), { glue, newElements,
+                        ZExtInt32ToInt64(*toIndex) });
+                }
+                SetSharedArrayLength(glue, newArray, *toIndex);
+                Jump(&scopeRelease);
+            }
+        }
+        Bind(&notCallable);
+        {
+            // @ref Filter: THROW_TYPE_ERROR_AND_RETURN "the callbackfun is not callable."
+            Label alreadyPending(env);
+            Label throwNow(env);
+            BRANCH(HasPendingException(glue), &alreadyPending, &throwNow);
+            Bind(&alreadyPending);
+            {
+                res = Exception();
+                Jump(&scopeRelease);
+            }
+            Bind(&throwNow);
+            {
+                CallRuntime(glue, RTSTUB_ID(ThrowTypeError),
+                    { IntToTaggedInt(Int32(GET_MESSAGE_STRING_ID(CallbackfunNotCallable))) });
+                res = Exception();
+                Jump(&scopeRelease);
+            }
+        }
+    }
+    Bind(&scopeRelease);
+    ConcurrentApiScopeReadDone<JSSharedArray>(glue, thisValue, expectModRecord,
+        desiredModRecord, scopeEntered, &readDoneExit);
+    Bind(&readDoneExit);
+    auto ret = *res;
+    env->SubCfgExit();
+    return ret;
+}
+
+// @ref panda::ecmascript::builtins::BuiltinsSharedArray::Reduce()
+void BuiltinsSharedArrayStubBuilder::Reduce(GateRef glue, GateRef thisValue,
+    GateRef numArgs, Variable *result, Label *exit, Label *slowPath)
+{
+    auto env = GetEnvironment();
+    Label isSArray(env);
+
+    // @ref Reduce: ARRAY_CHECK_SHARED_ARRAY("The reduce method cannot be bound.")
+    BRANCH_LIKELY(TaggedIsJSSharedArray(glue, thisValue), &isSArray, slowPath);
+    Bind(&isSArray);
+
+    *result = ReduceImpl(glue, thisValue, numArgs);
+    Jump(exit);
+}
+
+// @ref panda::ecmascript::builtins::BuiltinsSharedArray::Reduce()
+GateRef BuiltinsSharedArrayStubBuilder::ReduceImpl(GateRef glue, GateRef thisValue,
+    GateRef numArgs)
+{
+    auto env = GetEnvironment();
+    Label entry(env);
+    env->SubCfgEntry(&entry);
+
+    Label canReadExit(env);
+    Label readDoneExit(env);
+    Label scopeRelease(env);
+    Label hasScopeException(env);
+    Label notScopeException(env);
+    Label callbackIsCallable(env);
+    Label notCallable(env);
+
+    DEFVARIABLE(expectModRecord, VariableType::INT32(), Int32(0));
+    DEFVARIABLE(desiredModRecord, VariableType::INT32(), Int32(0));
+    DEFVARIABLE(scopeEntered, VariableType::BOOL(), False());
+    DEFVARIABLE(k, VariableType::INT32(), Int32(0));
+    DEFVARIABLE(accumulator, VariableType::JS_ANY(), Undefined());
+
+    // @ref Reduce: ConcurrentApiScope<JSSharedArray> scope(thread, thisHandle)
+    ConcurrentApiScopeCanRead<JSSharedArray>(glue, thisValue, expectModRecord,
+        desiredModRecord, scopeEntered, &canReadExit);
+    Bind(&canReadExit);
+
+    // @ref Reduce: RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread)
+    BRANCH(HasPendingException(glue), &hasScopeException, &notScopeException);
+    Bind(&hasScopeException);
+    {
+        accumulator = Exception();
+        Jump(&scopeRelease);
+    }
+    Bind(&notScopeException);
+    {
+        GateRef len = GetSharedArrayLength(thisValue);
+        GateRef callbackFnHandle = GetCallArg0(numArgs);
+
+        // @ref Reduce: callbackFnHandle->IsCallable check
+        BRANCH_LIKELY(TaggedIsCallable(glue, callbackFnHandle), &callbackIsCallable, &notCallable);
+        Bind(&callbackIsCallable);
+        {
+            // @ref Reduce: check "out of range."
+            Label outOfRange(env);
+            Label checkInitialValue(env);
+            GateRef emptyWithoutInitial = LogicAndBuilder(env)
+                .And(Int32Equal(len, Int32(0)))
+                .And(Int64LessThan(numArgs, IntPtr(2))) // 2: argc limit to provide initialValue
+                .Done();
+            BRANCH(emptyWithoutInitial, &outOfRange, &checkInitialValue);
+            Bind(&outOfRange);
+            {
+                // @ref Reduce: THROW_TYPE_ERROR_AND_RETURN "out of range."
+                Label alreadyPending(env);
+                Label throwNow(env);
+                BRANCH(HasPendingException(glue), &alreadyPending, &throwNow);
+                Bind(&alreadyPending);
+                {
+                    accumulator = Exception();
+                    Jump(&scopeRelease);
+                }
+                Bind(&throwNow);
+                {
+                    CallRuntime(glue, RTSTUB_ID(ThrowTypeError),
+                        { IntToTaggedInt(Int32(GET_MESSAGE_STRING_ID(OutOfRange))) });
+                    accumulator = Exception();
+                    Jump(&scopeRelease);
+                }
+            }
+            Bind(&checkInitialValue);
+            Label hasInitialValue(env);
+            Label checkLenPositive(env);
+            Label noInitialValue(env);
+            Label initDone(env);
+            // 2:2 means the number of parameters
+            BRANCH(Int64GreaterThanOrEqual(numArgs, IntPtr(2)), &hasInitialValue, &checkLenPositive);
+            Bind(&hasInitialValue);
+            {
+                // argc >= 2: accumulator = initialValue, k stays 0.
+                accumulator = GetCallArg1(numArgs);
+                Jump(&initDone);
+            }
+            // @ref Reduce: keep "else if (len > 0)" branch as C++
+            Bind(&checkLenPositive);
+            BRANCH(Int32GreaterThan(len, Int32(0)), &noInitialValue, &initDone);
+            Bind(&noInitialValue);
+            {
+                accumulator = GetElementByKey(glue, thisValue, *k);
+                IR_IF_UNLIKELY (HasPendingException(glue)) {
+                    accumulator = Exception();
+                    Jump(&scopeRelease);
+                }
+                k = Int32Add(*k, Int32(1));
+                Jump(&initDone);
+            }
+            Bind(&initDone);
+            GateRef argsLength = Int32(4); // 4: «accumulator, kValue, k, thisValue»
+            NewObjectStubBuilder newBuilder(this);
+            GateRef argList = newBuilder.NewTaggedArray(glue, argsLength);
+            IR_WHILE (Int32LessThan(*k, len)) {
+                GateRef kValue = GetElementByKey(glue, thisValue, *k);
+                IR_IF_UNLIKELY (HasPendingException(glue)) {
+                    accumulator = Exception();
+                    Jump(&scopeRelease);
+                }
+
+                SetValueToTaggedArray(VariableType::JS_ANY(), glue, argList, Int32(0), *accumulator);
+                SetValueToTaggedArray(VariableType::JS_ANY(), glue, argList, Int32(1), kValue);
+                // 2: parameter location
+                SetValueToTaggedArray(VariableType::INT32(), glue, argList, Int32(2), IntToTaggedInt(*k));
+                // 3: parameter location
+                SetValueToTaggedArray(VariableType::JS_ANY(), glue, argList, Int32(3), thisValue);
+                GateRef argv = PtrAdd(argList, IntPtr(TaggedArray::DATA_OFFSET));
+                JSCallArgs callArgs(JSCallMode::CALL_THIS_ARGV_WITH_RETURN);
+                callArgs.callThisArgvWithReturnArgs = { argsLength, argv, Undefined() };
+                CallStubBuilder callBuilder(this, glue, callbackFnHandle, argsLength, 0, nullptr, callArgs);
+                GateRef callResult = callBuilder.JSCallDispatch();
+
+                IR_IF_UNLIKELY (HasPendingException(glue)) {
+                    accumulator = Exception();
+                    Jump(&scopeRelease);
+                }
+                accumulator = callResult;
+
+                k = Int32Add(*k, Int32(1));
+            }
+            // @ref Reduce: RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread) after the
+            // ReduceUnStableJSArray call
+            IR_IF_UNLIKELY (HasPendingException(glue)) {
+                accumulator = Exception();
+                Jump(&scopeRelease);
+            }
+            Jump(&scopeRelease);
+        }
+        Bind(&notCallable);
+        {
+            // @ref Reduce: THROW_TYPE_ERROR_AND_RETURN "the callbackfun is not callable."
+            Label alreadyPending(env);
+            Label throwNow(env);
+            BRANCH(HasPendingException(glue), &alreadyPending, &throwNow);
+            Bind(&alreadyPending);
+            {
+                accumulator = Exception();
+                Jump(&scopeRelease);
+            }
+            Bind(&throwNow);
+            {
+                CallRuntime(glue, RTSTUB_ID(ThrowTypeError),
+                    { IntToTaggedInt(Int32(GET_MESSAGE_STRING_ID(CallbackfunNotCallable))) });
+                accumulator = Exception();
+                Jump(&scopeRelease);
+            }
+        }
+    }
+    Bind(&scopeRelease);
+    ConcurrentApiScopeReadDone<JSSharedArray>(glue, thisValue, expectModRecord,
+        desiredModRecord, scopeEntered, &readDoneExit);
+    Bind(&readDoneExit);
+    auto ret = *accumulator;
+    env->SubCfgExit();
+    return ret;
+}
+
 }  // namespace panda::ecmascript::kungfu

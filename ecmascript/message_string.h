@@ -69,6 +69,8 @@ namespace panda::ecmascript {
     V(InvalidStringLength, "Invalid string length")                                                            \
     V(InvalidNewTarget, "new.target is not an object")                                                         \
     V(ObjIsNotCallable, "obj is not Callable")                                                                 \
+    V(CallbackfunNotCallable, "the callbackfun is not callable.")                                               \
+    V(CallbackNotCallable, "callback is not callable")                                                         \
     V(SharedObjectRefersLocalObject, "shared object refers a local object")                                    \
     V(InvalidRadixLength, "radix must be 2 to 36")                                                             \
     V(SetPrototypeOfFailed, "SetPrototypeOf: prototype set failed")                                            \
@@ -110,7 +112,8 @@ namespace panda::ecmascript {
     V(StoreValueToConstPool, "const pool do not support store value in asm, line:%d")                          \
     V(GetObjectFromConstPoolCacheOutOfBounds, "index of cache element in const pool out of bounds, line:%d")   \
     V(ConvertNonTemporaryHeapObjectAsHeapObject, "convert a non object temporay tagged as object, line:%d")    \
-    V(ThisBranchOnlySupportInCompressedPointer, "ThisBranchOnlySupportInCompressedPointer")
+    V(ThisBranchOnlySupportInCompressedPointer, "ThisBranchOnlySupportInCompressedPointer")                    \
+    V(OutOfRange, "out of range.")
 
 #define DEBUG_CHECK_MESSAGE_STRING_LIST(V)                                                   \
     V(IsCallable)                                                                            \

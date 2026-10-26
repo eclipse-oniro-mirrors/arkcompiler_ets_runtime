@@ -48,6 +48,7 @@
 #include "ecmascript/mem/visitor.h"
 #include "ecmascript/ic/properties_cache.h"
 #include "ecmascript/property_attributes.h"
+#include "ecmascript/shared_objects/js_sendable_arraybuffer.h"
 
 namespace panda::ecmascript::kungfu {
 using JSFunction = panda::ecmascript::JSFunction;
@@ -922,6 +923,21 @@ inline GateRef StubBuilder::TaggedIsJSProxy(GateRef glue, GateRef x)
 inline GateRef StubBuilder::TaggedIsJSArray(GateRef glue, GateRef x)
 {
     return env_->GetBuilder()->TaggedIsJSArray(glue, x);
+}
+
+inline GateRef StubBuilder::TaggedIsJSSharedArray(GateRef glue, GateRef x)
+{
+    return env_->GetBuilder()->TaggedIsJSSharedArray(glue, x);
+}
+
+inline GateRef StubBuilder::TaggedIsJSSharedMap(GateRef glue, GateRef x)
+{
+    return env_->GetBuilder()->TaggedIsJSSharedMap(glue, x);
+}
+
+inline GateRef StubBuilder::TaggedIsJSSharedSet(GateRef glue, GateRef x)
+{
+    return env_->GetBuilder()->TaggedIsJSSharedSet(glue, x);
 }
 
 inline GateRef StubBuilder::IsTaggedArray(GateRef glue, GateRef x)
@@ -4393,6 +4409,12 @@ inline GateRef StubBuilder::GetArrayBufferData(GateRef glue, GateRef buffer)
 inline GateRef StubBuilder::GetArrayBufferByteLength(GateRef buffer)
 {
     GateRef offset = IntPtr(JSArrayBuffer::BYTE_LENGTH_OFFSET);
+    return LoadPrimitive(VariableType::INT32(), buffer, offset);
+}
+
+inline GateRef StubBuilder::GetSendableArrayBufferByteLength(GateRef buffer)
+{
+    GateRef offset = IntPtr(JSSendableArrayBuffer::BYTE_LENGTH_OFFSET);
     return LoadPrimitive(VariableType::INT32(), buffer, offset);
 }
 

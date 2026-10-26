@@ -97,6 +97,8 @@ libark_jsoptimizer_sources = [
   "builtins/builtins_shared_array_indexof_stub_builder.cpp",
   "builtins/builtins_shared_array_stub_builder.cpp",
   "builtins/builtins_shared_map_stub_builder.cpp",
+  "builtins/builtins_shared_set_stub_builder.cpp",
+  "builtins/builtins_shared_typedarray_stub_builder.cpp",
   "builtins/builtins_string_stub_builder.cpp",
   "builtins/builtins_stubs.cpp",
   "builtins/builtins_typedarray_stub_builder.cpp",

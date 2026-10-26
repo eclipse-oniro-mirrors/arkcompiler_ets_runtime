@@ -44,12 +44,21 @@ public:
         GateRef numArgs, Variable *result, Label *exit, Label *slowPath);
     void Delete(GateRef glue, GateRef thisValue,
         GateRef numArgs, Variable *result, Label *exit, Label *slowPath);
+    void ForEach(GateRef glue, GateRef thisValue,
+        GateRef numArgs, Variable *result, Label *exit, Label *slowPath);
+    void Clear(GateRef glue, GateRef thisValue,
+        GateRef numArgs, Variable *result, Label *exit, Label *slowPath);
+    void Entries(GateRef glue, GateRef thisValue,
+        GateRef numArgs, Variable *result, Label *exit, Label *slowPath);
+    void GetSize(GateRef glue, GateRef thisValue,
+        GateRef numArgs, Variable *result, Label *exit, Label *slowPath);
 
 private:
     void SetImpl(GateRef glue, GateRef thisValue, GateRef key, GateRef value);
     GateRef GetImpl(GateRef glue, GateRef thisValue, GateRef key);
     GateRef HasImpl(GateRef glue, GateRef thisValue, GateRef key);
     GateRef DeleteImpl(GateRef glue, GateRef thisValue, GateRef key);
+    void ClearImpl(GateRef glue, GateRef thisValue);
 };
 }  // namespace panda::ecmascript::kungfu
 #endif  // ECMASCRIPT_COMPILER_BUILTINS_SHARED_MAP_STUB_BUILDER_H
