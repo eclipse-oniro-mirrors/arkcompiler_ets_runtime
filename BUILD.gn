@@ -1676,7 +1676,7 @@ if (is_mingw) {
       "ecmascript/platform/unix/linux/dfx_hisys_event.cpp",
       "ecmascript/platform/unix/linux/process.cpp",
       "ecmascript/platform/unix/linux/pandafile.cpp",
-      "ecmascript/platform/common/module.cpp",
+      "ecmascript/platform/unix/linux/module.cpp",
       "ecmascript/platform/common/ecma_context.cpp",
       "ecmascript/platform/common/parameters.cpp",
       "ecmascript/platform/common/asm_stack.cpp",

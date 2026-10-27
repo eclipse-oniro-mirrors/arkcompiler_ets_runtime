@@ -4816,7 +4816,7 @@ void JSNApi::SetAssetPath(EcmaVM *vm, const std::string &assetPath)
 {
     ecmascript::CString path = assetPath.c_str();
     // check input assetPath
-#if !defined(PANDA_TARGET_WINDOWS) && !defined(PANDA_TARGET_MACOS)
+#if !defined(PANDA_TARGET_WINDOWS) && !defined(PANDA_TARGET_MACOS) && !defined(PANDA_TARGET_PREVIEW)
     if (!ModulePathHelper::ValidateAbcPath(path, ecmascript::ValidateFilePath::ABC)) {
         LOG_FULL(FATAL) << "Invalid input assetPath: " << assetPath.c_str();
     }
