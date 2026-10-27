@@ -5,3 +5,5 @@ obj/arkcompiler/ets_runtime/ecmascript/dfx/hprof/tests/HeapDumpTest
 #35677
 obj/arkcompiler/ets_runtime/test/jittest/lazy_deopt_10/lazy_deopt_10
 
+#workitem 44
+obj/arkcompiler/ets_runtime/ecmascript/arksteed/unittests/ArkSteedInitializationIntervalVerifierTest
