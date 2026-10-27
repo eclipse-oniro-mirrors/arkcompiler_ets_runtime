@@ -314,10 +314,6 @@ config("common_components_common_config") {
     }
   }
 
-  if (enable_handle_leak_detect) {
-    defines += [ "ENABLE_LOCAL_HANDLE_LEAK_DETECT" ]
-  }
-
   if (is_ohos && is_standard_system) {
     defines += [ "ENABLE_EXCEPTION_BACKTRACE" ]
 
@@ -351,9 +347,6 @@ config("common_components_test_config") {
     ":common_components_common_config",
   ]
 
-  if (enable_handle_leak_detect) {
-    defines = [ "ENABLE_LOCAL_HANDLE_LEAK_DETECT" ]
-  }
   if (!is_mac) {
     ldflags = [ "-Wl,-rpath=\$ORIGIN/" ]
   } else {
@@ -497,8 +490,6 @@ ohos_shared_library("libark_common_components_fuzz_test") {
       "platform/unix/linux/os.cpp",
     ]
   }
-
-  # deps = [ ":libarkcommon-runtime" ]
 
   public_configs = [ ":common_components_public_config" ]
   public_configs += [ "//arkcompiler/ets_runtime:include_llvm" ]

@@ -230,38 +230,30 @@ if (!ark_standalone_build) {
   # Standalone build: hilog is never enabled (!ark_standalone_build gates it off).
   enable_hilog = false
 }
-enable_hisysevent =
-    !ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) && is_ohos &&
+# Common derived condition: dfx/observability features on the ohos standard system.
+not_arkui_x = !(defined(is_arkui_x) && is_arkui_x)
+enable_ohos_dfx_common =
+    !ark_standalone_build && not_arkui_x && is_ohos &&
     is_standard_system && !is_qemu_runtime
-enable_dump_in_faultlog =
-    !ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) && is_ohos &&
-    is_standard_system && !is_qemu_runtime
+
+enable_hisysevent = enable_ohos_dfx_common
+enable_dump_in_faultlog = enable_ohos_dfx_common
+enable_bytrace = enable_ohos_dfx_common
+enable_hitrace = enable_ohos_dfx_common
+enable_unwinder = enable_ohos_dfx_common
+enable_backtrace_local = enable_ohos_dfx_common && (current_cpu == "arm64")
+enable_async_stack = enable_ohos_dfx_common && (current_cpu == "arm64")
+enable_static_backtrace = ets_runtime_feature_enable_static_backtrace &&
+                          enable_ohos_dfx_common && (current_cpu == "arm64")
 enable_handle_node_id_map_proto = enable_dump_in_faultlog
 if (defined(global_parts_info) &&
     !defined(global_parts_info.thirdparty_protobuf)) {
   enable_handle_node_id_map_proto = false
 }
-enable_bytrace =
-    !ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) && is_ohos &&
-    is_standard_system && !is_qemu_runtime
-enable_hitrace =
-    !ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) && is_ohos &&
-    is_standard_system && !is_qemu_runtime
-enable_unwinder =
-    !ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) && is_ohos &&
-    is_standard_system && !is_qemu_runtime
-enable_backtrace_local =
-    !ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) && is_ohos &&
-    is_standard_system && !is_qemu_runtime && (current_cpu == "arm64")
-enable_async_stack =
-    !ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) && is_ohos &&
-    is_standard_system && !is_qemu_runtime && (current_cpu == "arm64")
-enable_static_backtrace =
-    ets_runtime_feature_enable_static_backtrace &&
-    !ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) && is_ohos &&
-    is_standard_system && !is_qemu_runtime && (current_cpu == "arm64")
+# NOTE: ecma_stackinfo uses !build_ohos_sdk instead of !is_qemu_runtime, so it
+# must NOT be folded into enable_ohos_dfx_common.
 enable_ecma_stackinfo =
-    !ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) && is_ohos &&
+    !ark_standalone_build && not_arkui_x && is_ohos &&
     is_standard_system && !build_ohos_sdk
 
 hiviewdfx_deps = []
@@ -368,10 +360,6 @@ template("libark_jsruntime_common_set") {
           rebase_path("$root_gen_dir/arkcompiler/ets_runtime/stub.an")
     }
     defines = [ "STUB_AN_FILE=\"${stub_an_file_path}\"" ]
-
-    if (ets_runtime_enable_ark_steed) {
-      defines += [ "ECMASCRIPT_ENABLE_ARK_STEED_GN" ]
-    }
 
     if (current_cpu == "arm64") {
       defines += [ "ENABLE_POSTFORK_FORCEEXPAND" ]

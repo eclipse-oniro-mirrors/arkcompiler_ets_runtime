@@ -432,13 +432,6 @@ config("ark_jsruntime_public_config") {
     defines += [ "PANDA_JS_ETS_HYBRID_MODE" ]
     configs += [ "$ark_root/arkplatform:arkplatform_public_config" ]
   }
-  print("######### ets_runtime public enable compressed pointer = ${ets_runtime_enable_compressed_pointer} #########")
-  if (ets_runtime_enable_compressed_pointer) {
-    defines += [ "USE_COMPRESSED_POINTER" ]
-  }
-  if (is_debug) {
-    defines += [ "STORE_CHECK_FOR_COMPRESSED_POINTER" ]
-  }
 }
 
 intl_sources = []
@@ -476,10 +469,7 @@ if (enable_ark_intl) {
   }
 }
 
-config("ark_jsruntime_compiler_config") {
-  configs = [ "$js_root:ark_jsruntime_common_config" ]
-}
-
+# DFX config: dump, bytrace, hitrace, hilog, hisysevent, unwinder, backtrace, handle leak detect, etc.
 config("hiviewdfx_config") {
   defines = []
   if (enable_dump_in_faultlog) {
@@ -518,6 +508,10 @@ config("hiviewdfx_config") {
     defines += [ "ENABLE_STATIC_BACKTRACE" ]
   }
 
+  if (enable_handle_leak_detect) {
+    defines += [ "ENABLE_LOCAL_HANDLE_LEAK_DETECT" ]
+  }
+
   include_dirs = [ "$hilog_root/include" ]
 }
 
@@ -531,10 +525,141 @@ config("dfx_extra_config") {
   ]
 }
 
-config("ark_jsruntime_common_config") {
-  configs = [ ":hiviewdfx_config" ]
+# Platform-related macros: PANDA_TARGET_*, PANDA_USE_FUTEX, MUSL, QOS, CROSS_PLATFORM, etc.
+config("ark_jsruntime_platform_config") {
+  defines = []
+  ldflags = []
+  cflags_cc = []
 
-  defines = [ "PANDA_ENABLE_LTO" ]
+  if (ark_standalone_build) {
+    defines += [ "STANDALONE_MODE" ]
+  }
+
+  if (use_musl) {
+    defines += [ "PANDA_USE_MUSL" ]
+  }
+
+  if (build_public_version) {
+    defines += [ "IS_PUBLIC_VERSION" ]
+  }
+
+  if (is_arkui_x) {
+    defines += [ "CROSS_PLATFORM" ]
+  }
+
+  if (target_os == "android") {
+    defines += [ "ANDROID_PLATFORM" ]
+  }
+
+  if (is_ohos && is_standard_system && !is_arkui_x && !is_qemu_runtime &&
+      defined(global_parts_info) &&
+      defined(global_parts_info.resourceschedule_qos_manager)) {
+    defines += [ "ENABLE_QOS" ]
+  }
+
+  if (is_linux) {
+    defines += [
+      "PANDA_TARGET_PREVIEW",
+      "PANDA_TARGET_UNIX",
+      "PANDA_TARGET_LINUX",
+      "PANDA_USE_FUTEX",
+    ]
+  } else if (is_mingw) {
+    cflags_cc += [
+      "-std=c++17",
+      "-Wno-ignored-attributes",
+    ]
+    defines += [
+      "PANDA_TARGET_PREVIEW",
+      "PANDA_TARGET_WINDOWS",
+      "_CRTBLD",
+      "__LIBMSVCRT__",
+    ]
+    ldflags += [ "-lshlwapi" ]
+  } else if (is_mac) {
+    cflags_cc += [ "-std=c++17" ]
+    defines += [
+      "PANDA_TARGET_PREVIEW",
+      "PANDA_TARGET_UNIX",
+      "PANDA_TARGET_MACOS",
+    ]
+  } else if (target_os == "android") {
+    defines += [
+      "PANDA_TARGET_ANDROID",
+      "PANDA_TARGET_UNIX",
+      "PANDA_USE_FUTEX",
+    ]
+    if (!ark_standalone_build) {
+      defines += [ "ENABLE_ANLOG" ]
+    }
+  } else if (target_os == "ios") {
+    defines += [
+      "PANDA_TARGET_IOS",
+      "PANDA_TARGET_UNIX",
+    ]
+  } else {
+    defines += [
+      "PANDA_TARGET_UNIX",
+      "PANDA_USE_FUTEX",
+    ]
+    if (!is_standard_system && (current_cpu != "arm" || is_wearable_product)) {
+      defines += [ "PANDA_TARGET_MOBILE" ]
+    }
+  }
+
+  if (is_ohos) {
+    defines += [ "PANDA_TARGET_OHOS" ]
+  }
+
+  if (is_qemu_runtime && is_ohos) {
+    defines += [ "OHOS_FOR_QEMU" ]
+  }
+
+  if (is_ohos && is_standard_system) {
+    defines += [ "ENABLE_EXCEPTION_BACKTRACE" ]
+
+    if (use_musl && (current_cpu == "arm" || current_cpu == "arm64") &&
+        !is_mac && !is_mingw && target_os != "ios" && !is_asan) {
+      defines += [ "HOOK_ENABLE" ]
+    }
+  }
+}
+
+# CPU architecture macros: PANDA_TARGET_ARM32/ARM64/X86/AMD64, 32/64-bit, EXCLUDE_C_INTERPRETER, etc.
+config("ark_jsruntime_cpu_arch_config") {
+  defines = []
+  if (current_cpu == "arm") {
+    defines += [
+      "PANDA_TARGET_ARM32_ABI_SOFT=1",
+      "PANDA_TARGET_ARM32",
+      "PANDA_TARGET_32",
+    ]
+  } else if (current_cpu == "arm64") {
+    defines += [
+      "PANDA_TARGET_ARM64",
+      "PANDA_TARGET_64",
+      "PANDA_ENABLE_GLOBAL_REGISTER_VARIABLES",
+      "PANDA_USE_32_BIT_POINTER",
+    ]
+    if (!is_mingw && !is_mac && target_os != "ios" && !is_arkui_x &&
+        !enable_c_interpreter_arm64) {
+      defines += [ "EXCLUDE_C_INTERPRETER" ]
+    }
+  } else if (current_cpu == "x86") {
+    defines += [ "PANDA_TARGET_X86" ]
+  } else if (current_cpu == "amd64" || current_cpu == "x64" ||
+             current_cpu == "x86_64") {
+    defines += [
+      "PANDA_TARGET_64",
+      "PANDA_TARGET_AMD64",
+      "PANDA_USE_32_BIT_POINTER",
+    ]
+  }
+}
+
+# GC-related macros: CMC/CMS/sticky GC, compressed pointer, cold startup GC policy, etc.
+config("ark_jsruntime_gc_config") {
+  defines = []
 
   if (is_ohos) {
     defines += [ "ENABLE_COLD_STARTUP_GC_POLICY" ]
@@ -555,6 +680,7 @@ config("ark_jsruntime_common_config") {
     defines += [ "CMC_LCOV_EXCL" ]
     print("########## ets_runtime disable cmc-gc ##############")
   }
+
   if (enable_cms_gc) {
     defines += [ "USE_CMS_GC=1" ]
   } else {
@@ -578,42 +704,11 @@ config("ark_jsruntime_common_config") {
   if (is_debug) {
     defines += [ "STORE_CHECK_FOR_COMPRESSED_POINTER" ]
   }
+}
 
-  if (ark_standalone_build) {
-    defines += [ "STANDALONE_MODE" ]
-  }
-
-  if (enable_latest_optimization) {
-    defines += [ "LATEST_OPTIMIZATION_MACRO" ]
-  }
-
-  if (enable_controlflow_optimization) {
-    defines += [ "CONTROLFLOW_OPTIMIZATION" ]
-  }
-
-  if (enable_v70_optimization) {
-    defines += [ "V70_OPTIMIZATION_MACRO" ]
-  }
-
-  if (ets_runtime_feature_enable_list) {
-    defines += [ "ENABLE_API_FUNCTION_OPTIMIZATION" ]
-  }
-
-  if (enable_branch_elimination) {
-    defines += [ "ENABLE_BRANCH_ELIMINATION" ]
-  }
-
-  if (enable_branch_profile) {
-    defines += [ "ENABLE_BRANCH_PROFILE" ]
-  }
-
-  if (ets_runtime_enable_ark_steed) {
-    defines += [ "ECMASCRIPT_ENABLE_ARK_STEED_GN" ]
-  }
-
-  if (ets_runtime_feature_enable_stub_function_reordering) {
-    defines += [ "STUB_FUNCTION_REORDERING" ]
-  }
+# Compiler flags: warning set, -std/-O level, LTO/PGO/back-annotation, etc.
+config("ark_jsruntime_compiler_flags_config") {
+  defines = [ "PANDA_ENABLE_LTO" ]
 
   cflags_cc = [
     "-Wall",
@@ -678,125 +773,13 @@ config("ark_jsruntime_common_config") {
     }
   }
 
-  if (use_musl) {
-    defines += [ "PANDA_USE_MUSL" ]
-  }
-
-  if (build_public_version) {
-    defines += [ "IS_PUBLIC_VERSION" ]
-  }
-
-  if (is_arkui_x) {
-    defines += [ "CROSS_PLATFORM" ]
-  }
-
-  if (target_os == "android") {
-    defines += [ "ANDROID_PLATFORM" ]
-  }
-
-  if (is_ohos && is_standard_system && !is_arkui_x && !is_qemu_runtime &&
-      defined(global_parts_info) &&
-      defined(global_parts_info.resourceschedule_qos_manager)) {
-    defines += [ "ENABLE_QOS" ]
-  }
-
-
-  if (ark_compile_mode != "release") {
-    ark_profiler_features = [
-      "ECMASCRIPT_SUPPORT_CPUPROFILER",
-      "ECMASCRIPT_SUPPORT_HEAPPROFILER",
-      "ECMASCRIPT_SUPPORT_HEAPSAMPLING",
-      "ECMASCRIPT_SUPPORT_SNAPSHOT",
-      "ECMASCRIPT_SUPPORT_TRACING",
-    ]
-    defines += [ "ECMASCRIPT_SUPPORT_DEBUGGER" ]
-    defines += ark_profiler_features
-  }
-
   ldflags = []
-  if (is_linux) {
-    defines += [
-      "PANDA_TARGET_PREVIEW",
-      "PANDA_TARGET_UNIX",
-      "PANDA_TARGET_LINUX",
-      "PANDA_USE_FUTEX",
-    ]
-  } else if (is_mingw) {
-    cflags_cc += [
-      "-std=c++17",
-      "-Wno-ignored-attributes",
-    ]
-    defines += [
-      "PANDA_TARGET_PREVIEW",
-      "PANDA_TARGET_WINDOWS",
-      "_CRTBLD",
-      "__LIBMSVCRT__",
-    ]
-
-    ldflags += [ "-lshlwapi" ]
-
-    # not support profiler on Windows yet
-    if (ark_compile_mode != "release") {
-      defines -= ark_profiler_features
-    }
-  } else if (is_mac) {
-    cflags_cc += [ "-std=c++17" ]
-    defines += [
-      "PANDA_TARGET_PREVIEW",
-      "PANDA_TARGET_UNIX",
-      "PANDA_TARGET_MACOS",
-    ]
-
-    # not support profiler on MacOS yet
-    if (ark_compile_mode != "release") {
-      defines -= ark_profiler_features
-    }
-  } else if (target_os == "android") {
-    defines += [
-      "PANDA_TARGET_ANDROID",
-      "PANDA_TARGET_UNIX",
-      "PANDA_USE_FUTEX",
-    ]
-    if (!ark_standalone_build) {
-      defines += [ "ENABLE_ANLOG" ]
-    }
-  } else if (target_os == "ios") {
-    defines += [
-      "PANDA_TARGET_IOS",
-      "PANDA_TARGET_UNIX",
-    ]
-
-    # not support profiler on iOS yet
-    if (ark_compile_mode != "release") {
-      defines -= ark_profiler_features
-    }
-  } else {
-    defines += [
-      "PANDA_TARGET_UNIX",
-      "PANDA_USE_FUTEX",
-    ]
-    if (!is_standard_system && (current_cpu != "arm" || is_wearable_product)) {
-      defines += [ "PANDA_TARGET_MOBILE" ]
-    }
-  }
-
-  if (is_ohos) {
-    defines += [ "PANDA_TARGET_OHOS" ]
-  }
-
-  if (is_qemu_runtime && is_ohos) {
-    defines += [ "OHOS_FOR_QEMU" ]
-  }
-
   if (!is_mac && target_os != "ios" && !use_libfuzzer && !enable_lto_O0) {
     cflags_cc += [ "-flto=thin" ]
     ldflags += [ "-flto=thin" ]
   }
 
-  if (use_libfuzzer) {
-    defines += [ "FUZZ_TEST" ]
-  }
-
+  # Build mode: fastverify / debug / release.
   if (is_fastverify) {
     cflags_cc += [
       "-O3",
@@ -821,54 +804,49 @@ config("ark_jsruntime_common_config") {
   } else {
     defines += [ "NDEBUG" ]
   }
+}
 
-  if (enable_asm_assert) {
-    defines += [ "ENABLE_ASM_ASSERT" ]
+# Runtime feature macros: optimization levels, ArkSteed, stub reordering, INTL, COW_ARRAY,
+# ENABLE_ASM_ASSERT, etc.
+config("ark_jsruntime_feature_config") {
+  defines = []
+
+  if (enable_latest_optimization) {
+    defines += [ "LATEST_OPTIMIZATION_MACRO" ]
   }
 
-  if (run_with_asan) {
-    defines += [ "RUN_WITH_ASAN" ]
+  if (enable_controlflow_optimization) {
+    defines += [ "CONTROLFLOW_OPTIMIZATION" ]
   }
 
-  if (is_asan) {
-    if (use_hwasan) {
-      defines += [ "USE_HWASAN" ]
-    } else {
-      defines += [ "USE_ASAN" ]
-    }
+  if (enable_v70_optimization) {
+    defines += [ "V70_OPTIMIZATION_MACRO" ]
+  }
+
+  if (ets_runtime_feature_enable_list) {
+    defines += [ "ENABLE_API_FUNCTION_OPTIMIZATION" ]
+  }
+
+  if (enable_branch_elimination) {
+    defines += [ "ENABLE_BRANCH_ELIMINATION" ]
+  }
+
+  if (enable_branch_profile) {
+    defines += [ "ENABLE_BRANCH_PROFILE" ]
+  }
+
+  if (ets_runtime_enable_ark_steed) {
+    defines += [ "ECMASCRIPT_ENABLE_ARK_STEED_GN" ]
+  }
+
+  if (ets_runtime_feature_enable_stub_function_reordering) {
+    defines += [ "STUB_FUNCTION_REORDERING" ]
   }
 
   if (enable_cow_array) {
     defines += [ "ENABLE_COW_ARRAY" ]
   }
 
-  if (current_cpu == "arm") {
-    defines += [
-      "PANDA_TARGET_ARM32_ABI_SOFT=1",
-      "PANDA_TARGET_ARM32",
-      "PANDA_TARGET_32",
-    ]
-  } else if (current_cpu == "arm64") {
-    defines += [
-      "PANDA_TARGET_ARM64",
-      "PANDA_TARGET_64",
-      "PANDA_ENABLE_GLOBAL_REGISTER_VARIABLES",
-      "PANDA_USE_32_BIT_POINTER",
-    ]
-    if (!is_mingw && !is_mac && target_os != "ios" && !is_arkui_x &&
-        !enable_c_interpreter_arm64) {
-      defines += [ "EXCLUDE_C_INTERPRETER" ]
-    }
-  } else if (current_cpu == "x86") {
-    defines += [ "PANDA_TARGET_X86" ]
-  } else if (current_cpu == "amd64" || current_cpu == "x64" ||
-             current_cpu == "x86_64") {
-    defines += [
-      "PANDA_TARGET_64",
-      "PANDA_TARGET_AMD64",
-      "PANDA_USE_32_BIT_POINTER",
-    ]
-  }
   if (enable_ark_intl) {
     defines += [ "ARK_SUPPORT_INTL" ]
   } else {
@@ -879,16 +857,45 @@ config("ark_jsruntime_common_config") {
     }
   }
 
-  if (enable_handle_leak_detect) {
-    defines += [ "ENABLE_LOCAL_HANDLE_LEAK_DETECT" ]
+  if (enable_asm_assert) {
+    defines += [ "ENABLE_ASM_ASSERT" ]
+  }
+}
+
+# Profiler/debugger macros: enabled only in debug builds, trimmed on mingw/mac/ios.
+config("ark_jsruntime_profiler_config") {
+  defines = []
+  if (ark_compile_mode != "release") {
+    defines += [ "ECMASCRIPT_SUPPORT_DEBUGGER" ]
+    if (!is_mingw && !is_mac && target_os != "ios") {
+      defines += [
+        "ECMASCRIPT_SUPPORT_CPUPROFILER",
+        "ECMASCRIPT_SUPPORT_HEAPPROFILER",
+        "ECMASCRIPT_SUPPORT_HEAPSAMPLING",
+        "ECMASCRIPT_SUPPORT_SNAPSHOT",
+        "ECMASCRIPT_SUPPORT_TRACING",
+      ]
+    }
+  }
+}
+
+# Security macros: ASAN/RUN_WITH_ASAN, code encryption, FUZZ_TEST.
+config("ark_jsruntime_security_config") {
+  defines = []
+
+  if (run_with_asan) {
+    defines += [ "RUN_WITH_ASAN" ]
   }
 
-  if (is_ohos && is_standard_system) {
-    defines += [ "ENABLE_EXCEPTION_BACKTRACE" ]
+  if (use_libfuzzer) {
+    defines += [ "FUZZ_TEST" ]
+  }
 
-    if (use_musl && (current_cpu == "arm" || current_cpu == "arm64") &&
-        !is_mac && !is_mingw && target_os != "ios" && !is_asan) {
-      defines += [ "HOOK_ENABLE" ]
+  if (is_asan) {
+    if (use_hwasan) {
+      defines += [ "USE_HWASAN" ]
+    } else {
+      defines += [ "USE_ASAN" ]
     }
   }
 
@@ -911,6 +918,20 @@ config("ark_jsruntime_common_config") {
   if (code_encrypto_enable) {
     defines += [ "CODE_ENCRYPTION_ENABLE" ]
   }
+}
+
+# Combinator: full runtime uses all sub-configs.
+config("ark_jsruntime_common_config") {
+  configs = [
+    ":hiviewdfx_config",
+    ":ark_jsruntime_platform_config",
+    ":ark_jsruntime_cpu_arch_config",
+    ":ark_jsruntime_gc_config",
+    ":ark_jsruntime_compiler_flags_config",
+    ":ark_jsruntime_feature_config",
+    ":ark_jsruntime_profiler_config",
+    ":ark_jsruntime_security_config",
+  ]
 }
 
 # ecmascript unit testcase config
@@ -1878,10 +1899,8 @@ ohos_source_set("libark_jsruntime_test_set") {
     deps += [ "$js_root/ecmascript/compiler:libark_mock_stub_set" ]
   }
 
-  if (enable_handle_leak_detect) {
-    defines += [ "ENABLE_LOCAL_HANDLE_LEAK_DETECT" ]
-  }
-
+  # NOTE: ENABLE_HITRACE_LOCAL_HANDLE_DETECT is kept here unconditionally because
+  # dfx_extra_config only covers dfx builds; non-dfx test builds rely on this define.
   defines += [ "ENABLE_HITRACE_LOCAL_HANDLE_DETECT" ]
 
   deps += [ ":libcommon_components_set" ]
