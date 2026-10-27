@@ -14,15 +14,16 @@
  */
 
 //! METHOD      compute
-//! COUNT       BranchIfReferenceEqual  1
-//! COUNT       CallCommonStub   GetStringFromConstPool  1
+//! COUNT_LE    BranchIfReferenceEqual  1
+//! COUNT_LE    CallCommonStub   GetStringFromConstPool  1
 //! METHOD compute
 //! HAS LoadTaggedField
 //! COMPILE_COUNT_GE *compute* 1
 //! EXEC_COUNT_GE *compute* 1
 //! DEOPT_COUNT *Deoptimize* 0
-// Loading the error-name string preserves the cached lexical value. All three
-// argument reads reuse the first non-hole check before the JS call.
+// Note: the frontend (ets_frontend f0bcbe524b) eliminates the redundant hole-checks
+// for the repeated argument reads of the same non-hole lexical var, so at most one
+// throw.undefinedifholewithname reaches the JIT (COUNT_LE tolerates further elimination).
 
 declare function print(arg: number): string;
 

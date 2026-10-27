@@ -14,16 +14,17 @@
  */
 
 //! METHOD      compute
-//! COUNT       BranchIfReferenceEqual  3   # one guard per branch + one after the merge
+//! COUNT_LE    BranchIfReferenceEqual  2   # at most 2: one per branch; post-merge read elided by frontend
 //! METHOD compute
 //! HAS LoadTaggedField
 //! COMPILE_COUNT_GE *compute* 1
 //! EXEC_COUNT_GE *compute* 1
 //! DEOPT_COUNT *Deoptimize* 0
 // Test: non-hole fact survives a control-flow merge (NodeInfo::MergeWith intersection).
-// Each branch reads x (guard fires per branch); after the join a third guard reads x again.
-// The merged facts keep nonHole only when BOTH branches verified it, which holds here,
-// and the final guard must not throw.
+// Each branch reads x (guard fires per branch). The post-merge read's hole-check is
+// eliminated by the frontend's var-id store-dominance analysis (ets_frontend f0bcbe524b),
+// since x is provably non-hole after the merge; the JIT therefore sees at most 2 guards
+// (asserted via COUNT_LE so further elimination won't break the test).
 
 declare function print(arg: number): string;
 

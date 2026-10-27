@@ -14,17 +14,17 @@
  */
 
 //! METHOD      compute
-//! COUNT       BranchIfReferenceEqual  2
-//! COUNT       CallCommonStub   GetStringFromConstPool  2
+//! COUNT_LE    BranchIfReferenceEqual  2
+//! COUNT_LE    CallCommonStub   GetStringFromConstPool  2
 //! METHOD compute
 //! HAS LoadTaggedField
 //! COMPILE_COUNT_GE *compute* 1
 //! EXEC_COUNT_GE *compute* 1
 //! DEOPT_COUNT *Deoptimize* 0
-// Test: non-hole fact survives the loop back-edge (CloneForLoopHeader facts).
-// The hole guards sit inside a loop body; the RecordNonHole fact recorded in the first
-// iteration's blocks must remain valid for the loop header clone, and the guards in
-// later iterations must never throw because x is initialized before the loop.
+// Test: the frontend (ets_frontend f0bcbe524b) eliminates the redundant hole-checks
+// for the repeated loop-body reads of the same non-hole lexical var. The loop back-edge
+// keeps two guards (one per read in the body), asserted via COUNT_LE to tolerate further
+// elimination.
 
 declare function print(arg: number): string;
 

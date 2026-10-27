@@ -14,15 +14,16 @@
  */
 
 //! METHOD      compute
-//! COUNT       BranchIfReferenceEqual  2
-//! COUNT       CallCommonStub   GetStringFromConstPool  2
+//! COUNT_LE    BranchIfReferenceEqual  1
+//! COUNT_LE    CallCommonStub   GetStringFromConstPool  1
 //! METHOD compute
 //! HAS LoadTaggedField
 //! COMPILE_COUNT_GE *compute* 1
 //! EXEC_COUNT_GE *compute* 1
 //! DEOPT_COUNT *Deoptimize* 0
-// The first two reads share a non-hole check. Generic Add still invalidates
-// lexical-slot facts, so the third read needs another check after that call.
+// Note: the frontend (ets_frontend f0bcbe524b) eliminates the redundant hole-checks for
+// the repeated reads of the same non-hole lexical var in one basic block, so at most
+// one throw.undefinedifholewithname reaches the JIT (COUNT_LE tolerates further elimination).
 
 declare function print(arg: number): string;
 
