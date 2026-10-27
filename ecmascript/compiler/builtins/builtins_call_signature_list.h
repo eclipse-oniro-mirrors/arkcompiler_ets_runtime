@@ -48,6 +48,7 @@
     BUILTINS_WITH_SET_STUB_BUILDER(D)               \
     BUILTINS_WITH_MAP_STUB_BUILDER(D)               \
     BUILTINS_WITH_FUNCTION_STUB_BUILDER(V)          \
+    BUILTINS_WITH_SHARED_FUNCTION_STUB_BUILDER(V)   \
     BUILTINS_WITH_NUMBER_STUB_BUILDER(T)            \
     BUILTINS_WITH_TYPEDARRAY_STUB_BUILDER(V)        \
     BUILTINS_WITH_DATAVIEW_STUB_BUILDER(V)          \
@@ -189,6 +190,9 @@
     V(PrototypeApply,  Function,  Undefined(),  FUNCTION_PROTOTYPE_APPLY)                        \
     V(PrototypeBind,   Function,  Undefined(),  FUNCTION_PROTOTYPE_BIND)                         \
     V(PrototypeCall,   Function,  Undefined(),  FUNCTION_PROTOTYPE_CALL)
+
+#define BUILTINS_WITH_SHARED_FUNCTION_STUB_BUILDER(V)                                              \
+    V(PrototypeCall,   SharedFunction,  Undefined(),  SHARED_FUNCTION_PROTOTYPE_CALL)
 
 #define BUILTINS_WITH_NUMBER_STUB_BUILDER(V)                                                     \
     V(ParseFloat,      Number,    Undefined(),  NUMBER_PARSE_FLOAT)                              \

@@ -942,6 +942,20 @@ JSTaggedValue BuiltinsObject::GetBuiltinObjectToString(JSThread *thread, const J
     return thread->GlobalConstants()->GetObjectToString();
 }
 
+JSTaggedValue BuiltinsObject::ToStringWithTag(JSThread *thread, const JSHandle<JSTaggedValue> &tag)
+{
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    // Return the String that is the result of concatenating "[object ", tag, and "]".
+    JSHandle<EcmaString> leftString(factory->NewFromASCII("[object "));
+    JSHandle<EcmaString> rightString(factory->NewFromASCII("]"));
+
+    JSHandle<EcmaString> newLeftStringHandle =
+        factory->ConcatFromString(leftString, JSTaggedValue::ToString(thread, tag));
+    RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread);
+    JSHandle<EcmaString> result = factory->ConcatFromString(newLeftStringHandle, rightString);
+    return result.GetTaggedValue();
+}
+
 // 19.1.3.6 Object.prototype.toString()
 JSTaggedValue BuiltinsObject::ToString(EcmaRuntimeCallInfo *argv)
 {
@@ -965,10 +979,6 @@ JSTaggedValue BuiltinsObject::ToString(EcmaRuntimeCallInfo *argv)
     RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread);
 
     // 16. Let tag be Get (O, @@toStringTag).
-    auto ecmaVm = thread->GetEcmaVM();
-    JSHandle<GlobalEnv> env = ecmaVm->GetGlobalEnv();
-    auto factory = ecmaVm->GetFactory();
-
     JSHandle<JSTaggedValue> tag = JSTaggedValue::GetProperty(thread, msg,
         thread->GlobalConstants()->GetHandledToStringTagSymbol()).GetValue();
 
@@ -981,14 +991,7 @@ JSTaggedValue BuiltinsObject::ToString(EcmaRuntimeCallInfo *argv)
     }
 
     // 19. Return the String that is the result of concatenating "[object ", tag, and "]".
-    JSHandle<EcmaString> leftString(factory->NewFromASCII("[object "));
-    JSHandle<EcmaString> rightString(factory->NewFromASCII("]"));
-
-    JSHandle<EcmaString> newLeftStringHandle =
-        factory->ConcatFromString(leftString, JSTaggedValue::ToString(thread, tag));
-    RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread);
-    auto result = factory->ConcatFromString(newLeftStringHandle, rightString);
-    return result.GetTaggedValue();
+    return ToStringWithTag(thread, tag);
 }
 
 // 19.1.3.7 Object.prototype.valueOf()

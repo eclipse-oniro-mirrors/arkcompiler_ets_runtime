@@ -52,13 +52,38 @@ void BuiltinsObjectStubBuilder::ToStringFunc(Variable *result, Label *exit, Labe
                                                            ConstantIndex::TOSTRINGTAG_SYMBOL_INDEX);
         GateRef tag = FastGetPropertyByName(glue_, thisValue_, toStringTagSymbol, ProfileOperation());
 
+        Label tagIsString(env);
         Label defaultToString(env);
-        BRANCH(TaggedIsString(glue_, tag), slowPath, &defaultToString);
+        BRANCH(TaggedIsString(glue_, tag), &tagIsString, &defaultToString);
+        Bind(&tagIsString);
+        {
+            // For a JS_SHARED_OBJECT receiver the lookup above has already invoked a possible
+            // accessor getter once; taking the slowPath here would re-run the @@toStringTag
+            // retrieval (second invocation). Go through CallRuntime instead to keep the
+            // pre-change C++ behavior (single invocation, composed from its result).
+            Label isShared(env);
+            Label notShared(env);
+            GateRef objectType = GetObjectType(LoadHClass(glue_, thisValue_));
+            BRANCH(Int32Equal(objectType, Int32(static_cast<int32_t>(JSType::JS_SHARED_OBJECT))),
+                   &isShared, &notShared);
+            Bind(&isShared);
+            {
+                *result = CallRuntime(glue_, RTSTUB_ID(ObjectToStringWithTag), { tag });
+                Jump(exit);
+            }
+            Bind(&notShared);
+            Jump(slowPath);
+        }
         Bind(&defaultToString);
         {
-            // default object
+            // default object: also covers sendable JS_SHARED_OBJECT
             Label objectTag(env);
-            BRANCH(IsJSObjectType(glue_, thisValue_, JSType::JS_OBJECT), &objectTag, slowPath);
+            GateRef objectType = GetObjectType(LoadHClass(glue_, thisValue_));
+            BRANCH(LogicOrBuilder(env)
+                       .Or(Int32Equal(objectType, Int32(static_cast<int32_t>(JSType::JS_OBJECT))))
+                       .Or(Int32Equal(objectType, Int32(static_cast<int32_t>(JSType::JS_SHARED_OBJECT))))
+                       .Done(),
+                  &objectTag, slowPath);
             Bind(&objectTag);
             {
                 // [object object]
