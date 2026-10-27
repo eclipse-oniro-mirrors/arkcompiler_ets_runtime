@@ -29,10 +29,11 @@ struct Properties {
 
 class LayoutInfo : private TaggedArray {
 public:
-    static constexpr int MIN_PROPERTIES_LENGTH = JSObject::MIN_PROPERTIES_LENGTH;
     static constexpr int MAX_PROPERTIES_LENGTH = PropertyAttributes::MAX_FAST_PROPS_CAPACITY;
     static constexpr uint32_t ELEMENTS_INDEX_LOG2 = 1;
     static constexpr uint32_t ATTR_INDEX_OFFSET = 1;
+    static constexpr uint32_t MIN_GROW_COUNT = 1;
+    static constexpr uint32_t MAX_GROW_COUNT = 4;
 
     inline static LayoutInfo *Cast(TaggedObject *obj)
     {
@@ -91,7 +92,8 @@ public:
 
     static inline uint32_t ComputeGrowCapacity(uint32_t old_capacity)
     {
-        uint32_t new_capacity = old_capacity + MIN_PROPERTIES_LENGTH;
+        // grow 1:1 of old capacity, limited to [1, 4]
+        uint32_t new_capacity = old_capacity + std::min(MAX_GROW_COUNT, std::max(MIN_GROW_COUNT, old_capacity));
         return new_capacity > MAX_PROPERTIES_LENGTH ? MAX_PROPERTIES_LENGTH : new_capacity;
     }
 
