@@ -1352,6 +1352,11 @@ inline bool JSTaggedValue::IsResolvedRecordIndexBinding() const
     return IsHeapObject() && GetTaggedObject()->GetClass()->IsResolvedRecordIndexBinding();
 }
 
+inline bool JSTaggedValue::IsResolvedNativeRecordBinding() const
+{
+    return IsHeapObject() && GetTaggedObject()->GetClass()->IsResolvedNativeRecordBinding();
+}
+
 inline bool JSTaggedValue::IsResolvedRecordBinding() const
 {
     return IsHeapObject() && GetTaggedObject()->GetClass()->IsResolvedRecordBinding();

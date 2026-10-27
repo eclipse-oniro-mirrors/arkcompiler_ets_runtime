@@ -19,6 +19,7 @@
 #include "ecmascript/js_function.h"
 #include "ecmascript/js_hclass.h"
 #include "ecmascript/js_object-inl.h"
+#include "ecmascript/module/js_shared_module.h"
 #include "ecmascript/jspandafile/class_info_extractor.h"
 #include "ecmascript/tests/test_helper.h"
 
@@ -156,6 +157,55 @@ HWTEST_F_L0(SharedObjectFactoryTest, NewSResolvedRecordBindingKeepsEmptyModuleRe
     const CString *nameModuleRecord = nameRecord->GetModuleRecordName();
     ASSERT_NE(nameModuleRecord, nullptr);
     EXPECT_TRUE(nameModuleRecord->empty());
+}
+
+HWTEST_F_L0(SharedObjectFactoryTest, NewSResolvedNativeRecordBindingRecordLayoutAndTypeMatrix)
+{
+    ObjectFactory *factory = instance->GetFactory();
+    CString moduleRecord = "nativeLayoutModule";
+    CString abcFileName = "nativeLayout.abc";
+    JSHandle<JSTaggedValue> bindingName = JSHandle<JSTaggedValue>::Cast(factory->NewFromASCII("nativeName"));
+    int32_t index = 7;
+
+    // Layout invariants: child appends exactly one tagged slot after the parent's SIZE.
+    EXPECT_EQ(ResolvedNativeRecordBinding::BINDING_NAME_OFFSET, ResolvedRecordIndexBinding::SIZE);
+    EXPECT_EQ(ResolvedNativeRecordBinding::SIZE,
+        ResolvedRecordIndexBinding::SIZE + sizeof(JSTaggedType));
+    EXPECT_EQ(ResolvedNativeRecordBinding::INDEX_OFFSET, ResolvedRecordIndexBinding::INDEX_OFFSET);
+    EXPECT_EQ(ResolvedNativeRecordBinding::BINDING_NAME_OFFSET % sizeof(JSTaggedType), 0U);
+
+    // Parent factory still produces parent-typed objects with unchanged SIZE.
+    JSHandle<ResolvedRecordIndexBinding> base =
+        factory->NewSResolvedRecordIndexBindingRecord(moduleRecord, abcFileName, index);
+    EXPECT_EQ(base->GetClass()->GetObjectSize(), ResolvedRecordIndexBinding::SIZE);
+    EXPECT_EQ(base->GetClass()->GetObjectType(), JSType::RESOLVEDRECORDINDEXBINDING_RECORD);
+    EXPECT_TRUE(base.GetTaggedValue().IsResolvedRecordIndexBinding());
+    EXPECT_FALSE(base.GetTaggedValue().IsResolvedNativeRecordBinding());
+    EXPECT_FALSE(base->GetIsUpdatedFromResolvedRecordBinding());
+
+    // Child factory produces a child-typed object with the larger SIZE and inherited fields.
+    JSHandle<ResolvedNativeRecordBinding> child =
+        factory->NewSResolvedNativeRecordBindingRecord(moduleRecord, abcFileName, bindingName, index);
+    EXPECT_EQ(child->GetClass()->GetObjectSize(), ResolvedNativeRecordBinding::SIZE);
+    EXPECT_EQ(child->GetClass()->GetObjectType(), JSType::RESOLVEDNATIVERECORDBINDING_RECORD);
+    // Widened predicate accepts the child; precise predicate accepts only the child.
+    EXPECT_TRUE(child.GetTaggedValue().IsResolvedRecordIndexBinding());
+    EXPECT_TRUE(child.GetTaggedValue().IsResolvedNativeRecordBinding());
+    // The child never sets the parent's updated bit; it is identified by JSType, not by the bit.
+    EXPECT_EQ(child->GetBitField(), 0U);
+    EXPECT_FALSE(child->GetIsUpdatedFromResolvedRecordBinding());
+
+    // Parent view of the child reads inherited record/abc/index fields correctly (Cast check is on,
+    // because IsResolvedRecordIndexBinding is the widened predicate the parent Cast uses).
+    ResolvedRecordIndexBinding *asBase = ResolvedRecordIndexBinding::Cast(child.GetTaggedValue());
+    EXPECT_EQ(asBase->GetModuleRecordNameString(), moduleRecord);
+    EXPECT_EQ(asBase->GetAbcFileNameString(), abcFileName);
+    EXPECT_EQ(asBase->GetIndex(), index);
+    // Distinct JSType values: parent and child are not the same exact type.
+    EXPECT_NE(base->GetClass()->GetObjectType(), child->GetClass()->GetObjectType());
+
+    // The child's own appended slot carries the captured original import name.
+    EXPECT_EQ(child->GetBindingName(thread).GetRawData(), bindingName->GetRawData());
 }
 
 HWTEST_F_L0(SharedObjectFactoryTest, CopySArrayTest001)

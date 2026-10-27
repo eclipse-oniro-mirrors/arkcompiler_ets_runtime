@@ -378,6 +378,9 @@ void GlobalEnvConstants::InitSharedRootsClasses(ObjectFactory *factory)
         JSType::RESOLVEDRECORDINDEXBINDING_RECORD));
     SetConstant(ConstantIndex::RESOLVED_RECORD_BINDING_CLASS_INDEX,
         factory->NewSEcmaReadOnlyHClass(hClass, ResolvedRecordBinding::SIZE, JSType::RESOLVEDRECORDBINDING_RECORD));
+    SetConstant(ConstantIndex::RESOLVED_NATIVE_RECORD_BINDING_CLASS_INDEX,
+        factory->NewSEcmaReadOnlyHClass(hClass, ResolvedNativeRecordBinding::SIZE,
+        JSType::RESOLVEDNATIVERECORDBINDING_RECORD));
     SetConstant(ConstantIndex::SENDABLE_ENV_CLASS_INDEX,
         factory->NewSEcmaReadOnlyHClass(hClass, 0, JSType::SENDABLE_ENV));
     if (g_isEnableCMCGC) {

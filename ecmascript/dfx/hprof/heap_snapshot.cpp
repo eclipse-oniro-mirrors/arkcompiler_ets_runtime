@@ -475,6 +475,7 @@ CString HeapSnapshot::GetNodeName(JSType type, bool isVmMode)
         {JSType::RESOLVEDINDEXBINDING_RECORD, "ResolvedIndexBinding"},
         {JSType::RESOLVEDRECORDINDEXBINDING_RECORD, "ResolvedRecordIndexBinding"},
         {JSType::RESOLVEDRECORDBINDING_RECORD, "ResolvedRecordBinding"},
+        {JSType::RESOLVEDNATIVERECORDBINDING_RECORD, "ResolvedNativeRecordBinding"},
         {JSType::JS_MODULE_NAMESPACE, "ModuleNamespace"},
         {JSType::JS_API_PLAIN_ARRAY, "PlainArray"},
         {JSType::JS_API_PLAIN_ARRAY_ITERATOR, "PlainArrayIterator"},

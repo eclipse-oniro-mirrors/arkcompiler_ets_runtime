@@ -1066,6 +1066,30 @@ JSHandle<ResolvedRecordIndexBinding> ObjectFactory::NewSResolvedRecordIndexBindi
     return obj;
 }
 
+JSHandle<ResolvedNativeRecordBinding> ObjectFactory::NewSResolvedNativeRecordBindingRecord(
+    const CString &moduleRecord, const CString &abcFileName,
+    const JSHandle<JSTaggedValue> &bindingName, int32_t index)
+{
+    NewObjectHook();
+    TaggedObject *header = sHeap_->AllocateOldOrHugeObject(thread_,
+        JSHandle<JSHClass>(thread_->GlobalConstants()->GetHandledResolvedNativeRecordBindingClass()));
+    JSHandle<ResolvedNativeRecordBinding> obj(thread_, header);
+    // Initialize the tagged slot before exposing the object or doing further allocation.
+    obj->SetBindingName(thread_, thread_->GlobalConstants()->GetHandledUndefined());
+    obj->SetModuleRecordName(nullptr);
+    obj->SetAbcFileNameString(nullptr);
+    obj->SetIndex(index);
+    obj->SetBitField(0);
+
+    SharedModuleManager *sharedModuleManager = SharedModuleManager::GetInstance();
+    const CString *moduleRecordPtr = sharedModuleManager->GetOrInsertResolvedSendableBindingName(moduleRecord);
+    const CString *abcFileNamePtr = sharedModuleManager->GetOrInsertResolvedSendableBindingName(abcFileName);
+    obj->SetModuleRecordName(moduleRecordPtr);
+    obj->SetAbcFileNameString(abcFileNamePtr);
+    obj->SetBindingName(thread_, bindingName);
+    return obj;
+}
+
 JSHandle<ResolvedRecordBinding> ObjectFactory::NewSResolvedRecordBindingRecord()
 {
     JSHandle<JSTaggedValue> undefinedValue = thread_->GlobalConstants()->GetHandledUndefined();

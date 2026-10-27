@@ -18,6 +18,7 @@
 #include "ecmascript/ecma_vm.h"
 #include "ecmascript/global_env.h"
 #include "ecmascript/js_object-inl.h"
+#include "ecmascript/mem/heap-inl.h"
 #include "ecmascript/module/js_module_source_text.h"
 #include "ecmascript/tests/test_helper.h"
 
@@ -131,6 +132,55 @@ HWTEST_F_L0(JSSharedModuleTest, SendableClassModule_CloneRecordNameBinding_NonSh
     // The result should be a ResolvedRecordBinding for non-shared module
     JSTaggedValue clonedBinding = clonedEnv->Get(thread, 0);
     EXPECT_TRUE(clonedBinding.IsResolvedRecordBinding());
+}
+
+/**
+ * @tc.name: SendableClassModule_CloneModuleEnvironment_ResolvedNativeRecordBinding
+ * @tc.desc: Test CloneModuleEnvironment with RESOLVEDNATIVERECORDBINDING_RECORD (line 120-121)
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(JSSharedModuleTest, SendableClassModule_CloneModuleEnvironment_ResolvedNativeRecordBinding)
+{
+    ObjectFactory *factory = instance->GetFactory();
+    JSHandle<JSTaggedValue> bindingName(factory->NewFromASCII("nativeCloneExport"));
+    JSHandle<JSTaggedValue> binding = JSHandle<JSTaggedValue>::Cast(
+        factory->NewSResolvedNativeRecordBindingRecord("@native:clone_target", "clone.abc", bindingName, 3));
+    JSHandle<TaggedArray> env = factory->NewTaggedArray(1);
+    env->Set(thread, 0, binding.GetTaggedValue());
+    JSHandle<TaggedArray> result =
+        SendableClassModule::CloneModuleEnvironment(thread, JSHandle<JSTaggedValue>::Cast(env));
+    EXPECT_EQ(result->GetLength(), 1U);
+}
+
+/**
+ * @tc.name: ResolvedNativeRecordBinding_BindingNameSurvivesSharedGC
+ * @tc.desc: Test ResolvedNativeRecordBinding survives shared full GC when only reachable from a
+ *           shared array, with BindingName kept intact (visitor range line 115)
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(JSSharedModuleTest, ResolvedNativeRecordBinding_BindingNameSurvivesSharedGC)
+{
+    ObjectFactory *factory = instance->GetFactory();
+    JSHandle<JSTaggedValue> name = thread->GlobalConstants()->GetHandledDefaultString();
+
+    JSHandle<ResolvedNativeRecordBinding> child = factory->NewSResolvedNativeRecordBindingRecord(
+        "@native:gc_survivor", "gc.abc", name, 11);
+    // Reachable only via the shared env array
+    JSHandle<TaggedArray> env = factory->NewSTaggedArray(1);
+    env->Set(thread, 0, child.GetTaggedValue());
+    child = JSHandle<ResolvedNativeRecordBinding>(thread, JSTaggedValue::Undefined());
+
+    auto sHeap = SharedHeap::GetInstance();
+    sHeap->CollectGarbage<TriggerGCType::SHARED_FULL_GC, GCReason::OTHER>(thread);
+    ASSERT_FALSE(thread->HasPendingException());
+
+    JSTaggedValue slot = env->Get(thread, 0);
+    ASSERT_TRUE(slot.IsResolvedNativeRecordBinding());
+    JSHandle<ResolvedNativeRecordBinding> after(thread, slot);
+    // Verify the child and its fields are intact after GC
+    EXPECT_EQ(after->GetIndex(), 11);
+    EXPECT_EQ(after->GetBitField(), 0U);
+    EXPECT_EQ(after->GetBindingName(thread).GetRawData(), name->GetRawData());
 }
 
 /**

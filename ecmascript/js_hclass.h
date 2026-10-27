@@ -305,6 +305,7 @@ struct Reference;
         V(RESOLVEDINDEXBINDING_RECORD), /* ////////////////////////////////////////////////////////////////-PADDING */ \
         V(RESOLVEDRECORDINDEXBINDING_RECORD), /* //////////////////////////////////////////////////////////-PADDING */ \
         V(RESOLVEDRECORDBINDING_RECORD), /* ///////////////////////////////////////////////////////////////-PADDING */ \
+        V(RESOLVEDNATIVERECORDBINDING_RECORD), /* /////////////////////////////////////////////////////////-PADDING */ \
         V(CELL_RECORD),          /* ///////////////////////////////////////////////////////////////////////-PADDING */ \
         V(COMPLETION_RECORD), /* JS_RECORD_LAST /////////////////////////////////////////////////////////////////// */ \
         V(MACHINE_CODE_OBJECT),                                                                                        \
@@ -1944,7 +1945,14 @@ public:
 
     inline bool IsResolvedRecordIndexBinding() const
     {
-        return GetObjectType() == JSType::RESOLVEDRECORDINDEXBINDING_RECORD;
+        JSType type = GetObjectType();
+        return type == JSType::RESOLVEDRECORDINDEXBINDING_RECORD ||
+               type == JSType::RESOLVEDNATIVERECORDBINDING_RECORD;
+    }
+
+    inline bool IsResolvedNativeRecordBinding() const
+    {
+        return GetObjectType() == JSType::RESOLVEDNATIVERECORDBINDING_RECORD;
     }
 
     inline bool IsResolvedRecordBinding() const

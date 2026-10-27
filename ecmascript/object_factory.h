@@ -160,6 +160,7 @@ class ResolvedBinding;
 class ResolvedIndexBinding;
 class ResolvedRecordIndexBinding;
 class ResolvedRecordBinding;
+class ResolvedNativeRecordBinding;
 class BigInt;
 class AsyncGeneratorRequest;
 class AsyncIteratorRecord;
@@ -955,6 +956,10 @@ public:
 
     JSHandle<ResolvedRecordBinding> NewSResolvedRecordBindingRecord(
         const CString &moduleRecord, const JSHandle<JSTaggedValue> &bindingName);
+
+    JSHandle<ResolvedNativeRecordBinding> NewSResolvedNativeRecordBindingRecord(
+        const CString &moduleRecord, const CString &abcFileName,
+        const JSHandle<JSTaggedValue> &bindingName, int32_t index);
 
     JSHandle<LayoutInfo> CopyAndReSortSLayoutInfo(const JSHandle<LayoutInfo> &old, int end, int capacity);
 

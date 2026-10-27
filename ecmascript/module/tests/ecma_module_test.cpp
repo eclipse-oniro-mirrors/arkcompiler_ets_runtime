@@ -53,6 +53,7 @@
 #include "ecmascript/require/js_cjs_module.h"
 #include "ecmascript/module/module_value_accessor.h"
 #include "ecmascript/module/module_resolver.h"
+#include "ecmascript/module/module_snapshot.h"
 #include "ecmascript/module/napi_module_loader.h"
 #include "ecmascript/platform/module.h"
 #include "ecmascript/ecma_vm.h"
@@ -531,6 +532,16 @@ public:
     static JSTaggedValue GetModuleNamespaceInternal(JSThread *thread, JSTaggedValue localName, JSTaggedValue curModule)
     {
         return DeprecatedModuleValueAccessor::GetModuleNamespaceInternal(thread, localName, curModule);
+    }
+};
+// Reaches the protected ModuleSnapshot::RestoreUpdatedBinding so the integration test can drive
+// the real snapshot restore path (which rebuilds a ResolvedRecordBinding from the child's captured
+// name) from this translation unit, where the real upgrade trigger MockModuleValueAccessor lives.
+class MockModuleSnapshotForRestore : public ModuleSnapshot {
+public:
+    static void MockRestoreUpdatedBinding(JSThread *thread, JSHandle<TaggedArray> serializeArray)
+    {
+        RestoreUpdatedBinding(thread, serializeArray);
     }
 };
 
@@ -3781,10 +3792,16 @@ HWTEST_F_L0(EcmaModuleTest, GetSendableRecordBindingRewriteKeepsCurrentModuleFil
     EXPECT_EQ(result, exportObject.GetTaggedValue());
 
     JSTaggedValue updatedBinding = envRec->Get(thread, 0);
-    EXPECT_TRUE(updatedBinding.IsResolvedRecordIndexBinding());
-    ResolvedRecordIndexBinding *recordIndexBinding =
-        ResolvedRecordIndexBinding::Cast(updatedBinding.GetTaggedObject());
-    EXPECT_EQ(recordIndexBinding->GetAbcFileNameString(), currentFile);
+    // The real upgrade point now creates the ResolvedNativeRecordBinding child (capturing the original
+    // import name) rather than flipping the parent's updated bit. Both parent and child answer the
+    // widened predicate, so assert the precise child type to prove the child was actually created.
+    ASSERT_TRUE(updatedBinding.IsResolvedNativeRecordBinding());
+    JSHandle<ResolvedNativeRecordBinding> child(thread, updatedBinding);
+    EXPECT_EQ(child->GetBindingName(thread).GetRawData(),
+              nameBinding->GetBindingName(thread).GetRawData());
+    EXPECT_EQ(child->GetBitField(), 0U);
+    // Inherited parent view still exposes the referencing module's abc file.
+    EXPECT_EQ(ResolvedRecordIndexBinding::Cast(updatedBinding)->GetAbcFileNameString(), currentFile);
 }
 
 HWTEST_F_L0(EcmaModuleTest, GetSendableRecordBindingFallbackRewriteKeepsCurrentModuleFileName)
@@ -3827,7 +3844,12 @@ HWTEST_F_L0(EcmaModuleTest, GetSendableRecordBindingFallbackRewriteKeepsCurrentM
     EXPECT_EQ(result, exportObject.GetTaggedValue());
 
     JSTaggedValue updatedBinding = envRec->Get(thread, 0);
-    EXPECT_TRUE(updatedBinding.IsResolvedRecordIndexBinding());
+    ASSERT_TRUE(updatedBinding.IsResolvedNativeRecordBinding());
+    JSHandle<ResolvedNativeRecordBinding> child(thread, updatedBinding);
+    EXPECT_EQ(child->GetBindingName(thread).GetRawData(),
+              nameBinding->GetBindingName(thread).GetRawData());
+    EXPECT_EQ(child->GetBitField(), 0U);
+    // Fallback path: no native export index resolved, so the inherited Index stays UNDEFINED.
     ResolvedRecordIndexBinding *recordIndexBinding =
         ResolvedRecordIndexBinding::Cast(updatedBinding.GetTaggedObject());
     EXPECT_EQ(recordIndexBinding->GetAbcFileNameString(), currentFile);
@@ -3866,7 +3888,11 @@ HWTEST_F_L0(EcmaModuleTest, GetSendableRecordBindingRewriteWithNativeFastPropert
     EXPECT_EQ(result, exportValue.GetTaggedValue());
 
     JSTaggedValue updatedBinding = envRec->Get(thread, MODULE_VALUE_INDEX);
-    EXPECT_TRUE(updatedBinding.IsResolvedRecordIndexBinding());
+    ASSERT_TRUE(updatedBinding.IsResolvedNativeRecordBinding());
+    JSHandle<ResolvedNativeRecordBinding> child(thread, updatedBinding);
+    EXPECT_EQ(child->GetBindingName(thread).GetRawData(),
+              nameBinding->GetBindingName(thread).GetRawData());
+    EXPECT_EQ(child->GetBitField(), 0U);
     auto *recordIndexBinding = ResolvedRecordIndexBinding::Cast(updatedBinding.GetTaggedObject());
     EXPECT_NE(recordIndexBinding->GetIndex(), SourceTextModule::UNDEFINED_INDEX);
 }
@@ -3907,9 +3933,74 @@ HWTEST_F_L0(EcmaModuleTest, GetSendableRecordBindingRewriteWithNativeDictionaryP
     EXPECT_EQ(result, exportValue.GetTaggedValue());
 
     JSTaggedValue updatedBinding = envRec->Get(thread, MODULE_VALUE_INDEX);
-    EXPECT_TRUE(updatedBinding.IsResolvedRecordIndexBinding());
+    ASSERT_TRUE(updatedBinding.IsResolvedNativeRecordBinding());
+    JSHandle<ResolvedNativeRecordBinding> child(thread, updatedBinding);
+    EXPECT_EQ(child->GetBindingName(thread).GetRawData(),
+              nameBinding->GetBindingName(thread).GetRawData());
+    EXPECT_EQ(child->GetBitField(), 0U);
     auto *recordIndexBinding = ResolvedRecordIndexBinding::Cast(updatedBinding.GetTaggedObject());
     EXPECT_EQ(recordIndexBinding->GetIndex(), entry);
+}
+
+HWTEST_F_L0(EcmaModuleTest, GetSendableRecordBindingUpgradeThenCacheWipeThenRestore)
+{
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    ModuleManager *moduleManager = thread->GetModuleManager();
+
+    CString currentFile = "sendable_record_binding_upgrade_chain.abc";
+    JSHandle<SourceTextModule> module = factory->NewSSourceTextModule();
+    module->SetSharedType(SharedTypes::SHARED_MODULE);
+    module->SetEcmaSharedModuleFilenameString(currentFile);
+    module->SetEcmaModuleRecordNameString("sendable_record_binding_upgrade_chain");
+    JSHandle<TaggedArray> envRec = factory->NewSTaggedArray(MODULE_VALUE_COUNT);
+    module->SetEnvironment(thread, envRec);
+
+    CString importedRecord = "@ohos:native_upgrade_chain";
+    JSHandle<JSTaggedValue> bindingName(factory->NewFromASCII("namedExport"));
+    JSHandle<ResolvedRecordBinding> nameBinding =
+        factory->NewSResolvedRecordBindingRecord(importedRecord, bindingName);
+    envRec->Set(thread, MODULE_VALUE_INDEX, JSHandle<JSTaggedValue>::Cast(nameBinding));
+
+    JSHandle<JSObject> exports = factory->NewEmptyJSObject();
+    JSHandle<JSTaggedValue> exportValue(factory->NewFromASCII("namedValue"));
+    JSObject::CreateDataPropertyOrThrow(thread, exports, bindingName, exportValue);
+    ASSERT_FALSE(thread->HasPendingException());
+    JSHandle<SourceTextModule> nativeModule =
+        CreateNativeModuleWithExports(thread, factory, importedRecord, JSHandle<JSTaggedValue>::Cast(exports));
+    moduleManager->AddResolveImportedModule(importedRecord, nativeModule.GetTaggedValue());
+
+    // 1. Real upgrade trigger: creates the ResolvedNativeRecordBinding child carrying the original name.
+    JSTaggedValue result = MockModuleValueAccessor::GetModuleValueFromRecordBinding<false>(
+        thread, module, nameBinding.GetTaggedValue(), MODULE_VALUE_INDEX, true);
+    EXPECT_EQ(result, exportValue.GetTaggedValue());
+
+    JSTaggedValue updatedBinding = envRec->Get(thread, MODULE_VALUE_INDEX);
+    ASSERT_TRUE(updatedBinding.IsResolvedNativeRecordBinding());
+    JSHandle<ResolvedNativeRecordBinding> child(thread, updatedBinding);
+    EXPECT_EQ(child->GetBindingName(thread).GetRawData(), bindingName->GetRawData());
+    EXPECT_EQ(child->GetBitField(), 0U);
+    EXPECT_NE(ResolvedRecordIndexBinding::Cast(updatedBinding)->GetIndex(),
+              SourceTextModule::UNDEFINED_INDEX);
+
+    // 2. Wipe only the name-list entry so the main thread no longer has the target SO module,
+    //    without destroying the native module's C-native fields or resetting constpool literals.
+    ASSERT_TRUE(moduleManager->TryGetImportedModule(importedRecord)->IsSourceTextModule());
+    moduleManager->RemoveModuleNameFromList(importedRecord);
+    EXPECT_TRUE(moduleManager->TryGetImportedModule(importedRecord)->IsUndefined());
+
+    // 3. Real snapshot restore rebuilds a name binding from the child's captured name, with the
+    //    main-thread SO cache still missing.
+    JSHandle<TaggedArray> serializeArray = factory->NewTaggedArray(1);
+    serializeArray->Set(thread, 0, module.GetTaggedValue());
+    MockModuleSnapshotForRestore::MockRestoreUpdatedBinding(thread, serializeArray);
+    ASSERT_FALSE(thread->HasPendingException());
+
+    JSTaggedValue restored = envRec->Get(thread, MODULE_VALUE_INDEX);
+    ASSERT_TRUE(restored.IsResolvedRecordBinding());
+    JSHandle<ResolvedRecordBinding> restoredBinding(thread, restored);
+    EXPECT_EQ(restoredBinding->GetModuleRecordNameString(), importedRecord);
+    EXPECT_EQ(restoredBinding->GetBindingName(thread).GetRawData(), bindingName->GetRawData());
+    EXPECT_TRUE(moduleManager->TryGetImportedModule(importedRecord)->IsUndefined());
 }
 
 HWTEST_F_L0(EcmaModuleTest, GetSendableRecordBindingKeepsNameBindingForNativeElementIndex)

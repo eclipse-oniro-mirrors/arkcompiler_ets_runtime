@@ -177,6 +177,9 @@ OperationResult ModuleNamespace::GetProperty(JSThread *thread, const JSHandle<JS
         case JSType::RESOLVEDRECORDBINDING_RECORD:
             LOG_FULL(INFO) << "RESOLVEDRECORDINDEXBINDING_RECORD";
             break;
+        case JSType::RESOLVEDNATIVERECORDBINDING_RECORD:
+            LOG_FULL(INFO) << "RESOLVEDNATIVERECORDBINDING_RECORD";
+            break;
         default: // LCOV_EXCL_BR_LINE
             LOG_FULL(FATAL) << "UNREACHABLE";
     }

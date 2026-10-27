@@ -1549,6 +1549,18 @@ HWTEST_F_L0(EcmaDumpTest, HeapProfileDump)
                 DUMP_FOR_HANDLE(recordBinding);
                 break;
             }
+            case JSType::RESOLVEDNATIVERECORDBINDING_RECORD: {
+                CHECK_DUMP_FIELDS(Record::SIZE, ResolvedNativeRecordBinding::SIZE, 4U);
+                CString nativeModuleRecord = "dumpTestNativeRecordModule";
+                CString nativeAbcFileName = "dumpTestNativeRecord.abc";
+                JSHandle<JSTaggedValue> nativeBindingName =
+                    JSHandle<JSTaggedValue>::Cast(factory->NewFromASCII("dumpTestNativeRecordName"));
+                JSHandle<ResolvedNativeRecordBinding> nativeRecordBinding =
+                    factory->NewSResolvedNativeRecordBindingRecord(
+                        nativeModuleRecord, nativeAbcFileName, nativeBindingName, 0);
+                DUMP_FOR_HANDLE(nativeRecordBinding);
+                break;
+            }
             case JSType::JS_MODULE_NAMESPACE: {
                 CHECK_DUMP_FIELDS(JSObject::SIZE, ModuleNamespace::SIZE, 3U);
                 JSHandle<ModuleNamespace> moduleNamespace = factory->NewModuleNamespace();

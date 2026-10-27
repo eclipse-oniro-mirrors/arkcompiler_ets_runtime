@@ -388,6 +388,7 @@ public:
             {JSType::RESOLVEDRECORDBINDING_RECORD, {"ModuleRecord", "BindingName", "RESOLVEDRECORDBINDING_RECORD"}},
             {JSType::RESOLVEDRECORDINDEXBINDING_RECORD, {"ModuleRecord", "AbcFileName", "Index", "BitField",
                                                          "RESOLVEDRECORDINDEXBINDING_RECORD"}},
+            {JSType::RESOLVEDNATIVERECORDBINDING_RECORD, {"BindingName", "RESOLVEDNATIVERECORDBINDING_RECORD"}},
             {JSType::RESOLVING_FUNCTIONS_RECORD, {"ResolveFunction", "RejectFunction", "RESOLVING_FUNCTIONS_RECORD"}},
             {JSType::SENDABLE_ENV, {"SENDABLE_ENV"}},
             {JSType::SFUNCTION_ENV, {"SFUNCTION_ENV"}},
@@ -1002,6 +1003,9 @@ public:
                 ResolvedRecordIndexBinding::INDEX_OFFSET,
                 ResolvedRecordIndexBinding::BIT_FIELD_OFFSET,
                 ResolvedRecordIndexBinding::SIZE - ResolvedRecordIndexBinding::MODULE_RECORD_INDEX_OFFSET}},
+            {JSType::RESOLVEDNATIVERECORDBINDING_RECORD, {
+                ResolvedNativeRecordBinding::BINDING_NAME_OFFSET,
+                ResolvedNativeRecordBinding::SIZE - ResolvedNativeRecordBinding::BINDING_NAME_OFFSET}},
             {JSType::RESOLVING_FUNCTIONS_RECORD, {
                 ResolvingFunctionsRecord::RESOLVE_FUNCTION_OFFSET,
                 ResolvingFunctionsRecord::REJECT_FUNCTION_OFFSET,
@@ -1256,6 +1260,7 @@ public:
             {JSType::RESOLVEDINDEXBINDING_RECORD, {"RECORD"}},
             {JSType::RESOLVEDRECORDBINDING_RECORD, {"RECORD"}},
             {JSType::RESOLVEDRECORDINDEXBINDING_RECORD, {"RECORD"}},
+            {JSType::RESOLVEDNATIVERECORDBINDING_RECORD, {"RESOLVEDRECORDINDEXBINDING_RECORD"}},
             {JSType::RESOLVING_FUNCTIONS_RECORD, {"RECORD"}},
             {JSType::SENDABLE_ENV, {"TAGGED_ARRAY"}},
             {JSType::SFUNCTION_ENV, {"TAGGED_ARRAY"}},
@@ -1744,6 +1749,8 @@ public:
                 ResolvedRecordIndexBinding::INDEX_OFFSET - ResolvedRecordIndexBinding::ABC_FILE_NAME,
                 ResolvedRecordIndexBinding::BIT_FIELD_OFFSET - ResolvedRecordIndexBinding::INDEX_OFFSET,
                 ResolvedRecordIndexBinding::END_OFFSET - ResolvedRecordIndexBinding::BIT_FIELD_OFFSET}},
+            {JSType::RESOLVEDNATIVERECORDBINDING_RECORD, {
+                ResolvedNativeRecordBinding::SIZE - ResolvedNativeRecordBinding::BINDING_NAME_OFFSET}},
             {JSType::RESOLVING_FUNCTIONS_RECORD, {
                 ResolvingFunctionsRecord::REJECT_FUNCTION_OFFSET - ResolvingFunctionsRecord::RESOLVE_FUNCTION_OFFSET,
                 ResolvingFunctionsRecord::SIZE - ResolvingFunctionsRecord::REJECT_FUNCTION_OFFSET}},
@@ -4658,6 +4665,19 @@ HWTEST_F_L0(JSMetadataTest, TestResolvedrecordindexbindingRecordMetadata)
     tester.ReadAndParseMetadataJson(metadataFilePath, metadata);
     ASSERT_TRUE(metadata.status == JSMetadataTestHelper::INITIALIZED);
     ASSERT_TRUE(tester.Test(JSType::RESOLVEDRECORDINDEXBINDING_RECORD, metadata));
+#endif
+}
+
+HWTEST_F_L0(JSMetadataTest, TestResolvednativerecordbindingRecordMetadata)
+{
+#if defined(PANDA_TARGET_AMD64) || defined(PANDA_TARGET_ARM64)
+    JSMetadataTestHelper tester {};
+    std::string metadataFilePath = METADATA_SOURCE_FILE_DIR"resolvednativerecordbinding_record.json";
+    JSMetadataTestHelper::Metadata metadata {};
+
+    tester.ReadAndParseMetadataJson(metadataFilePath, metadata);
+    ASSERT_TRUE(metadata.status == JSMetadataTestHelper::INITIALIZED);
+    ASSERT_TRUE(tester.Test(JSType::RESOLVEDNATIVERECORDBINDING_RECORD, metadata));
 #endif
 }
 

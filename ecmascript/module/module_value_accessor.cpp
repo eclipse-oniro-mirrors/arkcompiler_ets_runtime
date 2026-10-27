@@ -83,9 +83,9 @@ bool TryGetNativeModuleExportIndex(JSThread *thread, JSTaggedValue resolvedModul
     return true;
 }
 
-bool UpdateSendableRecordBindingToRecordIndex(JSThread *thread, JSHandle<SourceTextModule> module,
-                                              JSHandle<ResolvedRecordBinding> binding,
-                                              int32_t index, int32_t slot)
+bool UpdateSendableRecordBindingToNativeRecord(JSThread *thread, JSHandle<SourceTextModule> module,
+                                               JSHandle<ResolvedRecordBinding> binding,
+                                               int32_t index, int32_t slot)
 {
     JSHandle<JSTaggedValue> moduleEnvironment(thread, module->GetEnvironment(thread));
     if (UNLIKELY(!moduleEnvironment->IsTaggedArray())) {
@@ -93,13 +93,19 @@ bool UpdateSendableRecordBindingToRecordIndex(JSThread *thread, JSHandle<SourceT
     }
     const CString *moduleRecord = binding->GetModuleRecordName();
     ASSERT(moduleRecord != nullptr);
-    // Preserve the referencing module's abc file so a later cache miss still
-    // falls back to the correct lazy-load path for this sendable binding.
+    // Capture the original name as a handle so it survives the child allocation below; a raw tagged
+    // value would dangle if GC moves the string during NewSResolvedNativeRecordBindingRecord.
+    JSHandle<JSTaggedValue> bindingName(thread, binding->GetBindingName(thread));
+    ASSERT(bindingName->IsString());
+    // Preserve the referencing module's abc file so a later cache miss still falls back to the
+    // correct lazy-load path for this sendable binding. The child stores the original BindingName
+    // so snapshot restoration can rebuild a ResolvedRecordBinding without the main-thread SO cache.
     ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
-    JSHandle<ResolvedRecordIndexBinding> recordBinding =
-        factory->NewSResolvedRecordIndexBindingRecord(*moduleRecord, module->GetEcmaModuleFilenameString(), index);
-    recordBinding->SetIsUpdatedFromResolvedRecordBinding(true);
-    JSHandle<TaggedArray>::Cast(moduleEnvironment)->Set(thread, slot, JSHandle<JSTaggedValue>::Cast(recordBinding));
+    JSHandle<ResolvedNativeRecordBinding> nativeBinding =
+        factory->NewSResolvedNativeRecordBindingRecord(*moduleRecord, module->GetEcmaModuleFilenameString(),
+                                                       bindingName, index);
+    JSHandle<TaggedArray>::Cast(moduleEnvironment)->Set(thread, slot,
+                                                        JSHandle<JSTaggedValue>::Cast(nativeBinding));
     return true;
 }
 } // namespace
@@ -478,18 +484,18 @@ JSTaggedValue ModuleValueAccessor::GetModuleValueFromRecordBinding(const GetModu
         info.thread, info.module, binding, requestModuleRecordName);
     RETURN_VALUE_IF_ABRUPT_COMPLETION(info.thread, JSTaggedValue::Exception());
     LogModuleLoadInfo(info.thread, info.module, resolvedModule, info.index, info.isSendable);
-    JSTaggedValue bindingName = binding->GetBindingName(info.thread);
+    JSHandle<JSTaggedValue> bindingName(info.thread, binding->GetBindingName(info.thread));
     if (info.isSendable) { // need fix: Check whether the 'info.isSendable' can be deleted
         int32_t exportIndex = SourceTextModule::UNDEFINED_INDEX;
         bool canUpdate = TryGetNativeModuleExportIndex(info.thread, resolvedModule.GetTaggedValue(),
-                                                       bindingName, exportIndex);
+                                                       bindingName.GetTaggedValue(), exportIndex);
         RETURN_VALUE_IF_ABRUPT_COMPLETION(info.thread, JSTaggedValue::Exception());
         if (canUpdate) {
-            (void)UpdateSendableRecordBindingToRecordIndex(info.thread, info.module, binding, exportIndex,
-                                                           info.index);
+            (void)UpdateSendableRecordBindingToNativeRecord(info.thread, info.module, binding, exportIndex,
+                                                            info.index);
         }
     }
-    return GetNativeOrCjsModuleValue(info.thread, resolvedModule, bindingName);
+    return GetNativeOrCjsModuleValue(info.thread, resolvedModule, bindingName.GetTaggedValue());
 }
 
 template JSTaggedValue ModuleValueAccessor::GetModuleValueFromRecordBinding<true>(

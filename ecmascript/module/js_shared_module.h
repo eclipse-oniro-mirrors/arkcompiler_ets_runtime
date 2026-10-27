@@ -49,7 +49,7 @@ private:
     static JSHandle<TaggedArray> GenerateSharedExports(JSThread *thread, const JSHandle<TaggedArray> &oldExports);
 };
 
-class ResolvedRecordIndexBinding final : public Record {
+class ResolvedRecordIndexBinding : public Record {
 public:
     CAST_CHECK(ResolvedRecordIndexBinding, IsResolvedRecordIndexBinding);
 
@@ -99,6 +99,25 @@ public:
     DECL_DUMP()
     DECL_VISIT_PRIMITIVE_OBJECT()
 };
+
+class ResolvedNativeRecordBinding final : public ResolvedRecordIndexBinding {
+public:
+    CAST_CHECK(ResolvedNativeRecordBinding, IsResolvedNativeRecordBinding);
+
+    static constexpr size_t BINDING_NAME_OFFSET = ResolvedRecordIndexBinding::SIZE;
+    ACCESSORS(BindingName, BINDING_NAME_OFFSET, SIZE);
+
+    DECL_DUMP()
+    DECL_VISIT_OBJECT(BINDING_NAME_OFFSET, SIZE)
+};
+
+static_assert(ResolvedNativeRecordBinding::BINDING_NAME_OFFSET ==
+    ResolvedRecordIndexBinding::SIZE);
+static_assert(ResolvedNativeRecordBinding::SIZE ==
+    ResolvedRecordIndexBinding::SIZE + sizeof(JSTaggedType));
+static_assert(ResolvedNativeRecordBinding::INDEX_OFFSET ==
+    ResolvedRecordIndexBinding::INDEX_OFFSET);
+static_assert(ResolvedNativeRecordBinding::BINDING_NAME_OFFSET % sizeof(JSTaggedType) == 0);
 
 class ResolvedRecordBinding final : public Record {
 public:
