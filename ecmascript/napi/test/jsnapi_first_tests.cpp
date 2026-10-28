@@ -2021,6 +2021,47 @@ HWTEST_F_L0(JSNApiTests, JSNApi_SetAssetPath_GetAssetPath)
     ASSERT_EQ(res1, data);
 }
 
+#if defined(PANDA_TARGET_PREVIEW)
+/**
+ * @tc.name: JSNApi_SetAssetPath_PreviewMode
+ * @tc.desc: SetAssetPath skips ValidateAbcPath for previewer-style asset paths
+ *           in previewer builds (linux/mingw/mac host).
+ * @tc.type: FUNC
+ * @tc.require: issuesProgram
+ */
+HWTEST_F_L0(JSNApiTests, JSNApi_SetAssetPath_PreviewMode)
+{
+    LocalScope scope(vm_);
+    // linux/cloud previewer intermediate path, not under /data/storage/el1/bundle/
+    std::string linuxPreviewPath =
+        "/home/user/demo/entry/.preview/default/intermediates/assets/default/ets/modules.abc";
+    JSNApi::SetAssetPath(vm_, linuxPreviewPath);
+    ASSERT_EQ(linuxPreviewPath, JSNApi::GetAssetPath(vm_));
+
+    // windows previewer path
+    std::string winPreviewPath =
+        "D:\\test\\entry\\.preview\\default\\intermediates\\assets\\default\\ets\\modules.abc";
+    JSNApi::SetAssetPath(vm_, winPreviewPath);
+    ASSERT_EQ(winPreviewPath, JSNApi::GetAssetPath(vm_));
+}
+#endif
+
+#if !defined(PANDA_TARGET_WINDOWS) && !defined(PANDA_TARGET_MACOS) && !defined(PANDA_TARGET_PREVIEW)
+/**
+ * @tc.name: JSNApi_SetAssetPath_DeviceMode
+ * @tc.desc: SetAssetPath keeps accepting valid bundle install paths on device builds.
+ * @tc.type: FUNC
+ * @tc.require: issuesProgram
+ */
+HWTEST_F_L0(JSNApiTests, JSNApi_SetAssetPath_DeviceMode)
+{
+    LocalScope scope(vm_);
+    std::string validPath = "/data/storage/el1/bundle/moduleName/ets/modules.abc";
+    JSNApi::SetAssetPath(vm_, validPath);
+    ASSERT_EQ(validPath, JSNApi::GetAssetPath(vm_));
+}
+#endif
+
 /**
  * @tc.number: ffi_interface_api_037
  * @tc.name: SetAssetPath
