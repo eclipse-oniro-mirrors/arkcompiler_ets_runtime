@@ -178,6 +178,7 @@ module_test_list = [
   "sendable",
   "sendablearray",
   "sendableobj",
+  "sendablebuiltinsir",
   "sharedobjectstorebarrier_treestring",
   "supercallforwardallargs",
 

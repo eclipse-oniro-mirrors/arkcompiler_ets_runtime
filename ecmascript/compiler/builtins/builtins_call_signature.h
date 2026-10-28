@@ -367,6 +367,7 @@ public:
             {FunctionPrototypeBind, "Function.prototype.bind"},
             {FunctionPrototypeCall, "Function.prototype.call"},
             {FunctionPrototypeHasInstance, "Function.prototype.hasInstance"},
+            {SharedFunctionPrototypeCall, "SharedFunction.prototype.call"},
             {ArrayIncludes, "Array.prototype.includes"},
             {ArrayIndexOf, "Array.prototype.indexOf"},
             {ArrayEntries, "Array.prototype.entries"},

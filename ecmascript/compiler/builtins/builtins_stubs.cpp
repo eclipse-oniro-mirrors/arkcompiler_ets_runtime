@@ -23,6 +23,7 @@
 #include "ecmascript/compiler/builtins/builtins_proxy_stub_builder.h"
 #include "ecmascript/compiler/builtins/builtins_reflect_stub_builder.h"
 #include "ecmascript/compiler/builtins/builtins_shared_array_stub_builder.h"
+#include "ecmascript/compiler/builtins/builtins_shared_function_stub_builder.h"
 #include "ecmascript/compiler/builtins/builtins_shared_map_stub_builder.h"
 #include "ecmascript/compiler/builtins/builtins_shared_set_stub_builder.h"
 #include "ecmascript/compiler/builtins/builtins_shared_typedarray_stub_builder.h"

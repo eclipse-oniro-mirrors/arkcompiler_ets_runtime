@@ -431,6 +431,7 @@ namespace panda::ecmascript {
     V(ArraySort)                                               \
     V(FastStringify)                                           \
     V(ObjectSlowAssign)                                        \
+    V(ObjectToStringWithTag)                                   \
     V(LocaleCompareWithGc)                                     \
     V(ParseInt)                                                \
     V(LocaleCompareCacheable)                                  \

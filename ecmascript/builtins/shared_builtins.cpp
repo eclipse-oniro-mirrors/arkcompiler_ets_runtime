@@ -411,9 +411,11 @@ void Builtins::InitializeSFunction(const JSHandle<GlobalEnv> &env,
     SetSFunction(env, sFuncPrototypeObj, "apply", Function::FunctionPrototypeApply, fieldIndex++, FunctionLength::TWO,
         BUILTINS_STUB_ID(FunctionPrototypeApply));
     // 19.2.3.2 Function.prototype.bind ( thisArg , ...args)
-    SetSFunction(env, sFuncPrototypeObj, "bind", Function::FunctionPrototypeBind, fieldIndex++, FunctionLength::ONE);
+    SetSFunction(env, sFuncPrototypeObj, "bind", Function::FunctionPrototypeBind, fieldIndex++, FunctionLength::ONE,
+        BUILTINS_STUB_ID(FunctionPrototypeBind));
     // 19.2.3.3 Function.prototype.call (thisArg , ...args)
-    SetSFunction(env, sFuncPrototypeObj, "call", Function::FunctionPrototypeCall, fieldIndex++, FunctionLength::ONE);
+    SetSFunction(env, sFuncPrototypeObj, "call", Function::FunctionPrototypeCall, fieldIndex++, FunctionLength::ONE,
+        BUILTINS_STUB_ID(SharedFunctionPrototypeCall));
     // 19.2.3.5 Function.prototype.toString ( )
     SetSFunction(env, sFuncPrototypeObj, thread_->GlobalConstants()->GetHandledToStringString(),
         Function::FunctionPrototypeToString, fieldIndex++, FunctionLength::ZERO);

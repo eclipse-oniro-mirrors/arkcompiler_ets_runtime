@@ -4320,6 +4320,13 @@ DEF_RUNTIME_STUBS(ObjectSlowAssign)
     return builtins::BuiltinsObject::AssignTaggedValue(thread, source, toAssign).GetRawData();
 }
 
+DEF_RUNTIME_STUBS(ObjectToStringWithTag)
+{
+    RUNTIME_STUBS_HEADER(ObjectToStringWithTag);
+    JSHandle<JSTaggedValue> tag = GetHArg<JSTaggedValue>(argv, argc, 0); // 0: means the zeroth parameter
+    return builtins::BuiltinsObject::ToStringWithTag(thread, tag).GetRawData();
+}
+
 DEF_RUNTIME_STUBS(NameDictionaryGetAllEnumKeys)
 {
     RUNTIME_STUBS_HEADER(NameDictionaryGetAllEnumKeys);
