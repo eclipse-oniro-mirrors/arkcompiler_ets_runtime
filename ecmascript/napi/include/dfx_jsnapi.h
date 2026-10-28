@@ -206,7 +206,7 @@ public:
     // SourceMap singleton interfaces
     static void SourceMapSplitSourceMap(const std::string &sourceMapData);
     static bool SourceMapTranslateUrlPosition(std::string &url, int &line, int &column, std::string &packageName);
-    static std::string SourceMapTranslateBySourceMap(const std::string &stackStr);
+    static std::string SourceMapTranslateBySourceMap(const std::string &stackStr, bool useInitStatus = true);
     static void SourceMapSetInitStatus(ecmascript::InitStatus status);
 
     static uint32_t GetCurrentThreadId();
