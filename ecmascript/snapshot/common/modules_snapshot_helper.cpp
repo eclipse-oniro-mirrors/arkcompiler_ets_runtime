@@ -151,22 +151,13 @@ void ModulesSnapshotHelper::MarkSnapshotDisabledByOption()
         static_cast<int>(SnapshotFeatureState::PANDAFILE) | static_cast<int>(SnapshotFeatureState::MODULE);
 }
 
-bool ModulesSnapshotHelper::TryDisableSnapshot(int reason)
-{
-    if (reason <= 0) {
-        return TryDisableSnapshot(DISABLE_REASON_UNKNOWN);
-    }
-    constexpr size_t SIG_MAX_DIGITS = 2;
-    char sigBuf[SIG_MAX_DIGITS]{};
-    auto written = IntToString(reason, sigBuf, SIG_MAX_DIGITS);
-    return TryDisableSnapshot(DISABLE_REASON_SIGNAL, std::string_view(sigBuf, written));
-}
-
+template<bool asyncSafe>
 bool ModulesSnapshotHelper::TryDisableSnapshot(const std::string_view& reason, const std::string_view& extraInfo)
 {
     // get crrent timestamp att first
     int64_t timestamp = GetCurrentTimestamp();
-    PosixFile stateFile(g_stateFilePathBuffer_, "w");
+    // asyncSafe == true: raw syscall based file operations, usable in signal handler context
+    PosixFile<asyncSafe> stateFile(g_stateFilePathBuffer_, "w");
     if (!stateFile.IsValid()) {
         return false;
     }
@@ -201,6 +192,19 @@ bool ModulesSnapshotHelper::TryDisableSnapshot(const std::string_view& reason, c
     return true;
 }
 
+bool ModulesSnapshotHelper::TryDisableSnapshot(int reason)
+{
+    // entry of the sigchain crash handler (signal context),
+    // route to the async-signal-safe raw syscall file path
+    if (reason <= 0) {
+        return TryDisableSnapshot<true>(DISABLE_REASON_UNKNOWN);
+    }
+    constexpr size_t SIG_MAX_DIGITS = 2;
+    char sigBuf[SIG_MAX_DIGITS]{};
+    auto written = IntToString(reason, sigBuf, SIG_MAX_DIGITS);
+    return TryDisableSnapshot<true>(DISABLE_REASON_SIGNAL, std::string_view(sigBuf, written));
+}
+
 // escaper entry of uncaught exception, it would be called when uncaught exception occurs
 void ModulesSnapshotHelper::TryDisableSnapshot(JSThread* thread)
 {
@@ -208,7 +212,7 @@ void ModulesSnapshotHelper::TryDisableSnapshot(JSThread* thread)
         return;
     }
 
-    if (!TryDisableSnapshot(DISABLE_REASON_UNCAUGHT_EXCEPTION)) {
+    if (!TryDisableSnapshot<false>(DISABLE_REASON_UNCAUGHT_EXCEPTION)) {
         return;
     }
     LOG_ECMA(WARN) << "js crash occurred, try to disable snapshot";
@@ -232,8 +236,8 @@ void ModulesSnapshotHelper::TryDisableSnapshot(JSThread* thread)
     content += "\n";
     content += base::ErrorHelper::GetJSErrorInfo(thread, exceptionHandle, base::ErrorHelper::JSErrorProps::STACK);
     content += "\n";
-    PosixFile stateFile(g_stateFilePathBuffer_, "r+");
-    stateFile.Seek(0, PosixFile::SeekOrigin::END);
+    PosixFile<false> stateFile(g_stateFilePathBuffer_, "r+");
+    stateFile.Seek(0, SeekOrigin::END);
     stateFile.Write(content);
     LOG_ECMA(WARN) << "uncaught exception occurs, modues and (or) pandafile snapshot(s) will be disabled next time.\n"
         << content;
@@ -246,7 +250,7 @@ void ModulesSnapshotHelper::TryDisableSnapshotOnANR()
     if (!DoNeedEscape()) {
         return;
     }
-    TryDisableSnapshot(DISABLE_APPLICATION_NOT_RESPONDING);
+    TryDisableSnapshot<false>(DISABLE_APPLICATION_NOT_RESPONDING);
 }
 
 void ModulesSnapshotHelper::DisableSnapshotEscaper() { g_escaperDisabled_ = true; }
@@ -766,7 +770,7 @@ void ModulesSnapshotHelper::UpdateFromStateFile(const CString &path)
     if (g_escaperDisabled_ || !FileExist(stateFilePath.c_str())) {
         return;
     }
-    PosixFile stateFile(stateFilePath, "r");
+    PosixFile<false> stateFile(stateFilePath, "r");
     char stateWord{};
     if (stateFile.IsValid() && stateFile.Read(&stateWord, sizeof(stateWord)) <= 0) {
         g_featureState_ = disableAll;
@@ -774,7 +778,7 @@ void ModulesSnapshotHelper::UpdateFromStateFile(const CString &path)
         return;
     }
 
-    stateFile.Seek(1, PosixFile::SeekOrigin::CURRENT); // skip first ":"
+    stateFile.Seek(1, SeekOrigin::CURRENT); // skip first ":"
     // Read reason
     std::string report = "unknown";
     report.resize(stateFile.Size());

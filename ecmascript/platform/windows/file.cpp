@@ -263,31 +263,42 @@ std::error_code Rename(const char *oldPath, const char *newPath, bool existOk)
 
 constexpr const std::string_view POSIX_FILE_CLASS_NAME = "PosixFile";
 
-PosixFile::PosixFile([[maybe_unused]] const std::string_view &path,
+template<bool asyncSafe>
+PosixFile<asyncSafe>::PosixFile([[maybe_unused]] const std::string_view &path,
     [[maybe_unused]] const std::string_view &flags,
     [[maybe_unused]] const std::string_view &mode)
 {
     LogUnsupportedPlatform(POSIX_FILE_CLASS_NAME);
 }
-PosixFile::~PosixFile() {}
 
-int64_t PosixFile::Write([[maybe_unused]] const char *data, [[maybe_unused]] size_t size)
+template<bool asyncSafe>
+PosixFile<asyncSafe>::~PosixFile() {}
+
+template<bool asyncSafe>
+int64_t PosixFile<asyncSafe>::Write([[maybe_unused]] const char *data, [[maybe_unused]] size_t size)
 {
     return LogUnsupportedPlatform(POSIX_FILE_CLASS_NAME, -1);
 }
 
-int64_t PosixFile::Read([[maybe_unused]] char *buf, [[maybe_unused]] size_t size)
+template<bool asyncSafe>
+int64_t PosixFile<asyncSafe>::Read([[maybe_unused]] char *buf, [[maybe_unused]] size_t size)
 {
     return LogUnsupportedPlatform(POSIX_FILE_CLASS_NAME, -1);
 }
 
-int64_t PosixFile::Seek([[maybe_unused]] int64_t off, [[maybe_unused]] SeekOrigin whence)
+template<bool asyncSafe>
+int64_t PosixFile<asyncSafe>::Seek([[maybe_unused]] int64_t off, [[maybe_unused]] SeekOrigin whence)
 {
     return LogUnsupportedPlatform(POSIX_FILE_CLASS_NAME, -1);
 }
 
-int64_t PosixFile::Tell() { return LogUnsupportedPlatform(POSIX_FILE_CLASS_NAME, -1); }
+template<bool asyncSafe>
+int64_t PosixFile<asyncSafe>::Tell() { return LogUnsupportedPlatform(POSIX_FILE_CLASS_NAME, -1); }
 
-int64_t PosixFile::Size() { return LogUnsupportedPlatform(POSIX_FILE_CLASS_NAME, -1); }
+template<bool asyncSafe>
+int64_t PosixFile<asyncSafe>::Size() { return LogUnsupportedPlatform(POSIX_FILE_CLASS_NAME, -1); }
+
+template class PosixFile<true>;
+template class PosixFile<false>;
 
 }  // namespace panda::ecmascript
