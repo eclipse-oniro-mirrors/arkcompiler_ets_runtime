@@ -27,7 +27,7 @@ public:
         : compilerThread_(compilerThread), env_(env), broker_(compilerThread, env)
     {}
 
-    ArkSteedAccessInfoFactory CreateAccessInfoFactory(const kungfu::BytecodeInfo &bytecodeInfo) const
+    ArkSteedAccessInfoFactory CreateAccessInfoFactory(const kungfu::BytecodeInfo *bytecodeInfo) const
     {
         return ArkSteedAccessInfoFactory(compilerThread_, bytecodeInfo, env_,
                                          const_cast<ArkSteedHeapBroker *>(&broker_));
@@ -43,7 +43,7 @@ public:
         return &broker_;
     }
 
-    OperationFeedback ReadOperationFeedback(const kungfu::BytecodeInfo &bytecodeInfo)
+    OperationFeedback ReadOperationFeedback(const kungfu::BytecodeInfo *bytecodeInfo)
     {
         OperationFeedback feedback;
         ArkSteedFeedbackReader reader(compilerThread_, bytecodeInfo, &broker_);
@@ -51,7 +51,7 @@ public:
         return feedback;
     }
 
-    CallFeedback ReadCallFeedback(const kungfu::BytecodeInfo &bytecodeInfo)
+    CallFeedback ReadCallFeedback(const kungfu::BytecodeInfo *bytecodeInfo)
     {
         CallFeedback feedback;
         ArkSteedFeedbackReader reader(compilerThread_, bytecodeInfo, &broker_);
@@ -59,7 +59,7 @@ public:
         return feedback;
     }
 
-    ConstructorFeedback ReadConstructorFeedback(const kungfu::BytecodeInfo &bytecodeInfo)
+    ConstructorFeedback ReadConstructorFeedback(const kungfu::BytecodeInfo *bytecodeInfo)
     {
         ConstructorFeedback feedback;
         ArkSteedFeedbackReader reader(compilerThread_, bytecodeInfo, &broker_);

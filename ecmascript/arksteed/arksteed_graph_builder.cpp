@@ -1517,10 +1517,10 @@ struct GraphBuilder::BytecodeVisitor {
             case kungfu::EcmaOpcode::MOV_V4_V4:
             case kungfu::EcmaOpcode::MOV_V8_V8:
             case kungfu::EcmaOpcode::MOV_V16_V16:
-                frameState.Set(bcInfo->vregOut[0], LoadRegister(bcInfo, 0));
+                frameState.Set(bcInfo->vregOut, LoadRegister(bcInfo, 0));
                 break;
             case kungfu::EcmaOpcode::STA_V8:
-                frameState.Set(bcInfo->vregOut[0], frameState.GetAcc());
+                frameState.Set(bcInfo->vregOut, frameState.GetAcc());
                 break;
             case kungfu::EcmaOpcode::LDA_V8:
                 frameState.SetAcc(LoadRegister(bcInfo, 0));
@@ -2472,7 +2472,7 @@ struct GraphBuilder::BytecodeVisitor {
     {
         ValueVertex *result = TryBuildBooleanWithoutCall(value, trueIfTruthy);
         if (result == nullptr) {
-            OperationFeedback feedback = self->pgoContext_.ReadOperationFeedback(*currentBcInfo);
+            OperationFeedback feedback = self->pgoContext_.ReadOperationFeedback(currentBcInfo);
             switch (feedback.hint) {
                 case ArkSteedOperationHint::BOOLEAN:
                     BuildDeoptIfNotBoolean(value);
@@ -2601,7 +2601,7 @@ struct GraphBuilder::BytecodeVisitor {
     // justify a specialization.
     bool TrySpecializeNumericConversion(ValueVertex *value, bool allowBigInt)
     {
-        OperationFeedback feedback = self->pgoContext_.ReadOperationFeedback(*currentBcInfo);
+        OperationFeedback feedback = self->pgoContext_.ReadOperationFeedback(currentBcInfo);
         switch (feedback.hint) {
             case ArkSteedOperationHint::BOOLEAN:
                 BuildDeoptIfNotBoolean(value);
@@ -2691,7 +2691,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *value = frameState.GetAcc();
 
         NamedStoreAccessSet access;
-        auto factory = self->pgoContext_.CreateAccessInfoFactory(*bcInfo);
+        auto factory = self->pgoContext_.CreateAccessInfoFactory(bcInfo);
         if (factory.TryBuildNamedStoreAccessInfo(0, &access) &&
             TryLowerNamedStoreAccessSet(bcIndex, access, receiver, value, PropertyKey::ConstDataId(constDataId))) {
             return;
@@ -2722,7 +2722,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *key = LoadRegister(bcInfo, 2);  // 2: key register index
         ValueVertex *value = frameState.GetAcc();
         ElementStoreAccessInfo access;
-        auto factory = self->pgoContext_.CreateAccessInfoFactory(*bcInfo);
+        auto factory = self->pgoContext_.CreateAccessInfoFactory(bcInfo);
         if (factory.TryBuildElementStoreAccessInfo(0, &access) &&
             TryLowerElementStoreInBounds(bcIndex, access, receiver, key, value)) {
             return;
@@ -2761,7 +2761,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *key = LoadRegister(bcInfo, 1);
         ValueVertex *value = frameState.GetAcc();
         ElementStoreAccessInfo access;
-        auto factory = self->pgoContext_.CreateAccessInfoFactory(*bcInfo);
+        auto factory = self->pgoContext_.CreateAccessInfoFactory(bcInfo);
         if (factory.TryBuildElementStoreAccessInfo(0, &access) &&
             TryLowerElementStoreInBounds(bcIndex, access, receiver, key, value)) {
             return;
@@ -2834,7 +2834,7 @@ struct GraphBuilder::BytecodeVisitor {
         int indexValue = GetImmediate<int>(bcInfo, 2);  // 2: immediate index
         ValueVertex *value = frameState.GetAcc();
         ElementStoreAccessInfo access;
-        auto factory = self->pgoContext_.CreateAccessInfoFactory(*bcInfo);
+        auto factory = self->pgoContext_.CreateAccessInfoFactory(bcInfo);
         if (factory.TryBuildElementStoreAccessInfo(0, &access) &&
             TryLowerElementStoreAppend(bcIndex, access, receiver, TaggedConstantFromInt32(indexValue), value,
                                        CommonStubID::StOwnByIndex)) {
@@ -3666,7 +3666,7 @@ struct GraphBuilder::BytecodeVisitor {
             return BuildSelfCallVertex(inputs, actualArgc);
         }
 
-        CallFeedback feedback = self->pgoContext_.ReadCallFeedback(*bcInfo);
+        CallFeedback feedback = self->pgoContext_.ReadCallFeedback(bcInfo);
         if (canUseCallSelf) {
             if (ValueVertex *call = TryBuildPGOSelfCall(feedback, inputs, actualArgc); call != nullptr) {
                 return call;
@@ -3914,7 +3914,7 @@ struct GraphBuilder::BytecodeVisitor {
         // JS-constructor guards below. A miss means func's [[Prototype]] changed after
         // profiling; the slot is rewritten on the next execution, so a recompile adapts.
         ValueVertex *expectedSuperCtor = nullptr;
-        CallFeedback feedback = self->pgoContext_.ReadCallFeedback(*bcInfo);
+        CallFeedback feedback = self->pgoContext_.ReadCallFeedback(bcInfo);
         if (feedback.IsMonomorphicJSFunction()) {
             expectedSuperCtor = GetHeapConstant(feedback.target);
         }
@@ -4090,7 +4090,7 @@ struct GraphBuilder::BytecodeVisitor {
         }
         uint32_t actualArgc = inputSize - 1U;
         std::optional<BuiltinConstructPlan> builtinPlan = TryCreateBuiltinLoadConstructPlan(args.front(), actualArgc);
-        ConstructorFeedback feedback = self->pgoContext_.ReadConstructorFeedback(*bcInfo);
+        ConstructorFeedback feedback = self->pgoContext_.ReadConstructorFeedback(bcInfo);
         if (!builtinPlan.has_value()) {
             builtinPlan = TryCreateProfiledKnownBuiltinConstructPlan(feedback, actualArgc);
         }
@@ -4430,7 +4430,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *value = frameState.GetAcc();
 
         NamedStoreAccessSet access;
-        auto factory = self->pgoContext_.CreateAccessInfoFactory(*bcInfo);
+        auto factory = self->pgoContext_.CreateAccessInfoFactory(bcInfo);
         if (factory.TryBuildNamedStoreAccessInfo(0, &access) && access.caseCount > 0) {
             for (uint32_t i = 0; i < access.caseCount; ++i) {
                 ASSERT(access.cases[i].kind == AccessKind::TRANSITION);
@@ -5490,7 +5490,7 @@ struct GraphBuilder::BytecodeVisitor {
         const auto &liveOut = self->analysis_->GetLiveOutOfBytecode(bcIndex);
 
         auto isInVRegOut = [bcInfo](VRegIDType index) {
-            return std::find(bcInfo->vregOut.begin(), bcInfo->vregOut.end(), index) != bcInfo->vregOut.end();
+            return (bcInfo->vregOut != BytecodeInfo::NO_VREG) && (bcInfo->vregOut == index);
         };
 
         AppendLazyCommonDeoptInputs(bcIndex, deoptFrameState);
@@ -7159,7 +7159,7 @@ struct GraphBuilder::BytecodeVisitor {
             return BuildI32BitwiseBinOp(kind, left, right, leftKnownInt, rightKnownInt);
         }
 
-        OperationFeedback feedback = self->pgoContext_.ReadOperationFeedback(*currentBcInfo);
+        OperationFeedback feedback = self->pgoContext_.ReadOperationFeedback(currentBcInfo);
         if (feedback.hint == ArkSteedOperationHint::INT) {
             LogOperationFeedback(feedback, "Bitwise", "I32BitwiseBinOp");
             return BuildI32BitwiseBinOp(kind, left, right, false, false);
@@ -7498,7 +7498,7 @@ struct GraphBuilder::BytecodeVisitor {
             return BuildI32CompareOp(kind, left, right, leftKnownInt, rightKnownInt);
         }
 
-        OperationFeedback feedback = self->pgoContext_.ReadOperationFeedback(*currentBcInfo);
+        OperationFeedback feedback = self->pgoContext_.ReadOperationFeedback(currentBcInfo);
         if (feedback.hint == ArkSteedOperationHint::INT) {
             LogOperationFeedback(feedback, "Compare", "I32CompareOp");
             return BuildI32CompareOp(kind, left, right, false, false);
@@ -7582,7 +7582,7 @@ struct GraphBuilder::BytecodeVisitor {
             compileInfoFacts_->EnsureType(constant, NodeTypeFromJSTaggedValue(value));
             return constant;
         }
-        OperationFeedback feedback = self->pgoContext_.ReadOperationFeedback(*currentBcInfo);
+        OperationFeedback feedback = self->pgoContext_.ReadOperationFeedback(currentBcInfo);
         bool observedNonInt32Result = SupportsF64BinOp(kind) && feedback.hint == ArkSteedOperationHint::NUMBER;
         if (!observedNonInt32Result) {
             if (ValueVertex *provenInt = TryBuildProvenIntBinOp(kind, left, right)) {
@@ -7689,7 +7689,7 @@ struct GraphBuilder::BytecodeVisitor {
             return constant;
         }
 
-        OperationFeedback feedback = self->pgoContext_.ReadOperationFeedback(*currentBcInfo);
+        OperationFeedback feedback = self->pgoContext_.ReadOperationFeedback(currentBcInfo);
         bool valueKnownInt = compileInfoFacts_->CheckType(value, NodeInfo::NodeType::INT);
         bool hasIntFeedback = feedback.hint == ArkSteedOperationHint::INT;
         bool hasNumberFeedback = feedback.hint == ArkSteedOperationHint::NUMBER ||
@@ -9969,7 +9969,7 @@ struct GraphBuilder::BytecodeVisitor {
             frameState.SetAcc(stored);
             return true;
         }
-        auto factory = self->pgoContext_.CreateAccessInfoFactory(*bcInfo);
+        auto factory = self->pgoContext_.CreateAccessInfoFactory(bcInfo);
         PropertyAccessSet accessSet;
         if (!factory.TryBuildNamedLoadAccessInfo(0, &accessSet)) {
             return false;
@@ -10477,7 +10477,7 @@ struct GraphBuilder::BytecodeVisitor {
     bool TryBuildLoadPropertyByValue(const BytecodeInfo *bcInfo, uint32_t bcIndex, ValueVertex *receiver,
                                      ValueVertex *key)
     {
-        auto factory = self->pgoContext_.CreateAccessInfoFactory(*bcInfo);
+        auto factory = self->pgoContext_.CreateAccessInfoFactory(bcInfo);
         ValueLoadAccessSet access;
         if (!factory.TryBuildValueLoadAccessInfo(&access)) {
             return false;
@@ -10615,7 +10615,7 @@ struct GraphBuilder::BytecodeVisitor {
 
     std::optional<ArkSteedObjectRef> TryGetGlobalCellBox(const BytecodeInfo *bcInfo)
     {
-        ArkSteedFeedbackReader reader(self->compilerThread_, *bcInfo, self->pgoContext_.GetBroker());
+        ArkSteedFeedbackReader reader(self->compilerThread_, bcInfo, self->pgoContext_.GetBroker());
         GlobalAccessFeedback feedback;
         if (!self->pgoContext_.GetBroker()->GetFeedbackForGlobalAccess(reader, &feedback)) {
             return std::nullopt;

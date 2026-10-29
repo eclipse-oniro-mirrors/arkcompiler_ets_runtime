@@ -26,7 +26,7 @@ namespace panda::ecmascript::arksteed {
 
 class ArkSteedFeedbackReader {
 public:
-    ArkSteedFeedbackReader(JSThread *compilerThread, const kungfu::BytecodeInfo &bytecodeInfo,
+    ArkSteedFeedbackReader(JSThread *compilerThread, const kungfu::BytecodeInfo *bytecodeInfo,
                            ArkSteedHeapBroker *broker)
         : compilerThread_(compilerThread), bytecodeInfo_(bytecodeInfo), broker_(broker)
     {}
@@ -71,7 +71,8 @@ private:
     ArkSteedOperationHint MakeOperationHint(uint32_t rawBits) const;
 
     JSThread *compilerThread_ {nullptr};
-    kungfu::BytecodeInfo bytecodeInfo_;
+    // Points to entries in the BytecodePreprocessor's bytecode table.
+    const kungfu::BytecodeInfo *bytecodeInfo_ {nullptr};
     ArkSteedHeapBroker *broker_ {nullptr};
 };
 

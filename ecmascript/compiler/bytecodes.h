@@ -703,9 +703,13 @@ private:
 
 class BytecodeInfo {
 public:
+    using InputVariant = std::variant<ConstDataId, ICSlotId, Immediate, VirtualRegister>;
+
+    static constexpr VRegIDType NO_VREG = -1;
+
     // set of id, immediate and read register
-    std::vector<std::variant<ConstDataId, ICSlotId, Immediate, VirtualRegister>> inputs {};
-    std::vector<VRegIDType> vregOut {}; // write register
+    std::vector<InputVariant> inputs {};
+    VRegIDType vregOut {NO_VREG}; // write register
     ICSlotId slotId {ICSlotId::INVALID_ID};
 
     bool Deopt() const
@@ -755,13 +759,12 @@ public:
 
     bool IsDef() const
     {
-        return (!vregOut.empty()) || AccOut();
+        return (vregOut != NO_VREG) || AccOut();
     }
 
-    bool IsOut(VRegIDType reg, uint32_t index) const
+    bool IsOut(VRegIDType reg) const
     {
-        bool isDefined = (!vregOut.empty() && (reg == vregOut.at(index)));
-        return isDefined;
+        return (vregOut != NO_VREG) && (reg == vregOut);
     }
 
     bool IsMov() const
@@ -836,7 +839,7 @@ public:
 
     size_t ComputeOutCount() const
     {
-        return (AccOut() ? 1 : 0) + vregOut.size();
+        return (AccOut() ? 1 : 0) + ((vregOut != NO_VREG) ? 1 : 0);
     }
 
     bool IsBc(EcmaOpcode ecmaOpcode) const
@@ -922,8 +925,9 @@ public:
 private:
     void SetInsufficientProfile(BytecodeCircuitBuilder *builder, const uint8_t *pc);
 
-    BytecodeMetaData metaData_ { 0 };
     bool isInsufficientProfile_ {false};
+    BytecodeMetaData metaData_ { 0 };
+
     friend class BytecodeCircuitBuilder;
 };
 

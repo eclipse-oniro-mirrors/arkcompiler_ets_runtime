@@ -87,19 +87,14 @@ public:
         JS_FUNCTION = 1U << 9U,
         JS_TYPED_ARRAY = 1U << 10U,
         OTHER_JS_RECEIVER = 1U << 11U,
+        // Universal set
+        UNKNOWN = (1U << 12U) - 1U,
 
-        NUMBER = static_cast<uint16_t>(INT) | static_cast<uint16_t>(DOUBLE),
-        NULL_OR_UNDEFINED = static_cast<uint16_t>(NULL_TYPE) | static_cast<uint16_t>(UNDEFINED),
-        ODDBALL = static_cast<uint16_t>(NULL_TYPE) | static_cast<uint16_t>(UNDEFINED) | static_cast<uint16_t>(BOOLEAN),
-        JS_RECEIVER = static_cast<uint16_t>(JS_ARRAY) | static_cast<uint16_t>(JS_FUNCTION) |
-                      static_cast<uint16_t>(JS_TYPED_ARRAY) | static_cast<uint16_t>(OTHER_JS_RECEIVER),
-        ANY_HEAP_OBJECT = static_cast<uint16_t>(STRING) | static_cast<uint16_t>(SYMBOL) |
-                          static_cast<uint16_t>(BIGINT) | static_cast<uint16_t>(JS_RECEIVER),
-        UNKNOWN = static_cast<uint16_t>(INT) | static_cast<uint16_t>(DOUBLE) | static_cast<uint16_t>(NULL_TYPE) |
-                  static_cast<uint16_t>(UNDEFINED) | static_cast<uint16_t>(BOOLEAN) | static_cast<uint16_t>(STRING) |
-                  static_cast<uint16_t>(SYMBOL) | static_cast<uint16_t>(BIGINT) | static_cast<uint16_t>(JS_ARRAY) |
-                  static_cast<uint16_t>(JS_FUNCTION) | static_cast<uint16_t>(JS_TYPED_ARRAY) |
-                  static_cast<uint16_t>(OTHER_JS_RECEIVER),
+        NUMBER = INT | DOUBLE,
+        NULL_OR_UNDEFINED = NULL_TYPE | UNDEFINED,
+        ODDBALL = NULL_OR_UNDEFINED | BOOLEAN,
+        JS_RECEIVER = JS_ARRAY | JS_FUNCTION | JS_TYPED_ARRAY | OTHER_JS_RECEIVER,
+        ANY_HEAP_OBJECT = STRING | SYMBOL | BIGINT | JS_RECEIVER,
     };
 
     NodeInfo() = default;
@@ -256,9 +251,9 @@ private:
 
     NodeType type_ {NodeType::UNKNOWN};
     bool nonHole_ {false};
+    bool possibleHClassesAreStale_ {false};
     AlternativeNodes alternatives_;
     PossibleHClassInfos possibleHClasses_;
-    bool possibleHClassesAreStale_ {false};
 };
 
 NodeInfo::NodeType NodeTypeFromJSTaggedValue(JSTaggedValue value);
