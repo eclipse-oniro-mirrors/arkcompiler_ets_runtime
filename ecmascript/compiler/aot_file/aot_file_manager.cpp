@@ -332,6 +332,12 @@ bool AOTFileManager::InsideAOT(uintptr_t pc)
     return anFileDataManager->SafeInsideAOT(pc);
 }
 
+bool AOTFileManager::TryInsideStubOrAot(uintptr_t pc)
+{
+    AnFileDataManager *anFileDataManager = AnFileDataManager::GetInstance();
+    return anFileDataManager->SafeTryInsideStubOrAOT(pc);
+}
+
 AOTFileInfo::CallSiteInfo AOTFileManager::CalCallSiteInfo(uintptr_t retAddr, bool isDeopt)
 {
     AnFileDataManager *anFileDataManager = AnFileDataManager::GetInstance();

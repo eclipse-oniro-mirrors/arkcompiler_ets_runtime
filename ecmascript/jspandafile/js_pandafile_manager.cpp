@@ -24,6 +24,7 @@
 
 #include "constpool_snapshot.h"
 #include "ecmascript/checkpoint/thread_state_transition.h"
+#include "ecmascript/dfx/cpu_profiler/profiler_metadata_registry.h"
 #include "ecmascript/runtime.h"
 #include "ecmascript/jspandafile/abc_buffer_cache.h"
 #include "ecmascript/jspandafile/js_pandafile_executor.h"
@@ -410,6 +411,7 @@ void JSPandaFileManager::AddJSPandaFile(const std::shared_ptr<JSPandaFile> &jsPa
 
     loadedJSPandaFiles_[filename] = std::move(jsPandaFile);
     JSPandaFileExecutor::BindPandaFileToAot(jsPandaFile.get());
+    ProfilerMetadataRegistry::Instance().OnLoad(jsPandaFile.get());
     LOG_ECMA(DEBUG) << "add file: " << filename;
 }
 
@@ -424,6 +426,8 @@ void JSPandaFileManager::RemoveJSPandaFile(const JSPandaFile *jsPandaFile)
     while (iterOld != oldJSPandaFiles_.end()) {
         if (iterOld->get() == jsPandaFile) {
             extractors_.erase(jsPandaFile);
+            // Keep the file alive until every profiler drained its in-flight samples.
+            ProfilerMetadataRegistry::Instance().OnUnload(jsPandaFile, *iterOld);
             oldJSPandaFiles_.erase(iterOld);
             return;
         }
@@ -433,6 +437,8 @@ void JSPandaFileManager::RemoveJSPandaFile(const JSPandaFile *jsPandaFile)
     auto iter = loadedJSPandaFiles_.find(filename);
     if (iter != loadedJSPandaFiles_.end()) {
         extractors_.erase(jsPandaFile);
+        // Keep the file alive until every profiler drained its in-flight samples.
+        ProfilerMetadataRegistry::Instance().OnUnload(jsPandaFile, iter->second);
         // erase shared_ptr from map, the ref count -1.
         loadedJSPandaFiles_.erase(iter);
     }

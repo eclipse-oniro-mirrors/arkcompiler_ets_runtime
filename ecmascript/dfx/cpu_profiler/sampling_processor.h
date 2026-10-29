@@ -26,6 +26,7 @@ namespace panda::ecmascript {
 class SamplesRecord;
 class JSThread;
 class EcmaVM;
+class CpuProfiler;
 class SamplingProcessor {
 public:
     static void AddSample(SamplesRecord *generator);
@@ -44,9 +45,12 @@ struct RunParams {
     uint32_t interval_;
     pthread_t tid_;
     void *taskHandle_;
+    CpuProfiler *profiler_;
 
-    RunParams(SamplesRecord *generator, uint32_t interval, pthread_t tid, void *taskHandle)
-        :generator_(generator), interval_(interval), tid_(tid), taskHandle_(taskHandle) {};
+    RunParams(SamplesRecord *generator, uint32_t interval, pthread_t tid, void *taskHandle,
+              CpuProfiler *profiler)
+        :generator_(generator), interval_(interval), tid_(tid), taskHandle_(taskHandle),
+         profiler_(profiler) {};
 };
 } // namespace panda::ecmascript
 #endif // ECMASCRIPT_DFX_CPU_PROFILER_SAMPLING_PROCESSOR_H

@@ -68,6 +68,31 @@ void SamplesRecord::NodeInit()
     profileInfo_->nodes[0].children.push_back(methodNode.id);
 }
 
+int SamplesRecord::ResolveProfileNodeId(struct NodeKey &nodeKey)
+{
+    auto result = nodeMap_.find(nodeKey);
+    if (result != nodeMap_.end()) {
+        previousId_ = result->second;
+        return result->second;
+    }
+    if (profileInfo_->nodeCount >= MAX_NODE_COUNT) {
+        LOG_ECMA(ERROR) << "AddSample: nodeCount exceeds MAX_NODE_COUNT";
+        return NODE_ID_OVERFLOW;
+    }
+    int id = static_cast<int>(nodeMap_.size() + 1);
+    nodeMap_.emplace(nodeKey, id);
+    previousId_ = id;
+    struct CpuProfileNode methodNode;
+    methodNode.id = id;
+    methodNode.parentId = nodeKey.parentId;
+    methodNode.codeEntry = GetMethodInfo(nodeKey.methodKey);
+    profileInfo_->nodes[profileInfo_->nodeCount++] = methodNode;
+    if (methodNode.parentId > 0 && methodNode.parentId <= profileInfo_->nodeCount) {
+        profileInfo_->nodes[methodNode.parentId - 1].children.push_back(id);
+    }
+    return id;
+}
+
 void SamplesRecord::AddSample(const FrameStackAndInfo &frame)
 {
     int frameStackLength = frame.frameStackLength;
@@ -83,30 +108,24 @@ void SamplesRecord::AddSample(const FrameStackAndInfo &frame)
     methodNode.id = 1;
     for (; frameStackLength >= 1; frameStackLength--) {
         nodeKey.methodKey = frame.frameStack[frameStackLength - 1];
-        methodNode.parentId = nodeKey.parentId = methodNode.id;
-        auto result = nodeMap_.find(nodeKey);
-        if (result == nodeMap_.end()) {
-            if (profileInfo_->nodeCount >= MAX_NODE_COUNT) {
-                LOG_ECMA(ERROR) << "AddSample: nodeCount exceeds MAX_NODE_COUNT";
-                previousTimeStamp_ = frame.timeStamp;
-                return;
-            }
-            int id = static_cast<int>(nodeMap_.size() + 1);
-            nodeMap_.emplace(nodeKey, id);
-            previousId_ = methodNode.id = id;
-            methodNode.codeEntry = GetMethodInfo(nodeKey.methodKey);
-            profileInfo_->nodes[profileInfo_->nodeCount++] = methodNode;
-            if (methodNode.parentId > 0 && methodNode.parentId <= profileInfo_->nodeCount) {
-                profileInfo_->nodes[methodNode.parentId - 1].children.push_back(id);
-            }
-        } else {
-            previousId_ = methodNode.id = result->second;
+        nodeKey.parentId = methodNode.id;
+        int nodeId = ResolveProfileNodeId(nodeKey);
+        if (nodeId == NODE_ID_OVERFLOW) {
+            previousTimeStamp_ = frame.timeStamp;
+            return;
         }
+        methodNode.id = nodeId;
     }
 
     int sampleNodeId = previousId_ == 0 ? 1 : methodNode.id;
     int timeDelta = static_cast<int>(frame.timeStamp -
         (previousTimeStamp_ == 0 ? profileInfo_->startTime : previousTimeStamp_));
+    if (timeDelta < MIN_TIME_DELTA) {
+        // Fire-and-forget sampling can deliver a sample stamped (request time)
+        // before the previously consumed one; clamp to keep deltas monotonic
+        // (Oracle review F2).
+        timeDelta = MIN_TIME_DELTA;
+    }
 
     // delete abnormal sample
     if (timeDelta > static_cast<int>(timeDeltaThreshold_) && previousState_ != RunningState::NAPI) {
@@ -128,6 +147,9 @@ void SamplesRecord::AddEmptyStackSample(uint64_t sampleTimeStamp)
 {
     int timeDelta = static_cast<int>(sampleTimeStamp -
         (previousTimeStamp_ == 0 ? profileInfo_->startTime : previousTimeStamp_));
+    if (timeDelta < MIN_TIME_DELTA) {
+        timeDelta = MIN_TIME_DELTA;
+    }
 
     // delete abnormal sample
     if (timeDelta > static_cast<int>(timeDeltaThreshold_) && previousState_ != RunningState::NAPI) {
@@ -407,6 +429,26 @@ int SamplesRecord::SemWait(int index)
 int SamplesRecord::SemDestroy(int index)
 {
     return sem_destroy(&sem_[index]);
+}
+
+int SamplesRecord::SemInit(int pshared, int value)
+{
+    return SemInit(1, pshared, value); // 1: processor-exit handshake slot
+}
+
+int SamplesRecord::SemPost()
+{
+    return SemPost(1);
+}
+
+int SamplesRecord::SemWait()
+{
+    return SemWait(1);
+}
+
+int SamplesRecord::SemDestroy()
+{
+    return SemDestroy(1);
 }
 
 const CMap<struct MethodKey, struct FrameInfo> &SamplesRecord::GetStackInfo() const

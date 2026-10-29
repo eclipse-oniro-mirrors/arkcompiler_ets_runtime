@@ -139,10 +139,17 @@ public:
     void SetGcState(bool gcState);
     bool GetRuntimeState() const;
     void SetRuntimeState(bool runtimeState);
+    // Indexed form: sem_[0] is the legacy per-sample ACK, sem_[1] the
+    // processor-exit handshake shared by both sampling modes, sem_[2] reserved.
     int SemInit(int index, int pshared, int value);
     int SemPost(int index);
     int SemWait(int index);
     int SemDestroy(int index);
+    // Index-free form used by the lock-free mode; the handshake is sem_[1].
+    int SemInit(int pshared, int value);
+    int SemPost();
+    int SemWait();
+    int SemDestroy();
     const CMap<struct MethodKey, struct FrameInfo> &GetStackInfo() const;
     void InsertStackInfo(struct MethodKey &methodKey, struct FrameInfo &codeEntry);
     bool PushFrameStack(struct MethodKey &methodKey);
@@ -181,6 +188,10 @@ private:
     void StringifySamples();
     struct FrameInfo GetMethodInfo(struct MethodKey &methodKey);
     std::string AddRunningState(const char *functionName, RunningState state, kungfu::DeoptType type);
+    // Sentinel returned when the profile tree hit MAX_NODE_COUNT; the caller
+    // aborts the sample being folded in.
+    static constexpr int NODE_ID_OVERFLOW = -1;
+    int ResolveProfileNodeId(struct NodeKey &nodeKey);
     void FrameInfoTempToMap(const FrameInfoTemp *frameInfoTemps, int frameInfoTempLength);
     void NapiFrameInfoTempToMap();
     void StatisticStateTime(int timeDelta, RunningState state);
@@ -197,7 +208,7 @@ private:
     CMap<struct NodeKey, int> nodeMap_;
     std::string sampleData_ = "";
     std::string fileName_ = "";
-    sem_t sem_[3]; // 3 : sem_ size is three.
+    sem_t sem_[3]; // 3: [0] legacy per-sample ACK, [1] processor-exit handshake, [2] reserved
     CMap<struct MethodKey, struct FrameInfo> stackInfoMap_;
     struct MethodKey frameStack_[MAX_STACK_SIZE] = {};
     int frameStackLength_ = 0;

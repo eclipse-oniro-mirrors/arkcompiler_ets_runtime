@@ -3921,6 +3921,7 @@
     <target name="CpuProfilerTest">
         <preparer>
             <option name="push" value="obj/arkcompiler/ets_runtime/ecmascript/dfx/cpu_profiler/tests/cpuprofiler_1.abc -> /data/test" src="out"/>
+            <option name="push" value="obj/arkcompiler/ets_runtime/ecmascript/dfx/cpu_profiler/tests/cpuprofiler_deep_recursion.abc -> /data/test" src="out"/>
             <option name="push" value="arkcompiler/ets_runtime/libark_jsruntime_test.so -> /data/test" src="out"/>
         </preparer>
     </target>

@@ -18,8 +18,13 @@
 
 #include <csignal>
 
+#include "ecmascript/dfx/cpu_profiler/cpu_profiler_symbolizer.h"
+#include "ecmascript/dfx/cpu_profiler/profiler_metadata_registry.h"
+#include "ecmascript/dfx/cpu_profiler/profiler_signal_context.h"
+#include "ecmascript/dfx/cpu_profiler/raw_sample.h"
 #include "ecmascript/dfx/cpu_profiler/samples_record.h"
 #include "ecmascript/dfx/cpu_profiler/sampling_processor.h"
+#include "ecmascript/dfx/cpu_profiler/signal_safe_frame_iterator.h"
 #include "ecmascript/debugger/js_debugger_manager.h"
 #include "ecmascript/interpreter/frame_handler.h"
 #include "ecmascript/js_thread.h"
@@ -27,6 +32,7 @@
 #include "ecmascript/platform/mutex.h"
 
 namespace panda::ecmascript {
+class AnFileDataManager;
 const int THRESHOLD_GROWTH_FACTORY = 2; // 2:TimeDelta Threshold Growth Factory
 const int THRESHOLD_FIXED_INCREMENT = 2000; // 2000:TimeDelta Threshold Fixed Increment
 using JSTaggedType = uint64_t;
@@ -103,11 +109,24 @@ public:
     bool GetStackCallNapi(JSThread *thread, bool beforeCallNapi);
 #if defined(ECMASCRIPT_SUPPORT_CPUPROFILER)
     // siginfo_t may be undefined on some platforms
+#if defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
+    // Legacy handler (default name retained): symbolizes inside the signal
+    // context and ACKs the sampling thread through sem_[0]. NOT
+    // async-signal-safe (issue #13618); historical behavior baseline.
+    // Defining ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY selects this scheme for
+    // the whole build (handler, tick loop, stop path); it is off by default.
     static void GetStackSignalHandler(int signal, siginfo_t *siginfo, void *context);
+#else
+    // Lock-free two-phase handler (default scheme): raw capture only,
+    // deferred symbolization — the only scheme compiled unless
+    // ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY is defined.
+    static void GetStackSignalHandlerLockFree(int signal, siginfo_t *siginfo, void *context);
+#endif
 #endif
 
-#ifdef PANDA_JS_ETS_HYBRID_MODE
-    // Hybrid stack processing methods
+#if defined(PANDA_JS_ETS_HYBRID_MODE)
+    // Hybrid stack processing; the lock-free handler also routes hybrid samples
+    // here temporarily (see CollectSampleInto).
     void ProcessHybridStack(JSThread *thread);
     void ProcessStaticFrame(const void *frame);
     void ProcessDynamicFrame(const void *frame, JSThread *thread);
@@ -124,16 +143,51 @@ public:
     explicit CpuProfiler(const EcmaVM *vm, const int interval = CPUPROFILER_DEFAULT_INTERVAL);
     virtual ~CpuProfiler();
 
+    // Read by the tracing integration (both modes) and the legacy handler.
     static CMap<pthread_t, struct TaskInfo> profilerMap_;
     static EcmaVM *GetVmbyTid(pthread_t tid);
+
+    // Processor-thread side: send one sampling request (pending bit + timestamp) and
+    // consume whatever raw samples have arrived. Never blocks on the handler.
+    void ScheduleSample(pthread_t jsThreadId);
+    bool ConsumeRawSamples();
+    // Sampling-thread side: migrate the signal-context tid binding when the FFRT
+    // task moves to another worker (called via SamplingProcessor::Run).
+    void RebindSignalContext(uint64_t newTid);
 private:
     static Mutex synchronizationMutex_;
 
+#if defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY) || defined(PANDA_JS_ETS_HYBRID_MODE)
+    // Legacy in-handler symbolization walk: used by GetStackSignalHandler, and
+    // by the hybrid routing's ProcessDynamicFrame (see CollectSampleInto).
     void GetStack(FrameIterator &it);
+#endif
+    // Signal-context side: register/PC validation and plain-load frame walk filling a
+    // preallocated raw sample slot. Must stay free of locks, allocation and logging.
+    void CollectSampleInto(RawSample &sample, CpuProfilerSignalContext *ctx, void *context);
+    void CollectUContextFrames(RawSample &sample, CpuProfilerSignalContext *ctx, void *context);
+    void CollectRawFrames(RawSample &sample, CpuProfilerSignalContext *ctx,
+                          SignalSafeProfilerFrameIterator &it);
+    // Processor-thread side: orchestrates symbolization of one raw sample; all
+    // allocation and metadata lookups live in CpuProfilerSymbolizer/SamplesRecord.
+    void ProcessRawSample(const RawSample &sample);
+    void ResetSamplingStats();
+    void LogSamplingStats();
+    void WaitHandlersDrained();
+    void WaitHandlersDrainedUnbounded();
     static uint64_t GetPcFromContext(void *context);
+    bool IsAddrAtStubOrAot(AnFileDataManager *manager, uint64_t pc) const;
+#if defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
+    // Legacy blocking form used by GetStackSignalHandler only.
     bool IsAddrAtStubOrAot(uint64_t pc) const;
+#endif
     bool CheckFileName(const std::string &fileName, std::string &absoluteFilePath) const;
     bool RegisterGetStackSignal();
+    bool PrepareProfilerSession(void **taskHandle);
+    void SetProfilerSignalState(ProfilerSignalState state);
+    bool StartProfilerCommon();
+    bool StopProfilerCommon();
+    void AbortProfilerStart();
 
     bool isProfiling_ = false;
     bool outToFile_ = false;
@@ -145,6 +199,15 @@ private:
     uint64_t beforeCallNapiTimeStamp_ = 0;
     std::atomic_bool isBuildNapiStack_ {false};
     bool enableVMTag_ {false};
+    // Signal-safe sampling data path (plan §4/§5): the queue is written by the
+    // SIGPROF handler only and consumed by the sampling processor thread only.
+    RawSamplesQueue rawQueue_;
+    CpuProfilerSignalContext signalCtx_;
+    // Table key of the currently published signalCtx_ binding; Start and the
+    // sampling-thread rebind maintain it under synchronizationMutex_.
+    uint64_t signalCtxKey_ {0};
+    // Processor-thread-only symbolization and metadata view (plan §7.1/§7.2).
+    CpuProfilerSymbolizer symbolizer_;
 
     friend class CpuProfilerFriendTest;
 };

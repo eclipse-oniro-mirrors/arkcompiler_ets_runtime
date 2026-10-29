@@ -68,12 +68,35 @@ const JSPandaFile *Method::GetJSPandaFile(const JSThread *thread) const
     return taggedPool->GetJSPandaFile();
 }
 
+const JSPandaFile *Method::GetJSPandaFileNoBarrier() const
+{
+    JSTaggedValue constpool(
+        Barriers::GetPrimitive<JSTaggedType>(this, CONSTANT_POOL_OFFSET));
+    if (constpool.IsUndefined()) {
+        return nullptr;
+    }
+    const ConstantPool *taggedPool = ConstantPool::Cast(constpool.GetTaggedObject());
+    return taggedPool->GetJSPandaFile();
+}
+
 MethodLiteral *Method::GetMethodLiteral(const JSThread *thread) const
 {
     if (IsAotWithCallField() || IsDeoptimized()) {
         ASSERT(!IsNativeWithCallField());
         const JSPandaFile *jsPandaFile = GetJSPandaFile(thread);
         ASSERT(jsPandaFile != nullptr);
+        return jsPandaFile->FindMethodLiteral(GetMethodId().GetOffset());
+    }
+    return reinterpret_cast<MethodLiteral *>(GetCodeEntryOrLiteral());
+}
+
+MethodLiteral *Method::GetMethodLiteralNoBarrier() const
+{
+    if (IsAotWithCallField() || IsDeoptimized()) {
+        const JSPandaFile *jsPandaFile = GetJSPandaFileNoBarrier();
+        if (jsPandaFile == nullptr) {
+            return nullptr;
+        }
         return jsPandaFile->FindMethodLiteral(GetMethodId().GetOffset());
     }
     return reinterpret_cast<MethodLiteral *>(GetCodeEntryOrLiteral());
