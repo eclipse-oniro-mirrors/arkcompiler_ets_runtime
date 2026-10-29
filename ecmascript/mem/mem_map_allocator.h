@@ -277,7 +277,7 @@ public:
 #if defined(PANDA_TARGET_64) && !WIN_OR_MAC_OR_IOS_PLATFORM && defined(NDEBUG)
             for (size_t i = 0; i <= MEM_MAP_RETRY_NUM; ++i) {
                 void *addr = reinterpret_cast<void *>(
-                    ToUintPtr(RandomGenerateBigAddr(HUGE_OBJECT_MEM_MAP_BEGIN_ADDR)) + i * STEP_INCREASE_MEM_MAP_ADDR);
+                    ToUintPtr(RandomGenerateBigAddr(HUGE_OBJECT_MEM_MAP_BEGIN_ADDR)));
                 memMap = PageMap(INITIAL_MEM_MAP_POOL_CAPACITY_FOR_COMPRESSED_POINTER, PAGE_PROT_NONE,
                                  INITIAL_MEM_MAP_POOL_CAPACITY_FOR_COMPRESSED_POINTER, addr);
                 if (ToUintPtr(memMap.GetMem()) >= ToUintPtr(addr) || i == MEM_MAP_RETRY_NUM) {
@@ -387,15 +387,16 @@ private:
         std::uniform_int_distribution<uint64_t> distribution(0, RANDOM_NUM_MAX);
         uint64_t randomNum = distribution(generator);
 
-        // Big addr random change in 0x2000000000 ~ 0x2FF0000000
+        // Big addr random change in:
+        //   huge:    [0x100000000 (4G),  0x830000000 (32.75G)]
+        //   regular: [0x880000000 (34G), 0xFB0000000 (62.75G)]
         return reinterpret_cast<void *>(addr + (randomNum << RANDOM_SHIFT_BIT));
     }
 
     static constexpr size_t REGULAR_REGION_MMAP_SIZE = 4_MB;
-    static constexpr uint64_t HUGE_OBJECT_MEM_MAP_BEGIN_ADDR = 0x1000000000;
-    static constexpr uint64_t REGULAR_OBJECT_MEM_MAP_BEGIN_ADDR = 0x2000000000;
-    static constexpr uint64_t STEP_INCREASE_MEM_MAP_ADDR = 0x1000000000;
-    static constexpr size_t RANDOM_NUM_MAX = 0xFF;
+    static constexpr uint64_t HUGE_OBJECT_MEM_MAP_BEGIN_ADDR = 0x100000000; // 4G
+    static constexpr uint64_t REGULAR_OBJECT_MEM_MAP_BEGIN_ADDR = 0x880000000; // 34G
+    static constexpr size_t RANDOM_NUM_MAX = 0x73; // max offset = 28.75G (0x73 << 28)
     static constexpr size_t RANDOM_SHIFT_BIT = 28;
     static constexpr size_t MEM_MAP_RETRY_NUM = 10;
 
