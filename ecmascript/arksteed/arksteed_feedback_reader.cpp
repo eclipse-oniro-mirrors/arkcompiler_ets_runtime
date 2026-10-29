@@ -27,16 +27,17 @@ bool ArkSteedFeedbackReader::TryGetFeedbackSlotId(int index, bool allowImmediate
     if (slotId == nullptr) {
         return false;
     }
-    if (index == ACCESS_SLOT_INPUT && !allowImmediate && bytecodeInfo_.slotId.GetId() != kungfu::ICSlotId::INVALID_ID) {
-        *slotId = static_cast<uint32_t>(bytecodeInfo_.slotId.GetId());
+    kungfu::ICSlotIdType slotID = bytecodeInfo_->slotId.GetId();
+    if (index == ACCESS_SLOT_INPUT && !allowImmediate && slotID != kungfu::ICSlotId::INVALID_ID) {
+        *slotId = static_cast<uint32_t>(slotID);
         return true;
     }
 
-    if (index < 0 || static_cast<size_t>(index) >= bytecodeInfo_.inputs.size()) {
+    if (index < 0 || static_cast<size_t>(index) >= bytecodeInfo_->inputs.size()) {
         return false;
     }
 
-    const auto &input = bytecodeInfo_.inputs[index];
+    const auto &input = bytecodeInfo_->inputs[index];
     if (std::holds_alternative<kungfu::ICSlotId>(input)) {
         *slotId = static_cast<uint32_t>(std::get<kungfu::ICSlotId>(input).GetId());
         return true;
@@ -158,11 +159,11 @@ bool ArkSteedFeedbackReader::ReadConstructorFeedback(ConstructorFeedback *feedba
 
 bool ArkSteedFeedbackReader::TryGetConstDataId(int index, uint16_t *constDataId) const
 {
-    if (index < 0 || static_cast<size_t>(index) >= bytecodeInfo_.inputs.size()) {
+    if (index < 0 || static_cast<size_t>(index) >= bytecodeInfo_->inputs.size()) {
         return false;
     }
 
-    const auto &input = bytecodeInfo_.inputs[index];
+    const auto &input = bytecodeInfo_->inputs[index];
     if (!std::holds_alternative<kungfu::ConstDataId>(input)) {
         return false;
     }

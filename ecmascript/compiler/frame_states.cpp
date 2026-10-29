@@ -215,9 +215,9 @@ void FrameStateBuilder::ComputeLiveOutBC(const BytecodeInfo &bytecodeInfo)
         liveOutResult_->ClearBit(accumulatorIndex_);
         currentBBliveOut_->defRegisters_.SetBit(accumulatorIndex_);
     }
-    for (const auto &out: bytecodeInfo.vregOut) {
-        liveOutResult_->ClearBit(out);
-        currentBBliveOut_->defRegisters_.SetBit(out);
+    if (bytecodeInfo.vregOut != BytecodeInfo::NO_VREG) {
+        liveOutResult_->ClearBit(bytecodeInfo.vregOut);
+        currentBBliveOut_->defRegisters_.SetBit(bytecodeInfo.vregOut);
     }
 
     // variable use
@@ -352,8 +352,8 @@ void FrameStateBuilder::UpdateMoveValues(const BytecodeInfo &bytecodeInfo)
     // variable kill
     if (bytecodeInfo.AccOut()) {
         liveContext_->SetValuesAt(accumulatorIndex_, gate);
-    } else if (bytecodeInfo.vregOut.size() != 0) {
-        auto vreg = bytecodeInfo.vregOut[0];
+    } else if (bytecodeInfo.vregOut != BytecodeInfo::NO_VREG) {
+        auto vreg = bytecodeInfo.vregOut;
         liveContext_->SetValuesAt(vreg, gate);
     }
 }
@@ -375,8 +375,8 @@ void FrameStateBuilder::UpdateFrameValues(const BytecodeInfo &bytecodeInfo,
     if (bytecodeInfo.AccOut()) {
         liveContext_->SetValuesAt(accumulatorIndex_, gate);
     }
-    for (const auto &out: bytecodeInfo.vregOut) {
-        liveContext_->SetValuesAt(out, gate);
+    if (bytecodeInfo.vregOut != BytecodeInfo::NO_VREG) {
+        liveContext_->SetValuesAt(bytecodeInfo.vregOut, gate);
     }
     if (bytecodeInfo.GetOpcode() == EcmaOpcode::RESUMEGENERATOR) {
         // accumulator is generator object

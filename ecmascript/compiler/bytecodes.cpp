@@ -895,21 +895,21 @@ void BytecodeInfo::InitBytecodeInfo(BytecodeInfo &info, const uint8_t *pc,
         case EcmaOpcode::MOV_V4_V4: {
             uint16_t vdst = READ_INST_4_0();
             uint16_t vsrc = READ_INST_4_1();
-            info.vregOut.emplace_back(vdst);
+            info.vregOut = vdst;
             info.inputs.emplace_back(VirtualRegister(vsrc));
             break;
         }
         case EcmaOpcode::MOV_V8_V8: {
             uint16_t vdst = READ_INST_8_0();
             uint16_t vsrc = READ_INST_8_1();
-            info.vregOut.emplace_back(vdst);
+            info.vregOut = vdst;
             info.inputs.emplace_back(VirtualRegister(vsrc));
             break;
         }
         case EcmaOpcode::MOV_V16_V16: {
             uint16_t vdst = READ_INST_16_0();
             uint16_t vsrc = READ_INST_16_2();
-            info.vregOut.emplace_back(vdst);
+            info.vregOut = vdst;
             info.inputs.emplace_back(VirtualRegister(vsrc));
             break;
         }
@@ -925,7 +925,7 @@ void BytecodeInfo::InitBytecodeInfo(BytecodeInfo &info, const uint8_t *pc,
         }
         case EcmaOpcode::STA_V8: {
             uint16_t vdst = READ_INST_8_0();
-            info.vregOut.emplace_back(vdst);
+            info.vregOut = vdst;
             break;
         }
         case EcmaOpcode::LDAI_IMM32: {
@@ -1485,14 +1485,14 @@ void BytecodeInfo::InitBytecodeInfo(BytecodeInfo &info, const uint8_t *pc,
             uint8_t numVars = READ_INST_8_0();
             info.inputs.emplace_back(Immediate(numVars));
             info.inputs.emplace_back(VirtualRegister(envVregIdx));
-            info.vregOut.emplace_back(envVregIdx);
+            info.vregOut = envVregIdx;
             break;
         }
         case EcmaOpcode::WIDE_NEWLEXENV_PREF_IMM16: {
             uint16_t numVars = READ_INST_16_1();
             info.inputs.emplace_back(Immediate(numVars));
             info.inputs.emplace_back(VirtualRegister(envVregIdx));
-            info.vregOut.emplace_back(envVregIdx);
+            info.vregOut = envVregIdx;
             break;
         }
         case EcmaOpcode::CALLRUNTIME_NEWSENDABLEENV_PREF_IMM8: {
@@ -1511,7 +1511,7 @@ void BytecodeInfo::InitBytecodeInfo(BytecodeInfo &info, const uint8_t *pc,
             info.inputs.emplace_back(Immediate(numVars));
             info.inputs.emplace_back(Immediate(scopeId));
             info.inputs.emplace_back(VirtualRegister(envVregIdx));
-            info.vregOut.emplace_back(envVregIdx);
+            info.vregOut = envVregIdx;
             break;
         }
         case EcmaOpcode::WIDE_NEWLEXENVWITHNAME_PREF_IMM16_ID16: {
@@ -1520,7 +1520,7 @@ void BytecodeInfo::InitBytecodeInfo(BytecodeInfo &info, const uint8_t *pc,
             info.inputs.emplace_back(Immediate(numVars));
             info.inputs.emplace_back(Immediate(scopeId));
             info.inputs.emplace_back(VirtualRegister(envVregIdx));
-            info.vregOut.emplace_back(envVregIdx);
+            info.vregOut = envVregIdx;
             break;
         }
         case EcmaOpcode::CREATEITERRESULTOBJ_V8_V8: {
@@ -2233,7 +2233,7 @@ void BytecodeInfo::InitBytecodeInfo(BytecodeInfo &info, const uint8_t *pc,
         }
         case EcmaOpcode::POPLEXENV: {
             info.inputs.emplace_back(VirtualRegister(envVregIdx));
-            info.vregOut.emplace_back(envVregIdx);
+            info.vregOut = envVregIdx;
             break;
         }
         case EcmaOpcode::LDPRIVATEPROPERTY_IMM8_IMM16_IMM16: {

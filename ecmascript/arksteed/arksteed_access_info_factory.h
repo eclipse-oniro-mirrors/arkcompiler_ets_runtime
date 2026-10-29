@@ -26,12 +26,12 @@ namespace panda::ecmascript::arksteed {
 
 class ArkSteedAccessInfoFactory {
 public:
-    ArkSteedAccessInfoFactory(JSThread *compilerThread, const kungfu::BytecodeInfo &bytecodeInfo,
+    ArkSteedAccessInfoFactory(JSThread *compilerThread, const kungfu::BytecodeInfo *bytecodeInfo,
                               JitCompilationEnv *env)
         : ArkSteedAccessInfoFactory(compilerThread, bytecodeInfo, env, nullptr)
     {}
 
-    ArkSteedAccessInfoFactory(JSThread *compilerThread, const kungfu::BytecodeInfo &bytecodeInfo,
+    ArkSteedAccessInfoFactory(JSThread *compilerThread, const kungfu::BytecodeInfo *bytecodeInfo,
                               JitCompilationEnv *env, ArkSteedHeapBroker *broker)
         : compilerThread_(compilerThread), bytecodeInfo_(bytecodeInfo), env_(env),
           broker_(broker == nullptr ? &ownedBroker_ : broker), feedbackReader_(compilerThread_, bytecodeInfo_, broker_),
@@ -54,7 +54,8 @@ private:
     bool RegisterDependencies(PropertyAccessSet *access) const;
 
     JSThread *compilerThread_ {nullptr};
-    kungfu::BytecodeInfo bytecodeInfo_;
+    // Points to entries in the BytecodePreprocessor's bytecode table.
+    const kungfu::BytecodeInfo *bytecodeInfo_ {nullptr};
     JitCompilationEnv *env_ {nullptr};
     ArkSteedHeapBroker ownedBroker_ {compilerThread_, env_};
     ArkSteedHeapBroker *broker_ {nullptr};

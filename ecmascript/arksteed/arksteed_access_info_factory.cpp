@@ -446,7 +446,7 @@ bool ArkSteedAccessInfoFactory::TryMakeNamedLoadAccessInfo(const NamedAccessCase
 bool ArkSteedAccessInfoFactory::TryBuildNamedStoreAccessInfo(int slotIndex, NamedStoreAccessSet *access) const
 {
     *access = {};
-    if (!IsNamedStoreInputShape(bytecodeInfo_)) {
+    if (!IsNamedStoreInputShape(*bytecodeInfo_)) {
         return false;
     }
     NamedAccessFeedback feedback;
@@ -459,7 +459,7 @@ bool ArkSteedAccessInfoFactory::TryBuildNamedStoreAccessInfo(int slotIndex, Name
 bool ArkSteedAccessInfoFactory::TryBuildElementStoreAccessInfo(int slotIndex, ElementStoreAccessInfo *access) const
 {
     *access = {};
-    if (!IsElementStoreInputShape(bytecodeInfo_)) {
+    if (!IsElementStoreInputShape(*bytecodeInfo_)) {
         return false;
     }
 
@@ -488,8 +488,8 @@ bool ArkSteedAccessInfoFactory::TryBuildElementStoreAccessInfo(int slotIndex, El
         // literal, so its handlers are always marked store-out-of-bounds: the store appends at or
         // beyond the current length. That deterministic append case is lowered explicitly, so the
         // bit only rejects stores with a runtime-computed key.
-        bool isOwnByIndexStore = bytecodeInfo_.GetOpcode() == kungfu::EcmaOpcode::STOWNBYINDEX_IMM8_V8_IMM16 ||
-                                 bytecodeInfo_.GetOpcode() == kungfu::EcmaOpcode::STOWNBYINDEX_IMM16_V8_IMM16;
+        bool isOwnByIndexStore = bytecodeInfo_->GetOpcode() == kungfu::EcmaOpcode::STOWNBYINDEX_IMM8_V8_IMM16 ||
+                                 bytecodeInfo_->GetOpcode() == kungfu::EcmaOpcode::STOWNBYINDEX_IMM16_V8_IMM16;
         if ((HandlerBase::IsStoreOutOfBounds(handlerInfo) && !isOwnByIndexStore) || hclass->IsJSShared()) {
             *access = {};
             return false;
@@ -632,7 +632,7 @@ bool ArkSteedAccessInfoFactory::ComputeNamedStoreAccessInfo(const NamedAccessFee
 bool ArkSteedAccessInfoFactory::TryBuildNamedLoadAccessInfo(int slotIndex, NamedLoadAccessSet *access) const
 {
     *access = {};
-    if (!IsNamedLoadBytecode(bytecodeInfo_.GetOpcode())) {
+    if (!IsNamedLoadBytecode(bytecodeInfo_->GetOpcode())) {
         return false;
     }
     NamedAccessFeedback feedback;
@@ -677,7 +677,7 @@ bool ArkSteedAccessInfoFactory::ComputeNamedLoadAccessInfo(const NamedAccessFeed
 bool ArkSteedAccessInfoFactory::TryBuildValueLoadAccessInfo(ValueLoadAccessSet *access) const
 {
     *access = {};
-    if (!IsValueLoadBytecode(bytecodeInfo_.GetOpcode())) {
+    if (!IsValueLoadBytecode(bytecodeInfo_->GetOpcode())) {
         return false;
     }
 

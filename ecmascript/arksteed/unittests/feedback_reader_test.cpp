@@ -505,7 +505,7 @@ TEST_F(ArkSteedFeedbackReaderTest, NamedAccessMonoSlotPublishesOneCase)
     const ProfileCasePair expected = CaptureMonoCasePair(HostThread(), profile, slot);
 
     RunOnJitThread([this, &method, site, slot, expected] {
-        ArkSteedFeedbackReader reader(CompilerThread(), *site, method.broker);
+        ArkSteedFeedbackReader reader(CompilerThread(), site, method.broker);
 
         // Outside the serializing mode the reader reaches no profile: the call is
         // refused and no part of the output structure is filled.
@@ -589,7 +589,7 @@ TEST_F(ArkSteedFeedbackReaderTest, NamedAccessPolySlotPublishesEveryCaseAtTheLim
     }
 
     RunOnJitThread([this, &method, site, slot, expected] {
-        ArkSteedFeedbackReader reader(CompilerThread(), *site, method.broker);
+        ArkSteedFeedbackReader reader(CompilerThread(), site, method.broker);
         NamedAccessFeedback feedback {};
         bool read = false;
         {
@@ -657,7 +657,7 @@ TEST_F(ArkSteedFeedbackReaderTest, NamedAccessRefusesOverflowMegaAndUnmaterializ
         }
 
         RunOnJitThread([this, &method, site, slot, &state] {
-            ArkSteedFeedbackReader reader(CompilerThread(), *site, method.broker);
+            ArkSteedFeedbackReader reader(CompilerThread(), site, method.broker);
             NamedAccessFeedback feedback {};
             bool read = true;
             {
@@ -727,7 +727,7 @@ TEST_F(ArkSteedFeedbackReaderTest, ValueAndElementAccessStates)
                     emptySite, emptySlot] {
         // Element access reader on the mono pair.
         {
-            ArkSteedFeedbackReader reader(CompilerThread(), *monoSite, mono.broker);
+            ArkSteedFeedbackReader reader(CompilerThread(), monoSite, mono.broker);
             ElementAccessFeedback feedback {};
             bool read = false;
             {
@@ -749,7 +749,7 @@ TEST_F(ArkSteedFeedbackReaderTest, ValueAndElementAccessStates)
         }
         // Value access reader on the same mono pair: the element layout.
         {
-            ArkSteedFeedbackReader reader(CompilerThread(), *monoSite, mono.broker);
+            ArkSteedFeedbackReader reader(CompilerThread(), monoSite, mono.broker);
             ValueAccessFeedback feedback {};
             bool read = false;
             {
@@ -772,7 +772,7 @@ TEST_F(ArkSteedFeedbackReaderTest, ValueAndElementAccessStates)
         }
         // Element and value access on the poly array at the limit.
         {
-            ArkSteedFeedbackReader reader(CompilerThread(), *polySite, poly.broker);
+            ArkSteedFeedbackReader reader(CompilerThread(), polySite, poly.broker);
             ElementAccessFeedback elementFeedback {};
             ValueAccessFeedback valueFeedback {};
             bool elementRead = false;
@@ -809,7 +809,7 @@ TEST_F(ArkSteedFeedbackReaderTest, ValueAndElementAccessStates)
         }
         // An unmaterialized slot: both readers refuse it and fill nothing.
         {
-            ArkSteedFeedbackReader reader(CompilerThread(), *emptySite, empty.broker);
+            ArkSteedFeedbackReader reader(CompilerThread(), emptySite, empty.broker);
             ElementAccessFeedback elementFeedback {};
             ValueAccessFeedback valueFeedback {};
             bool elementRead = true;
@@ -896,7 +896,7 @@ TEST_F(ArkSteedFeedbackReaderTest, GlobalAccessAndCallFeedbackStates)
                     emptySlot] {
         // Global access: the reader publishes the box of the slot.
         {
-            ArkSteedFeedbackReader reader(CompilerThread(), *globalSite, global.broker);
+            ArkSteedFeedbackReader reader(CompilerThread(), globalSite, global.broker);
             GlobalAccessFeedback feedback {};
             bool read = false;
             {
@@ -935,7 +935,7 @@ TEST_F(ArkSteedFeedbackReaderTest, GlobalAccessAndCallFeedbackStates)
         }
         // A call site that monomorphically targets a JS function.
         {
-            ArkSteedFeedbackReader reader(CompilerThread(), *jsSite, js.broker);
+            ArkSteedFeedbackReader reader(CompilerThread(), jsSite, js.broker);
             CallFeedback feedback {};
             bool read = false;
             {
@@ -961,7 +961,7 @@ TEST_F(ArkSteedFeedbackReaderTest, GlobalAccessAndCallFeedbackStates)
         // A call site whose slot holds a negative builtin id, cross-checked against
         // the id stored in the profile slot.
         {
-            ArkSteedFeedbackReader reader(CompilerThread(), *builtinSite, builtin.broker);
+            ArkSteedFeedbackReader reader(CompilerThread(), builtinSite, builtin.broker);
             CallFeedback feedback {};
             bool read = false;
             {
@@ -979,7 +979,7 @@ TEST_F(ArkSteedFeedbackReaderTest, GlobalAccessAndCallFeedbackStates)
         // A call site that never ran: the slot is undefined, so the read reports an
         // insufficient call with the addressed slot, not a target.
         {
-            ArkSteedFeedbackReader reader(CompilerThread(), *emptySite, empty.broker);
+            ArkSteedFeedbackReader reader(CompilerThread(), emptySite, empty.broker);
             CallFeedback feedback {};
             bool read = false;
             {
@@ -1024,7 +1024,7 @@ TEST_F(ArkSteedFeedbackReaderTest, OperationFeedbackPublishesEveryHint)
 
     RunOnJitThread([this, &method, &expectations] {
         for (const OperationExpectation &expectation : expectations) {
-            ArkSteedFeedbackReader reader(CompilerThread(), *expectation.site, method.broker);
+            ArkSteedFeedbackReader reader(CompilerThread(), expectation.site, method.broker);
             OperationFeedback feedback {};
             bool read = false;
             {
@@ -1084,7 +1084,7 @@ TEST_F(ArkSteedFeedbackReaderTest, RepeatedReadsAndImmediateLiteralAreStable)
             // them, and a value of the first read cannot be relocated while the second
             // read is resolved.
             ArkSteedHeapBrokerTestAccess::SerializingScope scope(method.broker, kRepeatedScope);
-            ArkSteedFeedbackReader reader(CompilerThread(), *site, method.broker);
+            ArkSteedFeedbackReader reader(CompilerThread(), site, method.broker);
             EXPECT_TRUE(reader.ReadNamedAccessFeedback(0, &first));
             EXPECT_TRUE(reader.ReadNamedAccessFeedback(0, &second));
 
@@ -1128,7 +1128,7 @@ TEST_F(ArkSteedFeedbackReaderTest, RepeatedReadsAndImmediateLiteralAreStable)
         // The immediate form of the slot accessor reads the literal operand of the
         // bytecode; the fixture method `LINEAR` computes `value * 2` first, so the
         // first `ldai` of that method carries 2.
-        ArkSteedFeedbackReader linearReader(CompilerThread(), *immediateSite, linear.broker);
+        ArkSteedFeedbackReader linearReader(CompilerThread(), immediateSite, linear.broker);
         uint32_t immediateSlot = 0;
         EXPECT_TRUE(linearReader.TryGetFeedbackSlotId(0, true, &immediateSlot));
         EXPECT_EQ(immediateSlot, kLinearFirstImmediate);
@@ -1161,7 +1161,7 @@ TEST_F(ArkSteedFeedbackReaderTest, PoolDispatchReleasesTaskOwnershipBeforeTeardo
     uint32_t completed = 0;
     for (uint32_t index = 0; index < kDispatches; ++index) {
         RunOnJitThread([this, &method, site, &completed] {
-            ArkSteedFeedbackReader reader(CompilerThread(), *site, method.broker);
+            ArkSteedFeedbackReader reader(CompilerThread(), site, method.broker);
             NamedAccessFeedback feedback {};
             bool read = false;
             {
@@ -1215,7 +1215,7 @@ TEST_F(ArkSteedFeedbackReaderTest, MutationControlsRejectShiftedExpectationsAndS
         bool read = false;
         {
             ArkSteedHeapBrokerTestAccess::SerializingScope scope(method.broker, kMutationScope);
-            ArkSteedFeedbackReader reader(CompilerThread(), *site, method.broker);
+            ArkSteedFeedbackReader reader(CompilerThread(), site, method.broker);
             read = reader.ReadNamedAccessFeedback(0, &feedback);
         }
         EXPECT_TRUE(read);
@@ -1263,7 +1263,7 @@ TEST_F(ArkSteedFeedbackReaderTest, MutationControlsRejectShiftedExpectationsAndS
         bool substitutedRead = true;
         {
             ArkSteedHeapBrokerTestAccess::SerializingScope scope(method.broker, kMutationScope);
-            ArkSteedFeedbackReader substitutedReader(CompilerThread(), substituted, method.broker);
+            ArkSteedFeedbackReader substitutedReader(CompilerThread(), &substituted, method.broker);
             substitutedRead = substitutedReader.ReadNamedAccessFeedback(0, &substitutedFeedback);
         }
         EXPECT_FALSE(substitutedRead) << "the reader accepted a name input that is not a const-data id";

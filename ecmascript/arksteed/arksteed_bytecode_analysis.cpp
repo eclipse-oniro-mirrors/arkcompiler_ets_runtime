@@ -106,8 +106,8 @@ void BytecodeAnalysis::SetDefinedVRegs(const BytecodeInfo *info, kungfu::BitSet 
     if (info->EnvOut()) {
         SetVReg(bitset, LexicalEnvIndex());
     }
-    for (VRegIDType out : info->vregOut) {
-        SetVReg(bitset, out);
+    if (info->vregOut != BytecodeInfo::NO_VREG) {
+        SetVReg(bitset, info->vregOut);
     }
 }
 
@@ -119,8 +119,8 @@ void BytecodeAnalysis::ClearDefinedVRegs(const BytecodeInfo *info, kungfu::BitSe
     if (info->EnvOut()) {
         ClearVReg(bitset, LexicalEnvIndex());
     }
-    for (VRegIDType out : info->vregOut) {
-        ClearVReg(bitset, out);
+    if (info->vregOut != BytecodeInfo::NO_VREG) {
+        ClearVReg(bitset, info->vregOut);
     }
 }
 
