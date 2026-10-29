@@ -948,4 +948,16 @@
     let s = JSON.stringify(obj);
 }
 
+{
+    const victim = {a:1,b:2,c:3};
+    Object.keys(victim);
+    function replacer(k,v) {
+        if (k=='a') {
+            delete this.b;
+        }
+        return v;
+    }
+    assert_equal(JSON.stringify(victim,replacer), '{"a":1,"c":3}');
+}
+
 test_end();
