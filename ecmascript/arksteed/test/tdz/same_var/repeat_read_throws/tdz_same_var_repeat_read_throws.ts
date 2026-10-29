@@ -14,19 +14,18 @@
  */
 
 //! METHOD      compute
-//! COUNT       BranchIfReferenceEqual  1
-//! COUNT       CallCommonStub   GetStringFromConstPool  1
+//! COUNT_LE    BranchIfReferenceEqual  1
+//! COUNT_LE    CallCommonStub   GetStringFromConstPool  1
 //! METHOD compute
 //! HAS LoadTaggedField
 //! COMPILE_COUNT_GE *compute* 1
 //! EXEC_COUNT_GE *compute* 1
 //! DEOPT_COUNT *Deoptimize* 0
-// Test: throw.undefinedifholewithname on the SAME value twice, accessed BEFORE initialization.
-// compute() is compiled while x is still the hole:
-//   - if the lexical slot is const-folded to the hole constant, the guard folds to an
-//     unconditional deferred throw (HoleCheckKind::ALWAYS_THROWS);
-//   - otherwise the emitted reference comparison fires on the first read.
-// Either way the call must throw a ReferenceError caught by the caller.
+// Test: throw.undefinedifholewithname on the SAME value, accessed BEFORE initialization.
+// The frontend (ets_frontend f0bcbe524b) deduplicates the repeated reads of the same
+// hole lexical var in one basic block, so at most one throw.undefinedifholewithname
+// reaches the JIT (COUNT_LE tolerates further elimination); it fires on the first read.
+// The call must throw a ReferenceError caught by the caller.
 
 declare function print(arg: string): void;
 
