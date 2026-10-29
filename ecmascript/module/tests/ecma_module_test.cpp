@@ -54,6 +54,7 @@
 #include "ecmascript/module/module_value_accessor.h"
 #include "ecmascript/module/module_resolver.h"
 #include "ecmascript/module/napi_module_loader.h"
+#include "ecmascript/platform/module.h"
 #include "ecmascript/ecma_vm.h"
 #include "ecmascript/containers/containers_errors.h"
 #include "ecmascript/dfx/native_module_failure_info.h"
@@ -1655,6 +1656,36 @@ HWTEST_F_L0(EcmaModuleTest, ParseAbcPathAndOhmUrl)
     EXPECT_EQ(entryPoint, res6);
     EXPECT_EQ(outFileName, outRes3);
 }
+
+#if defined(PANDA_TARGET_PREVIEW)
+/**
+ * @tc.name: ParseAbcPathAndOhmUrl_PreviewTestPage
+ * @tc.desc: Verify the preview test-page branch of GetOutEntryPoint: an inputFileName
+ *           starting with '.test' is resolved as bundleName/moduleName/.test/xxx/xxx
+ *           without combining the ets path (previewer builds only, device builds
+ *           link the common implementation without this branch).
+ * @tc.type: FUNC
+ * @tc.require: issuesProgram
+ */
+HWTEST_F_L0(EcmaModuleTest, ParseAbcPathAndOhmUrl_PreviewTestPage)
+{
+    instance->SetBundleName("com.bundleName.test");
+    instance->SetModuleName("entry");
+
+    // inputFileName: .test/xxx/xxx.abc -> entryPoint: bundleName/moduleName/.test/xxx/xxx
+    CString inputFileName = ".test/pages/index.abc";
+    CString outFileName = "";
+    CString entryPoint;
+    CString res = "com.bundleName.test/entry/.test/pages/index";
+    ModulePathHelper::ParseAbcPathAndOhmUrl(instance, inputFileName, outFileName, entryPoint);
+    EXPECT_EQ(entryPoint, res);
+    EXPECT_EQ(outFileName, "");
+
+    // direct branch check: '.test' prefix keeps moduleName and skips ets-path combination
+    CString outEntryPoint = GetOutEntryPoint(instance, ".test/pages/index.abc");
+    EXPECT_EQ(outEntryPoint, "com.bundleName.test/entry/.test/pages/index.abc");
+}
+#endif
 
 HWTEST_F_L0(EcmaModuleTest, CheckNativeModule)
 {
