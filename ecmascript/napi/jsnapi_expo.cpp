@@ -373,7 +373,7 @@ int32_t JSValueRef::Int32Value(const EcmaVM *vm)
 
 double JSValueRef::GetValueDouble(bool &isNumber)
 {
-    JSTaggedValue value = JSNApiHelper::ToJSTaggedValue(this);
+    JSTaggedValue value = JSNApiHelper::ToJSTaggedValueNoCheck(this);
     if (value.IsInt()) {
         isNumber = true;
         return static_cast<double>(value.GetInt());
@@ -388,7 +388,7 @@ double JSValueRef::GetValueDouble(bool &isNumber)
 
 int32_t JSValueRef::GetValueInt32(bool &isNumber)
 {
-    JSTaggedValue value = JSNApiHelper::ToJSTaggedValue(this);
+    JSTaggedValue value = JSNApiHelper::ToJSTaggedValueNoCheck(this);
     if (value.IsInt()) {
         isNumber = true;
         return value.GetInt();
@@ -409,7 +409,7 @@ uint32_t JSValueRef::GetValueUint32(bool &isNumber)
 
 int64_t JSValueRef::GetValueInt64(bool &isNumber)
 {
-    JSTaggedValue value = JSNApiHelper::ToJSTaggedValue(this);
+    JSTaggedValue value = JSNApiHelper::ToJSTaggedValueNoCheck(this);
     if (value.IsInt()) {
         isNumber = true;
         return static_cast<int64_t>(value.GetInt());
@@ -428,7 +428,7 @@ int64_t JSValueRef::GetValueInt64(bool &isNumber)
 
 bool JSValueRef::GetValueBool(bool &isBool)
 {
-    JSTaggedValue value = JSNApiHelper::ToJSTaggedValue(this);
+    JSTaggedValue value = JSNApiHelper::ToJSTaggedValueNoCheck(this);
     if (value.IsTrue()) {
         isBool = true;
         return true;
@@ -1215,7 +1215,7 @@ void *JSValueRef::GetNativePointerValueImpl(const EcmaVM* vm, bool &isNativePoin
     }
     isNativePointer = true;
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, nullptr);
-    JSHandle<JSTaggedValue> nativePointer = JSNApiHelper::ToJSHandle(this);
+    JSHandle<JSTaggedValue> nativePointer = JSNApiHelper::ToJSHandleNoCheck(this);
     return JSHandle<JSNativePointer>(nativePointer)->GetExternalPointer();
 }
 
@@ -1301,7 +1301,7 @@ void JSValueRef::TryGetArrayLength(const EcmaVM *vm, bool *isPendingException,
     JSThread *thread = vm->GetJSThread();
     *isPendingException = thread->HasPendingException();
     ecmascript::ThreadManagedScope managedScope(thread);
-    JSTaggedValue thisValue = JSNApiHelper::ToJSTaggedValue(this);
+    JSTaggedValue thisValue = JSNApiHelper::ToJSTaggedValueNoCheck(this);
     if (LIKELY(thisValue.IsJSArray())) {
         *isArrayOrSharedArray = true;
         *arrayLength = (*isPendingException) ?
@@ -2130,7 +2130,7 @@ bool PromiseCapabilityRef::Resolve(const EcmaVM *vm, uintptr_t value)
     ecmascript::ThreadManagedScope managedScope(thread);
     const GlobalEnvConstants *constants = thread->GlobalConstants();
 
-    JSTaggedValue arg = *reinterpret_cast<JSTaggedValue *>(value);
+    JSTaggedValue arg = JSNApiHelper::ToJSTaggedValue(reinterpret_cast<JSValueRef *>(value));
 #if ECMASCRIPT_ENABLE_STUB_ARGV_CHECK
     thread->CheckJSTaggedType(arg.GetRawData());
 #endif
@@ -2184,7 +2184,7 @@ bool PromiseCapabilityRef::Reject(const EcmaVM *vm, uintptr_t reason)
     ecmascript::ThreadManagedScope managedScope(thread);
     const GlobalEnvConstants *constants = thread->GlobalConstants();
 
-    JSTaggedValue arg = *reinterpret_cast<JSTaggedValue *>(reason);
+    JSTaggedValue arg = JSNApiHelper::ToJSTaggedValue(reinterpret_cast<JSValueRef *>(reason));
 #if ECMASCRIPT_ENABLE_STUB_ARGV_CHECK
     thread->CheckJSTaggedType(arg.GetRawData());
 #endif
@@ -2704,6 +2704,11 @@ LocalScope::~LocalScope()
 #ifdef USE_HWASAN
     vm->DelHandleScopeDepth();
 #endif
+    if (vm->IsHandleScopeCheckEnabled()) {
+        vm->GuardHandleStorage(prevNext_, prevHandleStorageIndex_);
+        vm->GuardPrimitiveStorage(prevPrimitiveNext_, prevPrimitiveStorageIndex_);
+    }
+
     vm->SetHandleScopeStorageNext(static_cast<JSTaggedType *>(prevNext_));
     vm->SetPrimitiveScopeStorageNext(static_cast<JSTaggedType *>(prevPrimitiveNext_));
 
@@ -3748,7 +3753,7 @@ uint32_t TypedArrayRef::ByteLength(const EcmaVM *vm)
 {
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, 0);
     ecmascript::ThreadManagedScope managedScope(thread);
-    JSHandle<JSTypedArray> typedArray(JSNApiHelper::ToJSHandle(this));
+    JSHandle<JSTypedArray> typedArray(JSNApiHelper::ToJSHandleNoCheck(this));
     LOG_IF_SPECIAL(typedArray, FATAL);
     return typedArray->GetByteLength();
 }
@@ -3757,7 +3762,7 @@ uint32_t TypedArrayRef::ByteOffset(const EcmaVM *vm)
 {
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, 0);
     ecmascript::ThreadManagedScope managedScope(thread);
-    JSHandle<JSTypedArray> typedArray(JSNApiHelper::ToJSHandle(this));
+    JSHandle<JSTypedArray> typedArray(JSNApiHelper::ToJSHandleNoCheck(this));
     LOG_IF_SPECIAL(typedArray, FATAL);
     return typedArray->GetByteOffset();
 }
@@ -3766,7 +3771,7 @@ uint32_t TypedArrayRef::ArrayLength(const EcmaVM *vm)
 {
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, 0);
     ecmascript::ThreadManagedScope managedScope(thread);
-    JSHandle<JSTypedArray> typedArray(JSNApiHelper::ToJSHandle(this));
+    JSHandle<JSTypedArray> typedArray(JSNApiHelper::ToJSHandleNoCheck(this));
     LOG_IF_SPECIAL(typedArray, FATAL);
     return typedArray->GetArrayLength();
 }
@@ -3775,7 +3780,7 @@ Local<ArrayBufferRef> TypedArrayRef::GetArrayBuffer(const EcmaVM *vm)
 {
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, JSValueRef::Undefined(vm));
     ecmascript::ThreadManagedScope managedScope(thread);
-    JSHandle<JSTypedArray> typedArray(JSNApiHelper::ToJSHandle(this));
+    JSHandle<JSTypedArray> typedArray(JSNApiHelper::ToJSHandleNoCheck(this));
     LOG_IF_SPECIAL(typedArray, ERROR);
     JSHandle<JSTaggedValue> arrayBuffer(thread, JSTypedArray::GetOffHeapBuffer(thread, typedArray));
     return JSNApiHelper::ToLocal<ArrayBufferRef>(arrayBuffer);
@@ -3785,7 +3790,7 @@ uint32_t SendableTypedArrayRef::ByteLength(const EcmaVM *vm)
 {
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, 0);
     ecmascript::ThreadManagedScope managedScope(thread);
-    JSHandle<ecmascript::JSSharedTypedArray> typedArray(JSNApiHelper::ToJSHandle(this));
+    JSHandle<ecmascript::JSSharedTypedArray> typedArray(JSNApiHelper::ToJSHandleNoCheck(this));
     LOG_IF_SPECIAL(typedArray, FATAL);
     return typedArray->GetByteLength();
 }
@@ -3794,7 +3799,7 @@ uint32_t SendableTypedArrayRef::ByteOffset(const EcmaVM *vm)
 {
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, 0);
     ecmascript::ThreadManagedScope managedScope(thread);
-    JSHandle<ecmascript::JSSharedTypedArray> typedArray(JSNApiHelper::ToJSHandle(this));
+    JSHandle<ecmascript::JSSharedTypedArray> typedArray(JSNApiHelper::ToJSHandleNoCheck(this));
     LOG_IF_SPECIAL(typedArray, FATAL);
     return typedArray->GetByteOffset();
 }
@@ -3803,7 +3808,7 @@ uint32_t SendableTypedArrayRef::ArrayLength(const EcmaVM *vm)
 {
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, 0);
     ecmascript::ThreadManagedScope managedScope(thread);
-    JSHandle<ecmascript::JSSharedTypedArray> typedArray(JSNApiHelper::ToJSHandle(this));
+    JSHandle<ecmascript::JSSharedTypedArray> typedArray(JSNApiHelper::ToJSHandleNoCheck(this));
     LOG_IF_SPECIAL(typedArray, FATAL);
     return typedArray->GetArrayLength();
 }
@@ -3812,7 +3817,7 @@ Local<SendableArrayBufferRef> SendableTypedArrayRef::GetArrayBuffer(const EcmaVM
 {
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, JSValueRef::Undefined(vm));
     ecmascript::ThreadManagedScope managedScope(thread);
-    JSHandle<ecmascript::JSSharedTypedArray> typedArray(JSNApiHelper::ToJSHandle(this));
+    JSHandle<ecmascript::JSSharedTypedArray> typedArray(JSNApiHelper::ToJSHandleNoCheck(this));
     LOG_IF_SPECIAL(typedArray, ERROR);
     JSHandle<JSTaggedValue> arrayBuffer(thread,
         ecmascript::JSSharedTypedArray::GetSharedOffHeapBuffer(thread, typedArray));
@@ -4247,7 +4252,7 @@ JSValueRef* FunctionRef::CallForNapi(const EcmaVM *vm, JSValueRef *thisObj,
         JSTaggedValue undefined = thread->GlobalConstants()->GetUndefined();
         JSTaggedValue thisValue = undefined;
         if (thisObj != nullptr) {
-            thisValue = *reinterpret_cast<JSTaggedValue *>(thisObj);
+            thisValue = JSNApiHelper::ToJSTaggedValue(thisObj);
         }
         EcmaRuntimeCallInfo *info =
             ecmascript::EcmaInterpreter::NewRuntimeCallInfo(thread, func, thisValue, undefined, length);
@@ -7068,7 +7073,7 @@ Local<JSValueRef> JSNApi::NapiHasProperty(const EcmaVM *vm, uintptr_t nativeObj,
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, JSValueRef::Undefined(vm));
     ecmascript::ThreadManagedScope managedScope(thread);
     EscapeLocalScope scope(vm);
-    JSHandle<JSTaggedValue> obj(nativeObj);
+    JSHandle<JSTaggedValue> obj = JSNApiHelper::ToJSHandle(reinterpret_cast<JSValueRef *>(nativeObj));
     if (!(obj->IsECMAObject() || obj->IsCallable())) {
         // When input validation is failed, we return JSTaggedValue::Hole to napi native engine.
         // Using JSTaggedValue::Hole as the "hand-shaking-protocol" to tell native engine to change error state.
@@ -7076,7 +7081,7 @@ Local<JSValueRef> JSNApi::NapiHasProperty(const EcmaVM *vm, uintptr_t nativeObj,
         return scope.Escape(JSNApiHelper::ToLocal<JSValueRef>(holeHandle));
     }
     LOG_IF_SPECIAL(obj, ERROR);
-    JSMutableHandle<JSTaggedValue> keyValue(key);
+    JSMutableHandle<JSTaggedValue> keyValue = JSNApiHelper::ToJSMutableHandle(reinterpret_cast<JSValueRef *>(key));
     JSTaggedValue res = ObjectFastOperator::TryFastHasProperty(thread, obj.GetTaggedValue(),
                                                                keyValue);
     if (!res.IsHole()) {
@@ -7092,7 +7097,7 @@ Local<JSValueRef> JSNApi::NapiHasOwnProperty(const EcmaVM *vm, uintptr_t nativeO
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, JSValueRef::Undefined(vm));
     ecmascript::ThreadManagedScope managedScope(thread);
     EscapeLocalScope scope(vm);
-    JSHandle<JSTaggedValue> obj(nativeObj);
+    JSHandle<JSTaggedValue> obj = JSNApiHelper::ToJSHandle(reinterpret_cast<JSValueRef *>(nativeObj));
     if (!(obj->IsECMAObject() || obj->IsCallable())) {
         // When input validation is failed, we return JSTaggedValue::Hole to napi native engine.
         // Using JSTaggedValue::Hole as the "hand-shaking-protocol" to tell native engine to change error state.
@@ -7100,7 +7105,7 @@ Local<JSValueRef> JSNApi::NapiHasOwnProperty(const EcmaVM *vm, uintptr_t nativeO
         return scope.Escape(JSNApiHelper::ToLocal<JSValueRef>(holeHandle));
     }
     LOG_IF_SPECIAL(obj, ERROR);
-    JSMutableHandle<JSTaggedValue> keyValue(key);
+    JSMutableHandle<JSTaggedValue> keyValue = JSNApiHelper::ToJSMutableHandle(reinterpret_cast<JSValueRef *>(key));
     JSTaggedValue res = ObjectFastOperator::TryFastHasProperty(thread, obj.GetTaggedValue(),
                                                                keyValue);
     if (!res.IsHole()) {
@@ -7116,7 +7121,7 @@ Local<JSValueRef> JSNApi::NapiGetProperty(const EcmaVM *vm, uintptr_t nativeObj,
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, JSValueRef::Undefined(vm));
     ecmascript::ThreadManagedScope managedScope(thread);
     EscapeLocalScope scope(vm);
-    JSHandle<JSTaggedValue> obj(nativeObj);
+    JSHandle<JSTaggedValue> obj = JSNApiHelper::ToJSHandle(reinterpret_cast<JSValueRef *>(nativeObj));
     if (!(obj->IsECMAObject() || obj->IsCallable())) {
         // When input validation is failed, we return JSTaggedValue::Hole to napi native engine.
         // Using JSTaggedValue::Hole as the "hand-shaking-protocol" to tell native engine to change error state.
@@ -7124,7 +7129,7 @@ Local<JSValueRef> JSNApi::NapiGetProperty(const EcmaVM *vm, uintptr_t nativeObj,
         return scope.Escape(JSNApiHelper::ToLocal<JSValueRef>(holeHandle));
     }
     LOG_IF_SPECIAL(obj, ERROR);
-    JSMutableHandle<JSTaggedValue> keyValue(key);
+    JSMutableHandle<JSTaggedValue> keyValue = JSNApiHelper::ToJSMutableHandle(reinterpret_cast<JSValueRef *>(key));
     if (!obj->IsHeapObject()) {
         OperationResult ret = JSTaggedValue::GetProperty(thread, obj, keyValue);
         RETURN_VALUE_IF_ABRUPT(thread, JSValueRef::Undefined(vm));
@@ -7149,7 +7154,7 @@ Local<JSValueRef> JSNApi::NapiDeleteProperty(const EcmaVM *vm, uintptr_t nativeO
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, JSValueRef::Undefined(vm));
     ecmascript::ThreadManagedScope managedScope(thread);
     EscapeLocalScope scope(vm);
-    JSHandle<JSTaggedValue> obj(nativeObj);
+    JSHandle<JSTaggedValue> obj = JSNApiHelper::ToJSHandle(reinterpret_cast<JSValueRef *>(nativeObj));
     if (!(obj->IsECMAObject() || obj->IsCallable())) {
         // When input validation is failed, we return JSTaggedValue::Hole to napi native engine.
         // Using JSTaggedValue::Hole as the "hand-shaking-protocol" to tell native engine to change error state.
@@ -7157,7 +7162,7 @@ Local<JSValueRef> JSNApi::NapiDeleteProperty(const EcmaVM *vm, uintptr_t nativeO
         return scope.Escape(JSNApiHelper::ToLocal<JSValueRef>(holeHandle));
     }
     LOG_IF_SPECIAL(obj, ERROR);
-    JSMutableHandle<JSTaggedValue> keyValue(key);
+    JSMutableHandle<JSTaggedValue> keyValue = JSNApiHelper::ToJSMutableHandle(reinterpret_cast<JSValueRef *>(key));
     if (keyValue->IsString() && !EcmaStringAccessor(keyValue.GetTaggedValue()).IsInternString()) {
         [[maybe_unused]] ecmascript::EcmaHandleScope handleScope(thread);
         auto string = thread->GetEcmaVM()->GetFactory()->InternString(keyValue);
@@ -7173,7 +7178,7 @@ Local<JSValueRef> JSNApi::NapiGetNamedProperty(const EcmaVM *vm, uintptr_t nativ
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, JSValueRef::Undefined(vm));
     ecmascript::ThreadManagedScope managedScope(thread);
     EscapeLocalScope scope(vm);
-    JSHandle<JSTaggedValue> obj(nativeObj);
+    JSHandle<JSTaggedValue> obj = JSNApiHelper::ToJSHandle(reinterpret_cast<JSValueRef *>(nativeObj));
     if (UNLIKELY(!(obj->IsECMAObject() || obj->IsCallable()))) {
         // When input validation is failed, we return JSTaggedValue::Hole to napi native engine.
         // Using JSTaggedValue::Hole as the "hand-shaking-protocol" to tell native engine to change error state.
@@ -7243,19 +7248,19 @@ Local<JSValueRef> JSNApi::NapiGetPropertyWithCallsiteInfo(const EcmaVM *vm, uint
         *hit = false;
     }
 
-    JSHandle<JSTaggedValue> obj(nativeObj);
+    JSHandle<JSTaggedValue> obj = JSNApiHelper::ToJSHandle(reinterpret_cast<JSValueRef *>(nativeObj));
     if (UNLIKELY(!(obj->IsECMAObject() || obj->IsCallable()))) {
         return JSNApiHelper::ToLocal<JSValueRef>(JSHandle<JSTaggedValue>(thread, JSTaggedValue::Hole()));
     }
 
-    JSHandle<NapiICInfo> icInfo = NapiICInfo::SafeCast(JSHandle<JSTaggedValue>(info));
+    JSHandle<NapiICInfo> icInfo = NapiICInfo::SafeCast(JSNApiHelper::ToJSHandle(reinterpret_cast<JSValueRef *>(info)));
     if (UNLIKELY(icInfo.IsEmpty() || !icInfo->CanLoadIC(thread))) {
         return NapiGetProperty(vm, nativeObj, key);
     }
 
     // Scope-free fast path: key IC path is handle-free and allocation-free. Return directly via
     // NewHandle into caller's scope with no EscapeLocalScope overhead.
-    JSMutableHandle<JSTaggedValue> keyHandle(key);
+    JSMutableHandle<JSTaggedValue> keyHandle = JSNApiHelper::ToJSMutableHandle(reinterpret_cast<JSValueRef *>(key));
     JSTaggedValue fastRes = NapiICInfo::TryLoadKeyIC(thread, icInfo, obj.GetTaggedValue(), keyHandle.GetTaggedValue());
     if (LIKELY(!fastRes.IsHole())) {
         RETURN_VALUE_IF_ABRUPT(thread, JSValueRef::Undefined(vm));
@@ -7290,10 +7295,10 @@ bool JSNApi::NapiSetPropertyWithCallsiteInfo(const EcmaVM *vm, uintptr_t nativeO
         *hit = false;
     }
 
-    JSHandle<JSTaggedValue> obj(nativeObj);
-    JSMutableHandle<JSTaggedValue> keyHandle(key);
-    JSHandle<JSTaggedValue> valueHandle(value);
-    JSHandle<NapiICInfo> icInfo = NapiICInfo::SafeCast(JSHandle<JSTaggedValue>(info));
+    JSHandle<JSTaggedValue> obj = JSNApiHelper::ToJSHandle(reinterpret_cast<JSValueRef *>(nativeObj));
+    JSMutableHandle<JSTaggedValue> keyHandle = JSNApiHelper::ToJSMutableHandle(reinterpret_cast<JSValueRef *>(key));
+    JSHandle<JSTaggedValue> valueHandle = JSNApiHelper::ToJSHandle(reinterpret_cast<JSValueRef *>(value));
+    JSHandle<NapiICInfo> icInfo = NapiICInfo::SafeCast(JSNApiHelper::ToJSHandle(reinterpret_cast<JSValueRef *>(info)));
 
     if (UNLIKELY(icInfo.IsEmpty() || !icInfo->CanStoreIC(thread))) {
         bool setSucceeded = JSNApiHelper::ToLocal<ObjectRef>(obj)->Set(vm,

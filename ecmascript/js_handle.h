@@ -21,7 +21,6 @@
 #include "ecmascript/ecma_handle_scope.h"
 #include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/mem/assert_scope.h"
-#include "ecmascript/mem/barriers.h"
 #include "objects/readonly_handle.h"
 /*
  * JSHandle: A JSHandle provides a reference to an object that survives relocation by the garbage collector.
@@ -69,6 +68,7 @@ class JSHandleTest;
 }  // namespace panda::test
 
 namespace panda::ecmascript {
+extern uintptr_t g_guardAddress;
 class TaggedArray;
 class LinkedHashMap;
 class LinkedHashSet;
@@ -138,6 +138,21 @@ public:
             return JSTaggedValue::Undefined().GetRawData();
         }
         return *reinterpret_cast<JSTaggedType *>(GetAddress()); // NOLINT(clang-analyzer-core.NullDereference)
+    }
+
+    inline JSTaggedValue GetTaggedValueWithCheck() const
+    {
+        CHECK_NO_DEREF_HANDLE;
+        if (GetAddress() == 0U) {
+            return JSTaggedValue::Undefined();
+        }
+        JSTaggedValue value = *reinterpret_cast<JSTaggedValue *>(GetAddress()); // NOLINT(clang-analyzer-core.NullDereference)
+#if !defined(PANDA_TARGET_WINDOWS)
+        if (value.GetRawData() == static_cast<JSTaggedType>(g_guardAddress)) {
+            LOG_FULL(FATAL) << "invalid handle checked";
+        }
+#endif
+        return value;
     }
 
     inline T *operator*() const
@@ -225,14 +240,12 @@ private:
 template <>
 inline JSTaggedValue *JSHandle<JSTaggedValue>::operator->() const
 {
-    // Barriers::UpdateSlot(reinterpret_cast<JSTaggedValue*>(GetAddress()), 0);
     return reinterpret_cast<JSTaggedValue *>(GetAddress());
 }
 
 template <>
 inline JSTaggedValue *JSHandle<JSTaggedValue>::operator*() const
 {
-    // Barriers::UpdateSlot(reinterpret_cast<JSTaggedValue*>(GetAddress()), 0);
     return reinterpret_cast<JSTaggedValue *>(GetAddress());
 }
 

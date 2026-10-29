@@ -21,10 +21,20 @@
 #include "ecmascript/platform/parameters.h"
 
 namespace panda::ecmascript {
+__attribute__((visibility("default"))) uintptr_t g_guardAddress = 0;
 MemMapAllocator *MemMapAllocator::GetInstance()
 {
     static MemMapAllocator *vmAllocator_ = new MemMapAllocator();
     return vmAllocator_;
+}
+
+void MemMapAllocator::InitializeGuard(size_t alignment)
+{
+    size_t capacity = PageSize();
+    MemMap memMap = PageMap(capacity, PAGE_PROT_NONE, alignment);
+    if (!memMapGuard_.SetGuard(memMap)) {
+        PageUnmap(memMap);
+    }
 }
 
 static int PageProtectMem(bool machineCodeSpace, void *mem, size_t size, [[maybe_unused]] bool isEnableJitFort)

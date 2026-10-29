@@ -66,6 +66,7 @@ enum class PageTagType : uint8_t {
     MACHINE_CODE,
     MEMPOOL_CACHE,
     METHOD_LITERAL,
+    GUARD
 };
 
 #ifdef PANDA_TARGET_WINDOWS

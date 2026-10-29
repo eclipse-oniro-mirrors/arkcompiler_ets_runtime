@@ -1434,6 +1434,68 @@ void EcmaVM::ShrinkHandleStorage(int prevIndex)
     }
 }
 
+void EcmaVM::GuardHandleStorage(void *prevNext, int prevIndex)
+{
+#if !ECMASCRIPT_ENABLE_ZAP_MEM
+    if (handleScopeStorageNext_ == prevNext) {
+        return;
+    }
+    if (LIKELY(currentHandleStorageIndex_ == prevIndex)) {
+        if (prevIndex != -1) {
+            uintptr_t addrBegin = ToUintPtr(prevNext);
+            uintptr_t addrEnd = ToUintPtr(handleScopeStorageNext_);
+            for (uintptr_t addr = addrBegin; addr < addrEnd; addr += sizeof(JSTaggedType)) {
+                *reinterpret_cast<JSTaggedType *>(addr) = static_cast<JSTaggedType>(g_guardAddress);
+            }
+        }
+    } else {
+        if (prevIndex != -1) {
+            uintptr_t addrBegin = ToUintPtr(prevNext);
+            uintptr_t addrEnd = ToUintPtr(&handleStorageNodes_[prevIndex]->data()[NODE_BLOCK_SIZE]);
+            for (uintptr_t addr = addrBegin; addr < addrEnd; addr += sizeof(JSTaggedType)) {
+                *reinterpret_cast<JSTaggedType *>(addr) = static_cast<JSTaggedType>(g_guardAddress);
+            }
+        }
+        for (int i = prevIndex + 1; i < currentHandleStorageIndex_; i++) {
+            uintptr_t addrBegin = ToUintPtr(&handleStorageNodes_[i]->data()[0]);
+            uintptr_t addrEnd = ToUintPtr(&handleStorageNodes_[i]->data()[NODE_BLOCK_SIZE]);
+            for (uintptr_t addr = addrBegin; addr < addrEnd; addr += sizeof(JSTaggedType)) {
+                *reinterpret_cast<JSTaggedType *>(addr) = static_cast<JSTaggedType>(g_guardAddress);
+            }
+        }
+        uintptr_t addrBegin = ToUintPtr(&handleStorageNodes_[currentHandleStorageIndex_]->data()[0]);
+        uintptr_t addrEnd = ToUintPtr(handleScopeStorageNext_);
+        for (uintptr_t addr = addrBegin; addr < addrEnd; addr += sizeof(JSTaggedType)) {
+            *reinterpret_cast<JSTaggedType *>(addr) = static_cast<JSTaggedType>(g_guardAddress);
+        }
+    }
+#endif
+}
+
+bool EcmaVM::IsValidOrCachedHandleAddress(uintptr_t handleAddress)
+{
+    DISALLOW_HANDLE_ALLOC;
+    uint32_t nid = handleStorageNodes_.size();
+    for (uint32_t i = 0; i < nid; i++) {
+        auto node = handleStorageNodes_.at(i);
+        auto startAddress = ToUintPtr(&(node->data()[0]));
+        auto endAddress = ToUintPtr(&(node->data()[NODE_BLOCK_SIZE]));
+        if (handleAddress >= startAddress && handleAddress < endAddress) {
+            return true;
+        }
+    }
+    nid = primitiveStorageNodes_.size();
+    for (uint32_t i = 0; i < nid; i++) {
+        auto node = primitiveStorageNodes_.at(i);
+        auto startAddress = ToUintPtr(&(node->data()[0]));
+        auto endAddress = ToUintPtr(&(node->data()[NODE_BLOCK_SIZE]));
+        if (handleAddress >= startAddress && handleAddress < endAddress) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void EcmaVM::PrintOptStat()
 {
     if (optCodeProfiler_ != nullptr) {
@@ -1578,6 +1640,44 @@ void EcmaVM::ShrinkPrimitiveStorage(int prevIndex)
             primitiveStorageNodes_.pop_back();
         }
     }
+}
+
+void EcmaVM::GuardPrimitiveStorage(void *prevNext, int prevIndex)
+{
+#if !ECMASCRIPT_ENABLE_ZAP_MEM
+    if (primitiveScopeStorageNext_ == prevNext) {
+        return;
+    }
+    if (LIKELY(currentPrimitiveStorageIndex_ == prevIndex)) {
+        if (prevIndex != -1) {
+            uintptr_t addrBegin = ToUintPtr(prevNext);
+            uintptr_t addrEnd = ToUintPtr(primitiveScopeStorageNext_);
+            for (uintptr_t addr = addrBegin; addr < addrEnd; addr += sizeof(JSTaggedType)) {
+                *reinterpret_cast<JSTaggedType *>(addr) = static_cast<JSTaggedType>(g_guardAddress);
+            }
+        }
+    } else {
+        if (prevIndex != -1) {
+            uintptr_t addrBegin = ToUintPtr(prevNext);
+            uintptr_t addrEnd = ToUintPtr(&primitiveStorageNodes_[prevIndex]->data()[NODE_BLOCK_SIZE]);
+            for (uintptr_t addr = addrBegin; addr < addrEnd; addr += sizeof(JSTaggedType)) {
+                *reinterpret_cast<JSTaggedType *>(addr) = static_cast<JSTaggedType>(g_guardAddress);
+            }
+        }
+        for (int i = prevIndex + 1; i < currentPrimitiveStorageIndex_; i++) {
+            uintptr_t addrBegin = ToUintPtr(&primitiveStorageNodes_[i]->data()[0]);
+            uintptr_t addrEnd = ToUintPtr(&primitiveStorageNodes_[i]->data()[NODE_BLOCK_SIZE]);
+            for (uintptr_t addr = addrBegin; addr < addrEnd; addr += sizeof(JSTaggedType)) {
+                *reinterpret_cast<JSTaggedType *>(addr) = static_cast<JSTaggedType>(g_guardAddress);
+            }
+        }
+        uintptr_t addrBegin = ToUintPtr(&primitiveStorageNodes_[currentPrimitiveStorageIndex_]->data()[0]);
+        uintptr_t addrEnd = ToUintPtr(primitiveScopeStorageNext_);
+        for (uintptr_t addr = addrBegin; addr < addrEnd; addr += sizeof(JSTaggedType)) {
+            *reinterpret_cast<JSTaggedType *>(addr) = static_cast<JSTaggedType>(g_guardAddress);
+        }
+    }
+#endif
 }
 
 void EcmaVM::DeletePrimitiveStorage()

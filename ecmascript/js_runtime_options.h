@@ -86,6 +86,7 @@ enum ArkProperties {
     DISABLE_CONSTPOOL_SNAPSHOT = 1ULL << 36,
     ENABLE_SNAPSHOT_STATS = 1ULL << 37,
     ENABLE_MODULE_DEPENDENCY_LOG = 1ULL << 38,
+    ENABLE_HANDLE_SCOPE_CHECK = 1ULL << 39,
 };
 
 enum ArkTSMode {
@@ -780,6 +781,11 @@ public:
     bool EnableHeapVerify() const
     {
         return enableHeapVerify_ && (static_cast<uint64_t>(arkProperties_) & ArkProperties::ENABLE_HEAP_VERIFY) != 0;
+    }
+
+    bool EnableHandleScopeCheck() const
+    {
+        return (static_cast<uint64_t>(arkProperties_) & ArkProperties::ENABLE_HANDLE_SCOPE_CHECK) != 0;
     }
 
     bool EnableMicroJobTrace() const
