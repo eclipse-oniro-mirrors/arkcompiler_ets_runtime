@@ -3332,6 +3332,33 @@ host_unittest_action("GC_HandleLeak_Test") {
   deps += hiviewdfx_deps
 }
 
+host_unittest_action("GC_HandleScope_Test") {
+  module_out_path = module_output_path
+
+  sources = [
+    # test file
+    "handle_scope_test.cpp",
+  ]
+
+  configs = [
+    "../../:asm_interp_enable_config",
+    "../../:ecma_test_config",
+  ]
+
+  deps = [ "../../:libark_jsruntime_test" ]
+
+  # hiviewdfx libraries
+  external_deps = hiviewdfx_ext_deps
+  external_deps += [
+    "icu:shared_icui18n",
+    "icu:shared_icuuc",
+    "runtime_core:libarkassembler_static",
+    "runtime_core:libarkverifier",
+    "zlib:libz",
+  ]
+  deps += hiviewdfx_deps
+}
+
 host_unittest_action("GC_HeapHelper_Test") {
   module_out_path = module_output_path
 
@@ -4154,6 +4181,7 @@ group("unittest") {
     ":GC_External_Strig_Test",
     ":GC_First_Test",
     ":GC_HandleLeak_Test",
+    ":GC_HandleScope_Test",
     ":GC_HeapHelper_Test",
     ":GC_HugeObject_Test",
     ":GC_IdleGCTrigger_Test",
@@ -4368,6 +4396,7 @@ group("host_unittest") {
     ":GC_External_Strig_TestAction",
     ":GC_First_TestAction",
     ":GC_HandleLeak_TestAction",
+    ":GC_HandleScope_TestAction",
     ":GC_HeapHelper_TestAction",
     ":GC_HugeObject_TestAction",
     ":GC_IdleGCTrigger_TestAction",
@@ -4522,6 +4551,7 @@ group("host_unittest") {
       ":GC_External_Strig_TestAction",
       ":GC_First_TestAction",
       ":GC_HandleLeak_TestAction",
+      ":GC_HandleScope_TestAction",
       ":GC_HeapHelper_TestAction",
       ":GC_HugeObject_TestAction",
       ":GC_IdleGCTrigger_TestAction",

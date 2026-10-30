@@ -20,6 +20,7 @@
       panda::ecmascript::HELP_OPTION_MSG*;
       panda::ecmascript::COMPILER_HELP_HEAD_MSG*;
       panda::ecmascript::g_isEnableCMCGC*;
+      panda::ecmascript::g_guardAddress*;
       panda::ArkCrashHolder*;
       panda::ecmascript::ConcurrentMonitor::*;
       panda::ArrayBufferRef::*;

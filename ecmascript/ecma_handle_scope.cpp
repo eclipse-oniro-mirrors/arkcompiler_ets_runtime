@@ -98,6 +98,9 @@ EcmaHandleScope::~EcmaHandleScope()
 
 void EcmaHandleScope::CloseHandleScope(EcmaVM *vm)
 {
+    if (vm->IsHandleScopeCheckEnabled()) {
+        vm->GuardHandleStorage(prevNext_, prevHandleStorageIndex_);
+    }
     vm->SetHandleScopeStorageNext(prevNext_);
     if (vm->GetHandleScopeStorageEnd() != prevEnd_) {
         vm->SetHandleScopeStorageEnd(prevEnd_);
@@ -107,6 +110,9 @@ void EcmaHandleScope::CloseHandleScope(EcmaVM *vm)
 
 void EcmaHandleScope::ClosePrimitiveScope(EcmaVM *vm)
 {
+    if (vm->IsHandleScopeCheckEnabled()) {
+        vm->GuardPrimitiveStorage(prevPrimitiveNext_, prevPrimitiveStorageIndex_);
+    }
     vm->SetPrimitiveScopeStorageNext(prevPrimitiveNext_);
     if (vm->GetPrimitiveScopeStorageEnd() != prevPrimitiveEnd_) {
         vm->SetPrimitiveScopeStorageEnd(prevPrimitiveEnd_);

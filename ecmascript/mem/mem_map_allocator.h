@@ -259,6 +259,56 @@ private:
     std::multimap<size_t, MemMap> freeList_;
 };
 
+// MemMapGuard holds a single MemMap which has no memory access permission and is used for fault detection
+class MemMapGuard {
+public:
+    static constexpr size_t GUARD_OFFSET = 0x100;
+    MemMapGuard() = default;
+    ~MemMapGuard() = default;
+
+    NO_COPY_SEMANTIC(MemMapGuard);
+    NO_MOVE_SEMANTIC(MemMapGuard);
+
+    void Finalize()
+    {
+        LockHolder lock(lock_);
+        PageUnmap(guard_);
+        g_guardAddress = 0;
+    }
+
+    bool SetGuard(MemMap memMap)
+    {
+        LockHolder lock(lock_);
+        if (g_guardAddress != 0) {
+            return false;
+        }
+        PageTag(memMap.GetMem(), memMap.GetSize(), PageTagType::GUARD);
+        PageRelease(memMap.GetMem(), memMap.GetSize());
+        PageProtect(memMap.GetMem(), memMap.GetSize(), PAGE_PROT_NONE);
+        if (memMap.GetSize() > GUARD_OFFSET * 2) { // 2: factor
+            g_guardAddress = ToUintPtr(memMap.GetMem()) + GUARD_OFFSET;
+        } else {
+            g_guardAddress = ToUintPtr(memMap.GetMem());
+        }
+        guard_ = memMap;
+        return true;
+    }
+
+    uintptr_t GetGuardBegin()
+    {
+        return ToUintPtr(guard_.GetMem());
+    }
+
+    uintptr_t GetGuardEnd()
+    {
+        return ToUintPtr(guard_.GetMem()) + guard_.GetSize();
+    }
+
+private:
+    Mutex lock_;
+    MemMap guard_;
+};
+
 class MemMapAllocator {
 public:
     MemMapAllocator() = default;
@@ -306,6 +356,7 @@ public:
             InitializeHugeRegionMap(alignment);
             InitializeRegularRegionMap(alignment);
 #endif
+            InitializeGuard(alignment);
         }
     }
 
@@ -318,6 +369,7 @@ public:
 #ifndef USE_COMPRESSED_POINTER
         compressMemMapPool_.Finalize();
 #endif
+        memMapGuard_.Finalize();
     }
 
     size_t GetCapacity()
@@ -368,6 +420,7 @@ private:
     void InitializeCompressRegionMap(size_t alignment);
     MemMap AlignMemMapTo4G(const MemMap &memMap, size_t targetSize);
 #endif
+    void InitializeGuard(size_t alignment);
     MemMap AllocateFromMemPool(const uint32_t threadId, size_t size, size_t alignment,
                                const std::string &spaceName, bool isMachineCode, bool isEnableJitFort,
                                bool shouldPageTag, PageTagType type);
@@ -409,6 +462,7 @@ private:
     MemMapPool compressMemMapPool_;
 #endif
     MemMapFreeList memMapFreeList_;
+    MemMapGuard memMapGuard_;
     std::atomic_size_t memMapTotalSize_ {0};
     size_t capacity_ {0};
 };

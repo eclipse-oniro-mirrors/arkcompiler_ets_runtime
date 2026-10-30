@@ -444,6 +444,16 @@ public:
 #endif // ENABLE_BACKTRACE_LOCAL
 #endif // ENABLE_HITRACE_LOCAL_HANDLE_DETECT
 
+    void SetHandleScopeCheckOptionForCurrentVM(bool flag)
+    {
+        handleScopeCheckEnabled_ = flag;
+    }
+
+    bool IsHandleScopeCheckEnabled() const
+    {
+        return options_.EnableHandleScopeCheck() || handleScopeCheckEnabled_;
+    }
+
     void PushToNativePointerList(JSNativePointer *pointer, Concurrent isConcurrent = Concurrent::NO);
     void RemoveFromNativePointerList(JSNativePointer *pointer);
     void PushToDeregisterModuleList(const CString &module);
@@ -528,9 +538,12 @@ public:
     uintptr_t *ExpandHandleStorage();
     void ShrinkHandleStorage(int prevIndex);
     void DeleteHandleStorage();
+    void GuardHandleStorage(void *prevNext, int prevIndex);
+    bool IsValidOrCachedHandleAddress(uintptr_t handleAddress);
     uintptr_t *ExpandPrimitiveStorage();
     void ShrinkPrimitiveStorage(int prevIndex);
     void DeletePrimitiveStorage();
+    void GuardPrimitiveStorage(void *prevNext, int prevIndex);
     // One-way enable of the proportional handle/primitive storage shrink.
     void EnableHandleMemoryOptimization()
     {
@@ -1925,6 +1938,9 @@ private:
 
     // isBundle means app compile mode is JSBundle
     bool isBundlePack_ {true};
+
+    // local option for handle scope check
+    bool handleScopeCheckEnabled_ {false};
 #if !WIN_OR_MAC_OR_IOS_PLATFORM
     HeapProfilerInterface *heapProfile_ {nullptr};
     HybridHeapProfiler *hybridHeapProfiler_ {nullptr};
