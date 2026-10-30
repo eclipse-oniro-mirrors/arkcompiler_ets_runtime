@@ -39,6 +39,7 @@
 #include "aot_compiler_load_callback.h"
 #include "ecmascript/platform/file.h"
 #include "iservice_registry.h"
+#include "security_guard_report.h"
 #include "system_ability_definition.h"
 
 using namespace testing::ext;
@@ -1714,6 +1715,27 @@ HWTEST_F(AotCompilerImplTest, AotCompilerImplTest_SpliceFdToFd_001, TestSize.Lev
 
     unlink(diskPath.c_str());
 }
+
+#if defined(CODE_SIGN_ENABLE) && defined(SECURITY_GUARD_ENABLE)
+/**
+* @tc.name: AotCompilerImplTest_SgReportWiring_001
+* @tc.desc: post-compilation completes normally with SG reporting enabled;
+*           the codesign event path is exercised (real SDK call, best-effort)
+* @tc.type: Func
+*/
+HWTEST_F(AotCompilerImplTest, AotCompilerImplTest_SgReportWiring_001, TestSize.Level0)
+{
+    AotCompilerArgs args = MakeTestArgs();
+    AotCompilerImplMock aotImplMock;
+    aotImplMock.SetAOTArgsHandler(std::make_unique<AOTArgsHandler>(args));
+    // Invalid fd: signing fails, the codesign event is still reported
+    // with the final sign-stage result and the flow is unaffected.
+    CompilationCleanupGuard guard(args.anFileName);
+    std::vector<uint8_t> sigData;
+    int32_t ret = aotImplMock.HandlePostCompilationMock(args, ERR_OK, sigData, guard);
+    EXPECT_NE(ret, ERR_OK);
+}
+#endif
 
 #endif // CODE_SIGN_ENABLE
 

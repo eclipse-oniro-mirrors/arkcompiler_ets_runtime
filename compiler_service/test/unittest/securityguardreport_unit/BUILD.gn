@@ -1,0 +1,58 @@
+# Copyright (c) 2026 Huawei Device Co., Ltd.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import("../../compiler_service_test.gni")
+import("//arkcompiler/ets_runtime/js_runtime_config.gni")
+
+config("module_private_config") {
+  visibility = [ ":*" ]
+  include_dirs = [
+    "${compiler_service_root}/include",
+    "${compiler_service_root}/interface",
+  ]
+  cflags = [
+    "-Wno-error=keyword-macro",
+    "-Wno-nested-anon-types",
+    "-Wno-gnu-anonymous-struct",
+    "-Wno-variadic-macros",
+    "-Wno-invalid-offsetof",
+  ]
+}
+
+ohos_unittest("SecurityGuardReportUnitTest") {
+  module_out_path = module_output_path
+  configs = [
+    ":module_private_config",
+    "$js_root:ark_jsruntime_public_config",
+  ]
+  version_script = "${compiler_service_root}/libaot_compiler_service.map"
+  sources = [
+    "${js_root}/common_components/log/log.cpp",
+    "${compiler_service_root}/src/security_guard_report.cpp",
+    "securityguardreport_unit.cpp",
+  ]
+  external_deps = [
+    "cJSON:cjson_static",
+    "c_utils:utils",
+    "googletest:gmock_main",
+    "googletest:gtest_main",
+    "hilog:libhilog",
+    "ipc:ipc_core",
+    "runtime_core:libarkfile_static",
+  ]
+  defines = []
+  if (security_guard_enable_test) {
+    external_deps += [ "security_guard:libsg_collect_sdk" ]
+    defines += [ "SECURITY_GUARD_ENABLE" ]
+  }
+}

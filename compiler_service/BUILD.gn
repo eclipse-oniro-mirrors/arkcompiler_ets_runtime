@@ -64,6 +64,7 @@ ohos_shared_library("libcompiler_service") {
     "src/aot_compiler_service.cpp",
     "src/power_disconnected_listener.cpp",
     "src/screen_status_listener.cpp",
+    "src/security_guard_report.cpp",
     "src/thermal_mgr_listener.cpp",
   ]
   if (enable_target_compilation) {
@@ -114,6 +115,20 @@ ohos_shared_library("libcompiler_service") {
   if (code_sign_enable) {
     external_deps += [ "code_signature:liblocal_code_sign_sdk" ]
     defines += [ "CODE_SIGN_ENABLE" ]
+  }
+
+  # security_guard_enable is already declared in
+  # //base/security/security_guard/security_guard.gni, so gate on part
+  # presence instead to avoid a duplicate build argument declaration.
+  # The REPORT_SECURITY_EVENT permission is granted declaratively via the
+  # "permission" field in compiler_service.cfg (registered by init).
+  if (defined(global_parts_info) &&
+      defined(global_parts_info.security_guard)) {
+    external_deps += [
+      "cJSON:cjson_static",
+      "security_guard:libsg_collect_sdk",
+    ]
+    defines += [ "SECURITY_GUARD_ENABLE" ]
   }
 
   if (!ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) &&

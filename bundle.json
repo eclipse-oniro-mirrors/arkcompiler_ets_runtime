@@ -63,7 +63,8 @@
               "ffrt",
               "cJSON",
               "hiview",
-              "json"
+              "json",
+              "security_guard"
             ],
             "third_party": [
             ]
