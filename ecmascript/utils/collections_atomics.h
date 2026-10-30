@@ -29,6 +29,7 @@ public:
     static JSTaggedValue Xor(EcmaRuntimeCallInfo *argv);
     static JSTaggedValue Exchange(EcmaRuntimeCallInfo *argv);
     static JSTaggedValue CompareExchange(EcmaRuntimeCallInfo *argv);
+    static JSTaggedValue IsLockFree(EcmaRuntimeCallInfo *argv);
     static JSTaggedValue Load(EcmaRuntimeCallInfo *argv);
     static JSTaggedValue Store(EcmaRuntimeCallInfo *argv);
     static JSTaggedValue Wait(EcmaRuntimeCallInfo *argv);

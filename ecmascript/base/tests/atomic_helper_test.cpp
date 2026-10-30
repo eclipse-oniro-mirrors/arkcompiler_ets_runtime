@@ -527,6 +527,60 @@ HWTEST_F_L0(AtomicHelperTest, ValidateIntegerTypedArrayWrapperRejectsNonArraysAn
     }
 }
 
+HWTEST_F_L0(AtomicHelperTest, CollectionsValidationBusinessErrors)
+{
+    using Helper = collections::CollectionsAtomicHelper;
+    using Errors = containers::ErrorFlag;
+    JSHandle<JSTaggedValue> invalid(thread, JSTaggedValue::Null());
+    EXPECT_TRUE(Helper::ValidateIntegerTypedArray(thread, invalid).IsException());
+    AtomicsTestHelper::ExpectBusinessError(thread, Errors::TYPE_ERROR);
+    auto ordinary = AtomicsTestHelper::CreateArray(thread, DataViewType::INT32, false);
+    EXPECT_TRUE(Helper::ValidateIntegerTypedArray(thread, ordinary).IsException());
+    AtomicsTestHelper::ExpectBusinessError(thread, Errors::TYPE_ERROR);
+    for (DataViewType type : {DataViewType::FLOAT32, DataViewType::FLOAT64, DataViewType::UINT8_CLAMPED}) {
+        auto array = AtomicsTestHelper::CreateArray(thread, type, true);
+        EXPECT_TRUE(Helper::ValidateIntegerTypedArray(thread, array).IsException());
+        AtomicsTestHelper::ExpectBusinessError(thread, Errors::TYPE_ERROR);
+    }
+    auto array = AtomicsTestHelper::CreateArray(thread, DataViewType::INT32, true);
+    JSHandle<JSTaggedValue> outside(thread, JSTaggedValue(2));
+    EXPECT_EQ(Helper::ValidateAtomicAccess(thread, array, outside), 0U);
+    AtomicsTestHelper::ExpectBusinessError(thread, Errors::RANGE_ERROR);
+    AtomicsTestHelper::DetachBuffer(thread, array);
+    EXPECT_TRUE(Helper::ValidateIntegerTypedArray(thread, array).IsException());
+    AtomicsTestHelper::ExpectBusinessError(thread, Errors::TYPE_ERROR);
+}
+
+HWTEST_F_L0(AtomicHelperTest, CollectionsStoreLoadBusinessErrors)
+{
+    using Helper = collections::CollectionsAtomicHelper;
+    JSHandle<JSTaggedValue> zero(thread, JSTaggedValue(0));
+    for (bool store : {false, true}) {
+        for (bool detachDuringConversion : {false, true}) {
+            auto array = AtomicsTestHelper::CreateArray(thread, DataViewType::INT32, true);
+            JSHandle<JSTaggedValue> index = zero;
+            if (detachDuringConversion) {
+                index = AtomicsTestHelper::CreateDetachingValue(thread, array, zero);
+            } else {
+                AtomicsTestHelper::DetachBuffer(thread, array);
+            }
+            EXPECT_TRUE((store ? Helper::AtomicStore(thread, array, index, zero) :
+                Helper::AtomicLoad(thread, array, index)).IsException());
+            AtomicsTestHelper::ExpectBusinessError(thread, containers::ErrorFlag::TYPE_ERROR);
+        }
+    }
+    auto ordinary = AtomicsTestHelper::CreateArray(thread, DataViewType::INT32, false);
+    JSHandle<JSTaggedValue> outside(thread, JSTaggedValue(2));
+    EXPECT_TRUE(AtomicHelper::AtomicLoad(thread, ordinary, outside).IsException());
+    ASSERT_TRUE(thread->HasPendingException());
+    JSHandle<JSTaggedValue> error(thread, thread->GetException());
+    thread->ClearException();
+    EXPECT_TRUE(AtomicsTestHelper::GetProperty(thread, error, "code")->IsUndefined());
+    auto name = AtomicsTestHelper::GetProperty(thread, error, "name");
+    ASSERT_TRUE(name->IsString());
+    EXPECT_EQ(EcmaStringAccessor(JSHandle<EcmaString>::Cast(name)).ToStdString(thread), "RangeError");
+}
+
 HWTEST_F_L0(AtomicHelperTest, AtomicBigIntStoreTruncatesToLow64Bits)
 {
     const std::array<const char *, 8> inputs = {"0", "1", "-1", "4294967296",

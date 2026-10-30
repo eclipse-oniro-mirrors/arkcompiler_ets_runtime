@@ -15,15 +15,99 @@
 
 #include "ecmascript/utils/collections_atomic_helper.h"
 
+#include <string>
+
 #include "ecmascript/base/typed_array_helper-inl.h"
+#include "ecmascript/containers/containers_errors.h"
 
 namespace panda::ecmascript::collections {
 using TypedArrayHelper = base::TypedArrayHelper;
 using BuiltinsBase = base::BuiltinsBase;
 using BuiltinsArrayBuffer = builtins::BuiltinsArrayBuffer;
 using BuiltinsSendableArrayBuffer = builtins::BuiltinsSendableArrayBuffer;
+using ContainerError = containers::ContainerError;
 
 namespace {
+std::string GetActualType(JSThread *thread, const JSHandle<JSTaggedValue> &value)
+{
+    if (value->IsTypedArray() || value->IsSharedTypedArray()) {
+        auto type = JSHandle<JSTypedArray>::Cast(value)->GetContentType();
+        auto name = TypedArrayHelper::GetConstructorNameFromType(thread, type);
+        return (value->IsSharedTypedArray() ? "collections." : "") +
+            EcmaStringAccessor(JSHandle<EcmaString>::Cast(name)).ToStdString(thread);
+    }
+    if (value->IsUndefined()) {
+        return "undefined";
+    }
+    if (value->IsNull()) {
+        return "null";
+    }
+    if (value->IsNumber()) {
+        return "number";
+    }
+    if (value->IsString()) {
+        return "string";
+    }
+    if (value->IsBoolean()) {
+        return "boolean";
+    }
+    if (value->IsBigInt()) {
+        return "bigint";
+    }
+    if (value->IsSymbol()) {
+        return "symbol";
+    }
+    return value->IsCallable() ? "function" : "object";
+}
+
+JSTaggedValue CreateRequiredError(JSThread *thread, uint32_t index)
+{
+    std::string message = "Parameter error. Param[" + std::to_string(index) +
+        "] is required, cannot be null or undefined";
+    return ContainerError::ParamError(thread, message.c_str());
+}
+
+JSTaggedValue CreateTypeError(JSThread *thread, const JSHandle<JSTaggedValue> &value, uint32_t index,
+    const char *expected)
+{
+    std::string message = "Parameter error. Param[" + std::to_string(index) +
+        "] type mismatch. Expected: " + expected + ", Actual: " + GetActualType(thread, value);
+    return ContainerError::ParamError(thread, message.c_str());
+}
+
+bool ValidateArgumentCount(EcmaRuntimeCallInfo *argv, uint32_t requiredCount, uint32_t maximumCount)
+{
+    uint32_t actualCount = argv->GetArgsNumber();
+    if (actualCount >= requiredCount && actualCount <= maximumCount) {
+        return true;
+    }
+    std::string expected = std::to_string(requiredCount);
+    if (requiredCount != maximumCount) {
+        expected += "-" + std::to_string(maximumCount);
+    }
+    std::string message = "Parameter error. Incorrect parameter count. Expected: " + expected +
+        ", Actual: " + std::to_string(actualCount);
+    auto *thread = argv->GetThread();
+    auto error = ContainerError::ParamError(thread, message.c_str());
+    THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, false);
+}
+
+bool ValidateNumberArgument(JSThread *thread, const JSHandle<JSTaggedValue> &value, uint32_t index, bool optional)
+{
+    if (optional && value->IsUndefined()) {
+        return true;
+    }
+    if (!optional && value->IsUndefinedOrNull()) {
+        auto error = CreateRequiredError(thread, index);
+        THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, false);
+    }
+    if (!value->IsNumber()) {
+        auto error = CreateTypeError(thread, value, index, "number");
+        THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, false);
+    }
+    return true;
+}
+
 template<typename T>
 JSTaggedValue LoadInteger([[maybe_unused]] JSThread *thread, uint8_t *address)
 {
@@ -68,6 +152,29 @@ void StoreInteger(JSThread *thread, uint8_t *address, DataViewType type,
 }
 }  // namespace
 
+bool CollectionsAtomicHelper::ValidateArguments(EcmaRuntimeCallInfo *argv, uint32_t requiredCount,
+    uint32_t maximumCount, bool waitable, bool hasArray)
+{
+    if (!ValidateArgumentCount(argv, requiredCount, maximumCount)) {
+        return false;
+    }
+    auto *thread = argv->GetThread();
+    if (hasArray) {
+        auto array = BuiltinsBase::GetCallArg(argv, 0);
+        AtomicTypedArrayWitness witness {};
+        if (!ValidateIntegerTypedArray(thread, array, witness, waitable)) {
+            return false;
+        }
+    }
+    for (uint32_t index = hasArray ? 1 : 0; index < argv->GetArgsNumber(); index++) {
+        auto value = BuiltinsBase::GetCallArg(argv, index);
+        if (!ValidateNumberArgument(thread, value, index, index >= requiredCount)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 JSTaggedValue CollectionsAtomicHelper::ValidateIntegerTypedArray(JSThread *thread, JSHandle<JSTaggedValue> typedArray,
     bool waitable)
 {
@@ -81,30 +188,35 @@ JSTaggedValue CollectionsAtomicHelper::ValidateIntegerTypedArray(JSThread *threa
 bool CollectionsAtomicHelper::ValidateIntegerTypedArray(JSThread *thread, const JSHandle<JSTaggedValue> &typedArray,
     AtomicTypedArrayWitness &witness, bool waitable)
 {
+    if (typedArray->IsUndefinedOrNull()) {
+        auto error = CreateRequiredError(thread, 0);
+        THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, false);
+    }
     if (!typedArray->IsSharedTypedArray()) {
-        THROW_TYPE_ERROR_AND_RETURN(thread, "The typedArray must be a collections TypedArray.", false);
+        auto error = CreateTypeError(thread, typedArray, 0, waitable ? "collections.Int32Array" : "AtomicIntegerArray");
+        THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, false);
     }
     // Validate the backing before checking the supported element types.
-    JSHandle<JSTaggedValue> buffer(thread, TypedArrayHelper::ValidateTypedArray(thread, typedArray));
+    JSHandle<JSTaggedValue> buffer(thread,
+        JSHandle<JSTypedArray>::Cast(typedArray)->GetViewedArrayBufferOrByteArray(thread));
     if (thread->HasPendingException()) {
         return false;
+    }
+    if (buffer->IsSendableArrayBuffer() &&
+        BuiltinsSendableArrayBuffer::IsDetachedBuffer(thread, buffer.GetTaggedValue())) {
+        auto error = ContainerError::ParamError(thread, "Parameter error. The SendableArrayBuffer is detached.");
+        THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, false);
     }
 
     // Resolve the element type from typedArray.[[TypedArrayName]].
     DataViewType type = JSTypedArray::Cast(typedArray->GetTaggedObject())->GetContentType();
 
     // Collections supports six unclamped integer types; only Int32 is waitable.
-    if (waitable) {
-        const bool validWaitType = type == DataViewType::INT32;
-        if (!validWaitType) {
-            THROW_TYPE_ERROR_AND_RETURN(thread, "The typedArray must be a collections Int32Array.", false);
-        }
-    } else {
-        const bool validIntegerType = BuiltinsArrayBuffer::IsUnclampedIntegerElementType(type);
-        if (!validIntegerType) {
-            THROW_TYPE_ERROR_AND_RETURN(thread,
-                "The collections TypedArray element type is not an unclamped integer.", false);
-        }
+    const bool validType = waitable ? type == DataViewType::INT32 :
+        BuiltinsArrayBuffer::IsUnclampedIntegerElementType(type);
+    if (!validType) {
+        auto error = CreateTypeError(thread, typedArray, 0, waitable ? "collections.Int32Array" : "AtomicIntegerArray");
+        THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, false);
     }
     JSTypedArray *array = JSTypedArray::Cast(typedArray->GetTaggedObject());
     witness = {buffer.GetTaggedValue(), type, array->GetArrayLength(), array->GetByteOffset(), true};
@@ -129,9 +241,11 @@ uint32_t CollectionsAtomicHelper::ValidateAtomicAccess(JSThread *thread, const A
     JSTaggedNumber accessIndex = JSTaggedValue::ToIndex(thread, requestIndex);
     RETURN_VALUE_IF_ABRUPT_COMPLETION(thread, 0);
     uint64_t index = base::NumberHelper::DoubleToUInt64(accessIndex.GetNumber());
-    // Throw a RangeError when the access index is outside the array.
+    // Throw a BusinessError when the access index is outside the array.
     if (index >= witness.length) {
-        THROW_RANGE_ERROR_AND_RETURN(thread, "Index is overflow.", 0);
+        auto error = ContainerError::BusinessError(thread, containers::ErrorFlag::RANGE_ERROR,
+            "Parameter error. Index is overflow.");
+        THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, 0);
     }
 
     // Resolve the element size and byte offset from the witness.
@@ -159,7 +273,8 @@ JSTaggedValue CollectionsAtomicHelper::AtomicStore(JSThread *thread, const JSHan
         JSHandle<JSTypedArray>::Cast(typedArray)->GetViewedArrayBufferOrByteArray(thread));
     if (buffer->IsSendableArrayBuffer() &&
         BuiltinsSendableArrayBuffer::IsDetachedBuffer(thread, buffer.GetTaggedValue())) {
-        THROW_TYPE_ERROR_AND_RETURN(thread, "The SendableArrayBuffer is detached.", JSTaggedValue::Exception());
+        auto error = ContainerError::ParamError(thread, "Parameter error. The SendableArrayBuffer is detached.");
+        THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, JSTaggedValue::Exception());
     }
     auto *block = reinterpret_cast<uint8_t *>(
         BuiltinsArrayBuffer::GetDataPointFromBuffer(thread, buffer.GetTaggedValue()));
@@ -182,7 +297,8 @@ JSTaggedValue CollectionsAtomicHelper::AtomicLoad(JSThread *thread, const JSHand
         JSHandle<JSTypedArray>::Cast(typedArray)->GetViewedArrayBufferOrByteArray(thread));
     if (buffer->IsSendableArrayBuffer() &&
         BuiltinsSendableArrayBuffer::IsDetachedBuffer(thread, buffer.GetTaggedValue())) {
-        THROW_TYPE_ERROR_AND_RETURN(thread, "The SendableArrayBuffer is detached.", JSTaggedValue::Exception());
+        auto error = ContainerError::ParamError(thread, "Parameter error. The SendableArrayBuffer is detached.");
+        THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, JSTaggedValue::Exception());
     }
     auto *block = reinterpret_cast<uint8_t *>(
         BuiltinsArrayBuffer::GetDataPointFromBuffer(thread, buffer.GetTaggedValue()));
