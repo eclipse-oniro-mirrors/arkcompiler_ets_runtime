@@ -19,12 +19,64 @@
 #include "ecmascript/mem/tlab_allocator.h"
 
 #include "ecmascript/free_object.h"
+#include "ecmascript/mem/cms_mem/slot_free_segment-inl.h"
 #include "ecmascript/mem/full_gc.h"
 #include "ecmascript/mem/heap-inl.h"
+#include "ecmascript/mem/specialized_slot_space.h"
 
 namespace panda::ecmascript {
 static constexpr size_t MIN_BUFFER_SIZE = 31_KB;
 static constexpr size_t SMALL_OBJECT_SIZE = 8_KB;
+
+SpecializedSlotTlabAllocator::SpecializedSlotTlabAllocator(SpecializedSlotSpace *space) : space_(space)
+{
+    ASSERT(space_ != nullptr);
+    slotSize_ = space_->GetSlotSize();
+}
+
+uintptr_t SpecializedSlotTlabAllocator::Allocate()
+{
+    ASSERT(space_ != nullptr);
+    if (LIKELY(top_ < end_)) {
+        uintptr_t result = top_;
+        top_ += slotSize_;
+        return result;
+    }
+    return Refill();
+}
+
+void SpecializedSlotTlabAllocator::Reset(SpecializedSlotSpace *space)
+{
+    ASSERT(space != nullptr);
+    Discard();
+    space_ = space;
+    slotSize_ = space->GetSlotSize();
+}
+
+void SpecializedSlotTlabAllocator::Finalize()
+{
+    Discard();
+    space_ = nullptr;
+    slotSize_ = 0;
+}
+
+void SpecializedSlotTlabAllocator::Discard()
+{
+    if (top_ < end_) {
+        SlotFreeSegment::FillFreeSegment(top_, end_ - top_);
+    }
+    top_ = 0;
+    end_ = 0;
+}
+
+uintptr_t SpecializedSlotTlabAllocator::Refill()
+{
+    auto [bufferBegin, bufferSize] = space_->AllocateBufferSync();
+    ASSERT(bufferBegin != 0 && bufferSize >= slotSize_);
+    top_ = bufferBegin;
+    end_ = bufferBegin + bufferSize;
+    return Allocate();
+}
 
 TlabAllocator::TlabAllocator(Heap *heap)
     : heap_(heap), enableExpandYoung_(true), enableStealOldRegion_(true), nonMovableSpace_(heap_->GetNonMovableSpace())

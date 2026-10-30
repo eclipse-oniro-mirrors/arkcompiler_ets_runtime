@@ -58,6 +58,11 @@ public:
     size_t Discard();
 
     inline std::pair<uintptr_t, size_t> TryAllocateBuffer(size_t bufferSize);
+
+    // See SlotFreeList::FillInFlightSegment: non-destructive fold of the
+    // in-flight tail, used by read-only region walks.
+    inline void FillInFlightSegment();
+
 private:
     size_t RecordFreeListSoldOut();
 

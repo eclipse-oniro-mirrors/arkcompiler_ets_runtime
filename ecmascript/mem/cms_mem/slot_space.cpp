@@ -61,8 +61,14 @@ void SlotSpace::InitializeAllocators()
             CMSRegionChainManager *gcRegionChainManager = new CMSRegionChainManager();
             allocator->Initialize(slotSize, regionChainManager);
             gcAllocator->Initialize(slotSize, gcRegionChainManager);
-            regionChainManager->Initialize(localHeap_, slotSize);
-            gcRegionChainManager->Initialize(localHeap_, slotSize);
+            regionChainManager->Initialize(localHeap_, slotSize, this);
+            gcRegionChainManager->Initialize(localHeap_, slotSize, this);
+            auto sweptChainManagerCallback = [](Space *ownerSpace,
+                                                CMSRegionChainManager *sweptRegionChainManager) {
+                static_cast<SlotSpace *>(ownerSpace)->AddSweptRegionChainManager(sweptRegionChainManager);
+            };
+            regionChainManager->SetSweptChainManagerCallback(sweptChainManagerCallback);
+            gcRegionChainManager->SetSweptChainManagerCallback(sweptChainManagerCallback);
 
             allocatorInstances_.emplace_back(allocator);
             gcAllocatorInstances_.emplace_back(gcAllocator);

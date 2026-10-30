@@ -20,7 +20,27 @@
 
 namespace panda::ecmascript {
 class Heap;
+class SpecializedSlotSpace;
 class SharedLocalSpace;
+
+class SpecializedSlotTlabAllocator {
+public:
+    inline explicit SpecializedSlotTlabAllocator(SpecializedSlotSpace *space);
+    ~SpecializedSlotTlabAllocator() = default;
+
+    inline uintptr_t Allocate();
+    inline void Reset(SpecializedSlotSpace *space);
+    inline void Finalize();
+
+private:
+    inline void Discard();
+    inline uintptr_t Refill();
+
+    SpecializedSlotSpace *space_ {nullptr};
+    size_t slotSize_ {0};
+    uintptr_t top_ {0};
+    uintptr_t end_ {0};
+};
 
 class TlabAllocatorBase {
 public:

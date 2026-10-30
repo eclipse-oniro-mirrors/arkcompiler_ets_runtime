@@ -21,10 +21,13 @@
 #include "ecmascript/global_env.h"
 #include "ecmascript/js_handle.h"
 #include "ecmascript/linked_hash_table.h"
+#include "ecmascript/mem/cms_mem/slot_space_config.h"
 #include "ecmascript/mem/clock_scope.h"
 #include "ecmascript/mem/concurrent_marker.h"
 #include "ecmascript/mem/idle_gc_trigger.h"
 #include "ecmascript/mem/local_cmc/cc_evacuator-inl.h"
+#include "ecmascript/mem/specialized_slot_space-inl.h"
+#include "ecmascript/mem/tlab_allocator-inl.h"
 #include "ecmascript/mem/verification.h"
 #include "ecmascript/stubs/runtime_stubs.h"
 
@@ -80,6 +83,43 @@ public:
     }
 
     Heap *heap_ {nullptr};
+};
+
+class TestSpecializedSlotSpace : public SpecializedSlotSpace {
+public:
+    TestSpecializedSlotSpace(Heap* heap, size_t slotSize, size_t initialCapacity, size_t maximumCapacity)
+        : SpecializedSlotSpace(heap, MemSpaceType::SLOT_SPACE, slotSize, initialCapacity, maximumCapacity)
+    {
+    }
+
+    void SetAllowExpand(bool allowExpand)
+    {
+        allowExpand_ = allowExpand;
+    }
+
+    void PrepareSweeping() override {}
+    void Sweep() override {}
+    void AsyncSweep([[maybe_unused]] bool isMain,
+                    [[maybe_unused]] bool releaseMemory = false) override {}
+    bool TryFillSweptRegion() override
+    {
+        return true;
+    }
+    bool FinishFillSweptRegion() override
+    {
+        return true;
+    }
+
+protected:
+    bool CheckExpandBudget([[maybe_unused]] size_t expandSize) override
+    {
+        return allowExpand_;
+    }
+
+    void InitializeRegion([[maybe_unused]] Region* region) override {}
+
+private:
+    bool allowExpand_ {true};
 };
 
 #ifdef PANDA_TARGET_64
@@ -591,5 +631,93 @@ HWTEST_F_L0(LocalCCTest, DisableTest)
     EXPECT_FALSE(heap_->LocalCCEnabled());
     bool succ = heap_->TryTriggerCCMarking(MarkReason::OTHER);
     EXPECT_FALSE(succ);
+}
+
+HWTEST_F_L0(LocalCCTest, SpecializedSlotSpaceAllocationTest)
+{
+    constexpr size_t SLOT_SIZE = SlotSpaceConfig::SLOT_STEP_SIZE * 2;
+    TestSpecializedSlotSpace space(heap_, SLOT_SIZE, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
+    space.SetAllowExpand(false);
+    EXPECT_EQ(space.GetSlotSize(), SLOT_SIZE);
+    EXPECT_EQ(space.Allocate(), 0U);
+    EXPECT_EQ(space.GetRegionCount(), 0U);
+
+    space.SetAllowExpand(true);
+    uintptr_t address = space.Allocate();
+    EXPECT_NE(address, 0U);
+    EXPECT_EQ(space.GetRegionCount(), 1U);
+}
+
+HWTEST_F_L0(LocalCCTest, SpecializedSlotSpacePrepareEvacuateWithPendingRegionTest)
+{
+    constexpr size_t SLOT_SIZE = SlotSpaceConfig::SLOT_STEP_SIZE * 2;
+    TestSpecializedSlotSpace space(heap_, SLOT_SIZE, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
+    uintptr_t address = space.Allocate();
+    EXPECT_NE(address, 0U);
+    EXPECT_EQ(space.GetRegionCount(), 1U);
+
+    space.PrepareEvacuation();
+    space.FinishEvacuation();
+    EXPECT_EQ(space.GetRegionCount(), 0U);
+}
+
+HWTEST_F_L0(LocalCCTest, SpecializedSlotSpaceGCObjectTest)
+{
+    constexpr size_t SLOT_SIZE = SlotSpaceConfig::SLOT_STEP_SIZE * 2;
+    TestSpecializedSlotSpace space(heap_, SLOT_SIZE, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
+    space.PrepareEvacuation();
+    auto [address, bufferSize] = space.AllocateBufferSync();
+    EXPECT_NE(address, 0U);
+    EXPECT_NE(bufferSize, 0U);
+    EXPECT_EQ(bufferSize % SLOT_SIZE, 0U);
+
+    space.FinishEvacuation();
+    EXPECT_EQ(space.GetRegionCount(), 1U);
+}
+
+HWTEST_F_L0(LocalCCTest, SpecializedSlotSpaceGCBufferAllocationTest)
+{
+    constexpr size_t SLOT_SIZE = SlotSpaceConfig::SLOT_STEP_SIZE * 2;
+    TestSpecializedSlotSpace space(heap_, SLOT_SIZE, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
+    space.PrepareEvacuation();
+
+    auto [first, firstBufferSize] = space.AllocateBufferSync();
+    auto [second, secondBufferSize] = space.AllocateBufferSync();
+    EXPECT_NE(first, 0U);
+    EXPECT_NE(second, 0U);
+    EXPECT_NE(firstBufferSize, 0U);
+    EXPECT_NE(secondBufferSize, 0U);
+    EXPECT_EQ(firstBufferSize % SLOT_SIZE, 0U);
+    EXPECT_EQ(secondBufferSize % SLOT_SIZE, 0U);
+
+    space.FinishEvacuation();
+    EXPECT_EQ(space.GetRegionCount(), 1U);
+}
+
+HWTEST_F_L0(LocalCCTest, SpecializedSlotTlabAllocatorTest)
+{
+    constexpr size_t SLOT_SIZE = SlotSpaceConfig::SLOT_STEP_SIZE * 2;
+    constexpr size_t OTHER_SLOT_SIZE = SlotSpaceConfig::SLOT_STEP_SIZE * 4;
+    TestSpecializedSlotSpace space(heap_, SLOT_SIZE, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
+    TestSpecializedSlotSpace otherSpace(heap_, OTHER_SLOT_SIZE, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
+    space.PrepareEvacuation();
+    otherSpace.PrepareEvacuation();
+    SpecializedSlotTlabAllocator allocator(&space);
+
+    uintptr_t firstAddress = allocator.Allocate();
+    allocator.Reset(&otherSpace);
+    uintptr_t secondAddress = allocator.Allocate();
+    uintptr_t thirdAddress = allocator.Allocate();
+    EXPECT_NE(firstAddress, 0U);
+    EXPECT_NE(secondAddress, 0U);
+    EXPECT_NE(thirdAddress, 0U);
+    EXPECT_NE(firstAddress, secondAddress);
+    EXPECT_EQ(thirdAddress - secondAddress, OTHER_SLOT_SIZE);
+
+    allocator.Finalize();
+    space.FinishEvacuation();
+    otherSpace.FinishEvacuation();
+    EXPECT_EQ(space.GetRegionCount(), 1U);
+    EXPECT_EQ(otherSpace.GetRegionCount(), 1U);
 }
 }  // namespace panda::test

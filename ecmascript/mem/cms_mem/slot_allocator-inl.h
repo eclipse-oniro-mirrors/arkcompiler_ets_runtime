@@ -54,6 +54,11 @@ std::pair<uintptr_t, size_t> SlotAllocator::TryAllocateBuffer(size_t bufferSize)
 {
     return freeList_.TryAllocateBuffer(bufferSize);
 }
+
+void SlotAllocator::FillInFlightSegment()
+{
+    freeList_.FillInFlightSegment();
+}
 }  // namespace panda::ecmascript
 
 #endif  // ECMASCRIPT_MEM_CMS_MEM_SLOT_ALLOCATOR_INL_H

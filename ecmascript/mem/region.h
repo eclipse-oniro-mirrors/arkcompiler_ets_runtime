@@ -1030,6 +1030,7 @@ protected:
     friend class RuntimeStubs;
     friend class ToSpace;
     friend class SlotSpace;
+    friend class SpecializedSlotSpace;
 };
 
 class BumpPointerFreeListWrapper {
