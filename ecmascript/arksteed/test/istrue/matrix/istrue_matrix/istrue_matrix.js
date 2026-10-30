@@ -18,7 +18,7 @@
 //! METHOD boolDoubleBang
 //! COMPILE_COUNT_GE *boolDoubleBang 1
 //! EXEC_COUNT_GE *boolDoubleBang 1
-//! HAS DeoptIfNotBoolean
+//! COUNT DeoptIfNotBoolean 1
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD boolNegate
@@ -30,13 +30,20 @@
 //! METHOD intDoubleBang
 //! COMPILE_COUNT_GE *intDoubleBang 1
 //! EXEC_COUNT_GE *intDoubleBang 1
-//! HAS CheckedTaggedIntToI32
+//! COUNT CheckedTaggedIntToI32 1
+//! COUNT I32ConditionCheck 1
+//! HAS_NOT DeoptIfNotBoolean
+//! HAS_NOT TaggedNumberToBoolean
+//! HAS_NOT BranchIfFloat64Compare
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD doubleDoubleBang
 //! COMPILE_COUNT_GE *doubleDoubleBang 1
 //! EXEC_COUNT_GE *doubleDoubleBang 1
-//! HAS TaggedDoubleToBoolean
+//! COUNT TaggedDoubleToBoolean 1
+//! HAS_NOT DeoptIfNotBoolean
+//! HAS_NOT TaggedNumberToBoolean
+//! HAS_NOT BranchIfFloat64Compare
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD nullDoubleBang
@@ -57,12 +64,14 @@
 //! EXEC_COUNT_GE *staticNumber 1
 //! HAS Float64ToBoolean
 //! HAS_NOT DeoptIfNotNumber
+//! HAS_NOT DeoptIfNotBoolean
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD staticInt
 //! COMPILE_COUNT_GE *staticInt 1
 //! EXEC_COUNT_GE *staticInt 1
 //! HAS_NOT DeoptIfNotNumber
+//! HAS_NOT DeoptIfNotBoolean
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD receiverTruthy
@@ -80,7 +89,10 @@
 //! METHOD specTruthy
 //! COMPILE_COUNT_GE *specTruthy 1
 //! EXEC_COUNT_GE *specTruthy 1
-//! HAS TaggedDoubleToBoolean
+//! COUNT TaggedDoubleToBoolean 1
+//! HAS_NOT DeoptIfNotBoolean
+//! HAS_NOT TaggedNumberToBoolean
+//! HAS_NOT BranchIfFloat64Compare
 //! HAS_NOT CallCommonStub ToBoolean*
 
 //! METHOD specFalsy

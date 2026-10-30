@@ -36,6 +36,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -245,6 +246,12 @@ protected:
             return nullptr;
         }
         InitializeInputs(vertex, inputs);
+        // These fixtures also construct Phis that already carry unboxed values.
+        if constexpr (std::is_same_v<Derived, PhiVertex>) {
+            if (!inputs.empty() && inputs.front() != nullptr) {
+                vertex->SetValueRepresentation(inputs.front()->GetValueRepresentation());
+            }
+        }
         return vertex;
     }
 

@@ -20,7 +20,7 @@
 //! DEOPT_COUNT *Deoptimize* 0
 //! METHOD numberIndexRead
 //! HAS LoadTaggedElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 //! HAS I32ToF64
 //! HAS_NOT CheckedTaggedIntToI32
 //! COMPILE_COUNT numberIndexRead 1

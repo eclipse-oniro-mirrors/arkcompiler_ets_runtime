@@ -19,32 +19,32 @@
 
 //! METHOD fractionIndexRead
 //! HAS LoadTaggedElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function fractionIndexRead(array, key) { return array[key]; }
 
 //! METHOD nanIndexRead
 //! HAS LoadTaggedElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function nanIndexRead(array, key) { return array[key]; }
 
 //! METHOD infiniteIndexRead
 //! HAS LoadTaggedElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function infiniteIndexRead(array, key) { return array[key]; }
 
 //! METHOD negativeIndexRead
 //! HAS LoadTaggedElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function negativeIndexRead(array, key) { return array[key]; }
 
 //! METHOD largeIndexRead
 //! HAS LoadTaggedElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function largeIndexRead(array, key) { return array[key]; }
 
 //! METHOD stringIndexRead
 //! HAS LoadTaggedElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function stringIndexRead(array, key) { return array[key]; }
 
 const values = ['zero', 'one', 'two'];

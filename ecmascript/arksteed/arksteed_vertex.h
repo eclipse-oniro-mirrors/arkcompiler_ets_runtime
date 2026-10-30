@@ -22,6 +22,7 @@
 #include <type_traits>
 
 #include "common_interfaces/base/bit_field.h"
+#include "ecmascript/arksteed/arksteed_node_type.h"
 #include "ecmascript/arksteed/arksteed_opcode_list.h"
 #include "ecmascript/arksteed/arksteed_regalloc_types.h"
 #include "ecmascript/arksteed/arksteed_regalloc_vertex_info.h"
@@ -39,6 +40,35 @@ class BranchControlVertex;
 class InputLocation;
 class Input;
 class ConstInput;
+
+// Requirements of a value's consumers, recorded before reusing conversions.
+enum class UseRepresentation : uint8_t {
+    TAGGED,
+    INT32,
+    TRUNCATED_INT32,
+    UINT32,
+    FLOAT64,
+    HOLEY_FLOAT64,
+    NON_TRUNCATED,
+    TAGGED_FOR_NUMBER_TO_STRING,
+};
+
+class UseRepresentationSet {
+public:
+    constexpr UseRepresentationSet() = default;
+    explicit constexpr UseRepresentationSet(UseRepresentation repr) : bits_(Bit(repr)) {}
+
+    bool Empty() const { return bits_ == 0; }
+    bool Contains(UseRepresentation repr) const { return (bits_ & Bit(repr)) != 0; }
+    bool ContainsAll(UseRepresentationSet other) const { return (bits_ & other.bits_) == other.bits_; }
+    bool ContainsOnlyTruncatedInt32() const { return bits_ == Bit(UseRepresentation::TRUNCATED_INT32); }
+    void Add(UseRepresentationSet other) { bits_ |= other.bits_; }
+    void Remove(UseRepresentation repr) { bits_ &= ~Bit(repr); }
+
+private:
+    static constexpr uint8_t Bit(UseRepresentation repr) { return 1U << static_cast<uint8_t>(repr); }
+    uint8_t bits_ {0};
+};
 
 // Accesses the internal thread-local vertex label counter.
 #if !defined(NDEBUG)
@@ -156,6 +186,8 @@ enum class VertexPropertyFlag : uint16_t {
     // `I32DivVertex` share the same empty flag set. The bit occupies bit 9, i.e.
     // the existing 16-bit property field of `Vertex`, so it resizes no vertex.
     CAN_BE_REMOVED_IF_DEAD = 1u << 9,
+    // Representation conversion; checks and lossy conversions keep their own semantics.
+    IS_CONVERSION = 1u << 10,
 };
 
 constexpr VertexPropertyFlag operator|(VertexPropertyFlag lhs, VertexPropertyFlag rhs)
@@ -166,21 +198,27 @@ constexpr VertexPropertyFlag operator|(VertexPropertyFlag lhs, VertexPropertyFla
 }
 
 // CC-OFFNXT(G.PRE.02-CPP) X-macro keeps property predicates and getters in sync.
-#define VERTEX_PROPERTY_FLAGS(V)                    \
-    V(CanEagerDeopt,       CAN_EAGER_DEOPT)          \
-    V(CanLazyDeopt,        CAN_LAZY_DEOPT)           \
-    V(CanThrow,            CAN_THROW)               \
-    V(CanRead,             CAN_READ)                \
-    V(CanWrite,            CAN_WRITE)               \
-    V(CanAllocate,         CAN_ALLOCATE)            \
-    V(IsNotIdempotent,     IS_NOT_IDEMPOTENT)        \
-    V(IsCall, IS_CALL) V(IsDeferredCall, IS_DEFERRED_CALL) \
-    V(CanBeRemovedIfDead,  CAN_BE_REMOVED_IF_DEAD)
+#define VERTEX_EFFECT_PROPERTY_FLAGS(V)                                                                                \
+    V(CanEagerDeopt, CAN_EAGER_DEOPT)                                                                                  \
+    V(CanLazyDeopt, CAN_LAZY_DEOPT)                                                                                    \
+    V(CanThrow, CAN_THROW)                                                                                             \
+    V(CanRead, CAN_READ)                                                                                               \
+    V(CanWrite, CAN_WRITE)                                                                                             \
+    V(CanAllocate, CAN_ALLOCATE)                                                                                       \
+    V(IsNotIdempotent, IS_NOT_IDEMPOTENT)
+
+// CC-OFFNXT(G.PRE.02-CPP) X-macro adds call and value properties to the effect properties.
+#define VERTEX_PROPERTY_FLAGS(V)                                                                                       \
+    VERTEX_EFFECT_PROPERTY_FLAGS(V)                                                                                    \
+    V(IsCall, IS_CALL)                                                                                                 \
+    V(IsDeferredCall, IS_DEFERRED_CALL)                                                                                \
+    V(CanBeRemovedIfDead, CAN_BE_REMOVED_IF_DEAD)                                                                      \
+    V(IsConversion, IS_CONVERSION)
 
 // CC-OFFNXT(G.PRE.02-CPP) X-macro shares the compound-property getter list.
-#define VERTEX_PROPERTY_COMPOUND_FLAGS(V) \
-    V(CanDeopt)                         \
-    V(CanParticipateInCSE)              \
+#define VERTEX_PROPERTY_COMPOUND_FLAGS(V)                                                                              \
+    V(CanDeopt)                                                                                                        \
+    V(CanParticipateInCSE)                                                                                             \
     V(MayHaveSideEffects)
 
 // CC-OFFNXT(G.PRE.02-CPP) X-macro generates typed constexpr predicates.
@@ -480,10 +518,24 @@ protected:
         bitfield_ = NumDoubleTempField::Update(bitfield_, value);
     }
 
+    void SetIdentityForTransform(ValueRepresentation representation)
+    {
+        bitfield_ = OpcodeField::Update(bitfield_, VertexOpcode::Identity);
+        bitfield_ = PropertyFlagsField::Update(bitfield_, 0);
+        SetInputCountForTransform(1);
+        SetValueRepresentationForTransform(representation);
+    }
+
     void SetInputCountForTransform(uint32_t inputCount)
     {
         ASSERT(inputCount <= GetInputCount());
         bitfield_ = InputCountField::Update(bitfield_, inputCount);
+    }
+
+    void SetValueRepresentationForTransform(ValueRepresentation representation)
+    {
+        ASSERT(representation != ValueRepresentation::NONE);
+        bitfield_ = ValueRepresentationField::Update(bitfield_, static_cast<uint32_t>(representation));
     }
 
 private:
@@ -566,6 +618,13 @@ public:
     }
 
     void SetHint(InstructionOperand hint);
+
+    void OverwriteWithIdentity(ValueVertex *value);
+    ValueVertex *UnwrapIdentities();
+    NodeType GetStaticType();
+
+    void MaybeRecordUseReprHint(UseRepresentation repr);
+    void MaybeRecordUseReprHint(UseRepresentationSet hints);
 
 protected:
     ValueVertex() = default;

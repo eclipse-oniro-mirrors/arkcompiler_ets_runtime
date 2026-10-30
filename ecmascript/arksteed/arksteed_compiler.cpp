@@ -31,6 +31,7 @@
 #include "ecmascript/arksteed/arksteed_graph_printer.h"
 #include "ecmascript/arksteed/arksteed_graph_processor.h"
 #include "ecmascript/arksteed/arksteed_graph_verifier.h"
+#include "ecmascript/arksteed/arksteed_phi_representation_selector.h"
 #include "ecmascript/arksteed/arksteed_regalloc.h"
 #include "ecmascript/arksteed/arksteed_regalloc_processors.h"
 #include "ecmascript/arksteed/arksteed_write_barrier_value_kind_pass.h"
@@ -176,6 +177,10 @@ bool ArkSteedCompilerTask::ShouldEnablePipelineStatistics(ArkSteedTask *arkSteed
 bool ArkSteedCompilerTask::BuildGraph(JSThread *compilerThread)
 {
     JitCompilationEnv *env = jitCompilationEnv_.get();
+    const auto &options = arkSteedTask_->GetHostVM()->GetJSOptions();
+    graph_->SetPhiUntaggingEnabled(options.GetCompilerArkSteedUntaggedPhis());
+    graph_->SetSpeculativePhiHoistingEnabled(options.GetCompilerArkSteedSpeculativeHoistPhiUntagging());
+    graph_->SetTruncatedInt32PhiEnabled(options.GetCompilerArkSteedTruncatedInt32Phis());
 
     // Raw heap temporaries are confined to one bytecode/read operation. The
     // builder polls between bytecodes; broker reads never park or acquire a lock.
@@ -254,6 +259,11 @@ bool ArkSteedCompilerTask::Compile()
 
     if (!BuildGraph(compilerThread)) {
         return false;
+    }
+
+    if (graph_->IsPhiUntaggingEnabled()) {
+        ArkSteedPipelineStatistics stats(pipelineStatistics_, "PhiRepresentationSelector");
+        PhiRepresentationSelector(graph_).Run();
     }
 
     {

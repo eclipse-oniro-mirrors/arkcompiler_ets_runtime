@@ -19,6 +19,7 @@
 // it. The case still exercises the nested-if chains of the early and late RPO
 // blocks and the final merge Phis; the printed sums check the retained
 // `x > 10`, `x < 20` and deeper nested comparison branches.
+//! HAS BranchIfInt32Compare
 //! HAS_NOT I32ConditionCheck
 //! COMPILE_COUNT_GE if_nested_2 1
 //! EXEC_COUNT_GE *if_nested_2 1

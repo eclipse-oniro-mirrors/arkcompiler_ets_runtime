@@ -19,7 +19,7 @@
 
 //! METHOD cachedRepeatedRead
 //! COUNT BranchIfInt64Compare 0
-//! COUNT F64ToI32Trunc 1
+//! COUNT UnsafeF64ToI32 1
 //! COUNT LoadTaggedElement 2
 //! COUNT_GE DeoptIfInt32Condition 2
 //! COUNT_GE DeoptIfTaggedCondition 2
@@ -34,7 +34,7 @@ function cachedRepeatedRead(a, b, key) {
 
 //! METHOD cachedStoreThenRead
 //! HAS_NOT BranchIfInt64Compare
-//! COUNT F64ToI32Trunc 1
+//! COUNT UnsafeF64ToI32 1
 //! HAS StoreTaggedElement
 //! COMPILE_COUNT cachedStoreThenRead 1
 //! EXEC_COUNT_GE *cachedStoreThenRead 1
@@ -47,7 +47,7 @@ function cachedStoreThenRead(a, b, key, value) {
 
 //! METHOD cachedChangedKey
 //! COUNT BranchIfInt64Compare 0
-//! COUNT F64ToI32Trunc 2
+//! COUNT UnsafeF64ToI32 2
 //! COMPILE_COUNT cachedChangedKey 1
 //! EXEC_COUNT_GE *cachedChangedKey 2
 function cachedChangedKey(a, key, next) {
@@ -58,7 +58,7 @@ function cachedChangedKey(a, key, next) {
 
 //! METHOD cachedBranchMerge
 //! COUNT BranchIfInt64Compare 0
-//! COUNT F64ToI32Trunc 2
+//! COUNT UnsafeF64ToI32 2
 //! COMPILE_COUNT cachedBranchMerge 1
 //! EXEC_COUNT_GE *cachedBranchMerge 2
 function cachedBranchMerge(a, key, takeFirst) {
@@ -88,7 +88,7 @@ function cachedLoopKey(a, left, right) {
 
 //! METHOD cachedSignedZero
 //! COUNT BranchIfInt64Compare 0
-//! COUNT F64ToI32Trunc 1
+//! COUNT UnsafeF64ToI32 1
 //! COMPILE_COUNT cachedSignedZero 1
 //! EXEC_COUNT_GE *cachedSignedZero 1
 function cachedSignedZero(a, key) {

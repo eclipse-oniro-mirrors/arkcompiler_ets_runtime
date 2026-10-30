@@ -29,43 +29,43 @@ declare function print(arg: any): string;
 // Uint32Array load still produces Float64, including for these small values.
 //! METHOD maskUint32
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function maskUint32(values, index) {
     return values[index] & 0xff;
 }
 
 //! METHOD signedShiftUint32
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function signedShiftUint32(values, index) {
     return values[index] >> 8;
 }
 
 //! METHOD unsignedShiftUint32
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function unsignedShiftUint32(values, index) {
     return values[index] >>> 16;
 }
 
 //! METHOD orUint32
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function orUint32(values, index) {
     return values[index] | 0;
 }
 
 //! METHOD xorUint32
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function xorUint32(values, index) {
     return values[index] ^ 0x55aa55aa;
 }
 
 //! METHOD leftShiftUint32
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function leftShiftUint32(values, index) {
     return values[index] << 1;
 }
 
 //! METHOD unsignedIdentityUint32
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function unsignedIdentityUint32(values, index) {
     return values[index] >>> 0;
 }
@@ -102,7 +102,7 @@ print('float64=' + maskUint32(new Float64Array([3.75, -2.75, NaN, Infinity]), 1)
 
 //! METHOD maskOffHeapUint32
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function maskOffHeapUint32(array, index) {
     return array[index] & 0xff;
 }

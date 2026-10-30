@@ -246,6 +246,11 @@ public:
         return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
     }
 
+    static SideEffectDescriptor Classify(NumberToStringVertex *)
+    {
+        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+    }
+
     static SideEffectDescriptor Classify(CallRuntimeVertex *vertex)
     {
         return SideEffectDescriptor {vertex->GetSideEffectKind()};

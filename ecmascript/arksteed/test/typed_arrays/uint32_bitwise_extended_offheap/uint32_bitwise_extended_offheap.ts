@@ -30,56 +30,56 @@ declare function print(arg: any): void;
 // The full operator/input matrix is covered by the on-heap normal-path cases.
 //! METHOD extendedAndLeftOffHeap
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedAndLeftOffHeap(a, b, i, k) {
     return a[i] & 255;
 }
 
 //! METHOD extendedAndRightOffHeap
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedAndRightOffHeap(a, b, i, k) {
     return 305419896 & a[i];
 }
 
 //! METHOD extendedAndBothOffHeap
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 2
+//! COUNT_GE UnsafeF64ToI32 2
 function extendedAndBothOffHeap(a, b, i, k) {
     return a[i] & b[i];
 }
 
 //! METHOD extendedOrDynamicLeftOffHeap
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedOrDynamicLeftOffHeap(a, b, i, k) {
     return k | a[i];
 }
 
 //! METHOD extendedXorDynamicRightOffHeap
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedXorDynamicRightOffHeap(a, b, i, k) {
     return a[i] ^ k;
 }
 
 //! METHOD extendedShlRightOffHeap
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedShlRightOffHeap(a, b, i, k) {
     return 305419896 << a[i];
 }
 
 //! METHOD extendedSarBothOffHeap
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 2
+//! COUNT_GE UnsafeF64ToI32 2
 function extendedSarBothOffHeap(a, b, i, k) {
     return a[i] >> b[i];
 }
 
 //! METHOD extendedShrDynamicRightOffHeap
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedShrDynamicRightOffHeap(a, b, i, k) {
     return a[i] >>> k;
 }

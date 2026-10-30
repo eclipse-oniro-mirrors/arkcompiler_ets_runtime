@@ -49,7 +49,10 @@ ArkSteedWriteBarrierValueKind ClassifyDirectWriteBarrierValueKind(ValueVertex *v
     if (value->Is<HeapConstantVertex>()) {
         return ArkSteedWriteBarrierValueKind::HeapObject;
     }
-    if (value->Is<I32ToTaggedIntVertex>() || value->Is<CheckedNonNegativeI32ToTaggedIntVertex>() ||
+    if (value->Is<I32ToTaggedIntVertex>() ||
+        value->Is<U32ToTaggedNumberVertex>() ||
+        value->Is<CheckedNonNegativeI32ToTaggedIntVertex>() ||
+        value->Is<NumberToTaggedVertex>() ||
         value->Is<F64ToTaggedDoubleVertex>()) {
         return ArkSteedWriteBarrierValueKind::NonHeap;
     }

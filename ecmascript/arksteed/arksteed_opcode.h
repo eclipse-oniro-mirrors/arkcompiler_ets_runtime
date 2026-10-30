@@ -385,6 +385,14 @@ public:
         lazyDeoptFrameState_->emplace_back(static_cast<VRegIDType>(vreg), value, kind);
     }
 
+    void SetDeoptFrameValue(uint32_t index, ValueVertex *value, DeoptTranslationKind valueKind)
+    {
+        ASSERT(lazyDeoptFrameState_ != nullptr);
+        ASSERT(index < lazyDeoptFrameState_->size());
+        (*lazyDeoptFrameState_)[index].value = value;
+        (*lazyDeoptFrameState_)[index].valueKind = valueKind;
+    }
+
     uint32_t GetBytecodeOffset() const
     {
         ASSERT(lazyDeoptFrameState_ != nullptr);
@@ -458,6 +466,13 @@ public:
     const EagerDeoptFrameState &GetEagerDeoptFrameState() const
     {
         return eagerDeoptFrameState_;
+    }
+
+    void SetDeoptFrameValue(uint32_t index, ValueVertex *value, DeoptTranslationKind valueKind)
+    {
+        ASSERT(index < eagerDeoptFrameState_.size());
+        eagerDeoptFrameState_[index].value = value;
+        eagerDeoptFrameState_[index].valueKind = valueKind;
     }
 
     uint32_t GetBytecodeOffset() const
@@ -2077,6 +2092,25 @@ public:
     void SetValueLocationConstraints();
 };
 
+// The operand can remain unboxed after Phi selection. Ark's runtime ABI
+// receives a tagged immediate, formed at the call boundary without a graph retag.
+class NumberToStringVertex : public VertexMixin<ValueVertex, NumberToStringVertex>,
+                             public ThrowableMixin,
+                             public LazyDeoptimizableMixin {
+public:
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::IS_CALL | VertexPropertyFlag::CAN_READ | VertexPropertyFlag::CAN_WRITE |
+        VertexPropertyFlag::CAN_ALLOCATE |
+        VertexPropertyFlag::CAN_LAZY_DEOPT | VertexPropertyFlag::CAN_THROW;
+    void SetValueLocationConstraints();
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == 1);
+        ASSERT(GetInput(0)->IsTagged() || GetInput(0)->IsInt32() || GetInput(0)->IsFloat64());
+    }
+};
+
 template <class Derived>
 class JSCallVertexBase : public VertexMixin<ValueVertex, Derived>,
                          public ThrowableMixin,
@@ -3024,7 +3058,8 @@ public:
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::TAGGED,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD | VertexPropertyFlag::IS_CONVERSION;
 
     explicit TaggedIntToI32Vertex() : FixedInputVertexMixin() {}
 
@@ -3040,7 +3075,7 @@ public:
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::INT32;
     static constexpr VertexPropertyFlag PROPERTIES =
-        VertexPropertyFlag::IS_NOT_IDEMPOTENT | VertexPropertyFlag::CAN_EAGER_DEOPT;
+        VertexPropertyFlag::IS_NOT_IDEMPOTENT | VertexPropertyFlag::CAN_EAGER_DEOPT | VertexPropertyFlag::IS_CONVERSION;
 
     explicit CheckedTaggedIntToI32Vertex(Chunk *chunk, uint32_t bytecodeOffset)
         : VertexMixin(), EagerDeoptimizableMixin(chunk, bytecodeOffset)
@@ -3652,7 +3687,7 @@ public:
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
     static constexpr VertexPropertyFlag PROPERTIES =
-        VertexPropertyFlag::IS_NOT_IDEMPOTENT | VertexPropertyFlag::CAN_EAGER_DEOPT;
+        VertexPropertyFlag::IS_NOT_IDEMPOTENT | VertexPropertyFlag::CAN_EAGER_DEOPT | VertexPropertyFlag::IS_CONVERSION;
 
     explicit CheckedNonNegativeI32ToTaggedIntVertex(Chunk *chunk, uint32_t bytecodeOffset)
         : VertexMixin(), EagerDeoptimizableMixin(chunk, bytecodeOffset)
@@ -3798,7 +3833,8 @@ public:
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::INT32,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD | VertexPropertyFlag::IS_CONVERSION;
 
     explicit I32ToF64Vertex() : FixedInputVertexMixin() {}
 
@@ -3817,9 +3853,45 @@ public:
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::INT32,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = {};
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::IS_CONVERSION;
 
     explicit I32ToI64Vertex() : FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
+class U32ToF64Vertex : public FixedInputVertexMixin<ValueVertex, U32ToF64Vertex> {
+public:
+    enum Indices : uint32_t {
+        INPUT_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::FLOAT64;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT32,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD | VertexPropertyFlag::IS_CONVERSION;
+
+    explicit U32ToF64Vertex() : FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
+class TaggedNumberToF64Vertex : public FixedInputVertexMixin<ValueVertex, TaggedNumberToF64Vertex> {
+public:
+    enum Indices : uint32_t {
+        INPUT_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::FLOAT64;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD | VertexPropertyFlag::IS_CONVERSION;
+
+    explicit TaggedNumberToF64Vertex() : FixedInputVertexMixin() {}
 
     void SetValueLocationConstraints();
 };
@@ -3833,7 +3905,7 @@ public:
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::FLOAT64;
     static constexpr VertexPropertyFlag PROPERTIES =
-        VertexPropertyFlag::IS_NOT_IDEMPOTENT | VertexPropertyFlag::CAN_EAGER_DEOPT;
+        VertexPropertyFlag::IS_NOT_IDEMPOTENT | VertexPropertyFlag::CAN_EAGER_DEOPT | VertexPropertyFlag::IS_CONVERSION;
 
     explicit CheckedNumberToF64Vertex(Chunk *chunk, uint32_t bytecodeOffset)
         : VertexMixin(), EagerDeoptimizableMixin(chunk, bytecodeOffset)
@@ -3856,7 +3928,33 @@ public:
     }
 };
 
-class F64ToI32TruncVertex : public FixedInputVertexMixin<ValueVertex, F64ToI32TruncVertex> {
+// Exact numeric conversion used when Phi selection replaces a checked
+// tagged-int untag. Reject fractions, out-of-range values, NaN and minus zero.
+class CheckedF64ToI32Vertex : public VertexMixin<ValueVertex, CheckedF64ToI32Vertex>,
+                              public EagerDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        INPUT_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::INT32;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::IS_NOT_IDEMPOTENT | VertexPropertyFlag::CAN_EAGER_DEOPT | VertexPropertyFlag::IS_CONVERSION;
+
+    explicit CheckedF64ToI32Vertex(Chunk *chunk, uint32_t bytecodeOffset)
+        : VertexMixin(), EagerDeoptimizableMixin(chunk, bytecodeOffset)
+    {}
+
+    void SetValueLocationConstraints();
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+        ASSERT(GetInput(INPUT_INDEX)->IsFloat64());
+    }
+};
+
+// Raw machine truncation. Callers must prove the input range or validate the result.
+class UnsafeF64ToI32Vertex : public FixedInputVertexMixin<ValueVertex, UnsafeF64ToI32Vertex> {
 public:
     enum Indices : uint32_t {
         INPUT_INDEX = 0,
@@ -3866,9 +3964,29 @@ public:
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::FLOAT64,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD | VertexPropertyFlag::IS_CONVERSION;
 
-    explicit F64ToI32TruncVertex() : FixedInputVertexMixin() {}
+    explicit UnsafeF64ToI32Vertex() : FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
+// Full JS ToInt32, including a non-GC runtime fallback outside the fast range.
+class DoubleToInt32Vertex : public FixedInputVertexMixin<ValueVertex, DoubleToInt32Vertex> {
+public:
+    enum Indices : uint32_t {
+        INPUT_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::INT32;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::FLOAT64,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::IS_DEFERRED_CALL | VertexPropertyFlag::IS_CONVERSION;
+
+    explicit DoubleToInt32Vertex() : FixedInputVertexMixin() {}
 
     void SetValueLocationConstraints();
 };
@@ -3883,7 +4001,8 @@ public:
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::INT32,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD | VertexPropertyFlag::IS_CONVERSION;
 
     explicit I32ToUint8ClampedVertex() : FixedInputVertexMixin() {}
 
@@ -3900,7 +4019,8 @@ public:
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::FLOAT64,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD | VertexPropertyFlag::IS_CONVERSION;
 
     explicit F64ToUint8ClampedVertex() : FixedInputVertexMixin() {}
 
@@ -3917,11 +4037,36 @@ public:
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::FLOAT64,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::IS_CALL;
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::IS_CALL | VertexPropertyFlag::IS_CONVERSION;
 
     explicit DoubleToInt32CallVertex() : FixedInputVertexMixin() {}
 
     void SetValueLocationConstraints();
+};
+
+enum class NumberTaggingKind : uint8_t { INT32, DOUBLE, NUMBER };
+
+// Phi retagging preserves its pre-selection numeric type. NUMBER canonicalizes
+// exact int32 values; DOUBLE always keeps a double tag, including integral values.
+class NumberToTaggedVertex : public VertexMixin<ValueVertex, NumberToTaggedVertex> {
+public:
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD | VertexPropertyFlag::IS_CONVERSION;
+    explicit NumberToTaggedVertex(NumberTaggingKind kind) : kind_(kind) {}
+    NumberTaggingKind GetKind() const
+    {
+        return kind_;
+    }
+    void SetValueLocationConstraints();
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == 1);
+        ASSERT(GetInput(0)->IsInt32() || GetInput(0)->IsFloat64());
+    }
+
+private:
+    NumberTaggingKind kind_;
 };
 
 class F64ToTaggedDoubleVertex : public FixedInputVertexMixin<ValueVertex, F64ToTaggedDoubleVertex> {
@@ -3934,7 +4079,8 @@ public:
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::FLOAT64,
     };
-    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD | VertexPropertyFlag::IS_CONVERSION;
 
     explicit F64ToTaggedDoubleVertex() : FixedInputVertexMixin() {}
 
@@ -5113,6 +5259,50 @@ public:
     void SetValueLocationConstraints();
 };
 
+// Saved interpreter state for checks introduced by Phi selection. This is
+// metadata, not an eager-deoptimizing instruction by itself.
+class PhiUntaggingCheckpointMixin {
+public:
+    void SetPhiUntaggingFrameState(Chunk *chunk,
+                                   const EagerDeoptimizableMixin::EagerDeoptFrameState &frameState,
+                                   uint32_t bytecodeOffset)
+    {
+        ASSERT(phiUntaggingInfo_ == nullptr);
+        phiUntaggingInfo_ = chunk->New<PhiUntaggingInfo>(chunk, bytecodeOffset);
+        phiUntaggingInfo_->frameState.reserve(frameState.size());
+        for (const auto &value : frameState) {
+            phiUntaggingInfo_->frameState.emplace_back(value.vreg, value.value, value.valueKind);
+        }
+    }
+
+    bool HasPhiUntaggingFrameState() const
+    {
+        return phiUntaggingInfo_ != nullptr;
+    }
+
+    const EagerDeoptimizableMixin::EagerDeoptFrameState &GetPhiUntaggingFrameState() const
+    {
+        ASSERT(HasPhiUntaggingFrameState());
+        return phiUntaggingInfo_->frameState;
+    }
+
+    uint32_t GetPhiUntaggingBytecodeOffset() const
+    {
+        ASSERT(HasPhiUntaggingFrameState());
+        return phiUntaggingInfo_->bytecodeOffset;
+    }
+
+private:
+    struct PhiUntaggingInfo {
+        PhiUntaggingInfo(Chunk *chunk, uint32_t offset) : frameState(chunk), bytecodeOffset(offset) {}
+
+        EagerDeoptimizableMixin::EagerDeoptFrameState frameState;
+        uint32_t bytecodeOffset;
+    };
+
+    PhiUntaggingInfo *phiUntaggingInfo_ {nullptr};
+};
+
 /**
  * BranchIfFastSpreadArray vertex - jumps to if_true when the value is a JSArray
  * whose spread-argument materialization is a pure slot copy: stable tagged
@@ -5195,7 +5385,7 @@ public:
 /**
  * Jump vertex - unconditional branch
  */
-class JumpVertex : public UnconditionalControlVertexT<JumpVertex> {
+class JumpVertex : public UnconditionalControlVertexT<JumpVertex>, public PhiUntaggingCheckpointMixin {
 public:
     static constexpr uint32_t NUM_INPUTS = 0;
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
@@ -5209,7 +5399,7 @@ public:
 /**
  * JumpLoop vertex - unconditional branch to loop header (back edge)
  */
-class JumpLoopVertex : public UnconditionalControlVertexT<JumpLoopVertex> {
+class JumpLoopVertex : public UnconditionalControlVertexT<JumpLoopVertex>, public PhiUntaggingCheckpointMixin {
 public:
     static constexpr uint32_t NUM_INPUTS = 0;
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
@@ -5330,6 +5520,20 @@ private:
     AllocatedState target_;
 };
 
+// Temporary forwarding node used by graph rewrites. Removed before regalloc.
+class IdentityVertex : public FixedInputVertexMixin<ValueVertex, IdentityVertex> {
+public:
+    enum Indices : uint32_t { INPUT_INDEX = 0, NUM_INPUTS = 1 };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    void SetValueLocationConstraints() { UNREACHABLE(); }
+    void VerifyInputs() const
+    {
+        ASSERT(GetInput(0)->GetValueRepresentation() == GetValueRepresentation());
+    }
+};
+
 /**
  * Phi vertex - SSA merge point for values from different predecessor blocks
  */
@@ -5366,10 +5570,70 @@ public:
 
     void SetValueLocationConstraints();
 
+    void SetValueRepresentation(ValueRepresentation representation)
+    {
+        ASSERT(GetValueRepresentation() == ValueRepresentation::TAGGED);
+        SetValueRepresentationForTransform(representation);
+    }
+
+    NodeType GetType() const { return type_; }
+    void SetType(NodeType type) { type_ = type; }
+    void MergeType(NodeType type) { type_ = UnionNodeType(type_, type); }
+    NodeType GetPostLoopType() const { return postLoopType_; }
+    void SetPostLoopType(NodeType type)
+    {
+        ASSERT(unmergedLoopPhi_);
+        postLoopType_ = type;
+    }
+    void MergePostLoopType(NodeType type)
+    {
+        ASSERT(unmergedLoopPhi_);
+        postLoopType_ = UnionNodeType(postLoopType_, type);
+    }
+    void PromotePostLoopType()
+    {
+        ASSERT(unmergedLoopPhi_);
+        ASSERT((static_cast<uint16_t>(postLoopType_) & ~static_cast<uint16_t>(type_)) == 0);
+        type_ = postLoopType_;
+    }
+
+    // Used before RA when pruning CFG edges. Caller compacts inputs and their
+    // corresponding predecessor list in the same order.
+    void RetainInputs(const std::vector<uint32_t> &indices)
+    {
+        ASSERT(!indices.empty());
+        for (uint32_t i = 0; i < indices.size(); ++i) {
+            ASSERT(indices[i] >= i && indices[i] < GetInputCount());
+            SetInput(i, GetInput(indices[i]));
+        }
+        SetInputCountForTransform(indices.size());
+    }
+
+    void ResizeExceptionInputs(uint32_t count)
+    {
+        ASSERT(count > 0 && count <= GetInputCount());
+        SetInputCountForTransform(count);
+    }
+
     void ReduceToSinglePredecessor()
     {
         ASSERT(GetInputCount() == 2);  // 2: inputs before the reduction
         SetInputCountForTransform(1);
+        type_ = postLoopType_;
+        unmergedLoopPhi_ = false;
+        sameLoopUseReprHints_ = {};
+    }
+
+    void RecordUseReprHint(UseRepresentationSet hints);
+    const UseRepresentationSet &GetUseReprHints() const { return useReprHints_; }
+    const UseRepresentationSet &GetSameLoopUseReprHints() const { return sameLoopUseReprHints_; }
+    void SetIsUnmergedLoopPhi(bool value) { unmergedLoopPhi_ = value; }
+    void SetInLoopScope(bool value) { inLoopScope_ = value; }
+
+    // Late inputs (especially loop backedges) must inherit already-recorded uses.
+    void PropagateUseReprHintsToInput(uint32_t index)
+    {
+        GetInput(index)->MaybeRecordUseReprHint(useReprHints_);
     }
 
     // Non-asserting mirror of `VerifyInputs()` ("Variable-input vertex must
@@ -5382,12 +5646,8 @@ public:
         if (storedCount == 0) {
             return false;
         }
-        const ValueVertex *first = GetInput(0);
-        if (first == nullptr) {
-            return false;
-        }
-        const ValueRepresentation representation = first->GetValueRepresentation();
-        for (uint32_t index = 1; index < storedCount; ++index) {
+        const ValueRepresentation representation = GetValueRepresentation();
+        for (uint32_t index = 0; index < storedCount; ++index) {
             if (!details::CheckSlotRepresentation(this, index, representation)) {
                 return false;
             }
@@ -5401,6 +5661,16 @@ public:
     }
 
     const VirtualRegister owner_;
+
+private:
+    // A normal loop keeps type_ unknown until its backedge is bound. The
+    // optimistic header instead exposes the entry type, validated at the latch.
+    NodeType type_ {NodeType::UNKNOWN};
+    NodeType postLoopType_ {NodeType::UNKNOWN};
+    UseRepresentationSet useReprHints_;
+    UseRepresentationSet sameLoopUseReprHints_;
+    bool unmergedLoopPhi_ {false};
+    bool inLoopScope_ {true};
 };
 
 class I32ToTaggedIntVertex : public FixedInputVertexMixin<ValueVertex, I32ToTaggedIntVertex> {
@@ -5410,7 +5680,8 @@ public:
         NUM_INPUTS = 1,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
-    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD | VertexPropertyFlag::IS_CONVERSION;
 
     explicit I32ToTaggedIntVertex() : FixedInputVertexMixin() {}
 
@@ -5429,7 +5700,8 @@ public:
         NUM_INPUTS = 1,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
-    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD | VertexPropertyFlag::IS_CONVERSION;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {ValueRepresentation::INT32};
 
     explicit U32ToTaggedNumberVertex() : FixedInputVertexMixin() {}
@@ -5444,7 +5716,8 @@ public:
         NUM_INPUTS = 1,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
-    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD | VertexPropertyFlag::IS_CONVERSION;
 
     explicit RawI64ToTaggedVertex() : FixedInputVertexMixin() {}
 
@@ -5458,7 +5731,8 @@ public:
         NUM_INPUTS = 1,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::INT64;
-    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD | VertexPropertyFlag::IS_CONVERSION;
 
     explicit TaggedToRawI64Vertex() : FixedInputVertexMixin() {}
 
@@ -5618,6 +5892,7 @@ private:
         }                                                                               \
     }
 
+MIXIN_GETTER(PhiUntaggingCheckpointMixin)
 MIXIN_GETTER(ThrowableMixin)
 MIXIN_GETTER(EagerDeoptimizableMixin)
 MIXIN_GETTER(LazyDeoptimizableMixin)

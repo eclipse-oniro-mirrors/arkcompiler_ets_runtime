@@ -57,9 +57,66 @@
 #include "ecmascript/tagged_array.h"
 
 namespace panda::ecmascript::arksteed {
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<IdentityVertex>(IdentityVertex *)
+{
+    UNREACHABLE();
+}
+
 #define __ assembler_->
 
 namespace {
+
+// Full JS ToInt32 fallback. DoubleToInt is a non-GC C call: preserve only
+// live caller-saved registers, and only on the overflowing conversion path.
+class DeferredDoubleToInt32 final : public ArkSteedDeferredCode {
+public:
+    DeferredDoubleToInt32(ArkSteedDoubleRegister input, ArkSteedRegister result,
+                          const DeferredRegisterSnapshot &snapshot)
+        : input_(input), result_(result), snapshot_(snapshot)
+    {}
+
+    Label *GetReturnLabel()
+    {
+        return &returnLabel_;
+    }
+
+    void Generate(ArkSteedAssembler *assembler) override
+    {
+        auto general = snapshot_.liveRegisters & GetNGCRuntimeCallerSavedGeneralRegisters();
+        auto doubles = snapshot_.liveDoubleRegisters & GetNGCRuntimeCallerSavedDoubleRegisters();
+        general.Clear(result_);
+        int32_t slots = (general.Count() + doubles.Count() + 1) & ~1;
+        assembler->ReserveCallArgSlots(slots);
+        int32_t slot = 0;
+        for (ArkSteedRegister reg : general) {
+            assembler->MoveRepr(MachineRepresentation::Word64, assembler->GetCallArgSlot(slot++), reg);
+        }
+        for (ArkSteedDoubleRegister reg : doubles) {
+            assembler->StoreFloat64(assembler->GetCallArgSlot(slot++), reg);
+        }
+        assembler->Move(ArkSteedDoubleRegister::FromCode(0), input_);
+        assembler->Move(ArkSteedAssembler::GetParameterRegister(0), static_cast<int64_t>(base::INT32_BITS));
+        assembler->CallNGCRuntime(RTSTUB_ID(DoubleToInt));
+        assembler->Move(result_, kReturnRegister);
+        slot = 0;
+        for (ArkSteedRegister reg : general) {
+            assembler->MoveRepr(MachineRepresentation::Word64, reg, assembler->GetCallArgSlot(slot++));
+        }
+        for (ArkSteedDoubleRegister reg : doubles) {
+            assembler->LoadFloat64(reg, assembler->GetCallArgSlot(slot++));
+        }
+        assembler->FreeCallArgSlots(slots);
+        assembler->Jump(&returnLabel_);
+    }
+
+private:
+    ArkSteedDoubleRegister input_;
+    ArkSteedRegister result_;
+    DeferredRegisterSnapshot snapshot_;
+    Label returnLabel_;
+};
 
 class DeferredCopyCOWElements final : public ArkSteedDeferredCode {
 public:
@@ -1687,6 +1744,50 @@ int ArkSteedCodeGenerator::PrepareKnownBuiltinNativeArguments(CallKnownBuiltinVe
                     __ GetCallArgSlot(static_cast<int32_t>(call->GetInputCount() + 2U)), scratch);
     }
     return reservedSlotCount;
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<NumberToStringVertex>(NumberToStringVertex *call)
+{
+    constexpr int32_t argumentSlot = 2;
+    constexpr int32_t paddingSlot = argumentSlot + 1;
+    constexpr int32_t slotCount = paddingSlot + 1;  // Runtime id, argc, argument, alignment padding.
+    __ ReserveCallArgSlots(slotCount);
+    {
+        TemporaryRegisterScope scope(assembler_);
+        auto scratch = scope.Acquire();
+        __ Move(scratch, static_cast<int64_t>(RTSTUB_ID(NumberToString)));
+        __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(0), scratch);
+        __ Move(scratch, static_cast<int64_t>(1));
+        __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(1), scratch);
+        if (call->GetInput(0)->IsFloat64()) {
+            __ Move(scratch, GetInputDoubleRegister(call, 0));
+            Label pureDouble;
+            Label tagged;
+            __ Compare(scratch, static_cast<int64_t>(JSTaggedValue::TAG_INT - JSTaggedValue::DOUBLE_ENCODE_OFFSET));
+            __ JumpIf(Condition::BELOW, &pureDouble);
+            __ LoadTaggedValue(scratch, JSTaggedValue(base::NAN_VALUE).GetRawData());
+            __ Jump(&tagged);
+            __ Bind(&pureDouble);
+            __ Add(scratch, static_cast<int64_t>(JSTaggedValue::DOUBLE_ENCODE_OFFSET));
+            __ Bind(&tagged);
+        } else if (call->GetInput(0)->IsInt32()) {
+            __ SignExtendInt32ToInt64(scratch, GetInputRegister(call, 0));
+            __ Or(scratch, static_cast<int64_t>(JSTaggedValue::TAG_INT));
+        } else {
+            __ Move(scratch, GetInputRegister(call, 0));
+        }
+        __ MoveRepr(MachineRepresentation::Tagged, __ GetCallArgSlot(argumentSlot), scratch);
+        __ LoadTaggedValue(scratch, JSTaggedValue::VALUE_UNDEFINED);
+        __ MoveRepr(MachineRepresentation::Tagged, __ GetCallArgSlot(paddingSlot), scratch);
+    }
+    __ CallRuntime(RTSTUB_ID(NumberToString));
+    if (HasLazyDeoptSafepoint(call)) {
+        EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
+    } else {
+        safepointBuilder_->DefineSafepoint(__ GetPcOffset());
+    }
+    __ FreeCallArgSlots(slotCount);
 }
 
 template <>
@@ -5021,6 +5122,42 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<I32ToI64Vertex>(I32ToI64Vertex
 }
 
 template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<U32ToF64Vertex>(U32ToF64Vertex *convert)
+{
+    __ Uint32ToFloat64(GetResultDoubleRegister(convert),
+                       GetInputRegister(convert, U32ToF64Vertex::INPUT_INDEX));
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<TaggedNumberToF64Vertex>(TaggedNumberToF64Vertex *convert)
+{
+    auto dst = GetResultDoubleRegister(convert);
+    auto input = GetInputRegister(convert, TaggedNumberToF64Vertex::INPUT_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister bits = scope.Acquire();
+    ArkSteedRegister scratch = scope.Acquire();
+    Label intCase;
+    Label done;
+
+    __ Move(bits, input);
+    __ Move(scratch, JSTaggedValue::TAG_MARK);
+    __ Word64And(bits, scratch);
+    __ Compare(bits, scratch);
+    __ JumpIf(Condition::EQUAL, &intCase);
+
+    __ Move(bits, input);
+    __ Move(scratch, static_cast<uint64_t>(JSTaggedValue::DOUBLE_ENCODE_OFFSET));
+    __ Sub(bits, scratch);
+    __ Move(dst, bits);
+    __ Jump(&done);
+
+    __ Bind(&intCase);
+    __ SignExtendInt32ToInt64(bits, input);
+    __ Int32ToFloat64(dst, bits);
+    __ Bind(&done);
+}
+
+template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<CheckedNumberToF64Vertex>(CheckedNumberToF64Vertex *convert)
 {
     auto dst = GetResultDoubleRegister(convert);
@@ -5054,9 +5191,49 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CheckedNumberToF64Vertex>(Chec
 }
 
 template <>
-void ArkSteedCodeGenerator::VisitNonControlVertex<F64ToI32TruncVertex>(F64ToI32TruncVertex *op)
+void ArkSteedCodeGenerator::VisitNonControlVertex<CheckedF64ToI32Vertex>(CheckedF64ToI32Vertex *convert)
 {
-    __ TruncateFloat64ToInt32(GetResultRegister(op), GetInputDoubleRegister(op, F64ToI32TruncVertex::INPUT_INDEX));
+    auto input = GetInputDoubleRegister(convert, CheckedF64ToI32Vertex::INPUT_INDEX);
+    auto result = GetResultRegister(convert);
+    TemporaryRegisterScope scope(assembler_);
+    auto originalBits = scope.Acquire();
+    auto convertedBits = scope.Acquire();
+    auto roundTrip = scope.AcquireDouble();
+    __ TruncateFloat64ToInt32(result, input);
+    __ SignExtendInt32ToInt64(result, result);
+    __ Int32ToFloat64(roundTrip, result);
+    // Bit equality also rejects -0 and NaN; a numeric comparison alone would
+    // accept -0. The round trip rejects fractions and values outside int32.
+    __ Move(originalBits, input);
+    __ Move(convertedBits, roundTrip);
+    __ Compare(originalBits, convertedBits);
+    BranchToEagerDeoptTarget(Condition::NOT_EQUAL, convert, kungfu::DeoptType::NOTINT1);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<UnsafeF64ToI32Vertex>(UnsafeF64ToI32Vertex *op)
+{
+    __ TruncateFloat64ToInt32(GetResultRegister(op), GetInputDoubleRegister(op, 0));
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<DoubleToInt32Vertex>(DoubleToInt32Vertex *op)
+{
+    auto input = GetInputDoubleRegister(op, 0);
+    auto result = GetResultRegister(op);
+    auto *slow = graph_->GetChunk()->New<DeferredDoubleToInt32>(
+        input, result, op->GetRegallocInfo()->GetDeferredRegisterSnapshot());
+    deferredCode_.push_back(slow);
+    TemporaryRegisterScope scope(assembler_);
+    auto exponent = scope.Acquire();
+    __ Move(exponent, input);
+    __ ShiftLeft(exponent, 1);                                          // Remove the sign bit.
+    __ ShiftRightLogical(exponent, base::DOUBLE_SIGNIFICAND_SIZE + 1);  // IEEE-754 biased exponent.
+    // NaN, infinity and |x| >= 2^63 use the complete modulo conversion.
+    __ Compare(exponent, base::DOUBLE_EXPONENT_BIAS + std::numeric_limits<int64_t>::digits);
+    __ JumpIf(Condition::ABOVE_OR_EQUAL, slow->GetEntryLabel());
+    __ TruncateFloat64ToInt32(result, input);
+    __ Bind(slow->GetReturnLabel());
 }
 
 template <>
@@ -5205,6 +5382,59 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<F64NegVertex>(F64NegVertex *op
     auto dst = GetResultDoubleRegister(op);
     auto value = GetInputDoubleRegister(op, F64NegVertex::VALUE_INDEX);
     __ Float64Neg(dst, value);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<NumberToTaggedVertex>(NumberToTaggedVertex *convert)
+{
+    auto dst = GetResultRegister(convert);
+    auto kind = convert->GetKind();
+    TemporaryRegisterScope scope(assembler_);
+    auto bits = scope.Acquire();
+    auto roundBits = scope.Acquire();
+    auto temporary = scope.AcquireDouble();
+    if (convert->GetInput(0)->IsInt32()) {
+        auto input = GetInputRegister(convert, 0);
+        if (kind != NumberTaggingKind::DOUBLE) {
+            __ SignExtendInt32ToInt64(dst, input);
+            __ Or(dst, static_cast<int64_t>(JSTaggedValue::TAG_INT));
+            return;
+        }
+        __ Int32ToFloat64(temporary, input);
+        __ Move(dst, temporary);
+        __ Add(dst, static_cast<int64_t>(JSTaggedValue::DOUBLE_ENCODE_OFFSET));
+        return;
+    }
+    auto input = GetInputDoubleRegister(convert, 0);
+    if (kind == NumberTaggingKind::INT32) {
+        __ TruncateFloat64ToInt32(dst, input);
+        __ SignExtendInt32ToInt64(dst, dst);
+        __ Or(dst, static_cast<int64_t>(JSTaggedValue::TAG_INT));
+        return;
+    }
+    Label asDouble;
+    Label pureDouble;
+    Label done;
+    __ Move(bits, input);
+    if (kind == NumberTaggingKind::NUMBER) {
+        __ TruncateFloat64ToInt32(dst, input);
+        __ SignExtendInt32ToInt64(dst, dst);
+        __ Int32ToFloat64(temporary, dst);
+        __ Move(roundBits, temporary);
+        __ Compare(bits, roundBits);  // Keeps -0 a double; excludes NaN and out-of-range values.
+        __ JumpIf(Condition::NOT_EQUAL, &asDouble);
+        __ Or(dst, static_cast<int64_t>(JSTaggedValue::TAG_INT));
+        __ Jump(&done);
+    }
+    __ Bind(&asDouble);
+    __ Move(dst, bits);
+    __ Compare(dst, static_cast<int64_t>(JSTaggedValue::TAG_INT - JSTaggedValue::DOUBLE_ENCODE_OFFSET));
+    __ JumpIf(Condition::BELOW, &pureDouble);
+    __ LoadTaggedValue(dst, JSTaggedValue(base::NAN_VALUE).GetRawData());
+    __ Jump(&done);
+    __ Bind(&pureDouble);
+    __ Add(dst, static_cast<int64_t>(JSTaggedValue::DOUBLE_ENCODE_OFFSET));
+    __ Bind(&done);
 }
 
 template <>

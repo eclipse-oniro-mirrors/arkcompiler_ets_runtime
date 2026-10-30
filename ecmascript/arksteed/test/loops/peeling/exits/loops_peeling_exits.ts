@@ -14,7 +14,7 @@
  */
 
 //! METHOD peeling_exits
-//! COUNT CallCommonStub Less 3
+//! COUNT_LE CallCommonStub Less 2
 //! COUNT JumpLoop 1
 
 function peeling_exits(n)

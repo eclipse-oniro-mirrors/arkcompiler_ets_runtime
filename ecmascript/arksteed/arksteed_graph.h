@@ -19,6 +19,7 @@
 #include "ecmascript/arksteed/arksteed_bb.h"
 #include "ecmascript/arksteed/arksteed_opcode.h"
 #include "ecmascript/arksteed/arksteed_vertex.h"
+#include "ecmascript/base/bit_helper.h"
 #include "ecmascript/mem/chunk_containers.h"
 
 namespace panda::ecmascript::arksteed {
@@ -70,7 +71,15 @@ public:
 
     ValueVertex *GetFloat64Constant(double value)
     {
-        return GetOrAddNewConstantVertex(float64Constants_, value);
+        // Preserve NaN payloads and distinguish +0 from -0.
+        uint64_t bits = base::bit_cast<uint64_t>(value);
+        auto it = float64Constants_.find(bits);
+        if (it != float64Constants_.end()) {
+            return it->second;
+        }
+        auto *vertex = Vertex::New<Float64ConstantVertex>(chunk_, 0, value);
+        float64Constants_.emplace(bits, vertex);
+        return vertex;
     }
 
     ValueVertex *GetTaggedConstant(uint64_t value)
@@ -106,7 +115,7 @@ public:
         return GetInt64Constants();
     }
 
-    const ChunkMap<double, Float64ConstantVertex *> &GetFloat64Constants() const
+    const ChunkMap<uint64_t, Float64ConstantVertex *> &GetFloat64Constants() const
     {
         return float64Constants_;
     }
@@ -145,6 +154,11 @@ public:
     }
 
     void RemoveUnreachableBlocks();
+
+    void RetainBlocks(const std::vector<BB *> &blocks)
+    {
+        blocks_.assign(blocks.begin(), blocks.end());
+    }
 
     using BlockIterator = ChunkVector<BB *>::iterator;
     using ConstBlockIterator = ChunkVector<BB *>::const_iterator;
@@ -225,6 +239,36 @@ public:
         mayHaveUnreachableBlocks_ = value;
     }
 
+    bool IsPhiUntaggingEnabled() const
+    {
+        return phiUntaggingEnabled_;
+    }
+
+    void SetPhiUntaggingEnabled(bool enabled)
+    {
+        phiUntaggingEnabled_ = enabled;
+    }
+
+    bool IsSpeculativePhiHoistingEnabled() const
+    {
+        return speculativePhiHoistingEnabled_;
+    }
+
+    void SetSpeculativePhiHoistingEnabled(bool enabled)
+    {
+        speculativePhiHoistingEnabled_ = enabled;
+    }
+
+    bool IsTruncatedInt32PhiEnabled() const
+    {
+        return truncatedInt32PhiEnabled_;
+    }
+
+    void SetTruncatedInt32PhiEnabled(bool enabled)
+    {
+        truncatedInt32PhiEnabled_ = enabled;
+    }
+
     Chunk *GetChunk() const
     {
         return chunk_;
@@ -289,7 +333,7 @@ private:
     ChunkVector<ValueVertex *> parameters_;
     ChunkMap<int32_t, Int32ConstantVertex *> int32Constants_;
     ChunkMap<int64_t, Int64ConstantVertex *> int64Constants_;
-    ChunkMap<double, Float64ConstantVertex *> float64Constants_;
+    ChunkMap<uint64_t, Float64ConstantVertex *> float64Constants_;
     ChunkMap<uint64_t, TaggedConstantVertex *> taggedConstants_;
     ChunkMap<uint32_t, HeapConstantVertex *> heapConstants_;
     uint32_t maxCallStackArgs_ = 0;
@@ -299,6 +343,9 @@ private:
     bool hasRecursiveCalls_;
     bool mayHaveUnreachableBlocks_;
     bool reuseStackSlots_ = true;
+    bool phiUntaggingEnabled_ = true;
+    bool speculativePhiHoistingEnabled_ = false;
+    bool truncatedInt32PhiEnabled_ = false;
 };
 
 }  // namespace panda::ecmascript::arksteed

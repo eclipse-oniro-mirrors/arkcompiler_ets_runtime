@@ -47,56 +47,56 @@ declare function print(arg: any): void;
 // Guard deopts are deliberately separated from the normal zero-deopt cases.
 //! METHOD guardUint32Bounds
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function guardUint32Bounds(a, i) {
     return a[i] & 255;
 }
 
 //! METHOD guardUint32Negative
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function guardUint32Negative(a, i) {
     return a[i] & 255;
 }
 
 //! METHOD guardUint32Fraction
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function guardUint32Fraction(a, i) {
     return a[i] & 255;
 }
 
 //! METHOD guardUint32NegativeFraction
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function guardUint32NegativeFraction(a, i) {
     return a[i] & 255;
 }
 
 //! METHOD guardUint32NaN
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function guardUint32NaN(a, i) {
     return a[i] & 255;
 }
 
 //! METHOD guardUint32Infinity
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function guardUint32Infinity(a, i) {
     return a[i] & 255;
 }
 
 //! METHOD guardUint32Array
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function guardUint32Array(a, i) {
     return a[i] & 255;
 }
 
 //! METHOD guardUint32Detached
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function guardUint32Detached(a, i) {
     return a[i] & 255;
 }
@@ -106,119 +106,119 @@ function guardUint32Detached(a, i) {
 // Effectful conversions below also cover objects returning a plain integer.
 //! METHOD extendedGuardBounds
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedGuardBounds(a, b, i, k) {
     return 255 & a[i];
 }
 
 //! METHOD extendedGuardNegative
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedGuardNegative(a, b, i, k) {
     return 255 & a[i];
 }
 
 //! METHOD extendedGuardFraction
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedGuardFraction(a, b, i, k) {
     return 255 & a[i];
 }
 
 //! METHOD extendedGuardArray
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedGuardArray(a, b, i, k) {
     return 255 & a[i];
 }
 
 //! METHOD extendedGuardLeftScalarString
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedGuardLeftScalarString(a, b, i, k) {
     return k & a[i];
 }
 
 //! METHOD extendedGuardLeftScalarFraction
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedGuardLeftScalarFraction(a, b, i, k) {
     return k & a[i];
 }
 
 //! METHOD extendedGuardLeftScalarUndefined
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedGuardLeftScalarUndefined(a, b, i, k) {
     return k & a[i];
 }
 
 //! METHOD extendedGuardRightScalarString
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedGuardRightScalarString(a, b, i, k) {
     return a[i] & k;
 }
 
 //! METHOD extendedGuardRightScalarFraction
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedGuardRightScalarFraction(a, b, i, k) {
     return a[i] & k;
 }
 
 //! METHOD extendedGuardRightScalarUndefined
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedGuardRightScalarUndefined(a, b, i, k) {
     return a[i] & k;
 }
 
 //! METHOD extendedGuardRightEffect
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedGuardRightEffect(a, b, i, k) {
     return a[i] & k;
 }
 
 //! METHOD extendedGuardLeftEffect
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedGuardLeftEffect(a, b, i, k) {
     return k & a[i];
 }
 
 //! METHOD extendedGuardLeftShiftEffect
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedGuardLeftShiftEffect(a, b, i, k) {
     return k << a[i];
 }
 
 //! METHOD extendedGuardBothIndexEffect
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 2
+//! COUNT_GE UnsafeF64ToI32 2
 function extendedGuardBothIndexEffect(a, b, i, k) {
     return a[i] & b[k];
 }
 
 //! METHOD extendedGuardThrowLeft
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedGuardThrowLeft(a, b, i, k) {
     return k & a[i];
 }
 
 //! METHOD extendedGuardThrowRight
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedGuardThrowRight(a, b, i, k) {
     return a[i] & k;
 }
 
 //! METHOD extendedGuardDetached
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedGuardDetached(a, b, i, k) {
     return 255 & a[i];
 }

@@ -28,42 +28,42 @@ declare function print(arg: any): void;
 // Every post-compilation call must stay in the generated code.
 //! METHOD normalMaskUint32
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function normalMaskUint32(a, i) {
     return a[i] & 255;
 }
 
 //! METHOD normalOrUint32
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function normalOrUint32(a, i) {
     return a[i] | 0;
 }
 
 //! METHOD normalXorUint32
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function normalXorUint32(a, i) {
     return a[i] ^ 1437226410;
 }
 
 //! METHOD normalShlUint32
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function normalShlUint32(a, i) {
     return a[i] << 1;
 }
 
 //! METHOD normalSarUint32
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function normalSarUint32(a, i) {
     return a[i] >> 8;
 }
 
 //! METHOD normalShrUint32
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function normalShrUint32(a, i) {
     return a[i] >>> 16;
 }

@@ -16,11 +16,95 @@
 #include "ecmascript/arksteed/arksteed_vertex.h"
 
 #include "ecmascript/arksteed/arksteed_bb.h"
+#include "ecmascript/arksteed/arksteed_compile_info_facts.h"
 #include "ecmascript/arksteed/arksteed_opcode.h"
 #include "ecmascript/arksteed/arksteed_opcode_list.h"
 #include "ecmascript/arksteed/arksteed_regalloc_vertex_info.h"
 
 namespace panda::ecmascript::arksteed {
+
+void ValueVertex::OverwriteWithIdentity(ValueVertex *value)
+{
+    ASSERT(GetInputCount() >= 1);
+    value = value->UnwrapIdentities();
+    ASSERT(value != this);
+    SetIdentityForTransform(value->GetValueRepresentation());
+    SetInput(0, value);
+}
+
+ValueVertex *ValueVertex::UnwrapIdentities()
+{
+    ValueVertex *value = this;
+    while (value->Is<IdentityVertex>()) {
+        value = value->GetInput(0);
+    }
+    return value;
+}
+
+NodeType ValueVertex::GetStaticType()
+{
+    ValueVertex *value = UnwrapIdentities();
+    if (auto *phi = value->TryCast<PhiVertex>()) {
+        return phi->GetType();
+    }
+    if (auto *constant = value->TryCast<TaggedConstantVertex>()) {
+        return NodeTypeFromJSTaggedValue(JSTaggedValue(constant->GetValue()));
+    }
+    if (auto *constant = value->TryCast<HeapConstantVertex>()) {
+        return static_cast<NodeType>(constant->GetStaticNodeType());
+    }
+    if (value->IsInt32() || value->Is<I32ToTaggedIntVertex>()) {
+        return NodeType::INT;
+    }
+    if (value->IsFloat64() || value->Is<F64ToTaggedDoubleVertex>()) {
+        return NodeType::DOUBLE;
+    }
+    if (value->IsUInt32() || value->Is<U32ToTaggedNumberVertex>()) {
+        return NodeType::NUMBER;
+    }
+    if (auto *tag = value->TryCast<NumberToTaggedVertex>()) {
+        switch (tag->GetKind()) {
+            case NumberTaggingKind::INT32:
+                return NodeType::INT;
+            case NumberTaggingKind::DOUBLE:
+                return NodeType::DOUBLE;
+            case NumberTaggingKind::NUMBER:
+                return NodeType::NUMBER;
+        }
+    }
+    return NodeType::UNKNOWN;
+}
+
+void ValueVertex::MaybeRecordUseReprHint(UseRepresentation repr)
+{
+    MaybeRecordUseReprHint(UseRepresentationSet(repr));
+}
+
+void ValueVertex::MaybeRecordUseReprHint(UseRepresentationSet hints)
+{
+    if (auto *phi = TryCast<PhiVertex>()) {
+        phi->RecordUseReprHint(hints);
+    }
+}
+
+void PhiVertex::RecordUseReprHint(UseRepresentationSet hints)
+{
+    // RPO can interleave loop exits, so the existing builder loop scope also
+    // gates same-loop hints. Unmerged separately controls bound Phi inputs.
+    if (unmergedLoopPhi_ && inLoopScope_) {
+        sameLoopUseReprHints_.Add(hints);
+    }
+    if (useReprHints_.ContainsAll(hints)) {
+        return;
+    }
+    useReprHints_.Add(hints);
+    uint32_t boundInputs = GetInputCount() - (unmergedLoopPhi_ ? 1 : 0);
+    for (uint32_t index = 0; index < boundInputs; ++index) {
+        if (ValueVertex *input = GetInput(index)) {
+            input->MaybeRecordUseReprHint(hints);
+        }
+    }
+}
 
 #if !defined(NDEBUG)
 namespace {

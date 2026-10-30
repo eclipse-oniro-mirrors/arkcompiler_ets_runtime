@@ -1011,7 +1011,7 @@ void ArkSteedDceTest::CheckRemovableConversionsAndMerge()
         NewRemovableVertex<U32ToTaggedNumberVertex>(),
         NewVertex<RawI64ToTaggedVertex>({RepresentationSample(ValueRepresentation::INT64)}),
         NewVertex<TaggedToRawI64Vertex>({RepresentationSample(ValueRepresentation::TAGGED)}),
-        NewRemovableVertex<I32ToF64Vertex>(), NewRemovableVertex<F64ToI32TruncVertex>(),
+        NewRemovableVertex<I32ToF64Vertex>(), NewRemovableVertex<UnsafeF64ToI32Vertex>(),
         NewRemovableVertex<I32ToUint8ClampedVertex>(), NewRemovableVertex<F64ToUint8ClampedVertex>(),
         NewRemovableVertex<F64ToTaggedDoubleVertex>(),
         NewVertex<PhiVertex>({RepresentationSample(ValueRepresentation::TAGGED),
@@ -1098,6 +1098,7 @@ void ArkSteedDceTest::CheckExceptionalAndMemoryOperationsRemainRequired(ValueVer
         NewVertex<LoadI64FromAddressVertex>({address}, SAMPLE_ADDRESS_OFFSET),
         NewVertex<LoadF64FromAddressVertex>({address}, SAMPLE_ADDRESS_OFFSET),
         NewVertex<StringEqualVertex>({tagged, tagged, tagged}),
+        NewVertex<DoubleToInt32Vertex>({RepresentationSample(ValueRepresentation::FLOAT64)}),
         NewVertex<DoubleToInt32CallVertex>({address}), NewVertex<I32DivVertex>({address, address})});
 }
 
