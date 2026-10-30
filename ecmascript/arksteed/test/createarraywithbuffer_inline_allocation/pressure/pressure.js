@@ -14,7 +14,7 @@
  */
 
 // Keep one explicit compilation per factory, including after capacity deopt.
-//! PARAMS --compiler-jit-hotness-threshold=0 --compiler-jit-call-threshold=60000 --compiler-enable-baselinejit=false
+//! PARAMS --compiler-jit-hotness-threshold=60000 --compiler-enable-baselinejit=false
 
 //! METHOD createWithPressure
 //! COUNT AllocateInYoung 1

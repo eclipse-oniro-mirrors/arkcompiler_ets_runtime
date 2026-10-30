@@ -14,7 +14,7 @@
  */
 
 // Compile before any clone mutation; use explicit ordinary collections below.
-//! PARAMS --asm-interpreter=true --compiler-jit-hotness-threshold=0 --compiler-jit-call-threshold=60000 --compiler-enable-baselinejit=false --enable-cmc-gc=false
+//! PARAMS --asm-interpreter=true --compiler-jit-hotness-threshold=60000 --compiler-enable-baselinejit=false --enable-cmc-gc=false
 
 //! METHOD createMetadata
 //! COUNT AllocateInYoung 1

@@ -16,6 +16,7 @@
 
 #include "ecmascript/base/config.h"
 #include "ecmascript/js_object.h"
+#include "ecmascript/jit/tiering_manager.h"
 #ifdef ENABLE_BRANCH_PROFILE
 #include "ecmascript/js_tagged_value.h"
 #include "ecmascript/log_wrapper.h"
@@ -1757,6 +1758,31 @@ DEF_RUNTIME_STUBS(UpdateHotnessCounterWithProf)
         return res.GetRawData();
     }
     return profileTypeInfo.GetRawData();
+}
+
+DEF_RUNTIME_STUBS(TryJitCompile)
+{
+    RUNTIME_STUBS_HEADER(TryJitCompile);
+    JSHandle<JSFunction> thisFunc = GetHArg<JSFunction>(argv, argc, 0);  // 0: means the zeroth parameter
+    TieringManager::TryJitCompile(thread, thisFunc);
+    return JSTaggedValue::Undefined().GetRawData();
+}
+
+DEF_RUNTIME_STUBS(SubmitJitTask)
+{
+    RUNTIME_STUBS_HEADER(SubmitJitTask);
+    JSHandle<JSFunction> thisFunc = GetHArg<JSFunction>(argv, argc, 0);  // 0: means the zeroth parameter
+    TieringManager::SubmitJitTask(thread, thisFunc);
+    return JSTaggedValue::Undefined().GetRawData();
+}
+
+DEF_RUNTIME_STUBS(RefreshHotnessCounter)
+{
+    RUNTIME_STUBS_HEADER(RefreshHotnessCounter);
+    JSHandle<JSFunction> thisFunc = GetHArg<JSFunction>(argv, argc, 0);  // 0: means the zeroth parameter
+    JSHandle<Method> method(thread, thisFunc->GetMethod(thread));
+    method->SetHotnessCounter(TieringManager::HotnessBudgetFor(thread, method));
+    return JSTaggedValue::Undefined().GetRawData();
 }
 
 DEF_RUNTIME_STUBS(JitCompile)

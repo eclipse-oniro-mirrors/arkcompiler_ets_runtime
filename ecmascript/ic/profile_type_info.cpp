@@ -20,6 +20,7 @@
 #include "ecmascript/ic/ic_info.h"
 #include "ecmascript/ic/ic_runtime.h"
 #include "ecmascript/ic/ic_runtime_stub-inl.h"
+#include "ecmascript/jit/tiering_manager.h"
 #include "ecmascript/js_function.h"
 #include "ecmascript/tagged_array-inl.h"
 
@@ -84,6 +85,7 @@ ProfileTypeInfoNexus::ProfileTypeInfoNexus(JSThread *thread, JSHandle<ProfileTyp
 
 void ProfileTypeInfoNexus::AddElementHandler(JSHandle<JSTaggedValue> hclass, JSHandle<JSTaggedValue> handler) const
 {
+    TieringManager::NotifyICChanged(thread_, pti_->GetMethod(thread_));
     ALLOW_LOCAL_TO_SHARE_WEAK_REF_HANDLE;
     auto profileData = pti_->GetICSlot(thread_, slotId_);
     ASSERT(!profileData.IsHole());
@@ -183,6 +185,7 @@ void ProfileTypeInfoNexus::AddHandlerWithoutKey(JSHandle<JSTaggedValue> hclass, 
                                                 JSHandle<JSTaggedValue> keyForMegaIC,
                                                 MegaICCache::MegaICKind kind) const
 {
+    TieringManager::NotifyICChanged(thread_, pti_->GetMethod(thread_));
     ALLOW_LOCAL_TO_SHARE_WEAK_REF_HANDLE;
     auto index = slotId_;
     if (IsNamedGlobalIC(GetKind())) {
@@ -215,6 +218,7 @@ void ProfileTypeInfoNexus::AddHandlerWithoutKey(JSHandle<JSTaggedValue> hclass, 
 void ProfileTypeInfoNexus::AddHandlerWithKey(JSHandle<JSTaggedValue> key, JSHandle<JSTaggedValue> hclass,
                                              JSHandle<JSTaggedValue> handler) const
 {
+    TieringManager::NotifyICChanged(thread_, pti_->GetMethod(thread_));
     ALLOW_LOCAL_TO_SHARE_WEAK_REF_HANDLE;
     if (IsValueGlobalIC(GetKind())) {
         AddGlobalHandlerKey(key, handler);
@@ -303,12 +307,16 @@ void ProfileTypeInfoNexus::AddGlobalHandlerKey(JSHandle<JSTaggedValue> key, JSHa
 
 void ProfileTypeInfoNexus::AddGlobalRecordHandler(JSHandle<JSTaggedValue> handler) const
 {
+    TieringManager::NotifyICChanged(thread_, pti_->GetMethod(thread_));
     uint32_t index = slotId_;
     pti_->SetICSlot(thread_, index, handler.GetTaggedValue());
 }
 
 void ProfileTypeInfoNexus::SetAsMega() const
 {
+    if (!pti_->GetICSlot(thread_, slotId_).IsHole()) {
+        TieringManager::NotifyICChanged(thread_, pti_->GetMethod(thread_));
+    }
     if (IsGlobalIC(kind_)) {
         pti_->SetICSlot(thread_, slotId_, JSTaggedValue::Hole());
     } else {

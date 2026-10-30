@@ -103,11 +103,12 @@ void DependentInfos::TriggerLazyDeoptimization(JSHandle<DependentInfos> dependen
             hasDeoptMethod = true;
             JSHandle<Method> method(thread, func->GetMethod(thread));
             // When lazy deopt happened, the deopt method cannot call as jit any more.
+            bool resetJitHotness = func->GetMachineCode(thread).IsMachineCodeObject();
             Deoptimizier::ClearCompiledCodeStatusWhenDeopt(thread,
                                                            func.GetObject<JSFunction>(),
                                                            method.GetObject<Method>(),
                                                            kungfu::DeoptType::LAZYDEOPT,
-                                                           false);
+                                                           resetJitHotness);
             ClearProfileTypeInfoForLazyDeopt(thread, func);
             TraceLazyDeoptReason(thread, func, (depCollection & collection));
         }

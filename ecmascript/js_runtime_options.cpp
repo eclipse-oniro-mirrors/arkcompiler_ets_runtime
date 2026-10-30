@@ -172,6 +172,8 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
         {"compiler-trace-jit", required_argument, nullptr, OPTION_COMPILER_TRACE_JIT},
         {"compiler-jit-hotness-threshold", required_argument, nullptr, OPTION_COMPILER_JIT_HOTNESS_THRESHOLD},
         {"compiler-jit-call-threshold", required_argument, nullptr, OPTION_COMPILER_JIT_CALL_THRESHOLD},
+        {"compiler-jit-ic-feedback-threshold", required_argument, nullptr,
+         OPTION_COMPILER_JIT_IC_FEEDBACK_THRESHOLD},
         {"compiler-osr-hotness-threshold", required_argument, nullptr, OPTION_COMPILER_OSR_HOTNESS_THRESHOLD},
         {"compiler-force-jit-compile-main", required_argument, nullptr, OPTION_COMPILER_FORCE_JIT_COMPILE_MAIN},
         {"compiler-enable-jit-pgo", required_argument, nullptr, OPTION_COMPILER_ENABLE_JIT_PGO},
@@ -1186,6 +1188,16 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
                     uint16_t val =  argUint32 > std::numeric_limits<uint16_t>::max() ?
                         std::numeric_limits<uint16_t>::max() : static_cast<uint16_t>(argUint32);
                     SetJitCallThreshold(val);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_JIT_IC_FEEDBACK_THRESHOLD:
+                ret = ParseUint32Param("compiler-jit-ic-feedback-threshold", &argUint32);
+                if (ret) {
+                    uint16_t val = argUint32 > std::numeric_limits<uint16_t>::max() ?
+                        std::numeric_limits<uint16_t>::max() : static_cast<uint16_t>(argUint32);
+                    SetJitIcFeedbackThreshold(val);
                 } else {
                     return false;
                 }

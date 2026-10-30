@@ -1,0 +1,3 @@
+A compiled: true
+B compiled: true
+B calls: 2003

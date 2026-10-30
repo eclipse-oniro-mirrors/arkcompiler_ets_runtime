@@ -217,7 +217,7 @@ public:
                                                 BUILTINS_STUB_ID(INVALID),
                                                 MemSpaceType methodSpaceType = SHARED_OLD_SPACE);
 
-    JSHandle<ProfileTypeInfo> NewProfileTypeInfo(uint32_t length);
+    JSHandle<ProfileTypeInfo> NewProfileTypeInfo(uint32_t length, const JSHandle<Method> &method = JSHandle<Method>());
     JSHandle<ICInfo> NewICInfo(uint32_t length);
     JSHandle<ConstantPool> NewConstantPool(uint32_t numOfCache);
     JSHandle<Program> NewProgram();
@@ -276,7 +276,8 @@ public:
                                       kungfu::BuiltinsStubCSigns::ID builtinId = BUILTINS_STUB_ID(INVALID),
                                       MemSpaceType spaceType = SHARED_OLD_SPACE);
     JSHandle<DependentInfos> NewDependentInfos(uint32_t capacity);
-    void InitializeMethod(const MethodLiteral *methodLiteral, JSHandle<Method> &method);
+    void InitializeMethod(const MethodLiteral *methodLiteral, JSHandle<Method> &method,
+                          const JSPandaFile *jsPandaFile = nullptr);
     // use for method
     JSHandle<JSFunction> NewJSFunction(const JSHandle<GlobalEnv> &env, const JSHandle<Method> &method);
     JSHandle<JSFunction> NewJSBuiltinFunction(const JSHandle<GlobalEnv> &env, const JSHandle<Method> &method);
@@ -623,7 +624,8 @@ public:
     JSHandle<JSFunction> NewJSFunctionByHClassWithoutAccessor(const JSHandle<GlobalEnv> &env, const void *func,
         const JSHandle<JSHClass> &clazz, FunctionKind kind = FunctionKind::NORMAL_FUNCTION);
 
-    JSHandle<Method> NewMethod(const MethodLiteral *methodLiteral, MemSpaceType spaceType = OLD_SPACE);
+    JSHandle<Method> NewMethod(const MethodLiteral *methodLiteral, MemSpaceType spaceType = OLD_SPACE,
+                               const JSPandaFile *jsPandaFile = nullptr);
 
     JSHandle<Method> NewMethod(const JSPandaFile *jsPandaFile, MethodLiteral *methodLiteral,
                                JSHandle<ConstantPool> constpool, uint32_t entryIndex,
@@ -889,7 +891,8 @@ public:
         kungfu::BuiltinsStubCSigns::ID builtinId = BUILTINS_STUB_ID(INVALID),
         MemSpaceType spaceType = SHARED_OLD_SPACE);
 
-    JSHandle<Method> NewSMethod(const MethodLiteral *methodLiteral, MemSpaceType methodSpaceType = SHARED_OLD_SPACE);
+    JSHandle<Method> NewSMethod(const MethodLiteral *methodLiteral, MemSpaceType methodSpaceType = SHARED_OLD_SPACE,
+                                const JSPandaFile *jsPandaFile = nullptr);
 
     JSHandle<Method> PUBLIC_API NewSMethod(const JSPandaFile *jsPandaFile,
                                            MethodLiteral *methodLiteral,

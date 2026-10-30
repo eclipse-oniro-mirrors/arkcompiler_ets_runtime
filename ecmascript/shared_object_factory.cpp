@@ -232,7 +232,7 @@ JSHandle<Method> ObjectFactory::NewSMethod(const JSPandaFile *jsPandaFile, Metho
     if (jsPandaFile->IsNewVersion()) {
         method = Method::Create(thread_, jsPandaFile, methodLiteral);
     } else {
-        method = NewSMethod(methodLiteral);
+        method = NewSMethod(methodLiteral, SHARED_OLD_SPACE, jsPandaFile);
         method->SetConstantPool(thread_, constpool);
     }
     if (needSetAotFlag) {
@@ -244,7 +244,8 @@ JSHandle<Method> ObjectFactory::NewSMethod(const JSPandaFile *jsPandaFile, Metho
     return method;
 }
 
-JSHandle<Method> ObjectFactory::NewSMethod(const MethodLiteral *methodLiteral, MemSpaceType spaceType)
+JSHandle<Method> ObjectFactory::NewSMethod(const MethodLiteral *methodLiteral, MemSpaceType spaceType,
+                                           const JSPandaFile *jsPandaFile)
 {
     ASSERT(spaceType == SHARED_READ_ONLY_SPACE ||
            spaceType == SHARED_NON_MOVABLE ||
@@ -262,7 +263,7 @@ JSHandle<Method> ObjectFactory::NewSMethod(const MethodLiteral *methodLiteral, M
             JSHandle<JSHClass>(thread_->GlobalConstants()->GetHandledMethodClass()));
     }
     JSHandle<Method> method(thread_, header);
-    InitializeMethod(methodLiteral, method);
+    InitializeMethod(methodLiteral, method, jsPandaFile);
     return method;
 }
 

@@ -31,9 +31,8 @@
 // body runs exactly once per call, the invalidation clears the compiled state
 // (isCompiled false), and the pending exception is never replaced by a normal
 // construct result. `ok:1:true` before and after proves the accumulator/frame
-// recovery. The first throw (no invalidation) keeps the caller compiled: it
-// only consumes one slot of the default deopt threshold (10) installed for
-// ArkSteed code.
+// recovery. The first throw (no invalidation) deoptimizes the caller. Recompile
+// before the next probe so dependency invalidation still targets compiled code.
 
 //! METHOD callCatch
 //! HAS InitializeEmptyObject
@@ -106,6 +105,10 @@ armedInvalidate = false;
 print(callCatch(depObj));
 print(ArkTools.arkSteedIsCompiled(callCatch));
 
+ArkTools.arkSteedCompileSync(callCatch);
+if (!ArkTools.arkSteedIsCompiled(callCatch)) {
+    throw new Error("recompiled caller before dependency invalidation");
+}
 armedThrow = true;
 armedInvalidate = true;
 print(callCatch(depObj));

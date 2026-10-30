@@ -1697,7 +1697,8 @@ JSTaggedValue BuiltinsArkTools::WaitJitCompileFinish(EcmaRuntimeCallInfo *info)
         return JSTaggedValue::False();
     }
     while (!jsFunction->GetMachineCode(thread).IsMachineCodeObject()) {
-        if (jsFunction->GetJitHotnessCnt(thread) == ProfileTypeInfo::JIT_DISABLE_FLAG) {
+        JSHandle<Method> method(thread, jsFunction->GetMethod(thread));
+        if (method->GetTieringDecision() == TieringDecision::DISABLED) {
             // The current function is not compiled for some reason.
             break;
         }

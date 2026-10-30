@@ -124,34 +124,50 @@ void name##StubBuilder::GenerateCircuitImpl(GateRef glue, GateRef sp, GateRef pc
     DispatchLast(glue, sp, pc, constpool, profileTypeInfo, *varAcc)                            \
 
 #define UPDATE_HOTNESS(_sp, callback)                                                                      \
-    GateRef curMethod = GetMethodFromFunction(glue, GetFunctionFromFrame(glue, GetFrame(_sp)));            \
-    GateRef curHotnessCounter = Int32Add(offset, GetHotnessCounterFromMethod(curMethod));                  \
-    SetHotnessCounter(glue, curMethod, curHotnessCounter);                                                 \
-    IR_IF_UNLIKELY (Int32LessThan(curHotnessCounter, Int32(0))) {                                          \
-        GateRef func = GetFunctionFromFrame(glue, GetFrame(_sp));                                          \
+    if (!(callback).IsEmpty()) {                                                                           \
         GateRef iVecOffset = IntPtr(JSThread::GlueData::GetInterruptVectorOffset(env->IsArch32Bit()));     \
         GateRef interruptsFlag = LoadPrimitive(VariableType::INT8(), glue, iVecOffset);                    \
-        SetHotnessCounter(glue, curMethod, Int32(EcmaInterpreter::METHOD_HOTNESS_THRESHOLD));              \
-        IR_IF_UNLIKELY (BitOr(TaggedIsUndefined(*varProfileTypeInfo),                                      \
-                              Int8Equal(interruptsFlag, Int8(VmThreadControl::VM_NEED_SUSPENSION)))) {     \
-            if (!(callback).IsEmpty()) {                                                                   \
-                varProfileTypeInfo = CallRuntime(glue, RTSTUB_ID(UpdateHotnessCounterWithProf), {func});   \
-            } else {                                                                                       \
-                varProfileTypeInfo = CallRuntime(glue, RTSTUB_ID(UpdateHotnessCounter), {func});           \
-            }                                                                                              \
+        IR_IF_UNLIKELY(Int8Equal(interruptsFlag, Int8(VmThreadControl::VM_NEED_SUSPENSION))) {             \
+            CallRuntime(glue, RTSTUB_ID(CheckSafePoint), {});                                              \
             IR_IF_UNLIKELY (HasPendingException(glue)) {                                                   \
                 DISPATCH_LAST();                                                                           \
             }                                                                                              \
-        } IR_ELSE {                                                                                        \
-            IR_IF_UNLIKELY (LoadPrimitive(VariableType::BOOL(), glue, IntPtr(                              \
-                JSThread::GlueData::GetIsEnableCMCGCOffset(env->Is32Bit())))) {                            \
-                IR_IF_UNLIKELY (Int32Equal(Int32(ThreadFlag::SUSPEND_REQUEST),                             \
-                                           CheckSuspendForCMCGC(glue))) {                                  \
-                    CallRuntime(glue, RTSTUB_ID(CheckSafePoint), {});                                      \
+        }                                                                                                  \
+    }                                                                                                      \
+    GateRef func = GetFunctionFromFrame(glue, GetFrame(_sp));                                              \
+    GateRef curMethod = GetMethodFromFunction(glue, func);                                                 \
+    GateRef curHotnessCounter = Int32Add(offset, GetHotnessCounterFromMethod(curMethod));                  \
+    SetHotnessCounter(glue, curMethod, curHotnessCounter);                                                 \
+    IR_IF_UNLIKELY (Int32LessThan(curHotnessCounter, Int32(0))) {                                          \
+        if ((callback).IsEmpty()) {                                                                        \
+            GateRef iVecOffset = IntPtr(JSThread::GlueData::GetInterruptVectorOffset(env->IsArch32Bit())); \
+            GateRef interruptsFlag = LoadPrimitive(VariableType::INT8(), glue, iVecOffset);                \
+            SetHotnessCounter(glue, curMethod, Int32(EcmaInterpreter::METHOD_HOTNESS_THRESHOLD));          \
+            IR_IF_UNLIKELY (BitOr(TaggedIsUndefined(*varProfileTypeInfo),                                  \
+                                  Int8Equal(interruptsFlag, Int8(VmThreadControl::VM_NEED_SUSPENSION)))) { \
+                varProfileTypeInfo = CallRuntime(glue, RTSTUB_ID(UpdateHotnessCounter), {func});           \
+                IR_IF_UNLIKELY (HasPendingException(glue)) {                                               \
+                    DISPATCH_LAST();                                                                       \
+                }                                                                                          \
+            } IR_ELSE {                                                                                    \
+                IR_IF_UNLIKELY (LoadPrimitive(VariableType::BOOL(), glue, IntPtr(                          \
+                    JSThread::GlueData::GetIsEnableCMCGCOffset(env->Is32Bit())))) {                        \
+                    IR_IF_UNLIKELY (Int32Equal(Int32(ThreadFlag::SUSPEND_REQUEST),                         \
+                                               CheckSuspendForCMCGC(glue))) {                              \
+                        CallRuntime(glue, RTSTUB_ID(CheckSafePoint), {});                                  \
+                    }                                                                                      \
                 }                                                                                          \
             }                                                                                              \
-            (callback).TryDump();                                                                          \
-            (callback).TryJitCompile();                                                                    \
+        } else {                                                                                           \
+            IR_IF_UNLIKELY (TaggedIsUndefined(*varProfileTypeInfo)) {                                      \
+                varProfileTypeInfo = CallRuntime(glue, RTSTUB_ID(UpdateHotnessCounterWithProf), {func});   \
+                IR_IF_UNLIKELY (HasPendingException(glue)) {                                               \
+                    DISPATCH_LAST();                                                                       \
+                }                                                                                          \
+            } IR_ELSE {                                                                                    \
+                (callback).TryDump();                                                                      \
+            }                                                                                              \
+            CallRuntime(glue, RTSTUB_ID(TryJitCompile), { func });                                         \
         }                                                                                                  \
     }
 
@@ -2943,11 +2959,10 @@ DECLARE_ASM_HANDLER(HandleReturn)
     Bind(&isStable);
     {
         GateRef varProfileTypeInfoVal = *varProfileTypeInfo;
-        GateRef isProfileDumpedAndJitCompiled = LogicAndBuilder(env)
-            .And(ProfilerStubBuilder(env).IsCompiledOrTryCompile(glue, GetFunctionFromFrame(glue, frame),
-                varProfileTypeInfoVal, callback, pc))
-            .And(ProfilerStubBuilder(env).IsProfileTypeInfoDumped(varProfileTypeInfoVal, callback))
-            .Done();
+        GateRef isProfileDumpedAndJitCompiled = BitAnd(
+            ProfilerStubBuilder(env).IsCompiledOrTryCompile(glue, GetFunctionFromFrame(glue, frame),
+                varProfileTypeInfoVal, callback, pc),
+            ProfilerStubBuilder(env).IsProfileTypeInfoDumped(varProfileTypeInfoVal, callback));
         BRANCH(isProfileDumpedAndJitCompiled, &tryContinue, &updateHotness);
     }
     Bind(&updateHotness);
@@ -3018,11 +3033,10 @@ DECLARE_ASM_HANDLER(HandleReturnundefined)
     Bind(&isStable);
     {
         GateRef varProfileTypeInfoVal = *varProfileTypeInfo;
-        GateRef isProfileDumpedAndJitCompiled = LogicAndBuilder(env)
-            .And(ProfilerStubBuilder(env).IsCompiledOrTryCompile(glue, GetFunctionFromFrame(glue, frame),
-                varProfileTypeInfoVal, callback, pc))
-            .And(ProfilerStubBuilder(env).IsProfileTypeInfoDumped(varProfileTypeInfoVal, callback))
-            .Done();
+        GateRef isProfileDumpedAndJitCompiled = BitAnd(
+            ProfilerStubBuilder(env).IsCompiledOrTryCompile(glue, GetFunctionFromFrame(glue, frame),
+                varProfileTypeInfoVal, callback, pc),
+            ProfilerStubBuilder(env).IsProfileTypeInfoDumped(varProfileTypeInfoVal, callback));
         BRANCH(isProfileDumpedAndJitCompiled, &tryContinue, &updateHotness);
     }
     Bind(&updateHotness);

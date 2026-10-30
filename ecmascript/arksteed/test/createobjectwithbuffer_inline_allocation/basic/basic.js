@@ -14,7 +14,7 @@
  */
 
 // Warm the templates with profile collection enabled, without automatic compilation.
-//! PARAMS --asm-interpreter=true --compiler-jit-hotness-threshold=0 --compiler-jit-call-threshold=60000 --compiler-enable-baselinejit=false --enable-cmc-gc=false
+//! PARAMS --asm-interpreter=true --compiler-jit-hotness-threshold=60000 --compiler-enable-baselinejit=false --enable-cmc-gc=false
 
 //! METHOD createPrimitives
 //! COUNT AllocateInYoung 1

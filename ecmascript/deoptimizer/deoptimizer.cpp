@@ -18,6 +18,7 @@
 #include "ecmascript/dfx/stackinfo/js_stackinfo.h"
 #include "ecmascript/interpreter/interpreter_assembly.h"
 #include "ecmascript/jit/jit.h"
+#include "ecmascript/jit/tiering_manager.h"
 #include "ecmascript/js_tagged_value_internals.h"
 #include "ecmascript/stubs/runtime_stubs-inl.h"
 #include "ecmascript/base/gc_helper.h"
@@ -396,7 +397,8 @@ bool Deoptimizier::CollectSteedDeoptContextFromRuntime(FrameIterator &it, SteedF
     stackContext_.callFrameTop_ = reinterpret_cast<uintptr_t>(preFrameSp);
     stackContext_.returnAddr_ = frame->GetReturnAddr();
     stackContext_.callerFp_ = reinterpret_cast<uintptr_t>(frame->GetPrevFrameFp());
-    stackContext_.isFrameLazyDeopt_ = false;
+    // Preserve a patched caller return address when eager deopt rebuilds this frame.
+    stackContext_.isFrameLazyDeopt_ = it.IsLazyDeoptFrameType();
     calleeRegAddr_ = nullptr;
 
     JSTaggedValue jsFunction = frame->GetFunction();
@@ -789,18 +791,12 @@ void Deoptimizier::ResetJitHotness(JSThread *thread, JSFunction *jsFunc)
     if (jsFunc->GetMachineCode(thread).IsMachineCodeObject()) {
         JSTaggedValue profileTypeInfoVal = jsFunc->GetProfileTypeInfo(thread);
         if (!profileTypeInfoVal.IsUndefined()) {
-            ProfileTypeInfo *profileTypeInfo = ProfileTypeInfo::Cast(profileTypeInfoVal.GetTaggedObject());
-            profileTypeInfo->SetJitHotnessCnt(0);
-            constexpr uint16_t thresholdStep = 4;
-            constexpr uint16_t thresholdLimit = ProfileTypeInfo::JIT_DISABLE_FLAG / thresholdStep;
-            uint16_t threshold = profileTypeInfo->GetJitHotnessThreshold();
-            threshold = threshold >= thresholdLimit ? ProfileTypeInfo::JIT_DISABLE_FLAG : threshold * thresholdStep;
-            profileTypeInfo->SetJitHotnessThreshold(threshold);
+            JSHandle<Method> method(thread, jsFunc->GetMethod(thread));
+            method->SetTieringDecision(TieringDecision::PREHEATED);
+            method->SetHotnessCounter(TieringManager::HotnessBudgetFor(thread, method));
             ProfileTypeInfoCell::Cast(jsFunc->GetRawProfileTypeInfo(thread))
                 ->SetMachineCode(thread, JSTaggedValue::Hole());
-            Method *method = Method::Cast(jsFunc->GetMethod(thread).GetTaggedObject());
-            LOG_JIT(DEBUG) << "reset jit hotness for func: " << method->GetMethodName(thread)
-                           << ", threshold:" << threshold;
+            LOG_JIT(DEBUG) << "reset jit hotness for func: " << method->GetMethodName(thread);
         }
     }
 }
@@ -848,13 +844,7 @@ void Deoptimizier::UpdateAndDumpDeoptInfo(kungfu::DeoptType type, bool dumpJsSta
             Dump(callTarget, type, i, dumpJsStackTrace);
         }
         ASSERT(thread_ != nullptr);
-        uint8_t deoptThreshold = method->GetDeoptThreshold();
-        if (deoptThreshold > 0) {
-            method->SetDeoptType(type);
-            method->SetDeoptThreshold(--deoptThreshold);
-        } else {
-            ClearCompiledCodeStatusWhenDeopt(thread_, func, method, type, !isRecursiveCall_);
-        }
+        ClearCompiledCodeStatusWhenDeopt(thread_, func, method, type, !isRecursiveCall_);
     }
 }
 

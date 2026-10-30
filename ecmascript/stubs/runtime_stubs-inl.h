@@ -1253,7 +1253,8 @@ JSTaggedValue RuntimeStubs::RuntimeNotifyInlineCache(JSThread *thread, const JSH
     if (function->IsSharedFunction()) {
         return JSTaggedValue::Undefined();
     } else {
-        profileTypeInfo = factory->NewProfileTypeInfo(icSlotSize);
+        JSHandle<Method> method(thread, function->GetMethod(thread));
+        profileTypeInfo = factory->NewProfileTypeInfo(icSlotSize, method);
     }
     Method *method = Method::Cast(function->GetMethod(thread));
     auto codeSize = method->GetCodeSize(thread);

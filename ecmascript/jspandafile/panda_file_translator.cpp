@@ -186,7 +186,7 @@ JSHandle<Program> PandaFileTranslator::GenerateProgramInternal(EcmaVM *vm,
         program->SetMainFunction(thread, JSTaggedValue::Undefined());
     } else {
         JSHandle<GlobalEnv> env = vm->GetGlobalEnv();
-        JSHandle<Method> method = factory->NewSMethod(mainMethodLiteral);
+        JSHandle<Method> method = factory->NewSMethod(mainMethodLiteral, SHARED_OLD_SPACE, jsPandaFile);
         JSTaggedValue patchVal = QuickFixHelper::CreateMainFuncWithPatch(vm, mainMethodLiteral, jsPandaFile);
         if (!patchVal.IsHole()) {
             method = JSHandle<Method>(thread, patchVal);
@@ -268,7 +268,7 @@ std::pair<JSHandle<ConstantPool>, JSHandle<ConstantPool>> PandaFileTranslator::P
                                 "ParseConstPool:methodLiteral is nullptr, offset: " + std::to_string(it.first));
             methodLiteral->SetFunctionKind(JSPandaFile::GetFunctionKind(type));
 
-            JSHandle<Method> method = factory->NewSMethod(methodLiteral);
+            JSHandle<Method> method = factory->NewSMethod(methodLiteral, SHARED_OLD_SPACE, jsPandaFile);
             constpool->SetObjectToCache(thread, value.GetConstpoolIndex(), method.GetTaggedValue());
             method->SetConstantPool(thread, sconstpool.GetTaggedValue());
         }
@@ -347,7 +347,7 @@ void PandaFileTranslator::ParseFuncAndLiteralConstPool(EcmaVM *vm, const JSPanda
                                                 + std::to_string(it.first));
             methodLiteral->SetFunctionKind(JSPandaFile::GetFunctionKind(type));
 
-            JSHandle<Method> method = factory->NewSMethod(methodLiteral);
+            JSHandle<Method> method = factory->NewSMethod(methodLiteral, SHARED_OLD_SPACE, jsPandaFile);
             constpool->SetObjectToCache(thread, value.GetConstpoolIndex(), method.GetTaggedValue());
             method->SetConstantPool(thread, sconstpool.GetTaggedValue());
         }
