@@ -1850,6 +1850,12 @@ public:
         HIGH,
     };
 
+    enum class PUBLIC_API UrgencyLevel : uint8_t {
+        LOW = 0,
+        MEDIUM,
+        HIGH,
+    };
+
     enum class PUBLIC_API PandaFileType : int8_t {
         FILE_FORMAT_INVALID = -1,
         FILE_DYNAMIC = 0,
@@ -1958,6 +1964,7 @@ public:
     static void TriggerGC(const EcmaVM *vm, ecmascript::GCReason reason,
         TRIGGER_GC_TYPE gcType = TRIGGER_GC_TYPE::SEMI_GC);
     static void HintGC(const EcmaVM *vm, MemoryReduceDegree degree, ecmascript::GCReason reason);
+    static void HintGC(const EcmaVM *vm, UrgencyLevel level);
     static void TriggerIdleGC(const EcmaVM *vm, TRIGGER_IDLE_GC_TYPE gcType);
     static size_t GetEcmaVMExpectedMemoryReclamationSize(const EcmaVM *vm);
     // One-way enable of the proportional handle/primitive storage shrink.

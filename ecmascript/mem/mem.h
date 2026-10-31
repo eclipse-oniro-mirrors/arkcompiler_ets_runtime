@@ -137,6 +137,11 @@ static constexpr double JUST_FINISH_STARTUP_SHARED_THRESHOLD_RATIO = 0.25;
 static constexpr double JUST_FINISH_STARTUP_LOCAL_CONCURRENT_MARK_RATIO = 0.9;
 static constexpr double JUST_FINISH_STARTUP_SHARED_CONCURRENT_MARK_RATIO = 0.75;
 
+// hint local cc
+static constexpr double LOW_LEVEL_MIN_INC_RATIO = 1.05f;
+static constexpr size_t LOW_LEVEL_MIN_INC_STEP = 5_MB;
+static constexpr size_t HIGH_LEVEL_MIN_INC_STEP = 1_MB;
+
 using TaggedType = uint64_t;
 static constexpr uint32_t TAGGED_TYPE_SIZE = sizeof(TaggedType);
 static constexpr uint32_t TAGGED_TYPE_SIZE_LOG = base::MathHelper::GetIntLog2(TAGGED_TYPE_SIZE);

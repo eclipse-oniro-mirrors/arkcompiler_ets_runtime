@@ -2733,6 +2733,39 @@ bool Heap::CheckAndTriggerHintGC(MemoryReduceDegree degree, GCReason reason)
     return false;
 }
 
+void Heap::CheckAndTriggerHintLocalCC(UrgencyLevel level)
+{
+    bool shouldTrigger = false;
+    size_t heapAliveSizeAfterGC = GetHeapAliveSizeAfterGC();
+    size_t currentObjectSize = GetHeapObjectSize();
+    LOG_GC(INFO) << "HintGC: heap alive size after last gc: " << heapAliveSizeAfterGC
+        << ", current obj size: " << currentObjectSize << ", urgency level: " << static_cast<int>(level);
+    size_t expectHeapSize = 0;
+
+    switch (level) {
+        case UrgencyLevel::LOW: {
+            expectHeapSize = std::max(static_cast<size_t>(heapAliveSizeAfterGC * LOW_LEVEL_MIN_INC_RATIO),
+                heapAliveSizeAfterGC + LOW_LEVEL_MIN_INC_STEP);
+            break;
+        }
+        case UrgencyLevel::MEDIUM: {
+            expectHeapSize = heapAliveSizeAfterGC + LOW_LEVEL_MIN_INC_STEP;
+            break;
+        }
+        case UrgencyLevel::HIGH: {
+            expectHeapSize = heapAliveSizeAfterGC + HIGH_LEVEL_MIN_INC_STEP;
+            break;
+        }
+        default: // LCOV_EXCL_BR_LINE
+            LOG_GC(FATAL) << "HintGC invalid urgency level value: " << static_cast<int>(level);
+            break;
+    }
+    shouldTrigger = currentObjectSize >= expectHeapSize;
+    if (shouldTrigger) {
+        DFXJSNApi::TriggerLocalCCWithVm(GetEcmaVM());
+    }
+}
+
 bool Heap::CheckOngoingConcurrentMarkingImpl(ThreadType threadType, int threadIndex,
                                              [[maybe_unused]] const char* traceName)
 {
@@ -2915,8 +2948,8 @@ bool Heap::TryTriggerCCMarking(MarkReason markReason)
     if (!LocalCCEnabled()) {
         return false;
     }
-    if (CheckCanTriggerConcurrentMarking() && !fullGCRequested_ && ConcurrentMarker::TryIncreaseTaskCounts()) {
-        WaitAndHandleCCFinished();
+    if (CheckCanTriggerConcurrentMarking()&& !thread_->IsConcurrentCopying() &&
+        !fullGCRequested_ && ConcurrentMarker::TryIncreaseTaskCounts()) {
         GetEcmaGCStats()->SetMarkReason(markReason);
         SetMarkType(MarkType::MARK_FOR_CC);
         thread_->HoldReadBarrier(ReadBarrierOwner::LOCAL_CC);
@@ -2925,6 +2958,20 @@ bool Heap::TryTriggerCCMarking(MarkReason markReason)
         return true;
     }
     return false;
+}
+
+bool Heap::TryReserveLocalCCTrigger()
+{
+    if (localCCTriggerCount_ > 0) {
+        return false;
+    }
+    localCCTriggerCount_ = 1;
+    return true;
+}
+
+void Heap::ReleaseLocalCCTrigger()
+{
+    localCCTriggerCount_ = 0;
 }
 
 void Heap::TryTriggerFullMarkOrGCByNativeSize()

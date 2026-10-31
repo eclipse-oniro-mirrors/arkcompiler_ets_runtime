@@ -100,7 +100,7 @@ public:
     static void ScheduleHybridDumpOnLoop(const EcmaVM *vm, const DumpSnapShotOption &dumpOption, uint32_t tid);
     static void TriggerGC(const EcmaVM *vm, uint32_t tid);
     static void TriggerGCWithVm(const EcmaVM *vm);
-    static void TriggerLocalCCWithVmForTest(const EcmaVM *vm);
+    static void TriggerLocalCCWithVm(const EcmaVM *vm);
     static void TriggerSharedGCWithVm(const EcmaVM *vm);
     static void DestroyHeapProfiler(const EcmaVM *vm);
 
