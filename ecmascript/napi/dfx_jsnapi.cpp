@@ -1453,9 +1453,12 @@ bool DFXJSNApi::SourceMapTranslateUrlPosition(std::string &url, int &line, int &
     return ecmascript::SourceMap::GetInstance().TranslateUrlPositionBySourceMap(url, line, column, packageName);
 }
 
-std::string DFXJSNApi::SourceMapTranslateBySourceMap(const std::string &stackStr)
+std::string DFXJSNApi::SourceMapTranslateBySourceMap(const std::string &stackStr, bool useInitStatus)
 {
-    return ecmascript::SourceMap::GetInstance().TranslateStackTraceWithStatus(stackStr);
+    if (useInitStatus) {
+        return ecmascript::SourceMap::GetInstance().TranslateStackTraceWithStatus(stackStr);
+    }
+    return ecmascript::SourceMap::GetInstance().TranslateBySourceMap(stackStr);
 }
 
 void DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus status)

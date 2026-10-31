@@ -2463,4 +2463,121 @@ HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_EmptyStack_001)
     // State isolation: restore to NOT_EXECUTED
     DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
 }
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_UseStatus_001
+ * @tc.desc: Test SourceMapTranslateBySourceMap with useInitStatus=true parses by InitStatus (branch: true)
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_UseStatus_001)
+{
+    // Branch useInitStatus=true: delegates to TranslateStackTraceWithStatus, so the
+    // IN_EXECUTED status must be honored (prefix + raw stack)
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::IN_EXECUTED);
+    std::string stackStr = "at foo (unknown.js:1:1)";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr, true);
+    std::string expected = "SourceMap is not initialized yet \n" + stackStr;
+    EXPECT_EQ(result, expected);
+
+    // State isolation: restore to NOT_EXECUTED
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+}
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_NoStatus_001
+ * @tc.desc: Test SourceMapTranslateBySourceMap with useInitStatus=false bypasses InitStatus and translates directly
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_NoStatus_001)
+{
+    // Branch useInitStatus=false: even when InitStatus=IN_EXECUTED, status parsing is skipped
+    // and TranslateBySourceMap is called directly (no "not initialized" prefix)
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::IN_EXECUTED);
+    std::string stackStr = "at foo (unknown.js:1:1)";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr, false);
+    EXPECT_EQ(result.find("SourceMap is not initialized yet"), std::string::npos);
+    EXPECT_NE(result.find("unknown.js"), std::string::npos);
+
+    // State isolation: restore to NOT_EXECUTED
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+}
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_NoStatus_NoSourceMap_001
+ * @tc.desc: Test SourceMapTranslateBySourceMap with useInitStatus=false bypasses NO_SOURCEMAP prefix too
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_NoStatus_NoSourceMap_001)
+{
+    // Branch useInitStatus=false with InitStatus=NO_SOURCEMAP: the status prefix
+    // "Cannot get SourceMap info" must NOT be prepended; direct translation keeps raw content
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NO_SOURCEMAP);
+    std::string stackStr = "at foo (unknown.js:1:1)";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr, false);
+    EXPECT_EQ(result.find("Cannot get SourceMap info"), std::string::npos);
+    EXPECT_NE(result.find("unknown.js"), std::string::npos);
+
+    // State isolation: restore to NOT_EXECUTED
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+}
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_NoStatus_AfterSplit_001
+ * @tc.desc: Test SourceMapTranslateBySourceMap with useInitStatus=false still performs real mapping with eager data
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_NoStatus_AfterSplit_001)
+{
+    // Branch useInitStatus=false: even when InitStatus=IN_EXECUTED, status parsing is skipped AND
+    // TranslateBySourceMap actually resolves frames using loaded eager source map data
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::IN_EXECUTED);
+
+    // Load eager data (same format as sourceMapTest.h sourceMapData)
+    std::string eagerData =
+        "{\n"
+        "  \"entry/src/main/ets/pages/Index.ts\": {\n"
+        "    \"version\": 3,\n"
+        "    \"file\": \"Index.ets\",\n"
+        "    \"sources\": [\n"
+        "      \"entry/src/main/ets/pages/Index.ets\"\n"
+        "    ],\n"
+        "    \"names\": [],\n"
+        "    \"mappings\": \"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\"\n"
+        "    \"entry-package-info\": \"entry|1.0.0\"\n"
+        "  }\n"
+        "}";
+    DFXJSNApi::SourceMapSplitSourceMap(eagerData);
+
+    // TranslateBySourceMap should resolve using eager data despite IN_EXECUTED status
+    std::string stackStr = "at func (entry/src/main/ets/pages/Index.ts:10:5)";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr, false);
+    // No status prefix, but real mapping happens
+    EXPECT_EQ(result.find("SourceMap is not initialized yet"), std::string::npos);
+    EXPECT_NE(result.find("entry/src/main/ets/pages/Index.ets"), std::string::npos);
+
+    // State isolation: restore to NOT_EXECUTED
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+}
 } // namespace panda::test
