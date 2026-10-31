@@ -59,14 +59,15 @@ public:
         return static_cast<size_type>(-1) / sizeof(T);
     }
 
+    // All the instances of stateless allocator type shall be equal according to C++17 requirements.
     bool operator==([[maybe_unused]] CAddressAllocator const &other) const
     {
-        return false;
+        return true;
     }
 
     bool operator!=([[maybe_unused]] CAddressAllocator const &other) const
     {
-        return true;
+        return false;
     }
 
     // NOLINTNEXTLINE(readability-identifier-naming)
