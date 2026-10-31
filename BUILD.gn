@@ -1287,6 +1287,7 @@ ecma_source = [
   "ecmascript/mem/shared_heap/shared_space.cpp",
   "ecmascript/mem/space.cpp",
   "ecmascript/mem/sparse_space.cpp",
+  "ecmascript/mem/specialized_slot_space.cpp",
   "ecmascript/mem/tagged_object.cpp",
   "ecmascript/mem/thread_local_allocation_buffer.cpp",
   "ecmascript/mem/verification.cpp",

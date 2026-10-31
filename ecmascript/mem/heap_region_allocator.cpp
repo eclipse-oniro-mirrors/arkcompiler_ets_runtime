@@ -128,7 +128,8 @@ Region *HeapRegionAllocator::AllocateAlignedRegion(Space *space, size_t capacity
         uintptr_t begin = AlignUp(mem + sizeof(DefaultRegion), static_cast<size_t>(MemAlignment::MEM_ALIGN_REGION));
         region = new (ToVoidPtr(mem)) DefaultRegion(heap->GetNativeAreaAllocator(), mem, begin, end, flags, typeFlag);
     } else {
-        ASSERT(G_USE_CMS_GC);
+        // A non-zero slot size explicitly requests a slot-free-list region. Besides CMS
+        // SlotSpace, non-CMS SpecializedSlotSpace also uses this representation.
         // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
         uintptr_t begin = AlignUp(mem + sizeof(CMSRegion), static_cast<size_t>(MemAlignment::MEM_ALIGN_REGION));
         region = new (ToVoidPtr(mem)) CMSRegion(heap->GetNativeAreaAllocator(), mem, begin, end, flags, typeFlag,

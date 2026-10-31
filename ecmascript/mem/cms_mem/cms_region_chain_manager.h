@@ -24,6 +24,10 @@
 
 namespace panda::ecmascript {
 class Heap;
+class CMSRegionChainManager;
+class Space;
+
+using SweptChainManagerCallback = void (*)(Space *ownerSpace, CMSRegionChainManager *sweptRegionChainManager);
 
 class CMSRegionChainManager {
 public:
@@ -32,13 +36,20 @@ public:
 
     NO_COPY_SEMANTIC(CMSRegionChainManager);
     NO_MOVE_SEMANTIC(CMSRegionChainManager);
-    
+
     enum class SweepMode {
         SWEEP_ALL,
         SWEEP_UNTIL_ONE_FREE_LIST,
     };
 
-    void Initialize(Heap *localHeap, size_t slotSize);
+    void Initialize(Heap *localHeap, size_t slotSize, Space *ownerSpace);
+
+    // Owners using async sweep must register this callback before sweeping starts.
+    void SetSweptChainManagerCallback(SweptChainManagerCallback callback)
+    {
+        ASSERT(callback != nullptr);
+        sweptChainManagerCallback_ = callback;
+    }
 
     Heap *GetLocalHeap() const
     {
@@ -115,11 +126,13 @@ private:
     };
 
     Heap *localHeap_ {nullptr};
+    Space *ownerSpace_ {nullptr};
     size_t slotSize_ {0};
+    SweptChainManagerCallback sweptChainManagerCallback_ {nullptr};
     EcmaList<Region> regionList_ {};
     Region *recordRegion_ {nullptr};
 
-    Mutex mutex_;
+    Mutex mutex_ {};
     std::atomic<size_t> numPendingSweepingRegions_ {0};
     std::vector<Region *> sweepingRegionList_ {};
     std::vector<SlotFreeListMetaInfo> sweptSlotFreeList_ {};

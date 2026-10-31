@@ -19,11 +19,12 @@
 
 namespace panda::ecmascript {
 
-void CMSRegionChainManager::Initialize(Heap *localHeap, size_t slotSize)
+void CMSRegionChainManager::Initialize(Heap *localHeap, size_t slotSize, Space *ownerSpace)
 {
-    ASSERT(localHeap_ == nullptr && localHeap != nullptr);
+    ASSERT(localHeap_ == nullptr && localHeap != nullptr && ownerSpace != nullptr);
     ASSERT(slotSize_ == 0);
     localHeap_ = localHeap;
+    ownerSpace_ = ownerSpace;
     slotSize_ = slotSize;
 }
 
@@ -47,7 +48,7 @@ size_t CMSRegionChainManager::Sweep(std::vector<Region *> &pendingReclaimFromReg
         if (survivalSize == 0) {
             regionList_.RemoveNode(region);
             pendingReclaimFromRegions.emplace_back(region);
-            localHeap_->GetSlotSpace()->DecreaseCommitted(region->GetCapacity());
+            ownerSpace_->DecreaseCommitted(region->GetCapacity());
         } else {
             // fixme: Full alived region do not need to sweep
             SlotFreeListMetaInfo freeList = SweepRegionImpl(region);
@@ -85,7 +86,7 @@ size_t CMSRegionChainManager::PrepareSweeping(std::vector<Region *> &pendingRecl
         if (survivalSize == 0) {
             regionList_.RemoveNode(region);
             pendingReclaimFromRegions.emplace_back(region);
-            localHeap_->GetSlotSpace()->DecreaseCommitted(region->GetCapacity());
+            ownerSpace_->DecreaseCommitted(region->GetCapacity());
         } else {
             // fixme: Full alived region do not need to sweep
             region->SwapLocalToShareRSetForCS();
@@ -118,7 +119,8 @@ void CMSRegionChainManager::ConcurrentSweep(const SweepMode sweepMode)
         }
     }
     if (swept > 0 && numPendingSweepingRegions_.fetch_sub(swept, std::memory_order_relaxed) == swept) {
-        localHeap_->GetSlotSpace()->AddSweptRegionChainManager(this);
+        ASSERT(sweptChainManagerCallback_ != nullptr);
+        sweptChainManagerCallback_(ownerSpace_, this);
     }
 }
 
