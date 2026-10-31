@@ -3810,6 +3810,32 @@ host_unittest_action("GC_SharedCC_Test") {
   deps += hiviewdfx_deps
 }
 
+host_unittest_action("Sendable_BuiltinsIRStress_Test") {
+  module_out_path = module_output_path
+
+  sources = [
+    "builtins_sendable_ir_stress_test.cpp",
+  ]
+
+  configs = [
+    "../../:asm_interp_enable_config",
+    "../../:ecma_test_config",
+  ]
+
+  deps = [ "../../:libark_jsruntime_test" ]
+
+  # hiviewdfx libraries
+  external_deps = hiviewdfx_ext_deps
+  external_deps += [
+    "icu:shared_icui18n",
+    "icu:shared_icuuc",
+    "runtime_core:libarkassembler_static",
+    "runtime_core:libarkverifier",
+    "zlib:libz",
+  ]
+  deps += hiviewdfx_deps
+}
+
 host_unittest_action("Sendable_SharedObjectFactory_Test") {
   module_out_path = module_output_path
 
@@ -4284,6 +4310,7 @@ group("unittest") {
     ":MethodLiteralIDMap_Test",
     ":Sendable_JsSendableArrayBuffer_Test",
     ":Sendable_JsSharedArray_Test",
+    ":Sendable_BuiltinsIRStress_Test",
     ":Sendable_SharedObjectFactory_Test",
     ":Shared_Memory_Reallocator_Test",
     ":Runtime_Test",

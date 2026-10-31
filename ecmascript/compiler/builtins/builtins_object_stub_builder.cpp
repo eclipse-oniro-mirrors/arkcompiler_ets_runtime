@@ -52,38 +52,50 @@ void BuiltinsObjectStubBuilder::ToStringFunc(Variable *result, Label *exit, Labe
                                                            ConstantIndex::TOSTRINGTAG_SYMBOL_INDEX);
         GateRef tag = FastGetPropertyByName(glue_, thisValue_, toStringTagSymbol, ProfileOperation());
 
-        Label tagIsString(env);
         Label defaultToString(env);
-        BRANCH(TaggedIsString(glue_, tag), &tagIsString, &defaultToString);
-        Bind(&tagIsString);
-        {
-            // For a JS_SHARED_OBJECT receiver the lookup above has already invoked a possible
-            // accessor getter once; taking the slowPath here would re-run the @@toStringTag
-            // retrieval (second invocation). Go through CallRuntime instead to keep the
-            // pre-change C++ behavior (single invocation, composed from its result).
-            Label isShared(env);
-            Label notShared(env);
-            GateRef objectType = GetObjectType(LoadHClass(glue_, thisValue_));
-            BRANCH(Int32Equal(objectType, Int32(static_cast<int32_t>(JSType::JS_SHARED_OBJECT))),
-                   &isShared, &notShared);
-            Bind(&isShared);
-            {
-                *result = CallRuntime(glue_, RTSTUB_ID(ObjectToStringWithTag), { tag });
-                Jump(exit);
-            }
-            Bind(&notShared);
-            Jump(slowPath);
-        }
+        BRANCH(TaggedIsString(glue_, tag), slowPath, &defaultToString);
         Bind(&defaultToString);
         {
-            // default object: also covers sendable JS_SHARED_OBJECT
+            // default object
             Label objectTag(env);
             GateRef objectType = GetObjectType(LoadHClass(glue_, thisValue_));
-            BRANCH(LogicOrBuilder(env)
-                       .Or(Int32Equal(objectType, Int32(static_cast<int32_t>(JSType::JS_OBJECT))))
-                       .Or(Int32Equal(objectType, Int32(static_cast<int32_t>(JSType::JS_SHARED_OBJECT))))
-                       .Done(),
-                  &objectTag, slowPath);
+            Label checkShared(env);
+            BRANCH(Int32Equal(objectType, Int32(static_cast<int32_t>(JSType::JS_OBJECT))),
+                   &objectTag, &checkShared);
+            Bind(&checkShared);
+            Label isShared(env);
+            BRANCH(Int32Equal(objectType, Int32(static_cast<int32_t>(JSType::JS_SHARED_OBJECT))),
+                   &isShared, slowPath);
+            Bind(&isShared);
+            {
+                // The repetition of [[Get]] toStringTagSymbol here is to maintain compatibility
+                // with the original version before modification
+                GateRef tag2 = FastGetPropertyByName(glue_, thisValue_, toStringTagSymbol,
+                                                     ProfileOperation());
+                Label exception(env);
+                Label noException(env);
+                BRANCH(HasPendingException(glue_), &exception, &noException);
+                Bind(&exception);
+                {
+                    *result = Exception();
+                    Jump(exit);
+                }
+                Bind(&noException);
+                {
+                    Label tag2IsString(env);
+                    Label tag2NotString(env);
+                    BRANCH(TaggedIsString(glue_, tag2), &tag2IsString, &tag2NotString);
+                    Bind(&tag2IsString);
+                    {
+                        *result = CallRuntime(glue_, RTSTUB_ID(ObjectToStringWithTag), { tag2 });
+                        Jump(exit);
+                    }
+                    Bind(&tag2NotString);
+                    {
+                        Jump(&objectTag);
+                    }
+                }
+            }
             Bind(&objectTag);
             {
                 // [object object]
@@ -456,6 +468,145 @@ void BuiltinsObjectStubBuilder::FastAssign(Variable *res, Label *funcExit, GateR
     AssignAllEnumProperty(res, funcExit, toAssign, source);
 }
 
+void BuiltinsObjectStubBuilder::SharedSourceLayoutAssignAllEnumProperty(Variable *result, Label *funcExit,
+    GateRef toAssign, GateRef source)
+{
+    // Two-pass layout iteration matching C++ LayoutInfo::GetAllKeys "strings before
+    // symbols" ordering.
+    auto env = GetEnvironment();
+    Label entryLabel(env);
+    env->SubCfgEntry(&entryLabel);
+    Label exit(env);
+
+    // num is only needed for the shortcut comparison.
+    GateRef num = GetNumberOfPropsFromHClass(LoadHClass(glue_, source));
+    DEFVARIABLE(stringCount, VariableType::INT32(), Int32(0));
+
+    // ---------- Pass 1: strings only ----------
+    SharedSourceLayoutAssignPass(result, funcExit, toAssign, source, true, &stringCount);
+
+    // ---------- Shortcut: all strings, no symbols - skip Pass 2 ----------
+    // stringCount == num <=> all layout keys are strings.
+    Label allStrings(env);
+    Label hasSymbols(env);
+    BRANCH(Int32Equal(*stringCount, num), &allStrings, &hasSymbols);
+    Bind(&allStrings);
+    {
+        Jump(&exit);
+    }
+    Bind(&hasSymbols);
+
+    // ---------- Pass 2: symbols only ----------
+    SharedSourceLayoutAssignPass(result, funcExit, toAssign, source, false, nullptr);
+    Jump(&exit);
+
+    Bind(&exit);
+    env->SubCfgExit();
+}
+
+void BuiltinsObjectStubBuilder::SharedSourceLayoutAssignPass(Variable *result, Label *funcExit,
+    GateRef toAssign, GateRef source, bool isStringPass, Variable *stringCount)
+{
+    // One layout pass over [0, num) processing only string (isStringPass) or symbol keys;
+    auto env = GetEnvironment();
+    GateRef cls = LoadHClass(glue_, source);
+    GateRef num = GetNumberOfPropsFromHClass(cls);
+    GateRef layout = GetLayoutFromHClass(glue_, cls);
+
+    {
+        DEFVARIABLE(idx, VariableType::INT32(), Int32(0));
+        Label loopHead(env);
+        Label loopEnd(env);
+        Label next(env);
+        Label loopExit(env);
+
+        Jump(&loopHead);
+        LoopBegin(&loopHead);
+        {
+            BRANCH(Int32LessThan(*idx, num), &next, &loopExit);
+            Bind(&next);
+
+            GateRef key = GetKeyFromLayoutInfo(glue_, layout, *idx);
+            GateRef attr = GetPropAttrFromLayoutInfo(glue_, layout, *idx);
+            Label matchKey(env);
+            if (isStringPass) {
+                BRANCH(TaggedIsString(glue_, key), &matchKey, &loopEnd);
+            } else {
+                BRANCH(TaggedIsSymbol(glue_, key), &matchKey, &loopEnd);
+            }
+            Bind(&matchKey);
+            {
+                if (isStringPass) {
+                    *stringCount = Int32Add(**stringCount, Int32(1));
+                }
+                Label enumerable(env);
+                BRANCH(IsEnumerable(attr), &enumerable, &loopEnd);
+                Bind(&enumerable);
+                {
+                    DEFVARIABLE(value, VariableType::JS_ANY(), Undefined());
+                    value = JSObjectGetPropertyWithRep(glue_, source, cls, attr);
+                    Label exception0(env);
+                    Label noexception0(env);
+                    BRANCH(HasPendingException(glue_), &exception0, &noexception0);
+                    Bind(&exception0);
+                    {
+                        *result = Exception();
+                        Jump(funcExit);
+                    }
+                    Bind(&noexception0);
+                    Label propertyBox(env);
+                    Label checkAccessor(env);
+                    Label setValue(env);
+                    BRANCH(TaggedIsPropertyBox(glue_, *value), &propertyBox, &checkAccessor);
+                    Bind(&propertyBox);
+                    {
+                        value = GetValueFromPropertyBox(glue_, *value);
+                        Jump(&setValue);
+                    }
+                    Bind(&checkAccessor);
+                    Label isAccessor(env);
+                    BRANCH(IsAccessor(attr), &isAccessor, &setValue);
+                    Bind(&isAccessor);
+                    {
+                        value = CallGetterHelper(glue_, source, source, *value, ProfileOperation());
+                        Label exception(env);
+                        BRANCH(HasPendingException(glue_), &exception, &setValue);
+                        Bind(&exception);
+                        {
+                            *result = Exception();
+                            Jump(funcExit);
+                        }
+                    }
+                    Bind(&setValue);
+                    {
+                        FastSetPropertyByName(glue_, toAssign, key, *value);
+                        Label exception(env);
+                        BRANCH(HasPendingException(glue_), &exception, &loopEnd);
+                        Bind(&exception);
+                        {
+                            *result = Exception();
+                            Jump(funcExit);
+                        }
+                    }
+                }
+            }
+        }
+        Bind(&loopEnd);
+        idx = Int32Add(*idx, Int32(1));
+        LoopEndWithCheckSafePoint(&loopHead, env, glue_);
+        Bind(&loopExit);
+    }
+}
+
+void BuiltinsObjectStubBuilder::SharedSourceFastAssign(Variable *res, Label *funcExit,
+    GateRef toAssign, GateRef source)
+{
+    // visit elements
+    AssignEnumElementProperty(res, funcExit, toAssign, source);
+    // visit named properties via two-pass (strings then symbols, matching C++ order)
+    SharedSourceLayoutAssignAllEnumProperty(res, funcExit, toAssign, source);
+}
+
 void BuiltinsObjectStubBuilder::Assign(Variable *res, Label *nextIt, Label *funcExit,
     GateRef toAssign, GateRef source)
 {
@@ -465,11 +616,43 @@ void BuiltinsObjectStubBuilder::Assign(Variable *res, Label *nextIt, Label *func
     Bind(&checkJsObj);
     {
         Label fastAssign(env);
+        Label sharedFastAssign(env);
         Label slowAssign(env);
-        BRANCH(IsJSObjectType(glue_, source, JSType::JS_OBJECT), &fastAssign, &slowAssign);
+        Label sourceIsHeapObject(env);
+        BRANCH(TaggedIsHeapObject(source), &sourceIsHeapObject, &slowAssign);
+        Bind(&sourceIsHeapObject);
+        GateRef sourceType = GetObjectType(LoadHClass(glue_, source));
+        Label sourceIsShared(env);
+        BRANCH(Int32Equal(sourceType, Int32(static_cast<int32_t>(JSType::JS_OBJECT))),
+               &fastAssign, &sourceIsShared);
+        Bind(&sourceIsShared);
+        {
+            // JS_SHARED_OBJECT fast path requires non-dictionary elements and properties;
+            // symbol key ordering is handled by the two-pass iteration in SharedSourceFastAssign.
+            Label isShared(env);
+            BRANCH(Int32Equal(sourceType, Int32(static_cast<int32_t>(JSType::JS_SHARED_OBJECT))),
+                   &isShared, &slowAssign);
+            Bind(&isShared);
+            {
+                Label elementsNotDict(env);
+                BRANCH(IsDictionaryMode(glue_, GetElementsArray(glue_, source)), &slowAssign,
+                       &elementsNotDict);
+                Bind(&elementsNotDict);
+                Label propertiesNotDict(env);
+                BRANCH(IsDictionaryMode(glue_, GetPropertiesArray(glue_, source)), &slowAssign,
+                       &propertiesNotDict);
+                Bind(&propertiesNotDict);
+                Jump(&sharedFastAssign);
+            }
+        }
         Bind(&fastAssign);
         {
             FastAssign(res, funcExit, toAssign, source);
+            Jump(nextIt);
+        }
+        Bind(&sharedFastAssign);
+        {
+            SharedSourceFastAssign(res, funcExit, toAssign, source);
             Jump(nextIt);
         }
         Bind(&slowAssign);

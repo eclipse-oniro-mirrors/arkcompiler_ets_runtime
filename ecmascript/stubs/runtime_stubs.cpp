@@ -4324,6 +4324,7 @@ DEF_RUNTIME_STUBS(ObjectToStringWithTag)
 {
     RUNTIME_STUBS_HEADER(ObjectToStringWithTag);
     JSHandle<JSTaggedValue> tag = GetHArg<JSTaggedValue>(argv, argc, 0); // 0: means the zeroth parameter
+    ASSERT(tag->IsString());
     return builtins::BuiltinsObject::ToStringWithTag(thread, tag).GetRawData();
 }
 
