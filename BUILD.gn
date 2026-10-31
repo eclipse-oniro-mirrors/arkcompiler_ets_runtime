@@ -469,6 +469,9 @@ config("hiviewdfx_config") {
   if (enable_dump_in_faultlog) {
     defines += [ "ENABLE_DUMP_IN_FAULTLOG" ]
   }
+  if (enable_lz4_compressed) {
+    defines += [ "ENABLE_LZ4_COMPRESSED" ]
+  }
   if (enable_handle_node_id_map_proto) {
     defines += [ "ENABLE_HANDLE_NODE_ID_MAP_PROTO" ]
   }
@@ -1499,6 +1502,9 @@ if (!is_mingw && !is_mac && target_os != "ios") {
       "ecmascript/base/block_hook_scope.cpp",
       "ecmascript/dfx/tracing/tracing.cpp",
     ]
+    if (enable_lz4_compressed) {
+      ecma_profiler_source += [ "ecmascript/dfx/hprof/compressed_stream.cpp" ]
+    }
     if (ark_js_hybrid) {
       ecma_profiler_source += [
         "ecmascript/dfx/hprof/dynamic_dump.cpp",
@@ -1849,8 +1855,9 @@ ohos_source_set("libark_jsruntime_test_set") {
   external_deps = [
     "libuv:uv",
     "zlib:libz",
-    "json:nlohmann_json_static"
+    "json:nlohmann_json_static",
   ]
+  external_deps += lz4_ext_deps
 
   if (enable_handle_node_id_map_proto) {
     external_deps += [ "protobuf:protobuf_lite" ]

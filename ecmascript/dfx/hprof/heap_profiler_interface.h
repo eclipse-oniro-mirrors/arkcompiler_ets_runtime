@@ -51,6 +51,7 @@ struct DumpSnapShotOption {
     std::string spaceType = "";  // space type for raw heap dump
     std::string heapType = "";  // heap type: local heap or shared heap
     LanguageEnv languageEnv = LanguageEnv::DYNAMIC;  // language environment selection
+    bool enableCompression = false;  // whether enable LZ4 compression
 };
 
 enum class RawHeapDumpCropLevel {

@@ -16,6 +16,8 @@
 #ifndef ECMASCRIPT_DFX_HPROF_STREAM_H
 #define ECMASCRIPT_DFX_HPROF_STREAM_H
 
+#include <cstdint>
+
 namespace panda::ecmascript {
 class HeapStat {
 public:

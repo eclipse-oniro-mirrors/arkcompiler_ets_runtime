@@ -52,6 +52,7 @@
               "libuv",
               "protobuf",
               "zlib",
+              "lz4",
               "bounds_checking_function",
               "icu",
               "access_token",

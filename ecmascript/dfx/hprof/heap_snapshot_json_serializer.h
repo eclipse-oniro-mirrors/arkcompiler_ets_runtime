@@ -37,7 +37,7 @@ class TraceNode;
 class StreamWriter {
 public:
     explicit StreamWriter(Stream *stream)
-        : stream_(stream), chunkSize_(stream->GetSize()), chunk_(chunkSize_), current_(0)
+        : stream_(stream), chunkSize_(stream->GetSize()), chunk_(chunkSize_, '\0'), current_(0)
     {
     }
     virtual ~StreamWriter() = default;
