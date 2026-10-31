@@ -8378,6 +8378,10 @@ struct GraphBuilder::BytecodeVisitor {
 
     ValueVertex *BuildCheckedElementIndex(ValueVertex *key)
     {
+        if (ValueVertex *index =
+                compileInfoFacts_->TryGetAlternative(key, AlternativeNodes::Kind::ELEMENT_INDEX_I32)) {
+            return index;
+        }
         if (compileInfoFacts_->CheckType(key, NodeInfo::NodeType::INT)) {
             return BuildTaggedIntToI32(key);
         }
@@ -8387,6 +8391,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *roundTrip = self->NewVertex<I32ToF64Vertex>(compileInfoFacts_, currentBlock,
                                                                  std::initializer_list<ValueVertex *> {index});
         BuildDeoptIfFloat64Condition(keyF64, roundTrip, Condition::NOT_EQUAL, kungfu::DeoptType::NOTINT7);
+        compileInfoFacts_->SetAlternative(key, AlternativeNodes::Kind::ELEMENT_INDEX_I32, index);
         return index;
     }
 
@@ -10103,7 +10108,8 @@ struct GraphBuilder::BytecodeVisitor {
 
     void BuildNormalElementLoad(uint32_t bcIndex, ValueVertex *receiver, ValueVertex *key)
     {
-        ValueVertex *index = BuildCheckedTaggedIntToI32(key);
+        //@ref panda::ecmascript::kungfu::StubBuilder::TryToElementsIndex()
+        ValueVertex *index = BuildCheckedElementIndex(key);
         ValueVertex *elements = BuildLoadElements(receiver);
         ValueVertex *capacity = self->NewVertex<LoadInt32FieldVertex>(
             compileInfoFacts_, currentBlock, {elements}, static_cast<int32_t>(TaggedArray::LENGTH_OFFSET));

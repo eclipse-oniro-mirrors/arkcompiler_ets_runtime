@@ -1,0 +1,14 @@
+true
+fraction
+true
+nan
+true
+infinite
+true
+negative
+true
+large
+true
+leading
+3
+OK
