@@ -1014,6 +1014,7 @@ static uintptr_t g_nativeTable[] = {
     reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Sub),
     reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Wait),
     reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Xor),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::IsLockFree),
 };
 
 void SnapshotProcessor::Initialize()

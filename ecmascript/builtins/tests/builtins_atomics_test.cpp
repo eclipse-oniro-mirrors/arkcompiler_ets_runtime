@@ -826,12 +826,139 @@ HWTEST_F_L0(BuiltinsAtomicsTest, CollectionsAtomicsRejectOrdinaryTypedArrays)
             continue;
         }
         SCOPED_TRACE(entry.GetName().data());
-        JSTaggedValue result = CallAtomicBuiltin(thread, entry.GetEntrypoint(),
-            {array.GetTaggedValue(), JSTaggedValue(0), JSTaggedValue(0), JSTaggedValue(0)});
+        std::vector<JSTaggedValue> args(entry.GetLength(), JSTaggedValue(0));
+        args[0] = array.GetTaggedValue();
+        JSTaggedValue result = CallAtomicBuiltin(thread, entry.GetEntrypoint(), args);
         EXPECT_TRUE(result.IsException());
-        EXPECT_TRUE(thread->HasPendingException());
-        thread->ClearException();
+        AtomicsTestHelper::ExpectBusinessError(thread, containers::ErrorFlag::TYPE_ERROR);
     }
+}
+
+void ExpectAtomicParameterMessage(JSThread *thread, const std::string &expected)
+{
+    ASSERT_TRUE(thread->HasPendingException());
+    JSHandle<JSTaggedValue> error(thread, thread->GetException());
+    thread->ClearException();
+    AtomicsTestHelper::ExpectBusinessErrorProperties(thread, error, containers::ErrorFlag::TYPE_ERROR);
+    auto message = AtomicsTestHelper::GetProperty(thread, error, "message");
+    ASSERT_TRUE(message->IsString());
+    EXPECT_EQ(EcmaStringAccessor(JSHandle<EcmaString>::Cast(message)).ToStdString(thread), expected);
+}
+
+HWTEST_F_L0(BuiltinsAtomicsTest, CollectionsAtomicsStrictArgumentCount)
+{
+    auto array = AtomicsTestHelper::CreateArray(thread, DataViewType::INT32, true);
+    for (const auto &entry : collections::CollectionsAtomics::GetAtomicsFunctions()) {
+        SCOPED_TRACE(entry.GetName().data());
+        uint32_t maximum = entry.GetLength();
+        bool optional = entry.GetName() == "wait" || entry.GetName() == "notify";
+        uint32_t minimum = optional ? maximum - 1 : maximum;
+        std::string expected = std::to_string(minimum);
+        if (optional) {
+            expected += "-" + std::to_string(maximum);
+        }
+        for (uint32_t count : {minimum - 1, maximum + 1}) {
+            std::vector<JSTaggedValue> args(count, JSTaggedValue(0));
+            if (!args.empty() && entry.GetName() != "isLockFree") {
+                args[0] = array.GetTaggedValue();
+            }
+            EXPECT_TRUE(CallAtomicBuiltin(thread, entry.GetEntrypoint(), args).IsException());
+            ExpectAtomicParameterMessage(thread,
+                "Parameter error. Incorrect parameter count. Expected: " + expected +
+                ", Actual: " + std::to_string(count));
+        }
+    }
+}
+
+void CheckRejectedNumericArguments(JSThread *thread, const base::BuiltinFunctionEntry &entry,
+    const JSHandle<JSTaggedValue> &array)
+{
+    auto *factory = thread->GetEcmaVM()->GetFactory();
+    auto object = AtomicsTestHelper::CreateValueOfObject(thread);
+    auto callable = AtomicsTestHelper::GetProperty(thread, object, "valueOf");
+    const std::array<JSHandle<JSTaggedValue>, 8> invalid = {
+        JSHandle<JSTaggedValue>(thread, JSTaggedValue::Null()),
+        JSHandle<JSTaggedValue>(thread, JSTaggedValue::Undefined()),
+        JSHandle<JSTaggedValue>(factory->NewFromASCII("1")),
+        JSHandle<JSTaggedValue>(thread, JSTaggedValue::True()),
+        JSHandle<JSTaggedValue>(BigInt::Int64ToBigInt(thread, 1)),
+        JSHandle<JSTaggedValue>(thread, thread->GlobalConstants()->GetIteratorSymbol()), object, callable};
+    bool optional = entry.GetName() == "wait" || entry.GetName() == "notify";
+    uint32_t required = entry.GetLength() - (optional ? 1 : 0);
+    uint32_t first = entry.GetName() == "isLockFree" ? 0 : 1;
+    for (uint32_t index = first; index < entry.GetLength(); index++) {
+        for (const auto &value : invalid) {
+            if (index >= required && value->IsUndefined()) {
+                continue;
+            }
+            std::vector<JSTaggedValue> args(entry.GetLength(), JSTaggedValue(0));
+            if (first != 0) {
+                args[0] = array.GetTaggedValue();
+            }
+            args[index] = value.GetTaggedValue();
+            EXPECT_TRUE(CallAtomicBuiltin(thread, entry.GetEntrypoint(), args).IsException());
+            AtomicsTestHelper::ExpectBusinessError(thread, containers::ErrorFlag::TYPE_ERROR);
+        }
+    }
+}
+
+HWTEST_F_L0(BuiltinsAtomicsTest, CollectionsAtomicsStrictNumberTypes)
+{
+    auto array = AtomicsTestHelper::CreateArray(thread, DataViewType::INT32, true);
+    for (const auto &entry : collections::CollectionsAtomics::GetAtomicsFunctions()) {
+        SCOPED_TRACE(entry.GetName().data());
+        CheckRejectedNumericArguments(thread, entry, array);
+    }
+    auto value = CallAtomicBuiltin(thread, collections::CollectionsAtomics::Load,
+        {array.GetTaggedValue(), JSTaggedValue(0)});
+    EXPECT_EQ(value, JSTaggedValue(0));
+}
+
+HWTEST_F_L0(BuiltinsAtomicsTest, CollectionsAtomicsRequiredAndTypeMessages)
+{
+    using Collections = collections::CollectionsAtomics;
+    auto array = AtomicsTestHelper::CreateArray(thread, DataViewType::INT32, true);
+    for (uint32_t index = 0; index < Collections::GetAtomicsFunctions()[0].GetLength(); index++) {
+        for (JSTaggedValue value : {JSTaggedValue::Null(), JSTaggedValue::Undefined()}) {
+            std::vector<JSTaggedValue> args = {array.GetTaggedValue(), JSTaggedValue(0), JSTaggedValue(0)};
+            args[index] = value;
+            EXPECT_TRUE(CallAtomicBuiltin(thread, Collections::Add, args).IsException());
+            ExpectAtomicParameterMessage(thread, "Parameter error. Param[" + std::to_string(index) +
+                "] is required, cannot be null or undefined");
+        }
+    }
+    EXPECT_TRUE(CallAtomicBuiltin(thread, Collections::Load, {JSTaggedValue(1), JSTaggedValue(0)}).IsException());
+    ExpectAtomicParameterMessage(thread,
+        "Parameter error. Param[0] type mismatch. Expected: AtomicIntegerArray, Actual: number");
+    EXPECT_TRUE(CallAtomicBuiltin(thread, Collections::Add,
+        {array.GetTaggedValue(), JSTaggedValue(0), JSTaggedValue::True()}).IsException());
+    ExpectAtomicParameterMessage(thread,
+        "Parameter error. Param[2] type mismatch. Expected: number, Actual: boolean");
+    auto unsignedArray = AtomicsTestHelper::CreateArray(thread, DataViewType::UINT32, true);
+    EXPECT_TRUE(CallAtomicBuiltin(thread, Collections::Wait,
+        {unsignedArray.GetTaggedValue(), JSTaggedValue(0), JSTaggedValue(0)}).IsException());
+    ExpectAtomicParameterMessage(thread,
+        "Parameter error. Param[0] type mismatch. Expected: collections.Int32Array, Actual: collections.Uint32Array");
+}
+
+HWTEST_F_L0(BuiltinsAtomicsTest, CollectionsAtomicsOptionalUndefinedAndBuiltinIsolation)
+{
+    using Collections = collections::CollectionsAtomics;
+    auto array = AtomicsTestHelper::CreateArray(thread, DataViewType::INT32, true);
+    auto expected = JSTaggedValue(thread->GlobalConstants()->GetNotEqualString());
+    EXPECT_EQ(CallAtomicBuiltin(thread, Collections::Wait,
+        {array.GetTaggedValue(), JSTaggedValue(0), JSTaggedValue(1)}), expected);
+    EXPECT_EQ(CallAtomicBuiltin(thread, Collections::Wait,
+        {array.GetTaggedValue(), JSTaggedValue(0), JSTaggedValue(1), JSTaggedValue::Undefined()}), expected);
+    EXPECT_EQ(CallAtomicBuiltin(thread, Collections::Notify,
+        {array.GetTaggedValue(), JSTaggedValue(0)}), JSTaggedValue(0));
+    EXPECT_EQ(CallAtomicBuiltin(thread, Collections::Notify,
+        {array.GetTaggedValue(), JSTaggedValue(0), JSTaggedValue::Undefined()}), JSTaggedValue(0));
+    EXPECT_TRUE(CallAtomicBuiltin(thread, Collections::IsLockFree, {JSTaggedValue::True()}).IsException());
+    AtomicsTestHelper::ExpectBusinessError(thread, containers::ErrorFlag::TYPE_ERROR);
+    EXPECT_EQ(CallAtomicBuiltin(thread, BuiltinsAtomics::IsLockFree, {JSTaggedValue::True()}), JSTaggedValue::True());
+    EXPECT_EQ(CallAtomicBuiltin(thread, Collections::IsLockFree, {JSTaggedValue(4)}), JSTaggedValue::True());
+    EXPECT_FALSE(thread->HasPendingException());
 }
 
 void CheckCollectionsAtomicMethod(JSThread *thread, const JSHandle<JSTaggedValue> &atomics)
@@ -1176,43 +1303,108 @@ HWTEST_F_L0(BuiltinsAtomicsTest, BigIntReadModifyWriteOperations)
     }
 }
 
-HWTEST_F_L0(BuiltinsAtomicsTest, ReadModifyWriteOperandConversionErrors)
+HWTEST_F_L0(BuiltinsAtomicsTest, CollectionsReadModifyWriteOperandConversionErrors)
 {
-    const std::array<DataViewType, 8> types = {DataViewType::INT8, DataViewType::UINT8,
-        DataViewType::INT16, DataViewType::UINT16, DataViewType::INT32, DataViewType::UINT32,
-        DataViewType::BIGINT64, DataViewType::BIGUINT64};
-    const std::array<AtomicBuiltin, 7> operations = {BuiltinsAtomics::Add, BuiltinsAtomics::Sub,
-        BuiltinsAtomics::And, BuiltinsAtomics::Or, BuiltinsAtomics::Xor,
-        BuiltinsAtomics::Exchange, BuiltinsAtomics::CompareExchange};
+    using Collections = collections::CollectionsAtomics;
+    const std::array<DataViewType, 6> types = {DataViewType::INT8, DataViewType::UINT8,
+        DataViewType::INT16, DataViewType::UINT16, DataViewType::INT32, DataViewType::UINT32};
+    const std::array<AtomicBuiltin, 7> operations = {Collections::Add, Collections::Sub,
+        Collections::And, Collections::Or, Collections::Xor, Collections::Exchange, Collections::CompareExchange};
     JSHandle<JSTaggedValue> symbol(thread, thread->GlobalConstants()->GetIteratorSymbol());
-    for (bool sendable : {false, true}) {
-        for (DataViewType type : types) {
-            bool bigInt = type == DataViewType::BIGINT64 || type == DataViewType::BIGUINT64;
-            if (sendable && bigInt) {
+    for (DataViewType type : types) {
+        auto array = AtomicsTestHelper::CreateArray(thread, type, true);
+        for (AtomicBuiltin operation : operations) {
+            EXPECT_TRUE(CallAtomicBuiltin(thread, operation,
+                {array.GetTaggedValue(), JSTaggedValue(0), symbol.GetTaggedValue()}).IsException());
+            EXPECT_EXCEPTION();
+        }
+        EXPECT_TRUE(CallAtomicBuiltin(thread, Collections::CompareExchange,
+            {array.GetTaggedValue(), JSTaggedValue(0), JSTaggedValue(0),
+            symbol.GetTaggedValue()}).IsException());
+        EXPECT_EXCEPTION();
+        JSHandle<JSTaggedValue> unchanged(thread, CallAtomicBuiltin(thread, Collections::Load,
+            {array.GetTaggedValue(), JSTaggedValue(0)}));
+        ASSERT_FALSE(thread->HasPendingException());
+        ASSERT_TRUE(unchanged->IsNumber());
+        EXPECT_EQ(unchanged->GetNumber(), 0);
+    }
+}
+
+HWTEST_F_L0(BuiltinsAtomicsTest, CollectionsAtomicsBusinessErrorParameters)
+{
+    using Errors = containers::ErrorFlag;
+    auto ordinary = AtomicsTestHelper::CreateArray(thread, DataViewType::INT32, false);
+    auto floating = AtomicsTestHelper::CreateArray(thread, DataViewType::FLOAT32, true);
+    auto detached = AtomicsTestHelper::CreateArray(thread, DataViewType::INT32, true);
+    AtomicsTestHelper::DetachBuffer(thread, detached);
+    auto valid = AtomicsTestHelper::CreateArray(thread, DataViewType::INT32, true);
+    const std::array<JSHandle<JSTaggedValue>, 4> invalidArrays = {
+        JSHandle<JSTaggedValue>(thread, JSTaggedValue::Null()), ordinary, floating, detached};
+    for (const auto &entry : collections::CollectionsAtomics::GetAtomicsFunctions()) {
+        if (entry.GetName() == "isLockFree") {
+            continue;
+        }
+        SCOPED_TRACE(entry.GetName().data());
+        for (const auto &invalid : invalidArrays) {
+            // Keep argument handles valid when an earlier error allocation triggers GC.
+            thread->GetEcmaVM()->CollectGarbage(TriggerGCType::FULL_GC);
+            std::vector<JSTaggedValue> args(entry.GetLength(), JSTaggedValue(0));
+            args[0] = invalid.GetTaggedValue();
+            EXPECT_TRUE(CallAtomicBuiltin(thread, entry.GetEntrypoint(), args).IsException());
+            AtomicsTestHelper::ExpectBusinessError(thread, Errors::TYPE_ERROR);
+        }
+        std::vector<JSTaggedValue> args(entry.GetLength(), JSTaggedValue(0));
+        args[0] = valid.GetTaggedValue();
+        args[1] = JSTaggedValue(2);
+        EXPECT_TRUE(CallAtomicBuiltin(thread, entry.GetEntrypoint(), args).IsException());
+        AtomicsTestHelper::ExpectBusinessError(thread, Errors::RANGE_ERROR);
+    }
+}
+
+HWTEST_F_L0(BuiltinsAtomicsTest, CollectionsAtomicsRejectsObjectArguments)
+{
+    JSHandle<JSTaggedValue> zero(thread, JSTaggedValue(0));
+    for (const auto &entry : collections::CollectionsAtomics::GetAtomicsFunctions()) {
+        if (entry.GetName() == "isLockFree") {
+            continue;
+        }
+        SCOPED_TRACE(entry.GetName().data());
+        for (size_t argument : {size_t {1}, size_t {2}}) {
+            if (argument == 2 && entry.GetName() == "load") {
                 continue;
             }
-            auto array = AtomicsTestHelper::CreateArray(thread, type, sendable);
-            JSHandle<JSTaggedValue> zero = bigInt ? JSHandle<JSTaggedValue>(BigInt::Int64ToBigInt(thread, 0)) :
-                JSHandle<JSTaggedValue>(thread, JSTaggedValue(0));
-            for (AtomicBuiltin operation : operations) {
-                EXPECT_TRUE(CallAtomicBuiltin(thread, operation,
-                    {array.GetTaggedValue(), JSTaggedValue(0), symbol.GetTaggedValue()}).IsException());
-                EXPECT_EXCEPTION();
-            }
-            EXPECT_TRUE(CallAtomicBuiltin(thread, BuiltinsAtomics::CompareExchange,
-                {array.GetTaggedValue(), JSTaggedValue(0), zero.GetTaggedValue(),
-                symbol.GetTaggedValue()}).IsException());
-            EXPECT_EXCEPTION();
-            JSHandle<JSTaggedValue> unchanged(thread, CallAtomicBuiltin(thread, BuiltinsAtomics::Load,
-                {array.GetTaggedValue(), JSTaggedValue(0)}));
-            if (bigInt) {
-                ASSERT_TRUE(unchanged->IsBigInt());
-                EXPECT_EQ(JSHandle<BigInt>::Cast(unchanged)->ToInt64(), 0);
-            } else {
-                EXPECT_EQ(unchanged->GetNumber(), 0);
-            }
+            auto array = AtomicsTestHelper::CreateArray(thread, DataViewType::INT32, true);
+            auto detaching = AtomicsTestHelper::CreateDetachingValue(thread, array, zero);
+            std::vector<JSTaggedValue> args(entry.GetLength(), JSTaggedValue(0));
+            args[0] = array.GetTaggedValue();
+            args[argument] = detaching.GetTaggedValue();
+            EXPECT_TRUE(CallAtomicBuiltin(thread, entry.GetEntrypoint(), args).IsException());
+            AtomicsTestHelper::ExpectBusinessError(thread, containers::ErrorFlag::TYPE_ERROR);
+            EXPECT_FALSE(builtins::BuiltinsSendableArrayBuffer::IsDetachedBuffer(
+                thread, AtomicsTestHelper::GetBuffer(thread, array).GetTaggedValue()));
         }
     }
+}
+
+HWTEST_F_L0(BuiltinsAtomicsTest, CollectionsAtomicsWaitBusinessErrors)
+{
+    auto unsignedArray = AtomicsTestHelper::CreateArray(thread, DataViewType::UINT32, true);
+    for (AtomicBuiltin method : {collections::CollectionsAtomics::Wait, collections::CollectionsAtomics::Notify}) {
+        std::vector<JSTaggedValue> args = {unsignedArray.GetTaggedValue(), JSTaggedValue(0), JSTaggedValue(0)};
+        if (method == collections::CollectionsAtomics::Wait) {
+            args.push_back(JSTaggedValue(0));
+        }
+        EXPECT_TRUE(CallAtomicBuiltin(thread, method, args).IsException());
+        AtomicsTestHelper::ExpectBusinessError(thread, containers::ErrorFlag::TYPE_ERROR);
+    }
+    auto array = AtomicsTestHelper::CreateArray(thread, DataViewType::INT32, true);
+    bool canSuspend = thread->GetEcmaVM()->GetAgentCanSuspend();
+    thread->GetEcmaVM()->SetAgentCanSuspend(false);
+    auto result = CallAtomicBuiltin(thread, collections::CollectionsAtomics::Wait,
+        {array.GetTaggedValue(), JSTaggedValue(0), JSTaggedValue(0), JSTaggedValue(0)});
+    thread->GetEcmaVM()->SetAgentCanSuspend(canSuspend);
+    EXPECT_TRUE(result.IsException());
+    AtomicsTestHelper::ExpectBusinessError(thread, containers::ErrorFlag::TYPE_ERROR);
 }
 
 HWTEST_F_L0(BuiltinsAtomicsTest, BigIntReadModifyWriteRejectsOperandDetachment)
@@ -1504,9 +1696,10 @@ HWTEST_F_L0(BuiltinsAtomicsTest, SharedWaitSurvivesGCAndBufferPromotion)
 namespace panda::test {
 namespace {
 using AtomicArgument = base::BuiltinsBase::ArgsPosition;
+constexpr uint32_t ATOMIC_LOAD_ARGUMENT_COUNT = 2;
+constexpr uint32_t ATOMIC_UPDATE_ARGUMENT_COUNT = 3;
 constexpr int32_t PROMOTED_BUFFER_VALUE = 11;
 constexpr int32_t ATOMIC_OPERAND_VALUE = 7;
-constexpr int32_t ATOMIC_SUM_VALUE = PROMOTED_BUFFER_VALUE + ATOMIC_OPERAND_VALUE;
 
 JSTaggedValue PromoteBufferOnValueOf(EcmaRuntimeCallInfo *argv)
 {
@@ -1538,8 +1731,7 @@ JSHandle<JSTaggedValue> CreatePromotingValue(JSThread *thread, const JSHandle<JS
     return object;
 }
 
-void VerifyAtomicBufferPromotion(JSThread *thread, AtomicBuiltin operation, uint32_t callbackArgument,
-    int32_t expectedResult, int32_t expectedStored)
+void VerifyRejectedPromotionArgument(JSThread *thread, AtomicBuiltin operation, uint32_t callbackArgument)
 {
     auto array = CreateSmallWaitableArray(thread, true);
     ASSERT_FALSE(thread->HasPendingException());
@@ -1551,35 +1743,31 @@ void VerifyAtomicBufferPromotion(JSThread *thread, AtomicBuiltin operation, uint
         JSTaggedValue(ATOMIC_OPERAND_VALUE), JSTaggedValue(ATOMIC_OPERAND_VALUE)};
     if (operation == collections::CollectionsAtomics::CompareExchange) {
         arguments[AtomicArgument::THIRD] = JSTaggedValue(PROMOTED_BUFFER_VALUE);
+    } else {
+        arguments.resize(operation == collections::CollectionsAtomics::Load ?
+            ATOMIC_LOAD_ARGUMENT_COUNT : ATOMIC_UPDATE_ARGUMENT_COUNT);
     }
     arguments[callbackArgument] = callback.GetTaggedValue();
     JSTaggedValue result = CallAtomicBuiltin(thread, operation, arguments);
-    ASSERT_FALSE(thread->HasPendingException());
-    ASSERT_TRUE(result.IsNumber());
-    EXPECT_EQ(result.GetNumber(), expectedResult);
-    EXPECT_TRUE(AtomicsTestHelper::GetBuffer(thread, array)->IsSendableArrayBuffer());
+    EXPECT_TRUE(result.IsException());
+    AtomicsTestHelper::ExpectBusinessError(thread, containers::ErrorFlag::TYPE_ERROR);
+    EXPECT_TRUE(AtomicsTestHelper::GetBuffer(thread, array)->IsByteArray());
     JSTaggedValue stored = CallAtomicBuiltin(thread, collections::CollectionsAtomics::Load,
         {array.GetTaggedValue(), JSTaggedValue(0)});
     ASSERT_FALSE(thread->HasPendingException());
     ASSERT_TRUE(stored.IsNumber());
-    EXPECT_EQ(stored.GetNumber(), expectedStored);
+    EXPECT_EQ(stored.GetNumber(), 0);
 }
 }  // namespace
 
-HWTEST_F_L0(BuiltinsAtomicsTest, CollectionsAtomicsResolvePromotedBufferAfterArgumentConversion)
+HWTEST_F_L0(BuiltinsAtomicsTest, CollectionsAtomicsRejectsPromotionCallbacks)
 {
     using Collections = collections::CollectionsAtomics;
-    VerifyAtomicBufferPromotion(thread, Collections::Load, AtomicArgument::SECOND,
-        PROMOTED_BUFFER_VALUE, PROMOTED_BUFFER_VALUE);
-    VerifyAtomicBufferPromotion(thread, Collections::Store, AtomicArgument::SECOND,
-        ATOMIC_OPERAND_VALUE, ATOMIC_OPERAND_VALUE);
-    VerifyAtomicBufferPromotion(thread, Collections::Store, AtomicArgument::THIRD,
-        ATOMIC_OPERAND_VALUE, ATOMIC_OPERAND_VALUE);
-    VerifyAtomicBufferPromotion(thread, Collections::Add, AtomicArgument::SECOND,
-        PROMOTED_BUFFER_VALUE, ATOMIC_SUM_VALUE);
-    VerifyAtomicBufferPromotion(thread, Collections::Add, AtomicArgument::THIRD,
-        PROMOTED_BUFFER_VALUE, ATOMIC_SUM_VALUE);
-    VerifyAtomicBufferPromotion(thread, Collections::CompareExchange, AtomicArgument::FOURTH,
-        PROMOTED_BUFFER_VALUE, ATOMIC_OPERAND_VALUE);
+    VerifyRejectedPromotionArgument(thread, Collections::Load, AtomicArgument::SECOND);
+    VerifyRejectedPromotionArgument(thread, Collections::Store, AtomicArgument::SECOND);
+    VerifyRejectedPromotionArgument(thread, Collections::Store, AtomicArgument::THIRD);
+    VerifyRejectedPromotionArgument(thread, Collections::Add, AtomicArgument::SECOND);
+    VerifyRejectedPromotionArgument(thread, Collections::Add, AtomicArgument::THIRD);
+    VerifyRejectedPromotionArgument(thread, Collections::CompareExchange, AtomicArgument::FOURTH);
 }
 }  // namespace panda::test

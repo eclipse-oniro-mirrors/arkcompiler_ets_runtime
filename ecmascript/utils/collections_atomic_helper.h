@@ -30,6 +30,8 @@ public:
         uint32_t byteOffset {0};
         bool isSendable {true};
     };
+    static bool ValidateArguments(EcmaRuntimeCallInfo *argv, uint32_t requiredCount, uint32_t maximumCount,
+        bool waitable = false, bool hasArray = true);
     static JSTaggedValue ValidateIntegerTypedArray(JSThread *thread, JSHandle<JSTaggedValue> typedArray,
         bool waitable = false);
     static bool ValidateIntegerTypedArray(JSThread *thread, const JSHandle<JSTaggedValue> &typedArray,

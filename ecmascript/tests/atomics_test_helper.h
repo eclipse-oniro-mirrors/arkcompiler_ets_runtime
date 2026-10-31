@@ -18,6 +18,7 @@
 
 #include "ecmascript/base/builtins_base.h"
 #include "ecmascript/base/typed_array_helper-inl.h"
+#include "ecmascript/containers/containers_errors.h"
 #include "ecmascript/global_env.h"
 #include "ecmascript/shared_objects/js_sendable_arraybuffer.h"
 #include "ecmascript/shared_objects/js_shared_typed_array.h"
@@ -90,6 +91,26 @@ inline void SetProperty(JSThread *thread, const JSHandle<JSTaggedValue> &object,
 {
     JSHandle<JSTaggedValue> key(thread->GetEcmaVM()->GetFactory()->NewFromASCII(name));
     JSObject::SetProperty(thread, object, key, value);
+}
+
+inline void ExpectBusinessErrorProperties(JSThread *thread, const JSHandle<JSTaggedValue> &error, int32_t expectedCode)
+{
+    auto code = GetProperty(thread, error, "code");
+    ASSERT_TRUE(code->IsNumber());
+    EXPECT_EQ(code->GetNumber(), expectedCode);
+    auto name = GetProperty(thread, error, "name");
+    ASSERT_TRUE(name->IsString());
+    EXPECT_EQ(EcmaStringAccessor(JSHandle<EcmaString>::Cast(name)).ToStdString(thread), "BusinessError");
+}
+
+inline void ExpectBusinessError(JSThread *thread, int32_t expectedCode)
+{
+    ASSERT_TRUE(thread->HasPendingException());
+    JSHandle<JSTaggedValue> error(thread, thread->GetException());
+    thread->ClearException();
+    ASSERT_TRUE(error->IsJSError());
+    ExpectBusinessErrorProperties(thread, error, expectedCode);
+    EXPECT_FALSE(thread->HasPendingException());
 }
 
 inline JSTaggedValue DetachOnValueOf(EcmaRuntimeCallInfo *argv)

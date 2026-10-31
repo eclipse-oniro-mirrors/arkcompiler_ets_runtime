@@ -17,6 +17,7 @@
 
 #include "ecmascript/base/typed_array_helper-inl.h"
 #include "ecmascript/checkpoint/thread_state_transition.h"
+#include "ecmascript/containers/containers_errors.h"
 #include "ecmascript/mem/barriers-inl.h"
 #include "libpandabase/utils/time.h"
 
@@ -26,6 +27,7 @@ using NumberHelper = base::NumberHelper;
 using BuiltinsBase = base::BuiltinsBase;
 using BuiltinsArrayBuffer = builtins::BuiltinsArrayBuffer;
 using BuiltinsSendableArrayBuffer = builtins::BuiltinsSendableArrayBuffer;
+using ContainerError = containers::ContainerError;
 using WaitResult = builtins::WaitResult;
 
 namespace {
@@ -38,7 +40,8 @@ void ValidateAtomicBuffer(JSThread *thread, const JSHandle<JSTaggedValue> &array
         JSHandle<JSTypedArray>::Cast(array)->GetViewedArrayBufferOrByteArray(thread));
     if (backing->IsSendableArrayBuffer() &&
         BuiltinsSendableArrayBuffer::IsDetachedBuffer(thread, backing.GetTaggedValue())) {
-        THROW_TYPE_ERROR(thread, "The SendableArrayBuffer is detached.");
+        auto error = ContainerError::ParamError(thread, "Parameter error. The SendableArrayBuffer is detached.");
+        THROW_NEW_ERROR_AND_RETURN(thread, error);
     }
 }
 }  // namespace
@@ -126,6 +129,9 @@ JSTaggedValue CollectionsAtomics::Load(EcmaRuntimeCallInfo *argv)
     JSThread *thread = argv->GetThread();
     BUILTINS_API_TRACE(thread, Atomics, Load);
     [[maybe_unused]] EcmaHandleScope handleScope(thread);
+    if (!CollectionsAtomicHelper::ValidateArguments(argv, LOAD_LENGTH, LOAD_LENGTH)) {
+        return JSTaggedValue::Exception();
+    }
     JSHandle<JSTaggedValue> typedArray = GetCallArg(argv, 0);
     JSHandle<JSTaggedValue> index = GetCallArg(argv, 1);
     return CollectionsAtomicHelper::AtomicLoad(thread, typedArray, index);
@@ -137,6 +143,9 @@ JSTaggedValue CollectionsAtomics::Store(EcmaRuntimeCallInfo *argv)
     JSThread *thread = argv->GetThread();
     BUILTINS_API_TRACE(thread, Atomics, Store);
     [[maybe_unused]] EcmaHandleScope handleScope(thread);
+    if (!CollectionsAtomicHelper::ValidateArguments(argv, UPDATE_LENGTH, UPDATE_LENGTH)) {
+        return JSTaggedValue::Exception();
+    }
     JSHandle<JSTaggedValue> typedArray = GetCallArg(argv, 0);
     JSHandle<JSTaggedValue> index = GetCallArg(argv, 1);
     JSHandle<JSTaggedValue> value = GetCallArg(argv, BuiltinsBase::ArgsPosition::THIRD);
@@ -177,6 +186,11 @@ template<typename Op>
 JSTaggedValue CollectionsAtomics::AtomicReadModifyWrite(JSThread *thread, const JSHandle<JSTaggedValue> &array,
     JSHandle<JSTaggedValue> &index, EcmaRuntimeCallInfo *argv, const Op &op)
 {
+    constexpr uint32_t requiredCount = std::is_same_v<Op, AtomicHelper::CompareExchangeFun> ?
+        COMPARE_EXCHANGE_LENGTH : UPDATE_LENGTH;
+    if (!CollectionsAtomicHelper::ValidateArguments(argv, requiredCount, requiredCount)) {
+        return JSTaggedValue::Exception();
+    }
     CollectionsAtomicHelper::AtomicTypedArrayWitness witness {};
     if (!CollectionsAtomicHelper::ValidateIntegerTypedArray(thread, array, witness)) {
         return JSTaggedValue::Exception();
@@ -222,6 +236,9 @@ JSTaggedValue CollectionsAtomics::Wait(EcmaRuntimeCallInfo *argv)
     ASSERT(argv);
     JSThread *thread = argv->GetThread();
     EcmaHandleScope scope(thread);
+    if (!CollectionsAtomicHelper::ValidateArguments(argv, UPDATE_LENGTH, WAIT_LENGTH, true)) {
+        return JSTaggedValue::Exception();
+    }
     auto array = GetCallArg(argv, 0);
     auto index = GetCallArg(argv, 1);
     auto value = GetCallArg(argv, BuiltinsBase::ArgsPosition::THIRD);
@@ -237,7 +254,8 @@ JSTaggedValue CollectionsAtomics::Wait(EcmaRuntimeCallInfo *argv)
     double duration = ConvertTimeout(thread, timeout);
     RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread);
     if (!thread->GetEcmaVM()->GetAgentCanSuspend()) {
-        THROW_TYPE_ERROR_AND_RETURN(thread, "vm does not allow wait to block.", JSTaggedValue::Exception());
+        auto error = ContainerError::ParamError(thread, "Parameter error. vm does not allow wait to block.");
+        THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, JSTaggedValue::Exception());
     }
     ValidateAtomicBuffer(thread, array);
     RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread);
@@ -254,6 +272,9 @@ JSTaggedValue CollectionsAtomics::Notify(EcmaRuntimeCallInfo *argv)
     ASSERT(argv);
     JSThread *thread = argv->GetThread();
     EcmaHandleScope scope(thread);
+    if (!CollectionsAtomicHelper::ValidateArguments(argv, LOAD_LENGTH, UPDATE_LENGTH, true)) {
+        return JSTaggedValue::Exception();
+    }
     auto array = GetCallArg(argv, 0);
     auto index = GetCallArg(argv, 1);
     auto count = GetCallArg(argv, BuiltinsBase::ArgsPosition::THIRD);
@@ -273,6 +294,17 @@ JSTaggedValue CollectionsAtomics::Notify(EcmaRuntimeCallInfo *argv)
     ValidateAtomicBuffer(thread, array);
     RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread);
     return JSTaggedValue(SignalShared(thread, array, offset, wakeCount));
+}
+
+JSTaggedValue CollectionsAtomics::IsLockFree(EcmaRuntimeCallInfo *argv)
+{
+    ASSERT(argv);
+    auto *thread = argv->GetThread();
+    EcmaHandleScope scope(thread);
+    if (!CollectionsAtomicHelper::ValidateArguments(argv, IS_LOCK_FREE_LENGTH, IS_LOCK_FREE_LENGTH, false, false)) {
+        return JSTaggedValue::Exception();
+    }
+    return builtins::BuiltinsAtomics::IsLockFree(argv);
 }
 
 WaitResult CollectionsAtomics::DoWait(JSThread *thread, const JSHandle<JSTaggedValue> &array,
