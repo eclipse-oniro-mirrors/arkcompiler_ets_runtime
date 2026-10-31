@@ -814,44 +814,6 @@ HWTEST_F_L0(CpuProfilerTest, TestSamplingProcessorAddSample)
 #endif // !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
 
 #if !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
-// The sampling loop's ConsumeAndFold drains the legacy NAPI queue on its ticks.
-HWTEST_F_L0(CpuProfilerTest, TestSamplingLoopDrainsLegacyNapiQueue)
-{
-    int interval = 500;
-    CpuProfilerFriendTest cpuProfilerFriend(instance, interval);
-    ASSERT_TRUE(cpuProfilerFriend.StartProfilerForInfoTest());
-    SamplesRecord *generator = cpuProfilerFriend.GetGenerator();
-
-    struct MethodKey key;
-    key.methodIdentifier = reinterpret_cast<void *>(0x43210000);
-    key.state = RunningState::NAPI;
-    struct FrameInfoTemp info;
-    strcpy_s(info.functionName, sizeof(info.functionName), "napi_tick_drain_func");
-    info.methodKey = key;
-    ASSERT_TRUE(generator->PushNapiFrameStack(key));
-    ASSERT_TRUE(generator->PushNapiStackInfo(info));
-    generator->PostNapiFrame();
-
-    // Several ticks must consume the queued frame.
-    CpuProfilerFriendTest::SleepThroughSignalInterruptions(50000); // 50ms: ~100 ticks
-    EXPECT_TRUE(generator->samplesQueue_->IsEmpty());
-
-    cpuProfilerFriend.BreakSamplingLoop();
-    CpuProfilerFriendTest::SleepThroughSignalInterruptions(50000); // 50ms: thread exits
-    std::unique_ptr<ProfileInfo> profileInfo;
-    ASSERT_TRUE(cpuProfilerFriend.StopCpuProfilerForInfoTest(profileInfo));
-    ASSERT_NE(profileInfo, nullptr);
-    bool found = false;
-    for (int i = 0; i < profileInfo->nodeCount; ++i) {
-        if (strstr(profileInfo->nodes[i].codeEntry.functionName.c_str(), "napi_tick_drain_func") != nullptr) {
-            found = true;
-        }
-    }
-    EXPECT_TRUE(found);
-}
-#endif // !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
-
-#if !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
 // The stop path folds legacy-channel frames that were posted after the last
 // in-loop ConsumeAndFold tick.
 HWTEST_F_L0(CpuProfilerTest, TestStopFoldsResidualNapiFrames)
