@@ -133,13 +133,36 @@ void FrameIterator::PrintText(uint32_t *jitTextBegin, uint32_t jitTextSize, std:
     LOG_FULL(INFO) << oss.str();
 }
 
+static MachineCode *TryGetMachineCodeFromFunction(const FrameIterator &it, uintptr_t retAddr)
+{
+    const JSThread *thread = it.GetThread();
+    if (g_isEnableCMCGC || thread == nullptr ||
+        thread->GetThreadId() != JSThread::GetCurrentThreadId() || thread->IsCrossThreadExecutionEnable()) {
+        return nullptr;
+    }
+    JSTaggedValue function = it.GetFunction();
+    if (!function.IsJSFunction()) {
+        return nullptr;
+    }
+    JSTaggedValue codeValue = JSFunction::Cast(function.GetTaggedObject())->GetMachineCode(thread);
+    if (!codeValue.IsMachineCodeObject()) {
+        return nullptr;
+    }
+    auto *machineCode = MachineCode::Cast(codeValue.GetTaggedObject());
+    // An active frame may still use an older code version.
+    return machineCode->IsInText(retAddr) ? machineCode : nullptr;
+}
+
 AOTFileInfo::CallSiteInfo FrameIterator::TryCalCallSiteInfoFromMachineCode(uintptr_t retAddr, bool isDeopt) const
 {
     FrameType type = GetFrameType();
     if (type == FrameType::OPTIMIZED_JS_FAST_CALL_FUNCTION_FRAME || type == FrameType::OPTIMIZED_JS_FUNCTION_FRAME ||
         type == FrameType::FASTJIT_FUNCTION_FRAME || type == FrameType::FASTJIT_FAST_CALL_FUNCTION_FRAME ||
         type == FrameType::STEED_FUNCTION_FRAME) {
-        MachineCode* machineCode = thread_->GetEcmaVM()->GetHeap()->GetMachineCodeObject(retAddr);
+        MachineCode *machineCode = TryGetMachineCodeFromFunction(*this, retAddr);
+        if (machineCode == nullptr) {
+            machineCode = thread_->GetEcmaVM()->GetHeap()->GetMachineCodeObject(retAddr);
+        }
         if (machineCode == nullptr) {
             std::ostringstream oss;
             oss << "machine code is nullptr. deopt type: " << std::hex << GetDeoptType() << ", retAddr: " << retAddr;
