@@ -48,6 +48,7 @@ public:
         FLOAT64,
         HOLEY_FLOAT64,
         CHECKED_VALUE,
+        ELEMENT_INDEX_I32,  // Index-only conversion; may canonicalize -0.
         COUNT,
     };
 
