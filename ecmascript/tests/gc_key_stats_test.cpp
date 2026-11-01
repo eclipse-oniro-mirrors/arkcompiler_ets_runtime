@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025 Huawei Device Co., Ltd.
+ * Copyright (c) 2025-2026 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -31,6 +31,7 @@
 #include "ecmascript/js_runtime_options.h"
 #include "ecmascript/tests/ecma_test_common.h"
 #include "ecmascript/mem/mem_controller.h"
+#include "ecmascript/runtime.h"
 
 using namespace panda;
 
@@ -287,5 +288,38 @@ HWTEST_F_L0(GCKeyStatsTest, ProcessLongGCEventTest014)
     gcKeyStats->ProcessLongGCEvent();
     EXPECT_TRUE(longGCStats->GetGCIsInBackground());
     delete gcStats;
+}
+
+HWTEST_F_L0(GCKeyStatsTest, GetAppArkTSModeTest001)
+{
+    EcmaVM *vm = thread->GetEcmaVM();
+    JSRuntimeOptions &options = vm->GetJSOptions();
+    options.SetArkTSMode(std::string(LANGUAGE_DYNAMIC));
+    ASSERT_TRUE(Runtime::HasInstance());
+    EcmaVM *mainVm = Runtime::GetInstance()->GetMainThread()->GetEcmaVM();
+    ASSERT_TRUE(mainVm != nullptr);
+    EXPECT_EQ(mainVm->GetArkTSMode(), ArkTSMode::DYNAMIC);
+}
+
+HWTEST_F_L0(GCKeyStatsTest, GetAppArkTSModeTest002)
+{
+    EcmaVM *vm = thread->GetEcmaVM();
+    JSRuntimeOptions &options = vm->GetJSOptions();
+    options.SetArkTSMode(std::string(LANGUAGE_STATIC));
+    ASSERT_TRUE(Runtime::HasInstance());
+    EcmaVM *mainVm = Runtime::GetInstance()->GetMainThread()->GetEcmaVM();
+    ASSERT_TRUE(mainVm != nullptr);
+    EXPECT_EQ(mainVm->GetArkTSMode(), ArkTSMode::STATIC);
+}
+
+HWTEST_F_L0(GCKeyStatsTest, GetAppArkTSModeTest003)
+{
+    EcmaVM *vm = thread->GetEcmaVM();
+    JSRuntimeOptions &options = vm->GetJSOptions();
+    options.SetArkTSMode(std::string(LANGUAGE_HYBRID));
+    ASSERT_TRUE(Runtime::HasInstance());
+    EcmaVM *mainVm = Runtime::GetInstance()->GetMainThread()->GetEcmaVM();
+    ASSERT_TRUE(mainVm != nullptr);
+    EXPECT_EQ(mainVm->GetArkTSMode(), ArkTSMode::HYBRID);
 }
 }  // namespace panda::test

@@ -3559,6 +3559,32 @@ host_unittest_action("Sendable_JsSharedArray_Test") {
   deps += hiviewdfx_deps
 }
 
+host_unittest_action("Cross_VM_Operator_Test") {
+  module_out_path = module_output_path
+
+  sources = [
+    "cross_vm_operator_test.cpp",
+  ]
+
+  configs = [
+    "../../:asm_interp_enable_config",
+    "../../:ecma_test_config",
+  ]
+
+  deps = [ "../../:libark_jsruntime_test" ]
+
+  # hiviewdfx libraries
+  external_deps = hiviewdfx_ext_deps
+  external_deps += [
+    "icu:shared_icui18n",
+    "icu:shared_icuuc",
+    "runtime_core:libarkassembler_static",
+    "runtime_core:libarkverifier",
+    "zlib:libz",
+  ]
+  deps += hiviewdfx_deps
+}
+
 host_unittest_action("Unified_GC_Test") {
   module_out_path = module_output_path
 
@@ -4345,9 +4371,10 @@ group("unittest") {
     ":ECMA_VM_Heap_Test",
     ":ECMA_VM_Heap_Memory_Pressure_Test",
     ":GlobalConstants_Test",
+    ":Cross_VM_Operator_Test",
   ]
 
- # TODO: CMC-GC UT FIX LATER
+  # TODO: CMC-GC UT FIX LATER
   if (ets_runtime_enable_cmc_gc) {
     deps -= [
       ":GC_ConcurrentMarking_Test",
@@ -4383,6 +4410,7 @@ group("unittest") {
       ":Sendable_JsSharedArray_Test",
       ":Shared_Memory_Reallocator_Test",
       ":Runtime_Test",
+      ":Cross_VM_Operator_Test",
     ]
 
     deps += [ ":CMC_Barrier_Test" ]
@@ -4559,6 +4587,7 @@ group("host_unittest") {
     ":ECMA_VM_Heap_TestAction",
     ":ECMA_VM_Heap_Memory_Pressure_TestAction",
     ":GlobalConstants_TestAction",
+    ":Cross_VM_Operator_TestAction",
   ]
 
   if (is_mac) {
@@ -4708,6 +4737,7 @@ group("host_unittest") {
       ":Sendable_SharedObjectFactory_TestAction",
       ":Shared_Memory_Reallocator_TestAction",
       ":Runtime_TestAction",
+      ":Cross_VM_Operator_TestAction",
     ]
   } else if (ets_runtime_enable_cmc_gc) {
     # TODO: CMC-GC UT FIX LATER
@@ -4746,6 +4776,7 @@ group("host_unittest") {
       ":Sendable_JsSharedArray_TestAction",
       ":Shared_Memory_Reallocator_TestAction",
       ":Runtime_TestAction",
+      ":Cross_VM_Operator_TestAction",
     ]
 
     deps += [ ":CMC_Barrier_TestAction" ]
