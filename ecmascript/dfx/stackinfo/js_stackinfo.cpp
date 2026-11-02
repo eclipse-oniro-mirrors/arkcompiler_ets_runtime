@@ -1551,6 +1551,7 @@ uintptr_t JSSymbolExtractor::GetDataSize()
 
 bool JSSymbolExtractor::InitializeHapFileInfo([[maybe_unused]]uintptr_t offset,
                                               [[maybe_unused]]bool needTranslate,
+                                              [[maybe_unused]]bool isStaticArkFrame,
                                               [[maybe_unused]]const char* filePath)
 {
 #if defined(ENABLE_ABILITY_EXTRACTOR)
@@ -1574,7 +1575,7 @@ bool JSSymbolExtractor::InitializeHapFileInfo([[maybe_unused]]uintptr_t offset,
     }
     pandaFilePath = GetFilePathByOffset(*zipFile, offset);
     if (pandaFilePath.empty()) {
-        pandaFilePath = "ets/modules.abc";
+        pandaFilePath = isStaticArkFrame ? "ets/modules_static.abc" : "ets/modules.abc";
         LOG_ECMA(WARN) << "Unknown offset, attempt to parse " << pandaFilePath;
     }
     fileMapper_ = GetMmapDataAsShared(*extractor, pandaFilePath);
@@ -1657,14 +1658,15 @@ bool JSSymbolExtractor::InitializeELFFileInfo(uintptr_t offset, const char* file
     return isInitialized_;
 }
 
-bool JSSymbolExtractor::Initialize(uintptr_t offset, bool needTranslate, const char* filePath)
+bool JSSymbolExtractor::Initialize(uintptr_t offset, bool needTranslate, bool isStaticArkFrame,
+                                   const char* filePath)
 {
     uintptr_t elfOffset = 0;
     CString realPath;
     auto type = ModulePathHelper::ParseVMANameToFileName(filePath, elfOffset, realPath);
     switch (type) {
         case ModulePathType::HAP_MODULE_PATH:
-            return InitializeHapFileInfo(offset, needTranslate, filePath);
+            return InitializeHapFileInfo(offset, needTranslate, isStaticArkFrame, filePath);
         case ModulePathType::ABC_MODULE_PATH:
             return InitializeAbcFileInfo(realPath.c_str());
         case ModulePathType::SHORT_MODULE_PATH:
@@ -1680,6 +1682,7 @@ bool JSSymbolExtractor::Initialize(uintptr_t offset, bool needTranslate, const c
 bool ArkParseJSFileInfo([[maybe_unused]] uintptr_t byteCodePc, [[maybe_unused]] uintptr_t mapBase,
                         [[maybe_unused]] uintptr_t offset, [[maybe_unused]] const char* filePath,
                         [[maybe_unused]] uintptr_t extractorptr, [[maybe_unused]] bool needTranslate,
+                        [[maybe_unused]] bool isStaticArkFrame,
                         [[maybe_unused]] JsFunction *jsFunction)
 {
     bool ret = false;
@@ -1693,7 +1696,7 @@ bool ArkParseJSFileInfo([[maybe_unused]] uintptr_t byteCodePc, [[maybe_unused]] 
         LOG_ECMA(ERROR) << "Parse JSframe info failed, extractor is nullptr.";
         return false;
     }
-    if (!extractor->Initialize(offset, needTranslate, filePath)) {
+    if (!extractor->Initialize(offset, needTranslate, isStaticArkFrame, filePath)) {
         return false;
     }
     ret = ArkParseJsFrameInfo(byteCodePc, mapBase, extractor->GetLoadOffset(),
@@ -2083,10 +2086,11 @@ __attribute__((visibility("default"))) int ark_parse_js_frame_info(
 
 __attribute__((visibility("default"))) int ark_parse_js_file_info(
     uintptr_t byteCodePc, uintptr_t mapBase, uintptr_t offset, const char* filePath,
-    uintptr_t extractorptr, bool needTranslate, panda::ecmascript::JsFunction *jsFunction)
+    uintptr_t extractorptr, bool needTranslate, bool isStaticArkFrame,
+    panda::ecmascript::JsFunction *jsFunction)
 {
     if (panda::ecmascript::ArkParseJSFileInfo(byteCodePc, mapBase, offset, filePath,
-        extractorptr, needTranslate, jsFunction)) {
+        extractorptr, needTranslate, isStaticArkFrame, jsFunction)) {
         return 1;
     }
     return -1;

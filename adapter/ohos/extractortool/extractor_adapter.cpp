@@ -29,7 +29,6 @@ std::shared_ptr<FileMapper> GetMmapDataAsShared(Extractor& extractor, const std:
 
 std::string GetFilePathByOffset(ZipFile& zipFile, uintptr_t offset)
 {
-    static const std::string dynamicAbc = "ets/modules.abc";
     static constexpr char extNameAbc[] = ".abc";
     const ZipEntryMap& entries = zipFile.GetAllEntries();
     for (const auto& entry : entries) {
@@ -45,7 +44,6 @@ std::string GetFilePathByOffset(ZipFile& zipFile, uintptr_t offset)
             return entry.first;
         }
     }
-    LOG_ECMA(WARN) << "Unknown offset, attemp to parse " << dynamicAbc;
-    return dynamicAbc;
+    return "";
 }
 }  // namespace panda::ecmascript
