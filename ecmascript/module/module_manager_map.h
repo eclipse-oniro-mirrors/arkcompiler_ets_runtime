@@ -16,6 +16,12 @@
 #ifndef ECMASCRIPT_MODULE_MANAGER_MAP_H
 #define ECMASCRIPT_MODULE_MANAGER_MAP_H
 
+#include "ecmascript/base/config.h"
+#include "ecmascript/module/module_root_visitor.h"
+
+#if ENABLE_LOCALCC_OPTIMIZATION
+#include "ecmascript/module/module_manager_map_localcc.h"
+#else
 #include <memory>
 #include <optional>
 #include "ecmascript/mem/gc_root.h"
@@ -415,7 +421,7 @@ public:
             entry.value = GCRoot();
             size_--;
             deletedCount_++;
-            
+
             // Check if we should shrink
             if (ShouldShrink()) {
                 Rehash(capacity_ / GROW_FACTOR); // Check if need to clean up deletions
@@ -536,4 +542,5 @@ public:
 };
 #endif // ENABLE_LATEST_OPTIMIZATION
 }  // namespace panda::ecmascript
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
 #endif

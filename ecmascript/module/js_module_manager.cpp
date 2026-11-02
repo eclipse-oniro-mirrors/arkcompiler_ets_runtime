@@ -265,6 +265,57 @@ void ModuleManager::ProcessPendingRemovalLocalModules(const WeakRootVisitor &vis
     }
 }
 
+uint32_t ModuleManager::PrepareConcurrentRootScan(uint32_t maxTaskCount)
+{
+#if ENABLE_LOCALCC_OPTIMIZATION
+    uint32_t resolvedTaskCount = resolvedModules_.PrepareConcurrentRootScan(maxTaskCount);
+    uint32_t sendableTaskCount =
+        resolvedSendableModules_.PrepareConcurrentRootScan(1);
+    return std::max(resolvedTaskCount, sendableTaskCount);
+#else
+    (void)maxTaskCount;
+    return 0;
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
+}
+
+void ModuleManager::BeginConcurrentRootScan()
+{
+#if ENABLE_LOCALCC_OPTIMIZATION
+    resolvedModules_.BeginConcurrentRootScan();
+    resolvedSendableModules_.BeginConcurrentRootScan();
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
+}
+
+void ModuleManager::ProcessConcurrentRootScan(uint32_t threadIndex, uint32_t taskCount,
+    const ModuleRootVisitor &visitor)
+{
+#if ENABLE_LOCALCC_OPTIMIZATION
+    resolvedModules_.ProcessConcurrentRootScan(threadIndex, taskCount, visitor);
+#else
+    (void)threadIndex;
+    (void)taskCount;
+    (void)visitor;
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
+}
+
+void ModuleManager::ProcessConcurrentSendableRootScan(uint32_t threadIndex, const ModuleRootVisitor &visitor)
+{
+#if ENABLE_LOCALCC_OPTIMIZATION
+    resolvedSendableModules_.ProcessConcurrentRootScan(threadIndex, 1, visitor);
+#else
+    (void)threadIndex;
+    (void)visitor;
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
+}
+
+void ModuleManager::FinishConcurrentRootScan()
+{
+#if ENABLE_LOCALCC_OPTIMIZATION
+    resolvedModules_.FinishConcurrentRootScan();
+    resolvedSendableModules_.FinishConcurrentRootScan();
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
+}
+
 CString ModuleManager::GetRecordName(const JSThread *thread, JSTaggedValue module)
 {
     CString entry = "";

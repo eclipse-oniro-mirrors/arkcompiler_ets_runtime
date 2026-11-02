@@ -20,6 +20,14 @@
 #include "base/common.h"
 #include <cstdint>
 
+// Set to 0 to use the LocalCC implementation without the reference-processing
+// and module-root scanning optimizations. May be overridden with -D at build time.
+// The runtime and users of its internal headers must use the same value because
+// this switch changes internal class layouts.
+#ifndef ENABLE_LOCALCC_OPTIMIZATION
+#define ENABLE_LOCALCC_OPTIMIZATION 0
+#endif
+
 namespace panda::ecmascript {
 #ifdef USE_CMC_GC
 extern uint32_t g_isEnableCMCGC;

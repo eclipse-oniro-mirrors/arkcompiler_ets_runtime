@@ -18,13 +18,19 @@
 #include "ecmascript/dfx/cpu_profiler/cpu_profiler.h"
 #endif
 
+#include <algorithm>
+#include <limits>
+
 #include "common_components/taskpool/taskpool.h"
 #include "ecmascript/cross_vm/unified_gc/unified_gc.h"
 #include "ecmascript/cross_vm/unified_gc/unified_gc_marker.h"
+#include "ecmascript/js_native_pointer.h"
 #include "ecmascript/mem/cms_mem/sticky_sweep_gc.h"
 #include "ecmascript/mem/cms_mem/sweep_gc.h"
 #include "ecmascript/mem/idle_gc_trigger.h"
 #include "ecmascript/mem/local_cmc/cc_evacuator-inl.h"
+#include "ecmascript/mem/native_area_allocator.h"
+#include "ecmascript/mem/local_cmc/concurrent_copy_gc.h"
 #include "ecmascript/mem/partial_gc.h"
 #include "ecmascript/mem/parallel_evacuator.h"
 #include "ecmascript/mem/parallel_marker.h"
@@ -127,6 +133,27 @@ static void DumpHybridHeapSnapshotBeforeOOM(EcmaVM *vm, DumpReason reason, bool 
     }
 }
 #endif  // PANDA_JS_ETS_HYBRID_MODE
+
+namespace {
+void SwapBackAndPopNativePointerList(NativePointerList &list, NativePointerList::iterator &iter)
+{
+    *iter = list.back();
+    if (iter + 1 == list.end()) {
+        list.pop_back();
+        iter = list.end();
+    } else {
+        list.pop_back();
+    }
+}
+
+void ShrinkNativePointerListWithFactor(NativePointerList &list)
+{
+    constexpr size_t shrinkFactor = 2;
+    if (list.size() < list.capacity() / shrinkFactor) {
+        list.shrink_to_fit();
+    }
+}
+}  // namespace
 
 SharedHeap *SharedHeap::instance_ = nullptr;
 
@@ -1780,6 +1807,9 @@ void Heap::CompactHeapBeforeFork()
 void Heap::DisableParallelGC()
 {
     WaitAllTasksFinished();
+#if ENABLE_LOCALCC_OPTIMIZATION
+    WaitLocalCCNativePointerCallbacks();
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
     parallelGC_ = false;
     maxEvacuateTaskCount_ = 0;
     UpdateMaxMarkTaskCount(0);
@@ -2158,7 +2188,11 @@ void Heap::CollectGarbageFromCCMark(GCReason reason)
 #endif
     GetEcmaGCStats()->PrintGCStatistic();
     markType_ = MarkType::MARK_YOUNG;
+#if ENABLE_LOCALCC_OPTIMIZATION
+    ProcessLocalCCGCCallback();
+#else
     ProcessGCCallback();
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
 }
 
 void Heap::ProcessGCCallback()
@@ -2173,6 +2207,17 @@ void Heap::ProcessGCCallback()
     CleanCallback();
     JSFinalizationRegistry::CheckAndCall(thread_);
     // clear env cache
+    thread_->ClearCache();
+}
+
+void Heap::ProcessLocalCCGCCallback()
+{
+    if (g_isEnableCMCGC) {
+        thread_->InvokeWeakNodeFreeGlobalCallBack();
+    }
+    thread_->InvokeWeakNodeNativeFinalizeCallback();
+    CleanCallback();
+    JSFinalizationRegistry::CheckAndCall(thread_);
     thread_->ClearCache();
 }
 
@@ -3418,6 +3463,396 @@ bool Heap::FinishGCRestrainTask::Run([[maybe_unused]] uint32_t threadIndex)
     return true;
 }
 
+void Heap::AddDeadNativeSize(ProcessNativePointerTaskResult &result, size_t bindingSize, NativeFlag nativeFlag)
+{
+    size_t index = static_cast<size_t>(nativeFlag);
+    if (index < result.deadNativeSizeByFlag.size()) {
+        result.deadNativeSizeByFlag[index] += bindingSize;
+    }
+}
+
+void Heap::ProcessNativePointerRange(NativePointerList &list, size_t begin, size_t end,
+                                     const WeakRootVisitor &visitor, ProcessNativePointerTaskResult &result)
+{
+    for (size_t index = begin; index < end; index++) {
+        JSNativePointer *object = reinterpret_cast<JSNativePointer *>(list[index].GetTaggedObject());
+        auto fwd = visitor(reinterpret_cast<TaggedObject *>(object));
+        if (fwd == nullptr) {
+            size_t bindingSize = object->GetBindingSize();
+            result.deadIndexes.emplace_back(index);
+            result.deadObjects.emplace_back(object);
+            AddDeadNativeSize(result, bindingSize, object->GetNativeFlag());
+            continue;
+        }
+
+        result.liveBindingSize += JSNativePointer::Cast(fwd)->GetBindingSize();
+        if (fwd != reinterpret_cast<TaggedObject *>(object)) {
+            list[index] = JSTaggedValue(fwd);
+        }
+    }
+}
+
+void Heap::ProcessNativePointerBlocks(NativePointerList &list, std::atomic<size_t> &nextIndex, size_t listSize,
+                                      size_t blockSize, const WeakRootVisitor &visitor,
+                                      ProcessNativePointerTaskResult &result)
+{
+    for (size_t begin = nextIndex.fetch_add(blockSize, std::memory_order_relaxed); begin < listSize;
+         begin = nextIndex.fetch_add(blockSize, std::memory_order_relaxed)) {
+        ProcessNativePointerRange(list, begin, std::min(begin + blockSize, listSize), visitor, result);
+    }
+}
+
+void Heap::BuildDeadNativePointerCallbacks(const ProcessNativePointerTaskResult &result,
+                                           LocalCCNativePointerCallbackBucket &bucket)
+{
+    bucket.Reset();
+    size_t count = result.deadObjects.size();
+    if (count == 0) {
+        return;
+    }
+    if (count > std::numeric_limits<size_t>::max() / sizeof(LocalCCNativePointerCallbackData)) {
+        LOG_ECMA_MEM(FATAL) << "Native pointer callback allocation size overflow, count: " << count;
+        UNREACHABLE();
+    }
+
+    bucket.callbacks.reset(new LocalCCNativePointerCallbackData[count]);
+    bucket.size = count;
+    auto *callbacks = bucket.callbacks.get();
+    for (size_t index = 0; index < count; index++) {
+        JSNativePointer *object = result.deadObjects[index];
+        callbacks[index] = LocalCCNativePointerCallbackData {
+            object->GetDeleter(),
+            object->GetExternalPointer(),
+            object->GetData()
+        };
+    }
+}
+
+void Heap::CollectDeadIndexes(const std::vector<ProcessNativePointerTaskResult> &results, size_t deadCount,
+                              std::vector<size_t> &deadIndexes)
+{
+    deadIndexes.reserve(deadCount);
+    for (const auto &result : results) {
+        deadIndexes.insert(deadIndexes.end(), result.deadIndexes.begin(), result.deadIndexes.end());
+    }
+}
+
+void Heap::MarkDeadIndexes(const std::vector<ProcessNativePointerTaskResult> &results, std::vector<uint8_t> &deadFlags)
+{
+    for (const auto &result : results) {
+        for (size_t deadIndex : result.deadIndexes) {
+            deadFlags[deadIndex] = 1;
+        }
+    }
+}
+
+void Heap::CompactNativePointerListInOrder(NativePointerList &list, const std::vector<uint8_t> &deadFlags)
+{
+    size_t writeIndex = 0;
+    for (size_t readIndex = 0; readIndex < list.size(); readIndex++) {
+        if (deadFlags[readIndex] != 0) {
+            continue;
+        }
+        if (writeIndex != readIndex) {
+            list[writeIndex] = list[readIndex];
+        }
+        writeIndex++;
+    }
+    list.resize(writeIndex);
+}
+
+void Heap::CompactNativePointerListUnordered(NativePointerList &list, const std::vector<size_t> &deadIndexes)
+{
+    size_t newSize = list.size();
+    size_t deadIndexPos = deadIndexes.size();
+    while (deadIndexPos > 0) {
+        size_t deadIndex = deadIndexes[--deadIndexPos];
+        if (deadIndex >= newSize) {
+            continue;
+        }
+        while (newSize > 0 && deadIndexPos > 0 && deadIndexes[deadIndexPos - 1] == newSize - 1) {
+            deadIndexPos--;
+            newSize--;
+        }
+        if (deadIndex >= newSize) {
+            continue;
+        }
+        newSize--;
+        if (deadIndex != newSize) {
+            list[deadIndex] = list[newSize];
+        }
+    }
+    list.resize(newSize);
+}
+
+void Heap::CompactNativePointerList(NativePointerList &list,
+                                    const std::vector<ProcessNativePointerTaskResult> &results, size_t deadCount)
+{
+    constexpr size_t UNORDERED_COMPACT_DEAD_RATIO = 4;
+    if (deadCount * UNORDERED_COMPACT_DEAD_RATIO <= list.size()) {
+        std::vector<size_t> deadIndexes;
+        CollectDeadIndexes(results, deadCount, deadIndexes);
+        std::sort(deadIndexes.begin(), deadIndexes.end());
+        CompactNativePointerListUnordered(list, deadIndexes);
+    } else {
+        std::vector<uint8_t> deadFlags(list.size(), 0);
+        MarkDeadIndexes(results, deadFlags);
+        CompactNativePointerListInOrder(list, deadFlags);
+    }
+}
+
+void Heap::ApplyDeadNativeSizeStats(NativeAreaAllocator *allocator,
+                                    const std::array<size_t, NATIVE_FLAG_COUNT> &deadNativeSizeByFlag)
+{
+    for (size_t index = 0; index < deadNativeSizeByFlag.size(); index++) {
+        allocator->DecreaseNativeSizeStats(deadNativeSizeByFlag[index], static_cast<NativeFlag>(index));
+    }
+}
+
+size_t Heap::ProcessNativePointerListSerial(NativePointerList &list, const WeakRootVisitor &visitor)
+{
+    if (list.empty()) {
+        return 0;
+    }
+
+    size_t liveBindingSize = 0;
+    auto &asyncNativeCallbacksPack = GetEcmaVM()->GetAsyncNativePointerCallbacksPack();
+    auto iter = list.begin();
+    while (iter != list.end()) {
+        JSNativePointer *object = reinterpret_cast<JSNativePointer *>((*iter).GetTaggedObject());
+        auto fwd = visitor(reinterpret_cast<TaggedObject *>(object));
+        if (fwd == nullptr) {
+            size_t bindingSize = object->GetBindingSize();
+            asyncNativeCallbacksPack.AddCallback(std::make_pair(object->GetDeleter(),
+                std::make_tuple(thread_->GetEnv(), object->GetExternalPointer(), object->GetData())), bindingSize);
+            nativeAreaAllocator_->DecreaseNativeSizeStats(bindingSize, object->GetNativeFlag());
+            SwapBackAndPopNativePointerList(list, iter);
+            continue;
+        }
+        liveBindingSize += JSNativePointer::Cast(fwd)->GetBindingSize();
+        if (fwd != reinterpret_cast<TaggedObject *>(object)) {
+            *iter = JSTaggedValue(fwd);
+        }
+        ++iter;
+    }
+    ShrinkNativePointerListWithFactor(list);
+    return liveBindingSize;
+}
+
+uint32_t Heap::PrepareConcurrentNativePointerTasksForLocalCC()
+{
+    ASSERT(localCCConcurrentNativePointerProcessing_);
+    ASSERT(localCCConcurrentNativePointerTaskResults_.empty());
+    localCCConcurrentNativePointerSnapshotSize_ = localCCConcurrentNativePointerList_.size();
+    localCCConcurrentNativePointerNextIndex_.store(0, std::memory_order_relaxed);
+
+    uint32_t taskCount = CalculateProcessReferencesTaskCount(localCCConcurrentNativePointerSnapshotSize_);
+    ASSERT(taskCount > 0);
+    localCCConcurrentNativePointerTaskResults_.resize(taskCount);
+    if (localCCConcurrentNativePointerSnapshotSize_ == 0) {
+        localCCConcurrentNativePointerBlockSize_ = 1;
+        return taskCount;
+    }
+
+    auto &localCCCallbacks = GetEcmaVM()->GetLocalCCConcurrentNativePointerCallbacks();
+    ASSERT(localCCCallbacks.empty());
+    localCCCallbacks.resize(taskCount);
+    size_t chunkSize = (localCCConcurrentNativePointerSnapshotSize_ + taskCount - 1) / taskCount;
+    for (auto &result : localCCConcurrentNativePointerTaskResults_) {
+        result.deadIndexes.reserve(chunkSize);
+        result.deadObjects.reserve(chunkSize);
+    }
+    constexpr size_t PROCESS_REFERENCES_BLOCK_SIZE = 4096;
+    localCCConcurrentNativePointerBlockSize_ = std::min(PROCESS_REFERENCES_BLOCK_SIZE, chunkSize);
+    return taskCount;
+}
+
+void Heap::ProcessConcurrentNativePointerTaskForLocalCC(ConcurrentCopyGC *localCCGC, uint32_t threadIndex,
+                                                        uint32_t taskIndex)
+{
+    ASSERT(threadIndex != MAIN_THREAD_INDEX);
+    ASSERT(taskIndex < localCCConcurrentNativePointerTaskResults_.size());
+    if (localCCConcurrentNativePointerSnapshotSize_ == 0) {
+        return;
+    }
+
+    auto &localCCCallbacks = GetEcmaVM()->GetLocalCCConcurrentNativePointerCallbacks();
+    ASSERT(localCCCallbacks.size() == localCCConcurrentNativePointerTaskResults_.size());
+    auto allocator = localCCGC->GetTlabAllocator(threadIndex);
+    allocator->Initialize();
+    {
+        CCEvacuator evacuator(this, allocator);
+        ProcessNativePointerBlocks(localCCConcurrentNativePointerList_,
+            localCCConcurrentNativePointerNextIndex_, localCCConcurrentNativePointerSnapshotSize_,
+            localCCConcurrentNativePointerBlockSize_, ConcurrentCopyGC::CreateUpdateWeakVisitor(&evacuator),
+            localCCConcurrentNativePointerTaskResults_[taskIndex]);
+        BuildDeadNativePointerCallbacks(localCCConcurrentNativePointerTaskResults_[taskIndex],
+                                        localCCCallbacks[taskIndex]);
+    }
+    allocator->Finalize();
+}
+
+void Heap::MergeConcurrentNativePointerTaskResultsForLocalCC(uint32_t threadIndex)
+{
+    NativePointerList &list = localCCConcurrentNativePointerList_;
+    size_t listSize = localCCConcurrentNativePointerSnapshotSize_;
+    ASSERT(!localCCConcurrentNativePointerTaskResults_.empty());
+    ASSERT(list.size() == listSize);
+    ASSERT(localCCConcurrentNativePointerNextIndex_.load(std::memory_order_relaxed) >= listSize);
+    size_t liveBindingSize = 0;
+    size_t deadCount = 0;
+    std::array<size_t, NATIVE_FLAG_COUNT> deadNativeSizeByFlag {};
+    for (const auto &result : localCCConcurrentNativePointerTaskResults_) {
+        liveBindingSize += result.liveBindingSize;
+        deadCount += result.deadIndexes.size();
+        for (size_t index = 0; index < deadNativeSizeByFlag.size(); index++) {
+            deadNativeSizeByFlag[index] += result.deadNativeSizeByFlag[index];
+        }
+    }
+
+    if (deadCount > 0) {
+        CompactNativePointerList(list, localCCConcurrentNativePointerTaskResults_, deadCount);
+    }
+
+    localCCConcurrentNativePointerLiveBindingSize_ = liveBindingSize;
+    localCCDeadNativeSizeByFlag_ = deadNativeSizeByFlag;
+    localCCConcurrentNativePointerTaskResults_.clear();
+    localCCConcurrentNativePointerNextIndex_.store(0, std::memory_order_relaxed);
+    localCCConcurrentNativePointerSnapshotSize_ = 0;
+    localCCConcurrentNativePointerBlockSize_ = 0;
+}
+
+uint32_t Heap::CalculateProcessReferencesTaskCount(size_t itemCount) const
+{
+    constexpr size_t PROCESS_REFERENCES_MIN_ITEMS_PER_TASK = 8192;
+    if (itemCount < PROCESS_REFERENCES_MIN_ITEMS_PER_TASK) {
+        return 1;
+    }
+    uint32_t taskpoolThreadCount = common::Taskpool::GetCurrentTaskpool()->GetTotalThreadNum();
+    uint32_t maxTaskCount = std::min(GetMaxEvacuateTaskCount(), taskpoolThreadCount);
+    uint32_t taskCountBySize = static_cast<uint32_t>((itemCount + PROCESS_REFERENCES_MIN_ITEMS_PER_TASK - 1) /
+        PROCESS_REFERENCES_MIN_ITEMS_PER_TASK);
+    return std::max(1U, std::min(maxTaskCount, taskCountBySize));
+}
+
+void Heap::ProcessReferencesForLocalCC(const WeakRootVisitor &visitor)
+{
+    if (!IsYoungGC()) {
+        ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK,
+            ("ProcessReferencesNum:" + std::to_string(nativePointerList_.size())
+            + ";ConcurrentNum:" + std::to_string(concurrentNativePointerList_.size())).c_str(), "");
+
+        ASSERT(!localCCConcurrentNativePointerProcessing_);
+        localCCNativeBindingSizeBeforeGC_ = nativeBindingSize_;
+        localCCNativePointerLiveBindingSize_ = ProcessNativePointerListSerial(nativePointerList_, visitor);
+        ASSERT(localCCConcurrentNativePointerList_.empty());
+        concurrentNativePointerList_.swap(localCCConcurrentNativePointerList_);
+        localCCConcurrentNativePointerLiveBindingSize_ = 0;
+        localCCDeadNativeSizeByFlag_.fill(0);
+        localCCNativePointerCallbackEnv_ = thread_->GetEnv();
+        localCCConcurrentNativePointerProcessing_ = true;
+    }
+}
+
+void Heap::FinalizeConcurrentNativePointerListForLocalCC()
+{
+    if (!localCCConcurrentNativePointerProcessing_) {
+        return;
+    }
+
+    NativePointerList &snapshot = localCCConcurrentNativePointerList_;
+    size_t survivorCount = snapshot.size();
+    size_t registeredDuringCopyCount = concurrentNativePointerList_.size();
+    if (survivorCount != 0) {
+        if (registeredDuringCopyCount == 0) {
+            concurrentNativePointerList_.swap(snapshot);
+        } else {
+            ASSERT(registeredDuringCopyCount <= snapshot.max_size() - survivorCount);
+            size_t requiredCapacity = survivorCount + registeredDuringCopyCount;
+            if (requiredCapacity > snapshot.capacity()) {
+                snapshot.reserve(requiredCapacity);
+            }
+            snapshot.insert(snapshot.end(), concurrentNativePointerList_.begin(), concurrentNativePointerList_.end());
+            concurrentNativePointerList_.clear();
+            concurrentNativePointerList_.swap(snapshot);
+            ShrinkNativePointerListWithFactor(concurrentNativePointerList_);
+        }
+    }
+    ASSERT(snapshot.empty());
+
+    size_t liveBindingSize = localCCNativePointerLiveBindingSize_ +
+        localCCConcurrentNativePointerLiveBindingSize_;
+    size_t rebuiltNativeBindingSize = liveBindingSize;
+    if (nativeBindingSize_ >= localCCNativeBindingSizeBeforeGC_) {
+        rebuiltNativeBindingSize += nativeBindingSize_ - localCCNativeBindingSizeBeforeGC_;
+    } else {
+        size_t removedDuringCopy = localCCNativeBindingSizeBeforeGC_ - nativeBindingSize_;
+        if (removedDuringCopy >= rebuiltNativeBindingSize) {
+            rebuiltNativeBindingSize = 0;
+        } else {
+            rebuiltNativeBindingSize -= removedDuringCopy;
+        }
+    }
+    ResetNativeBindingSize();
+    IncreaseNativeBindingSize(rebuiltNativeBindingSize);
+    nativeBindingSizeAfterLastGC_ = liveBindingSize;
+
+    std::array<size_t, NATIVE_FLAG_COUNT> deadNativeSizeByFlag = localCCDeadNativeSizeByFlag_;
+    localCCNativePointerLiveBindingSize_ = 0;
+    localCCConcurrentNativePointerLiveBindingSize_ = 0;
+    localCCNativeBindingSizeBeforeGC_ = 0;
+    localCCDeadNativeSizeByFlag_.fill(0);
+    localCCConcurrentNativePointerProcessing_ = false;
+
+    ApplyDeadNativeSizeStats(nativeAreaAllocator_, deadNativeSizeByFlag);
+    RecomputeLimits();
+}
+
+std::unique_ptr<common::Task> Heap::PrepareLocalCCCallback()
+{
+    auto &localCCCallbacks = this->GetEcmaVM()->GetLocalCCConcurrentNativePointerCallbacks();
+    void *callbackEnv = localCCNativePointerCallbackEnv_;
+    localCCNativePointerCallbackEnv_ = nullptr;
+    if (localCCCallbacks.empty()) {
+        return nullptr;
+    }
+    bool hasCallbacks = false;
+    for (const auto &callbacks : localCCCallbacks) {
+        if (!callbacks.Empty()) {
+            hasCallbacks = true;
+            break;
+        }
+    }
+    if (!hasCallbacks) {
+        localCCCallbacks.clear();
+        return nullptr;
+    }
+    {
+        LockHolder lock(localCCNativePointerCallbackMutex_);
+        runningLocalCCNativePointerCallbackTasks_++;
+    }
+    return std::make_unique<LocalCCDeleteCallbackTask>(
+        thread_->GetThreadId(), this, localCCCallbacks, callbackEnv);
+}
+
+void Heap::WaitLocalCCNativePointerCallbacks()
+{
+    LockHolder lock(localCCNativePointerCallbackMutex_);
+    while (runningLocalCCNativePointerCallbackTasks_ > 0) {
+        localCCNativePointerCallbackCV_.Wait(&localCCNativePointerCallbackMutex_);
+    }
+}
+
+void Heap::NotifyLocalCCNativePointerCallbacksFinished()
+{
+    LockHolder lock(localCCNativePointerCallbackMutex_);
+    ASSERT(runningLocalCCNativePointerCallbackTasks_ > 0);
+    runningLocalCCNativePointerCallbackTasks_--;
+    if (runningLocalCCNativePointerCallbackTasks_ == 0) {
+        localCCNativePointerCallbackCV_.SignalAll();
+    }
+}
+
 void Heap::CleanCallback()
 {
     auto &concurrentCallbacks = this->GetEcmaVM()->GetConcurrentNativePointerCallbacks();
@@ -3463,6 +3898,30 @@ bool Heap::DeleteCallbackTask::Run([[maybe_unused]] uint32_t threadIndex)
                 std::get<1>(iter.second), std::get<2>(iter.second)); // 2 is the param.
         }
     }
+    return true;
+}
+
+Heap::LocalCCDeleteCallbackTask::~LocalCCDeleteCallbackTask()
+{
+    if (heap_ != nullptr) {
+        heap_->NotifyLocalCCNativePointerCallbacksFinished();
+    }
+}
+
+bool Heap::LocalCCDeleteCallbackTask::Run([[maybe_unused]] uint32_t threadIndex)
+{
+    for (auto &bucket : nativePointerCallbackBuckets_) {
+        LocalCCNativePointerCallbackData *callbacks = bucket.callbacks.get();
+        for (size_t index = 0; index < bucket.size; index++) {
+            auto &callbackData = callbacks[index];
+            if (callbackData.callback != nullptr) {
+                callbackData.callback(env_, callbackData.pointer, callbackData.data);
+            }
+        }
+    }
+    Heap *heap = heap_;
+    heap_ = nullptr;
+    heap->NotifyLocalCCNativePointerCallbacksFinished();
     return true;
 }
 

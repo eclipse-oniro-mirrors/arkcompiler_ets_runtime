@@ -16,6 +16,7 @@
 #ifndef ECMASCRIPT_MEM_LOCAL_CMC_CONCURRENT_COPY_GC_H
 #define ECMASCRIPT_MEM_LOCAL_CMC_CONCURRENT_COPY_GC_H
 
+#include "ecmascript/base/config.h"
 #include "ecmascript/mem/cms_mem/slot_allocator-inl.h"
 #include "ecmascript/mem/heap.h"
 #include "ecmascript/mem/tlab_allocator.h"
@@ -36,14 +37,26 @@ public:
     }
     void HandleUpdateFinished();
     PUBLIC_API void WaitFinished();
+    static WeakRootVisitor CreateUpdateWeakVisitor(CCEvacuator *evacuator);
 
 private:
     // Coordinate this collector's copy lifetime with the SharedGC LocalCC drain.
     void StartLocalCCCopy();
     void ProcessWeakReference();
+    void ProcessRecordWeakReferenceInParallel(uint32_t totalThreadCount);
     void Sweep();
     void InitializeCopyPhase();
+    uint32_t CalculateConcurrentRootTaskCount() const;
     void UpdateRoot();
+    void PostUpdateConcurrentRootsTask();
+    void StartConcurrentNativePointerTasks(uint32_t coordinatorThreadIndex);
+    void ProcessConcurrentNativePointerTask(uint32_t threadIndex, uint32_t taskIndex);
+    void HandleConcurrentNativePointerTaskFinished(uint32_t threadIndex);
+    void StartConcurrentRootTasks(uint32_t coordinatorThreadIndex);
+    void ProcessConcurrentRootTask(uint32_t threadIndex);
+    void HandleConcurrentRootTaskFinished(uint32_t threadIndex);
+    void PostLocalCCCallback();
+    void UpdateConcurrentRoots(uint32_t coordinatorThreadIndex);
     void ConcurrentCopy();
     void RunUpdatePhase();
     void Finish();
@@ -72,6 +85,10 @@ private:
     std::array<CCTlabAllocator, common::MAX_TASKPOOL_THREAD_NUM + 1> tlabAllocators_;
 #endif
     std::atomic<size_t> runningTaskCount_ {0};
+    std::atomic<size_t> runningNativePointerTaskCount_ {0};
+    std::atomic<size_t> runningConcurrentRootTaskCount_ {0};
+    uint32_t concurrentRootTaskCount_ {0};
+    std::unique_ptr<common::Task> localCCCallbackTask_;
     Mutex waitMutex_;
     ConditionVariable waitCV_;
 
@@ -79,6 +96,51 @@ private:
     std::atomic<size_t> taskIter_ {0};
     friend class Heap;
     friend class ConcurrentCopyTask;
+    friend class ConcurrentCopyNativePointerTask;
+    friend class ConcurrentCopyModuleRootTask;
+    friend class ConcurrentCopyUpdateConcurrentRootsTask;
+    friend class ConcurrentCopyUpdateWeakReferenceTask;
+};
+
+class ConcurrentCopyUpdateConcurrentRootsTask : public common::Task {
+public:
+    ConcurrentCopyUpdateConcurrentRootsTask(int32_t id, ConcurrentCopyGC *cc) : Task(id), cc_(cc) {}
+    ~ConcurrentCopyUpdateConcurrentRootsTask() override = default;
+    bool Run(uint32_t threadIndex) override;
+
+    NO_COPY_SEMANTIC(ConcurrentCopyUpdateConcurrentRootsTask);
+    NO_MOVE_SEMANTIC(ConcurrentCopyUpdateConcurrentRootsTask);
+
+private:
+    ConcurrentCopyGC *cc_ {nullptr};
+};
+
+class ConcurrentCopyNativePointerTask : public common::Task {
+public:
+    ConcurrentCopyNativePointerTask(int32_t id, ConcurrentCopyGC *cc, uint32_t taskIndex)
+        : Task(id), cc_(cc), taskIndex_(taskIndex) {}
+    ~ConcurrentCopyNativePointerTask() override = default;
+    bool Run(uint32_t threadIndex) override;
+
+    NO_COPY_SEMANTIC(ConcurrentCopyNativePointerTask);
+    NO_MOVE_SEMANTIC(ConcurrentCopyNativePointerTask);
+
+private:
+    ConcurrentCopyGC *cc_ {nullptr};
+    uint32_t taskIndex_ {0};
+};
+
+class ConcurrentCopyModuleRootTask : public common::Task {
+public:
+    ConcurrentCopyModuleRootTask(int32_t id, ConcurrentCopyGC *cc) : Task(id), cc_(cc) {}
+    ~ConcurrentCopyModuleRootTask() override = default;
+    bool Run(uint32_t threadIndex) override;
+
+    NO_COPY_SEMANTIC(ConcurrentCopyModuleRootTask);
+    NO_MOVE_SEMANTIC(ConcurrentCopyModuleRootTask);
+
+private:
+    ConcurrentCopyGC *cc_ {nullptr};
 };
 
 class ConcurrentCopyTask : public common::Task {
@@ -100,6 +162,23 @@ private:
     std::atomic<size_t> &runningTaskCount_;
     ConcurrentCopyGC *cc_ {nullptr};
     size_t totalSize_ {0};
+};
+
+class ConcurrentCopyUpdateWeakReferenceTask : public common::Task {
+public:
+    ConcurrentCopyUpdateWeakReferenceTask(int32_t id, ConcurrentCopyGC *cc, uint32_t weakReferenceThreadIndex,
+                                          common::TaskPackMonitor *monitor)
+        : Task(id), cc_(cc), weakReferenceThreadIndex_(weakReferenceThreadIndex), monitor_(monitor) {}
+    ~ConcurrentCopyUpdateWeakReferenceTask() override = default;
+    bool Run(uint32_t threadIndex) override;
+
+    NO_COPY_SEMANTIC(ConcurrentCopyUpdateWeakReferenceTask);
+    NO_MOVE_SEMANTIC(ConcurrentCopyUpdateWeakReferenceTask);
+
+private:
+    ConcurrentCopyGC *cc_ {nullptr};
+    uint32_t weakReferenceThreadIndex_ {0};
+    common::TaskPackMonitor *monitor_ {nullptr};
 };
 }  // namespace ecmascript
 }  // namespace panda

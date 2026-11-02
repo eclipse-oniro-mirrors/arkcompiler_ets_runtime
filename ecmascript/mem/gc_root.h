@@ -16,7 +16,12 @@
 #ifndef ECMASCRIPT_GC_ROOT_H
 #define ECMASCRIPT_GC_ROOT_H
 
+#include "ecmascript/base/config.h"
+
+#include <atomic>
+
 #include "ecmascript/js_tagged_value_wrapper.h"
+#include "ecmascript/js_thread.h"
 #include "ecmascript/mem/barriers.h"
 #include "ecmascript/mem/slots.h"
 
@@ -43,6 +48,13 @@ public:
         if constexpr (needWriteBarrier) {
             if (g_isEnableCMCGC) {
                 common::BaseRuntime::WriteRoot(reinterpret_cast<void *>(objPtr_.GetRawData()));
+            } else {
+#if ENABLE_LOCALCC_OPTIMIZATION
+                const JSThread *owner = JSThread::GetCurrent();
+                if (LIKELY(owner != nullptr) && UNLIKELY(owner->NeedReadBarrier())) {
+                    objPtr_ = JSTaggedValue(Barriers::NormalizeGCRoot(owner, objPtr_.GetRawData()));
+                }
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
             }
         }
     }
@@ -81,6 +93,48 @@ public:
     }
 
     /**
+     * Uses a container-owned fast predicate to avoid checking the thread-wide
+     * barrier state outside that container's concurrent root scan.
+     */
+    JSTaggedValue Read(std::atomic<bool>& concurrentRootScanCheckRequired)
+    {
+        if (g_isEnableCMCGC) {
+            return JSTaggedValue(
+                reinterpret_cast<JSTaggedType>(common::BaseRuntime::ReadBarrier(reinterpret_cast<void *>(&objPtr_))));
+        }
+        if (UNLIKELY(concurrentRootScanCheckRequired.load(std::memory_order_relaxed))) {
+            const JSThread *owner = JSThread::GetCurrent();
+            if (LIKELY(owner != nullptr)) {
+                return JSTaggedValue(
+                    Barriers::ReadBarrierForGCRoot(owner, reinterpret_cast<uintptr_t>(&objPtr_)));
+            }
+        }
+        return objPtr_;
+    }
+
+    /**
+     * Atomic access is not necessarily required for correctness against data race on supported 64-bit targets.
+     * The stored root is a naturally aligned 8-byte JSTaggedType in normal memory, and a single 64-bit load or store
+     * does not tear on x86-64 or AArch64. Keep atomic access for 32-bit compatibility, where a 64-bit access may be
+     * split and torn.
+     *
+     * With the current Clang -O2 64-bit release builds, relaxed atomic accesses are lowered to
+     * ordinary mov instructions on x86-64 and ldr/str instructions on AArch64. They add no fences, locks, exclusive
+     * loops, or other atomic-maintenance overhead compared with direct accesses.
+     */
+    JSTaggedValue AtomicLoad() const
+    {
+        auto field = reinterpret_cast<const volatile std::atomic<JSTaggedType> *>(&objPtr_);
+        return JSTaggedValue(field->load(std::memory_order_relaxed));
+    }
+
+    void AtomicStore(JSTaggedValue value)
+    {
+        auto field = reinterpret_cast<volatile std::atomic<JSTaggedType> *>(&objPtr_);
+        field->store(value.GetRawData(), std::memory_order_relaxed);
+    }
+
+    /**
      * Allows GC to visit this root during root scanning phases.
      * Such as enumeration phase and fowarding phase
      */
@@ -106,7 +160,11 @@ public:
     public:
         size_t operator()(const GCRoot &root) const
         {
+#if ENABLE_LOCALCC_OPTIMIZATION
+            return std::hash<JSTaggedType>()(root.AtomicLoad().GetRawData());
+#else
             return std::hash<JSTaggedType>()(root.objPtr_.GetRawData());
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
         }
 
         template <typename T>
@@ -117,6 +175,10 @@ public:
     };
 
 private:
+#if ENABLE_LOCALCC_OPTIMIZATION
+    static_assert(sizeof(JSTaggedValue) == sizeof(JSTaggedType));
+    static_assert(alignof(JSTaggedValue) >= alignof(std::atomic<JSTaggedType>));
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
     JSTaggedValue objPtr_;
 };
 

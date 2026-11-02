@@ -1844,7 +1844,14 @@ void Heap::ClearNativePointerList()
     for (auto iter : nativePointerList_) {
         reinterpret_cast<JSNativePointer *>(iter.GetTaggedObject())->Destroy(thread_);
     }
+#if ENABLE_LOCALCC_OPTIMIZATION
+    NativePointerList concurrentNativePointers;
+    ASSERT(localCCConcurrentNativePointerList_.empty());
+    concurrentNativePointerList_.swap(concurrentNativePointers);
+    for (auto iter : concurrentNativePointers) {
+#else
     for (auto iter : concurrentNativePointerList_) {
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
         reinterpret_cast<JSNativePointer *>(iter.GetTaggedObject())->Destroy(thread_);
     }
     nativePointerList_.clear();

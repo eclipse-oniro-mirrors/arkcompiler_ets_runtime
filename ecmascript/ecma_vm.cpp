@@ -603,6 +603,10 @@ EcmaVM::~EcmaVM()
         UNREACHABLE();
     }
 #endif
+#if ENABLE_LOCALCC_OPTIMIZATION
+    heap_->WaitAndHandleCCFinished();
+    heap_->WaitLocalCCNativePointerCallbacks();
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
     initialized_ = false;
 #if defined(ECMASCRIPT_SUPPORT_CPUPROFILER)
     if (profiler_ != nullptr) {
@@ -1054,6 +1058,14 @@ void EcmaVM::ProcessReferences(const WeakRootVisitor& visitor)
 #endif
 }
 
+void EcmaVM::ProcessReferencesForLocalCC(const WeakRootVisitor &visitor)
+{
+    heap_->ProcessReferencesForLocalCC(visitor);
+#ifndef EXCLUDE_PGO
+    GetPGOProfiler()->ProcessReferences(visitor);
+#endif
+}
+
 void EcmaVM::ProcessSnapShotEnv(const WeakRootVisitor& visitor)
 {
     GetSnapshotEnv()->ProcessSnapShotEnv(visitor);
@@ -1129,6 +1141,32 @@ void EcmaVM::IterateConcurrentRoots(RootVisitor &v)
 {
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "IterateConcurrentRoots", "");
     moduleManagers_.Iterate(v);
+}
+
+uint32_t EcmaVM::PrepareConcurrentRootScan(uint32_t maxTaskCount)
+{
+    ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "PrepareConcurrentRootScan", "");
+    return moduleManagers_.PrepareConcurrentRootScan(maxTaskCount);
+}
+
+void EcmaVM::BeginConcurrentRootScan()
+{
+    moduleManagers_.BeginConcurrentRootScan();
+}
+
+void EcmaVM::ProcessConcurrentRootScan(uint32_t threadIndex, uint32_t taskCount, const ModuleRootVisitor &visitor)
+{
+    moduleManagers_.ProcessConcurrentRootScan(threadIndex, taskCount, visitor);
+}
+
+void EcmaVM::ProcessConcurrentSendableRootScan(uint32_t threadIndex, const ModuleRootVisitor &visitor)
+{
+    moduleManagers_.ProcessConcurrentSendableRootScan(threadIndex, visitor);
+}
+
+void EcmaVM::FinishConcurrentRootScan()
+{
+    moduleManagers_.FinishConcurrentRootScan();
 }
 
 void EcmaVM::Iterate(RootVisitor &v)
@@ -2989,6 +3027,9 @@ void EcmaVM::NotifyANR()
 void EcmaVM::ModuleManagers::Iterate(RootVisitor &v)
 {
     LockHolder lock(CMCGCMutex_);
+#if ENABLE_LOCALCC_OPTIMIZATION
+    WaitForConcurrentRootScanCheckRequired();
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
     for (ModuleManager *moduleManager : moduleManagersVec_) {
         moduleManager->Iterate(v);
     }
@@ -3002,16 +3043,81 @@ void EcmaVM::ModuleManagers::ProcessPendingRemovalLocalModules(const WeakRootVis
     }
 }
 
+void EcmaVM::ModuleManagers::WaitForConcurrentRootScanCheckRequired()
+{
+    while (concurrentRootScanCheckRequired_.load(std::memory_order_relaxed)) {
+        concurrentRootScanCV_.Wait(&CMCGCMutex_);
+    }
+}
+
+uint32_t EcmaVM::ModuleManagers::PrepareConcurrentRootScan(uint32_t maxTaskCount)
+{
+    LockHolder lock(CMCGCMutex_);
+    ASSERT(concurrentRootScanCheckRequired_.load(std::memory_order_relaxed));
+    uint32_t taskCount = 0;
+    for (ModuleManager *moduleManager : moduleManagersVec_) {
+        taskCount = std::max(taskCount, moduleManager->PrepareConcurrentRootScan(maxTaskCount));
+    }
+    concurrentRootScanActive_ = true;
+    return taskCount;
+}
+
+void EcmaVM::ModuleManagers::BeginConcurrentRootScan()
+{
+    LockHolder lock(CMCGCMutex_);
+    WaitForConcurrentRootScanCheckRequired();
+    ASSERT(!concurrentRootScanActive_);
+    ASSERT(!concurrentRootScanCheckRequired_.load(std::memory_order_relaxed));
+    concurrentRootScanCheckRequired_.store(true, std::memory_order_relaxed);
+    for (ModuleManager *moduleManager : moduleManagersVec_) {
+        moduleManager->BeginConcurrentRootScan();
+    }
+}
+
+void EcmaVM::ModuleManagers::ProcessConcurrentRootScan(uint32_t threadIndex, uint32_t taskCount,
+    const ModuleRootVisitor &visitor)
+{
+    for (ModuleManager *moduleManager : moduleManagersVec_) {
+        moduleManager->ProcessConcurrentRootScan(threadIndex, taskCount, visitor);
+    }
+}
+
+void EcmaVM::ModuleManagers::ProcessConcurrentSendableRootScan(uint32_t threadIndex, const ModuleRootVisitor &visitor)
+{
+    for (ModuleManager *moduleManager : moduleManagersVec_) {
+        moduleManager->ProcessConcurrentSendableRootScan(threadIndex, visitor);
+    }
+}
+
+void EcmaVM::ModuleManagers::FinishConcurrentRootScan()
+{
+    for (ModuleManager *moduleManager : moduleManagersVec_) {
+        moduleManager->FinishConcurrentRootScan();
+    }
+    LockHolder lock(CMCGCMutex_);
+    ASSERT(concurrentRootScanActive_);
+    ASSERT(concurrentRootScanCheckRequired_.load(std::memory_order_relaxed));
+    concurrentRootScanActive_ = false;
+    concurrentRootScanCheckRequired_.store(false, std::memory_order_relaxed);
+    concurrentRootScanCV_.SignalAll();
+}
+
 template <typename T>
 void EcmaVM::ModuleManagers::PushBack(T v)
 {
     LockHolder lock(CMCGCMutex_);
+#if ENABLE_LOCALCC_OPTIMIZATION
+    WaitForConcurrentRootScanCheckRequired();
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
     moduleManagersVec_.push_back(v);
 }
 
 void EcmaVM::ModuleManagers::DestroyAllNativeObj()
 {
     LockHolder lock(CMCGCMutex_);
+#if ENABLE_LOCALCC_OPTIMIZATION
+    WaitForConcurrentRootScanCheckRequired();
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
     for (auto &moduleManager : moduleManagersVec_) {
         moduleManager->NativeObjDestroy();
     }
@@ -3020,6 +3126,9 @@ void EcmaVM::ModuleManagers::DestroyAllNativeObj()
 void EcmaVM::ModuleManagers::Clear()
 {
     LockHolder lock(CMCGCMutex_);
+#if ENABLE_LOCALCC_OPTIMIZATION
+    WaitForConcurrentRootScanCheckRequired();
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
     for (auto &moduleManager : moduleManagersVec_) {
         delete moduleManager;
         moduleManager = nullptr;
