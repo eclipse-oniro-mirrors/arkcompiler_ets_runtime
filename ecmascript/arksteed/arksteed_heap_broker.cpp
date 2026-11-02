@@ -364,6 +364,23 @@ bool ArkSteedHeapBroker::CanLoadExternalModuleVar(int32_t index, bool installDep
     return dependencies != nullptr && dependencies->DependOnNotHotReloadPatchMain(hostThread);
 }
 
+bool ArkSteedHeapBroker::CanLoadLocalModuleVar() const
+{
+    NoGCScope scope(this);
+    auto *hostThread = env_->GetHostThread();
+    auto *function = *env_->GetJsFunction();
+    //@ref panda::ecmascript::ModuleValueAccessor::GetModuleValueInner()
+    JSTaggedValue module = function->GetModule(hostThread);
+    if (SourceTextModule::IsSendableFunctionModule(module)) {
+        return false;
+    }
+    auto *moduleRecord = SourceTextModule::Cast(module.GetTaggedObject());
+    if (!moduleRecord->GetIsNewBcVersion() || moduleRecord->GetNameDictionary(hostThread).IsUndefined()) {
+        return false;
+    }
+    return true;
+}
+
 bool ArkSteedHeapBroker::CanCallFunction(const ArkSteedFunctionRef &ref, uint32_t actualArgc) const
 {
     NoGCScope scope(this);

@@ -4657,8 +4657,12 @@ struct GraphBuilder::BytecodeVisitor {
     void LowerLdLocalModuleVar(const BytecodeInfo *bcInfo)
     {
         ValueVertex *jsFunc = LoadParam(CALL_TARGET_PARAM_INDEX);
-        ValueVertex *index = TaggedConstantFromInt32(GetImmediate<int>(bcInfo, 0));
-        RuntimeCallToAccWithLazyDeopt({index, jsFunc}, RTSTUB_ID(LdLocalModuleVarByIndexOnJSFunc));
+        int32_t index = GetImmediate<int32_t>(bcInfo, 0);
+        if (TryBuildLoadLocalModuleVar(jsFunc, index)) {
+            return;
+        }
+        ValueVertex *taggedIndex = TaggedConstantFromInt32(index);
+        RuntimeCallToAccWithLazyDeopt({taggedIndex, jsFunc}, RTSTUB_ID(LdLocalModuleVarByIndexOnJSFunc));
     }
 
     void LowerStModuleVar(const BytecodeInfo *bcInfo)
@@ -10671,6 +10675,20 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *result =
             self->NewVertex<LoadTaggedElementVertex>(compileInfoFacts_, currentBlock, {dictionary, targetIndex});
         frameState.SetAcc(result);
+        return true;
+    }
+
+    bool TryBuildLoadLocalModuleVar(ValueVertex *jsFunc, int32_t index)
+    {
+        if (!self->pgoContext_.GetBroker()->CanLoadLocalModuleVar()) {
+            return false;
+        }
+        //@ref panda::ecmascript::ModuleValueAccessor::GetModuleValueInner()
+        ValueVertex *module = self->NewVertex<LoadTaggedFieldVertex>(
+            compileInfoFacts_, currentBlock, {jsFunc}, static_cast<int32_t>(JSFunction::ECMA_MODULE_OFFSET));
+        ValueVertex *dictionary = self->NewVertex<LoadTaggedFieldVertex>(
+            compileInfoFacts_, currentBlock, {module}, static_cast<int32_t>(SourceTextModule::NAME_DICTIONARY_OFFSET));
+        frameState.SetAcc(GetValueFromTaggedArray(dictionary, static_cast<uint32_t>(index)));
         return true;
     }
 

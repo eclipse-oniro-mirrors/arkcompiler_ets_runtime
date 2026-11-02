@@ -334,6 +334,7 @@ class ArkSteedHeapBroker {
     bool TryGetKnownConstructInfo(const ArkSteedFunctionRef &ref, KnownConstructInfo *info) const;
     uint32_t GetArgumentsObjectSize() const;
     bool CanLoadExternalModuleVar(int32_t index, bool installDependency) const;
+    bool CanLoadLocalModuleVar() const;
     ArkSteedObjectRef GetBuiltinMethod(uint16_t builtinId, uint32_t globalEnvIndex) const;
     ArkSteedHClassRef GetEmptyObjectHClass(uint32_t *objectSize) const;
     bool TryGetObjectType(const ArkSteedHeapRef &ref, JSType *type, bool *callable = nullptr) const;
