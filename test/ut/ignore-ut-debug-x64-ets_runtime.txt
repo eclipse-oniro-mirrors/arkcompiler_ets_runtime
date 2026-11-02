@@ -7,3 +7,11 @@ obj/arkcompiler/ets_runtime/test/jittest/lazy_deopt_10/lazy_deopt_10
 
 #workitem 44
 obj/arkcompiler/ets_runtime/ecmascript/arksteed/unittests/ArkSteedInitializationIntervalVerifierTest
+
+#workitem 46
+obj/arkcompiler/ets_runtime/ecmascript/arksteed/unittests/ArkSteedDeoptTranslationTest
+obj/arkcompiler/ets_runtime/ecmascript/arksteed/unittests/ArkSteedGraphVerifierTest
+obj/arkcompiler/ets_runtime/ecmascript/arksteed/unittests/ArkSteedHeapRefTest
+
+#workitem 47
+obj/arkcompiler/ets_runtime/ecmascript/module/tests/ModuleTest
