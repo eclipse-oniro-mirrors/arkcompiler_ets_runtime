@@ -357,6 +357,11 @@ void BuiltinsSharedSetStubBuilder::ForEach(GateRef glue, GateRef thisValue,
     BRANCH(TaggedIsJSSharedSet(glue, thisValue), &isSharedSet, slowPath);
     Bind(&isSharedSet);
 
+    Label notClassConstructor(env);
+    GateRef callbackFnHandle = GetCallArg0(numArgs);
+    SlowPathIfClassCtorCallback(glue, callbackFnHandle, &notClassConstructor, slowPath);
+    Bind(&notClassConstructor);
+
     // Step 2: acquire the READ scope
     Label canReadExit(env);
     Label readDoneExit(env);
@@ -387,7 +392,6 @@ void BuiltinsSharedSetStubBuilder::ForEach(GateRef glue, GateRef thisValue,
         // Step 3: callable check — INSIDE the scope in C++; failure throws
         // in-place and the scope release goes through scopeRelease (RAII parity).
         // @ref ForEach: if (!func->IsCallable()) { throw TYPE_ERROR "callback is not callable" }
-        GateRef callbackFnHandle = GetCallArg0(numArgs);
         BRANCH_LIKELY(TaggedIsCallable(glue, callbackFnHandle), &callbackIsCallable, &notCallable);
         Bind(&callbackIsCallable);
         {

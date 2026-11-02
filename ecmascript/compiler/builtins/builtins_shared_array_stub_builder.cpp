@@ -1147,6 +1147,10 @@ void BuiltinsSharedArrayStubBuilder::ForEach(GateRef glue, GateRef thisValue,
     BRANCH_LIKELY(TaggedIsJSSharedArray(glue, thisValue), &isSharedArray, slowPath);
     Bind(&isSharedArray);
 
+    Label notClassConstructor(env);
+    SlowPathIfClassCtorCallback(glue, GetCallArg0(numArgs), &notClassConstructor, slowPath);
+    Bind(&notClassConstructor);
+
     *result = ForEachImpl(glue, thisValue, numArgs);
     Jump(exit);
 }
@@ -1250,6 +1254,10 @@ void BuiltinsSharedArrayStubBuilder::Map(GateRef glue, GateRef thisValue,
 
     CheckSpeciesCreateFastPath(glue, thisValue, &speciesFast, slowPath);
     Bind(&speciesFast);
+
+    Label notClassConstructor(env);
+    SlowPathIfClassCtorCallback(glue, GetCallArg0(numArgs), &notClassConstructor, slowPath);
+    Bind(&notClassConstructor);
 
     *result = MapImpl(glue, thisValue, numArgs);
     Jump(exit);
@@ -1397,6 +1405,10 @@ void BuiltinsSharedArrayStubBuilder::Filter(GateRef glue, GateRef thisValue,
     // Combined receiver + species guard
     CheckSpeciesCreateFastPath(glue, thisValue, &speciesFast, slowPath);
     Bind(&speciesFast);
+
+    Label notClassConstructor(env);
+    SlowPathIfClassCtorCallback(glue, GetCallArg0(numArgs), &notClassConstructor, slowPath);
+    Bind(&notClassConstructor);
 
     *result = FilterImpl(glue, thisValue, numArgs);
     Jump(exit);
@@ -1546,6 +1558,10 @@ void BuiltinsSharedArrayStubBuilder::Reduce(GateRef glue, GateRef thisValue,
     // @ref Reduce: ARRAY_CHECK_SHARED_ARRAY("The reduce method cannot be bound.")
     BRANCH_LIKELY(TaggedIsJSSharedArray(glue, thisValue), &isSArray, slowPath);
     Bind(&isSArray);
+
+    Label notClassConstructor(env);
+    SlowPathIfClassCtorCallback(glue, GetCallArg0(numArgs), &notClassConstructor, slowPath);
+    Bind(&notClassConstructor);
 
     *result = ReduceImpl(glue, thisValue, numArgs);
     Jump(exit);

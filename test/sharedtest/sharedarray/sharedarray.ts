@@ -2510,3 +2510,43 @@ function forEachFamilySubclassAndArgs(): void {
     print("===forEach family subclass and args end===");
 }
 forEachFamilySubclassAndArgs();
+
+// A class-constructor callback must keep the pre-stub C++ behavior: the error
+// message comes from JSFunction::Call ("class constructor cannot call"), and the
+// callback is never invoked for empty containers (no throw).
+function forEachFamilyClassCtorCallback() {
+    print("===forEach family class ctor callback begin===");
+
+    class Cb {
+        constructor() {}
+    }
+
+    const src = new SendableArray<number>(1, 2, 3);
+    const empty = new SendableArray<number>();
+    const one = new SendableArray<number>(7);
+
+    const show = function (tag: string, f: () => any) {
+        try {
+            print(tag + ": no throw, ret=" + f());
+        } catch (e) {
+            print(tag + ": " + e.name + ": " + e.message + " code=" + e.code);
+        }
+    };
+
+    show("ctor forEach", () => src.forEach(Cb));
+    show("ctor forEach empty", () => empty.forEach(Cb));
+    show("ctor map", () => src.map(Cb));
+    show("ctor map empty", () => empty.map(Cb).length);
+    show("ctor filter", () => src.filter(Cb));
+    show("ctor filter empty", () => empty.filter(Cb).length);
+    show("ctor reduce", () => src.reduce(Cb));
+    show("ctor reduce+init", () => src.reduce(Cb, 0));
+    show("ctor reduce 1elem", () => one.reduce(Cb));
+    show("ctor reduce empty+init", () => empty.reduce(Cb, 42));
+
+    show("smi forEach", () => src.forEach(123));
+    show("undefined forEach", () => src.forEach(undefined));
+
+    print("===forEach family class ctor callback end===");
+}
+forEachFamilyClassCtorCallback();

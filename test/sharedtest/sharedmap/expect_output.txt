@@ -328,3 +328,8 @@ submap size: 2
 submap cleared size: 0
 submap has after clear: false
 ===map subclass edge cases end===
+===map forEach class ctor callback begin===
+ctor forEach: TypeError: class constructor cannot call code=undefined
+ctor forEach empty: no throw, ret=undefined
+smi forEach: TypeError: obj is not Callable code=undefined
+===map forEach class ctor callback end===

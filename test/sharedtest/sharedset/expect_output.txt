@@ -113,3 +113,8 @@ subset values: 1;
 subset forEach: 1
 subset cleared size: 0
 ===set subclass edge cases end===
+===set forEach class ctor callback begin===
+ctor forEach: TypeError: class constructor cannot call code=undefined
+ctor forEach empty: no throw, ret=undefined
+smi forEach: TypeError: callback is not callable code=undefined
+===set forEach class ctor callback end===

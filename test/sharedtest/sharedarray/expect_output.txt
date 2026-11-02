@@ -704,3 +704,17 @@ derived filter instanceof: true
 derived reduce sum: 6
 derived reduce unchanged: 1,2,3
 ===forEach family subclass and args end===
+===forEach family class ctor callback begin===
+ctor forEach: TypeError: class constructor cannot call code=undefined
+ctor forEach empty: no throw, ret=undefined
+ctor map: TypeError: class constructor cannot call code=undefined
+ctor map empty: no throw, ret=0
+ctor filter: TypeError: class constructor cannot call code=undefined
+ctor filter empty: no throw, ret=0
+ctor reduce: TypeError: class constructor cannot call code=undefined
+ctor reduce+init: TypeError: class constructor cannot call code=undefined
+ctor reduce 1elem: no throw, ret=7
+ctor reduce empty+init: no throw, ret=42
+smi forEach: TypeError: the callbackfun is not callable. code=undefined
+undefined forEach: TypeError: the callbackfun is not callable. code=undefined
+===forEach family class ctor callback end===

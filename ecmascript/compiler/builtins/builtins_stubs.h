@@ -82,6 +82,8 @@ public:
     GateRef CallSlowPath(GateRef nativeCode, GateRef glue, GateRef globalEnv, GateRef thisValue,
                          GateRef numArgs, GateRef func, GateRef newTarget);
 
+    void SlowPathIfClassCtorCallback(GateRef glue, GateRef callback, Label *notClassConstructor, Label *slowPath);
+
     inline GateRef IsNumberYearMonthDay(GateRef year, GateRef month, GateRef day)
     {
         GateRef condition = BitAnd(TaggedIsNumber(year), TaggedIsNumber(month));

@@ -160,6 +160,22 @@ GateRef BuiltinsStubBuilder::GetCallArg2(GateRef numArg)
     return res;
 }
 
+// Routes a class-constructor callback to the C++ slowPath before entering the
+// fast path. JSCallDispatch throws "class constructor cannot called without 'new'"
+// while the pre-stub C++ baseline JSFunction::Call throws "class constructor cannot call",
+// so falling back keeps the baseline error message for compatibility.
+void BuiltinsStubBuilder::SlowPathIfClassCtorCallback(GateRef glue, GateRef callback,
+    Label *notClassConstructor, Label *slowPath)
+{
+    auto env = GetEnvironment();
+    // Class constructors are always callable heap objects, so only heap values can match:
+    // the hclass load is guarded by TaggedIsHeapObject.
+    Label callbackIsHeapObject(env);
+    BRANCH(TaggedIsHeapObject(callback), &callbackIsHeapObject, notClassConstructor);
+    Bind(&callbackIsHeapObject);
+    BRANCH(IsClassConstructor(glue, callback), slowPath, notClassConstructor);
+}
+
 GateRef BuiltinsStubBuilder::GetGlobalEnvFromFunction(GateRef glue, GateRef func)
 {
     auto env0 = GetEnvironment();

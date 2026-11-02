@@ -360,3 +360,34 @@ function setSubclassEdgeCases(): void {
     print("===set subclass edge cases end===");
 }
 setSubclassEdgeCases();
+
+// A class-constructor callback must keep the pre-stub C++ behavior: the error
+// message comes from JSFunction::Call ("class constructor cannot call"), and the
+// callback is never invoked for an empty set (no throw).
+function forEachClassCtorCallback() {
+    print("===set forEach class ctor callback begin===");
+
+    class Cb {
+        constructor() {}
+    }
+
+    const src = new SendableSet<number>();
+    src.add(1);
+    src.add(2);
+    const empty = new SendableSet<number>();
+
+    const show = function (tag: string, f: () => any) {
+        try {
+            print(tag + ": no throw, ret=" + f());
+        } catch (e) {
+            print(tag + ": " + e.name + ": " + e.message + " code=" + e.code);
+        }
+    };
+
+    show("ctor forEach", () => src.forEach(Cb));
+    show("ctor forEach empty", () => empty.forEach(Cb));
+    show("smi forEach", () => src.forEach(123));
+
+    print("===set forEach class ctor callback end===");
+}
+forEachClassCtorCallback();
