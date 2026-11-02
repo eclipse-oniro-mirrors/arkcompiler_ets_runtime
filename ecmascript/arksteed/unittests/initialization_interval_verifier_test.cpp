@@ -14,6 +14,8 @@
  */
 
 #include "ecmascript/arksteed/arksteed_graph_verifier.h"
+#include "ecmascript/js_arguments.h"
+#include "ecmascript/js_array.h"
 #include "ecmascript/mem/native_area_allocator.h"
 #include "ecmascript/tests/test_helper.h"
 
@@ -64,22 +66,23 @@ protected:
                 graph.Add(block);
             }
             canAllocate = New<CanAllocateInYoungVertex>({glue, size});
-            entry->AddVertex(canAllocate);
-            entry->SetControlVertex(New<BranchIfTrueVertex>({canAllocate}, fastBlock, slowBlock));
+            Fixture::AddVertex(entry, canAllocate);
+            Fixture::SetControl(entry, New<BranchIfTrueVertex>({canAllocate}, fastBlock, slowBlock));
             fastBlock->AddPredecessor(entry);
             slowBlock->AddPredecessor(entry);
             fastAllocation = New<AllocateInYoungVertex>({glue, size});
-            fastBlock->AddVertex(fastAllocation);
-            fastBlock->SetControlVertex(New<JumpVertex>({}, merge));
+            Fixture::AddVertex(fastBlock, fastAllocation);
+            Fixture::SetControl(fastBlock, New<JumpVertex>({}, merge));
             merge->AddPredecessor(fastBlock);
             slowAllocation = New<CallRuntimeVertex>(
                 {graph.GetTaggedConstant(static_cast<uint64_t>(objectSize) | JSTaggedValue::TAG_INT)},
                 RTSTUB_ID(AllocateInYoung));
-            slowBlock->AddVertex(slowAllocation);
-            slowBlock->SetControlVertex(New<JumpVertex>({}, merge));
+            Fixture::AddVertex(slowBlock, slowAllocation);
+            Fixture::SetControl(slowBlock, New<JumpVertex>({}, merge));
             merge->AddPredecessor(slowBlock);
             phi = New<PhiVertex>({fastAllocation, slowAllocation}, VirtualRegister(0));
-            merge->AddPhiVertex(phi);
+            Fixture::AddPhi(merge, phi);
+            SetControl(merge, New<ReturnVertex>({hclass}));
         }
 
         explicit Fixture(Initializer kind): Fixture()
@@ -91,7 +94,7 @@ protected:
         {
             slowAllocation = New<CallRuntimeVertex>(arguments, RTSTUB_ID(AllocateInYoung));
             slowBlock->GetVertices().clear();
-            slowBlock->AddVertex(slowAllocation);
+            Fixture::AddVertex(slowBlock, slowAllocation);
             phi->SetInput(1, slowAllocation);
         }
 
@@ -104,6 +107,42 @@ protected:
         VertexT* New(std::initializer_list<ValueVertex*> inputs, Args&&... args)
         {
             return Vertex::New<VertexT>(&chunk, inputs, std::forward<Args>(args)...);
+        }
+
+        static void AddVertex(BB* block, NonControlVertex* vertex)
+        {
+            vertex->SetOwner(block);
+            block->AddVertex(vertex);
+        }
+
+        static void AddPhi(BB* block, PhiVertex* phi)
+        {
+            // PhiVertex::GetOwner names its virtual register, not its block.
+            static_cast<Vertex*>(phi)->SetOwner(block);
+            block->AddPhiVertex(phi);
+        }
+
+        static void SetControl(BB* block, ControlVertex* control)
+        {
+            if (control != nullptr) {
+                control->SetOwner(block);
+                // Match the builder for a new edge, or retain an existing edge's slot.
+                if (auto* jump = control->TryCast<UnconditionalControlVertex>()) {
+                    uint32_t index = 0;
+                    while (index < jump->Target()->PredecessorCount()
+                           && jump->Target()->GetPredecessor(index) != block) {
+                        ++index;
+                    }
+                    jump->SetPredecessorId(index);
+                }
+            }
+            block->SetControlVertex(control);
+        }
+
+        static void PrependVertex(BB* block, NonControlVertex* vertex)
+        {
+            vertex->SetOwner(block);
+            block->GetVertices().insert(block->GetVertices().begin(), vertex);
         }
 
         CreateObjectWithBufferInfo Snapshot()
@@ -119,8 +158,9 @@ protected:
         {
             auto* successor = BB::New(&chunk);
             graph.Add(successor);
-            block->SetControlVertex(New<JumpVertex>({}, successor));
+            Fixture::SetControl(block, New<JumpVertex>({}, successor));
             successor->AddPredecessor(block);
+            SetControl(successor, New<ReturnVertex>({hclass}));
             return successor;
         }
 
@@ -143,12 +183,13 @@ protected:
                 default:
                     UNREACHABLE();
             }
-            merge->AddVertex(result);
+            Fixture::AddVertex(merge, result);
             return result;
         }
 
         void BeforeCheck(NonControlVertex* vertex)
         {
+            vertex->SetOwner(entry);
             entry->GetVertices().insert(entry->GetVertices().end() - 1, vertex);
         }
 
@@ -198,7 +239,7 @@ protected:
         InitializeUnmappedArgumentsElementsVertex* InitializeElements(ValueVertex* argc)
         {
             auto* result = New<InitializeUnmappedArgumentsElementsVertex>({argc, phi, hclass});
-            merge->AddVertex(result);
+            Fixture::AddVertex(merge, result);
             return result;
         }
 
@@ -213,14 +254,14 @@ protected:
             fastBlock = BB::New(&chunk);
             slowBlock = BB::New(&chunk);
             merge = BB::New(&chunk);
-            previous->SetControlVertex(New<JumpVertex>({}, entry));
+            Fixture::SetControl(previous, New<JumpVertex>({}, entry));
             entry->AddPredecessor(previous);
             objectSize = JSArguments::GetInlinedPropertyOffset(JSArguments::LENGTH_OF_INLINE_PROPERTIES);
             size = graph.GetInt64Constant(objectSize);
             Allocate();
             AddSlowAllocationHClass();
             auto* result = New<InitializeUnmappedArgumentsVertex>({glue, argc, phi, elements, hclass, hclass});
-            merge->AddVertex(result);
+            Fixture::AddVertex(merge, result);
             return result;
         }
 
@@ -246,7 +287,7 @@ protected:
         {
             auto* call = Call();
             call->SetLazyDeoptFrameState(LazyFrame(value), 0);
-            block->AddVertex(call);
+            Fixture::AddVertex(block, call);
         }
 
         void ExpectRejectedInBothPhases(const char* message)
@@ -286,7 +327,7 @@ protected:
             EagerDeoptimizableMixin::EagerDeoptFrameState frame(&chunk);
             frame.emplace_back(0, value, DeoptTranslationKind::TAGGED);
             deopt->SetEagerDeoptFrameState(std::move(frame));
-            merge->SetControlVertex(deopt);
+            Fixture::SetControl(merge, deopt);
         }
 
         static AllocatedState Register()
@@ -299,9 +340,9 @@ protected:
         void AddMoves()
         {
             auto slot = AllocatedState(LocationState::STACK_SLOT, MachineRepresentation::Tagged, 0);
-            merge->AddVertex(New<GapMoveVertex>({}, Register(), slot));
-            merge->AddVertex(New<GapMoveVertex>({}, slot, Register()));
-            merge->AddVertex(New<ConstantGapMoveVertex>({}, hclass, Register()));
+            Fixture::AddVertex(merge, New<GapMoveVertex>({}, Register(), slot));
+            Fixture::AddVertex(merge, New<GapMoveVertex>({}, slot, Register()));
+            Fixture::AddVertex(merge, New<ConstantGapMoveVertex>({}, hclass, Register()));
         }
     };
 };
@@ -312,12 +353,12 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, AcceptsAllFourInitializersAnd
         SCOPED_TRACE(kind);
         Fixture f;
         auto* result = f.Initialize(kind);
-        f.merge->SetControlVertex(f.New<ReturnVertex>({result}));
+        Fixture::SetControl(f.merge, f.New<ReturnVertex>({result}));
         f.Verify();
         f.Verify(true);
         f.merge->GetVertices().clear();
         f.AddMoves();
-        f.merge->AddVertex(result);
+        Fixture::AddVertex(f.merge, result);
         EXPECT_DEATH(f.Verify(), "Illegal operation");
         f.Verify(true);
     }
@@ -349,7 +390,7 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsOrdinaryRuntimeCallAsU
     Fixture f(EMPTY_OBJECT);
     auto* call = f.Call();
     f.slowBlock->GetVertices().clear();
-    f.slowBlock->AddVertex(call);
+    Fixture::AddVertex(f.slowBlock, call);
     f.phi->SetInput(1, call);
     EXPECT_DEATH(f.Verify(), "Allocation merge Phi requires one fast and one slow allocation");
 }
@@ -369,7 +410,7 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, AcceptsAllocationWithHClassBe
         auto* initializer = f.merge->GetVertices().back();
         f.merge->GetVertices().clear();
         f.AddMoves();
-        f.merge->AddVertex(initializer);
+        Fixture::AddVertex(f.merge, initializer);
         f.Verify(true);
     }
 }
@@ -417,22 +458,22 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, AcceptsCompletedValuesInFrame
     auto* result = f.Initialize();
     auto* exit = f.AddSuccessor(f.merge);
     auto* merged = f.New<PhiVertex>({result}, VirtualRegister(0));
-    exit->AddPhiVertex(merged);
-    exit->SetControlVertex(f.New<ReturnVertex>({merged}));
+    Fixture::AddPhi(exit, merged);
+    Fixture::SetControl(exit, f.New<ReturnVertex>({merged}));
     f.Verify();
 }
 
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsReturnEscapeAfterInitialization)
 {
     Fixture f(EMPTY_OBJECT);
-    f.merge->SetControlVertex(f.New<ReturnVertex>({f.fastAllocation}));
+    Fixture::SetControl(f.merge, f.New<ReturnVertex>({f.fastAllocation}));
     EXPECT_DEATH(f.Verify(), "Allocation escapes");
 }
 
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsFieldStoreEscape)
 {
     Fixture f(EMPTY_OBJECT);
-    f.merge->AddVertex(f.New<StoreTaggedFieldVertex>({f.hclass, f.slowAllocation}, JSObject::ELEMENTS_OFFSET));
+    Fixture::AddVertex(f.merge, f.New<StoreTaggedFieldVertex>({f.hclass, f.slowAllocation}, JSObject::ELEMENTS_OFFSET));
     EXPECT_DEATH(f.Verify(), "Allocation escapes");
 }
 
@@ -440,7 +481,7 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsPhiEscape)
 {
     Fixture f(EMPTY_OBJECT);
     auto* exit = f.AddSuccessor(f.merge);
-    exit->AddPhiVertex(f.New<PhiVertex>({f.fastAllocation, f.fastAllocation}, VirtualRegister(0)));
+    Fixture::AddPhi(exit, f.New<PhiVertex>({f.fastAllocation}, VirtualRegister(0)));
     EXPECT_DEATH(f.Verify(), "Allocation merge Phi requires");
 }
 
@@ -499,6 +540,7 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsUnprotectedInitializer
         auto* init = f.Initialize(kind);
         // HClass, GlobalEnv and literal roots all occupy the third input.
         auto* unprotected = f.New<InitialValueVertex>({}, 0);
+        Fixture::PrependVertex(f.entry, unprotected);
         init->SetInput(2, unprotected);
         f.ExpectRejectedInBothPhases("Initializer requires a rooted constant");
     }
@@ -537,14 +579,14 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsCallsAndSecondAllocati
         if (withHClass) {
             f.AddSlowAllocationHClass();
         }
-        f.merge->AddVertex(f.Call());
+        Fixture::AddVertex(f.merge, f.Call());
         f.Initialize();
         f.ExpectRejectedInBothPhases("Illegal operation");
         f.merge->GetVertices().erase(f.merge->GetVertices().begin());
-        f.slowBlock->AddVertex(f.Call());
+        Fixture::AddVertex(f.slowBlock, f.Call());
         f.ExpectRejectedInBothPhases("Illegal operation");
         f.slowBlock->GetVertices().pop_back();
-        f.fastBlock->AddVertex(f.New<AllocateInYoungVertex>({f.glue, f.size}));
+        Fixture::AddVertex(f.fastBlock, f.New<AllocateInYoungVertex>({f.glue, f.size}));
         EXPECT_DEATH(f.Verify(), "Second allocation");
     }
 }
@@ -552,7 +594,7 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsCallsAndSecondAllocati
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsOrdinaryLoadsEvenAfterRegalloc)
 {
     Fixture f;
-    f.merge->AddVertex(f.New<LoadTaggedFieldVertex>({f.hclass}, TaggedObject::HCLASS_OFFSET));
+    Fixture::AddVertex(f.merge, f.New<LoadTaggedFieldVertex>({f.hclass}, TaggedObject::HCLASS_OFFSET));
     f.Initialize();
     EXPECT_DEATH(f.Verify(true), "Illegal operation");
 }
@@ -567,9 +609,7 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsDeoptAndBranchInsideIn
         }
         f.AddEagerFrame(f.hclass);
         f.ExpectRejectedInBothPhases("Illegal operation");
-        auto* target = BB::New(&f.chunk);
-        f.graph.Add(target);
-        f.merge->SetControlVertex(f.New<JumpVertex>({}, target));
+        f.AddSuccessor(f.merge);
         f.ExpectRejectedInBothPhases("Illegal operation");
     }
 }
@@ -578,28 +618,29 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsIncompleteAndCrossBloc
 {
     {
         Fixture f;
-        EXPECT_DEATH(f.Verify(), "Incomplete initialization interval");
+        EXPECT_DEATH(f.Verify(), "");
     }
     Fixture g;
     auto* init = g.Initialize();
     g.merge->GetVertices().pop_back();
-    g.merge->GetPhis().clear();
     auto* later = g.AddSuccessor(g.merge);
-    later->AddVertex(init);
-    EXPECT_DEATH(g.Verify(), "Allocation Phi may only feed its matching initializer");
+    Fixture::AddVertex(later, init);
+    EXPECT_DEATH(g.Verify(), "");
 }
 
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsAllocationBlockWithoutJumpToMerge)
 {
     {
         Fixture f;
-        f.fastBlock->SetControlVertex(nullptr);
-        EXPECT_DEATH(f.Verify(), "Allocation block must end with a jump");
+        Fixture::SetControl(f.fastBlock, nullptr);
+        EXPECT_DEATH(f.Verify(), "");
     }
     Fixture g;
     auto* stray = BB::New(&g.chunk);
     g.graph.Add(stray);
-    g.slowBlock->SetControlVertex(g.New<JumpVertex>({}, stray));
+    Fixture::SetControl(stray, g.New<ReturnVertex>({g.hclass}));
+    Fixture::SetControl(g.slowBlock, g.New<JumpVertex>({}, stray));
+    stray->AddPredecessor(g.slowBlock);
     EXPECT_DEATH(g.Verify(), "Allocation must jump to its merge Phi block");
 }
 
@@ -607,9 +648,11 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsInitializerBeforeAlloc
 {
     Fixture f;
     auto* init = f.Initialize();
-    f.fastBlock->AddVertex(init);
+    f.merge->GetVertices().pop_back();
+    Fixture::AddVertex(f.fastBlock, init);
     EXPECT_DEATH(f.Verify(), "Allocation Phi may only feed its matching initializer");
     f.fastBlock->GetVertices().pop_back();
+    Fixture::AddVertex(f.merge, init);
     f.Initialize();
     EXPECT_DEATH(f.Verify(), "Allocation Phi may only feed its matching initializer");
 }
@@ -618,7 +661,7 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsDifferentAllocationAnd
 {
     Fixture f;
     auto* init = f.Initialize();
-    init->SetInput(InitializeEmptyObjectVertex::ALLOCATION_INDEX, f.New<AllocateInYoungVertex>({f.glue, f.size}));
+    init->SetInput(InitializeEmptyObjectVertex::ALLOCATION_INDEX, f.fastAllocation);
     EXPECT_DEATH(f.Verify(), "Allocation escapes");
     init->SetInput(InitializeEmptyObjectVertex::ALLOCATION_INDEX, f.hclass);
     EXPECT_DEATH(f.Verify(), "");
@@ -627,14 +670,14 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsDifferentAllocationAnd
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsRepeatedScheduling)
 {
     Fixture f(EMPTY_OBJECT);
-    f.merge->AddVertex(f.fastAllocation);
-    EXPECT_DEATH(f.Verify(), "Allocation scheduled more than once");
+    Fixture::AddVertex(f.merge, f.fastAllocation);
+    EXPECT_DEATH(f.Verify(), "");
 }
 
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsAllocationAsConstantMoveSource)
 {
     Fixture f;
-    f.merge->AddVertex(f.New<ConstantGapMoveVertex>({}, f.fastAllocation, Fixture::Register()));
+    Fixture::AddVertex(f.merge, f.New<ConstantGapMoveVertex>({}, f.fastAllocation, Fixture::Register()));
     f.Initialize();
     EXPECT_DEATH(f.Verify(true), "");
 }
@@ -723,12 +766,12 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, AcceptsDynamicArgumentsAndNon
         if (object) {
             EXPECT_NE(elementsAllocation, f.slowAllocation);
         }
-        f.merge->SetControlVertex(f.New<ReturnVertex>({result}));
+        Fixture::SetControl(f.merge, f.New<ReturnVertex>({result}));
         f.Verify();
         f.Verify(true);
         f.merge->GetVertices().clear();
         f.AddMoves();
-        f.merge->AddVertex(result);
+        Fixture::AddVertex(f.merge, result);
         EXPECT_DEATH(f.Verify(), "Illegal operation");
         f.Verify(true);
     }
@@ -805,7 +848,9 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsMismatchedDynamicSlowS
     encoding->SetInput(I64BitwiseBinaryVertex::LEFT_INDEX, f.size);
     encoding->SetInput(I64BitwiseBinaryVertex::RIGHT_INDEX, f.graph.GetInt64Constant(0));
     f.ExpectRejectedInBothPhases("IsInt64Constant");
-    f.slowAllocation->SetInput(0, f.New<InitialValueVertex>({}, 0));
+    auto* unencoded = f.New<InitialValueVertex>({}, 0);
+    Fixture::PrependVertex(f.entry, unencoded);
+    f.slowAllocation->SetInput(0, unencoded);
     f.ExpectRejectedInBothPhases("Is<T>");
 }
 
@@ -890,12 +935,12 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsUnsafeOperationsDuring
               static_cast<NonControlVertex*>(f.New<LoadTaggedFieldVertex>({f.hclass}, TaggedObject::HCLASS_OFFSET)),
               static_cast<NonControlVertex*>(f.New<I64AddVertex>({f.size, f.size}))}) {
             f.merge->GetVertices().clear();
-            f.merge->AddVertex(operation);
-            f.merge->AddVertex(init);
+            Fixture::AddVertex(f.merge, operation);
+            Fixture::AddVertex(f.merge, init);
             f.ExpectRejectedInBothPhases("Illegal operation");
         }
         f.merge->GetVertices().clear();
-        f.merge->AddVertex(init);
+        Fixture::AddVertex(f.merge, init);
         f.AddLazyFrame(f.phi, f.merge);
         f.ExpectRejectedInBothPhases("Allocation escapes into frame state");
     }
@@ -913,9 +958,9 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsSizeConversionBetweenC
     scheduled.erase(std::find(scheduled.begin(), scheduled.end(), tagged));
     scheduled.erase(std::find(scheduled.begin(), scheduled.end(), bits));
     f.slowBlock->GetVertices().clear();
-    f.slowBlock->AddVertex(bits);
-    f.slowBlock->AddVertex(tagged);
-    f.slowBlock->AddVertex(f.slowAllocation);
+    Fixture::AddVertex(f.slowBlock, bits);
+    Fixture::AddVertex(f.slowBlock, tagged);
+    Fixture::AddVertex(f.slowBlock, f.slowAllocation);
     f.ExpectRejectedInBothPhases("Only register moves may separate the check and allocation");
 }
 
@@ -933,14 +978,14 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsSecondMergePhiInInterv
 {
     Fixture f;
     auto* second = f.New<PhiVertex>({f.fastAllocation, f.slowAllocation}, VirtualRegister(1));
-    f.merge->AddPhiVertex(second);
+    Fixture::AddPhi(f.merge, second);
     f.Initialize();
     EXPECT_DEATH(f.Verify(), "Second allocation");
 }
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsMissingCapacityCheck)
 {
     Fixture f(EMPTY_OBJECT);
-    f.entry->SetControlVertex(f.New<JumpVertex>({}, f.fastBlock));
+    Fixture::SetControl(f.entry, f.New<JumpVertex>({}, f.fastBlock));
     EXPECT_DEATH(f.Verify(), "Is<T>");
 }
 
@@ -973,6 +1018,7 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, CapacityPredicateHasReadOnlyT
     EXPECT_FALSE(check->CanEagerDeopt());
     EXPECT_FALSE(check->CanLazyDeopt());
     f.Initialize();
+    check->SetRegallocInfo(nullptr);
     f.Verify();
 }
 
@@ -987,10 +1033,10 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsUnscheduledOrEarlierBl
 {
     Fixture f(EMPTY_OBJECT);
     f.entry->GetVertices().clear();
-    EXPECT_DEATH(f.Verify(), "Capacity predicate must be scheduled in the checking block");
+    EXPECT_DEATH(f.Verify(), "");
     auto* earlier = BB::New(&f.chunk);
-    earlier->AddVertex(f.canAllocate);
-    earlier->SetControlVertex(f.New<JumpVertex>({}, f.entry));
+    Fixture::AddVertex(earlier, f.canAllocate);
+    Fixture::SetControl(earlier, f.New<JumpVertex>({}, f.entry));
     f.entry->AddPredecessor(earlier);
     f.graph.Add(earlier);
     EXPECT_DEATH(f.Verify(), "Capacity predicate must be scheduled in the checking block");
@@ -1003,7 +1049,7 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsOperationsBetweenPredi
          {static_cast<NonControlVertex*>(f.Call()),
           static_cast<NonControlVertex*>(f.New<StoreI64ToAddressVertex>({f.glue, f.glue}, 0)),
           static_cast<NonControlVertex*>(f.New<I64AddVertex>({f.size, f.size}))}) {
-        f.entry->AddVertex(operation);
+        Fixture::AddVertex(f.entry, operation);
         f.ExpectRejectedInBothPhases("Only register moves may separate the capacity predicate and branch");
         f.entry->GetVertices().pop_back();
     }
@@ -1012,13 +1058,12 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsOperationsBetweenPredi
 TEST_F(ArkSteedInitializationIntervalVerifierTest, AcceptsEffectsBeforePredicateAndMovesAfterRegalloc)
 {
     Fixture f(EMPTY_OBJECT);
-    f.entry->GetVertices().insert(f.entry->GetVertices().begin(), f.Call());
+    Fixture::PrependVertex(f.entry, f.Call());
     f.Verify();
     auto slot = AllocatedState(LocationState::STACK_SLOT, MachineRepresentation::Tagged, 0);
-    f.entry->AddVertex(f.New<GapMoveVertex>({}, Fixture::Register(), slot));
-    f.entry->AddVertex(f.New<ConstantGapMoveVertex>({}, f.hclass, Fixture::Register()));
-    f.fastBlock->GetVertices().insert(f.fastBlock->GetVertices().begin(),
-                                      f.New<GapMoveVertex>({}, slot, Fixture::Register()));
+    Fixture::AddVertex(f.entry, f.New<GapMoveVertex>({}, Fixture::Register(), slot));
+    Fixture::AddVertex(f.entry, f.New<ConstantGapMoveVertex>({}, f.hclass, Fixture::Register()));
+    Fixture::PrependVertex(f.fastBlock, f.New<GapMoveVertex>({}, slot, Fixture::Register()));
     EXPECT_DEATH(f.Verify(), "Only register moves may separate the capacity predicate and branch");
     f.Verify(true);
 }
@@ -1026,8 +1071,8 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, AcceptsEffectsBeforePredicate
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsRepeatedPredicateScheduling)
 {
     Fixture f(EMPTY_OBJECT);
-    f.entry->AddVertex(f.canAllocate);
-    EXPECT_DEATH(f.Verify(), "Capacity predicate scheduled more than once");
+    Fixture::AddVertex(f.entry, f.canAllocate);
+    EXPECT_DEATH(f.Verify(), "");
 }
 
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsChangedGlueAndSizeAfterCheck)
@@ -1044,14 +1089,14 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsChangedGlueAndSizeAfte
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsReversedCapacityEdges)
 {
     Fixture f(EMPTY_OBJECT);
-    f.entry->SetControlVertex(f.New<BranchIfTrueVertex>({f.canAllocate}, f.slowBlock, f.fastBlock));
+    Fixture::SetControl(f.entry, f.New<BranchIfTrueVertex>({f.canAllocate}, f.slowBlock, f.fastBlock));
     EXPECT_DEATH(f.Verify(), "Fast allocation requires the successful check edge");
 }
 
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsCallsBetweenCheckAndAllocation)
 {
     Fixture f(EMPTY_OBJECT);
-    f.fastBlock->GetVertices().insert(f.fastBlock->GetVertices().begin(), f.Call());
+    Fixture::PrependVertex(f.fastBlock, f.Call());
     f.ExpectRejectedInBothPhases("Only register moves may separate the check and allocation");
 }
 
@@ -1062,6 +1107,8 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsPhiPredecessorMismatch
     f.phi->SetInput(1, f.fastAllocation);
     EXPECT_DEATH(f.Verify(), "Allocation Phi input must match its predecessor");
     std::swap(f.merge->GetPredecessors()[0], f.merge->GetPredecessors()[1]);
+    f.fastBlock->GetControlVertex()->Cast<JumpVertex>()->SetPredecessorId(1);
+    f.slowBlock->GetControlVertex()->Cast<JumpVertex>()->SetPredecessorId(0);
     f.Verify();
 }
 

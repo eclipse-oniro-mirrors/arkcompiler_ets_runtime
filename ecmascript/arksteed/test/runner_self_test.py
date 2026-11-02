@@ -7180,12 +7180,109 @@ def check_corpus_mask_combined_twin_filter(module) -> List[str]:
     return failures
 
 
+def check_dce_anonymous_deopt_witness(module) -> List[str]:
+    """Only a global zero-deopt witness detects method-anonymous records."""
+    failures: List[str] = []
+    stdout = "".join(line + "\n" for line in [ARKSTEED_EAGER_LINE, LAZY_LINE])
+    evidence = module.collect_evidence(stdout)
+    if module.DeoptCountConstraint("*", 0).violated(evidence) is None:
+        failures.append(
+            "DEOPT_COUNT * 0 must be violated by the anonymous eager record and a lazy record")
+    if module.DeoptCountConstraint("dce_target", 0).violated(evidence) is not None:
+        failures.append(
+            "a method-name zero-deopt pattern is satisfied while the records are present; "
+            "the self-test must treat that form as vacuous, never as a witness")
+    return failures
+
+
+def _dce_optimized_witness_markers(module):
+    return module.collect_evidence("".join(line + "\n" for line in [
+        COMPILER_PREFIX + "======== ArkSteedCompilerTask: Starts compiling: dce_target ========",
+        COMPILER_PREFIX + ">>> Running method: case.#*#dce_target",
+    ]))
+
+
+def _parse_dce_optimized_witness(module, failures):
+    """Validate the witness grammar before evaluating any marker evidence."""
+
+    case = _make_case(module, (
+        "//! COMPILE_COUNT dce_target 1\n"
+        "//! EXEC_COUNT_GE *dce_target 1\n"
+        "//! DEOPT_COUNT * 0\n"
+        "function dce_target(): number { return 1; }\n"))
+    if case.config_errors:
+        failures.append(f"the optimized witness sample is a config error: {case.config_errors}")
+        return None
+    compiles = [c for c in case.evidence_constraints
+                if isinstance(c, module.CompileCountConstraint)]
+    execs = [c for c in case.evidence_constraints
+             if isinstance(c, module.ExecCountGeConstraint)]
+    deopts = [c for c in case.evidence_constraints
+              if isinstance(c, module.DeoptCountConstraint)]
+    if len(compiles) != 1 or compiles[0].count != 1 or compiles[0].pattern != "dce_target":
+        failures.append(f"COMPILE_COUNT parse mismatch: {compiles}")
+        return None
+    if len(execs) != 1 or execs[0].count != 1 or execs[0].pattern != "*dce_target":
+        failures.append(f"EXEC_COUNT_GE parse mismatch: {execs}")
+        return None
+    if len(deopts) != 1 or deopts[0].count != 0 or deopts[0].pattern != "*":
+        failures.append(f"DEOPT_COUNT parse mismatch: {deopts}")
+        return None
+    return compiles[0], execs[0], deopts[0]
+
+
+def check_dce_optimized_witness_forms(module) -> List[str]:
+    """Optimized-witness constraints parse and accept real execution markers."""
+    failures: List[str] = []
+    constraints = _parse_dce_optimized_witness(module, failures)
+    if constraints is None:
+        return failures
+    compile_constraint, exec_constraint, _ = constraints
+    for constraint in (compile_constraint, exec_constraint):
+        if "==" in constraint.pattern or ">=" in constraint.pattern:
+            failures.append(f"comparison token folded into a pattern: {constraint.label()}")
+
+    markers = _dce_optimized_witness_markers(module)
+    for constraint, kind in zip(constraints, ("compile", "exec", "deopt")):
+        message = constraint.violated(markers)
+        if message is not None:
+            failures.append(
+                f"'{constraint.label()}' must be satisfied by a real {kind} marker: {message}")
+    if markers["deopt"]:
+        failures.append(f"the marker evidence must stay deopt-free: {markers['deopt']}")
+    return failures
+
+
+def check_dce_folded_comparison_witness(module) -> List[str]:
+    """A comparison operator inside a compile pattern matches no real record."""
+    failures: List[str] = []
+    markers = _dce_optimized_witness_markers(module)
+
+    folded = _make_case(module, (
+        "//! COMPILE_COUNT dce_target == 1\n"
+        "function dce_target(): number { return 1; }\n"))
+    folded_compiles = [c for c in folded.evidence_constraints
+                       if isinstance(c, module.CompileCountConstraint)]
+    if len(folded_compiles) != 1 or folded_compiles[0].pattern != "dce_target ==":
+        failures.append(
+            f"the folded comparison form must parse with the operator inside the pattern: "
+            f"{folded_compiles}")
+    elif folded_compiles[0].violated(markers) is None:
+        failures.append(
+            "'COMPILE_COUNT dce_target == 1' must be violated: '==' is part of the pattern "
+            "and matches no compile record")
+    return failures
+
+
 CHECKS: List[CHECK_RESULTS] = [
     check_deopt_events_only,
     check_real_deopt_events_counted_once,
     check_conflicting_params_rejected,
     check_deopt_trace_options_implied,
     check_deopt_trace_message_filtered,
+    check_dce_anonymous_deopt_witness,
+    check_dce_optimized_witness_forms,
+    check_dce_folded_comparison_witness,
     check_control_evidence_collection,
     check_control_applicability,
     check_control_construction,

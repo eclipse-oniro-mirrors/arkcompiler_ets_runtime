@@ -32,6 +32,16 @@ namespace kungfu {
 };
 
 static constexpr int64_t BASELINEJIT_PC_FLAG = static_cast<int64_t>(std::numeric_limits<uint64_t>::max());
+
+namespace arksteed {
+// Compiled caller-argument area in FP-slot words: +2 raw int32 argc,
+// +3 tagged call target, +4 new target, +5 this, +6... user arguments.
+// Only the argc descriptor uses INT32_TO_TAGGED in an eager deopt frame;
+// the other InitialValue descriptors hold real tagged references.
+constexpr int32_t ACTUAL_ARGC_FP_SLOT_INDEX = 2;
+constexpr int32_t CALL_TARGET_FP_SLOT_INDEX = 3;
+}  // namespace arksteed
+
 // Here list all scenarios of calling between Runtime/CInterpreter/ASMInterpreter/AOTCompiler/CBuiltin/ASMBuitlin.
 // Please note that the "[]" means a must frame while "<>" means an optional frame. Each case is from top to down.
 //

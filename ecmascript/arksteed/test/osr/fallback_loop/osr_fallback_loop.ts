@@ -19,8 +19,8 @@ declare function print(value: number): void;
 
 // Safe fallback for OSR (restriction 9 / E8): a loop method run with OSR enabled
 // must complete correctly in the current tier. On the pinned revision the OSR
-// chain has no entry path (see test/coverage/osr-chain-audit.md), so the result
-// is produced without entering installed OSR code.
+// chain has no entry path, so the result is produced without entering installed
+// OSR code; this case therefore checks the fallback result, not OSR entry.
 function osrLoop(n: number): number {
     let sum = 0;
     let i = 0;

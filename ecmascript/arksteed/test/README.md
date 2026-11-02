@@ -20,6 +20,8 @@ An `ark_disasm` failure is diagnostic-only unless a bytecode constraint is prese
 * `createobjectwithbuffer_inline_allocation/metadata` owns descriptor, prototype, and type-change isolation on separate clones, including tiny nonzero numbers and post-GC rechecks.
 * `allocate_initialize_split` and `allocation_slowpath` retain separate structural and allocation-pressure coverage. Native initialization-verifier and template tests remain separate from JS behavior tests.
 
+`constructors/newobjrange/body_stub` also exercises synchronous compilation after forced GC. The host must enter the native state while waiting for the compiler, allowing shared GC to suspend it without deadlocking compiler re-entry; code installation remains in the managed state.
+
 ## Test Case Runner
 
 Execute the command `python3 ./run_arksteed_tests.py [<args> ...]` to run all the test cases.
@@ -98,6 +100,11 @@ Constraints on `CallCommonStub` and `CallRuntime` **must** be followed by a stub
 * Example: `//! HAS_NOT CallCommonStub GetPropertyByName` requires that no `CallCommonStub` node calling `COStub_GetPropertyByName` appears, while e.g. `COStub_Add` calls are unaffected.
 * Example: `//! COUNT CallRuntime Throw* 1` requires exactly one `CallRuntime` node whose stub name starts with `Throw`.
 
+IR constraints must express the behavior under test, not an incidental frontend lowering.
+Nullish and truthiness expressions may use either branches or live boolean values depending on the frontend.
+Do not require `TaggedEqual` or `I32ConditionCheck` to be absent solely because an older lowering left them dead.
+The nullish and truthiness cases retain their output checks and compilation/execution evidence without that restriction.
+
 ### Evidence annotations (case-scoped, matched against captured stdout)
 
 These annotations count events in the case's captured stdout. `<pattern>` is a shell-style wildcard matched against the useful part of the relevant log line (the text after the `[<component>] ` prefix). `<n>=0` is allowed and asserts the absence of matching events. A violation reports the actual value; an unknown keyword is a case configuration error.
@@ -145,3 +152,24 @@ Example:
 More examples are shown in the following test cases:
 * `pgo/int32/test_1`
 * `pgo/int32/test_2`
+
+## DCE runtime regressions
+
+The six DCE cases are three optimized/interpreter pairs: `arithmetic/dce_dead_arithmetic_value`, `objects/dce_preserved_property_effects`, and `gc/dce_preserved_allocation_and_gc`, each with a sibling whose name ends in `_interp_twin`. From this directory, run only these cases with:
+
+```bash
+python3 ./run_arksteed_tests.py --platform x64 --mode debug \
+  --include 'arithmetic/dce_dead_arithmetic_value*' \
+  --include 'objects/dce_preserved_property_effects*' \
+  --include 'gc/dce_preserved_allocation_and_gc*'
+```
+
+The runner builds the required targets by default; add `--skip-build` only when they are already built for the selected platform and mode.
+
+The arithmetic case checks removal of dead tagged results while retaining checked arithmetic guards and frame-state dependencies. The property case checks retained stores, loads and calls, with exact values and ordered effects. The allocation case checks retained allocation and a real full-GC event. Each interpreter twin disables compiled tiers and checks the same expected semantic output with zero compile/execution markers.
+
+The allocation case requires both `AllocateInYoung` and `InitializeEmptyArray` in its compiled method: the dynamic three-element literal creates an empty array, then stores its elements. Its explicit full-GC event, no-deopt witness and ordered semantic output remain separate requirements.
+
+Optimized cases require `COMPILE_COUNT <method> 1`, `EXEC_COUNT_GE *<method>* 1` and `DEOPT_COUNT * 0`: the wildcard is necessary because ArkSteed's eager deopt record has no method name. Do not put `==` or `>=` into count annotations; they become part of the match pattern. GC records are counted from captured stdout before complete multiline GC records are filtered from the semantic output comparison; printed results and effect journals are still checked exactly.
+
+`python3 ./runner_self_test.py` checks annotation parsing and optimized-witness behavior without a VM. The native DCE graph contracts are documented in `../unittests/README.md`.
