@@ -98,6 +98,17 @@ int64_t UtcMsRef(const DateTimeFields &fields)
     return days * MS_PER_DAY + fields.hour * MS_PER_HOUR + fields.minute * MS_PER_MINUTE +
            fields.second * MS_PER_SECOND + fields.millisecond;
 }
+
+// GetUTCTimestamp converts local date-time fields to UTC epoch ms. Independently of the zone
+// in effect, the returned instant plus the zone offset at that instant must equal the pure
+// ECMA-UTC value of the same fields. This keeps the assertion valid on hosts where TZ cannot
+// be forced (e.g. OpenHarmony devices, whose zone comes from system settings).
+void ExpectLocalTimeMatchesUtcMs(const DateTimeFields &fields, int64_t expectedUtcMs)
+{
+    int64_t actual = GetUTCTimestamp(fields.year - TM_YEAR_BASE, fields.month, fields.day, fields.hour,
+                                     fields.minute, fields.second, fields.millisecond);
+    EXPECT_EQ(actual + GetLocalOffsetFromOS(actual, true), expectedUtcMs);
+}
 } // namespace
 
 class TimeTest : public BaseTestWithOutScope {
@@ -127,70 +138,77 @@ public:
         tzset();
     }
 
+    // Whether setenv("TZ") + tzset() actually switches the C library's zone on this host.
+    bool CanForceZone(const char *tz, int64_t probeTimeMs, int64_t expectedOffsetMs)
+    {
+        SetTimezone(tz);
+        return GetLocalOffsetFromOS(probeTimeMs, true) == expectedOffsetMs;
+    }
+
+    bool CanForceNewYork()
+    {
+        int64_t summer2026 = UtcMsRef({2026, 6, 1, 12}) - NY_DAYLIGHT_OFFSET_HOURS * MS_PER_HOUR;
+        return CanForceZone(NY_POSIX_TZ, summer2026, NY_DAYLIGHT_OFFSET_HOURS * MS_PER_HOUR);
+    }
+
 private:
     std::string savedTz_ {};
     bool savedTzValid_ = false;
 };
 
-HWTEST_F_L0(TimeTest, GetUTCTimestamp_Epoch_Utc)
+HWTEST_F_L0(TimeTest, GetUTCTimestamp_Epoch)
 {
-    SetTimezone("UTC");
-    EXPECT_EQ(GetUTCTimestamp(EPOCH_YEAR - TM_YEAR_BASE, 0, 1, 0, 0, 0, 0), 0);
+    // 1970-01-01 00:00 local time is -offset(epoch) in UTC epoch ms
+    ExpectLocalTimeMatchesUtcMs({EPOCH_YEAR, 0, 1}, 0);
 }
 
-HWTEST_F_L0(TimeTest, GetUTCTimestamp_InRangeDate_Utc)
+HWTEST_F_L0(TimeTest, GetUTCTimestamp_InRangeDate)
 {
-    SetTimezone("UTC");
-    EXPECT_EQ(GetUTCTimestamp(2024 - TM_YEAR_BASE, 0, 1, 0, 0, 0, 0), UtcMsRef({2024, 0, 1}));
-    EXPECT_EQ(GetUTCTimestamp(2024 - TM_YEAR_BASE, 5, 15, 12, 34, 56, 789),
-              UtcMsRef({2024, 5, 15, 12, 34, 56, 789}));
+    ExpectLocalTimeMatchesUtcMs({2024, 0, 1}, UtcMsRef({2024, 0, 1}));
+    ExpectLocalTimeMatchesUtcMs({2024, 5, 15, 12, 34, 56, 789}, UtcMsRef({2024, 5, 15, 12, 34, 56, 789}));
 }
 
 // Beyond 2038-01-19 a 32-bit time_t cannot represent the date and mktime() fails. The
 // implementation must still return the correct timestamp instead of a negative error value.
-HWTEST_F_L0(TimeTest, GetUTCTimestamp_Beyond32BitTimeT_Utc)
+HWTEST_F_L0(TimeTest, GetUTCTimestamp_Beyond32BitTimeT)
 {
-    SetTimezone("UTC");
-    EXPECT_EQ(GetUTCTimestamp(2039 - TM_YEAR_BASE, 0, 1, 0, 0, 0, 0), UtcMsRef({2039, 0, 1}));
-    EXPECT_EQ(GetUTCTimestamp(2040 - TM_YEAR_BASE, 1, 29, 0, 0, 0, 0), UtcMsRef({2040, 1, 29}));
-    EXPECT_EQ(GetUTCTimestamp(2100 - TM_YEAR_BASE, 11, 31, 23, 59, 59, 999),
-              UtcMsRef({2100, 11, 31, 23, 59, 59, 999}));
+    ExpectLocalTimeMatchesUtcMs({2039, 0, 1}, UtcMsRef({2039, 0, 1}));
+    ExpectLocalTimeMatchesUtcMs({2040, 1, 29}, UtcMsRef({2040, 1, 29}));
+    ExpectLocalTimeMatchesUtcMs({2100, 11, 31, 23, 59, 59, 999}, UtcMsRef({2100, 11, 31, 23, 59, 59, 999}));
 }
 
-HWTEST_F_L0(TimeTest, GetUTCTimestamp_PreEpochDate_Utc)
+HWTEST_F_L0(TimeTest, GetUTCTimestamp_PreEpochDate)
 {
-    SetTimezone("UTC");
-    EXPECT_EQ(GetUTCTimestamp(1969 - TM_YEAR_BASE, 11, 31, 0, 0, 0, 0), UtcMsRef({1969, 11, 31}));
+    ExpectLocalTimeMatchesUtcMs({1969, 11, 31}, UtcMsRef({1969, 11, 31}));
     EXPECT_EQ(UtcMsRef({1969, 11, 31}), -MS_PER_DAY);
 }
 
-HWTEST_F_L0(TimeTest, GetUTCTimestamp_NormalizesOverflowingFields_Utc)
+HWTEST_F_L0(TimeTest, GetUTCTimestamp_NormalizesOverflowingFields)
 {
-    SetTimezone("UTC");
     // 25:30 on Jan 1st carries into 01:30 on Jan 2nd
-    EXPECT_EQ(GetUTCTimestamp(2024 - TM_YEAR_BASE, 0, 1, 25, 30, 0, 0), UtcMsRef({2024, 0, 2, 1, 30}));
+    ExpectLocalTimeMatchesUtcMs({2024, 0, 1, 25, 30}, UtcMsRef({2024, 0, 2, 1, 30}));
     // 1500 ms carry one second
-    EXPECT_EQ(GetUTCTimestamp(2024 - TM_YEAR_BASE, 0, 1, 0, 0, 0, 1500), UtcMsRef({2024, 0, 1, 0, 0, 1, 500}));
+    ExpectLocalTimeMatchesUtcMs({2024, 0, 1, 0, 0, 0, 1500}, UtcMsRef({2024, 0, 1, 0, 0, 1, 500}));
 }
 
 // Month/day carry-overs can push the date across a year boundary; the equivalent-year
 // fallback must stay exact even when the carried date lands on a leap year.
-HWTEST_F_L0(TimeTest, GetUTCTimestamp_CarryAcrossYearBoundary_Utc)
+HWTEST_F_L0(TimeTest, GetUTCTimestamp_CarryAcrossYearBoundary)
 {
-    SetTimezone("UTC");
     // month 15 carries into April of the next year; 2040 is a leap year
-    EXPECT_EQ(GetUTCTimestamp(2039 - TM_YEAR_BASE, 15, 1, 0, 0, 0, 0), UtcMsRef({2040, 3, 1}));
+    ExpectLocalTimeMatchesUtcMs({2039, 15, 1}, UtcMsRef({2040, 3, 1}));
     // negative months carry backwards across the boundary
-    EXPECT_EQ(GetUTCTimestamp(2039 - TM_YEAR_BASE, -3, 1, 0, 0, 0, 0), UtcMsRef({2038, 9, 1}));
+    ExpectLocalTimeMatchesUtcMs({2039, -3, 1}, UtcMsRef({2038, 9, 1}));
     // extreme day carry must neither fail nor drift
-    EXPECT_EQ(GetUTCTimestamp(2039 - TM_YEAR_BASE, 0, 1000001, 0, 0, 0, 0),
-              UtcMsRef({2039, 0, 1}) + 1000000 * MS_PER_DAY); // 1000000: days carried forward
+    ExpectLocalTimeMatchesUtcMs({2039, 0, 1000001}, UtcMsRef({2039, 0, 1}) + 1000000 * MS_PER_DAY);
 }
 
 // A carry across the year boundary must also keep the correct DST offset of the carried date.
 HWTEST_F_L0(TimeTest, GetUTCTimestamp_CarryAcrossYearBoundary_KeepsDstOffset)
 {
-    SetTimezone(NY_POSIX_TZ);
+    if (!CanForceNewYork()) {
+        GTEST_SKIP() << "TZ override is not honored on this host";
+    }
     // month 15 carries into April 2040 (daylight time): local 12:00 is 16:00 UTC
     EXPECT_EQ(GetUTCTimestamp(2039 - TM_YEAR_BASE, 15, 1, 12, 0, 0, 0),
               UtcMsRef({2040, 3, 1, 12}) - NY_DAYLIGHT_OFFSET_HOURS * MS_PER_HOUR);
@@ -203,7 +221,9 @@ HWTEST_F_L0(TimeTest, GetUTCTimestamp_CarryAcrossYearBoundary_KeepsDstOffset)
 // offset as a present-day date in the same DST season.
 HWTEST_F_L0(TimeTest, GetUTCTimestamp_Beyond32BitTimeT_KeepsDstOffset)
 {
-    SetTimezone(NY_POSIX_TZ);
+    if (!CanForceNewYork()) {
+        GTEST_SKIP() << "TZ override is not honored on this host";
+    }
     int64_t est = NY_STANDARD_OFFSET_HOURS * MS_PER_HOUR;
     int64_t edt = NY_DAYLIGHT_OFFSET_HOURS * MS_PER_HOUR;
     // January is standard time: local 12:00 is 17:00 UTC
@@ -217,7 +237,6 @@ HWTEST_F_L0(TimeTest, GetUTCTimestamp_Beyond32BitTimeT_KeepsDstOffset)
 
 HWTEST_F_L0(TimeTest, GetLocalOffsetFromOS_NotLocal_ReturnsZero)
 {
-    SetTimezone(NY_POSIX_TZ);
     EXPECT_EQ(GetLocalOffsetFromOS(0, false), 0);
     EXPECT_EQ(GetLocalOffsetFromOS(UtcMsRef({2039, 6, 1, 12}), false), 0);
 }
@@ -226,33 +245,39 @@ HWTEST_F_L0(TimeTest, GetLocalOffsetFromOS_NotLocal_ReturnsZero)
 // still match the offset of a present-day date in the same DST season.
 HWTEST_F_L0(TimeTest, GetLocalOffsetFromOS_Beyond32BitTimeT_MatchesSeason)
 {
-    SetTimezone(NY_POSIX_TZ);
-    int64_t summer2026 = GetUTCTimestamp(2026 - TM_YEAR_BASE, 6, 1, 12, 0, 0, 0);
-    int64_t winter2026 = GetUTCTimestamp(2026 - TM_YEAR_BASE, 0, 15, 12, 0, 0, 0);
-    int64_t summer2039 = GetUTCTimestamp(2039 - TM_YEAR_BASE, 6, 1, 12, 0, 0, 0);
-    int64_t winter2039 = GetUTCTimestamp(2039 - TM_YEAR_BASE, 0, 15, 12, 0, 0, 0);
-    EXPECT_EQ(GetLocalOffsetFromOS(summer2026, true), NY_DAYLIGHT_OFFSET_HOURS * MS_PER_HOUR);
-    EXPECT_EQ(GetLocalOffsetFromOS(winter2026, true), NY_STANDARD_OFFSET_HOURS * MS_PER_HOUR);
+    int64_t summer2026 = UtcMsRef({2026, 6, 1, 12}) - NY_DAYLIGHT_OFFSET_HOURS * MS_PER_HOUR;
+    int64_t winter2026 = UtcMsRef({2026, 0, 15, 12}) - NY_STANDARD_OFFSET_HOURS * MS_PER_HOUR;
+    int64_t summer2039 = UtcMsRef({2039, 6, 1, 12}) - NY_DAYLIGHT_OFFSET_HOURS * MS_PER_HOUR;
+    int64_t winter2039 = UtcMsRef({2039, 0, 15, 12}) - NY_STANDARD_OFFSET_HOURS * MS_PER_HOUR;
+    // Zone-independent: dates across the 2038 boundary must see consistent offsets
     EXPECT_EQ(GetLocalOffsetFromOS(summer2039, true), GetLocalOffsetFromOS(summer2026, true));
     EXPECT_EQ(GetLocalOffsetFromOS(winter2039, true), GetLocalOffsetFromOS(winter2026, true));
+    if (CanForceNewYork()) {
+        EXPECT_EQ(GetLocalOffsetFromOS(summer2026, true), NY_DAYLIGHT_OFFSET_HOURS * MS_PER_HOUR);
+        EXPECT_EQ(GetLocalOffsetFromOS(winter2026, true), NY_STANDARD_OFFSET_HOURS * MS_PER_HOUR);
+    }
 }
 
 HWTEST_F_L0(TimeTest, IsDst_Beyond32BitTimeT_MatchesSeason)
 {
-    SetTimezone(NY_POSIX_TZ);
-    int64_t summer2026 = GetUTCTimestamp(2026 - TM_YEAR_BASE, 6, 1, 12, 0, 0, 0);
-    int64_t winter2026 = GetUTCTimestamp(2026 - TM_YEAR_BASE, 0, 15, 12, 0, 0, 0);
-    int64_t summer2039 = GetUTCTimestamp(2039 - TM_YEAR_BASE, 6, 1, 12, 0, 0, 0);
-    int64_t winter2039 = GetUTCTimestamp(2039 - TM_YEAR_BASE, 0, 15, 12, 0, 0, 0);
-    EXPECT_TRUE(IsDst(summer2026));
-    EXPECT_FALSE(IsDst(winter2026));
+    int64_t summer2026 = UtcMsRef({2026, 6, 1, 12}) - NY_DAYLIGHT_OFFSET_HOURS * MS_PER_HOUR;
+    int64_t winter2026 = UtcMsRef({2026, 0, 15, 12}) - NY_STANDARD_OFFSET_HOURS * MS_PER_HOUR;
+    int64_t summer2039 = UtcMsRef({2039, 6, 1, 12}) - NY_DAYLIGHT_OFFSET_HOURS * MS_PER_HOUR;
+    int64_t winter2039 = UtcMsRef({2039, 0, 15, 12}) - NY_STANDARD_OFFSET_HOURS * MS_PER_HOUR;
+    // Zone-independent: dates across the 2038 boundary must see the same DST status
     EXPECT_EQ(IsDst(summer2039), IsDst(summer2026));
     EXPECT_EQ(IsDst(winter2039), IsDst(winter2026));
+    if (CanForceNewYork()) {
+        EXPECT_TRUE(IsDst(summer2026));
+        EXPECT_FALSE(IsDst(winter2026));
+    }
 }
 
 HWTEST_F_L0(TimeTest, IsDst_Utc_AlwaysFalse)
 {
-    SetTimezone("UTC");
+    if (!CanForceZone("UTC", 0, 0)) {
+        GTEST_SKIP() << "TZ override is not honored on this host";
+    }
     EXPECT_FALSE(IsDst(0));
     EXPECT_FALSE(IsDst(UtcMsRef({2039, 6, 1, 12})));
 }
