@@ -1740,7 +1740,13 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<LoadBuiltinObjectVertex>(LoadB
                     BuiltinIndex::GetInstance().GetBuiltinBoxOffset(load->GetBuiltinIndex());
     ASSERT(offset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
     __ LoadField(result, glue, static_cast<int32_t>(offset));
+    // An uninitialized builtin cache has no PropertyBox. Preserve Hole so
+    // the existing BUILTINISHOLE1 guard can deopt before any dereference.
+    Label done;
+    __ Compare(result, static_cast<int32_t>(JSTaggedValue::VALUE_HOLE));
+    __ JumpIf(Condition::EQUAL, &done);
     __ LoadField(result, result, static_cast<int32_t>(PropertyBox::VALUE_OFFSET));
+    __ Bind(&done);
 }
 
 template <>
