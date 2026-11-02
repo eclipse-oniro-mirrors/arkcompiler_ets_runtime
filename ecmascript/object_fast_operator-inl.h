@@ -157,6 +157,7 @@ JSTaggedValue ObjectFastOperator::TryFastHasProperty(JSThread *thread, JSTaggedV
             keyHandle.Update(JSTaggedValue(string));
             key = keyHandle.GetTaggedValue();
             receiver = receiverHandler.GetTaggedValue();
+            hclass = receiver.GetTaggedObject()->GetClass();
         }
         ASSERT(
             !TaggedArray::Cast(JSObject::Cast(receiver)->GetProperties(thread).GetTaggedObject())->IsDictionaryMode());
