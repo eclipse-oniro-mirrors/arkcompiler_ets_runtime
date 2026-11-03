@@ -2510,11 +2510,13 @@ public:
         NUM_INPUTS = 3,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    // The common stub falls back to NewThisObject, which throws when newTarget is not a constructor.
     static constexpr VertexPropertyFlag PROPERTIES =
         VertexPropertyFlag::IS_CALL |
         VertexPropertyFlag::CAN_READ |
         VertexPropertyFlag::CAN_WRITE |
-        VertexPropertyFlag::CAN_ALLOCATE;
+        VertexPropertyFlag::CAN_ALLOCATE |
+        VertexPropertyFlag::CAN_THROW;
 
     FastSuperAllocateThisVertex() : VertexMixin() {}
 
