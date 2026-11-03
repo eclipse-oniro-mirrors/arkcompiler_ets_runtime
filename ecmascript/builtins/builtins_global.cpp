@@ -319,16 +319,20 @@ JSTaggedValue BuiltinsGlobal::PrintEntrypoint(EcmaRuntimeCallInfo *msg)
     BUILTINS_API_TRACE(thread, Global, PrintEntryPoint);
 
     uint32_t numArgs = msg->GetArgsNumber();
+    CString buffer;
     for (uint32_t i = 0; i < numArgs; i++) {
         JSHandle<EcmaString> stringContent = JSTaggedValue::ToString(thread, GetCallArg(msg, i));
-        RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread);
-        PrintString(thread, *stringContent);
-
-        if (i != numArgs - 1) {
-            std::cout << " ";
+        if (UNLIKELY(thread->HasPendingException())) {
+            std::cout << buffer << std::flush;
+            return JSTaggedValue::Exception();
         }
+        if (i != 0) {
+            buffer += " ";
+        }
+        buffer += ConvertToString(thread, *stringContent);
     }
-    std::cout << std::endl;
+    buffer += '\n';
+    std::cout << buffer << std::flush;
     return JSTaggedValue::Undefined();
 }
 
