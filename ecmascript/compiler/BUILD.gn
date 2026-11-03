@@ -768,6 +768,7 @@ action("gen_stub_file") {
               "//binarys/third_party/icu/innerapis/shared_icuuc/clang_x64/libs") + ":" + rebase_path(
               "//binarys/third_party/icu/innerapis/shared_icui18n/clang_x64/libs") + ":" + rebase_path(
               "//binarys/third_party/zlib/innerapis/shared_libz/clang_x64/libs") + ":" + rebase_path(
+              "//binarys/third_party/lz4/innerapis/liblz4_shared/clang_x64/libs") + ":" + rebase_path(
               "//binarys/third_party/bounds_checking_function/innerapis/libsec_shared/clang_x64/libs"),
     ]
     not_needed([ "llvm_lib_dir" ])
@@ -786,6 +787,7 @@ action("gen_stub_file") {
           rebase_path(root_out_dir_with_host_toolchain) +
           "/${icu_subsystem_name}/${icu_part_name}:" +
           rebase_path(root_out_dir_with_host_toolchain) + "/thirdparty/zlib:" +
+          rebase_path(root_out_dir_with_host_toolchain) + "/thirdparty/lz4:" +
           rebase_path(root_out_dir_with_host_toolchain) +
           "/hmosbundlemanager/zlib_override:" +
           rebase_path(root_out_dir_with_host_toolchain) +

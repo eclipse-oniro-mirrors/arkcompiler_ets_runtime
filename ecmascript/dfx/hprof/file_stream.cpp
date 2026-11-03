@@ -79,9 +79,7 @@ bool FileStream::WriteChunk(char *data, int32_t size)
         return false;
     }
 
-    std::string str(data, size);
-
-    fileStream_ << str;
+    fileStream_.write(data, size);
 
     return true;
 }
@@ -116,10 +114,9 @@ bool FileDescriptorStream::WriteChunk(char *data, int32_t size)
         return false;
     }
 
-    std::string str(data, size);
-    int ret = dprintf(fd_, "%s", str.c_str());
+    ssize_t ret = write(fd_, data, static_cast<size_t>(size));
     if (ret < 0) {
-        LOG_ECMA(ERROR) << "Write FD print failed, ret" << ret;
+        LOG_ECMA(ERROR) << "Write FD write failed, ret" << ret;
         return false;
     }
     ret = fsync(fd_);
@@ -144,7 +141,7 @@ bool FileDescriptorStream::WriteBinBlock(char *data, int32_t size)
 }
 
 BinaryWriter::BinaryWriter(Stream *stream)
-    : stream_(stream), chunkSize_(stream->GetSize()), chunk_(chunkSize_), current_(0)
+    : stream_(stream), chunkSize_(stream->GetSize()), chunk_(chunkSize_, '\0'), current_(0)
 {
 }
 

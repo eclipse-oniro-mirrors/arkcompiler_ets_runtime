@@ -38,7 +38,6 @@ bool HeapSnapshotJSONSerializer::Serialize(HeapSnapshot *snapshot, Stream *strea
     SerializeStringTable(snapshot, writer);        // 8.
     SerializerSnapshotClosure(writer);   // 9.
     writer->End();
-
     delete writer;
 
     LOG_ECMA(INFO) << "HeapSnapshotJSONSerializer::Serialize exit";

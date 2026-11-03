@@ -31,6 +31,8 @@
 #include "ecmascript/platform/file.h"
 #include "ecmascript/runtime.h"
 #include "ecmascript/runtime_lock.h"
+#include "ecmascript/dfx/hprof/heap_snapshot_json_serializer.h"
+#include "ecmascript/dfx/hprof/compressed_stream.h"
 
 #if defined(ENABLE_DUMP_IN_FAULTLOG)
 #include "faultloggerd_client.h"
@@ -290,6 +292,9 @@ bool HeapProfiler::DumpHeapSnapshotFromSharedGC(Stream *stream, const DumpSnapSh
 bool HeapProfiler::DoDump(Stream *stream, Progress *progress, const DumpSnapShotOption &dumpOption)
 {
     DISALLOW_GARBAGE_COLLECTION;
+    // DoDump handles JSON/text serialization only; binary rawheap dumps must go
+    // through BinaryDump, which writes via WriteBinBlock and must not be compressed.
+    ASSERT(dumpOption.dumpFormat != DumpFormat::BINARY);
     int32_t heapCount = 0;
     size_t heapSize = 0;
     HeapSnapshot *snapshot = nullptr;
@@ -326,17 +331,66 @@ bool HeapProfiler::DoDump(Stream *stream, Progress *progress, const DumpSnapShot
     if (progress != nullptr) {
         progress->ReportProgress(heapCount, heapCount);
     }
+
+    return SerializeWithCompression(stream, snapshot, writeMap, dumpOption);
+}
+
+bool HeapProfiler::SerializeWithCompression(Stream *stream, HeapSnapshot *snapshot, bool writeMap,
+                                            const DumpSnapShotOption &dumpOption)
+{
     auto serializeAndDelete = [&](Stream* targetStream) -> bool {
         HeapSnapshotJSONSerializer::Serialize(snapshot, targetStream);
         if (writeMap) HeapSnapshotJSONSerializer::SerializeExtraInfo(snapshot, targetStream);
         GetChunk()->Delete(snapshot);
         return true;
     };
-    if (!stream->Good()) {
-        FileStream newStream(GenDumpFileName(dumpOption.dumpFormat));
-        return serializeAndDelete(&newStream);
+
+    Stream* targetStream = stream;
+#if defined(ENABLE_LZ4_COMPRESSED)
+    CompressedStream* compressedStream = nullptr;
+
+    if (dumpOption.enableCompression && stream->Good()) {
+        compressedStream = new CompressedStream(stream);
+        targetStream = compressedStream;
+        LOG_ECMA(INFO) << "HeapProfiler: Using CompressedStream";
     }
-    return serializeAndDelete(stream);
+#else
+    if (dumpOption.enableCompression) {
+        LOG_ECMA(WARN) << "HeapProfiler: compressed dump is not enabled in this build, "
+                       << "falling back to plain dump";
+    }
+#endif
+
+    bool result = false;
+    if (!targetStream->Good()) {
+#if defined(ENABLE_LZ4_COMPRESSED)
+        // targetStream is unusable (LZ4 init failure or bad underlying stream).
+        // Tear down the compression layer and original stream first to release
+        // any partially-written resources (e.g. LZ4 frame header already flushed
+        // to the original fd), then fall back to a fresh FileStream.
+        if (compressedStream != nullptr) {
+            delete compressedStream;  // destructor calls EndOfStream on original stream
+            compressedStream = nullptr;
+        } else {
+            stream->EndOfStream();
+        }
+#else
+        stream->EndOfStream();
+#endif
+        LOG_ECMA(WARN) << "HeapProfiler: target stream unusable, falling back to file";
+        FileStream newStream(GenDumpFileName(dumpOption.dumpFormat));
+        result = serializeAndDelete(&newStream);
+    } else {
+        result = serializeAndDelete(targetStream);
+#if defined(ENABLE_LZ4_COMPRESSED)
+        if (compressedStream != nullptr) {
+            delete compressedStream;
+            compressedStream = nullptr;
+        }
+#endif
+    }
+
+    return result;
 }
 
 void HeapProfiler::UpdateNodeAddressIdMap()

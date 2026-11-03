@@ -79,6 +79,7 @@ template("host_unittest_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -370,6 +371,7 @@ template("host_moduletest_action") {
         rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
             rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
             rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+            rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
             rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
             rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
             rebase_path(_root_out_dir_) +
@@ -440,6 +442,7 @@ template("host_moduletest_action") {
         rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
             rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
             rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+            rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
             rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
             rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
             rebase_path(_root_out_dir_) +
@@ -512,6 +515,7 @@ template("host_moduletest_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -586,6 +590,7 @@ template("host_moduletest_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -772,6 +777,7 @@ template("host_moduletest_assert_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -860,6 +866,7 @@ template("host_moduletest_assert_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -923,6 +930,7 @@ template("host_moduletest_assert_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -987,6 +995,7 @@ template("host_moduletest_assert_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -1124,6 +1133,7 @@ template("host_perf_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -1180,6 +1190,7 @@ template("host_perf_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -1289,6 +1300,7 @@ template("host_aot_js_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -1400,6 +1412,7 @@ template("host_aot_js_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -1486,6 +1499,7 @@ template("host_aot_js_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -1572,6 +1586,7 @@ template("host_aot_js_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -1691,6 +1706,7 @@ template("host_aot_js_test_action") {
         rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
             rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
             rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+            rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
             rebase_path(_root_out_dir_) +
             "/resourceschedule/frame_aware_sched:" +
             rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
@@ -1768,6 +1784,7 @@ template("host_aot_js_test_action") {
         rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
             rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
             rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+            rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
             rebase_path(_root_out_dir_) +
             "/resourceschedule/frame_aware_sched:" +
             rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
@@ -1848,6 +1865,7 @@ template("host_aot_js_test_action") {
         rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
             rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
             rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+            rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
             rebase_path(_root_out_dir_) +
             "/resourceschedule/frame_aware_sched:" +
             rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
@@ -1973,6 +1991,7 @@ template("host_aot_js_test_action") {
         rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
             rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
             rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+            rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
             rebase_path(_root_out_dir_) +
             "/resourceschedule/frame_aware_sched:" +
             rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
@@ -2062,6 +2081,7 @@ template("host_aot_js_test_action") {
             "/arkcompiler/ets_runtime:" + rebase_path(_root_out_dir_) +
             "/${_icu_path_}:" + rebase_path(_root_out_dir_) +
             "/thirdparty/zlib:" + rebase_path(_root_out_dir_) +
+            "/thirdparty/lz4:" + rebase_path(_root_out_dir_) +
             "/resourceschedule/frame_aware_sched:" +
             rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
             rebase_path(_root_out_dir_) +
@@ -2149,6 +2169,7 @@ template("host_aot_js_test_action") {
             "/arkcompiler/ets_runtime:" + rebase_path(_root_out_dir_) +
             "/${_icu_path_}:" + rebase_path(_root_out_dir_) +
             "/thirdparty/zlib:" + rebase_path(_root_out_dir_) +
+            "/thirdparty/lz4:" + rebase_path(_root_out_dir_) +
             "/resourceschedule/frame_aware_sched:" +
             rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
             rebase_path(_root_out_dir_) +
@@ -2245,6 +2266,7 @@ template("host_aot_js_assert_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -2354,6 +2376,7 @@ template("host_aot_js_assert_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -2432,6 +2455,7 @@ template("host_aot_js_assert_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -2508,6 +2532,7 @@ template("host_aot_js_assert_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -2784,6 +2809,7 @@ template("host_aot_test_action") {
         rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
             rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
             rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+            rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
             rebase_path(_root_out_dir_) +
             "/resourceschedule/frame_aware_sched:" +
             rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
@@ -2909,6 +2935,7 @@ template("host_aot_test_action") {
         rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
             rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
             rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+            rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
             rebase_path(_root_out_dir_) +
             "/resourceschedule/frame_aware_sched:" +
             rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
@@ -3021,6 +3048,7 @@ template("host_aot_test_action") {
         rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
             rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
             rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+            rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
             rebase_path(_root_out_dir_) +
             "/resourceschedule/frame_aware_sched:" +
             rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
@@ -3112,6 +3140,7 @@ template("host_aot_test_action") {
         rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
             rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
             rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+            rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
             rebase_path(_root_out_dir_) +
             "/resourceschedule/frame_aware_sched:" +
             rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
@@ -3202,6 +3231,7 @@ template("host_aot_test_action") {
         rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
             rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
             rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+            rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
             rebase_path(_root_out_dir_) +
             "/resourceschedule/frame_aware_sched:" +
             rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
@@ -3263,6 +3293,7 @@ template("host_aot_test_action") {
         rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
             rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
             rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+            rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
             rebase_path(_root_out_dir_) +
             "/resourceschedule/frame_aware_sched:" +
             rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
@@ -3392,6 +3423,7 @@ template("host_aot_test_action") {
           rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
               rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
               rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+              rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
               rebase_path(_root_out_dir_) +
               "/resourceschedule/frame_aware_sched:" +
               rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
@@ -3508,6 +3540,7 @@ template("host_aot_test_action") {
           rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
               rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
               rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+              rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
               rebase_path(_root_out_dir_) +
               "/resourceschedule/frame_aware_sched:" +
               rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
@@ -3592,6 +3625,7 @@ template("host_aot_test_action") {
           rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
               rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
               rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+              rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
               rebase_path(_root_out_dir_) +
               "/resourceschedule/frame_aware_sched:" +
               rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
@@ -3674,6 +3708,7 @@ template("host_aot_test_action") {
           rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
               rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
               rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+              rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
               rebase_path(_root_out_dir_) +
               "/resourceschedule/frame_aware_sched:" +
               rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
@@ -3738,6 +3773,7 @@ template("host_aot_test_action") {
           rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
               rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
               rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+              rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
               rebase_path(_root_out_dir_) +
               "/resourceschedule/frame_aware_sched:" +
               rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
@@ -3862,6 +3898,7 @@ template("host_aot_test_action") {
           rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
               rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
               rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+              rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
               rebase_path(_root_out_dir_) +
               "/resourceschedule/frame_aware_sched:" +
               rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
@@ -3969,6 +4006,7 @@ template("host_aot_test_action") {
           rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
               rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
               rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+              rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
               rebase_path(_root_out_dir_) +
               "/resourceschedule/frame_aware_sched:" +
               rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
@@ -4065,6 +4103,7 @@ template("host_aot_test_action") {
               "/arkcompiler/ets_runtime:" + rebase_path(_root_out_dir_) +
               "/${_icu_path_}:" + rebase_path(_root_out_dir_) +
               "/thirdparty/zlib:" + rebase_path(_root_out_dir_) +
+              "/thirdparty/lz4:" + rebase_path(_root_out_dir_) +
               "/resourceschedule/frame_aware_sched:" +
               rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
               rebase_path(_root_out_dir_) +
@@ -4156,6 +4195,7 @@ template("host_aot_test_action") {
               "/arkcompiler/ets_runtime:" + rebase_path(_root_out_dir_) +
               "/${_icu_path_}:" + rebase_path(_root_out_dir_) +
               "/thirdparty/zlib:" + rebase_path(_root_out_dir_) +
+              "/thirdparty/lz4:" + rebase_path(_root_out_dir_) +
               "/resourceschedule/frame_aware_sched:" +
               rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
               rebase_path(_root_out_dir_) +
@@ -4227,6 +4267,7 @@ template("host_aot_test_action") {
               "/arkcompiler/ets_runtime:" + rebase_path(_root_out_dir_) +
               "/${_icu_path_}:" + rebase_path(_root_out_dir_) +
               "/thirdparty/zlib:" + rebase_path(_root_out_dir_) +
+              "/thirdparty/lz4:" + rebase_path(_root_out_dir_) +
               "/resourceschedule/frame_aware_sched:" +
               rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
               rebase_path(_root_out_dir_) +
@@ -4327,6 +4368,7 @@ template("host_aot_assert_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -4436,6 +4478,7 @@ template("host_aot_assert_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -4536,6 +4579,7 @@ template("host_aot_assert_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -4617,6 +4661,7 @@ template("host_aot_assert_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -4695,6 +4740,7 @@ template("host_aot_assert_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -4755,6 +4801,7 @@ template("host_aot_assert_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -4846,6 +4893,7 @@ template("host_pgotypeinfer_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -4898,6 +4946,7 @@ template("host_pgotypeinfer_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -4948,6 +4997,7 @@ template("host_pgotypeinfer_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -5117,6 +5167,7 @@ template("host_quickfix_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -5222,6 +5273,7 @@ template("host_jit_js_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -5285,6 +5337,7 @@ template("host_jit_js_test_action") {
         rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
             rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
             rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+            rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
             rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
             rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
             rebase_path(_root_out_dir_) +
@@ -5416,6 +5469,7 @@ template("host_jit_test_action") {
         rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
             rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
             rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+            rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
             rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
             rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
             rebase_path(_root_out_dir_) +
@@ -5478,6 +5532,7 @@ template("host_jit_test_action") {
           rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
               rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
               rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+              rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
               rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
               rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
               rebase_path(_root_out_dir_) +
@@ -5557,6 +5612,7 @@ template("host_baseline_jit_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -5642,6 +5698,7 @@ template("host_aot_js_double_pgo_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -5695,6 +5752,7 @@ template("host_aot_js_double_pgo_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -5741,6 +5799,7 @@ template("host_aot_js_double_pgo_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +
@@ -5800,6 +5859,7 @@ template("host_aot_js_double_pgo_test_action") {
       rebase_path(_root_out_dir_) + "/arkcompiler/ets_runtime:" +
           rebase_path(_root_out_dir_) + "/${_icu_path_}:" +
           rebase_path(_root_out_dir_) + "/thirdparty/zlib:" +
+          rebase_path(_root_out_dir_) + "/thirdparty/lz4:" +
           rebase_path(_root_out_dir_) + "/resourceschedule/frame_aware_sched:" +
           rebase_path(_root_out_dir_) + "/hiviewdfx/hilog:" +
           rebase_path(_root_out_dir_) +

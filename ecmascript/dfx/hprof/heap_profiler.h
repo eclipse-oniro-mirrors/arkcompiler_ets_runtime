@@ -201,6 +201,8 @@ private:
     HeapSnapshot *MakeHeapSnapshot(SampleType sampleType, const DumpSnapShotOption &dumpOption,
                                    bool traceAllocation = false);
     bool DoDump(Stream *stream, Progress *progress, const DumpSnapShotOption &dumpOption);
+    bool SerializeWithCompression(Stream *stream, HeapSnapshot *snapshot, bool writeMap,
+                                  const DumpSnapShotOption &dumpOption);
     void UpdateNodeAddressIdMap();
     std::string GenDumpFileName(DumpFormat dumpFormat);
     CString GetTimeStamp();
