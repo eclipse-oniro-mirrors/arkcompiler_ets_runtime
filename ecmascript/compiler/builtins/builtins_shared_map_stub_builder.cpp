@@ -332,6 +332,11 @@ void BuiltinsSharedMapStubBuilder::ForEach(GateRef glue, GateRef thisValue,
     BRANCH(TaggedIsJSSharedMap(glue, thisValue), &isSharedMap, slowPath);
     Bind(&isSharedMap);
 
+    Label notClassConstructor(env);
+    GateRef callbackFnHandle = GetCallArg0(numArgs);
+    SlowPathIfClassCtorCallback(glue, callbackFnHandle, &notClassConstructor, slowPath);
+    Bind(&notClassConstructor);
+
     // Step 2: acquire the READ scope
     Label canReadExit(env);
     Label readDoneExit(env);
@@ -358,7 +363,6 @@ void BuiltinsSharedMapStubBuilder::ForEach(GateRef glue, GateRef thisValue,
     Bind(&notScopeException);
     {
         // Step 3: callable check
-        GateRef callbackFnHandle = GetCallArg0(numArgs);
         BRANCH_LIKELY(TaggedIsCallable(glue, callbackFnHandle), &callbackIsCallable, &notCallable);
         Bind(&callbackIsCallable);
         {

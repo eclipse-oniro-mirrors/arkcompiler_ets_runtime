@@ -992,3 +992,33 @@ function mapSubclassEdgeCases(): void {
     print("===map subclass edge cases end===");
 }
 mapSubclassEdgeCases();
+
+// A class-constructor callback must keep the pre-stub C++ behavior: the error
+// message comes from JSFunction::Call ("class constructor cannot call"), and the
+// callback is never invoked for an empty map (no throw).
+function forEachClassCtorCallback() {
+    print("===map forEach class ctor callback begin===");
+
+    class Cb {
+        constructor() {}
+    }
+
+    const src = new SendableMap<number, number>();
+    src.set(1, 10);
+    const empty = new SendableMap<number, number>();
+
+    const show = function (tag: string, f: () => any) {
+        try {
+            print(tag + ": no throw, ret=" + f());
+        } catch (e) {
+            print(tag + ": " + e.name + ": " + e.message + " code=" + e.code);
+        }
+    };
+
+    show("ctor forEach", () => src.forEach(Cb));
+    show("ctor forEach empty", () => empty.forEach(Cb));
+    show("smi forEach", () => src.forEach(123));
+
+    print("===map forEach class ctor callback end===");
+}
+forEachClassCtorCallback();
