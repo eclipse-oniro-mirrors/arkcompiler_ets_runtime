@@ -1835,7 +1835,10 @@ HWTEST_F_L0(JsStackInfoTest, TestStepArkWithRecordJit_002)
 //     interleaved-context isolation;
 //   - degradation chain: position hit -> safepoint fallback -> 0;
 //   - defensive reads: corrupt MAGIC / size caps / read failures only degrade
-//     a single frame, never break the unwind.
+//     a single frame, never break the unwind;
+//   - transition-frame skip: frames sitting directly on a STEED caller are
+//     skipped (report only, return-address capture kept); non-STEED callers,
+//     AOT frames and unreadable peeks keep the legacy native report.
 // Lookup convention (FindBcOffsetByPCOffset): the position table is keyed at
 // the call vertex's start (pcBefore) and queried with pc-1, while the
 // safepoint table is keyed at the raw return address. Query pcs and return-
@@ -2641,6 +2644,10 @@ HWTEST_F_L0(JsStackInfoTest, SteedPcStateMachine_NoDumpNoCrosstalk)
  *   own slot (leave/builtin/bridge/optimized/fastjit geometry with sentinels
  *   in every other slot); interpreter-style and entry frames invalidate the
  *   candidate so the next STEED caller degrades instead of misreporting.
+ *   A transition frame (leave/builtin/bridge) sitting directly on a STEED
+ *   frame is not reported itself: the same driver step skips it and resolves
+ *   the STEED caller through the transition frame's return-address slot
+ *   (its raw heap JIT pc cannot be symbolized out of process).
  * @tc.type: FUNC
  * @tc.require:
  */
@@ -2652,24 +2659,26 @@ HWTEST_F_L0(JsStackInfoTest, SteedPcStateMachine_ReturnAddrFrameTypes)
         size_t prevOffset;
         size_t retAddrOffset;  // MiddleFrameMem::NO_RETURN_ADDR = invalidating
         bool needsFunctionSlot;  // FASTJIT: record-jit reads the function slot
+        bool transitionSkip;  // skipped when sitting directly on a STEED frame
     };
     const SlotCase cases[] = {
         { FrameType::BUILTIN_FRAME, BuiltinFrame::GetTypeOffset(), BuiltinFrame::GetPrevOffset(),
-          BuiltinFrame::GetReturnAddrOffset(), false },
+          BuiltinFrame::GetReturnAddrOffset(), false, true },
         { FrameType::LEAVE_FRAME, OptimizedLeaveFrame::GetTypeOffset(), OptimizedLeaveFrame::GetPrevOffset(),
-          OptimizedLeaveFrame::GetReturnAddrOffset(), false },
+          OptimizedLeaveFrame::GetReturnAddrOffset(), false, true },
         { FrameType::ASM_INTERPRETER_BRIDGE_FRAME, AsmInterpretedBridgeFrame::GetTypeOffset(),
           AsmInterpretedBridgeFrame::GetPrevOffset(),
-          AsmInterpretedBridgeFrame::GetReturnAddrOffset(false), false },
+          AsmInterpretedBridgeFrame::GetReturnAddrOffset(false), false, true },
         { FrameType::OPTIMIZED_JS_FUNCTION_FRAME, OptimizedJSFunctionFrame::GetTypeOffset(),
-          OptimizedJSFunctionFrame::GetPrevOffset(), OptimizedJSFunctionFrame::GetReturnAddrOffset(), false },
+          OptimizedJSFunctionFrame::GetPrevOffset(), OptimizedJSFunctionFrame::GetReturnAddrOffset(),
+          false, false },
         { FrameType::FASTJIT_FUNCTION_FRAME, FASTJITFunctionFrame::GetTypeOffset(),
           FASTJITFunctionFrame::GetPrevOffset(),
-          FASTJITFunctionFrame::GetPrevOffset() + sizeof(uintptr_t), true },
+          FASTJITFunctionFrame::GetPrevOffset() + sizeof(uintptr_t), true, false },
         { FrameType::ASM_INTERPRETER_FRAME, AsmInterpretedFrame::GetTypeOffset(),
-          AsmInterpretedFrame::GetPrevOffset(), MiddleFrameMem::NO_RETURN_ADDR, false },
+          AsmInterpretedFrame::GetPrevOffset(), MiddleFrameMem::NO_RETURN_ADDR, false, false },
         { FrameType::INTERPRETER_FRAME, InterpretedFrame::GetTypeOffset(),
-          InterpretedFrame::GetPrevOffset(), MiddleFrameMem::NO_RETURN_ADDR, false },
+          InterpretedFrame::GetPrevOffset(), MiddleFrameMem::NO_RETURN_ADDR, false, false },
     };
 
     for (const auto &slotCase : cases) {
@@ -2714,9 +2723,25 @@ HWTEST_F_L0(JsStackInfoTest, SteedPcStateMachine_ReturnAddrFrameTypes)
         EXPECT_EQ(pcOut, worldX.bytecodeArray + 100);
 
         // step 1: the middle frame; its return-address slot (if any) feeds
-        // the candidate for the next STEED caller
+        // the candidate for the next STEED caller. A transition frame on a
+        // STEED frame is not reported: the same step skips it and resolves
+        // the STEED caller itself, consuming the transition frame's own
+        // return-address slot as the callsite candidate
         ASSERT_TRUE(SteedStep(ctx, fpOut, pcOut, fpOut, pcOut))
             << "frame type " << static_cast<uintptr_t>(slotCase.type);
+        if (slotCase.transitionSkip) {
+            // the marker from the transition frame's own return-address slot
+            // resolved the STEED caller in this very step (a wrong-slot
+            // sentinel read would degrade to 0, a stale candidate to 300);
+            // the walk advanced past the STEED frame (its prevFp ends the
+            // chain), so there is no separate step for it
+            EXPECT_EQ(pcOut, worldY.bytecodeArray + 600)
+                << "frame type " << static_cast<uintptr_t>(slotCase.type);
+            EXPECT_EQ(fpOut, 0U)
+                << "frame type " << static_cast<uintptr_t>(slotCase.type);
+            JsStackInfo::machineCodeMap.clear();
+            continue;
+        }
 
         // step 2: the second STEED frame consumes the candidate
         ASSERT_TRUE(SteedStep(ctx, steedY.Fp(), pcOut, fpOut, pcOut))
@@ -2912,6 +2937,189 @@ HWTEST_F_L0(JsStackInfoTest, SteedPcDefensiveReads_PageBoundary)
         EXPECT_EQ(pcOut, world.bytecodeArray + 300);
         JsStackInfo::machineCodeMap.clear();
     }
+}
+
+/**
+ * @tc.name: SteedTransitionFrameSkip_OnSteedCaller
+ * @tc.desc: A transition frame (LEAVE_FRAME) sitting directly on a
+ *   STEED_FUNCTION_FRAME is skipped: the step reports the STEED frame itself
+ *   (JS frame, bytecode pc resolved from the transition frame's return
+ *   address via the position table), never a native frame carrying the raw
+ *   JIT machine-code pc; the walk then continues from the STEED frame's own
+ *   caller and still terminates at the entry-style boundary.
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(JsStackInfoTest, SteedTransitionFrameSkip_OnSteedCaller)
+{
+    // STEED caller world: the position table maps the callsite boundary 32 -> 400
+    SteedFuncWorld caller;
+    caller.Build(true, true, false, 32, 400, 0, 0);
+    // the transition frame's return address: one past the boundary, i.e. the
+    // callsite inside the caller's JIT text (a raw heap JIT pc for faultloggerd)
+    const uintptr_t callSiteInCaller = caller.funcAddr + 33;
+    // beyond the STEED frame: an entry-style boundary ends the sequence
+    EntryFrameMem entry(0, 0x7777);
+    // the STEED frame's own return address feeds a later caller; unused here
+    SteedFrameMem steedFrame(caller.jsFunc, entry.Fp(), 0x9999);
+    // LEAVE_FRAME directly on the STEED frame: its callsiteFp slot points at
+    // the STEED frame's fp, its return-address slot carries the JIT callsite
+    MiddleFrameMem leaveFrame(static_cast<uintptr_t>(FrameType::LEAVE_FRAME),
+                              OptimizedLeaveFrame::GetTypeOffset(), OptimizedLeaveFrame::GetPrevOffset(),
+                              OptimizedLeaveFrame::GetReturnAddrOffset(), steedFrame.Fp(), callSiteInCaller);
+
+    SafeMemContext &ctx = NewSteedCtx();
+    caller.Register(ctx);
+    ctx.AddRange(reinterpret_cast<uintptr_t>(&entry.slots[0]),
+                  reinterpret_cast<uintptr_t>(&entry.slots[EntryFrameMem::NUM_SLOTS]));
+    ctx.AddRange(reinterpret_cast<uintptr_t>(&leaveFrame.slots[0]),
+                  reinterpret_cast<uintptr_t>(&leaveFrame.slots[MiddleFrameMem::NUM_SLOTS]));
+    ctx.AddRange(reinterpret_cast<uintptr_t>(&steedFrame.slots[0]),
+                  reinterpret_cast<uintptr_t>(&steedFrame.slots[5]));
+
+    uintptr_t fp = leaveFrame.Fp(OptimizedLeaveFrame::GetTypeOffset());
+    uintptr_t sp = 0;
+    // fault pc outside the JIT text (the fault happened inside the runtime
+    // call under the LEAVE_FRAME): the resolution must come from the captured
+    // transition-frame return address, not from the fault pc
+    uintptr_t pc = 0x7FFF0000;
+    uintptr_t methodId = 0;
+    bool isJsFrame = true;
+    StepFrameType ft = StepFrameType::JS_FRAME;
+    std::vector<uintptr_t> jitCache;
+    ArkUnwindParam param(&ctx, SafeReadMemFuncForJit, &fp, &sp, &pc, &methodId,
+                         &isJsFrame, &ft, 0, jitCache);
+    // the transition frame is skipped: the step reports the STEED frame
+    ASSERT_TRUE(step_ark_with_record_jit(&param) == 1);
+    EXPECT_TRUE(isJsFrame);
+    EXPECT_EQ(ft, StepFrameType::JS_FRAME);
+    EXPECT_EQ(pc, caller.bytecodeArray + 400);
+    // fp/sp advance past the STEED frame to its own caller for the next step
+    EXPECT_EQ(fp, entry.Fp());
+    EXPECT_EQ(sp, entry.Fp());
+
+    // the sequence still terminates at the entry-style boundary
+    ASSERT_TRUE(step_ark_with_record_jit(&param) == 1);
+    EXPECT_FALSE(isJsFrame);
+    EXPECT_EQ(ft, StepFrameType::NATIVE_FRAME);
+    EXPECT_EQ(pc, 0x7777U);
+    JsStackInfo::machineCodeMap.clear();
+}
+
+/**
+ * @tc.name: SteedTransitionFrameSkip_NonSteedNextKept
+ * @tc.desc: The skip never fires without a STEED caller: a transition frame
+ *   above another transition frame (its return address points into mapped
+ *   stub code) and an AOT function frame above a STEED frame (a real JS
+ *   frame, excluded from the transition set) both keep the legacy native
+ *   report with the raw return-address pc.
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(JsStackInfoTest, SteedTransitionFrameSkip_NonSteedNextKept1)
+{
+    // (a) transition frame whose caller is another transition frame: keep the
+    // native report (the raw pc points into mapped stub code)
+    MiddleFrameMem builtinFrame(static_cast<uintptr_t>(FrameType::BUILTIN_FRAME),
+                                BuiltinFrame::GetTypeOffset(), BuiltinFrame::GetPrevOffset(),
+                                BuiltinFrame::GetReturnAddrOffset(), 0, 0x4321);
+    MiddleFrameMem leaveFrame(static_cast<uintptr_t>(FrameType::LEAVE_FRAME),
+                              OptimizedLeaveFrame::GetTypeOffset(), OptimizedLeaveFrame::GetPrevOffset(),
+                              OptimizedLeaveFrame::GetReturnAddrOffset(),
+                              builtinFrame.Fp(BuiltinFrame::GetTypeOffset()), 0x1234);
+    SafeMemContext &ctx = NewSteedCtx();
+    ctx.AddRange(reinterpret_cast<uintptr_t>(&builtinFrame.slots[0]),
+                 reinterpret_cast<uintptr_t>(&builtinFrame.slots[MiddleFrameMem::NUM_SLOTS]));
+    ctx.AddRange(reinterpret_cast<uintptr_t>(&leaveFrame.slots[0]),
+                 reinterpret_cast<uintptr_t>(&leaveFrame.slots[MiddleFrameMem::NUM_SLOTS]));
+
+    uintptr_t fp = leaveFrame.Fp(OptimizedLeaveFrame::GetTypeOffset());
+    uintptr_t sp = 0;
+    uintptr_t pc = 0;
+    uintptr_t methodId = 0;
+    bool isJsFrame = true;
+    StepFrameType ft = StepFrameType::JS_FRAME;
+    std::vector<uintptr_t> jitCache;
+    ArkUnwindParam param(&ctx, SafeReadMemFuncForJit, &fp, &sp, &pc, &methodId,
+                         &isJsFrame, &ft, 0, jitCache);
+    ASSERT_TRUE(step_ark_with_record_jit(&param) == 1);
+    EXPECT_FALSE(isJsFrame);
+    EXPECT_EQ(ft, StepFrameType::NATIVE_FRAME);
+    EXPECT_EQ(pc, 0x1234U);
+    EXPECT_EQ(fp, builtinFrame.Fp(BuiltinFrame::GetTypeOffset()));
+    JsStackInfo::machineCodeMap.clear();
+}
+
+HWTEST_F_L0(JsStackInfoTest, SteedTransitionFrameSkip_NonSteedNextKept2)
+{
+    // (b) AOT function frame above a STEED frame: a real JS frame, never
+    // skipped even though the caller-side frame is a STEED frame
+    SteedFrameMem steedFrame(0x1234, 0, 0);
+    MiddleFrameMem aotFrame(static_cast<uintptr_t>(FrameType::OPTIMIZED_JS_FUNCTION_FRAME),
+                            OptimizedJSFunctionFrame::GetTypeOffset(),
+                            OptimizedJSFunctionFrame::GetPrevOffset(),
+                            OptimizedJSFunctionFrame::GetReturnAddrOffset(),
+                            steedFrame.Fp(), 0x5678);
+    SafeMemContext &ctx = NewSteedCtx();
+    ctx.AddRange(reinterpret_cast<uintptr_t>(&aotFrame.slots[0]),
+                  reinterpret_cast<uintptr_t>(&aotFrame.slots[MiddleFrameMem::NUM_SLOTS]));
+    ctx.AddRange(reinterpret_cast<uintptr_t>(&steedFrame.slots[0]),
+                  reinterpret_cast<uintptr_t>(&steedFrame.slots[5]));
+
+    uintptr_t fp = aotFrame.Fp(OptimizedJSFunctionFrame::GetTypeOffset());
+    uintptr_t sp = 0;
+    uintptr_t pc = 0;
+    uintptr_t methodId = 0;
+    bool isJsFrame = true;
+    StepFrameType ft = StepFrameType::JS_FRAME;
+    std::vector<uintptr_t> jitCache;
+    ArkUnwindParam param(&ctx, SafeReadMemFuncForJit, &fp, &sp, &pc, &methodId,
+                         &isJsFrame, &ft, 0, jitCache);
+    ASSERT_TRUE(step_ark_with_record_jit(&param) == 1);
+    EXPECT_FALSE(isJsFrame);
+    EXPECT_EQ(ft, StepFrameType::NATIVE_FRAME);
+    EXPECT_EQ(pc, 0x5678U);
+    EXPECT_EQ(fp, steedFrame.Fp());
+    JsStackInfo::machineCodeMap.clear();
+}
+
+/**
+ * @tc.name: SteedTransitionFrameSkip_PeekReadFailureKept
+ * @tc.desc: When the peek cannot read the caller-side frame's type slot
+ *   (unmapped crash-process memory), the skip falls back to the legacy
+ *   report: the transition frame is reported as a native frame with its raw
+ *   return address instead of silently dropping out of the trace.
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(JsStackInfoTest, SteedTransitionFrameSkip_PeekReadFailureKept)
+{
+    // a STEED frame that exists but is not registered in the safe-read
+    // context: the peek's type read fails (its type slot does hold
+    // STEED_FUNCTION_FRAME, so a readable one would have triggered the skip)
+    SteedFrameMem ghost(0x1234, 0, 0);
+    MiddleFrameMem leaveFrame(static_cast<uintptr_t>(FrameType::LEAVE_FRAME),
+                              OptimizedLeaveFrame::GetTypeOffset(), OptimizedLeaveFrame::GetPrevOffset(),
+                              OptimizedLeaveFrame::GetReturnAddrOffset(), ghost.Fp(), 0x1234);
+    SafeMemContext &ctx = NewSteedCtx();
+    ctx.AddRange(reinterpret_cast<uintptr_t>(&leaveFrame.slots[0]),
+                  reinterpret_cast<uintptr_t>(&leaveFrame.slots[MiddleFrameMem::NUM_SLOTS]));
+
+    uintptr_t fp = leaveFrame.Fp(OptimizedLeaveFrame::GetTypeOffset());
+    uintptr_t sp = 0;
+    uintptr_t pc = 0;
+    uintptr_t methodId = 0;
+    bool isJsFrame = true;
+    StepFrameType ft = StepFrameType::JS_FRAME;
+    std::vector<uintptr_t> jitCache;
+    ArkUnwindParam param(&ctx, SafeReadMemFuncForJit, &fp, &sp, &pc, &methodId,
+                         &isJsFrame, &ft, 0, jitCache);
+    ASSERT_TRUE(step_ark_with_record_jit(&param) == 1);
+    EXPECT_FALSE(isJsFrame);
+    EXPECT_EQ(ft, StepFrameType::NATIVE_FRAME);
+    EXPECT_EQ(pc, 0x1234U);
+    EXPECT_EQ(fp, ghost.Fp());
+    JsStackInfo::machineCodeMap.clear();
 }
 #endif  // ECMASCRIPT_ENABLE_ARK_STEED
 

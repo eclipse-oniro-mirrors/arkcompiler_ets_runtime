@@ -1074,6 +1074,7 @@ static uintptr_t GetSteedBytecodePc(void *ctx, ReadMemFunc readMem, uintptr_t ty
 
     return bytecodeArray + bcOffset;
 }
+
 #endif  // ECMASCRIPT_ENABLE_ARK_STEED
 
 __attribute__((no_sanitize("hwaddress"))) uintptr_t GetBytecodeOffset(void *ctx,
@@ -1321,7 +1322,80 @@ bool ArkGetMethodIdWithJit(ArkUnwindParam *arkUnwindParam, uintptr_t frameType, 
     return true;
 }
 
-// 跨进程回栈入口
+// Transition frames that an outbound call from ArkSteed code builds directly
+// on the caller's STEED_FUNCTION_FRAME (see ecmascript/frames.h): their
+// return-address slot holds the raw callsite pc inside the heap-allocated JIT
+// machine code, which no out-of-process symbolizer can map (the jit dump ELF
+// is a post-walk synthetic file, not part of the process image). AOT function
+// frames are deliberately excluded: they are real JS frames whose report must
+// not be dropped, and their return addresses stay inside the mapped aot .so.
+static bool IsSteedTransitionFrame(uintptr_t frameType)
+{
+    switch (static_cast<FrameType>(frameType)) {
+        case FrameType::LEAVE_FRAME:
+        case FrameType::LEAVE_FRAME_WITH_ARGV:
+        case FrameType::BUILTIN_CALL_LEAVE_FRAME:
+        case FrameType::BUILTIN_FRAME:
+        case FrameType::ASM_BRIDGE_FRAME:
+        case FrameType::ASM_INTERPRETER_BRIDGE_FRAME:
+        case FrameType::OPTIMIZED_JS_FUNCTION_ARGS_CONFIG_FRAME:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Side-effect-free peek at the caller-side frame: advance a local pointer
+// through the current frame's prev chain (the same arithmetic the walk itself
+// uses) and read the next frame's type slot. Any geometry or read failure
+// means "do not skip" and the caller keeps the legacy report path.
+static bool PeekNextFrameIsSteed(ArkUnwindParam *arkUnwindParam, uintptr_t typeSlot, uintptr_t frameType)
+{
+    uintptr_t typeOffset = 0;
+    uintptr_t prevOffset = 0;
+    if (!GetTypeOffsetAndPrevOffsetFromFrameType(frameType, typeOffset, prevOffset)) {
+        return false;
+    }
+    // read next fp
+    uintptr_t nextFp = 0;
+    if (!arkUnwindParam->readMem(arkUnwindParam->ctx, typeSlot - typeOffset + prevOffset, &nextFp) ||
+        nextFp < sizeof(FrameType)) {
+        return false;
+    }
+    // read next frame type
+    uintptr_t nextType = 0;
+    if (!arkUnwindParam->readMem(arkUnwindParam->ctx, nextFp - sizeof(FrameType), &nextType)) {
+        return false;
+    }
+    FrameIterator::TryRemoveLazyDeoptFlag(nextType);
+    return nextType == static_cast<uintptr_t>(FrameType::STEED_FUNCTION_FRAME);
+}
+
+// Advance currentPtr (type-slot address) through the prev chain to the
+// caller frame's fp; failure means the walk cannot continue.
+__attribute__((no_sanitize("hwaddress"))) static bool AdvanceToCallerFp(ArkUnwindParam *arkUnwindParam,
+                                                                        uintptr_t &currentPtr,
+                                                                        uintptr_t frameType)
+{
+    uintptr_t typeOffset = 0;
+    uintptr_t prevOffset = 0;
+    if (!GetTypeOffsetAndPrevOffsetFromFrameType(frameType, typeOffset, prevOffset)) {
+#if ECMASCRIPT_ENABLE_ARK_STEED
+        ResetUnwindPcState();
+#endif
+        return false;
+    }
+    currentPtr -= typeOffset;
+    currentPtr += prevOffset;
+    if (!arkUnwindParam->readMem(arkUnwindParam->ctx, currentPtr, &currentPtr)) {
+#if ECMASCRIPT_ENABLE_ARK_STEED
+        ResetUnwindPcState();
+#endif
+        return false;
+    }
+    return true;
+}
+
 bool ArkGetNextFrameWithJit(ArkUnwindParam *arkUnwindParam, uintptr_t &currentPtr, uintptr_t &frameType)
 {
     currentPtr -= sizeof(FrameType);
@@ -1341,10 +1415,21 @@ bool ArkGetNextFrameWithJit(ArkUnwindParam *arkUnwindParam, uintptr_t &currentPt
         return true;
     }
     bool ret = false;
-    if (IsJsFunctionFrame(frameType) ||
-        IsNativeFunctionFrame(frameType)) {
-        *arkUnwindParam->pc = GetBytecodeOffset(arkUnwindParam->ctx, arkUnwindParam->readMem, frameType, currentPtr);
-        ret = true;
+    if (IsJsFunctionFrame(frameType) || IsNativeFunctionFrame(frameType)) {
+        // An ArkSteed transition frame sitting directly on a STEED_FUNCTION_FRAME
+        // would be reported as a native frame whose pc is a raw heap JIT address
+        // that faultloggerd cannot symbolize. Skip only this frame's report and
+        // let the tail recursion below process the STEED frame itself, whose
+        // bytecode pc is resolved through its own position/safepoint tables.
+        // CaptureFrameReturnAddr below still records the transition frame's
+        // return address, which is the callsite candidate the STEED branch
+        // consumes, so the resolution chain is unchanged.
+        if (!(IsSteedTransitionFrame(frameType) &&
+              PeekNextFrameIsSteed(arkUnwindParam, currentPtr, frameType))) {
+            *arkUnwindParam->pc = GetBytecodeOffset(arkUnwindParam->ctx, arkUnwindParam->readMem,
+                                                    frameType, currentPtr);
+            ret = true;
+        }
     } else if (IsFastJitFunctionFrame(frameType) || IsSteedFunctionFrame(frameType)) {
         *arkUnwindParam->pc = GetBytecodeOffset(arkUnwindParam->ctx, arkUnwindParam->readMem, frameType, currentPtr);
         ret = ArkGetMethodIdWithJit(arkUnwindParam, frameType, currentPtr);
@@ -1355,20 +1440,7 @@ bool ArkGetNextFrameWithJit(ArkUnwindParam *arkUnwindParam, uintptr_t &currentPt
     CaptureFrameReturnAddr(arkUnwindParam->ctx, arkUnwindParam->readMem, currentPtr, frameType);
 #endif
 
-    uintptr_t typeOffset = 0;
-    uintptr_t prevOffset = 0;
-    if (!GetTypeOffsetAndPrevOffsetFromFrameType(frameType, typeOffset, prevOffset)) {
-#if ECMASCRIPT_ENABLE_ARK_STEED
-        ResetUnwindPcState();
-#endif
-        return false;
-    }
-    currentPtr -= typeOffset;
-    currentPtr += prevOffset;
-    if (!arkUnwindParam->readMem(arkUnwindParam->ctx, currentPtr, &currentPtr)) {
-#if ECMASCRIPT_ENABLE_ARK_STEED
-        ResetUnwindPcState();
-#endif
+    if (!AdvanceToCallerFp(arkUnwindParam, currentPtr, frameType)) {
         return false;
     }
 
