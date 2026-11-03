@@ -956,14 +956,6 @@ void ArkSteedAssembler::ReturnWithPendingException()
     Return();
 }
 
-void ArkSteedAssembler::ReturnIfPendingException()
-{
-    Label noPendingException;
-    BranchIfNoPendingException(&noPendingException);
-    ReturnWithPendingException();
-    Bind(&noPendingException);
-}
-
 void ArkSteedAssembler::LoadAndClearPendingException(ArkSteedRegister dst, ArkSteedRegister glue)
 {
     TemporaryRegisterScope scope(this);

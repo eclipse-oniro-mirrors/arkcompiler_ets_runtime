@@ -311,7 +311,6 @@ public:
     inline void CallCommonStub(uint32_t stubId);
     inline void LoadBuiltinStubEntry(ArkSteedRegister dst, ArkSteedRegister glue, uint32_t builtinId);
     void ReturnWithPendingException();
-    void ReturnIfPendingException();
     // Branch to target if no pending exception exists in JSThread.
     void BranchIfNoPendingException(Label *target);
     void LoadAndClearPendingException(ArkSteedRegister dst, ArkSteedRegister glue);

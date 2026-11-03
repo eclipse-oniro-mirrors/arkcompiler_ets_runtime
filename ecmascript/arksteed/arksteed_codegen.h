@@ -110,6 +110,7 @@ private:
     void EmitCallConstructorGeneric(CallVertexT *call, ArkSteedRegister scratch);
     void EmitReturnWithPendingException();
     void EmitReturnIfPendingException();
+    Label *GetReturnWithPendingExceptionVeneer();
     int PrepareTrampolineArguments(const Vertex *call, uint32_t actualArgc, uint32_t targetIndex,
                                    uint32_t newTargetIndex, uint32_t receiverIndex, uint32_t firstArgIndex,
                                    ArkSteedRegister scratch);
@@ -179,6 +180,8 @@ private:
     // Block color assignment for CFG coloring (only computed when comments enabled)
     ChunkVector<int> blockColorAssignment_;
     ArkSteedDeferredCodeList deferredCode_;
+    // Lazily created once per function; shared by every exception-check site.
+    ArkSteedDeferredCode *returnIfPendingVeneer_ = nullptr;
     bool blockColorsComputed_ = false;
     bool withColors_;
 };

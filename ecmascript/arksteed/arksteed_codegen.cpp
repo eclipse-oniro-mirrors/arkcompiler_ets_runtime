@@ -467,6 +467,50 @@ constexpr int CALL_ARG0 = 0;
 constexpr int CALL_ARG1 = CALL_ARG0 + 1;
 constexpr int CALL_ARG2 = CALL_ARG1 + 1;
 
+// Shared slow path of every exception-check site: prepare the frame for a lazy deopt, leave the
+// frame and return with the pending exception. It is emitted once per function in the deferred
+// code area; entering it with a jump leaves fp, sp and the return address identical to the inline
+// form, so the frame state matches every call site.
+void EmitReturnWithPendingExceptionBody(ArkSteedAssembler *assembler,
+                                        ArkSteedSafepointTableBuilder *safepointBuilder)
+{
+    constexpr RuntimeStubID stubID = kungfu::RuntimeStubCSigns::ID_UpFrame;
+    constexpr int stackArgCount = 4;
+    constexpr int argCount = 1;
+    constexpr int prepareExceptionLazyDeopt = 1;
+
+    assembler->ReserveCallArgSlots(stackArgCount);
+    {
+        TemporaryRegisterScope scope(assembler);
+        ArkSteedRegister scratch = scope.AcquireScratch();
+        assembler->Move(scratch, static_cast<int64_t>(stubID));
+        assembler->MoveRepr(MachineRepresentation::Word64, assembler->GetCallArgSlot(CALL_ARG0), scratch);
+        assembler->Move(scratch, argCount);
+        assembler->MoveRepr(MachineRepresentation::Word64, assembler->GetCallArgSlot(CALL_ARG1), scratch);
+        assembler->Move(scratch, JSTaggedValue(prepareExceptionLazyDeopt).GetRawData());
+        assembler->MoveRepr(MachineRepresentation::Tagged, assembler->GetCallArgSlot(CALL_ARG2), scratch);
+    }
+    assembler->CallRuntime(stubID);
+    safepointBuilder->DefineSafepoint(assembler->GetPcOffset());
+    assembler->FreeCallArgSlots(stackArgCount);
+    assembler->ReturnWithPendingException();
+}
+
+class DeferredReturnWithPendingException final : public ArkSteedDeferredCode {
+public:
+    explicit DeferredReturnWithPendingException(ArkSteedSafepointTableBuilder *safepointBuilder)
+        : safepointBuilder_(safepointBuilder) {}
+
+    void Generate(ArkSteedAssembler *assembler) override
+    {
+        assembler->RecordComment("Return with pending exception");
+        EmitReturnWithPendingExceptionBody(assembler, safepointBuilder_);
+    }
+
+private:
+    ArkSteedSafepointTableBuilder *safepointBuilder_;
+};
+
 ArkSteedRegister GetInputRegister(const Vertex *vertex, int index)
 {
     const InputLocation *loc = vertex->GetInputLocation(index);
@@ -1240,33 +1284,25 @@ void ArkSteedCodeGenerator::EmitCallConstructorGeneric(CallVertexT *call, ArkSte
 
 void ArkSteedCodeGenerator::EmitReturnWithPendingException()
 {
-    constexpr auto stubId = kungfu::RuntimeStubCSigns::ID_UpFrame;
-    constexpr int stackArgCount = 4;
-    constexpr int argCount = 1;
-    constexpr int prepareExceptionLazyDeopt = 1;
-    __ ReserveCallArgSlots(stackArgCount);
-    {
-        TemporaryRegisterScope scope(assembler_);
-        ArkSteedRegister scratch = scope.AcquireScratch();
-        __ Move(scratch, static_cast<int64_t>(stubId));
-        __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0), scratch);
-        __ Move(scratch, argCount);
-        __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG1), scratch);
-        __ Move(scratch, JSTaggedValue(prepareExceptionLazyDeopt).GetRawData());
-        __ MoveRepr(MachineRepresentation::Tagged, __ GetCallArgSlot(CALL_ARG2), scratch);
-    }
-    __ CallRuntime(stubId);
-    safepointBuilder_->DefineSafepoint(__ GetPcOffset());
-    __ FreeCallArgSlots(stackArgCount);
-    __ ReturnWithPendingException();
+    EmitReturnWithPendingExceptionBody(assembler_, safepointBuilder_);
 }
 
 void ArkSteedCodeGenerator::EmitReturnIfPendingException()
 {
+    RecordComment("Exception check: return if pending");
     Label noPendingException;
     __ BranchIfNoPendingException(&noPendingException);
-    EmitReturnWithPendingException();
+    __ Jump(GetReturnWithPendingExceptionVeneer());
     __ Bind(&noPendingException);
+}
+
+Label *ArkSteedCodeGenerator::GetReturnWithPendingExceptionVeneer()
+{
+    if (returnIfPendingVeneer_ == nullptr) {
+        returnIfPendingVeneer_ = graph_->GetChunk()->New<DeferredReturnWithPendingException>(safepointBuilder_);
+        deferredCode_.push_back(returnIfPendingVeneer_);
+    }
+    return returnIfPendingVeneer_->GetEntryLabel();
 }
 
 int ArkSteedCodeGenerator::PrepareTrampolineArguments(const Vertex *call, uint32_t userArgc,
@@ -4965,7 +5001,7 @@ void ArkSteedCodeGenerator::ProcessNonControlVertex(NonControlVertex *vertex)
 
     // Allocation returns an uninitialized object, even when its HClass is installed.
     // Do not add an exit before initialization; reentry recovery is outside this contract.
-    if ((vertex->CanThrow() || vertex->IsCall()) && !IsUninitializedAllocation(vertex)) {
+    if (vertex->CanThrow() && !IsUninitializedAllocation(vertex)) {
         if (HasExceptionLazyDeopt(vertex)) {
             ASSERT(CatchBlockOf(vertex) == nullptr);
             if (__ GetPcOffset() > pcBefore) {
