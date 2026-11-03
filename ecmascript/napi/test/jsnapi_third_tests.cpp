@@ -61,6 +61,8 @@
 #include "ecmascript/pgo_profiler/pgo_profiler_decoder.h"
 #include "ecmascript/pgo_profiler/pgo_profiler_encoder.h"
 #include "ecmascript/pgo_profiler/pgo_profiler_manager.h"
+#include "ecmascript/runtime.h"
+#include "ecmascript/runtime_lock.h"
 #include "ecmascript/tagged_array.h"
 #include "ecmascript/tests/test_helper.h"
 #include "ecmascript/tagged_tree.h"
@@ -5076,6 +5078,49 @@ HWTEST_F_L0(JSNApiTests, CrossThreadExecution)
             GTEST_LOG_(INFO) << "vm is in the gc or shared gc";
         }
     }
+}
+
+HWTEST_F_L0(JSNApiTests, CrossThreadExecutionDuringSuspendAll)
+{
+    if (ecmascript::g_isEnableCMCGC) {
+        return;
+    }
+    EXPECT_FALSE(JSNApi::IsCrossThreadExecutionAllowed(vm_));
+    RuntimeLockHolder lock(thread_, SharedHeap::GetInstance()->GetSuspensionRequestMutex());
+    {
+        SuspendAllScope suspendScope(thread_);
+        // The SuspendAll initiator has no request flag, but recovery must still be rejected.
+        EXPECT_FALSE(thread_->HasSuspendRequest());
+        bool allowed = true;
+        std::thread recovery([&]() {
+            allowed = JSNApi::CheckAndSetAllowCrossThreadExecution(vm_);
+        });
+        recovery.join();
+        EXPECT_FALSE(allowed);
+        EXPECT_FALSE(JSNApi::IsCrossThreadExecutionAllowed(vm_));
+    }
+    JSNApi::DisallowCrossThreadExecution(vm_);
+}
+
+HWTEST_F_L0(JSNApiTests, CrossThreadExecutionWhileThreadListBusy)
+{
+    if (ecmascript::g_isEnableCMCGC) {
+        return;
+    }
+    Runtime::GetInstance()->GCIterateThreadList([&](JSThread *thread) {
+        if (thread != thread_) {
+            return;
+        }
+        bool allowed = true;
+        // Join while holding threadsLock_: recovery must reject instead of blocking on that lock.
+        std::thread recovery([&]() {
+            allowed = JSNApi::CheckAndSetAllowCrossThreadExecution(vm_);
+        });
+        recovery.join();
+        EXPECT_FALSE(allowed);
+        EXPECT_FALSE(JSNApi::IsCrossThreadExecutionAllowed(vm_));
+    });
+    JSNApi::DisallowCrossThreadExecution(vm_);
 }
 
 HWTEST_F_L0(JSNApiTests, IsCrossBundleHsp)
