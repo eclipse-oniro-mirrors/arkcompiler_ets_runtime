@@ -573,6 +573,13 @@ JSTaggedValue JSFunction::Call(EcmaRuntimeCallInfo *info)
     // 3. If IsCallable(F) is false, throw a TypeError exception.
     if (!func->IsCallable()) {
         RETURN_STACK_BEFORE_THROW_IF_ASM(thread);
+        LOG_ECMA(INFO) << "JSFunction::Call: Callable is false, func raw data: " << std::dec
+                       << func->GetRawData() << ", func is heap object: " << func->IsHeapObject()
+                       << ", pending exception: " << thread->HasPendingException();
+        if (func->IsHeapObject()) {
+            LOG_ECMA(INFO) << "JSFunction::Call: func js type: " << std::dec
+                           << static_cast<uint32_t>(func->GetTaggedObject()->GetClass()->GetObjectType());
+        }
         THROW_TYPE_ERROR_AND_RETURN(thread, "Callable is false", JSTaggedValue::Exception());
     }
 
