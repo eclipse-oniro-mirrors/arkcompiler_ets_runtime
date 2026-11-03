@@ -426,6 +426,16 @@ config("ark_jsruntime_public_config") {
     defines += [ "PANDA_JS_ETS_HYBRID_MODE" ]
     configs += [ "$ark_root/arkplatform:arkplatform_public_config" ]
   }
+  if (ets_runtime_enable_huge_page) {
+    defines += [ "ENABLE_HUGE_PAGE_MEM=1" ]
+  } else {
+    defines += [ "ENABLE_HUGE_PAGE_MEM=0" ]
+  }
+  if (ets_runtime_enable_huge_page && is_debug) {
+    defines += [ "ENABLE_HUGEPAGE_DFX_STATS=1" ]
+  } else {
+    defines += [ "ENABLE_HUGEPAGE_DFX_STATS=0" ]
+  }
 }
 
 intl_sources = []
@@ -706,6 +716,16 @@ config("ark_jsruntime_gc_config") {
   }
   if (is_debug) {
     defines += [ "STORE_CHECK_FOR_COMPRESSED_POINTER" ]
+  }
+  if (ets_runtime_enable_huge_page) {
+    defines += [ "ENABLE_HUGE_PAGE_MEM=1" ]
+  } else {
+    defines += [ "ENABLE_HUGE_PAGE_MEM=0" ]
+  }
+  if (ets_runtime_enable_huge_page && is_debug) {
+    defines += [ "ENABLE_HUGEPAGE_DFX_STATS=1" ]
+  } else {
+    defines += [ "ENABLE_HUGEPAGE_DFX_STATS=0" ]
   }
 }
 
@@ -1406,6 +1426,10 @@ if (ets_runtime_enable_compressed_pointer) {
   ecma_source += [ "ecmascript/mem/compressed_mem_map_allocator.cpp" ]
 } else {
   ecma_source += [ "ecmascript/mem/normal_mem_map_allocator.cpp" ]
+}
+
+if (ets_runtime_enable_huge_page) {
+  ecma_source += [ "ecmascript/mem/huge_mem_map_pool.cpp" ]
 }
 
 if (is_arkui_x && ark_compile_mode == "release") {

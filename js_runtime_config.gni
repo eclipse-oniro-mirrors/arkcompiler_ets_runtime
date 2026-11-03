@@ -145,6 +145,11 @@ declare_args() {
   # Control whether to include the C interpreter in arm64 builds.
   enable_c_interpreter = false
   enable_c_interpreter_arm64 = false
+
+  # Huge pages are an OHOS device feature. Host builds keep the code disabled;
+  # the standalone pool unit test explicitly overrides the feature macro.
+  ets_runtime_enable_huge_page =
+      is_ohos && is_standard_system && target_cpu == "arm64"
 }
 
 enable_c_interpreter_arm64 = enable_c_interpreter && (current_cpu == "arm64")

@@ -78,6 +78,48 @@ void MemMapAllocator::InitialMemPool(MemMap &mem, const uint32_t threadId, size_
     }
 }
 
+#if ENABLE_HUGE_PAGE_MEM
+MemMap MemMapAllocator::TryAllocateHugeSlot(size_t alignment, const std::string &spaceName,
+                                            HugePageTag hugePageTag, HugeSlotAllocPolicy hugeSlotAllocPolicy)
+{
+    if (hugePageTag == HugePageTag::INVALID) {
+        return MemMap();
+    }
+    HugeSlotAllocResult result =
+        hugeMemMapPool_.TryAllocateSlot(hugePageTag, spaceName, alignment, hugeSlotAllocPolicy);
+    if (result.slot.GetMem() != nullptr) {
+        if (result.memMapSizeDelta != 0) {
+            IncreaseMemMapTotalSize(result.memMapSizeDelta);
+        }
+        return result.slot;
+    }
+    if (result.quotaExceeded) {
+        static std::atomic<bool> hasDumped {false};
+        if (!hasDumped.exchange(true, std::memory_order_relaxed)) {
+            LOG_GC(WARN) << "Global Huge Page Quota EXCEEDED! Triggering DFX Summary Dump...";
+            DumpGlobalMemUsageSummaryDfx();
+        }
+    }
+    return MemMap();
+}
+
+bool MemMapAllocator::TryReleaseHugeSlot(void *mem, size_t size, bool isRegular)
+{
+    if (!isRegular) {
+        return false;
+    }
+    size_t memMapSizeDelta = 0;
+    if (!hugeMemMapPool_.ReleaseSlotIfOwned(mem, size, &memMapSizeDelta)) {
+        return false;
+    }
+    if (memMapSizeDelta != 0) {
+        DecreaseMemMapTotalSize(memMapSizeDelta);
+    }
+    return true;
+}
+
+#endif
+
 // MemUsage has been decreased for async free mem.
 void MemMapAllocator::AsyncFree(void *mem, size_t size, bool isRegular, bool isCompress, bool shouldPageTag)
 {
@@ -115,4 +157,87 @@ void MemMapAllocator::AdapterSuitablePoolCapacity(bool isLargeHeap)
 
     LOG_GC(INFO) << "Ark Auto adapter memory pool capacity:" << capacity_;
 }
+
+#if ENABLE_HUGE_PAGE_MEM
+void MemMapAllocator::NotifyApplicationBackground()
+{
+    hugeMemMapPool_.NotifyApplicationBackground();
+}
+
+void MemMapAllocator::NotifyGCReclaimFinished(TriggerGCType gcType)
+{
+    hugeMemMapPool_.NotifyGCReclaimFinished(gcType);
+}
+
+void MemMapAllocator::NotifyApplicationForeground()
+{
+    hugeMemMapPool_.NotifyApplicationForeground();
+}
+
+#if ENABLE_HUGEPAGE_DFX_STATS
+void MemMapAllocator::NotifyHugeSlotMoved(void *mem, HugePageTag tag)
+{
+    hugeMemMapPool_.NotifySlotMoved(mem, tag);
+}
+#endif
+
+bool MemMapAllocator::ShouldBatchHugePageSlotRelease(TriggerGCType gcType, bool isSharedHeap)
+{
+    if (!hugeMemMapPool_.HasChunks()) {
+        return false;
+    }
+    if (isSharedHeap) {
+        return gcType == TriggerGCType::SHARED_FULL_GC;
+    }
+    return gcType == TriggerGCType::FULL_GC;
+}
+
+void MemMapAllocator::BeginHugePageSlotReleaseBatch()
+{
+    hugeMemMapPool_.BeginSlotReleaseBatch();
+}
+
+void MemMapAllocator::EndHugePageSlotReleaseBatch()
+{
+    hugeMemMapPool_.EndSlotReleaseBatch();
+}
+
+void MemMapAllocator::PrepareHugePageBeforeFork()
+{
+    hugeMemMapPool_.PrepareBeforeFork();
+}
+
+void MemMapAllocator::ConfigureHugePageAfterFork()
+{
+#if USE_COMPRESSED_HUGE_PAGE_POOL
+    bool enabled = hugeMemMapPool_.ConfigureAfterFork();
+    if (!enabled) {
+        ReturnCompressedHugePagePoolToRegularPool();
+    }
+#else
+    hugeMemMapPool_.ConfigureAfterFork();
+#endif
+}
+
+#if USE_COMPRESSED_HUGE_PAGE_POOL
+void MemMapAllocator::ReturnCompressedHugePagePoolToRegularPool()
+{
+    MemMap reserved = compressedHugePagePool_.ReleaseReservedMemory();
+    if (reserved.GetMem() == nullptr) {
+        return;
+    }
+    memMapPool_.AdoptMemMap(reserved);
+    LOG_GC(DEBUG) << "Compressed huge page pool returned to regular pool, size:" << reserved.GetSize();
+}
+#endif
+
+void MemMapAllocator::DumpGlobalMemUsageSummaryDfx()
+{
+#if ENABLE_HUGEPAGE_DFX_STATS
+    hugeMemMapPool_.DumpUsageDfx();
+#else
+    hugeMemMapPool_.DumpUsageSummaryDfx();
+#endif
+}
+#endif
 }  // namespace panda::ecmascript

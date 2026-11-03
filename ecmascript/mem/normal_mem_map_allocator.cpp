@@ -13,12 +13,17 @@
  * limitations under the License.
  */
 
+#include <cerrno>
+#include <algorithm>
+#include <cstring>
+
 #include "ecmascript/mem/mem_map_allocator.h"
 
 #include "common_components/platform/cpu.h"
 #include "ecmascript/mem/tagged_state_word.h"
-#include "ecmascript/platform/os.h"
 #include "ecmascript/platform/parameters.h"
+#include "ecmascript/base/config.h"
+#include "ecmascript/platform/os.h"
 
 namespace panda::ecmascript {
 void MemMapAllocator::InitializeRegularRegionMap([[maybe_unused]] size_t alignment)
@@ -152,10 +157,18 @@ MemMap MemMapAllocator::AlignMemMapTo4G(const MemMap &memMap, size_t targetSize)
 #endif
 }
 
+#if ENABLE_HUGE_PAGE_MEM
+MemMap MemMapAllocator::Allocate(const uint32_t threadId, size_t size, size_t alignment,
+                                 const std::string &spaceName, bool regular, bool isCompress,
+                                 bool isMachineCode, bool isEnableJitFort, bool shouldPageTag,
+                                 bool skipCheckCapacity, HugePageTag hugePageTag,
+                                 HugeSlotAllocPolicy hugeSlotAllocPolicy)
+#else
 MemMap MemMapAllocator::Allocate(const uint32_t threadId, size_t size, size_t alignment,
                                  const std::string &spaceName, bool regular, bool isCompress,
                                  bool isMachineCode, bool isEnableJitFort, bool shouldPageTag,
                                  bool skipCheckCapacity)
+#endif
 {
     if (UNLIKELY(memMapTotalSize_ + size > capacity_)) {
         LOG_GC(ERROR) << "memory map overflow";
@@ -183,8 +196,13 @@ MemMap MemMapAllocator::Allocate(const uint32_t threadId, size_t size, size_t al
             return AllocateFromCompressPool(threadId, size, alignment, spaceName, isMachineCode,
                 isEnableJitFort, shouldPageTag, type);
         } else {
+#if ENABLE_HUGE_PAGE_MEM
+            return AllocateFromMemPool(threadId, size, alignment, spaceName, isMachineCode,
+                isEnableJitFort, shouldPageTag, type, hugePageTag, hugeSlotAllocPolicy);
+#else
             return AllocateFromMemPool(threadId, size, alignment, spaceName, isMachineCode,
                 isEnableJitFort, shouldPageTag, type);
+#endif
         }
     } else {
         // GC do not allocate Huge object
@@ -231,10 +249,23 @@ MemMap MemMapAllocator::AllocateFromCompressPool(const uint32_t threadId, size_t
     return MemMap();
 }
 
+#if ENABLE_HUGE_PAGE_MEM
+MemMap MemMapAllocator::AllocateFromMemPool(const uint32_t threadId, size_t size, size_t alignment,
+                                            const std::string &spaceName, bool isMachineCode, bool isEnableJitFort,
+                                            bool shouldPageTag, PageTagType type, HugePageTag hugePageTag,
+                                            HugeSlotAllocPolicy hugeSlotAllocPolicy)
+#else
 MemMap MemMapAllocator::AllocateFromMemPool(const uint32_t threadId, size_t size, size_t alignment,
                                             const std::string &spaceName, bool isMachineCode, bool isEnableJitFort,
                                             bool shouldPageTag, PageTagType type)
+#endif
 {
+#if ENABLE_HUGE_PAGE_MEM
+    MemMap hugeSlot = TryAllocateHugeSlot(alignment, spaceName, hugePageTag, hugeSlotAllocPolicy);
+    if (hugeSlot.GetMem() != nullptr) {
+        return hugeSlot;
+    }
+#endif
     MemMap mem = memMapPool_.GetRegularMemFromCommitted(size);
     if (mem.GetMem() != nullptr) {
         InitialMemPool(mem, threadId, size, spaceName, isMachineCode, isEnableJitFort, shouldPageTag, type);
@@ -263,7 +294,12 @@ MemMap MemMapAllocator::AllocateFromMemPool(const uint32_t threadId, size_t size
 void MemMapAllocator::CacheOrFree(void *mem, size_t size, bool isRegular, bool isCompress, size_t cachedSize,
                                   bool shouldPageTag, bool skipCache)
 {
-    // Clear ThreadId tag and tag the mem with ARKTS HEAP.
+#if ENABLE_HUGE_PAGE_MEM
+    if (TryReleaseHugeSlot(mem, size, isRegular)) {
+        return;
+    }
+#endif
+
     if (shouldPageTag) {
         PageTag(mem, size, PageTagType::HEAP);
     }

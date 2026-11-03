@@ -16,19 +16,30 @@
 #ifndef ECMASCRIPT_MEM_MEM_MAP_ALLOCATOR_H
 #define ECMASCRIPT_MEM_MEM_MAP_ALLOCATOR_H
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <deque>
 #include <map>
 #include <random>
-#include <set>
+#include <string>
+#include <vector>
 
+#include "ecmascript/platform/os.h"
 #include "ecmascript/base/config.h"
+#include "ecmascript/common_enum.h"
 #include "ecmascript/ecma_macros.h"
 #include "ecmascript/log_wrapper.h"
+#include "ecmascript/mem/huge_mem_map_pool.h"
 #include "ecmascript/mem/mem.h"
 #include "ecmascript/mem/mem_common.h"
 #include "ecmascript/platform/map.h"
 #include "ecmascript/platform/mutex.h"
+
+namespace panda::test {
+class HeapTest;
+class MemMapAllocatorTest;
+}  // namespace panda::test
 
 namespace panda::ecmascript {
 // Regular region with length of DEFAULT_REGION_SIZE(256kb)
@@ -121,13 +132,18 @@ public:
 
     void SplitMemMapToCache(MemMap memMap)
     {
-        auto memAddr = reinterpret_cast<uintptr_t>(memMap.GetMem());
-        size_t memTotalSize = AlignDown(memMap.GetSize(), REGULAR_MMAP_SIZE);
-        size_t count = memTotalSize / REGULAR_MMAP_SIZE;
-        while (count-- > 0) {
-            memMapCache_.emplace_back(reinterpret_cast<void *>(memAddr), REGULAR_MMAP_SIZE);
-            memAddr += REGULAR_MMAP_SIZE;
+        LockHolder lock(lock_);
+        SplitMemMapToCacheLocked(memMap);
+    }
+
+    void AdoptMemMap(MemMap memMap)
+    {
+        if (memMap.GetMem() == nullptr) {
+            return;
         }
+        LockHolder lock(lock_);
+        memMapVector_.emplace_back(memMap);
+        SplitMemMapToCacheLocked(memMap);
     }
 
     void InsertMemMap(MemMap memMap)
@@ -159,6 +175,17 @@ public:
     }
 
 private:
+    void SplitMemMapToCacheLocked(MemMap memMap)
+    {
+        auto memAddr = reinterpret_cast<uintptr_t>(memMap.GetMem());
+        size_t memTotalSize = AlignDown(memMap.GetSize(), REGULAR_MMAP_SIZE);
+        size_t count = memTotalSize / REGULAR_MMAP_SIZE;
+        while (count-- > 0) {
+            memMapCache_.emplace_back(reinterpret_cast<void *>(memAddr), REGULAR_MMAP_SIZE);
+            memAddr += REGULAR_MMAP_SIZE;
+        }
+    }
+
     static constexpr size_t REGULAR_MMAP_SIZE = DEFAULT_REGION_SIZE;
     Mutex lock_;
     std::vector<MemMap> memMapCache_;
@@ -348,9 +375,20 @@ public:
             TaggedStateWord::BASE_ADDRESS = addr & mask;
             InitializeHugeRegionMapForCompressedPointer(
                 INITIAL_HUGE_OBJECT_CAPACITY_FOR_COMPRESSED_POINTER, ToVoidPtr(addr));
+#if USE_COMPRESSED_HUGE_PAGE_POOL
+            InitializeRegularRegionMapForCompressedPointer(
+                COMPRESSED_REGULAR_OBJECT_CORE_CAPACITY,
+                ToVoidPtr(addr + INITIAL_HUGE_OBJECT_CAPACITY_FOR_COMPRESSED_POINTER));
+            uintptr_t hugePagePoolAddr = addr + INITIAL_MEM_MAP_POOL_CAPACITY_FOR_COMPRESSED_POINTER -
+                COMPRESSED_HUGE_PAGE_POOL_CAPACITY;
+            compressedHugePagePool_.Initialize(
+                MemMap(ToVoidPtr(hugePagePoolAddr), COMPRESSED_HUGE_PAGE_POOL_CAPACITY));
+            hugeMemMapPool_.SetCompressedBackingPool(&compressedHugePagePool_);
+#else
             InitializeRegularRegionMapForCompressedPointer(
                 INITIAL_REGULAR_OBJECT_CAPACITY_FOR_COMPRESSED_POINTER,
                 ToVoidPtr(addr + INITIAL_HUGE_OBJECT_CAPACITY_FOR_COMPRESSED_POINTER));
+#endif
 #else
             InitializeCompressRegionMap(alignment);
             InitializeHugeRegionMap(alignment);
@@ -364,6 +402,12 @@ public:
     {
         memMapTotalSize_ = 0;
         capacity_ = 0;
+#if ENABLE_HUGE_PAGE_MEM
+        hugeMemMapPool_.Finalize();
+#if USE_COMPRESSED_HUGE_PAGE_POOL
+        compressedHugePagePool_.Finalize();
+#endif
+#endif
         memMapFreeList_.Finalize();
         memMapPool_.Finalize();
 #ifndef USE_COMPRESSED_POINTER
@@ -401,16 +445,63 @@ public:
 
     static MemMapAllocator *GetInstance();
 
+#if ENABLE_HUGE_PAGE_MEM
+    MemMap Allocate(const uint32_t threadId, size_t size, size_t alignment,
+                    const std::string &spaceName, bool regular, bool isCompress, bool isMachineCode,
+                    bool isEnableJitFort, bool shouldPageTag, bool skipCheckCapacity,
+                    HugePageTag hugePageTag = HugePageTag::INVALID,
+                    HugeSlotAllocPolicy hugeSlotAllocPolicy = HugeSlotAllocPolicy::DEFAULT);
+#else
     MemMap Allocate(const uint32_t threadId, size_t size, size_t alignment,
                     const std::string &spaceName, bool regular, bool isCompress, bool isMachineCode,
                     bool isEnableJitFort, bool shouldPageTag, bool skipCheckCapacity);
+#endif
 
     void CacheOrFree(void *mem, size_t size, bool isRegular, bool isCompress, size_t cachedSize,
                      bool shouldPageTag, bool skipCache);
 
     void AsyncFree(void *mem, size_t size, bool isRegular, bool isCompress, bool shouldPageTag);
 
+#if ENABLE_HUGE_PAGE_MEM
+    bool IsHugePageEnabled() const
+    {
+        return hugeMemMapPool_.IsEnabled();
+    }
+
+    void NotifyApplicationBackground();
+
+    void NotifyGCReclaimFinished(TriggerGCType gcType);
+
+    void NotifyApplicationForeground();
+
+#if ENABLE_HUGEPAGE_DFX_STATS
+    void NotifyHugeSlotMoved(void *mem, HugePageTag tag);
+#endif
+
+    bool ShouldBatchHugePageSlotRelease(TriggerGCType gcType, bool isSharedHeap);
+
+    void BeginHugePageSlotReleaseBatch();
+
+    void EndHugePageSlotReleaseBatch();
+
+    void PrepareHugePageBeforeFork();
+
+    void ConfigureHugePageAfterFork();
+
+    void DumpGlobalMemUsageSummaryDfx();
+#endif
+
 private:
+#if USE_COMPRESSED_HUGE_PAGE_POOL
+    void ReturnCompressedHugePagePoolToRegularPool();
+#endif
+
+#if ENABLE_HUGE_PAGE_MEM
+    MemMap TryAllocateHugeSlot(size_t alignment, const std::string &spaceName, HugePageTag hugePageTag,
+                               HugeSlotAllocPolicy hugeSlotAllocPolicy);
+    bool TryReleaseHugeSlot(void *mem, size_t size, bool isRegular);
+#endif
+
 #ifdef USE_COMPRESSED_POINTER
     void InitializeRegularRegionMapForCompressedPointer(size_t capacity, void *addr);
     void InitializeHugeRegionMapForCompressedPointer(size_t capacity, void *addr);
@@ -421,9 +512,18 @@ private:
     MemMap AlignMemMapTo4G(const MemMap &memMap, size_t targetSize);
 #endif
     void InitializeGuard(size_t alignment);
+
+#if ENABLE_HUGE_PAGE_MEM
+    MemMap AllocateFromMemPool(const uint32_t threadId, size_t size, size_t alignment,
+                               const std::string &spaceName, bool isMachineCode, bool isEnableJitFort,
+                               bool shouldPageTag, PageTagType type,
+                               HugePageTag hugePageTag = HugePageTag::INVALID,
+                               HugeSlotAllocPolicy hugeSlotAllocPolicy = HugeSlotAllocPolicy::DEFAULT);
+#else
     MemMap AllocateFromMemPool(const uint32_t threadId, size_t size, size_t alignment,
                                const std::string &spaceName, bool isMachineCode, bool isEnableJitFort,
                                bool shouldPageTag, PageTagType type);
+#endif
     MemMap AllocateFromCompressPool(const uint32_t threadId, size_t size, size_t alignment,
                                     const std::string &spaceName, bool isMachineCode, bool isEnableJitFort,
                                     bool shouldPageTag, PageTagType type);
@@ -465,6 +565,16 @@ private:
     MemMapGuard memMapGuard_;
     std::atomic_size_t memMapTotalSize_ {0};
     size_t capacity_ {0};
+
+#if ENABLE_HUGE_PAGE_MEM
+#if USE_COMPRESSED_HUGE_PAGE_POOL
+    CompressedHugePagePool compressedHugePagePool_;
+#endif
+    HugeMemMapPool hugeMemMapPool_;
+#endif
+
+    friend class panda::test::HeapTest;
+    friend class panda::test::MemMapAllocatorTest;
 };
 }  // namespace panda::ecmascript
 #endif  // ECMASCRIPT_MEM_MEM_MAP_ALLOCATOR_H

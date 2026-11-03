@@ -30,6 +30,7 @@
 #include "ecmascript/mem/idle_gc_trigger.h"
 #include "ecmascript/mem/module_space.h"
 #include "ecmascript/mem/local_cmc/cc_evacuator-inl.h"
+#include "ecmascript/mem/mem_map_allocator.h"
 #include "ecmascript/mem/local_cmc/concurrent_copy_gc.h"
 #include "ecmascript/mem/native_area_allocator.h"
 #include "ecmascript/mem/native_pointer_space.h"
@@ -913,6 +914,13 @@ void SharedHeap::Reclaim(TriggerGCType gcType)
 
 void SharedHeap::ReclaimRegions(TriggerGCType gcType, bool gcThread)
 {
+#if ENABLE_HUGE_PAGE_MEM
+    bool shouldBatchHugeSlotRelease =
+        MemMapAllocator::GetInstance()->ShouldBatchHugePageSlotRelease(gcType, true);
+    if (shouldBatchHugeSlotRelease) {
+        MemMapAllocator::GetInstance()->BeginHugePageSlotReleaseBatch();
+    }
+#endif
     if (gcType == TriggerGCType::SHARED_FULL_GC || gcType == TriggerGCType::SHARED_CC) {
         sCompressSpace_->Reset();
     }
@@ -924,6 +932,12 @@ void SharedHeap::ReclaimRegions(TriggerGCType gcType, bool gcThread)
     sHugeObjectSpace_->ReclaimHugeRegion();
     sOldSpace_->ReclaimCSets();
     sWorkManager_->FinishBase();
+#if ENABLE_HUGE_PAGE_MEM
+    if (shouldBatchHugeSlotRelease) {
+        MemMapAllocator::GetInstance()->EndHugePageSlotReleaseBatch();
+        MemMapAllocator::GetInstance()->NotifyGCReclaimFinished(gcType);
+    }
+#endif
     sSweeper_->WaitAllTaskFinished();
     EnumerateOldSpaceRegionsWithRecord([] (Region *region) {
         region->ClearMarkGCBitset();
@@ -3122,6 +3136,13 @@ void Heap::PostParallelGCTask(ParallelGCTaskPhase gcTask)
 void Heap::ChangeGCParams(bool inBackground)
 {
     const double doubleOne = 1.0;
+#if ENABLE_HUGE_PAGE_MEM
+    if (inBackground) {
+        MemMapAllocator::GetInstance()->NotifyApplicationBackground();
+    } else {
+        MemMapAllocator::GetInstance()->NotifyApplicationForeground();
+    }
+#endif
     if (g_isEnableCMCGC) {
         common::BaseRuntime::ChangeGCParams(inBackground);
         return;
@@ -3151,6 +3172,9 @@ void Heap::ChangeGCParams(bool inBackground)
         maxEvacuateTaskCount_ = common::Taskpool::GetCurrentTaskpool()->GetTotalThreadNum();
         common::Taskpool::GetCurrentTaskpool()->SetThreadPriority(common::PriorityMode::FOREGROUND);
     }
+#if ENABLE_HUGE_PAGE_MEM
+    MemMapAllocator::GetInstance()->DumpGlobalMemUsageSummaryDfx();
+#endif
 }
 
 GCStats *Heap::GetEcmaGCStats()
