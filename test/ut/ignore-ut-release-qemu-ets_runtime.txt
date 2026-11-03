@@ -27,5 +27,3 @@ obj/arkcompiler/ets_runtime/ecmascript/tests/JS_Collator_TestWithQemu
 obj/arkcompiler/ets_runtime/ecmascript/tests/JS_DateTimeFormat_First_TestWithQemu
 obj/arkcompiler/ets_runtime/ecmascript/tests/JS_DateTimeFormat_Second_TestWithQemu
 obj/arkcompiler/ets_runtime/ecmascript/tests/JS_ListFormat_TestWithQemu
-obj/arkcompiler/ets_runtime/ecmascript/tests/GC_Second_TestWithQemu
-obj/arkcompiler/ets_runtime/ecmascript/tests/GC_IdleGCTrigger_TestWithQemu

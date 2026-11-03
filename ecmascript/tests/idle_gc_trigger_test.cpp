@@ -458,11 +458,16 @@ HWTEST_F_L0(IdleGCTriggerTest, NotifyNeedFreeze002)
     };
     Runtime::GetInstance()->SetNotifyDeferFreezeCallback(callback);
     SharedHeap *sheap = SharedHeap::GetInstance();
-    sheap->NotifyHeapAliveSizeAfterGC(1);
+    // Reset the shared-heap singleton to a known post-GC state first, so fragmentSizeAfterGC_/
+    // liveObjectSize_ don't leak from prior tests and perturb the decision below.
+    sheap->CollectGarbage<TriggerGCType::SHARED_FULL_GC, GCReason::OTHER>(thread);
     sheap->GetOldSpace()->IncreaseLiveObjectSize(5242889);
+    // Set heapAliveSizeAfterGC to the current heap object size so expectHeapSize exceeds
+    // GetHeapObjectSize(): CheckIdleOrHintFullGC then returns false and TryTriggerIdleGC takes
+    // the else branch -> NotifyIsNeedFreeze(true) -> freeze.
+    sheap->NotifyHeapAliveSizeAfterGC(sheap->GetHeapObjectSize());
     IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
     trigger->TryTriggerIdleGC(TRIGGER_IDLE_GC_TYPE::SHARED_FULL_GC);
-    sheap->CollectGarbage<TriggerGCType::SHARED_FULL_GC, GCReason::OTHER>(thread);
     sheap->Prepare(false);
     ASSERT_TRUE(freeze);
     delete trigger;

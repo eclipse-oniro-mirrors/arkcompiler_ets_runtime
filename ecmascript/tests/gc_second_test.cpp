@@ -438,19 +438,11 @@ HWTEST_F_L0(GCTest, AdjustCapacity)
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
     SemiSpace * space = heap->GetNewSpace();
 
-    EXPECT_EQ(space->GetSurvivalObjectSize(), 0);
-    {
-        [[maybe_unused]] ecmascript::EcmaHandleScope baseScope(thread);
-        for (int i = 0; i < 300; i++) {
-            [[maybe_unused]] JSHandle<TaggedArray> array = thread->GetEcmaVM()->GetFactory()->NewTaggedArray(
-                10 * 1024, JSTaggedValue::Hole(), MemSpaceType::SEMI_SPACE);
-        }
-    }
-    // The loop's GCs may swap the semi spaces and post async reclaim tasks:
-    // wait them out, then re-fetch the active space for stable assertions.
-    heap->WaitAllTasksFinished();
-    space = heap->GetNewSpace();
-    EXPECT_GT(space->GetSurvivalObjectSize(), 0);
+    // The active semi-space always has at least one committed region: Initialize() commits a
+    // DEFAULT_REGION_SIZE region on heap init and after every SwapNewSpace->Restart, so
+    // committedSize > 0 holds without any prior allocation. Assert on it because the
+    // committed-driven AdjustCapacity calls below rely on it (not on survivalObjectSize_).
+    EXPECT_GT(space->GetCommittedSize(), 0);
 
     // Pin the capacity at half the committed size so the small-flow calls below
     // deterministically take the committed-driven coverage recovery.
@@ -471,9 +463,14 @@ HWTEST_F_L0(GCTest, NativeMemAllocInSensitive)
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
     ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
     heap->NotifyHighSensitive(true);
+    // 20 x 64MB = 1.25GB: exceeds nativeSizeTriggerGCThreshold_ (768MB) to trigger the
+    // sensitive NATIVE_LIMIT OLD_GC reclamation, and total > 1GB keeps the < 1GB assertion
+    // meaningful. A single 300MB guest mmap crashes qemu user-mode (signal 44 / SIGSEGV;
+    // ceiling ~256MB on qemu 6.2.0), so cap each ArrayBuffer at 64MB -- works on host,
+    // real arm64, and qemu.
     for (size_t i = 0; i < 20; i++) {
         [[maybe_unused]] ecmascript::EcmaHandleScope baseScope(thread);
-        factory->NewJSArrayBuffer(300 * 1024 * 1024); // 300MB
+        factory->NewJSArrayBuffer(64 * 1024 * 1024); // 64MB
     }
     EXPECT_TRUE(heap->GetGlobalNativeSize() < 1 * 1024 * 1024* 1024); // 1GB
 }
