@@ -751,7 +751,6 @@ GateRef CircuitBuilder::TypedCallOperator(GateRef hirGate, MachineType type, con
     ASSERT(acc_.GetOpCode(hirGate) == OpCode::JS_BYTECODE);
     auto numValueIn = inList.size() - 3; // 3: state & depend & frame state
     uint64_t pcOffset = acc_.TryGetPcOffset(hirGate);
-    ASSERT(pcOffset != 0);
     if (!isSideEffect) {
         return GetCircuit()->NewGate(circuit_->TypedCallBuiltin(numValueIn, pcOffset), type,
                                      inList.size(), inList.data(), GateType::AnyType());
@@ -1180,7 +1179,6 @@ GateRef CircuitBuilder::TypedCall(GateRef hirGate, std::vector<GateRef> args, bo
     auto currentDepend = currentLabel->GetDepend();
     uint64_t bitfield = args.size();
     uint64_t pcOffset = acc_.TryGetPcOffset(hirGate);
-    ASSERT(pcOffset != 0);
     args.insert(args.begin(), currentDepend);
     args.insert(args.begin(), currentControl);
     AppendFrameState(args, hirGate);
@@ -1199,7 +1197,6 @@ GateRef CircuitBuilder::TypedFastCall(GateRef hirGate, std::vector<GateRef> args
     auto currentDepend = currentLabel->GetDepend();
     uint64_t bitfield = args.size();
     uint64_t pcOffset = acc_.TryGetPcOffset(hirGate);
-    ASSERT(pcOffset != 0);
     args.insert(args.begin(), currentDepend);
     args.insert(args.begin(), currentControl);
     AppendFrameState(args, hirGate);
@@ -1714,8 +1711,10 @@ GateRef CircuitBuilder::MonoLoadPropertyOnProto(GateRef receiver, GateRef plrGat
 GateRef CircuitBuilder::MonoCallGetterOnProto(GateRef gate, GateRef receiver, GateRef plrGate,
                                               GateRef unsharedConstPool, size_t hclassIndex)
 {
+    // pc 0 is valid (first bytecode of the method); the gate kind is the
+    // presence check. ldthisbyname can open a method, so pcOffset != 0 fired.
+    ASSERT(acc_.GetOpCode(gate) == OpCode::JS_BYTECODE);
     uint64_t pcOffset = acc_.TryGetPcOffset(gate);
-    ASSERT(pcOffset != 0);
 
     auto currentLabel = env_->GetCurrentLabel();
     auto currentControl = currentLabel->GetControl();

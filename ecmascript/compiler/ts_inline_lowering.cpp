@@ -785,7 +785,11 @@ GateRef TSInlineLowering::GetAccessorReceiver(GateRef gate)
 {
     EcmaOpcode ecmaOpcode = acc_.GetByteCodeOpcode(gate);
     if (UNLIKELY(ecmaOpcode == EcmaOpcode::STTHISBYNAME_IMM8_ID16 ||
-                 ecmaOpcode == EcmaOpcode::STTHISBYNAME_IMM16_ID16)) {
+                 ecmaOpcode == EcmaOpcode::STTHISBYNAME_IMM16_ID16 ||
+                 ecmaOpcode == EcmaOpcode::LDTHISBYNAME_IMM8_ID16 ||
+                 ecmaOpcode == EcmaOpcode::LDTHISBYNAME_IMM16_ID16)) {
+        // Both *thisbyname opcodes have no explicit receiver vreg input; reading
+        // value input 2 would run past the value input range of LDTHISBYNAME.
         return argAcc_.GetFrameArgsIn(gate, FrameArgIdx::THIS_OBJECT);
     }
     return acc_.GetValueIn(gate, 2); // 2: receiver
