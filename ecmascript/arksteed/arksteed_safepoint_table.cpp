@@ -28,7 +28,7 @@
 
 namespace panda::ecmascript::arksteed {
 namespace {
-constexpr size_t DEOPT_LOGICAL_PAIR_SIZE = 2;
+constexpr size_t DEOPT_LOGICAL_PAIR_SIZE = ArkSteedSafepointTableBuilder::DEOPT_LOGICAL_PAIR_SIZE;
 // SLEB128 of int64_t needs at most ceil(64 / 7) = 10 bytes.
 constexpr size_t MAX_SLEB128_INT64_SIZE = 10;
 
@@ -104,9 +104,10 @@ void ArkSteedSafepointTableBuilder::DefineDeoptSafepoint(
     if (entries_.empty()) {
         encodedDeoptData_.clear();
     }
-    std::sort(deopts.begin(), deopts.end(),
-              [](const ArkSteedDeoptValue &lhs, const ArkSteedDeoptValue &rhs) { return lhs.id < rhs.id; });
-    ASSERT(deopts.size() <= UINT16_MAX / DEOPT_LOGICAL_PAIR_SIZE);
+    std::sort(deopts.begin(), deopts.end(), [](const ArkSteedDeoptValue &lhs, const ArkSteedDeoptValue &rhs) {
+        return lhs.id < rhs.id;
+    });
+    CHECK(deopts.size() <= ArkSteedSafepointTableBuilder::MAX_DEOPT_VALUE_COUNT);
     entries_.push_back(NewEntry(pcOffset));
     entries_.back().deoptNum = static_cast<uint16_t>(deopts.size() * DEOPT_LOGICAL_PAIR_SIZE);
     uint16_t kind = static_cast<uint16_t>(exceptionHandlerKind);

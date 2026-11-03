@@ -48,6 +48,7 @@ class ArkSteedHeapBroker {
   private:
     friend class ArkSteedHeapBrokerTestAccess;
 
+  public:
     class NoGCScope {
       public:
         explicit NoGCScope(const ArkSteedHeapBroker *broker) : broker_(broker)
@@ -108,7 +109,21 @@ class ArkSteedHeapBroker {
         bool hasProtoCell{false};
     };
 
-    ArkSteedHeapBroker(JSThread *compilerThread, JitCompilationEnv *env) : compilerThread_(compilerThread), env_(env) {}
+    ArkSteedHeapBroker(JSThread *compilerThread, JitCompilationEnv *env)
+        : ArkSteedHeapBroker(compilerThread, env,
+                             (env != nullptr && env->GetMethodLiteral() != nullptr)
+                                 ? env->GetMethodLiteral()->GetMethodId().GetOffset()
+                                 : 0U,
+                             env == nullptr ? JSHandle<ProfileTypeInfo>() : env->GetProfileTypeInfo())
+    {}
+
+    ArkSteedHeapBroker(JSThread *compilerThread, JitCompilationEnv *env,
+                       uint32_t methodOffset, const JSHandle<ProfileTypeInfo> &profileTypeInfo)
+        : compilerThread_(compilerThread),
+          env_(env),
+          methodOffset_(methodOffset),
+          profileTypeInfo_(profileTypeInfo)
+    {}
 
     void StartSerializing() const
     {
@@ -137,11 +152,10 @@ class ArkSteedHeapBroker {
 
     bool TryGetProfileTypeInfo(ProfileTypeInfo **profileTypeArray) const
     {
-        if (!SerializingAllowed()) {
+        if (profileTypeInfo_.IsEmpty() || !SerializingAllowed()) {
             return false;
         }
-        auto profileTypeInfo = env_->GetProfileTypeInfo();
-        JSTaggedValue profileTypeInfoValue = GetRawHandleValue(profileTypeInfo);
+        JSTaggedValue profileTypeInfoValue = GetRawHandleValue(profileTypeInfo_);
         if (!profileTypeInfoValue.IsProfileTypeInfo()) {
             return false;
         }
@@ -265,8 +279,7 @@ class ArkSteedHeapBroker {
             return false;
         }
         NoGCScope scope(this);
-        uint32_t methodOffset = env_->GetMethodLiteral()->GetMethodId().GetOffset();
-        JSTaggedValue nameValue = env_->GetStringFromConstantPool(methodOffset, cpIdx, false);
+        JSTaggedValue nameValue = env_->GetStringFromConstantPool(methodOffset_, cpIdx, false);
         if (nameValue.IsUndefined()) {
             return false;
         }
@@ -279,12 +292,11 @@ class ArkSteedHeapBroker {
     bool TryGetMethodFromConstantPool(uint16_t cpIdx, ArkSteedObjectRef *method) const
     {
         ASSERT(method != nullptr);
-        if (env_->GetMethodLiteral() == nullptr) {
+        if (!SerializingAllowed()) {
             return false;
         }
         NoGCScope scope(this);
-        uint32_t methodOffset = env_->GetMethodLiteral()->GetMethodId().GetOffset();
-        JSTaggedValue constpool = env_->GetConstantPoolByMethodOffset(methodOffset);
+        JSTaggedValue constpool = env_->GetConstantPoolByMethodOffset(methodOffset_);
         if (!constpool.IsConstantPool()) {
             return false;
         }
@@ -518,6 +530,8 @@ private:
 
     JSThread *compilerThread_ {nullptr};
     JitCompilationEnv *env_ {nullptr};
+    uint32_t methodOffset_ {0};
+    JSHandle<ProfileTypeInfo> profileTypeInfo_;
     mutable ArkSteedBrokerMode mode_ {ArkSteedBrokerMode::SERIALIZED};
     mutable std::array<NamedAccessFeedbackCacheEntry, FEEDBACK_CACHE_SIZE> namedAccessFeedbackCache_ {};
     mutable std::array<ValueAccessFeedbackCacheEntry, FEEDBACK_CACHE_SIZE> valueAccessFeedbackCache_ {};

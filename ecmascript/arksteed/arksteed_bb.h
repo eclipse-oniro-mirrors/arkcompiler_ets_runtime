@@ -24,6 +24,7 @@
 
 namespace panda::ecmascript::arksteed {
 
+class ArkSteedCompilationUnit;
 class ControlVertex;
 class NonControlVertex;
 class ValueVertex;
@@ -180,6 +181,19 @@ public:
         registerMergeState_ = state;
     }
 
+    // The compilation unit whose bytecodes produced this block. Nullptr for
+    // blocks of the top-level method; set for blocks built by an inlined
+    // callee's child GraphBuilder so dumps can attribute them.
+    const ArkSteedCompilationUnit *GetInlineOwnerUnit() const
+    {
+        return inlineOwnerUnit_;
+    }
+
+    void SetInlineOwnerUnit(const ArkSteedCompilationUnit *unit)
+    {
+        inlineOwnerUnit_ = unit;
+    }
+
     bool HasPhi() const
     {
         return !phis_.empty();
@@ -312,6 +326,7 @@ private:
     ChunkVector<BB *> predecessors_;
     RegisterMergeState *registerMergeState_;
     RegallocLoopInfo *regallocLoopInfo_;
+    const ArkSteedCompilationUnit *inlineOwnerUnit_ {nullptr};
     LoopEffects *loopEffects_;
     bool hasPeeledIteration_ {false};
     Label label_;

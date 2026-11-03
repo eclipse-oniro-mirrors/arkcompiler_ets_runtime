@@ -144,6 +144,12 @@ enum CommandValues {
     OPTION_COMPILER_ARKSTEED_SOURCE_POSITION_TABLE,
     OPTION_COMPILER_ARKSTEED_PASS_TRACE,
     OPTION_COMPILER_ARKSTEED_PASS_TRACE_METHODS,
+    OPTION_COMPILER_ARKSTEED_ENABLE_INLINE,
+    OPTION_COMPILER_ARKSTEED_INLINE_LOOP_CALLEE,
+    OPTION_COMPILER_ARKSTEED_MAX_CUMULATIVE_INLINE_BYTECODE_SIZE,
+    OPTION_COMPILER_ARKSTEED_MAX_GRAPH_NODES_BEFORE_INLINE,
+    OPTION_COMPILER_ARKSTEED_MAX_INLINE_ACTUAL_ARGS,
+    OPTION_COMPILER_ARKSTEED_SMALL_INLINE_BYTECODE_SIZE,
     OPTION_COMPILER_TYPE_THRESHOLD,
     OPTION_ENABLE_RUNTIME_STAT,
     OPTION_COMPILER_LOG_SNAPSHOT,
@@ -1077,6 +1083,97 @@ public:
         return compilerArkSteedPassTraceMethods_;
     }
 
+    void SetCompilerArkSteedEnableInline(bool value)
+    {
+        compilerArkSteedEnableInline_ = value;
+    }
+
+    bool GetCompilerArkSteedEnableInline() const
+    {
+        return compilerArkSteedEnableInline_;
+    }
+
+    void SetCompilerArkSteedInlineLoopCallee(bool value)
+    {
+        compilerArkSteedInlineLoopCallee_ = value;
+    }
+
+    bool GetCompilerArkSteedInlineLoopCallee() const
+    {
+        return compilerArkSteedInlineLoopCallee_;
+    }
+
+    static constexpr uint32_t DEFAULT_ARKSTEED_MAX_INLINE_BYTECODE_SIZE = 128;
+    static constexpr uint32_t DEFAULT_ARKSTEED_MAX_INLINE_DEPTH = 4;
+    static constexpr uint32_t DEFAULT_ARKSTEED_MAX_INLINE_DEPTH_SMALL = 10;
+
+    // ArkSteed shares the legacy inliner's inline tracing switch.
+    bool GetCompilerArkSteedEnableTraceInline() const
+    {
+        return GetTraceInline();
+    }
+
+    // ArkSteed shares the legacy inliner's size/depth knobs. When the flag was not
+    // explicitly set, ArkSteed keeps its own defaults because the two inliners have
+    // different cost models.
+    uint32_t GetCompilerArkSteedMaxInlineBytecodeSize() const
+    {
+        return maxInlineBytecodesSet_ ? static_cast<uint32_t>(maxInlineBytecodes_)
+                                      : DEFAULT_ARKSTEED_MAX_INLINE_BYTECODE_SIZE;
+    }
+
+    void SetCompilerArkSteedMaxCumulativeInlineBytecodeSize(uint32_t value)
+    {
+        compilerArkSteedMaxCumulativeInlineBytecodeSize_ = value;
+    }
+
+    uint32_t GetCompilerArkSteedMaxCumulativeInlineBytecodeSize() const
+    {
+        return compilerArkSteedMaxCumulativeInlineBytecodeSize_;
+    }
+
+    void SetCompilerArkSteedMaxGraphNodesBeforeInline(uint32_t value)
+    {
+        compilerArkSteedMaxGraphNodesBeforeInline_ = value;
+    }
+
+    uint32_t GetCompilerArkSteedMaxGraphNodesBeforeInline() const
+    {
+        return compilerArkSteedMaxGraphNodesBeforeInline_;
+    }
+
+    void SetCompilerArkSteedMaxInlineActualArgs(uint32_t value)
+    {
+        compilerArkSteedMaxInlineActualArgs_ = value;
+    }
+
+    uint32_t GetCompilerArkSteedMaxInlineActualArgs() const
+    {
+        return compilerArkSteedMaxInlineActualArgs_;
+    }
+
+    uint32_t GetCompilerArkSteedMaxInlineDepth() const
+    {
+        return maxInlineDepthLargeSet_ ? static_cast<uint32_t>(maxInlineDepthLarge_)
+                                       : DEFAULT_ARKSTEED_MAX_INLINE_DEPTH;
+    }
+
+    uint32_t GetCompilerArkSteedMaxInlineDepthSmall() const
+    {
+        return maxInlineDepthSmallSet_ ? static_cast<uint32_t>(maxInlineDepthSmall_)
+                                       : DEFAULT_ARKSTEED_MAX_INLINE_DEPTH_SMALL;
+    }
+
+    void SetCompilerArkSteedSmallInlineBytecodeSize(uint32_t value)
+    {
+        compilerArkSteedSmallInlineBytecodeSize_ = value;
+    }
+
+    uint32_t GetCompilerArkSteedSmallInlineBytecodeSize() const
+    {
+        return compilerArkSteedSmallInlineBytecodeSize_;
+    }
+
     void SetCompilerLogSnapshot(bool value)
     {
         compilerLogSnapshot_ = value;
@@ -1949,6 +2046,7 @@ public:
     void SetMaxInlineBytecodes(size_t value)
     {
         maxInlineBytecodes_ = value;
+        maxInlineBytecodesSet_ = true;
     }
 
     size_t GetMaxInlineBytecodes()
@@ -1969,6 +2067,7 @@ public:
     void SetMaxInlineDepthSmall(size_t value)
     {
         maxInlineDepthSmall_ = value;
+        maxInlineDepthSmallSet_ = true;
     }
 
     size_t GetMaxInlineDepthSmall()
@@ -1979,6 +2078,7 @@ public:
     void SetMaxInlineDepthLarge(size_t value)
     {
         maxInlineDepthLarge_ = value;
+        maxInlineDepthLargeSet_ = true;
     }
 
     size_t GetMaxInlineDepthLarge()
@@ -2880,6 +2980,12 @@ private:
     bool compilerArkSteedSourcePositionTable_ {false};
     bool compilerArkSteedPassTrace_ {false};
     std::string compilerArkSteedPassTraceMethods_ {""};
+    bool compilerArkSteedEnableInline_ {false};
+    bool compilerArkSteedInlineLoopCallee_ {false};
+    uint32_t compilerArkSteedMaxCumulativeInlineBytecodeSize_ {256};
+    uint32_t compilerArkSteedMaxGraphNodesBeforeInline_ {1000};
+    uint32_t compilerArkSteedMaxInlineActualArgs_ {16};
+    uint32_t compilerArkSteedSmallInlineBytecodeSize_ {30};
     bool compilerLogSnapshot_ {false};
     bool compilerLogTime_ {false};
     bool enableCompilerLogAllMethodsTime_ {false};
@@ -2974,6 +3080,11 @@ private:
     size_t maxInlineDepthLarge_ {1};
     size_t maxInlineCount_ {6};
     size_t maxInlineSizeLarge_ {45};
+    // ArkSteed-specific defaults apply while these remain unset; see the
+    // GetCompilerArkSteedMaxInline* getters.
+    bool maxInlineBytecodesSet_ {false};
+    bool maxInlineDepthSmallSet_ {false};
+    bool maxInlineDepthLargeSet_ {false};
     std::string targetCompilerMode_ {""};
     std::string frameworkAbcPath_ {""};
     std::string hapPath_ {""};

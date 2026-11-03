@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-//! PARAMS --compiler-jit-hotness-threshold=60000
+//! PARAMS --compiler-jit-hotness-threshold=60000 --compiler-arksteed-enable-inline=false
 //! METHOD storesAcrossCall
 //! HAS Call
 //! COUNT LoadInt32Field 2
@@ -54,7 +54,7 @@ for (let i = 0; i < 16; ++i) {
     const arr = [1, 2, 3, 4];
     storesAcrossCall(arr, 2, i & 1 ? grow : unchanged);
     storesAcrossBranch(arr, 2, grow, (i & 1) !== 0);
-    loopWithMutation(arr, 4, unchanged);
+    loopWithMutation(arr, 4, i & 1 ? grow : unchanged);
 }
 ArkTools.arkSteedCompileSync(storesAcrossCall);
 ArkTools.arkSteedCompileSync(storesAcrossBranch);

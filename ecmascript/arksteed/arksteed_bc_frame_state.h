@@ -40,6 +40,13 @@ public:
         std::fill_n(data_, numVRegs_, initial);
     }
 
+    SharedBCFrameState Snapshot(Chunk *chunk) const
+    {
+        SharedBCFrameState snapshot(numVRegs_, nullptr, chunk);
+        std::copy_n(data_, numVRegs_, snapshot.data_);
+        return snapshot;
+    }
+
     VRegIDType NumVRegs() const
     {
         return numVRegs_;

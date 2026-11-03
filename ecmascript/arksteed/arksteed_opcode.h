@@ -306,12 +306,12 @@ COMMON_MIXINS_LIST(DEFINE_MIXIN_TYPE)
 class LazyDeoptimizableMixin {
 public:
     struct LazyDeoptFrameValue {
-        VRegIDType vreg;
+        DeoptVRegId vreg;
         ValueVertex *value;
         DeoptTranslationKind valueKind;
         InputLocation sourceLocation;
 
-        LazyDeoptFrameValue(VRegIDType vregId, ValueVertex *frameValue, DeoptTranslationKind kind)
+        LazyDeoptFrameValue(DeoptVRegId vregId, ValueVertex *frameValue, DeoptTranslationKind kind)
             : vreg(vregId), value(frameValue), valueKind(kind)
         {}
     };
@@ -337,7 +337,7 @@ public:
         return lazyDeoptFrameState_ == nullptr ? 0 : static_cast<uint32_t>(lazyDeoptFrameState_->size());
     }
 
-    VRegIDType GetDeoptVReg(uint32_t index) const
+    DeoptVRegId GetDeoptVReg(uint32_t index) const
     {
         ASSERT(lazyDeoptFrameState_ != nullptr);
         ASSERT(index < lazyDeoptFrameState_->size());
@@ -398,12 +398,12 @@ private:
 class EagerDeoptimizableMixin {
 public:
     struct EagerDeoptFrameValue {
-        VRegIDType vreg;
+        DeoptVRegId vreg;
         ValueVertex *value;
         DeoptTranslationKind valueKind;
         InputLocation sourceLocation;
 
-        EagerDeoptFrameValue(VRegIDType vregId, ValueVertex *frameValue, DeoptTranslationKind kind)
+        EagerDeoptFrameValue(DeoptVRegId vregId, ValueVertex *frameValue, DeoptTranslationKind kind)
             : vreg(vregId), value(frameValue), valueKind(kind)
         {}
     };
@@ -419,7 +419,7 @@ public:
         eagerDeoptFrameState_ = std::move(frameState);
     }
 
-    VRegIDType GetDeoptVReg(uint32_t index) const
+    DeoptVRegId GetDeoptVReg(uint32_t index) const
     {
         ASSERT(index < eagerDeoptFrameState_.size());
         return eagerDeoptFrameState_[index].vreg;
@@ -1932,7 +1932,10 @@ private:
     SideEffectKind sideEffectKind_;
 };
 
-class CallVertex : public VertexMixin<ValueVertex, CallVertex>, public ThrowableMixin, public LazyDeoptimizableMixin {
+template <class Derived>
+class JSCallVertexBase : public VertexMixin<ValueVertex, Derived>,
+                         public ThrowableMixin,
+                         public LazyDeoptimizableMixin {
 public:
     enum Indices : uint32_t {
         TARGET_INDEX = 0,
@@ -1945,7 +1948,9 @@ public:
                                                      VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::CAN_ALLOCATE |
                                                      VertexPropertyFlag::CAN_LAZY_DEOPT | VertexPropertyFlag::CAN_THROW;
 
-    CallVertex(uint32_t actualArgc) : VertexMixin(), actualArgc_(actualArgc) {}
+    explicit JSCallVertexBase(uint32_t actualArgc)
+        : VertexMixin<ValueVertex, Derived>(), actualArgc_(actualArgc)
+    {}
 
     uint32_t GetActualArgc() const
     {
@@ -1954,7 +1959,7 @@ public:
 
     size_t GetArgCount() const
     {
-        return GetInputCount();
+        return this->GetInputCount();
     }
 
     void SetValueLocationConstraints();
@@ -2096,45 +2101,27 @@ private:
     size_t builtinIndex_;
 };
 
-class CallKnownJSFunctionVertex : public VertexMixin<ValueVertex, CallKnownJSFunctionVertex>,
-                                  public ThrowableMixin,
-                                  public LazyDeoptimizableMixin {
+class CallVertex : public JSCallVertexBase<CallVertex> {
 public:
-    enum Indices : uint32_t {
-        TARGET_INDEX = 0,
-        NEW_TARGET_INDEX = 1,
-        RECEIVER_INDEX = 2,
-        CONTEXT_INDEX = 3,
-        FIRST_ARG_INDEX = 4,
-    };
-    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
-    static constexpr VertexPropertyFlag PROPERTIES =
-        VertexPropertyFlag::IS_CALL |
-        VertexPropertyFlag::CAN_READ |
-        VertexPropertyFlag::CAN_WRITE |
-        VertexPropertyFlag::CAN_ALLOCATE |
-        VertexPropertyFlag::CAN_LAZY_DEOPT |
-        VertexPropertyFlag::CAN_THROW;
+    explicit CallVertex(uint32_t actualArgc) : JSCallVertexBase(actualArgc) {}
 
-    explicit CallKnownJSFunctionVertex(uint32_t actualArgc)
-        : VertexMixin(), actualArgc_(actualArgc)
+    void SetValueLocationConstraints();
+};
+
+class CallKnownJSFunctionVertex : public JSCallVertexBase<CallKnownJSFunctionVertex> {
+public:
+    CallKnownJSFunctionVertex(uint32_t actualArgc, uint32_t expectedArgc, uint32_t callCount)
+        : JSCallVertexBase(actualArgc), expectedArgc_(expectedArgc), callCount_(callCount)
+    {}
+
+    uint32_t GetExpectedArgc() const
     {
+        return expectedArgc_;
     }
 
-    uint32_t GetActualArgc() const
+    uint32_t GetCallCount() const
     {
-        return actualArgc_;
-    }
-
-    uint32_t GetReservedCallSlotCount() const
-    {
-        uint32_t logicalSlots = actualArgc_ + NUM_MANDATORY_JSFUNC_ARGS + 1U;
-        return (logicalSlots + 1U) & ~1U;
-    }
-
-    size_t GetArgCount() const
-    {
-        return GetInputCount();
+        return callCount_;
     }
 
     void SetValueLocationConstraints();
@@ -2152,7 +2139,8 @@ public:
     }
 
 private:
-    uint32_t actualArgc_;
+    uint32_t expectedArgc_;
+    uint32_t callCount_;
 };
 
 class CallKnownBuiltinVertex : public VertexMixin<ValueVertex, CallKnownBuiltinVertex>,

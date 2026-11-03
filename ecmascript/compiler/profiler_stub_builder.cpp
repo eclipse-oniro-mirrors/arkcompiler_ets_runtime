@@ -242,15 +242,47 @@ void ProfilerStubBuilder::ProfileCall(
             IR_IF (Int32LessThan(slotIdNext, length)) {
                 GateRef slotValue = GetICSlot(glue, profileTypeInfo, slotId);
                 IR_IF (TaggedIsHeapObject(slotValue)) {
+                    GateRef callMetadata = GetICSlot(glue, profileTypeInfo, slotIdNext);
                     IR_IF (Int64Equal(slotValue, target)) {
-                        GateRef callCnt = TaggedGetInt(GetICSlot(glue, profileTypeInfo, slotIdNext));
-                        GateRef newCallCnt = Int32Add(callCnt, Int32(1));
-                        SetICSlot(VariableType::JS_ANY(), glue, profileTypeInfo, slotIdNext,
-                                  IntToTaggedInt(newCallCnt));
+                        IR_IF (TaggedIsInt(callMetadata)) {
+                            GateRef callCnt = TaggedGetInt(callMetadata);
+                            GateRef newCallCnt = Int32Add(callCnt, Int32(1));
+                            SetICSlot(VariableType::JS_ANY(), glue, profileTypeInfo, slotIdNext,
+                                      IntToTaggedInt(newCallCnt));
+                        }
                     } IR_ELSE {
-                        GateRef nonType = TaggedInt(PGO_BUILTINS_STUB_ID(NONE));
-                        SetICSlot(VariableType::JS_ANY(), glue, profileTypeInfo, slotId, nonType);
-                        TryPreDumpInner(glue, func, profileTypeInfo);
+                        GateRef interruptVector = LoadPrimitive(VariableType::INT64(), glue,
+                            IntPtr(JSThread::GlueData::GetInterruptVectorOffset(env->Is32Bit())));
+                        GateRef useExactCallTarget = Int64Equal(
+                            Int64And(interruptVector,
+                                     Int64(1ULL << JSThread::ArkSteedInlineStatusBits::START_BIT)), Int64(0));
+                        IR_IF (useExactCallTarget) {
+                            GateRef nonType = TaggedInt(PGO_BUILTINS_STUB_ID(NONE));
+                            SetICSlot(VariableType::JS_ANY(), glue, profileTypeInfo, slotId, nonType);
+                            TryPreDumpInner(glue, func, profileTypeInfo);
+                        } IR_ELSE {
+                            GateRef expectedMethod = GetMethodFromFunction(glue, slotValue);
+                            GateRef actualMethod = GetMethodFromFunction(glue, target);
+                            GateRef expectedCell = Load(VariableType::JS_POINTER(), glue, slotValue,
+                                IntPtr(JSFunction::RAW_PROFILE_TYPE_INFO_OFFSET));
+                            GateRef actualCell = Load(VariableType::JS_POINTER(), glue, target,
+                                IntPtr(JSFunction::RAW_PROFILE_TYPE_INFO_OFFSET));
+                            GateRef sameMethodAndCell = BitAnd(
+                                Int64Equal(expectedMethod, actualMethod), Int64Equal(expectedCell, actualCell));
+                            GateRef hasExactCountOrFamily = BitOr(
+                                TaggedIsInt(callMetadata), Int64Equal(callMetadata, expectedCell));
+                            IR_IF (BitAnd(sameMethodAndCell, hasExactCountOrFamily)) {
+                                IR_IF (TaggedIsInt(callMetadata)) {
+                                    // Keep the representative function and shared profile cell for ArkSteed's
+                                    // compatible closure guard.
+                                    SetICSlot(VariableType::JS_ANY(), glue, profileTypeInfo, slotIdNext, expectedCell);
+                                }
+                            } IR_ELSE {
+                                GateRef nonType = TaggedInt(PGO_BUILTINS_STUB_ID(NONE));
+                                SetICSlot(VariableType::JS_ANY(), glue, profileTypeInfo, slotId, nonType);
+                                TryPreDumpInner(glue, func, profileTypeInfo);
+                            }
+                        }
                     }
                 } IR_ELSE {
                     // Only when slot value is undefined, it means uninitialized, so we need to update the slot.

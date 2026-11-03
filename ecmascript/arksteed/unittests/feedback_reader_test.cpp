@@ -987,7 +987,7 @@ TEST_F(ArkSteedFeedbackReaderTest, GlobalAccessAndCallFeedbackStates)
                 read = reader.ReadCallFeedback(&feedback);
             }
             EXPECT_TRUE(read);
-            EXPECT_EQ(feedback.kind, CallFeedbackKind::INSUFFICIENT);
+            EXPECT_TRUE(feedback.IsInsufficient());
             EXPECT_EQ(feedback.slotId, emptySlot);
             EXPECT_FALSE(feedback.target.HasHandle());
         }

@@ -4130,10 +4130,9 @@ DEF_RUNTIME_STUBS(DeoptHandler)
     int32_t dispatch = GetArg(argv, argc, 0).GetInt();
     kungfu::DeoptType type = static_cast<kungfu::DeoptType>(dispatch);
     JSHandle<JSTaggedValue> maybeAcc = GetHArg<JSTaggedValue>(argv, argc, 1);
-    size_t depth = Deoptimizier::GetInlineDepth(thread, static_cast<uint32_t>(type));
-    Deoptimizier deopt(thread, depth, type);
+    Deoptimizier deopt(thread, 0, type);
     std::vector<kungfu::ARKDeopt> deoptBundle;
-    deopt.CollectDeoptBundleVec(deoptBundle);
+    size_t depth = deopt.CollectDeoptBundleVec(deoptBundle);
     ASSERT(!deoptBundle.empty());
     size_t shift = Deoptimizier::ComputeShift(depth);
     deopt.CollectVregs(deoptBundle, shift);

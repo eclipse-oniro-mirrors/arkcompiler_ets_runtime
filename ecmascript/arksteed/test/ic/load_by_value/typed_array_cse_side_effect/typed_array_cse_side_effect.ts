@@ -15,19 +15,24 @@
 
 // @ts-nocheck
 //! PARAMS --compiler-jit-hotness-threshold=10000
+// General inlining adds the monomorphic callback's target and typed-array
+// store guards to the caller graph; the methodId identity guard contributes
+// two more LoadInt32Field (the two halves of literalInfo). The element-load
+// limits below still check that a side-effecting callback invalidates CSE
+// across the call boundary.
 //! METHOD loadAroundMutation
 //! COUNT_LE TypedArrayIntLoadElement 2
-//! COUNT_LE LoadInt32Field 2
+//! COUNT_LE LoadInt32Field 5
 //! HAS DeoptIfHClassMismatch
-//! COUNT_LE DeoptIfInt32Condition 2
+//! COUNT_LE DeoptIfInt32Condition 4
 //! HAS_NOT CallCommonStub GetPropertyByValue
 
 //! METHOD loadAroundDetach
 //! COUNT_LE TypedArrayIntLoadElement 2
-//! COUNT_LE LoadInt32Field 2
+//! COUNT_LE LoadInt32Field 3
 //! HAS DeoptIfHClassMismatch
 //! COUNT_LE DeoptIfInt32Condition 2
-//! COUNT_LE DeoptIfTaggedCondition 2
+//! COUNT_LE DeoptIfTaggedCondition 4
 //! HAS_NOT CallCommonStub GetPropertyByValue
 declare function print(arg: any): string;
 

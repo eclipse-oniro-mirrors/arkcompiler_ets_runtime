@@ -42,6 +42,10 @@ enum class DeoptTranslationKind : uint8_t {
     RAW_INT32 = 3,
 };
 
+// Signed id axis for deopt records: negative values are reserved special slots
+// (SpecVregIndex), non-negative values are bytecode virtual registers.
+using DeoptVRegId = int32_t;
+
 // Lazy-deopt safepoint offsets are FP-relative and 8-byte aligned, so the low 3 bits are
 // free.  We encode DeoptTranslationKind there so the trampoline can reconstruct the correct
 // JSTaggedValue without requiring upfront normalization nodes on the hot path.
@@ -168,7 +172,7 @@ struct DeoptId {
 };
 
 struct DeoptTranslationInput {
-    int32_t vreg {0};
+    DeoptVRegId vreg {0};
     DeoptTranslationKind valueKind {DeoptTranslationKind::TAGGED};
     DeoptSourceKind sourceKind {DeoptSourceKind::CONSTANT};
     int64_t source {0};

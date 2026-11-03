@@ -883,7 +883,8 @@ bool ArkSteedHeapBroker::GetFeedbackForGlobalAccess(const ArkSteedFeedbackReader
     return reader.ReadGlobalAccessFeedback(feedback);
 }
 
-bool ArkSteedHeapBroker::GetFeedbackForCall(const ArkSteedFeedbackReader &reader, CallFeedback *feedback) const
+bool ArkSteedHeapBroker::GetFeedbackForCall(const ArkSteedFeedbackReader &reader,
+                                            CallFeedback *feedback) const
 {
     *feedback = {};
     NoGCScope scope(this);

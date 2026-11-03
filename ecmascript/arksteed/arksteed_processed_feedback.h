@@ -39,12 +39,6 @@ enum class ValueAccessFeedbackKind : uint8_t {
     ELEMENT,
 };
 
-enum class CallFeedbackKind : uint8_t {
-    INSUFFICIENT,
-    MONOMORPHIC_JS_FUNCTION,
-    MONOMORPHIC_BUILTIN,
-};
-
 enum class ConstructorFeedbackKind : uint8_t {
     INSUFFICIENT,
     MONOMORPHIC_JS_FUNCTION,
@@ -92,20 +86,48 @@ struct OperationFeedback {
     }
 };
 
-struct CallFeedback {
-    CallFeedbackKind kind {CallFeedbackKind::INSUFFICIENT};
-    uint32_t slotId {0};
-    ArkSteedFunctionRef target {};
-    kungfu::BuiltinsStubCSigns::ID builtinId {kungfu::BuiltinsStubCSigns::ID::NONE};
+enum class CallReductionKind : uint8_t {
+    NONE,
+    TAGGED_CONSTANT,
+    USER_ARGUMENT,
+};
 
+struct CallFeedback {
+    uint32_t slotId {0};
+    ArkSteedObjectRef target {};
+    ArkSteedObjectRef method {};
+    JSTaggedType reducedConstant {JSTaggedValue::VALUE_UNDEFINED};
+    uint32_t expectedArgc {0};
+    uint32_t methodId {0};
+    uint32_t callCount {0};
+    uint32_t reducedArgumentIndex {0};
+    CallReductionKind reductionKind {CallReductionKind::NONE};
+    bool isMonomorphic {false};
+    bool isCompatibleClosure {false};
+    // Class constructors are reported so super-call speculation can use the
+    // feedback, but the regular known-call/inline paths must not consume them.
+    bool isClassConstructor {false};
+    ArkSteedObjectRef closureFamily {};
+    kungfu::BuiltinsStubCSigns::ID builtinId {kungfu::BuiltinsStubCSigns::ID::NONE};
+    bool isMonomorphicBuiltin {false};
+
+    bool IsInsufficient() const
+    {
+        return !isMonomorphic || !target.IsSafeForCompile() ||
+            !method.IsSafeForCompile() ||
+            (isCompatibleClosure && !closureFamily.IsSafeForCompile());
+    }
+
+    // Identity-guarded speculation (e.g. super-ctor) needs the exact function
+    // object; a compatible closure family has a different runtime identity.
     bool IsMonomorphicJSFunction() const
     {
-        return kind == CallFeedbackKind::MONOMORPHIC_JS_FUNCTION;
+        return isMonomorphic && !isCompatibleClosure && !IsInsufficient();
     }
 
     bool IsMonomorphicBuiltin() const
     {
-        return kind == CallFeedbackKind::MONOMORPHIC_BUILTIN;
+        return isMonomorphicBuiltin && builtinId != kungfu::BuiltinsStubCSigns::ID::NONE;
     }
 };
 

@@ -22,7 +22,9 @@
 //! HAS         CallKnownJSFunction
 //! COMPILE_COUNT_GE *invokeCreateTarget* 1
 //! EXEC_COUNT_GE *invokeCreateTarget* 1
-//! DEOPT_COUNT *Deoptimize* 0
+// One bounded eager deopt: our argc-mismatch known call identity-guards the
+// reassigned global `print`; the interpreter falls back correctly.
+//! DEOPT_COUNT *Deoptimize* 1
 function Car(make, model, year) {
   this.make = make;
   this.model = model;

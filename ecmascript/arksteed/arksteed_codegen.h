@@ -27,6 +27,7 @@
 namespace panda::ecmascript::arksteed {
 
 class ArkSteedSafepointTableBuilder;
+class ArkSteedCompilationUnit;
 class DeoptLiteralTableBuilder;
 class DeoptTranslationBuilder;
 class GapMoveResolver;
@@ -98,14 +99,17 @@ private:
     void ComputeSteedCallSlotCount(CallVertexT *call, ArkSteedRegister slotCount);
     template <typename CallVertexT>
     void PrepareArkSteedCall(CallVertexT *call, ArkSteedRegister target, ArkSteedRegister scratch);
+    void PrepareKnownArkSteedCall(CallKnownJSFunctionVertex *call, ArkSteedRegister target);
     void PrepareArkSteedSelfCall(CallSelfVertex *call);
-    void PrepareKnownCall(CallKnownJSFunctionVertex *call);
     template <typename CallVertexT>
     void FreeArkSteedCallFrame(CallVertexT *call);
+    template <class CallT>
+    void EmitPreparedArkSteedCall(CallT *call, ArkSteedRegister target, Label *exit);
     template <typename CallVertexT>
     void EmitCallArkSteed(CallVertexT *call, ArkSteedRegister target, ArkSteedRegister scratch, Label *exit);
-    void EmitCallGeneric(CallVertex *call, ArkSteedRegister scratch);
-    void EmitCallGeneric(CallKnownJSFunctionVertex *call, ArkSteedRegister scratch);
+    void EmitCallKnownArkSteed(CallKnownJSFunctionVertex *call, ArkSteedRegister target, Label *exit);
+    template <class CallT>
+    void EmitCallGeneric(CallT *call, ArkSteedRegister scratch);
     template <typename CallVertexT>
     void EmitCallConstructorGeneric(CallVertexT *call, ArkSteedRegister scratch);
     void EmitReturnWithPendingException();
@@ -113,6 +117,8 @@ private:
     int PrepareTrampolineArguments(const Vertex *call, uint32_t actualArgc, uint32_t targetIndex,
                                    uint32_t newTargetIndex, uint32_t receiverIndex, uint32_t firstArgIndex,
                                    ArkSteedRegister scratch);
+    template <class CallT>
+    int PrepareTrampolineArguments(CallT *call, ArkSteedRegister scratch);
     void PrepareKnownCallArguments(const Vertex *call, uint32_t actualArgc, uint32_t expectedArgc,
                                    uint32_t firstArgIndex);
     template <typename ConstructorVertexT>
@@ -145,6 +151,9 @@ private:
 
     void RecordComment(const char *msg);
     void RecordBlockComment(BB *block);
+    // Emits EagerInline begin/end markers when the inline-owner changes between
+    // layout-adjacent blocks. A null block closes any open inline region.
+    void RecordInlineTransitionComment(BB *block);
     void RecordVertexComment(uint32_t pcBefore, Vertex *vertex);
     void AppendVertexSuccessorInfo(std::ostringstream *ss, Vertex *vertex);
     void RecordGapMoveComment(const InstructionOperand &src, const InstructionOperand &dest, PhiVertex *phi);
@@ -175,6 +184,7 @@ private:
     ChunkVector<EagerDeoptTarget *> eagerDeoptTargetsById_;
     int currentBlockColorIndex_ = 0;
     BB *currentLayoutNextBlock_ = nullptr;
+    const ArkSteedCompilationUnit *prevInlineUnit_ {nullptr};
 
     // Block color assignment for CFG coloring (only computed when comments enabled)
     ChunkVector<int> blockColorAssignment_;

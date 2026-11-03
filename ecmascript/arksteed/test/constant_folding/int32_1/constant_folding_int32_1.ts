@@ -44,7 +44,9 @@
 //! HAS_NOT I32SubWithOverflow
 //! HAS_NOT I32MulWithOverflow
 //! HAS Int32Constant
-//! COUNT Int32Constant 8
+// +2 vs the documented 8: the multi-frame deopt frame state materializes an
+// Int32Constant(0) INLINE_DEPTH vertex, counted in the vertex list and the table.
+//! COUNT Int32Constant 10
 //! COMPILE_COUNT *constant_folding_int32_1* 1
 //! COMPILE_COUNT_GE *constant_folding_int32_1* 1
 //! EXEC_COUNT *constant_folding_int32_1* 2

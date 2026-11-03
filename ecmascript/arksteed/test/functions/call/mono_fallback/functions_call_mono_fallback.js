@@ -15,10 +15,11 @@
 
 //! PARAMS --compiler-jit-hotness-threshold=6000
 //! METHOD callKnownTarget
-//! HAS Call
-//! HAS_NOT CallKnownJSFunction
+//! HAS_NOT Call
+//! COUNT CallKnownJSFunction 1
+//! COUNT DeoptIfTaggedCondition 0
 //! HAS_NOT BranchIfReferenceEqual
-//! HAS_NOT DeoptIfReferenceNotEqual
+//! HAS DeoptIfReferenceNotEqual
 
 function addWithDefault(left, right = 7) {
     if (left < 0) {

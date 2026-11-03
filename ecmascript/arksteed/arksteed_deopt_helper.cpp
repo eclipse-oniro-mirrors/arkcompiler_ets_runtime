@@ -58,8 +58,6 @@ constexpr uint32_t LEB128_PAYLOAD_BITS = 7U;
 constexpr uint32_t LEB128_MAX_SHIFT = 63U;
 constexpr size_t MIN_EXPLICIT_INPUT_SIZE = 3U;  // opcode, vreg and source
 constexpr size_t DEOPT_TRANSLATION_HEADER_SIZE = sizeof(uint32_t) + sizeof(uint8_t);
-constexpr int64_t ARKSTEED_SUPPORTED_INLINE_DEPTH = 0;
-
 enum class DeoptTranslationSpecialKind : uint8_t {
     UNDEFINED = 0,
     NULL_VALUE,
@@ -918,9 +916,18 @@ DeoptTranslationInput BuildDeoptTranslationInput(ArkSteedAssembler *assembler, c
         DeoptSourceKind::CONSTANT,
         0,
     };
+    ValueVertex *value = vertex->GetDeoptFrameValue(index);
+    if (input.vreg == static_cast<int32_t>(SpecVregIndex::INLINE_DEPTH)) {
+        // Inline depth is compiler metadata, not a runtime value. A shared Int32Constant
+        // can acquire a register allocation through an ordinary graph use, so serialize
+        // the literal independently of its register-allocation location.
+        CHECK(input.valueKind == DeoptTranslationKind::RAW_INT32);
+        CHECK(value->Is<Int32ConstantVertex>());
+        input.source = GetConstantSourceForDeoptTranslation(value, input.valueKind);
+        return input;
+    }
     const InstructionOperand &operand = vertex->GetDeoptSourceLocation(index)->GetOperand();
     if (operand.IsConstant()) {
-        ValueVertex *value = vertex->GetDeoptFrameValue(index);
         if (auto *heapConstant = value->TryCast<HeapConstantVertex>()) {
             ASSERT(input.valueKind == DeoptTranslationKind::TAGGED);
             ASSERT(literalTableBuilder != nullptr);
@@ -956,18 +963,15 @@ std::vector<DeoptTranslationInput> BuildDeoptTranslationInputs(ArkSteedAssembler
                                                                DeoptLiteralTableBuilder *literalTableBuilder)
 {
     std::vector<DeoptTranslationInput> inputs;
-    inputs.reserve(vertex->GetDeoptFrameValueCount() + 1);
-    inputs.push_back({
-        static_cast<int32_t>(SpecVregIndex::INLINE_DEPTH),
-        DeoptTranslationKind::RAW_INT32,
-        DeoptSourceKind::CONSTANT,
-        ARKSTEED_SUPPORTED_INLINE_DEPTH,
-    });
+    inputs.reserve(vertex->GetDeoptFrameValueCount());
     for (uint32_t index = 0; index < vertex->GetDeoptFrameValueCount(); ++index) {
         inputs.push_back(BuildDeoptTranslationInput(assembler, vertex, index, literalTableBuilder));
     }
     std::sort(inputs.begin(), inputs.end(),
               [](const DeoptTranslationInput &lhs, const DeoptTranslationInput &rhs) { return lhs.vreg < rhs.vreg; });
+    ASSERT(std::count_if(inputs.begin(), inputs.end(), [](const DeoptTranslationInput &input) {
+        return input.vreg == static_cast<int32_t>(SpecVregIndex::INLINE_DEPTH);
+    }) == 1);
     return inputs;
 }
 
@@ -1233,8 +1237,13 @@ bool HandleArkSteedDeoptNoGC(JSThread *thread, uintptr_t returnPc, uintptr_t inp
         return false;
     }
     MaterializedArkSteedDeoptFrame materialized;
+    // Small callees may nest deeper than the non-small limit; the runtime bound is
+    // the larger of the two configured depth limits.
+    uint32_t maxInlineDepth = std::max(
+        thread->GetEcmaVM()->GetJSOptions().GetCompilerArkSteedMaxInlineDepth(),
+        thread->GetEcmaVM()->GetJSOptions().GetCompilerArkSteedMaxInlineDepthSmall());
     if (!MaterializeTranslation(translation, machineCode, inputFp, snapshot, &materialized) ||
-        materialized.inlineDepth != static_cast<size_t>(ARKSTEED_SUPPORTED_INLINE_DEPTH)) {
+        materialized.inlineDepth > maxInlineDepth) {
         return false;
     }
 

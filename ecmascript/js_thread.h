@@ -241,6 +241,7 @@ public:
     using BCStubStatusBits = PGOStatusBits::NextField<BCStubStatus, BCSTUBSTATUS_BITFIELD_NUM>;
     using CommonStubStatusBits = BCStubStatusBits::NextField<CommonStubStatus, BOOL_BITFIELD_NUM>;
     using BuiltinsStubStatusBits = CommonStubStatusBits::NextField<BuiltinsStubStatus, BOOL_BITFIELD_NUM>;
+    using ArkSteedInlineStatusBits = BuiltinsStubStatusBits::NextField<bool, BOOL_BITFIELD_NUM>;
     using ThreadId = uint32_t;
 
     enum FrameDroppedState {
@@ -919,6 +920,11 @@ public:
     BuiltinsStubStatus GetBuiltinsStubStatus() const
     {
         return BuiltinsStubStatusBits::Decode(glueData_.interruptVector_);
+    }
+
+    void SetArkSteedInlineEnable(bool enable)
+    {
+        SetInterruptValue<ArkSteedInlineStatusBits>(enable);
     }
 
     bool ShouldHandleMarkOrCopyFinishedInSafepoint();

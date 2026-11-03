@@ -16,11 +16,10 @@
 #ifndef ECMASCRIPT_ARKSTEED_BYTECODE_PREPROCESSOR_NEW_H
 #define ECMASCRIPT_ARKSTEED_BYTECODE_PREPROCESSOR_NEW_H
 
+#include "ecmascript/arksteed/arksteed_compilation_unit.h"
 #include <algorithm>
 
 #include "ecmascript/arksteed/arksteed_vreg.h"
-#include "ecmascript/compiler/jit_compilation_env.h"
-#include "ecmascript/jspandafile/method_literal.h"
 #include "ecmascript/mem/chunk_containers.h"
 
 namespace panda::ecmascript::arksteed {
@@ -136,7 +135,7 @@ public:
         }
     };
 
-    BytecodePreprocessor(JitCompilationEnv *env, Chunk *chunk);
+    BytecodePreprocessor(ArkSteedCompilationUnit *unit, Chunk *chunk);
 
     bool Run();
 
@@ -153,6 +152,16 @@ public:
     uint32_t GetNumAllBasicBlocks() const
     {
         return static_cast<uint32_t>(basicBlocks_.size());
+    }
+
+    bool HasTryBlocks() const
+    {
+        return !tryBlocks_.empty();
+    }
+
+    bool HasLoops() const
+    {
+        return !loopHeaders_.empty();
     }
 
     const BasicBlockInfo *GetBasicBlockByRPO(uint32_t rpoIndex) const
@@ -192,7 +201,11 @@ public:
 
     JitCompilationEnv *GetEnv() const
     {
-        return env_;
+        return unit_->GetEnv();
+    }
+    ArkSteedCompilationUnit *GetCompilationUnit() const
+    {
+        return unit_;
     }
     MethodLiteral *GetMethod() const
     {
@@ -232,7 +245,7 @@ private:
     void DumpGraphvizNodes(std::ostream &out) const;
     void DumpGraphvizEdges(std::ostream &out) const;
 
-    JitCompilationEnv *env_;
+    ArkSteedCompilationUnit *unit_;
     MethodLiteral *method_;
 
     VRegIDType numLocalVRegs_;

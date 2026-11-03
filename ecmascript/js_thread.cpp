@@ -230,6 +230,7 @@ JSThread::JSThread(EcmaVM *vm) : id_(os::thread::GetCurrentThreadId()), vm_(vm)
     }
     vmThreadControl_ = new VmThreadControl(this);
     SetBCStubStatus(BCStubStatus::NORMAL_BC_STUB);
+    SetArkSteedInlineEnable(vm_->GetJSOptions().GetCompilerArkSteedEnableInline());
     dateUtils_ = new DateUtils();
 
     glueData_.propertiesCache_ = new PropertiesCache();

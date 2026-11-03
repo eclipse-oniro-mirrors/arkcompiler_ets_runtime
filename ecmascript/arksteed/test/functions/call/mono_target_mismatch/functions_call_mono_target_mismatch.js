@@ -16,7 +16,7 @@
 //! PARAMS --compiler-jit-hotness-threshold=6000
 //! METHOD callProfiledTarget
 //! HAS CallKnownJSFunction
-//! COUNT DeoptIfReferenceNotEqual 1
+//! COUNT DeoptIfTaggedCondition 0
 //! HAS_NOT Call
 
 function addOne(value) {

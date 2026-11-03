@@ -17,6 +17,7 @@
 
 #include <sstream>
 
+#include "ecmascript/arksteed/arksteed_compilation_unit.h"
 #include "ecmascript/arksteed/arksteed_dump_helper.h"
 #include "ecmascript/arksteed/arksteed_graph.h"
 #include "ecmascript/arksteed/arksteed_loop_effects.h"
@@ -275,8 +276,16 @@ void GraphPrinter::PreProcessBlock(BB *block)
 
     const char *blockTypeName =
         block->IsLoopHeader() ? "Loop Header" : block->IsExceptionHandler() ? "Exception Handler" : "Other";
-    LOG_COMPILER(INFO) << PrintBlockArrows(block) << "Block " << block->GetId()
-                       << " (" << blockTypeName << ')';
+    std::ostringstream blockHeader;
+    blockHeader << PrintBlockArrows(block) << "Block " << block->GetId()
+                << " (" << blockTypeName << ')';
+    if (const ArkSteedCompilationUnit *ownerUnit = block->GetInlineOwnerUnit(); ownerUnit != nullptr) {
+        blockHeader << " [inline: "
+                    << MethodLiteral::ParseFunctionName(ownerUnit->GetJSPandaFile(),
+                                                        ownerUnit->GetMethod()->GetMethodId())
+                    << ", depth=" << ownerUnit->GetInlineDepth() << ']';
+    }
+    LOG_COMPILER(INFO) << blockHeader.str();
     if (block->IsLoopHeader() && block->GetLoopEffects() != nullptr) {
         const LoopEffects &effects = *block->GetLoopEffects();
         LOG_COMPILER(INFO) << GetArrowColumn(nullptr) << "  LoopInfo: peeled=" << block->HasPeeledIteration();

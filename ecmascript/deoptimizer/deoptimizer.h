@@ -44,6 +44,7 @@ enum class SpecVregIndex: int {
     ACTUAL_ARGC_INDEX = -8,
     DEOPT_CONTINUATION_KIND_INDEX = -9,
     BASE_CONSTRUCTOR_THIS_INDEX = -10,
+    INLINED_ARGUMENTS_START_INDEX = -11,
 };
 
 // Which special post-linking continuation a lazy-deopt site must apply. The
@@ -61,6 +62,12 @@ enum class DeoptContinuationKind : int32_t {
 inline JSTaggedType EncodeDeoptContinuationKind(DeoptContinuationKind kind)
 {
     return JSTaggedValue(static_cast<int32_t>(kind)).GetRawData();
+}
+
+inline int32_t GetInlinedArgumentVregIndex(uint32_t argumentIndex)
+{
+    return static_cast<int32_t>(SpecVregIndex::INLINED_ARGUMENTS_START_INDEX) -
+        static_cast<int32_t>(argumentIndex);
 }
 
 struct Context {
@@ -193,7 +200,7 @@ public:
                                              MachineCode *machineCode);
 #endif
     void DumpMachineCode(JSTaggedValue jsFunction, uintptr_t *prevReturnAddrAddress);
-    void CollectDeoptBundleVec(std::vector<kungfu::ARKDeopt>& deoptBundle);
+    size_t CollectDeoptBundleVec(std::vector<kungfu::ARKDeopt>& deoptBundle);
     void CollectMaterializedVregs(const std::vector<std::pair<VRegId, JSTaggedType>> &deoptValues, size_t shift);
     bool IsRecursiveCall(FrameIterator& it, JSTaggedValue& jsFunction);
     JSTaggedType ConstructAsmInterpretFrame(JSHandle<JSTaggedValue> maybeAcc, bool isArkSteedEagerDeopt);
@@ -203,7 +210,6 @@ public:
     static PUBLIC_API size_t ComputeShift(size_t depth);
     static int32_t DecodeVregIndex(OffsetType id, size_t shift);
     static size_t DecodeDeoptDepth(OffsetType id, size_t shift);
-    static size_t GetInlineDepth(JSThread *thread, uint32_t deoptType = 0);
     static void ClearCompiledCodeStatusWhenDeopt(JSThread *thread, JSFunction *fun,
                                                  Method *method, kungfu::DeoptType type, bool resetJitHotness);
     static void ReplaceReturnAddrWithLazyDeoptTrampline(JSThread *thread, uintptr_t *returnAddraddress,

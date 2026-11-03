@@ -145,6 +145,13 @@ private:
             return 0.0;
         }
         JSTaggedValue callCnt = profileTypeInfo->GetICSlot(thread, idx + 1);
+        // ArkSteed records a ProfileTypeInfoCell in the secondary slot for a
+        // compatible closure family. Legacy inlining has no guards for that
+        // state, so treat it as unavailable frequency instead of decoding a
+        // heap object as an integer counter.
+        if (!callCnt.IsInt()) {
+            return 0.0;
+        }
         double callSiteCallCnt = static_cast<double>(callCnt.GetInt());  // 32: skip methodId
         return callSiteCallCnt / callerCallCnt;
     }
