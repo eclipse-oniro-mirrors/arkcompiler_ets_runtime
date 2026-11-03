@@ -21,6 +21,7 @@
 #include <sstream>
 
 #include "ecmascript/arksteed/arksteed_assembler-inl.h" // IWYU pragma: keep
+#include "ecmascript/arksteed/arksteed_compilation_unit.h"
 #include "ecmascript/arksteed/arksteed_deopt_helper.h"
 #include "ecmascript/arksteed/arksteed_dump_helper.h"
 #include "ecmascript/arksteed/arksteed_register_merge_state.h"
@@ -693,29 +694,31 @@ ArkSteedDeoptValue MakeConstantDeopt(int32_t id, int64_t value)
     };
 }
 
-int64_t GetConstantForDeopt(const ValueVertex *value, int32_t vregId)
+int64_t GetConstantForDeopt(const ValueVertex *value, DeoptTranslationKind valueKind)
 {
     switch (value->GetOpcode()) {
         case VertexOpcode::TaggedConstant:
+            ASSERT(valueKind == DeoptTranslationKind::TAGGED);
             return static_cast<int64_t>(value->Cast<TaggedConstantVertex>()->GetValue());
         case VertexOpcode::Int32Constant: {
-            if (vregId == static_cast<int32_t>(SpecVregIndex::PC_OFFSET_INDEX) ||
-                vregId == static_cast<int32_t>(SpecVregIndex::INLINE_DEPTH)) {
+            if (valueKind == DeoptTranslationKind::RAW_INT32) {
                 return value->Cast<Int32ConstantVertex>()->GetValue();
             }
+            ASSERT(valueKind == DeoptTranslationKind::INT32_TO_TAGGED ||
+                   valueKind == DeoptTranslationKind::TAGGED);
             return static_cast<int64_t>(JSTaggedValue(value->Cast<Int32ConstantVertex>()->GetValue()).GetRawData());
         }
         case VertexOpcode::Int64Constant: {
-            if (vregId == static_cast<int32_t>(SpecVregIndex::PC_OFFSET_INDEX) ||
-                vregId == static_cast<int32_t>(SpecVregIndex::INLINE_DEPTH)) {
+            if (valueKind == DeoptTranslationKind::RAW_INT32) {
                 return static_cast<int64_t>(value->Cast<Int64ConstantVertex>()->GetValue());
             }
+            ASSERT(valueKind == DeoptTranslationKind::INT32_TO_TAGGED ||
+                   valueKind == DeoptTranslationKind::TAGGED);
             int64_t rawValue = value->Cast<Int64ConstantVertex>()->GetValue();
             return static_cast<int64_t>(JSTaggedValue(static_cast<int>(rawValue)).GetRawData());
         }
         case VertexOpcode::Float64Constant: {
-            ASSERT(vregId != static_cast<int32_t>(SpecVregIndex::PC_OFFSET_INDEX));
-            ASSERT(vregId != static_cast<int32_t>(SpecVregIndex::INLINE_DEPTH));
+            ASSERT(valueKind == DeoptTranslationKind::FLOAT64_TO_TAGGED_DOUBLE);
             uint64_t raw = static_cast<uint64_t>(
                 GetFloat64RawBits(value->Cast<Float64ConstantVertex>()->GetValue()));
             if (raw >= static_cast<uint64_t>(JSTaggedValue::TAG_INT - JSTaggedValue::DOUBLE_ENCODE_OFFSET)) {
@@ -743,7 +746,7 @@ void AppendDeoptSource(std::vector<ArkSteedDeoptValue> *deopts,
             });
         } else {
             deopts->push_back(MakeConstantDeopt(
-                frameValue.vreg, GetConstantForDeopt(frameValue.value, frameValue.vreg)));
+                frameValue.vreg, GetConstantForDeopt(frameValue.value, frameValue.valueKind)));
         }
         return;
     }
@@ -832,9 +835,6 @@ void EmitLazyDeoptSafepoint(ArkSteedAssembler *assembler,
     ASSERT(lazy->HasLazyDeoptFrameState());
 
     std::vector<ArkSteedDeoptValue> deopts;
-    // 3: INLINE_DEPTH plus at most two base-constructor sources
-    deopts.reserve(lazy->GetLazyDeoptFrameState().size() + 3);
-    deopts.emplace_back(MakeConstantDeopt(static_cast<int32_t>(SpecVregIndex::INLINE_DEPTH), 0));
     AppendDeoptSources(&deopts, lazy, assembler, literalTableBuilder);
     if constexpr (std::is_same_v<NodeT, CallBaseConstructorVertex>) {
         AppendBaseConstructorSources(&deopts, vertex, assembler);
@@ -1207,10 +1207,38 @@ void ArkSteedCodeGenerator::PrepareArkSteedSelfCall(CallSelfVertex *call)
                               CallSelfVertex::FIRST_ARG_INDEX);
 }
 
-void ArkSteedCodeGenerator::PrepareKnownCall(CallKnownJSFunctionVertex *call)
+void ArkSteedCodeGenerator::PrepareKnownArkSteedCall(CallKnownJSFunctionVertex *call, ArkSteedRegister target)
 {
-    PrepareKnownCallArguments(call, call->GetActualArgc(), call->GetActualArgc(),
-                              CallKnownJSFunctionVertex::FIRST_ARG_INDEX);
+    const uint32_t userArgc = call->GetActualArgc();
+    const uint32_t expectedArgc = call->GetExpectedArgc();
+    const uint32_t frameArgc = std::max(userArgc, expectedArgc);
+    const uint32_t totalArgc = userArgc + NUM_MANDATORY_JSFUNC_ARGS;
+    // 2U: argc slot and even-alignment padding
+    const uint32_t slotCount = (frameArgc + NUM_MANDATORY_JSFUNC_ARGS + 2U) & ~1U;
+    const uint32_t fillSlotCount = slotCount - (userArgc + NUM_MANDATORY_JSFUNC_ARGS + 1U);
+
+    __ ReserveCallArgSlots(static_cast<int32_t>(slotCount));
+    StoreStubStackArgument(call, CallKnownJSFunctionVertex::TARGET_INDEX,
+                           __ GetCallArgSlot(CallKnownJSFunctionVertex::TARGET_INDEX + CALL_ARG1));
+    StoreStubStackArgument(call, CallKnownJSFunctionVertex::NEW_TARGET_INDEX,
+                           __ GetCallArgSlot(CallKnownJSFunctionVertex::NEW_TARGET_INDEX + CALL_ARG1));
+    StoreStubStackArgument(call, CallKnownJSFunctionVertex::THIS_INDEX,
+                           __ GetCallArgSlot(CallKnownJSFunctionVertex::THIS_INDEX + CALL_ARG1));
+    for (uint32_t i = 0; i < userArgc; i++) {
+        StoreStubStackArgument(call, CallKnownJSFunctionVertex::FIRST_ARG_INDEX + i,
+                               __ GetCallArgSlot(CallKnownJSFunctionVertex::FIRST_ARG_INDEX + CALL_ARG1 + i));
+    }
+    // Fill missing formals and the optional alignment slot with a compact
+    // runtime loop.  Expanding one store per missing formal makes generated
+    // code proportional to the callee's declared argc and can place the
+    // ARM64 TBZ guarding this fast path beyond its forward branch range.
+    __ Move(target, static_cast<uint64_t>(fillSlotCount));
+    __ PushUndefinedForSteedCall(target, userArgc);
+
+    __ Move(target, static_cast<uint64_t>(totalArgc));
+    __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0), target);
+    __ MoveRepr(MachineRepresentation::Tagged, target,
+                __ GetCallArgSlot(CallKnownJSFunctionVertex::TARGET_INDEX + CALL_ARG1));
 }
 
 template <typename CallVertexT>
@@ -1220,11 +1248,9 @@ void ArkSteedCodeGenerator::FreeArkSteedCallFrame(CallVertexT *call)
     __ RestoreStackPointerToFrameBottom(graph_);
 }
 
-template <typename CallVertexT>
-void ArkSteedCodeGenerator::EmitCallArkSteed(CallVertexT *call, ArkSteedRegister target, ArkSteedRegister scratch,
-                                             Label *exit)
+template <class CallT>
+void ArkSteedCodeGenerator::EmitPreparedArkSteedCall(CallT *call, ArkSteedRegister target, Label *exit)
 {
-    PrepareArkSteedCall(call, target, scratch);
     TemporaryRegisterScope scope(assembler_);
     ArkSteedRegister codeEntry = scope.AcquireScratch();
     __ PrepareSteedCalleeContext(target, codeEntry);
@@ -1238,26 +1264,25 @@ void ArkSteedCodeGenerator::EmitCallArkSteed(CallVertexT *call, ArkSteedRegister
     __ Jump(exit);
 }
 
-void ArkSteedCodeGenerator::EmitCallGeneric(CallVertex *call, ArkSteedRegister scratch)
+template <typename CallVertexT>
+void ArkSteedCodeGenerator::EmitCallArkSteed(CallVertexT *call, ArkSteedRegister target, ArkSteedRegister scratch,
+                                             Label *exit)
 {
-    int stackArgCount = PrepareTrampolineArguments(
-        call, call->GetActualArgc(), CallVertex::TARGET_INDEX, CallVertex::NEW_TARGET_INDEX,
-        CallVertex::THIS_INDEX, CallVertex::FIRST_ARG_INDEX, scratch);
-    __ CallTrampoline(RTSTUB_ID(JSCall));
-    if (HasLazyDeoptSafepoint(call)) {
-        EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
-    } else {
-        safepointBuilder_->DefineSafepoint(__ GetPcOffset());
-    }
-    __ FreeCallArgSlots(stackArgCount);
+    PrepareArkSteedCall(call, target, scratch);
+    EmitPreparedArkSteedCall(call, target, exit);
 }
 
-void ArkSteedCodeGenerator::EmitCallGeneric(CallKnownJSFunctionVertex *call, ArkSteedRegister scratch)
+void ArkSteedCodeGenerator::EmitCallKnownArkSteed(CallKnownJSFunctionVertex *call, ArkSteedRegister target,
+                                                  Label *exit)
 {
-    int stackArgCount = PrepareTrampolineArguments(
-        call, call->GetActualArgc(), CallKnownJSFunctionVertex::TARGET_INDEX,
-        CallKnownJSFunctionVertex::NEW_TARGET_INDEX, CallKnownJSFunctionVertex::RECEIVER_INDEX,
-        CallKnownJSFunctionVertex::FIRST_ARG_INDEX, scratch);
+    PrepareKnownArkSteedCall(call, target);
+    EmitPreparedArkSteedCall(call, target, exit);
+}
+
+template <class CallT>
+void ArkSteedCodeGenerator::EmitCallGeneric(CallT *call, ArkSteedRegister scratch)
+{
+    int stackArgCount = PrepareTrampolineArguments(call, scratch);
     __ CallTrampoline(RTSTUB_ID(JSCall));
     if (HasLazyDeoptSafepoint(call)) {
         EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
@@ -1270,9 +1295,7 @@ void ArkSteedCodeGenerator::EmitCallGeneric(CallKnownJSFunctionVertex *call, Ark
 template <typename CallVertexT>
 void ArkSteedCodeGenerator::EmitCallConstructorGeneric(CallVertexT *call, ArkSteedRegister scratch)
 {
-    int stackArgCount = PrepareTrampolineArguments(
-        call, call->GetActualArgc(), CallVertexT::TARGET_INDEX, CallVertexT::NEW_TARGET_INDEX,
-        CallVertexT::THIS_INDEX, CallVertexT::FIRST_ARG_INDEX, scratch);
+    int stackArgCount = PrepareTrampolineArguments(call, scratch);
     __ CallTrampoline(RTSTUB_ID(JSCallNew));
     if (HasLazyDeoptSafepoint(call)) {
         EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
@@ -1326,6 +1349,31 @@ int ArkSteedCodeGenerator::PrepareTrampolineArguments(const Vertex *call, uint32
     StoreStubStackArgument(call, receiverIndex, __ GetCallArgSlot(CallVertex::THIS_INDEX + CALL_ARG2));
     for (uint32_t i = 0; i < userArgc; i++) {
         StoreStubStackArgument(call, firstArgIndex + i, __ GetCallArgSlot(CallVertex::FIRST_ARG_INDEX + CALL_ARG2 + i));
+    }
+    return static_cast<int>(reservedSlotCount);
+}
+
+template <class CallT>
+int ArkSteedCodeGenerator::PrepareTrampolineArguments(CallT *call, ArkSteedRegister scratch)
+{
+    uint32_t userArgc = call->GetActualArgc();
+    uint32_t totalArgc = userArgc + NUM_MANDATORY_JSFUNC_ARGS;
+    // stack layout: totalArgc, actualArgV, target, newTarget, this, userArgs
+    uint32_t stackArgCount = totalArgc + CALL_ARG2;
+    uint32_t reservedSlotCount = (stackArgCount + 1) & ~1U;
+    __ ReserveCallArgSlots(static_cast<int32_t>(reservedSlotCount));
+
+    __ Move(scratch, static_cast<int64_t>(totalArgc));
+    __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0), scratch);
+    __ Move(scratch, 0);
+    __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG1), scratch);
+
+    StoreStubStackArgument(call, CallT::TARGET_INDEX, __ GetCallArgSlot(CallT::TARGET_INDEX + CALL_ARG2));
+    StoreStubStackArgument(call, CallT::NEW_TARGET_INDEX, __ GetCallArgSlot(CallT::NEW_TARGET_INDEX + CALL_ARG2));
+    StoreStubStackArgument(call, CallT::THIS_INDEX, __ GetCallArgSlot(CallT::THIS_INDEX + CALL_ARG2));
+    for (uint32_t i = 0; i < userArgc; i++) {
+        StoreStubStackArgument(call, CallT::FIRST_ARG_INDEX + i,
+                               __ GetCallArgSlot(CallT::FIRST_ARG_INDEX + CALL_ARG2 + i));
     }
     return static_cast<int>(reservedSlotCount);
 }
@@ -1948,40 +1996,6 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CallNewObjRangeDerivedVertex>(
 }
 
 template <>
-void ArkSteedCodeGenerator::VisitNonControlVertex<CallKnownJSFunctionVertex>(CallKnownJSFunctionVertex *call)
-{
-    Label callGeneric;
-    Label exit;
-    ArkSteedRegister target = GetInputRegister(call, CallKnownJSFunctionVertex::TARGET_INDEX);
-    __ JumpIfFunctionNotCompiled(target, &callGeneric);
-    ArkSteedRegister context = GetInputRegister(call, CallKnownJSFunctionVertex::CONTEXT_INDEX);
-    ASSERT(target == ArkSteedAssembler::CALLEE_TARGET_REGISTER);
-    ASSERT(context == ArkSteedAssembler::CALLEE_CONTEXT_REGISTER);
-    PrepareKnownCall(call);
-    {
-        TemporaryRegisterScope scope(assembler_);
-        ArkSteedRegister codeEntry = scope.AcquireScratch();
-        __ LoadField(codeEntry, target, JSFunction::CODE_ENTRY_OFFSET);
-        __ Call(codeEntry);
-    }
-    if (HasLazyDeoptSafepoint(call)) {
-        EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
-    } else {
-        safepointBuilder_->DefineSafepoint(__ GetPcOffset());
-    }
-    __ RestoreStackPointerToFrameBottom(graph_);
-    __ Jump(&exit);
-
-    __ Bind(&callGeneric);
-    {
-        TemporaryRegisterScope scope(assembler_);
-        ArkSteedRegister scratch = scope.Acquire();
-        EmitCallGeneric(call, scratch);
-    }
-    __ Bind(&exit);
-}
-
-template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<CallKnownBuiltinVertex>(CallKnownBuiltinVertex *call)
 {
     int reservedSlotCount = 0;
@@ -2131,6 +2145,21 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CallDerivedConstructorVertex>(
 }
 
 template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<CallKnownJSFunctionVertex>(CallKnownJSFunctionVertex *call)
+{
+    Label callGeneric;
+    Label exit;
+    ArkSteedRegister target = GetInputRegister(call, CallKnownJSFunctionVertex::TARGET_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister scratch = scope.Acquire();
+    __ JumpIfFunctionNotCompiled(target, &callGeneric);
+    EmitCallKnownArkSteed(call, target, &exit);
+    __ Bind(&callGeneric);
+    EmitCallGeneric(call, scratch);
+    __ Bind(&exit);
+}
+
+template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfHClassMismatchVertex>(DeoptIfHClassMismatchVertex *checkHClass)
 {
     constexpr int RECEIVER_INDEX = static_cast<int>(DeoptIfHClassMismatchVertex::RECEIVER_INDEX);
@@ -2273,6 +2302,12 @@ template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfTaggedConditionVertex>(
     DeoptIfTaggedConditionVertex *check)
 {
+    // Known-call guards (target and method identity checks) deopt with
+    // NOTCALLTARGETHEAPOBJECT; mark them so the code comments show where an
+    // inlined call is protected.
+    if (check->GetDeoptType() == kungfu::DeoptType::NOTCALLTARGETHEAPOBJECT) {
+        RecordComment("EagerInline guard");
+    }
     auto left = GetInputRegister(check, DeoptIfTaggedConditionVertex::LEFT_INDEX);
     auto right = GetInputRegister(check, DeoptIfTaggedConditionVertex::RIGHT_INDEX);
     __ Compare(left, right);
@@ -4896,6 +4931,7 @@ void ArkSteedCodeGenerator::Generate()
         currentLayoutNextBlock_ = (i + 1 < numBlocks) ? (*graph_)[i + 1] : nullptr;
 
         RecordBlockComment(curBlock);
+        RecordInlineTransitionComment(curBlock);
         __ Bind(curBlock->GetLabel());
 
         if (curBlock->HasPhi()) {
@@ -4925,6 +4961,8 @@ void ArkSteedCodeGenerator::Generate()
         __ CheckCodePools(true);
 #endif
     }
+    // An inline region may extend to the last block of the layout.
+    RecordInlineTransitionComment(nullptr);
     EmitDeferredCode();
     // Eager-deopt exit decoding relies on the fixed-size exit cluster being the
     // final bytes of the function. Flush ARM64 embedded literals before it.
@@ -5238,7 +5276,10 @@ void ArkSteedCodeGenerator::ExecuteConstantMove(const AllocatedState &dest, Valu
             return;
         }
         if (dest.GetRepresentation() == MachineRepresentation::Tagged) {
-            __ Move(reg, GetConstantForDeopt(constVertex, 0));
+            DeoptTranslationKind valueKind = constVertex->Is<Float64ConstantVertex>()
+                ? DeoptTranslationKind::FLOAT64_TO_TAGGED_DOUBLE
+                : DeoptTranslationKind::TAGGED;
+            __ Move(reg, GetConstantForDeopt(constVertex, valueKind));
             return;
         }
         LoadConstantToRegister(constVertex, reg);
@@ -5365,6 +5406,31 @@ void ArkSteedCodeGenerator::RecordBlockComment(BB *block)
         }
     }
     RecordComment(ss.str().c_str());
+}
+
+void ArkSteedCodeGenerator::RecordInlineTransitionComment(BB *block)
+{
+    if (!__ IsCommentEnabled()) {
+        return;
+    }
+    const ArkSteedCompilationUnit *cur = (block == nullptr) ? nullptr : block->GetInlineOwnerUnit();
+    if (cur == prevInlineUnit_) {
+        return;
+    }
+    if (prevInlineUnit_ != nullptr) {
+        std::ostringstream ss;
+        ss << "EagerInline end "
+           << MethodLiteral::ParseFunctionName(prevInlineUnit_->GetJSPandaFile(),
+                                               prevInlineUnit_->GetMethod()->GetMethodId());
+        RecordComment(ss.str().c_str());
+    }
+    if (cur != nullptr) {
+        std::ostringstream ss;
+        ss << "EagerInline begin "
+           << MethodLiteral::ParseFunctionName(cur->GetJSPandaFile(), cur->GetMethod()->GetMethodId());
+        RecordComment(ss.str().c_str());
+    }
+    prevInlineUnit_ = cur;
 }
 
 // The vertex comment is anchored at pcBefore (just before the vertex's first

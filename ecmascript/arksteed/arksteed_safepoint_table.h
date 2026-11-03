@@ -16,6 +16,7 @@
 #ifndef ECMASCRIPT_ARKSTEED_SAFEPOINT_TABLE_H
 #define ECMASCRIPT_ARKSTEED_SAFEPOINT_TABLE_H
 
+#include <limits>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -106,7 +107,13 @@ static_assert(sizeof(ArkSteedSafepointEntry) == 12, "Entry must be 12 bytes");  
 
 class PUBLIC_API ArkSteedSafepointTableBuilder {
 public:
-    explicit ArkSteedSafepointTableBuilder(Chunk *chunk) : chunk_(chunk), entries_(chunk), encodedDeoptData_(chunk) {}
+    static constexpr size_t DEOPT_LOGICAL_PAIR_SIZE = 2;
+    static constexpr size_t MAX_DEOPT_VALUE_COUNT =
+        std::numeric_limits<uint16_t>::max() / DEOPT_LOGICAL_PAIR_SIZE;
+
+    explicit ArkSteedSafepointTableBuilder(Chunk *chunk)
+        : chunk_(chunk), entries_(chunk), encodedDeoptData_(chunk)
+    {}
     ~ArkSteedSafepointTableBuilder() = default;
 
     class Safepoint {

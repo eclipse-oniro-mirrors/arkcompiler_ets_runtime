@@ -237,13 +237,11 @@ void BranchIfECMAObjectVertex::SetValueLocationConstraints()
 void CallKnownJSFunctionVertex::SetValueLocationConstraints()
 {
     DefineAsFixed(this, 0);
-    SetTemporariesNeeded(1);
-    UseAndClobberFixed(Arg(TARGET_INDEX), ArkSteedAssembler::CALLEE_TARGET_REGISTER);
-    UseAny(Arg(NEW_TARGET_INDEX));
-    UseAny(Arg(RECEIVER_INDEX));
-    UseAndClobberFixed(Arg(CONTEXT_INDEX), ArkSteedAssembler::CALLEE_CONTEXT_REGISTER);
-    for (uint32_t index = FIRST_ARG_INDEX; index < GetInputCount(); ++index) {
-        UseAny(Arg(index));
+    // One scratch survives the compiled-code check and one holds the code entry.
+    SetTemporariesNeeded(2);
+    UseRegister(Arg(TARGET_INDEX));
+    for (uint32_t i = NEW_TARGET_INDEX; i < GetInputCount(); i++) {
+        UseAny(Arg(i));
     }
     UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
 }
@@ -1491,8 +1489,8 @@ DUMP_EXTRA(CallNewObjRangeDerived)
 DUMP_EXTRA(CallKnownJSFunction)
 {
     out << "  actualArgc = " << vertex->GetActualArgc()
-        << "  reservedCallSlotCount = " << vertex->GetReservedCallSlotCount()
-        << "  source = feedback";
+        << ", expectedArgc = " << vertex->GetExpectedArgc()
+        << ", callCount = " << vertex->GetCallCount();
 }
 
 DUMP_EXTRA(CallKnownBuiltin)

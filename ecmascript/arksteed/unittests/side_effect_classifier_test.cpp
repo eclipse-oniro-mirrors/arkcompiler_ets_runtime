@@ -375,7 +375,7 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, CallIsUnknown)
 HWTEST_F_L0(ArkSteedSideEffectClassifierTest, CallKnownJSFunctionIsUnknown)
 {
     auto *vertex = Vertex::New<CallKnownJSFunctionVertex>(
-        &chunk_, static_cast<size_t>(0), static_cast<uint32_t>(0));
+        &chunk_, static_cast<size_t>(0), static_cast<uint32_t>(0), static_cast<uint32_t>(0), static_cast<uint32_t>(0));
 
     ExpectEffectWithoutLocation(Classifier::Classify(vertex), SideEffectKind::UNKNOWN_CALL);
 }

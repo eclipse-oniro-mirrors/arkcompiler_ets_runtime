@@ -13,8 +13,7 @@
  * limitations under the License.
  */
 
-// @ts-nocheck
-//! PARAMS --compiler-jit-hotness-threshold=10000
+//! PARAMS --compiler-jit-hotness-threshold=10000 --compiler-arksteed-enable-inline=false
 //! METHOD integer
 //! COUNT TypedArrayIntLoadElement 2
 //! COUNT LoadInt32Field 1
@@ -33,9 +32,9 @@
 //! METHOD twoReceivers
 //! COUNT LoadInt32Field 2
 //! METHOD aroundCall
-//! COUNT LoadInt32Field 1
-//! COUNT TypedArrayIntLoadElement 2
-//! COUNT DeoptIfTaggedCondition 2
+//! COUNT LoadInt32Field 3
+//! COUNT TypedArrayIntLoadElement 1
+//! COUNT DeoptIfTaggedCondition 3
 //! METHOD polymorphic
 //! HAS BranchIfHClassIn
 //! COUNT_GE TypedArrayIntLoadElement 2

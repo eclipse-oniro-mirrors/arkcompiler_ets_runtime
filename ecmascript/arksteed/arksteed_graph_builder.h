@@ -24,26 +24,41 @@
 #include "ecmascript/arksteed/arksteed_bc_frame_state.h"
 #include "ecmascript/arksteed/arksteed_bytecode_analysis.h"
 #include "ecmascript/arksteed/arksteed_bytecode_preprocessor.h"
+#include "ecmascript/arksteed/arksteed_inline_frame_state.h"
 #include "ecmascript/arksteed/arksteed_pgo_context.h"
 #include "ecmascript/compiler/common_stub_csigns.h"
 
 namespace panda::ecmascript::arksteed {
 class CompileInfoFacts;
 class Graph;
+class ArkSteedCompilationUnit;
 class LoopEffects;
 struct SideEffectDescriptor;
 
 
 class GraphBuilder {
 public:
+    struct InlineBuildResult {
+        BB *exitBlock {nullptr};
+        ValueVertex *returnValue {nullptr};
+        CompileInfoFacts *facts {nullptr};
+        bool hasNormalReturn {false};
+    };
+
     GraphBuilder(JSThread *compilerThread,
                  Graph *destGraph,
                  uintptr_t glueAddr,
                  BytecodePreprocessor *preproc,
                  BytecodeAnalysis *analysis,
-                 bool isOsr);
+                 bool isOsr,
+                 const ArkSteedInlinedCallerFrame *parentDeoptFrame = nullptr);
 
     bool Run();
+    bool RunInline(BB *callerBlock,
+                   CompileInfoFacts *callerFacts,
+                   const ChunkVector<ValueVertex *> &arguments,
+                   uint32_t actualArgc,
+                   InlineBuildResult *result);
 
 private:
     using BasicBlockInfo = BytecodePreprocessor::BasicBlockInfo;
@@ -52,6 +67,8 @@ private:
     using RuntimeStubID = kungfu::RuntimeStubCSigns::ID;
 
     struct CatchBlockInputData;
+    struct InheritedCatchContext;
+    struct LocalClosureInfo;
     struct BytecodeVisitor;
 
     enum class LoopPeelingStage : uint8_t {
@@ -98,7 +115,14 @@ private:
     }
 
     void DebugLog();
+    void BuildBody(SharedBCFrameState frameState);
     void InitializeStartBlock(SharedBCFrameState frameState);
+    void InitializeInlineStartBlock(SharedBCFrameState frameState,
+                                    BB *callerBlock,
+                                    CompileInfoFacts *callerFacts,
+                                    const ChunkVector<ValueVertex *> &arguments,
+                                    uint32_t actualArgc);
+    void FinishInlineReturn(BB *returnBlock, ValueVertex *returnValue, CompileInfoFacts *returnFacts);
     void ProcessDeadBasicBlock(uint32_t rpoIndex);
     void ProcessBasicBlock(SharedBCFrameState frameState, uint32_t rpoIndex);
     void ProcessCatchBlockHead(SharedBCFrameState frameState, uint32_t rpoIndex);
@@ -182,6 +206,7 @@ private:
     uintptr_t glueAddr_;
     BytecodePreprocessor *preproc_;
     BytecodeAnalysis *analysis_;
+    const ArkSteedInlinedCallerFrame *parentDeoptFrame_ {nullptr};
 
     ArkSteedPGOContext pgoContext_;
 
@@ -194,11 +219,15 @@ private:
     // Constants frequently used
     ValueVertex *glue_ = nullptr;
     ValueVertex *undefinedValue_ = nullptr;
-    InitialValueVertex *initialActualArgc_ = nullptr;
+    ValueVertex *initialActualArgc_ = nullptr;
     ValueVertex *actualArgc_ = nullptr;
     ValueVertex *taggedActualArgc_ = nullptr;
-    InitialValueVertex *initialCallTarget_ = nullptr;
-    InitialValueVertex *initialLexicalEnv_ = nullptr;
+    ValueVertex *initialCallTarget_ = nullptr;
+    // Function whose body this builder is building, used as the caller argument of
+    // the inline-entry runtime trace. Null on the root builder (initialCallTarget_
+    // is used instead); set from the parent's call target for inlinee builders.
+    ValueVertex *inlineTraceCallerVertex_ = nullptr;
+    ValueVertex *initialLexicalEnv_ = nullptr;
     LoadTaggedFieldVertex *lazyGlobalEnv_ = nullptr;
 
     ChunkVector<BB *> blocks_;
@@ -206,6 +235,39 @@ private:
     ChunkVector<BB *> exitBlocks_;
     ChunkVector<CompileInfoFacts *> compileInfoFacts_;
     ChunkVector<CatchBlockInputData *> catchBlockInputs_;
+    ChunkMap<ValueVertex *, LocalClosureInfo *> localClosureInfos_;
+    ChunkVector<ValueVertex *> inlineActualArguments_;
+    uint32_t inlineBytecodeBudgetUsedStorage_ {0};
+    uint32_t inlineBytecodeBudgetUsedSmallStorage_ {0};
+    uint32_t *inlineBytecodeBudgetUsed_ {&inlineBytecodeBudgetUsedStorage_};
+    uint32_t *inlineBytecodeBudgetUsedSmall_ {&inlineBytecodeBudgetUsedSmallStorage_};
+
+    // Inline preparation cache: when the same callee is inlined repeatedly under the
+    // same caller unit and the same profile, the finished compilation unit, preprocessor
+    // and analysis are shared (all three are pure functions of the callee).
+    // Site-level checks (depth/budget/graph node count) still run on every inline.
+    // Child GraphBuilders share the root builder's cache by pointer (same as
+    // inlineBytecodeBudgetUsed_).
+    struct InlinePrepCacheEntry {
+        ArkSteedCompilationUnit *unit;
+        BytecodePreprocessor *preprocessor;
+        BytecodeAnalysis *analysis;
+        uint32_t bytecodeSize;
+    };
+    using InlinePrepCacheKey = std::tuple<uint32_t, uint64_t, const ArkSteedCompilationUnit *>;
+    using InlinePrepCache = std::map<InlinePrepCacheKey, InlinePrepCacheEntry>;
+    InlinePrepCache inlinePrepCacheStorage_;
+    InlinePrepCache *inlinePrepCache_ {&inlinePrepCacheStorage_};
+
+    // An inlined callee without a local try block may still throw into a catch
+    // block owned by an outer compilation unit. Its catch phis must receive the
+    // caller frame at the call site, not the callee's virtual-register frame.
+    InheritedCatchContext *inheritedCatchContext_ {nullptr};
+
+    BB *inlineExitBlock_ {nullptr};
+    BB *inlineTerminalBlock_ {nullptr};
+    CompileInfoFacts *inlineExitFacts_ {nullptr};
+    ChunkVector<ValueVertex *> inlineReturnValues_;
     ChunkMap<BB *, OutgoingBlockState> outgoingBlockStates_;
     ChunkVector<uint8_t> loopHeadersToPeel_;
     ChunkVector<uint8_t> handledSourceBlocks_;

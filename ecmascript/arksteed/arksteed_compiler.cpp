@@ -182,7 +182,8 @@ bool ArkSteedCompilerTask::BuildGraph(JSThread *compilerThread, uintptr_t hostGl
     }
     JitHeapAccessScope heapAccess(compilerThread);
     DISALLOW_HEAP_ALLOC;
-    BytecodePreprocessor preproc(env, chunk_.get());
+    ArkSteedCompilationUnit topLevelUnit(env);
+    BytecodePreprocessor preproc(&topLevelUnit, chunk_.get());
     {
         ArkSteedPipelineStatistics stats(pipelineStatistics_, "BytecodePreprocessor");
         if (!preproc.Run()) {

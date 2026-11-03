@@ -15,12 +15,114 @@
 
 #include "ecmascript/arksteed/arksteed_feedback_reader.h"
 #include "ecmascript/ic/property_box.h"
+#include "ecmascript/js_function.h"
+#include "ecmascript/method.h"
 #include "ecmascript/pgo_profiler/types/pgo_profiler_type.h"
 
 namespace panda::ecmascript::arksteed {
 
 constexpr uint32_t IC_POLY_CASE_WIDTH = 2;
 constexpr int ACCESS_SLOT_INPUT = 0;
+
+namespace {
+kungfu::Bytecodes g_callFeedbackBytecodes;
+
+bool IsReducibleFunctionKind(FunctionKind kind)
+{
+    return kind == FunctionKind::NORMAL_FUNCTION || kind == FunctionKind::ARROW_FUNCTION ||
+        kind == FunctionKind::BASE_CONSTRUCTOR;
+}
+
+kungfu::BytecodeInfo DecodeBytecodeInfo(const uint8_t *pc, uint32_t pcOffset)
+{
+    kungfu::BytecodeInfo info;
+    info.SetMetaData(g_callFeedbackBytecodes.GetBytecodeMetaData(pc));
+    kungfu::BytecodeInfo::InitBytecodeInfo(info, pc, pcOffset, 0);
+    return info;
+}
+
+bool TryAnalyzeConstantReturn(const kungfu::BytecodeInfo &first, CallFeedback *feedback)
+{
+    if (first.GetOpcode() == kungfu::EcmaOpcode::LDAI_IMM32) {
+        if (first.inputs.size() != 1 || !std::holds_alternative<kungfu::Immediate>(first.inputs[0])) {
+            return false;
+        }
+        int32_t value = static_cast<int32_t>(std::get<kungfu::Immediate>(first.inputs[0]).GetValue());
+        feedback->reductionKind = CallReductionKind::TAGGED_CONSTANT;
+        feedback->reducedConstant = JSTaggedValue(value).GetRawData();
+        return true;
+    }
+
+    switch (first.GetOpcode()) {
+        case kungfu::EcmaOpcode::LDUNDEFINED:
+            feedback->reducedConstant = JSTaggedValue::VALUE_UNDEFINED;
+            break;
+        case kungfu::EcmaOpcode::LDNULL:
+            feedback->reducedConstant = JSTaggedValue::VALUE_NULL;
+            break;
+        case kungfu::EcmaOpcode::LDTRUE:
+            feedback->reducedConstant = JSTaggedValue::VALUE_TRUE;
+            break;
+        case kungfu::EcmaOpcode::LDFALSE:
+            feedback->reducedConstant = JSTaggedValue::VALUE_FALSE;
+            break;
+        default:
+            return false;
+    }
+    feedback->reductionKind = CallReductionKind::TAGGED_CONSTANT;
+    return true;
+}
+
+void AnalyzeArgumentReturn(Method *method, const kungfu::BytecodeInfo &first, CallFeedback *feedback)
+{
+    if (first.GetOpcode() != kungfu::EcmaOpcode::LDA_V8 || first.inputs.size() != 1 ||
+        !std::holds_alternative<kungfu::VirtualRegister>(first.inputs[0])) {
+        return;
+    }
+    uint32_t vreg = std::get<kungfu::VirtualRegister>(first.inputs[0]).GetId();
+    uint32_t firstUserArgVreg = method->GetNumVregsWithCallField() + method->GetNumRevervedArgs();
+    uint32_t expectedArgc = method->GetNumArgsWithCallField();
+    if (vreg < firstUserArgVreg || vreg - firstUserArgVreg >= expectedArgc) {
+        return;
+    }
+    feedback->reductionKind = CallReductionKind::USER_ARGUMENT;
+    feedback->reducedArgumentIndex = vreg - firstUserArgVreg;
+}
+
+void AnalyzeTrivialCallReduction(JSThread *thread, Method *method, CallFeedback *feedback)
+{
+    if (method->IsNativeWithCallField() || !IsReducibleFunctionKind(method->GetFunctionKind())) {
+        return;
+    }
+
+    const uint8_t *start = method->GetBytecodeArray();
+    const uint8_t *end = start + method->GetCodeSize(thread);
+    if (start == end) {
+        return;
+    }
+
+    kungfu::BytecodeInfo first = DecodeBytecodeInfo(start, 0);
+    const uint8_t *secondPc = start + first.GetSize();
+    if (first.IsBc(kungfu::EcmaOpcode::RETURNUNDEFINED) && secondPc == end) {
+        feedback->reductionKind = CallReductionKind::TAGGED_CONSTANT;
+        feedback->reducedConstant = JSTaggedValue::VALUE_UNDEFINED;
+        return;
+    }
+    if (secondPc >= end) {
+        return;
+    }
+
+    kungfu::BytecodeInfo second = DecodeBytecodeInfo(
+        secondPc, static_cast<uint32_t>(secondPc - start));
+    if (!second.IsBc(kungfu::EcmaOpcode::RETURN) || secondPc + second.GetSize() != end) {
+        return;
+    }
+    if (TryAnalyzeConstantReturn(first, feedback)) {
+        return;
+    }
+    AnalyzeArgumentReturn(method, first, feedback);
+}
+}  // namespace
 
 bool ArkSteedFeedbackReader::TryGetFeedbackSlotId(int index, bool allowImmediate, uint32_t *slotId) const
 {
@@ -52,58 +154,6 @@ bool ArkSteedFeedbackReader::TryGetFeedbackSlotId(int index, bool allowImmediate
 bool ArkSteedFeedbackReader::TryGetFeedbackSlotId(uint32_t *slotId) const
 {
     return TryGetFeedbackSlotId(ACCESS_SLOT_INPUT, false, slotId);
-}
-
-bool ArkSteedFeedbackReader::ReadCallFeedback(CallFeedback *feedback) const
-{
-    if (feedback == nullptr) {
-        return false;
-    }
-    *feedback = {};
-
-    uint32_t slotId = 0;
-    if (!TryGetFeedbackSlotId(&slotId)) {
-        return false;
-    }
-
-    ProfileTypeInfo *profileTypeArray = nullptr;
-    if (!broker_->TryGetProfileTypeInfo(&profileTypeArray)) {
-        return false;
-    }
-    uint32_t slotLength = profileTypeArray->GetICSlotLength();
-    if (slotId >= slotLength || slotLength - slotId <= 1) {
-        return false;
-    }
-
-    feedback->slotId = slotId;
-    JSTaggedValue target = profileTypeArray->GetICSlot(compilerThread_, slotId);
-    if (target.IsUndefined()) {
-        return true;
-    }
-    if (target.IsInt()) {
-        int64_t rawTarget = static_cast<int64_t>(target.GetInt());
-        if (rawTarget < 0) {
-            int64_t rawBuiltinId = -rawTarget;
-            if (rawBuiltinId > kungfu::BuiltinsStubCSigns::NONE &&
-                rawBuiltinId < kungfu::BuiltinsStubCSigns::ID::NUM_OF_BUILTINS_ID) {
-                feedback->kind = CallFeedbackKind::MONOMORPHIC_BUILTIN;
-                feedback->builtinId = static_cast<kungfu::BuiltinsStubCSigns::ID>(rawBuiltinId);
-                return true;
-            }
-        }
-        return true;
-    }
-    if (!target.IsJSFunction()) {
-        return true;
-    }
-
-    feedback->target = broker_->MakeFunctionRef(target);
-    if (!feedback->target.IsSafeForCompile()) {
-        *feedback = {};
-        return false;
-    }
-    feedback->kind = CallFeedbackKind::MONOMORPHIC_JS_FUNCTION;
-    return true;
 }
 
 bool ArkSteedFeedbackReader::ReadConstructorFeedback(ConstructorFeedback *feedback) const
@@ -145,6 +195,16 @@ bool ArkSteedFeedbackReader::ReadConstructorFeedback(ConstructorFeedback *feedba
         return true;
     }
     if (!target.IsJSFunction()) {
+        return true;
+    }
+
+    // The closure-family encoding (profiler_stub_builder) keeps a representative
+    // function in the primary slot and parks the shared profile cell in the
+    // secondary slot instead of an int call count. Identity speculation on the
+    // representative would deopt on the next family member, so only an int
+    // count (a genuinely unique target) qualifies as monomorphic here.
+    if (slotLength - slotId <= 1 ||
+        !profileTypeArray->GetICSlot(compilerThread_, slotId + 1).IsInt()) {
         return true;
     }
 
@@ -542,6 +602,85 @@ bool ArkSteedFeedbackReader::ReadOperationFeedback(OperationFeedback *feedback) 
     feedback->trueWeight = profile.GetTrueWeight();
     feedback->falseWeight = profile.GetFalseWeight();
     feedback->hint = MakeOperationHint(rawBits);
+    return true;
+}
+
+bool ArkSteedFeedbackReader::ReadCallFeedback(CallFeedback *feedback) const
+{
+    *feedback = {};
+
+    uint32_t slotId = 0;
+    if (!TryGetFeedbackSlotId(&slotId)) {
+        return false;
+    }
+
+    ProfileTypeInfo *profileTypeArray = nullptr;
+    if (!broker_->TryGetProfileTypeInfo(&profileTypeArray)) {
+        return false;
+    }
+    uint32_t length = profileTypeArray->GetICSlotLength();
+    if (slotId >= length || length - slotId <= 1) {
+        return false;
+    }
+
+    JSTaggedValue targetValue = profileTypeArray->GetICSlot(compilerThread_, slotId);
+    JSTaggedValue countValue = profileTypeArray->GetICSlot(compilerThread_, slotId + 1);
+    // Report the addressed slot even when the site is not usable, matching the
+    // upstream reader's contract (the coverage tests assert on it).
+    feedback->slotId = slotId;
+    if (targetValue.IsInt()) {
+        int64_t rawTarget = static_cast<int64_t>(targetValue.GetInt());
+        if (rawTarget < 0) {
+            int64_t rawBuiltinId = -rawTarget;
+            if (rawBuiltinId > kungfu::BuiltinsStubCSigns::NONE &&
+                rawBuiltinId < kungfu::BuiltinsStubCSigns::ID::NUM_OF_BUILTINS_ID) {
+                feedback->slotId = slotId;
+                feedback->isMonomorphicBuiltin = true;
+                feedback->builtinId = static_cast<kungfu::BuiltinsStubCSigns::ID>(rawBuiltinId);
+            }
+        }
+        return true;
+    }
+    if (!targetValue.IsJSFunction()) {
+        return true;
+    }
+
+    auto *target = JSFunction::Cast(targetValue.GetTaggedObject());
+    const bool isClassConstructor = target->IsClassConstructor();
+    JSTaggedValue methodValue = target->GetMethod(compilerThread_);
+    if (!methodValue.IsMethod()) {
+        return true;
+    }
+
+    feedback->slotId = slotId;
+    feedback->target = broker_->MakeObjectRef(targetValue);
+    feedback->method = broker_->MakeObjectRef(methodValue);
+    if (!feedback->target.IsSafeForCompile() || !feedback->method.IsSafeForCompile()) {
+        *feedback = {};
+        return false;
+    }
+    feedback->expectedArgc = Method::Cast(methodValue.GetTaggedObject())->GetNumArgsWithCallField();
+    feedback->methodId = Method::Cast(methodValue.GetTaggedObject())->GetMethodId().GetOffset();
+    if (countValue.IsInt() && countValue.GetInt() > 0) {
+        feedback->callCount = static_cast<uint32_t>(countValue.GetInt());
+    } else if (countValue.IsProfileTypeInfoCell() &&
+               target->GetRawProfileTypeInfo(compilerThread_) == countValue) {
+        feedback->isCompatibleClosure = true;
+        feedback->closureFamily = broker_->MakeObjectRef(countValue);
+        feedback->callCount = 1;
+    } else {
+        *feedback = {};
+        return false;
+    }
+    if (isClassConstructor) {
+        // Super-call speculation consumes constructor feedback; trivial-call
+        // reduction and the regular known-call/inline paths must not.
+        feedback->isClassConstructor = true;
+        feedback->isMonomorphic = true;
+        return true;
+    }
+    AnalyzeTrivialCallReduction(compilerThread_, Method::Cast(methodValue.GetTaggedObject()), feedback);
+    feedback->isMonomorphic = true;
     return true;
 }
 

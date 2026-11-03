@@ -260,6 +260,7 @@ if (ets_runtime_enable_ark_steed) {
     "${ARK_STEED_ROOT}/arksteed_bytecode_preprocessor.cpp",
     "${ARK_STEED_ROOT}/arksteed_codegen.cpp",
     "${ARK_STEED_ROOT}/arksteed_comment.cpp",
+    "${ARK_STEED_ROOT}/arksteed_compilation_unit.cpp",
     "${ARK_STEED_ROOT}/arksteed_compile_info_facts.cpp",
     "${ARK_STEED_ROOT}/arksteed_compiler.cpp",
     "${ARK_STEED_ROOT}/arksteed_constant_folding.cpp",

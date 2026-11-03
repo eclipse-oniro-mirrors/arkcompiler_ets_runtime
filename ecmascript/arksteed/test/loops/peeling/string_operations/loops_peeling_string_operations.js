@@ -13,23 +13,23 @@
  * limitations under the License.
  */
 
-//! PARAMS --compiler-jit-hotness-threshold=60000
+//! PARAMS --compiler-jit-hotness-threshold=60000 --compiler-arksteed-enable-inline=false
 //! METHOD concatFacts
 //! HAS CallCommonStub StringAdd
-//! COUNT LoadTaggedField 4 # GlobalEnv, holder.value once, packing function and its environment.
+//! COUNT LoadTaggedField 3 # GlobalEnv, holder.value once, packing function and its environment.
 //! METHOD numberStringFacts
 //! HAS CallRuntime NumberToString
 //! HAS CallCommonStub StringAdd
 //! HAS BranchIfTaggedString
-//! COUNT LoadTaggedField 4
+//! COUNT LoadTaggedField 3
 //! METHOD knownNumberStringFacts
 //! HAS CallRuntime NumberToString
 //! HAS_NOT BranchIfTaggedString
-//! COUNT LoadTaggedField 3 # No GlobalEnv load is needed for the known-number path.
+//! COUNT LoadTaggedField 2 # No GlobalEnv load is needed for the known-number path.
 //! METHOD peelConcatFacts
 //! HAS CallCommonStub StringAdd
 //! COUNT JumpLoop 1
-//! COUNT LoadTaggedField 4
+//! COUNT LoadTaggedField 3
 
 // Keep result-array initialization outside the methods whose loads are counted.
 function packResults(before, text, after) {

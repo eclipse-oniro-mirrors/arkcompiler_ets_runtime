@@ -24,7 +24,16 @@ namespace panda::ecmascript::arksteed {
 class ArkSteedPGOContext {
 public:
     ArkSteedPGOContext(JSThread *compilerThread, JitCompilationEnv *env)
-        : compilerThread_(compilerThread), env_(env), broker_(compilerThread, env)
+        : ArkSteedPGOContext(compilerThread, env, env->GetMethodLiteral()->GetMethodId().GetOffset(),
+                             env->GetProfileTypeInfo())
+    {}
+
+    ArkSteedPGOContext(JSThread *compilerThread, JitCompilationEnv *env,
+                       uint32_t methodOffset, const JSHandle<ProfileTypeInfo> &profileTypeInfo)
+        : compilerThread_(compilerThread),
+          env_(env),
+          profileEnabled_(!profileTypeInfo.IsEmpty()),
+          broker_(compilerThread, env, methodOffset, profileTypeInfo)
     {}
 
     ArkSteedAccessInfoFactory CreateAccessInfoFactory(const kungfu::BytecodeInfo *bytecodeInfo) const
@@ -46,6 +55,9 @@ public:
     OperationFeedback ReadOperationFeedback(const kungfu::BytecodeInfo *bytecodeInfo)
     {
         OperationFeedback feedback;
+        if (!profileEnabled_) {
+            return feedback;
+        }
         ArkSteedFeedbackReader reader(compilerThread_, bytecodeInfo, &broker_);
         broker_.GetFeedbackForOperation(reader, &feedback);
         return feedback;
@@ -54,6 +66,9 @@ public:
     CallFeedback ReadCallFeedback(const kungfu::BytecodeInfo *bytecodeInfo)
     {
         CallFeedback feedback;
+        if (!profileEnabled_) {
+            return feedback;
+        }
         ArkSteedFeedbackReader reader(compilerThread_, bytecodeInfo, &broker_);
         broker_.GetFeedbackForCall(reader, &feedback);
         return feedback;
@@ -69,12 +84,14 @@ public:
 
     bool TargetsCurrentFunction(const CallFeedback &feedback) const
     {
-        return feedback.IsMonomorphicJSFunction() && broker_.IsSameFunction(feedback.target);
+        return feedback.isMonomorphic && !feedback.isCompatibleClosure &&
+               broker_.IsSameFunction(feedback.target);
     }
 
 private:
     JSThread *compilerThread_ {nullptr};
     JitCompilationEnv *env_ {nullptr};
+    bool profileEnabled_ {true};
     mutable ArkSteedHeapBroker broker_;
 };
 

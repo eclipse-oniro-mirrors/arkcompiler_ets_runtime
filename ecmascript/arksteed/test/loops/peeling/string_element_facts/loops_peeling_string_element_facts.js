@@ -13,26 +13,26 @@
  * limitations under the License.
  */
 
-//! PARAMS --compiler-jit-hotness-threshold=60000
+//! PARAMS --compiler-jit-hotness-threshold=60000 --compiler-arksteed-enable-inline=false
 //! METHOD charFacts
 //! HAS LineStringLoadElement
 //! HAS LoadSingleCharTableElement
 //! HAS CallCommonStub CreateStringBySingleCharCode
 //! HAS_NOT CallCommonStub GetPropertyByValue
-//! COUNT LoadTaggedField 4 # GlobalEnv, holder.value once, packing function and its environment.
+//! COUNT LoadTaggedField 3 # GlobalEnv, holder.value once, packing function and its environment.
 //! METHOD peelCharFacts
 //! HAS LineStringLoadElement
 //! HAS CallCommonStub CreateStringBySingleCharCode
 //! COUNT JumpLoop 1
 //! HAS_NOT Deopt
-//! COUNT LoadTaggedField 4
+//! COUNT LoadTaggedField 3
 //! METHOD charThenCall
 //! HAS LineStringLoadElement
 //! HAS CallKnownJSFunction
 //! COUNT_GE LoadTaggedField 3
 //! METHOD charEnvFacts
 //! HAS CallCommonStub CreateStringBySingleCharCode
-//! COUNT LoadTaggedField 7 # GlobalEnv, captured slot, two TDZ-path loads and three packing-call loads.
+//! COUNT LoadTaggedField 6 # GlobalEnv, captured slot, two TDZ-path loads and three packing-call loads.
 //! COUNT CallKnownJSFunction 1
 //! COUNT BranchIfReferenceEqual 1 # One TDZ check.
 

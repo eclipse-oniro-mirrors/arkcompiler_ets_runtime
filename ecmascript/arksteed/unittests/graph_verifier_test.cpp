@@ -128,6 +128,7 @@ constexpr const char *DEATH_CONDITION_PHI_REPRESENTATION =
     "ASSERTION FAILED: CheckInputs\\(\\)";  // arksteed_opcode.h, PhiVertex::CheckInputs (input representations agree)
 constexpr const char *DEATH_CONDITION_NULL_PHI_INPUT =
     "ASSERTION FAILED: input != nullptr";  // arksteed_graph_verifier.h, ProcessVertex
+// arksteed_opcode.h, JSCallVertexBase
 constexpr const char *DEATH_CONDITION_CALL_LAYOUT =
     "ASSERTION FAILED: CheckInputs\\(\\)";  // arksteed_opcode.h, CallVertex::CheckInputs (stored layout arity)
 constexpr const char *DEATH_CONDITION_FIXED_INPUT_REPRESENTATION =

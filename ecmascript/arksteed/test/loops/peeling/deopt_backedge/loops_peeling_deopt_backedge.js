@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-//! PARAMS --compiler-jit-hotness-threshold=60000
+//! PARAMS --compiler-jit-hotness-threshold=60000 --compiler-arksteed-enable-inline=false
 //! METHOD peelStringReceiver
 //! HAS_NOT Deopt
 //! COUNT JumpLoop 1

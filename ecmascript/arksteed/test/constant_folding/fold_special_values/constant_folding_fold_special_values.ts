@@ -46,7 +46,9 @@
 //! BYTECODE_COUNT add2 0x1, a3 1
 //! HAS I32AddWithOverflow
 //! HAS_NOT I32SubWithOverflow
-//! COUNT Int32Constant 4
+// +2 vs the documented 4: the multi-frame deopt frame state materializes an
+// Int32Constant(0) INLINE_DEPTH vertex, counted in the vertex list and the table.
+//! COUNT Int32Constant 6
 
 //! METHOD fold_infinity
 //! BYTECODE_COUNT add2 0x0, v1 1

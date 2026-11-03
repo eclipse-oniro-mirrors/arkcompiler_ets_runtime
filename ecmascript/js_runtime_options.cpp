@@ -56,6 +56,18 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
         {"compiler-arksteed-pass-trace", required_argument, nullptr, OPTION_COMPILER_ARKSTEED_PASS_TRACE},
         {"compiler-arksteed-pass-trace-methods", required_argument, nullptr,
          OPTION_COMPILER_ARKSTEED_PASS_TRACE_METHODS},
+        {"compiler-arksteed-enable-inline", required_argument, nullptr,
+         OPTION_COMPILER_ARKSTEED_ENABLE_INLINE},
+        {"compiler-arksteed-inline-loop-callee", required_argument, nullptr,
+         OPTION_COMPILER_ARKSTEED_INLINE_LOOP_CALLEE},
+        {"compiler-arksteed-max-cumulative-inline-bytecode-size", required_argument, nullptr,
+         OPTION_COMPILER_ARKSTEED_MAX_CUMULATIVE_INLINE_BYTECODE_SIZE},
+        {"compiler-arksteed-max-graph-nodes-before-inline", required_argument, nullptr,
+         OPTION_COMPILER_ARKSTEED_MAX_GRAPH_NODES_BEFORE_INLINE},
+        {"compiler-arksteed-max-inline-actual-args", required_argument, nullptr,
+         OPTION_COMPILER_ARKSTEED_MAX_INLINE_ACTUAL_ARGS},
+        {"compiler-arksteed-small-inline-bytecode-size", required_argument, nullptr,
+         OPTION_COMPILER_ARKSTEED_SMALL_INLINE_BYTECODE_SIZE},
         {"compiler-log-snapshot", required_argument, nullptr, OPTION_COMPILER_LOG_SNAPSHOT},
         {"compiler-log-time", required_argument, nullptr, OPTION_COMPILER_LOG_TIME},
         {"compiler-log-all-methods-time", required_argument, nullptr, OPTION_COMPILER_LOG_ALL_METHODS_TIME},
@@ -752,8 +764,56 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
                     return false;
                 }
                 break;
+            case OPTION_COMPILER_ARKSTEED_ENABLE_INLINE:
+                ret = ParseBoolParam(&argBool);
+                if (ret) {
+                    SetCompilerArkSteedEnableInline(argBool);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_ARKSTEED_INLINE_LOOP_CALLEE:
+                ret = ParseBoolParam(&argBool);
+                if (ret) {
+                    SetCompilerArkSteedInlineLoopCallee(argBool);
+                } else {
+                    return false;
+                }
+                break;
             case OPTION_COMPILER_ARKSTEED_PASS_TRACE_METHODS:
                 SetCompilerArkSteedPassTraceMethods(optarg);
+                break;
+            case OPTION_COMPILER_ARKSTEED_MAX_CUMULATIVE_INLINE_BYTECODE_SIZE:
+                ret = ParseUint32Param("compiler-arksteed-max-cumulative-inline-bytecode-size", &argUint32);
+                if (ret) {
+                    SetCompilerArkSteedMaxCumulativeInlineBytecodeSize(argUint32);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_ARKSTEED_MAX_GRAPH_NODES_BEFORE_INLINE:
+                ret = ParseUint32Param("compiler-arksteed-max-graph-nodes-before-inline", &argUint32);
+                if (ret) {
+                    SetCompilerArkSteedMaxGraphNodesBeforeInline(argUint32);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_ARKSTEED_MAX_INLINE_ACTUAL_ARGS:
+                ret = ParseUint32Param("compiler-arksteed-max-inline-actual-args", &argUint32);
+                if (ret) {
+                    SetCompilerArkSteedMaxInlineActualArgs(argUint32);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_ARKSTEED_SMALL_INLINE_BYTECODE_SIZE:
+                ret = ParseUint32Param("compiler-arksteed-small-inline-bytecode-size", &argUint32);
+                if (ret) {
+                    SetCompilerArkSteedSmallInlineBytecodeSize(argUint32);
+                } else {
+                    return false;
+                }
                 break;
             case OPTION_ASM_OPT_LEVEL:
                 ret = ParseUint32Param("compiler-opt-level", &argUint32);

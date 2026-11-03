@@ -16,22 +16,22 @@
 //! PARAMS --compiler-jit-hotness-threshold=6000
 //! METHOD callArg0
 //! HAS CallKnownJSFunction
-//! COUNT DeoptIfReferenceNotEqual 1
+//! COUNT DeoptIfTaggedCondition 0
 //! HAS_NOT Call
 
 //! METHOD callArgs3
 //! HAS CallKnownJSFunction
-//! COUNT DeoptIfReferenceNotEqual 1
+//! COUNT DeoptIfTaggedCondition 0
 //! HAS_NOT Call
 
 //! METHOD callRange
 //! HAS CallKnownJSFunction
-//! COUNT DeoptIfReferenceNotEqual 1
+//! COUNT DeoptIfTaggedCondition 0
 //! HAS_NOT Call
 
 //! METHOD callThisRange
 //! HAS CallKnownJSFunction
-//! COUNT DeoptIfReferenceNotEqual 1
+//! COUNT DeoptIfTaggedCondition 0
 //! HAS_NOT Call
 
 function arg0Target() {

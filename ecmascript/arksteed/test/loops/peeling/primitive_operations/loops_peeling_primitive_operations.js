@@ -13,44 +13,44 @@
  * limitations under the License.
  */
 
-//! PARAMS --compiler-jit-hotness-threshold=60000
+//! PARAMS --compiler-jit-hotness-threshold=60000 --compiler-arksteed-enable-inline=false
 //! METHOD truthFacts
 //! COMPILE_COUNT_GE *truthFacts 1
 //! EXEC_COUNT_GE *truthFacts 1
 //! HAS CallCommonStub ToBoolean*
-//! COUNT LoadTaggedField 3 # holder.value once, packing function and its environment.
+//! COUNT LoadTaggedField 2 # holder.value once, packing function and its environment.
 //! METHOD falseFacts
 //! COMPILE_COUNT_GE *falseFacts 1
 //! EXEC_COUNT_GE *falseFacts 1
 //! HAS CallCommonStub ToBooleanFalse
-//! COUNT LoadTaggedField 3
+//! COUNT LoadTaggedField 2
 //! METHOD typeofFacts
 //! COMPILE_COUNT_GE *typeofFacts 1
 //! EXEC_COUNT_GE *typeofFacts 1
 //! HAS CallCommonStub TypeOf
-//! COUNT LoadTaggedField 3
+//! COUNT LoadTaggedField 2
 //! METHOD strictFacts
 //! COMPILE_COUNT_GE *strictFacts 1
 //! EXEC_COUNT_GE *strictFacts 1
 //! HAS CallCommonStub StrictEqual
-//! COUNT LoadTaggedField 4 # Also loads GlobalEnv for StrictEqual.
+//! COUNT LoadTaggedField 3 # Also loads GlobalEnv for StrictEqual.
 //! METHOD strictNotFacts
 //! COMPILE_COUNT_GE *strictNotFacts 1
 //! EXEC_COUNT_GE *strictNotFacts 1
 //! HAS CallCommonStub StrictNotEqual
-//! COUNT LoadTaggedField 4
+//! COUNT LoadTaggedField 3
 //! METHOD peelPrimitiveFacts
 //! COMPILE_COUNT_GE *peelPrimitiveFacts 1
 //! EXEC_COUNT_GE *peelPrimitiveFacts 1
 //! HAS CallCommonStub TypeOf
 //! HAS CallCommonStub StrictEqual
 //! COUNT JumpLoop 1
-//! COUNT LoadTaggedField 4
+//! COUNT LoadTaggedField 3
 //! METHOD envFacts
 //! COMPILE_COUNT_GE *envFacts 1
 //! EXEC_COUNT_GE *envFacts 1
 //! HAS CallCommonStub TypeOf
-//! COUNT LoadTaggedField 6 # Captured slot, two TDZ-path loads, parent env, packing function and its env.
+//! COUNT LoadTaggedField 5 # Captured slot, two TDZ-path loads, parent env, packing function and its env.
 //! COUNT CallKnownJSFunction 1
 //! COUNT BranchIfReferenceEqual 1 # One TDZ check.
 

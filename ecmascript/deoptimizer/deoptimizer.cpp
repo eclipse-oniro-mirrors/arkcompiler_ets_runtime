@@ -20,6 +20,7 @@
 #include "ecmascript/jit/jit.h"
 #include "ecmascript/jit/tiering_manager.h"
 #include "ecmascript/js_tagged_value_internals.h"
+#include "ecmascript/stackmap/ark_stackmap_parser.h"
 #include "ecmascript/stubs/runtime_stubs-inl.h"
 #include "ecmascript/base/gc_helper.h"
 #include "ecmascript/base/number_helper.h"
@@ -451,7 +452,7 @@ void Deoptimizier::DumpMachineCode(JSTaggedValue jsFunction, uintptr_t *prevRetu
     FrameIterator::PrintText(textBegin, textSize, "print machine code begin:");
 }
 
-void Deoptimizier::CollectDeoptBundleVec(std::vector<ARKDeopt>& deoptBundle)
+size_t Deoptimizier::CollectDeoptBundleVec(std::vector<ARKDeopt>& deoptBundle)
 {
     isArkSteedFrame_ = false;
     JSTaggedValue jsFunction = JSTaggedValue::Undefined();
@@ -511,7 +512,13 @@ void Deoptimizier::CollectDeoptBundleVec(std::vector<ARKDeopt>& deoptBundle)
         prevReturnAddrAddress = it.GetReturnAddrAddress();
     }
     ASSERT(!it.Done());
+    // Decode the inline depth from the exact bundle selected by this frame walk.
+    // A separate walk can observe a different optimized frame during lazy deopt,
+    // which makes the shift inconsistent with the encoded vreg ids in this bundle.
+    kungfu::ArkStackMapParser stackMapParser;
+    inlineDepth_ = stackMapParser.GetInlineDepth(deoptBundle);
     isRecursiveCall_ = IsRecursiveCall(it, jsFunction);
+    return inlineDepth_;
 }
 
 bool Deoptimizier::IsRecursiveCall(FrameIterator& it, JSTaggedValue& jsFunction)
@@ -562,16 +569,13 @@ void Deoptimizier::RelocateCalleeSave()
 bool Deoptimizier::CollectVirtualRegisters(JSTaggedValue callTarget, Method *method, FrameWriter *frameWriter,
     size_t curDepth)
 {
-    int32_t actualNumArgs = 0;
-    int32_t declaredNumArgs = 0;
-    if (curDepth == 0) {
-        actualNumArgs = static_cast<int32_t>(GetDeoptValue(curDepth,
+    int32_t declaredNumArgs = static_cast<int32_t>(method->GetNumArgsWithCallField());
+    int32_t actualNumArgs = declaredNumArgs;
+    bool hasActualArgc = HasDeoptValue(curDepth, static_cast<int32_t>(SpecVregIndex::ACTUAL_ARGC_INDEX));
+    if (hasActualArgc) {
+        int32_t actualFrameArgc = static_cast<int32_t>(GetDeoptValue(curDepth,
             static_cast<int32_t>(SpecVregIndex::ACTUAL_ARGC_INDEX)).GetInt());
-        declaredNumArgs = static_cast<int32_t>(method->GetNumArgsWithCallField());
-    } else {
-        // inline method actualNumArgs equal to declaredNumArgs
-        actualNumArgs = static_cast<int32_t>(method->GetNumArgsWithCallField());
-        declaredNumArgs = static_cast<int32_t>(method->GetNumArgsWithCallField());
+        actualNumArgs = std::max(0, actualFrameArgc - static_cast<int32_t>(NUM_MANDATORY_JSFUNC_ARGS));
     }
 
     int32_t callFieldNumVregs = static_cast<int32_t>(method->GetNumVregsWithCallField());
@@ -582,19 +586,30 @@ bool Deoptimizier::CollectVirtualRegisters(JSTaggedValue callTarget, Method *met
     // [maybe argc]
     bool isFastCall = JSFunctionBase::IsFastCallFromCallTarget(thread_, callTarget);
     if (!isFastCall && declaredNumArgs != actualNumArgs) {
+        // ACTUAL_ARGC_INDEX uses the compiled-call convention and includes the
+        // three mandatory JS-function arguments. The interpreter's dynamic
+        // argc slot stores user arguments only.
         auto value = JSTaggedValue(actualNumArgs);
         frameWriter->PushValue(value.GetRawData());
     }
-    int32_t virtualIndex = declaredNumArgs + callFieldNumVregs +
+    int32_t reservedArgumentCount = std::max(actualNumArgs, declaredNumArgs);
+    int32_t virtualIndex = reservedArgumentCount + callFieldNumVregs +
         static_cast<int32_t>(method->GetNumRevervedArgs()) - 1;
     if (!frameWriter->Reserve(static_cast<size_t>(virtualIndex))) {
         return false;
     }
-    for (int32_t i = static_cast<int32_t>(declaredNumArgs - 1); i >= 0; i--) {
+    int32_t firstArgumentVreg = callFieldNumVregs + static_cast<int32_t>(method->GetNumRevervedArgs());
+    for (int32_t i = reservedArgumentCount - 1; i >= 0; i--) {
         JSTaggedValue value = JSTaggedValue::Undefined();
-        // deopt value
-        if (HasDeoptValue(curDepth, virtualIndex)) {
-            value = GetDeoptValue(curDepth, virtualIndex);
+        if (i < actualNumArgs) {
+            int32_t formalVreg = firstArgumentVreg + i;
+            if (i < declaredNumArgs && HasDeoptValue(curDepth, formalVreg)) {
+                value = GetDeoptValue(curDepth, formalVreg);
+            } else if (HasDeoptValue(curDepth, GetInlinedArgumentVregIndex(static_cast<uint32_t>(i)))) {
+                value = GetDeoptValue(curDepth, GetInlinedArgumentVregIndex(static_cast<uint32_t>(i)));
+            } else if (curDepth == 0) {
+                value = GetActualFrameArgs(i);
+            }
         }
         frameWriter->PushValue(value.GetRawData());
         virtualIndex--;
@@ -640,7 +655,7 @@ bool Deoptimizier::CollectVirtualRegisters(JSTaggedValue callTarget, Method *met
     //         |--------------------------|            v
     //         |       v0 - vN            |
     //  sp --> |--------------------------|
-    int32_t vregsAndArgsNum = declaredNumArgs + callFieldNumVregs +
+    int32_t vregsAndArgsNum = reservedArgumentCount + callFieldNumVregs +
         static_cast<int32_t>(method->GetNumRevervedArgs());
     for (int32_t i = callFieldNumVregs; i < vregsAndArgsNum; i++) {
         JSTaggedValue value = JSTaggedValue::Undefined();
@@ -890,21 +905,6 @@ size_t Deoptimizier::DecodeDeoptDepth(OffsetType id, size_t shift)
         return id & mask;
     }
     return (-id) & mask;
-}
-
-// static
-size_t Deoptimizier::GetInlineDepth(JSThread *thread, uint32_t deoptType)
-{
-    JSTaggedType *current = const_cast<JSTaggedType *>(thread->GetCurrentFrame());
-    FrameIterator it(current, thread);
-    it.SetDeoptType(deoptType);
-    for (; !it.Done(); it.Advance<GCVisitedFlag::DEOPT>()) {
-        if (!it.IsOptimizedJSFunctionFrame()) {
-            continue;
-        }
-        return it.GetInlineDepth();
-    }
-    return 0;
 }
 
 // static

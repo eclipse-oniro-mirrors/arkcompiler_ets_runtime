@@ -44,12 +44,13 @@ class InsufficientProfileResolver {
 public:
     static constexpr uint8_t INVALID_UINT8_SLOT_INDEX = 0xFF;
 
-    explicit InsufficientProfileResolver(JitCompilationEnv *env)
+    explicit InsufficientProfileResolver(const ArkSteedCompilationUnit *unit)
     {
+        JitCompilationEnv *env = unit->GetEnv();
         if (!env->GetJSOptions().IsEnableJITPGO()) {
             return;
         }
-        JSHandle<ProfileTypeInfo> profileTypeInfo = env->GetProfileTypeInfo();
+        JSHandle<ProfileTypeInfo> profileTypeInfo = unit->GetProfileTypeInfo();
         JSTaggedValue value = profileTypeInfo.GetTaggedValue();
         if (profileTypeInfo.GetTaggedType() == 0 || !value.IsProfileTypeInfo()) {
             return;
@@ -183,6 +184,11 @@ private:
 
     bool SlotValueIsUndefined(uint32_t slotId) const
     {
+        // An inlined callee's ProfileTypeInfo can be shorter than the callee's
+        // IC slot range (or empty); missing data must not read out of bounds.
+        if (slotId >= profileTypeInfo_->GetICSlotLength()) {
+            return false;
+        }
         return profileTypeInfo_->GetICSlot(thread_, slotId).IsUndefined();
     }
 
@@ -192,12 +198,12 @@ private:
 };
 }  // namespace
 
-BytecodePreprocessor::BytecodePreprocessor(JitCompilationEnv *env, Chunk *chunk)
-    : env_(env),
-      method_(env->GetMethodLiteral()),
+BytecodePreprocessor::BytecodePreprocessor(ArkSteedCompilationUnit *unit, Chunk *chunk)
+    : unit_(unit),
+      method_(unit->GetMethod()),
       numLocalVRegs_(method_->GetNumVregsWithCallField()),
       numParamVRegs_(method_->GetNumArgsForArkSteed()),
-      bcSizeBytes_(MethodLiteral::GetCodeSize(env_->GetJSPandaFile(), method_->GetMethodId())),
+      bcSizeBytes_(unit->GetBytecodeSize()),
       tryBlocks_(chunk),
       basicBlocks_(chunk),
       bytecodes_(chunk),
@@ -327,7 +333,7 @@ const BytecodePreprocessor::BytecodeLoopInfo *BytecodePreprocessor::TryGetLoopIn
 uint32_t BytecodePreprocessor::JumpTargetBcIndexOfBytecode(uint32_t bcIndex, uint32_t bcOffset)
 {
     // Used by READ_INST_*_0() macros below
-    const uint8_t *pc = env_->GetMethodPcStart() + bcOffset;
+    const uint8_t *pc = unit_->GetMethodPcStart() + bcOffset;
     int32_t jumpOffset = 0;
     switch (bytecodes_[bcIndex].GetOpcode()) {
         case kungfu::EcmaOpcode::JEQZ_IMM8:
@@ -393,14 +399,14 @@ bool BytecodePreprocessor::CollectBytecodeInfo()
     bytecodes_.reserve(bcSizeBytes_);
     bcIndexOfOffset_.resize(bcSizeBytes_ + 1, NULL_INDEX);
 
-    const uint8_t *startPc = env_->GetMethodPcStart();
+    const uint8_t *startPc = unit_->GetMethodPcStart();
     BytecodeInstruction bcIns(startPc);
     BytecodeInstruction bcInsLast = bcIns.JumpTo(bcSizeBytes_);
 
     VRegIDType envVRegIndex = VRegOfLexicalEnv(numLocalVRegs_, numParamVRegs_);
 
-    Jit::JitLockHolder jitLockHolder(env_->GetJSThread());
-    InsufficientProfileResolver profileResolver(env_);
+    Jit::JitLockHolder jitLockHolder(GetEnv()->GetJSThread());
+    InsufficientProfileResolver profileResolver(unit_);
 
     auto makeBytecodeDetails = [startPc, envVRegIndex, &profileResolver](uint32_t curOffset) {
         kungfu::BytecodeInfo res;
@@ -440,7 +446,7 @@ void BytecodePreprocessor::CollectTryCatchBlockInfo()
     using CDATryBlock = panda_file::CodeDataAccessor::TryBlock;
     using CDACatchBlock = panda_file::CodeDataAccessor::CatchBlock;
 
-    const panda_file::File *pf = env_->GetJSPandaFile()->GetPandaFile();
+    const panda_file::File *pf = unit_->GetJSPandaFile()->GetPandaFile();
     panda_file::MethodDataAccessor mda(*pf, method_->GetMethodId());
     panda_file::CodeDataAccessor cda(*pf, mda.GetCodeId().value());
 
