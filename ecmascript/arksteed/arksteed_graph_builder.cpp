@@ -14,6 +14,7 @@
  */
 
 #include "ecmascript/arksteed/arksteed_graph_builder.h"
+#include "ecmascript/arksteed/unittests/graph_builder_test_access.h"
 
 #include <algorithm>
 #include <cmath>
@@ -63,6 +64,7 @@
 #include "ecmascript/jspandafile/program_object.h"
 #include "ecmascript/lexical_env.h"
 #include "ecmascript/mem/mem.h"
+#include "ecmascript/mem/barriers.h"
 #include "ecmascript/method.h"
 #include "ecmascript/module/js_module_manager.h"
 #include "ecmascript/string/base_string.h"
@@ -5863,7 +5865,267 @@ struct GraphBuilder::BytecodeVisitor {
     {
         ValueVertex *object = LoadRegister(bcInfo, 1);
         ValueVertex *target = frameState.GetAcc();
-        CommonStubCallToAccWithICAndLazyDeopt(bcInfo, {object, target, GlobalEnv()}, CommonStubID::Instanceof);
+        if (!TryBuildInlineInstanceof(bcInfo, object, target)) {
+            CommonStubCallToAccWithICAndLazyDeopt(bcInfo, {object, target, GlobalEnv()}, CommonStubID::InstanceofJit);
+        }
+    }
+
+    struct InstanceofInlineBlocks {
+        BB *trueBlock {nullptr};
+        BB *falseBlock {nullptr};
+        BB *targetMismatchBlock {nullptr};
+        BB *doneBlock {nullptr};
+    };
+
+    void BuildInstanceofResult(CompileInfoFacts *entryFacts, const InstanceofInlineBlocks &blocks,
+                               ValueVertex *inlineResult, ValueVertex *object, ValueVertex *target,
+                               const BytecodeInfo *bcInfo)
+    {
+        auto enterBlock = [this, entryFacts](BB *block) {
+            currentBlock = block;
+            compileInfoFacts_ = entryFacts->Clone();
+        };
+
+        ChunkVector<ValueVertex *> resultInputs(self->chunk_);
+        if (blocks.trueBlock != nullptr) {
+            enterBlock(blocks.trueBlock);
+            self->FinishBlockWithJump(blocks.trueBlock, blocks.doneBlock);
+            resultInputs.emplace_back(self->graph_->GetTaggedConstant(JSTaggedValue::VALUE_TRUE));
+        }
+        if (blocks.falseBlock != nullptr) {
+            enterBlock(blocks.falseBlock);
+            self->FinishBlockWithJump(blocks.falseBlock, blocks.doneBlock);
+            resultInputs.emplace_back(self->graph_->GetTaggedConstant(JSTaggedValue::VALUE_FALSE));
+        }
+        if (inlineResult != nullptr) {
+            resultInputs.emplace_back(inlineResult);
+        }
+
+        enterBlock(blocks.targetMismatchBlock);
+        CallCommonStubVertex *mismatchCall =
+            CommonStubCallWithICAndLazyDeopt(bcInfo, {object, target, GlobalEnv()}, CommonStubID::InstanceofJit);
+        self->FinishBlockWithJump(blocks.targetMismatchBlock, blocks.doneBlock);
+        resultInputs.emplace_back(mismatchCall);
+
+        enterBlock(blocks.doneBlock);
+        compileInfoFacts_->OnSideEffect();
+        ValueVertex *result = resultInputs.size() >= 2
+                                  ? self->NewPhiVertexWith(blocks.doneBlock, resultInputs, self->AccIndex())
+                                  : resultInputs.front();
+        compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
+        frameState.SetAcc(result);
+    }
+
+    enum class HClassCheckResult : uint8_t {
+        SUCCESS,
+        UNREACHABLE,
+        FAILURE,
+    };
+
+    struct InstanceofConstantTargetPlan {
+        ArkSteedFunctionRef ctorFunc {};
+        ArkSteedObjectRef ctorProto {};
+        ValueVertex *ctorFuncConstant {nullptr};
+        ValueVertex *ctorProtoConstant {nullptr};
+        bool useConstantTarget {false};
+    };
+
+    bool TryPlanInstanceofConstantTarget(const ArkSteedAccessInfoFactory &factory,
+                                         const InstanceofAccessInfo &access,
+                                         InstanceofConstantTargetPlan *plan)
+    {
+        *plan = {};
+        ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
+        if (broker == nullptr) {
+            return false;
+        }
+        plan->ctorFunc = access.ctorFunc;
+        if (!broker->TryGetInstanceofCtorProto(access.ctorFunc, &plan->ctorProto)) {
+            return false;
+        }
+        if (!factory.InstallFunctionPrototypeDetector()) {
+            return false;
+        }
+        plan->ctorFuncConstant = GetHeapConstant(plan->ctorFunc);
+        plan->ctorProtoConstant = GetHeapConstant(plan->ctorProto);
+        plan->useConstantTarget = plan->ctorFuncConstant != nullptr && plan->ctorProtoConstant != nullptr;
+        return plan->useConstantTarget;
+    }
+
+    struct InstanceofLhsChainPlan {
+        InstanceofLhsChainInfo chain {};
+        ArkSteedHClassRef hclassRef {};
+        JSHClass *hclass {nullptr};
+        bool useLhsChain {false};
+    };
+
+    bool TryPlanInstanceofLhsChain(const ArkSteedAccessInfoFactory &factory, uint32_t bcIndex, ValueVertex *object,
+                                   InstanceofLhsChainPlan *plan)
+    {
+        HClassInference inference(this, object);
+        std::optional<NodeInfo::PossibleHClasses> possibleHClasses = inference.TryGetPossibleHClasses();
+        if (inference.AllHClassesAreFresh() && possibleHClasses.has_value() && possibleHClasses->size() == 1) {
+            plan->hclass = possibleHClasses->front();
+            if (plan->hclass->IsECMAObject() && !plan->hclass->IsJSProxy()) {
+                plan->useLhsChain = factory.TryPrewalkInstanceofLhsChain(plan->hclass, &plan->hclassRef, &plan->chain);
+            }
+        }
+        if (plan->useLhsChain) {
+            HClassCheckResult checkResult =
+                BuildCheckSingleHClass(bcIndex, object, plan->hclass, plan->hclassRef, true, false);
+            plan->useLhsChain = checkResult != HClassCheckResult::FAILURE;
+        }
+        return plan->useLhsChain;
+    }
+
+    struct InstanceofInlinePlan {
+        int32_t lhsChainHitIndex {-1};
+        bool foldToConstantResult {false};
+    };
+
+    InstanceofInlinePlan ComputeInstanceofInlinePlan(const InstanceofConstantTargetPlan &constTarget,
+                                                     const InstanceofLhsChainPlan &lhs) const
+    {
+        InstanceofInlinePlan plan;
+        if (lhs.useLhsChain) {
+            for (uint32_t i = 0; i < lhs.chain.count; ++i) {
+                if (SameInstanceofHeapRef(constTarget.ctorProto, lhs.chain.members[i])) {
+                    plan.lhsChainHitIndex = static_cast<int32_t>(i);
+                    break;
+                }
+            }
+        }
+
+        // A hit folds to true. A complete prewalked chain with no hit folds to false. A truncated
+        // chain cannot be folded because its unseen tail may still contain the constructor's prototype.
+        plan.foldToConstantResult = lhs.useLhsChain && (plan.lhsChainHitIndex >= 0 || !lhs.chain.truncated);
+        return plan;
+    }
+
+    void BuildInstanceofBlocksByPlan(const InstanceofInlinePlan &plan, InstanceofInlineBlocks *blocks)
+    {
+        if (plan.foldToConstantResult) {
+            BB **resultBlock = plan.lhsChainHitIndex >= 0 ? &blocks->trueBlock : &blocks->falseBlock;
+            *resultBlock = self->NewBlock();
+        }
+        blocks->doneBlock = self->NewBlock();
+    }
+
+    HClassCheckResult BuildInstanceofConstantTargetGuards(uint32_t bcIndex, const InstanceofAccessInfo &access,
+                                                          const InstanceofInlineBlocks &blocks,
+                                                          JSHClass *expectedHClass, ValueVertex *target,
+                                                          const InstanceofConstantTargetPlan &plan,
+                                                          ValueVertex **ctorProto)
+    {
+        *ctorProto = plan.ctorProtoConstant;
+        BB *constantTargetBlock = self->NewBlock();
+        self->FinishBlockWithBranch<BranchIfReferenceEqualVertex>(currentBlock, {target, plan.ctorFuncConstant},
+                                                                  constantTargetBlock, blocks.targetMismatchBlock);
+        currentBlock = constantTargetBlock;
+
+        if (!access.canAssumeStableHClass) {
+            HClassCheckResult checkResult =
+                BuildCheckSingleHClass(bcIndex, target, expectedHClass, access.ctorHClass, true, false);
+            if (checkResult != HClassCheckResult::SUCCESS) {
+                return checkResult;
+            }
+        }
+        if (!access.canAssumeStableProtoChain) {
+            ChunkVector<ValueVertex *> guardInputs(self->chunk_);
+            guardInputs.emplace_back(target);
+            auto *guard = self->NewVertex<DeoptIfPrototypeChangedVertex>(
+                currentBlock, guardInputs, self->chunk_, true, false, self->preproc_->GetBytecodeOffset(bcIndex));
+            guard->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+        }
+        return HClassCheckResult::SUCCESS;
+    }
+
+    bool SameInstanceofHeapRef(const ArkSteedHeapRef &lhs, const ArkSteedHeapRef &rhs) const
+    {
+        ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
+        if (broker == nullptr) {
+            return false;
+        }
+        return broker->SameHeapObject(lhs, rhs);
+    }
+
+    void BuildInstanceofTargetMismatchOnlyResult(CompileInfoFacts *entryFacts, InstanceofInlineBlocks &blocks,
+                                                 ValueVertex *object, ValueVertex *target, const BytecodeInfo *bcInfo)
+    {
+        if (currentBlock->GetControlVertex() == nullptr) {
+            self->FinishBlockWithJump(currentBlock, blocks.targetMismatchBlock);
+        }
+        blocks.doneBlock = self->NewBlock();
+        BuildInstanceofResult(entryFacts, blocks, nullptr, object, target, bcInfo);
+    }
+
+    ValueVertex *BuildInstanceofBody(const InstanceofInlinePlan &plan, const InstanceofLhsChainPlan &lhs,
+                                     const InstanceofInlineBlocks &blocks, ValueVertex *object, ValueVertex *ctorProto,
+                                     uint32_t bcIndex)
+    {
+        if (plan.foldToConstantResult) {
+            BB *resultBlock = plan.lhsChainHitIndex >= 0 ? blocks.trueBlock : blocks.falseBlock;
+            self->FinishBlockWithJump(currentBlock, resultBlock);
+            return nullptr;
+        }
+
+        ValueVertex *walkObject = object;
+        if (lhs.useLhsChain && lhs.chain.truncated) {
+            ASSERT(lhs.chain.count > 0);
+            ValueVertex *tail = GetHeapConstant(lhs.chain.members[lhs.chain.count - 1]);
+            if (tail != nullptr) {
+                walkObject = tail;
+            }
+        }
+        auto *walk = self->NewVertex<HasInPrototypeChainVertex>(
+            compileInfoFacts_, currentBlock, {walkObject, ctorProto, self->graph_->GetInt32Constant(0)}, self->chunk_,
+            self->preproc_->GetBytecodeOffset(bcIndex));
+        walk->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+        self->FinishBlockWithJump(currentBlock, blocks.doneBlock);
+        return walk;
+    }
+
+    bool TryBuildInlineInstanceof(const BytecodeInfo *bcInfo, ValueVertex *object, ValueVertex *target)
+    {
+        auto factory = self->pgoContext_.CreateAccessInfoFactory(bcInfo);
+        InstanceofAccessInfo access;
+        if (!factory.TryBuildInstanceofAccessInfo(&access)) {
+            return false;
+        }
+        JSHClass *expectedHClass = nullptr;
+        if (!TryResolveHClassRef(access.ctorHClass, &expectedHClass) || expectedHClass == nullptr) {
+            return false;
+        }
+        uint32_t bcIndex = currentBcIndex;
+
+        InstanceofConstantTargetPlan constTarget;
+        TryPlanInstanceofConstantTarget(factory, access, &constTarget);
+        if (!constTarget.useConstantTarget) {
+            return false;
+        }
+        InstanceofLhsChainPlan lhs;
+        TryPlanInstanceofLhsChain(factory, bcIndex, object, &lhs);
+        InstanceofInlinePlan plan = ComputeInstanceofInlinePlan(constTarget, lhs);
+        if (currentBlock->GetControlVertex() != nullptr) {
+            return true;
+        }
+
+        InstanceofInlineBlocks blocks;
+        CompileInfoFacts *entryFacts = compileInfoFacts_;
+        blocks.targetMismatchBlock = self->NewBlock();
+        blocks.targetMismatchBlock->SetDeferred(true);
+        ValueVertex *ctorProto = nullptr;
+        HClassCheckResult guardResult = BuildInstanceofConstantTargetGuards(bcIndex, access, blocks, expectedHClass,
+                                                                            target, constTarget, &ctorProto);
+        if (guardResult != HClassCheckResult::SUCCESS) {
+            BuildInstanceofTargetMismatchOnlyResult(entryFacts, blocks, object, target, bcInfo);
+            return true;
+        }
+
+        BuildInstanceofBlocksByPlan(plan, &blocks);
+        ValueVertex *inlineResult = BuildInstanceofBody(plan, lhs, blocks, object, ctorProto, bcIndex);
+        BuildInstanceofResult(entryFacts, blocks, inlineResult, object, target, bcInfo);
+        return true;
     }
 
     void LowerTestIn(const BytecodeInfo *bcInfo)
@@ -6641,7 +6903,7 @@ struct GraphBuilder::BytecodeVisitor {
                 // 2 : object operand, after glue and property key.
                 return !InputMayBeJSReceiver(call, 1) && !InputMayBeJSReceiver(call, 2);
             // `instanceof` may call @@hasInstance on the constructor operand.
-            case CommonStubID::Instanceof:
+            case CommonStubID::InstanceofJit:
                 // 2 : constructor operand, after glue and object operand.
                 return !InputMayBeJSReceiver(call, 2);
             // Define/st-own operations may run receiver/prototype/proxy paths or mutate object shapes.
@@ -8890,12 +9152,6 @@ struct GraphBuilder::BytecodeVisitor {
         }
         return nullptr;
     }
-
-    enum class HClassCheckResult : uint8_t {
-        SUCCESS,
-        UNREACHABLE,
-        FAILURE,
-    };
 
     struct RequestedHClassInfo {
         JSHClass *hclass {nullptr};
@@ -12036,4 +12292,51 @@ BB *GraphBuilder::VisitBytecodesOfBasicBlock(SharedBCFrameState frameState, uint
     // Lowering may create internal subgraphs, so callers need the actual exit block rather than blocks_[rpoIndex].
     return visitor.currentBlock;
 }
+GraphBuilder::BytecodeVisitor ArkSteedGraphBuilderTestAccess::MakeInstanceofTestVisitor(GraphBuilder *builder,
+                                                                                        SharedBCFrameState frameState,
+                                                                                        const BytecodeInfo *bcInfo)
+{
+    builder->InitializeStartBlock(frameState);
+    builder->RecordOutgoingBlockState(0, frameState);
+    builder->InitCompileInfoFacts(1);
+    const auto *blockInfo = builder->preproc_->GetBasicBlockByRPO(1);
+    return {
+        .self = builder,
+        .glue = builder->glue_,
+        .lazyGlobalEnv = builder->lazyGlobalEnv_,
+        .blockInfo = blockInfo,
+        .currentBlock = builder->BlockAt(1),
+        .lazyCatchBlock = nullptr,
+        .compileInfoFacts_ = builder->CompileInfoFactsAt(1),
+        .frameState = frameState,
+        .lazyCatchBlockInputs = nullptr,
+        .currentBcInfo = bcInfo,
+        .currentBcIndex = blockInfo->startBcIndex,
+    };
+}
+
+bool ArkSteedGraphBuilderTestAccess::TryBuildInlineInstanceofWithConstants(GraphBuilder *builder,
+                                                                           const BytecodeInfo *bcInfo,
+                                                                           JSTaggedValue object, JSTaggedValue target,
+                                                                           JSHClass *staleLhsHClass)
+{
+    SharedBCFrameState frameState(builder->preproc_->GetNumVRegs(), nullptr, builder->chunk_);
+    auto visitor = MakeInstanceofTestVisitor(builder, frameState, bcInfo);
+    ArkSteedHeapBroker *broker = builder->pgoContext_.GetBroker();
+    if (broker == nullptr) {
+        return false;
+    }
+    ArkSteedHeapBroker::NoGCScope scope(broker);
+    ValueVertex *objectVertex = visitor.GetHeapConstant(broker->MakeObjectRef(object));
+    ValueVertex *targetVertex = visitor.GetHeapConstant(broker->MakeObjectRef(target));
+    if (objectVertex == nullptr || targetVertex == nullptr) {
+        return false;
+    }
+    if (staleLhsHClass != nullptr) {
+        visitor.compileInfoFacts_->RecordHClass(objectVertex, staleLhsHClass, true);
+    }
+    visitor.frameState.SetAcc(targetVertex);
+    return visitor.TryBuildInlineInstanceof(bcInfo, objectVertex, targetVertex);
+}
+
 }  // namespace panda::ecmascript::arksteed

@@ -1,0 +1,10 @@
+arrayHit=1
+arrayMiss=0
+rebindBefore=7
+rebindAfter=9
+rebindOld=0
+poly=1
+polyOther=1
+polyCustom=1
+polyBound=1
+arrayAfter=1

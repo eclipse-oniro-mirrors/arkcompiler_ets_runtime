@@ -51,8 +51,8 @@ namespace {
 // Property of the global object the fixture script publishes its functions on.
 constexpr const char *kFixturesObjectName = "__arksteedFixtures";
 // Number of `FixtureMethodKind` enumerators, in declaration order.
-constexpr uint8_t kFixtureMethodKindCount = 16;
-static_assert(static_cast<uint8_t>(FixtureMethodKind::EMPTY_SLOT) + 1 == kFixtureMethodKindCount,
+constexpr uint8_t K_FIXTURE_METHOD_KIND_COUNT = 17;
+static_assert(static_cast<uint8_t>(FixtureMethodKind::INSTANCEOF_LHS_TERMINATED) + 1 == K_FIXTURE_METHOD_KIND_COUNT,
               "the method table must cover every FixtureMethodKind");
 
 // Property name of a kind on the published object; identical to the enumerator
@@ -92,6 +92,8 @@ const char *FixtureMethodKindName(FixtureMethodKind kind)
             return "OPERATION";
         case FixtureMethodKind::EMPTY_SLOT:
             return "EMPTY_SLOT";
+        case FixtureMethodKind::INSTANCEOF_LHS_TERMINATED:
+            return "INSTANCEOF_LHS_TERMINATED";
     }
     return "UNKNOWN";
 }
@@ -184,6 +186,9 @@ bool TryGetProfileAccessOpcode(FixtureMethodKind kind, kungfu::EcmaOpcode *opcod
         case FixtureMethodKind::CALL_JS:
         case FixtureMethodKind::CALL_BUILTIN:
             *opcode = kungfu::EcmaOpcode::CALLARG1_IMM8_V8;
+            return true;
+        case FixtureMethodKind::INSTANCEOF_LHS_TERMINATED:
+            *opcode = kungfu::EcmaOpcode::INSTANCEOF_IMM8_V8;
             return true;
         default:
             return false;
@@ -944,6 +949,11 @@ bool ArkSteedBytecodeFixture::CheckProfileState(FixtureMethodKind kind, FixtureM
                 return FailProfile(name, "the unexecuted access slot is not undefined", observed);
             }
             return true;
+        case FixtureMethodKind::INSTANCEOF_LHS_TERMINATED:
+            if (!first.IsWeak() || !second.IsUndefined()) {
+                return FailProfile(name, "the instanceof slot is not a weak constructor", observed);
+            }
+            return true;
         default:
             return FailProfile(name, "the kind has no required profile state", observed);
     }
@@ -1279,7 +1289,7 @@ void ArkSteedBytecodeFixture::SetUp()
     if (!ExecuteFixtureScript(fixtures)) {
         return;
     }
-    for (uint8_t index = 0; index < kFixtureMethodKindCount; index++) {
+    for (uint8_t index = 0; index < K_FIXTURE_METHOD_KIND_COUNT; index++) {
         if (!LoadMethod(static_cast<FixtureMethodKind>(index), fixtures)) {
             return;
         }
@@ -1290,7 +1300,7 @@ void ArkSteedBytecodeFixture::SetUp()
     // writes the two states IC cannot reach, then verifies the required state of
     // each kind. A mismatch stops the initialization at PROFILE with the
     // observed slot values, and no slot is substituted.
-    for (uint8_t index = 0; index < kFixtureMethodKindCount; index++) {
+    for (uint8_t index = 0; index < K_FIXTURE_METHOD_KIND_COUNT; index++) {
         FixtureMethodKind kind = static_cast<FixtureMethodKind>(index);
         if (IsProfileKind(kind) && !LoadProfile(kind, methods_[kind])) {
             return;
@@ -1299,7 +1309,7 @@ void ArkSteedBytecodeFixture::SetUp()
     if (!ConstructProfileStates()) {
         return;
     }
-    for (uint8_t index = 0; index < kFixtureMethodKindCount; index++) {
+    for (uint8_t index = 0; index < K_FIXTURE_METHOD_KIND_COUNT; index++) {
         FixtureMethodKind kind = static_cast<FixtureMethodKind>(index);
         if (IsProfileKind(kind) && !CheckProfileState(kind, methods_[kind])) {
             return;

@@ -1520,6 +1520,11 @@ inline GateRef StubBuilder::IsDictionaryModeByHClass(GateRef hClass)
     return env_->GetBuilder()->IsDictionaryModeByHClass(hClass);
 }
 
+inline GateRef StubBuilder::LoadPrototype(GateRef glue, GateRef hclass)
+{
+    return Load(VariableType::JS_POINTER(), glue, hclass, IntPtr(JSHClass::PROTOTYPE_OFFSET));
+}
+
 inline GateRef StubBuilder::IsDictionaryElement(GateRef hClass)
 {
     return env_->GetBuilder()->IsDictionaryElement(hClass);

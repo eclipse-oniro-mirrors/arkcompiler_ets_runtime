@@ -1527,18 +1527,24 @@ void PGOProfiler::DumpInstanceof(ApEntityId abcId, const CString &recordName, En
     }
     if (firstValue.IsWeak()) {
         TaggedObject *object = firstValue.GetWeakReferentUnChecked();
+        JSHClass *hclass = nullptr;
         if (object->GetClass()->IsHClass()) {
-            JSHClass *hclass = JSHClass::Cast(object);
-            // Since pgo does not support symbol, we choose to return if hclass having @@hasInstance
-            JSHandle<GlobalEnv> env = GetCurrentGlobalEnv();
-            JSTaggedValue key = thread->GlobalConstants()->GetHasInstanceSymbol();
-            JSHClass *functionPrototypeHC = JSObject::Cast(env->GetFunctionPrototype().GetTaggedValue())->GetClass();
-            JSTaggedValue foundHClass = TryFindKeyInPrototypeChain(object, hclass, key);
-            if (!foundHClass.IsUndefined() && JSHClass::Cast(foundHClass.GetTaggedObject()) != functionPrototypeHC) {
+            hclass = JSHClass::Cast(object);
+        } else {
+            JSTaggedValue ctorFunc(object);
+            if (!ctorFunc.IsJSFunction()) {
                 return;
             }
-            AddObjectInfo(abcId, recordName, methodId, bcOffset, hclass, hclass, hclass);
+            hclass = ctorFunc.GetTaggedObject()->GetClass();
         }
+        JSHandle<GlobalEnv> env = GetCurrentGlobalEnv();
+        JSTaggedValue key = thread->GlobalConstants()->GetHasInstanceSymbol();
+        JSHClass *functionPrototypeHC = JSObject::Cast(env->GetFunctionPrototype().GetTaggedValue())->GetClass();
+        JSTaggedValue foundHClass = TryFindKeyInPrototypeChain(object, hclass, key);
+        if (!foundHClass.IsUndefined() && JSHClass::Cast(foundHClass.GetTaggedObject()) != functionPrototypeHC) {
+            return;
+        }
+        AddObjectInfo(abcId, recordName, methodId, bcOffset, hclass, hclass, hclass);
         return;
     }
     // Poly Not Consider now

@@ -291,6 +291,7 @@ namespace panda::ecmascript {
     V(SuspendGenerator)                                        \
     V(IsIn)                                                    \
     V(InstanceOf)                                              \
+    V(InstanceofIC)                                            \
     V(CreateGeneratorObj)                                      \
     V(ThrowConstAssignment)                                    \
     V(GetTemplateObject)                                       \

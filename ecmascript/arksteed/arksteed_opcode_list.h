@@ -73,6 +73,7 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(TypedArrayIntLoadElement)                 \
     V(TypedArrayDoubleLoadElement)              \
     V(LoadPrototypeFromNonJSProxyObject)        \
+    V(HasInPrototypeChain)                      \
     V(LoadPrototypeHolderByHClass)              \
     V(ConvertHoleToUndefined)                   \
     V(LoadHClassAddress)                        \

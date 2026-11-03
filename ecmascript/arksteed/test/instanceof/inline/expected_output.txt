@@ -1,0 +1,5 @@
+hit=1
+miss=0
+primitive=0
+protoSelf=0
+sink=100

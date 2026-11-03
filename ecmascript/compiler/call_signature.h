@@ -465,7 +465,7 @@ private:
     V(Or)                                       \
     V(Xor)                                      \
     V(IsIn)                                     \
-    V(Instanceof)                               \
+    V(InstanceofJit)                            \
     V(OrdinaryHasInstance)                      \
     V(Inc)                                      \
     V(Dec)                                      \

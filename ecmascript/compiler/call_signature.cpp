@@ -576,11 +576,12 @@ DEF_CALL_SIGNATURE(IsIn)
     FOUR_ARGS_CALL_SIGNATURE(IsIn, VariableType::JS_ANY())
 }
 
-DEF_CALL_SIGNATURE(Instanceof)
+DEF_CALL_SIGNATURE(InstanceofJit)
 {
     constexpr size_t paramCount = 6;
-    CallSignature instanceof ("Instanceof", 0, paramCount, ArgumentsOrder::DEFAULT_ORDER, VariableType::JS_ANY());
-    *callSign = instanceof;
+    CallSignature instanceofJit ("InstanceofJit", 0, paramCount, ArgumentsOrder::DEFAULT_ORDER,
+                                 VariableType::JS_ANY());
+    *callSign = instanceofJit;
     std::array<VariableType, paramCount> params = {
         VariableType::NATIVE_POINTER(),  // glue
         VariableType::JS_ANY(),          // object

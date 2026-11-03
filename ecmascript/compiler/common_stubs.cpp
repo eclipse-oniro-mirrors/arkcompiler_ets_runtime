@@ -617,7 +617,10 @@ void IsInStubBuilder::GenerateCircuit()
     Return(IsIn(glue, prop, obj));
 }
 
-void InstanceofStubBuilder::GenerateCircuit()
+// JIT-only instanceof common stub: always lowers to the single-slot feedback
+// body (InstanceOfSingleSlot). It is used by arksteed and slowpath lowering.
+// JIT-off interpreters without PGO profiling use the dual-slot body instead.
+void InstanceofJitStubBuilder::GenerateCircuit()
 {
     GateRef glue = PtrArgument(0);
     GateRef object = TaggedArgument(1);
@@ -627,7 +630,7 @@ void InstanceofStubBuilder::GenerateCircuit()
     GateRef slotId = Int32Argument(5);      // 5 : 6th pars
     GateRef profileTypeInfo = UpdateProfileTypeInfo(glue, jsFunc);
     SetCurrentGlobalEnv(globalEnv);
-    Return(InstanceOf(glue, object, target, profileTypeInfo, slotId, ProfileOperation()));
+    Return(InstanceOfSingleSlot(glue, object, target, profileTypeInfo, slotId, ProfileOperation()));
 }
 
 void OrdinaryHasInstanceStubBuilder::GenerateCircuit()

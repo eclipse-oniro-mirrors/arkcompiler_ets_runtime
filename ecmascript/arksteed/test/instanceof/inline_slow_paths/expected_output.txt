@@ -1,0 +1,6 @@
+deepHit=1
+deepMiss=0
+proxy=0
+proxyHit=1
+replacedNew=1
+arrowTarget=2

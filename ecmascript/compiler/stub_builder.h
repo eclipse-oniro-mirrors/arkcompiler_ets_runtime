@@ -497,6 +497,7 @@ public:
     GateRef GetObjectType(GateRef hClass);
     GateRef IsDictionaryMode(GateRef glue, GateRef object);
     GateRef IsDictionaryModeByHClass(GateRef hClass);
+    GateRef LoadPrototype(GateRef glue, GateRef hclass);
     GateRef IsDictionaryElement(GateRef hClass);
     GateRef IsJSArrayPrototypeModified(GateRef hClass);
     GateRef IsStableElements(GateRef hClass);
@@ -613,9 +614,29 @@ public:
     GateRef HasFunctionPrototype(GateRef glue, GateRef ctor);
     GateRef InstanceOf(GateRef glue, GateRef object, GateRef target, GateRef profileTypeInfo, GateRef slotId,
         ProfileOperation callback);
+    GateRef InstanceOfSingleSlot(GateRef glue, GateRef object, GateRef target, GateRef profileTypeInfo,
+                                 GateRef slotId, ProfileOperation callback);
     GateRef OrdinaryHasInstance(GateRef glue, GateRef target, GateRef obj);
+
+private:
+    void InstanceofGenericResolve(GateRef glue, GateRef target, Label *icHitBuiltin, Label *icCustom, Label *exit,
+                                  Variable *result, Variable *customHandler);
+    void InstanceofCustomCall(GateRef glue, GateRef target, GateRef object, Variable *customHandler,
+                              Variable *result, Label *exit, ProfileOperation callback);
     void TryFastHasInstance(GateRef glue, GateRef instof, GateRef target, GateRef object, Label *fastPath,
                             Label *exit, Variable *result, ProfileOperation callback);
+    template <bool useIC>
+    GateRef GetMethodImpl(GateRef glue, GateRef obj, GateRef key, GateRef profileTypeInfo, GateRef slotId);
+    void CheckInstanceofTarget(GateRef glue, GateRef target, Label *targetIsEcmaObject, Label *exit,
+                               Variable *result);
+    void InstanceofPopulate(GateRef glue, GateRef object, GateRef target, GateRef profileTypeInfo, GateRef slotId,
+                            Label *exit, Variable *result);
+    void InstanceofExecuteSingleSlot(GateRef glue, GateRef object, GateRef target, ProfileOperation callback,
+                                     Label *exit, Variable *result, Variable *customHandler);
+    GateRef GetMethod(GateRef glue, GateRef obj, GateRef key, GateRef profileTypeInfo, GateRef slotId);
+    GateRef GetMethodWithoutIC(GateRef glue, GateRef obj, GateRef key);
+
+public:
     GateRef ConvertTaggedValueWithElementsKind(GateRef glue, GateRef value, GateRef extraKind);
     GateRef SameValue(GateRef glue, GateRef left, GateRef right);
     GateRef SameValueZero(GateRef glue, GateRef left, GateRef right);
@@ -1174,7 +1195,6 @@ public:
     GateRef HasArkSteedEntry(GateRef jsFunc);
     GateRef GetInternalString(GateRef glue, GateRef key);
     GateRef GetExpectedNumOfArgs(GateRef method);
-    GateRef GetMethod(GateRef glue, GateRef obj, GateRef key, GateRef profileTypeInfo, GateRef slotId);
     // proxy operator
     GateRef GetMethodFromJSProxy(GateRef glue, GateRef proxy);
     GateRef GetHandlerFromJSProxy(GateRef glue, GateRef proxy);

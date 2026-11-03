@@ -433,7 +433,8 @@ namespace panda::ecmascript::kungfu {
     APPEND_JIT_SUFFIX(HandleReturn, V)                        \
     APPEND_JIT_SUFFIX(HandleReturnundefined, V)               \
     APPEND_JIT_SUFFIX(HandleSuspendgeneratorV8, V)            \
-    APPEND_JIT_SUFFIX(HandleAsyncgeneratorresolveV8V8V8, V)
+    APPEND_JIT_SUFFIX(HandleAsyncgeneratorresolveV8V8V8, V)   \
+    APPEND_JIT_SUFFIX(HandleInstanceofImm8V8, V)
 
 #define APPEND_SUFFIX(name, V) \
     V(name##WithProf, name, SlotIDFormat::IMM8)

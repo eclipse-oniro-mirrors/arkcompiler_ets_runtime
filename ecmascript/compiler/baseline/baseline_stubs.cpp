@@ -1257,7 +1257,7 @@ void BaselineInstanceofImm8V8StubBuilder::GenerateCircuit()
     GateRef obj = GetVregValue(glue, sp, ZExtInt32ToPtr(objId));
     GateRef acc = GetAccFromFrame(glue, frame);
     SetCurrentGlobalEnv(GetGlobalEnv(glue));
-    GateRef result = InstanceOf(glue, obj, acc, profileTypeInfo, slotId, callback);
+    GateRef result = InstanceOfSingleSlot(glue, obj, acc, profileTypeInfo, slotId, callback);
     CHECK_PENDING_EXCEPTION(result);
 }
 

@@ -1069,6 +1069,39 @@ public:
     void SetValueLocationConstraints();
 };
 
+class HasInPrototypeChainVertex : public VertexMixin<ValueVertex, HasInPrototypeChainVertex>,
+                                  public EagerDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        OBJECT_INDEX = 0,
+        PROTOTYPE_INDEX,
+        DEPTH_INDEX,
+        NUM_INPUTS,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::INT32,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_READ | VertexPropertyFlag::CAN_EAGER_DEOPT;
+
+    explicit HasInPrototypeChainVertex(Chunk *chunk, uint32_t bytecodeOffset)
+        : VertexMixin(), EagerDeoptimizableMixin(chunk, bytecodeOffset)
+    {
+    }
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+        ASSERT(GetInput(OBJECT_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(GetInput(PROTOTYPE_INDEX)->GetValueRepresentation() == ValueRepresentation::TAGGED);
+        ASSERT(GetInput(DEPTH_INDEX)->GetValueRepresentation() == ValueRepresentation::INT32);
+    }
+};
+
 class LoadHClassAddressVertex : public FixedInputVertexMixin<ValueVertex, LoadHClassAddressVertex> {
 public:
     enum Indices : uint32_t {

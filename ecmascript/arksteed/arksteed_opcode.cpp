@@ -626,6 +626,15 @@ void LoadPrototypeFromNonJSProxyObjectVertex::SetValueLocationConstraints()
     UseRegister(Arg(OBJECT_INDEX));
 }
 
+void HasInPrototypeChainVertex::SetValueLocationConstraints()
+{
+    DefineSameAsFirst(this);
+    UseAndClobberRegister(Arg(OBJECT_INDEX));
+    UseRegister(Arg(PROTOTYPE_INDEX));
+    UseAndClobberRegister(Arg(DEPTH_INDEX));
+    SetTemporariesNeeded(3);  // 3: current object, hclass address and type check value
+}
+
 void LoadPrototypeHolderByHClassVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
@@ -1527,6 +1536,11 @@ DUMP_EXTRA(DeoptIfNotJSHClass)
 DUMP_EXTRA(DeoptIfHClassMismatch)
 {
     out << "  expected = heap#" << vertex->GetExpectedHClassHandleIndex();
+}
+
+DUMP_EXTRA(HasInPrototypeChain)
+{
+    out << "  bpc = " << vertex->GetBytecodeOffset();
 }
 
 DUMP_EXTRA(DeoptIfHClassNotIn)
