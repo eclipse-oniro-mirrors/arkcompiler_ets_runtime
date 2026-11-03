@@ -253,6 +253,19 @@ const void *CrossVMOperator::EcmaVMInterfaceImpl::GetEcmaVM() const
     return static_cast<const void *>(vm_);
 }
 
+std::string CrossVMOperator::EcmaVMInterfaceImpl::GetArkTSMode() const
+{
+    ArkTSMode mode = vm_->GetArkTSMode();
+    switch (mode) {
+        case ArkTSMode::STATIC:
+            return "static";
+        case ArkTSMode::HYBRID:
+            return "hybrid";
+        default:
+            return "dynamic";
+    }
+}
+
 std::unique_ptr<AbstractDumper> CrossVMOperator::EcmaVMInterfaceImpl::CreateHeapDumper(const DumpRequest &request)
 {
 #if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER)

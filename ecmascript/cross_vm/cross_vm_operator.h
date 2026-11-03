@@ -78,6 +78,7 @@ private:
         bool ForEachDynamicFrame(void *currFrameSP, void *toFrameSP,
                                  const std::function<void(const void *)> &cb) const override;
         const void *GetEcmaVM() const override;
+        std::string GetArkTSMode() const override;
         std::unique_ptr<AbstractDumper> CreateHeapDumper(const DumpRequest &request) override;
 
     private:

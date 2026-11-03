@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Huawei Device Co., Ltd.
+ * Copyright (c) 2024-2026 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -25,9 +25,11 @@
 #include <sys/resource.h>
 #endif
 
+#include "ecmascript/ecma_vm.h"
 #include "ecmascript/mem/heap-inl.h"
 #include "ecmascript/pgo_profiler/pgo_profiler_manager.h"
 #include "ecmascript/platform/dfx_hisys_event.h"
+#include "ecmascript/runtime.h"
 
 namespace panda::ecmascript {
 using PGOProfilerManager = pgo::PGOProfilerManager;
@@ -37,8 +39,28 @@ const std::string COMPONENT_NAME = "ets_runtime";
 const std::string MAIN_THREAD_STR = "main thread";
 const std::string CHILD_THREAD_STR = "child thread";
 const std::string DYNAMIC_STR = "dynamic";
+const std::string STATIC_STR = "static";
+const std::string HYBRID_STR = "hybrid";
 
 namespace {
+std::string GetAppArkTSMode()
+{
+    if (Runtime::HasInstance()) {
+        EcmaVM *mainVm = Runtime::GetInstance()->GetMainThread()->GetEcmaVM();
+        if (mainVm != nullptr) {
+            ArkTSMode mode = mainVm->GetArkTSMode();
+            switch (mode) {
+                case ArkTSMode::STATIC:
+                    return STATIC_STR;
+                case ArkTSMode::HYBRID:
+                    return HYBRID_STR;
+                default:
+                    return DYNAMIC_STR;
+            }
+        }
+    }
+    return DYNAMIC_STR;
+}
 void SendLongGCHiSysEvent(LongGCStats& longGCStats, bool isGetCpuLoad)
 {
 #ifdef ENABLE_HISYSEVENT
@@ -148,6 +170,7 @@ void GCKeyStats::SendSysEventBeforeDump(std::string type, size_t limitSize, size
     long tid = syscall(SYS_gettid);
     std::string threadType = (heapType == SHARED_HEAP_STR ? "" :
         ((pid == tid) ? MAIN_THREAD_STR : CHILD_THREAD_STR));
+    std::string arkTSMode = GetAppArkTSMode();
 
     int32_t ret = HiSysEventWrite(OHOS::HiviewDFX::HiSysEvent::Domain::FRAMEWORK,
         "ARK_STATS_DUMP",
@@ -165,7 +188,7 @@ void GCKeyStats::SendSysEventBeforeDump(std::string type, size_t limitSize, size
         "EVENT_CONFIG", eventConfig,
         "APP_RUNNING_UNIQUE_ID", &DFX_GetAppRunningUniqueId == nullptr ? "" : DFX_GetAppRunningUniqueId(),
         "EVENT_VERSION", "1.0.0",
-        "ARKTS_TYPE", DYNAMIC_STR,
+        "ARKTS_TYPE", arkTSMode,
         "THREAD_TYPE", threadType,
         "SPACE_TYPE", spaceType,
         "LAST_ALLOCATE_OBJECT_SIZE", lastAllocObjSize,
@@ -173,8 +196,11 @@ void GCKeyStats::SendSysEventBeforeDump(std::string type, size_t limitSize, size
     if (ret != 0) {
         LOG_GC(ERROR) << "GCKeyStats SendSysEventBeforeDump Failed! ret = " << ret;
     }
+    LOG_GC(INFO) << "GCKeyStats::SendSysEventBeforeDump, type = " << type << ", limitSize = " << limitSize
+                 << ", activeMemory = " << activeMemory << ", arkTSMode = " << arkTSMode;
 #else
-    LOG_GC(INFO) << "GCKeyStats type: " << type << ", limitSize: " << limitSize << ", activeMemory: " << activeMemory;
+    LOG_GC(INFO) << "Not support HiSysEventWrite, GCKeyStats type: " << type
+                 << ", limitSize: " << limitSize << ", activeMemory: " << activeMemory;
 #endif
 }
 
