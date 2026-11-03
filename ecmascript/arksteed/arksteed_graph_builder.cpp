@@ -7152,6 +7152,15 @@ struct GraphBuilder::BytecodeVisitor {
             compileInfoFacts_, currentBlock, {receiver, index, clampedValue}, access.typedArrayType, access.onHeapMode);
     }
 
+    ValueVertex *BuildBitwiseInt32Input(ValueVertex *value, ValueVertex *raw, bool knownInt)
+    {
+        if (raw != nullptr) {
+            // This is a consumer-local truncation, not an exact alternative for value.
+            return self->NewVertex<F64ToI32TruncVertex>(compileInfoFacts_, currentBlock, {raw});
+        }
+        return knownInt ? BuildTaggedIntToI32(value) : BuildCheckedTaggedIntToI32(value);
+    }
+
     ValueVertex *BuildBitwiseOperation(IntBitwiseKind kind)
     {
         ValueVertex *left = LoadRegister(currentBcInfo, 0);
@@ -7164,6 +7173,25 @@ struct GraphBuilder::BytecodeVisitor {
 
         OperationFeedback feedback = self->pgoContext_.ReadOperationFeedback(currentBcInfo);
         if (feedback.hint == ArkSteedOperationHint::INT) {
+            // TODO: Replace this direct-load pattern match with UINT32-based handling
+            // once Uint32Array loads, conversions, and deopt reconstruction support it.
+            auto directUint32Raw = [](ValueVertex *value) -> ValueVertex * {
+                auto *tag = value->TryCast<F64ToTaggedDoubleVertex>();
+                if (tag == nullptr) {
+                    return nullptr;
+                }
+                auto *raw = tag->GetInput(F64ToTaggedDoubleVertex::INPUT_INDEX);
+                auto *load = raw->TryCast<TypedArrayDoubleLoadElementVertex>();
+                return load != nullptr && load->GetElementType() == JSType::JS_UINT32_ARRAY ? raw : nullptr;
+            };
+            ValueVertex *leftRaw = directUint32Raw(left);
+            ValueVertex *rightRaw = directUint32Raw(right);
+            if (leftRaw != nullptr || rightRaw != nullptr) {
+                LogOperationFeedback(feedback, "Bitwise", "Uint32ArrayTruncatingI32BitwiseBinOp");
+                ValueVertex *leftI32 = BuildBitwiseInt32Input(left, leftRaw, leftKnownInt);
+                ValueVertex *rightI32 = BuildBitwiseInt32Input(right, rightRaw, rightKnownInt);
+                return BuildI32BitwiseTaggedValue(kind, leftI32, rightI32);
+            }
             LogOperationFeedback(feedback, "Bitwise", "I32BitwiseBinOp");
             return BuildI32BitwiseBinOp(kind, left, right, false, false);
         }
