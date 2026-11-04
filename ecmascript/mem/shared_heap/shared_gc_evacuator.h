@@ -57,8 +57,9 @@ public:
         ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "SharedGCEvacuator::ProcessRSet", "");
         ASSERT(JSThread::GetCurrent() == handler->GetHeap()->GetEcmaVM()->GetJSThread());
         ASSERT(JSThread::GetCurrent()->IsInRunningState());
-        auto visitor = [this](void *mem) -> bool {
-            ObjectSlot slot(ToUintPtr(mem));
+        auto visitor = [this](void *mem, auto referenceTypeWrapper) -> bool {
+            constexpr ReferenceType refType = decltype(referenceTypeWrapper)::value;
+            ObjectSlotBase<refType> slot(ToUintPtr(mem));
             return UpdateObjectSlot(slot);
         };
         handler->ProcessAll(visitor);
@@ -67,8 +68,9 @@ public:
 
     void ProcessLocalToShareRSet()
     {
-        auto visitor = [this](void *mem) -> bool {
-            ObjectSlot slot(ToUintPtr(mem));
+        auto visitor = [this](void *mem, auto referenceTypeWrapper) -> bool {
+            constexpr ReferenceType refType = decltype(referenceTypeWrapper)::value;
+            ObjectSlotBase<refType> slot(ToUintPtr(mem));
             return UpdateObjectSlot(slot);
         };
         for (RSetWorkListHandler *handler : rSetHandlers_) {
