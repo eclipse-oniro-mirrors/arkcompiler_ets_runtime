@@ -1448,6 +1448,16 @@ void ArkSteedAssembler::BranchIfNoPendingException(Label *target)
     JumpIf(Condition::EQUAL, target);
 }
 
+void ArkSteedAssembler::BranchIfPendingException(Label *target)
+{
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister scratch = scope.AcquireScratch();
+    Move(scratch, static_cast<uint64_t>(entryThread_->GetGlueAddr()));
+    LoadField(scratch, scratch, static_cast<int32_t>(JSThread::GlueData::GetExceptionOffset(false)));
+    Compare(scratch, static_cast<int32_t>(JSTaggedValue::VALUE_HOLE));
+    JumpIf(Condition::NOT_EQUAL, target);
+}
+
 void ArkSteedAssembler::ReturnWithPendingException()
 {
     Move(aarch64::x0, JSTaggedValue::Exception().GetRawData());

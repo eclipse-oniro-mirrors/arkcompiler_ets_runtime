@@ -313,6 +313,9 @@ public:
     void ReturnWithPendingException();
     // Branch to target if no pending exception exists in JSThread.
     void BranchIfNoPendingException(Label *target);
+    // Branch to target if a pending exception exists in JSThread (condition
+    // inverted w.r.t. BranchIfNoPendingException; glue policy stays in sync).
+    void BranchIfPendingException(Label *target);
     void LoadAndClearPendingException(ArkSteedRegister dst, ArkSteedRegister glue);
     void Return();
 
