@@ -707,6 +707,10 @@ config("ark_jsruntime_gc_config") {
 config("ark_jsruntime_compiler_flags_config") {
   defines = [ "PANDA_ENABLE_LTO" ]
 
+  if (ets_runtime_enable_jit_runtime) {
+    defines += [ "ETS_RUNTIME_ENABLE_JIT_RUNTIME" ]
+  }
+
   cflags_cc = [
     "-Wall",
     "-Wshadow",

@@ -56,6 +56,9 @@ void Jit::PreFork()
 
 void Jit::SetJitEnablePostFork(EcmaVM *vm, const std::string &bundleName)
 {
+#ifndef ETS_RUNTIME_ENABLE_JIT_RUNTIME
+    return;
+#endif
     JSRuntimeOptions &options = vm->GetJSOptions();
     bool jitEnable = ohos::JitTools::GetJitEscapeDisable() || !AotCrashInfo::IsJitEscape();
     jitEnable &= ohos::EnableAotJitListHelper::GetInstance()->IsEnableJit(bundleName);
