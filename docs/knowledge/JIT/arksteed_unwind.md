@@ -26,6 +26,11 @@ faultloggerd, hiperf都是外部工程，它们不是调用ark_js_vm，而是使
 * 符号化阶段调用，`ark_create_js_symbol_extractor`，`ark_parse_js_frame_info` 基于字节码PC(bytecodeOffset) + sourceMap还原成JSFunction的name,line
 * 符号化完成后，调用`ark_write_jit_code` 把jitCode (存在JsStackInfo::machineCodeMap中) 写到ELF文件中
 
+### Steed 过渡帧的跳过（ArkGetNextFrameWithJit）
+Steed 代码外调（runtime stub / builtin / native / 解释器回桥）会在 STEED_FUNCTION_FRAME 上直接建过渡帧：`LEAVE_FRAME`、`LEAVE_FRAME_WITH_ARGV`、`BUILTIN_FRAME`、`BUILTIN_CALL_LEAVE_FRAME`、`ASM_BRIDGE_FRAME`、`ASM_INTERPRETER_BRIDGE_FRAME`（见 `ecmascript/frames.h`）。这些帧的 returnAddr 槽存的是堆上 JIT 机器码的调用点地址，进程外无法符号化（jit dump ELF 是回栈结束后生成的合成文件，不在进程地址空间内）。
+
+因此 `ArkGetNextFrameWithJit` 对"当前帧属于上述过渡帧集合，且 prev 链的下一帧是 STEED_FUNCTION_FRAME"的帧**跳过上报**，直接沿帧链前进到 Steed 帧本身，由其 bytecode pc 解析路径（position/safepoint 表）产出可符号化的 pc。
+
 ### 与hiperf的协作
 hiperf调用faultloggerd提供的Unwinder类来回栈，因此它是间接依赖libark_jsruntime.so, 但是使用的回栈函数与崩溃场景不同
 * 主要调用 ```int step_ark(void *ctx, panda::ecmascript::ReadMemFunc readMem, panda::ecmascript::ArkStepParam *arkStepParam)```来走栈，当前并不处理JIT帧对应的bcOffset
