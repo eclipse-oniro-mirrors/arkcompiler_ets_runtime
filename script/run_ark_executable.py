@@ -40,6 +40,16 @@ IS_MACOS = platform.system().lower() == "darwin"
 LIB_PATH_ENV_VAR = "DYLD_LIBRARY_PATH" if IS_MACOS else "LD_LIBRARY_PATH"
 
 
+def _relative_depfile_inputs(paths):
+    result = []
+    for path in paths:
+        try:
+            result.append(os.path.relpath(path))
+        except ValueError:
+            result.append(path)  # Different Windows drives cannot be rebased.
+    return sorted(result)
+
+
 def get_env_path_from_rsp(script_file: str) -> list:
     """get env path from response file recursively."""
     rsp_file = "{0}{1}".format(script_file, ".rsp")
@@ -286,7 +296,7 @@ def judge_output(args: object):
             if path.is_dir():
                 dependencies.update(str(file) for file in path.rglob('*')
                                     if '__pycache__' not in file.parts and '.git' not in file.parts)
-        write_depfile(args.depfile, args.dep_target, sorted(dependencies), add_pydeps=False)
+        write_depfile(args.depfile, args.dep_target, _relative_depfile_inputs(dependencies), add_pydeps=False)
 
     print("Run [LD_LIBRARY_PATH=" + args.env_path + " " + cmd + "] success!")
     print("used: %.5f seconds" % (time.time() - start_time))
