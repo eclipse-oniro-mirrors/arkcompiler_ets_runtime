@@ -15,6 +15,7 @@
 #include "gtest/gtest.h"
 
 #include <future>
+#include <new>
 
 #include "ecmascript/jspandafile/js_pandafile_manager.h"
 #include "ecmascript/napi/include/jsnapi.h"
@@ -121,6 +122,7 @@ protected:
 
         const File* file = pf->GetPandaFile();
         auto classes = pf->GetClasses();
+        size_t methodIdx = 0;  // indexes into pf->GetMethodLiterals() for placement-new below
 
         for (size_t i = 0; i < classes.Size(); i++) {
             panda_file::File::EntityId classId(classes[i]);
@@ -128,8 +130,9 @@ protected:
                 continue;
             }
             ClassDataAccessor cda(*file, classId);
-            cda.EnumerateMethods([pf, &methodLiterals](panda_file::MethodDataAccessor& mda) {
-                auto* methodLiteral = new MethodLiteral(mda.GetMethodId());
+            cda.EnumerateMethods([pf, &methodLiterals, &methodIdx](panda_file::MethodDataAccessor& mda) {
+                auto* methodLiteral = new (pf->GetMethodLiterals() + methodIdx) MethodLiteral(mda.GetMethodId());
+                methodIdx++;
                 methodLiteral->Initialize(pf.get());
                 pf->SetMethodLiteralToMap(methodLiteral);
                 methodLiterals.push_back(methodLiteral);
@@ -163,7 +166,7 @@ protected:
         }
     }
 
-    static constexpr uint32_t threshhold = 0;
+    static constexpr uint32_t threshold = 0;
 };
 
 HWTEST_F_L0(PGOProfilerTestOne, WithWorker)
@@ -200,7 +203,7 @@ HWTEST_F_L0(PGOProfilerTestOne, WithWorker)
     JSNApi::DestroyJSVM(vm);
 
     vm = JSNApi::CreateJSVM(option);
-    PGOProfilerDecoder loader("ark-profiler-worker/modules.ap", threshhold);
+    PGOProfilerDecoder loader("ark-profiler-worker/modules.ap", threshold);
     std::unordered_map<std::string, std::unordered_map<std::string, std::vector<PGOMethodId>>> methodIdInAp;
     ParseRelatedPandaFileMethods(loader, methodIdInAp);
     ASSERT_EQ(methodIdInAp.size(), 3);
@@ -251,7 +254,7 @@ HWTEST_F_L0(PGOProfilerTestOne, ForceDump)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    PGOProfilerDecoder loader("ark-profiler-worker/modules.ap", threshhold);
+    PGOProfilerDecoder loader("ark-profiler-worker/modules.ap", threshold);
     std::shared_ptr<PGOAbcFilePool> abcFilePool = std::make_shared<PGOAbcFilePool>();
     ASSERT_TRUE(loader.LoadFull(abcFilePool));
 

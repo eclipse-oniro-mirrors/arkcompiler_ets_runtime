@@ -18,7 +18,7 @@
 #include "ecmascript/ic/proto_change_details.h"
 #include "ecmascript/js_handle.h"
 #include "ecmascript/js_object-inl.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 
 namespace panda::ecmascript {
 PropertyAccessor::PropertyAccessor(JSThread *thread, JSHandle<JSTaggedValue> object)
@@ -135,7 +135,7 @@ void PropertyAccessor::InitSimplePropertiesEnumCache()
 {
     ObjectFactory *factory = thread_->GetEcmaVM()->GetFactory();
     JSHandle<JSObject> receiverObj(receiver_);
-    JSHClass *jsHClass = receiverObj->GetJSHClass();
+    JSHandle<JSHClass> jsHClass(thread_, receiverObj->GetJSHClass());
 
     ASSERT(receiverObj->GetNumberOfElements(thread_) == 0);
     ASSERT(!receiver_->IsInSharedHeap());
@@ -158,7 +158,7 @@ void PropertyAccessor::InitSimplePropertiesEnumCache()
         JSHandle<EnumCache> enumCache = JSObject::GetOrCreateEnumCache(thread_,
             JSHandle<JSHClass>(thread_, proto.GetTaggedObject()->GetClass()));
         enumCache->SetProtoChainInfoEnumCache(thread_, JSTaggedValue::Undefined());
-        JSHClass::EnableProtoChangeMarker(thread_, JSHandle<JSHClass>(thread_, jsHClass));
+        JSHClass::EnableProtoChangeMarker(thread_, jsHClass);
     }
 
     JSObject::SetEnumCacheKind(thread_, JSHandle<EnumCache>::Cast(enumCache_), EnumCacheKind::SIMPLE);
@@ -415,7 +415,7 @@ void PropertyAccessor::PushRemainingKeys(JSHandle<JSObject> object, std::vector<
             PropertyDescriptor desc(thread_);
             JSProxy::GetOwnProperty(thread_, JSHandle<JSProxy>(object), value, desc);
             RETURN_IF_ABRUPT_COMPLETION(thread_);
-            if (!desc.IsEnumerable() || !value->IsString()) {
+            if (!desc.IsEnumerable()) {
                 proxyArr->Set(thread_, i, JSTaggedValue::Hole());
             } else {
                 remainingIndex++;

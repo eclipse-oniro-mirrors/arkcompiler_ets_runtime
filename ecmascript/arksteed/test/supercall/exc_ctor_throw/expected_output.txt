@@ -1,0 +1,4 @@
+uncaught: true base-ctor
+after-throw: true
+retry: base-ctor true true true
+wrap: true wrapped:base-ctor

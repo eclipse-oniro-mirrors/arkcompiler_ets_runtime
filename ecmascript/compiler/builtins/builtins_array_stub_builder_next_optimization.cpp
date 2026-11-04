@@ -185,12 +185,7 @@ GateRef BuiltinsArrayStubBuilder::DoSortOptimised(GateRef glue, GateRef receiver
         BRANCH(TaggedIsHole(*presentValue), &presentValueIsHole, &afterGettingpresentValue);
         Bind(&presentValueIsHole);
         {
-#if ENABLE_NEXT_OPTIMIZATION
             GateRef presentValueHasProp = HasProperty(glue, receiver, IntToTaggedPtr(*i), hir);
-#else
-            GateRef presentValueHasProp = CallRuntimeWithGlobalEnv(glue, GetCurrentGlobalEnv(),
-                RTSTUB_ID(HasProperty), {receiver, IntToTaggedInt(*i)});
-#endif
             BRANCH(TaggedIsTrue(presentValueHasProp), &presentValueHasProperty, &afterGettingpresentValue);
             Bind(&presentValueHasProperty);
             {
@@ -224,12 +219,7 @@ GateRef BuiltinsArrayStubBuilder::DoSortOptimised(GateRef glue, GateRef receiver
                 BRANCH(TaggedIsHole(*middleValue), &middleValueIsHole, &afterGettingmiddleValue);
                 Bind(&middleValueIsHole);
                 {
-#if ENABLE_NEXT_OPTIMIZATION
                     GateRef middleValueHasProp = HasProperty(glue, receiver, IntToTaggedPtr(middleIndex), hir);
-#else
-                    GateRef middleValueHasProp = CallRuntimeWithGlobalEnv(glue, GetCurrentGlobalEnv(),
-                        RTSTUB_ID(HasProperty), {receiver, IntToTaggedInt(middleIndex)});
-#endif
                     BRANCH(TaggedIsTrue(middleValueHasProp), &middleValueHasProperty, &afterGettingmiddleValue);
                     Bind(&middleValueHasProperty);
                     {
@@ -341,13 +331,8 @@ GateRef BuiltinsArrayStubBuilder::DoSortOptimised(GateRef glue, GateRef receiver
                     BRANCH(TaggedIsHole(*previousValue), &previousValueIsHole, &afterGettingpreviousValue);
                     Bind(&previousValueIsHole);
                     {
-#if ENABLE_NEXT_OPTIMIZATION
                         GateRef previousValueHasProp =
                             HasProperty(glue, receiver, IntToTaggedPtr(Int64Sub(*j, Int64(1))), hir);
-#else
-                        GateRef previousValueHasProp = CallRuntimeWithGlobalEnv(glue, GetCurrentGlobalEnv(),
-                            RTSTUB_ID(HasProperty), {receiver, IntToTaggedInt(Int64Sub(*j, Int64(1)))});
-#endif
                         BRANCH(TaggedIsTrue(previousValueHasProp),
                                &previousValueHasProperty, &afterGettingpreviousValue);
                         Bind(&previousValueHasProperty);
@@ -1320,8 +1305,8 @@ void BuiltinsArrayStubBuilder::FindOrFindIndex(GateRef glue, GateRef thisValue, 
                 Label checkStable(env);
                 JSCallArgs callArgs(JSCallMode::CALL_THIS_ARG3_WITH_RETURN);
                 callArgs.callThisArg3WithReturnArgs = { argHandle, *kValue, key, thisValue };
-                CallStubBuilder callBuilder(this, glue, callbackFnHandle, Int32(NUM_MANDATORY_JSFUNC_ARGS), 0, nullptr,
-                    Circuit::NullGate(), callArgs);
+                CallStubBuilder callBuilder(this, glue, callbackFnHandle, Int32(NUM_MANDATORY_JSFUNC_ARGS),
+                                            0, nullptr, callArgs);
                 GateRef retValue = callBuilder.JSCallDispatch();
                 BRANCH_UNLIKELY(HasPendingException(glue), &hasException, &notHasException);
                 Bind(&hasException);
@@ -1378,7 +1363,7 @@ void BuiltinsArrayStubBuilder::FindOrFindIndex(GateRef glue, GateRef thisValue, 
                     JSCallArgs callArgs(JSCallMode::CALL_THIS_ARG3_WITH_RETURN);
                     callArgs.callThisArg3WithReturnArgs = { argHandle, kValue, key, thisValue };
                     CallStubBuilder callBuilder(this, glue, callbackFnHandle, Int32(NUM_MANDATORY_JSFUNC_ARGS), 0,
-                        nullptr, Circuit::NullGate(), callArgs);
+                                                nullptr, callArgs);
                     GateRef retValue = callBuilder.JSCallDispatch();
                     BRANCH_UNLIKELY(TaggedIsException(retValue), &hasException, &notHasException);
                     Bind(&hasException);
@@ -1519,8 +1504,8 @@ void BuiltinsArrayStubBuilder::VisitAll(GateRef glue, GateRef thisValue, GateRef
                 GateRef key = Int64ToTaggedInt(*i);
                 JSCallArgs callArgs(JSCallMode::CALL_THIS_ARG3_WITH_RETURN);
                 callArgs.callThisArg3WithReturnArgs = {argHandle, *kValue, key, thisValue};
-                CallStubBuilder callBuilder(this, glue, callbackFnHandle, Int32(NUM_MANDATORY_JSFUNC_ARGS), 0, nullptr,
-                                            Circuit::NullGate(), callArgs);
+                CallStubBuilder callBuilder(this, glue, callbackFnHandle, Int32(NUM_MANDATORY_JSFUNC_ARGS),
+                                            0, nullptr, callArgs);
                 GateRef retValue = callBuilder.JSCallDispatch();
                 BRANCH_UNLIKELY(HasPendingException(glue), &hasException, &noException);
                 Bind(&hasException);
@@ -1564,13 +1549,8 @@ void BuiltinsArrayStubBuilder::VisitAll(GateRef glue, GateRef thisValue, GateRef
             Label notHasException1(env);
             BRANCH_NO_WEIGHT(Int64LessThan(*i, *thisArrLen), &next, exit);
             Bind(&next);
-#if ENABLE_NEXT_OPTIMIZATION
             GateRef hasProp = CallCommonStub(glue, CommonStubCSigns::JSTaggedValueHasProperty,
                                              { glue, thisValue, IntToTaggedPtr(*i), GetCurrentGlobalEnv() });
-#else
-            GateRef hasProp = CallRuntimeWithGlobalEnv(glue, GetCurrentGlobalEnv(),
-                RTSTUB_ID(HasProperty), {thisValue, IntToTaggedInt(*i)});
-#endif
             BRANCH_LIKELY(TaggedIsTrue(hasProp), &hasProperty, &loopEnd);
             Bind(&hasProperty);
             kValue = FastGetPropertyByIndex(glue, thisValue, TruncInt64ToInt32(*i), ProfileOperation());
@@ -1587,8 +1567,8 @@ void BuiltinsArrayStubBuilder::VisitAll(GateRef glue, GateRef thisValue, GateRef
                 GateRef key = Int64ToTaggedInt(*i);
                 JSCallArgs callArgs(JSCallMode::CALL_THIS_ARG3_WITH_RETURN);
                 callArgs.callThisArg3WithReturnArgs = {argHandle, *kValue, key, thisValue};
-                CallStubBuilder callBuilder(this, glue, callbackFnHandle, Int32(NUM_MANDATORY_JSFUNC_ARGS), 0, nullptr,
-                                            Circuit::NullGate(), callArgs);
+                CallStubBuilder callBuilder(this, glue, callbackFnHandle, Int32(NUM_MANDATORY_JSFUNC_ARGS),
+                                            0, nullptr, callArgs);
                 GateRef retValue = callBuilder.JSCallDispatch();
                 BRANCH_UNLIKELY(HasPendingException(glue), &hasException1, &notHasException1);
                 Bind(&hasException1);
@@ -2307,11 +2287,11 @@ void BuiltinsArrayStubBuilder::DoConcat(GateRef glue, GateRef thisValue, GateRef
     GateRef globalEnv = GetCurrentGlobalEnv();
     auto arrayFunc = GetGlobalEnvValue(VariableType::JS_ANY(), glue, globalEnv,
         GlobalEnv::ARRAY_FUNCTION_INDEX);
-    GateRef intialHClass = Load(VariableType::JS_ANY(), glue, arrayFunc,
+    GateRef initialHClass = Load(VariableType::JS_ANY(), glue, arrayFunc,
         IntPtr(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
     NewObjectStubBuilder newBuilder(this, globalEnv);
     newBuilder.SetParameters(glue, 0);
-    GateRef newArray = newBuilder.NewJSArrayWithSize(intialHClass, sumArrayLen);
+    GateRef newArray = newBuilder.NewJSArrayWithSize(initialHClass, sumArrayLen);
     BRANCH(TaggedIsException(newArray), exit, &setProperties);
     Bind(&setProperties);
     {
@@ -2320,7 +2300,7 @@ void BuiltinsArrayStubBuilder::DoConcat(GateRef glue, GateRef thisValue, GateRef
             TruncInt64ToInt32(sumArrayLen));
         GateRef accessor = GetGlobalConstantValue(VariableType::JS_ANY(), glue,
             ConstantIndex::ARRAY_LENGTH_ACCESSOR);
-        SetPropertyInlinedProps(glue, newArray, intialHClass, accessor,
+        SetPropertyInlinedProps(glue, newArray, initialHClass, accessor,
             Int32(JSArray::LENGTH_INLINE_PROPERTY_INDEX));
         SetExtensibleToBitfield(glue, newArray, true);
         DEFVARIABLE(i, VariableType::INT64(), Int64(0));

@@ -1,0 +1,3 @@
+transparent: 1 true true
+replaced: true false false
+throw: true from-trap

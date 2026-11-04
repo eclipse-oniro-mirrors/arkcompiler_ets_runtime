@@ -56,6 +56,7 @@
 #include "ecmascript/builtins/builtins_weak_ref.h"
 #include "ecmascript/builtins/builtins_weak_set.h"
 #include "ecmascript/containers/containers_arraylist.h"
+#include "ecmascript/containers/containers_bitvector.h"
 #include "ecmascript/containers/containers_deque.h"
 #include "ecmascript/containers/containers_hashmap.h"
 #include "ecmascript/containers/containers_hashset.h"
@@ -70,9 +71,12 @@
 #include "ecmascript/containers/containers_treemap.h"
 #include "ecmascript/containers/containers_treeset.h"
 #include "ecmascript/containers/containers_vector.h"
-#include "ecmascript/containers/containers_bitvector.h"
-#include "ecmascript/runtime_lock.h"
+#include "ecmascript/utils/collections_atomics.h"
+#if USE_CMS_GC
+#include "ecmascript/mem/cms_mem/slot_space-inl.h"
+#endif
 #include "ecmascript/ecma_string_table_optimization-inl.h"
+#include "ecmascript/runtime_lock.h"
 #ifdef ARK_SUPPORT_INTL
 #include "ecmascript/builtins/builtins_collator.h"
 #include "ecmascript/builtins/builtins_date_time_format.h"
@@ -83,9 +87,9 @@
 #include "ecmascript/builtins/builtins_number_format.h"
 #include "ecmascript/builtins/builtins_plural_rules.h"
 #include "ecmascript/builtins/builtins_relative_time_format.h"
+#include "ecmascript/builtins/builtins_segment_iterator.h"
 #include "ecmascript/builtins/builtins_segmenter.h"
 #include "ecmascript/builtins/builtins_segments.h"
-#include "ecmascript/builtins/builtins_segment_iterator.h"
 #endif
 
 namespace panda::ecmascript {
@@ -996,7 +1000,21 @@ static uintptr_t g_nativeTable[] = {
     reinterpret_cast<uintptr_t>(JSFunction::LengthGetter),
     reinterpret_cast<uintptr_t>(JSArray::LengthSetter),
     reinterpret_cast<uintptr_t>(JSArray::LengthGetter),
-    reinterpret_cast<uintptr_t>(JSPandaFileManager::GetInstance)
+    reinterpret_cast<uintptr_t>(JSPandaFileManager::GetInstance),
+
+    // Collections entries are appended to preserve existing native method indices.
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Add),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::And),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::CompareExchange),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Exchange),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Load),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Notify),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Or),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Store),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Sub),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Wait),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::Xor),
+    reinterpret_cast<uintptr_t>(collections::CollectionsAtomics::IsLockFree),
 };
 
 void SnapshotProcessor::Initialize()
@@ -1008,8 +1026,13 @@ void SnapshotProcessor::Initialize()
         largeObjAllocator_.Initialize(commonRegionSize_);
     } else {
         auto heap = const_cast<Heap *>(vm_->GetHeap());
+#if USE_CMS_GC
+        slotRegionAllocator_.Initialize();
+        size_t oldSpaceCapacity = heap->GetSlotSpace()->GetInitialCapacity();
+#else
         size_t oldSpaceCapacity = heap->GetOldSpace()->GetInitialCapacity();
         oldLocalSpace_ = new LocalSpace(heap, oldSpaceCapacity, oldSpaceCapacity);
+#endif
         size_t nonMovableCapacity = heap->GetNonMovableSpace()->GetInitialCapacity();
         nonMovableLocalSpace_ = new LocalSpace(heap, nonMovableCapacity, nonMovableCapacity);
         size_t machineCodeCapacity = heap->GetMachineCodeSpace()->GetInitialCapacity();
@@ -1064,7 +1087,11 @@ void SnapshotProcessor::StopAllocate()
         pinnedObjAllocator_.StopAllocate(sHeap_);
         largeObjAllocator_.StopAllocate(sHeap_);
     } else {
+#if USE_CMS_GC
+        slotRegionAllocator_.StopAllocate();
+#else
         oldLocalSpace_->Stop();
+#endif
         nonMovableLocalSpace_->Stop();
         machineCodeLocalSpace_->Stop();
         snapshotLocalSpace_->Stop();
@@ -1078,7 +1105,11 @@ void SnapshotProcessor::WriteObjectToFile(std::fstream &writer)
         pinnedObjAllocator_.WriteToFile(writer);
         largeObjAllocator_.WriteToFile(writer);
     } else {
+#if USE_CMS_GC
+        slotRegionAllocator_.WriteToFile(writer);
+#else
         WriteSpaceObjectToFile(oldLocalSpace_, writer);
+#endif
         WriteSpaceObjectToFile(nonMovableLocalSpace_, writer);
         WriteSpaceObjectToFile(machineCodeLocalSpace_, writer);
         WriteSpaceObjectToFile(snapshotLocalSpace_, writer);
@@ -1138,7 +1169,11 @@ std::vector<size_t> SnapshotProcessor::StatisticsObjectSize()
         objSizeVector.emplace_back(pinnedObjAllocator_.GetAllocatedSize());
         objSizeVector.emplace_back(largeObjAllocator_.GetAllocatedSize());
     } else {
+#if USE_CMS_GC
+        objSizeVector.emplace_back(slotRegionAllocator_.GetAllocatedSize());
+#else
         objSizeVector.emplace_back(StatisticsSpaceObjectSize(oldLocalSpace_));
+#endif
         objSizeVector.emplace_back(StatisticsSpaceObjectSize(nonMovableLocalSpace_));
         objSizeVector.emplace_back(StatisticsSpaceObjectSize(machineCodeLocalSpace_));
         objSizeVector.emplace_back(StatisticsSpaceObjectSize(snapshotLocalSpace_));
@@ -1172,8 +1207,7 @@ size_t SnapshotProcessor::StatisticsHugeObjectSize(HugeObjectSpace* space)
     return objSize;
 }
 
-void SnapshotProcessor::ProcessObjectQueue(CQueue<TaggedObject *> *queue,
-                                           std::unordered_map<uint64_t, ObjectEncode> *data)
+void SnapshotProcessor::ProcessObjectQueue(CQueue<TaggedObject *> *queue)
 {
     while (!queue->empty()) {
         auto taggedObject = queue->front();
@@ -1181,7 +1215,7 @@ void SnapshotProcessor::ProcessObjectQueue(CQueue<TaggedObject *> *queue,
             break;
         }
         queue->pop();
-        SerializeObject(taggedObject, queue, data);
+        SerializeObject(taggedObject, queue);
     }
 
     StopAllocate();
@@ -1214,6 +1248,11 @@ uintptr_t SnapshotProcessor::AllocateObjectToLocalSpace(MonoSpace *space, size_t
 void SnapshotProcessor::SetObjectEncodeField(uintptr_t obj, size_t offset, uint64_t value)
 {
     *reinterpret_cast<uint64_t *>(obj + offset) = value;
+}
+
+void SnapshotProcessor::SetCompressedObjectEncodeField(uintptr_t obj, size_t offset, CompressedEncodeBit encodeBit)
+{
+    *reinterpret_cast<RawDataType<ReferenceType::COMPRESSED> *>(obj + offset) = encodeBit.GetValue();
 }
 
 void SnapshotProcessor::DeserializeObjectExcludeString(uintptr_t regularObjBegin, size_t regularObjSize,
@@ -1281,13 +1320,17 @@ void SnapshotProcessor::DeserializeObjectExcludeString(uintptr_t oldSpaceBegin, 
     uintptr_t snapshotBegin = machineCodeBegin + machineCodeObjSize;
     uintptr_t hugeObjBegin = snapshotBegin + snapshotObjSize;
     auto heap = vm_->GetHeap();
-    auto oldSpace = heap->GetOldSpace();
     auto nonMovableSpace = heap->GetNonMovableSpace();
     auto machineCodeSpace = heap->GetMachineCodeSpace();
     auto snapshotSpace = heap->GetSnapshotSpace();
     auto hugeObjectSpace = heap->GetHugeObjectSpace();
 
+#if USE_CMS_GC
+    DeserializeSlotSpaceObject(oldSpaceBegin, oldSpaceObjSize);
+#else
+    auto oldSpace = heap->GetOldSpace();
     DeserializeSpaceObject(oldSpaceBegin, oldSpace, oldSpaceObjSize);
+#endif
     DeserializeSpaceObject(nonMovableBegin, nonMovableSpace, nonMovableObjSize);
     DeserializeSpaceObject(machineCodeBegin, machineCodeSpace, machineCodeObjSize);
     DeserializeSpaceObject(snapshotBegin, snapshotSpace, snapshotObjSize);
@@ -1322,7 +1365,9 @@ void SnapshotProcessor::DeserializeSpaceObject(uintptr_t beginAddr, Space* space
         }
 
         // Other information like aliveObject size, highWaterMark etc. in the region object to restore.
+#if !USE_CMS_GC
         region->aliveObject_ = liveObjectSize;
+#endif
         region->highWaterMark_ = region->packedData_.begin_ + liveObjectSize;
         region->SetGCFlag(RegionGCFlags::NEED_RELOCATE);
 
@@ -1371,7 +1416,9 @@ void SnapshotProcessor::DeserializeHugeSpaceObject(uintptr_t beginAddr, HugeObje
         }
 
         // Other information like aliveObject size, highWaterMark etc. in the region object to restore.
+#if !USE_CMS_GC
         region->aliveObject_ = objSize;
+#endif
         region->highWaterMark_ = region->packedData_.begin_ + objSize;
         region->SetGCFlag(RegionGCFlags::NEED_RELOCATE);
         space->AddRegion(region);
@@ -1511,15 +1558,14 @@ void SnapshotProcessor::AddRootObjectToAOTFileManager(SnapshotType type, const C
 }
 
 SnapshotProcessor::SerializeObjectVisitor::SerializeObjectVisitor(SnapshotProcessor *processor, uintptr_t snapshotObj,
-    CQueue<TaggedObject *> *queue, std::unordered_map<uint64_t, ObjectEncode> *data)
-    : processor_(processor), snapshotObj_(snapshotObj), queue_(queue), data_(data) {}
+    CQueue<TaggedObject *> *queue)
+    : processor_(processor), snapshotObj_(snapshotObj), queue_(queue) {}
 
-void SnapshotProcessor::SerializeObjectVisitor::VisitObjectRangeImpl(BaseObject *root, uintptr_t start,
-                                                                     uintptr_t endAddr, VisitObjectArea area)
+void SnapshotProcessor::SerializeObjectVisitor::VisitObjectRangeImpl(BaseObject *root, ObjectSlot start,
+                                                                     ObjectSlot end, VisitObjectArea area)
 {
     int index = 0;
-    ObjectSlot end(endAddr);
-    for (ObjectSlot slot(start); slot < end; slot++) {
+    for (ObjectSlot slot = start; slot < end; slot++) {
         if (area == VisitObjectArea::NATIVE_POINTER) {
             auto nativePointer = *reinterpret_cast<void **>(slot.SlotAddress());
             processor_->SetObjectEncodeField(snapshotObj_, slot.SlotAddress() - ToUintPtr(root),
@@ -1530,29 +1576,36 @@ void SnapshotProcessor::SerializeObjectVisitor::VisitObjectRangeImpl(BaseObject 
             }
             auto fieldAddr = reinterpret_cast<JSTaggedType *>(slot.SlotAddress());
             processor_->SetObjectEncodeField(snapshotObj_, slot.SlotAddress() - ToUintPtr(root),
-                                             processor_->SerializeTaggedField(fieldAddr, queue_, data_));
+                                             processor_->SerializeTaggedField(fieldAddr, queue_));
         }
     }
 }
 
-void SnapshotProcessor::SerializeObject(TaggedObject *objectHeader, CQueue<TaggedObject *> *queue,
-                                        std::unordered_map<uint64_t, ObjectEncode> *data)
+void SnapshotProcessor::SerializeObjectVisitor::VisitCompressedObjectRangeImpl(BaseObject *root,
+    CompressedObjectSlot start, CompressedObjectSlot end)
+{
+    for (CompressedObjectSlot slot = start; slot < end; slot++) {
+        CompressedJSTaggedType *fieldAddr = reinterpret_cast<CompressedJSTaggedType *>(slot.SlotAddress());
+        CompressedEncodeBit encodeBit = processor_->SerializeCompressedTaggedField(fieldAddr, queue_);
+        processor_->SetCompressedObjectEncodeField(snapshotObj_, slot.SlotAddress() - ToUintPtr(root), encodeBit);
+    }
+}
+
+void SnapshotProcessor::SerializeObject(TaggedObject *objectHeader, CQueue<TaggedObject *> *queue)
 {
     auto hclass = objectHeader->GetClass();
     JSType objectType = hclass->GetObjectType();
-    uintptr_t snapshotObj = 0;
-    if (UNLIKELY(data->find(ToUintPtr(objectHeader)) == data->end())) {
+    auto it = objectEncodeMap_.find(ToUintPtr(objectHeader));
+    if (UNLIKELY(it == objectEncodeMap_.end())) {
         LOG_FULL(FATAL) << "Data map can not find object";
         UNREACHABLE();
-    } else {
-        snapshotObj = data->find(ToUintPtr(objectHeader))->second.first;
     }
-
+    uintptr_t snapshotObj = it->second.snapshotAddr;
     // header
-    EncodeBit encodeBit = SerializeObjectHeader(objectHeader, static_cast<size_t>(objectType), queue, data);
+    EncodeBit encodeBit = SerializeObjectHeader(objectHeader, static_cast<size_t>(objectType), queue);
     SetObjectEncodeField(snapshotObj, 0, encodeBit.GetValue());
 
-    SerializeObjectVisitor visitor(this, snapshotObj, queue, data);
+    SerializeObjectVisitor visitor(this, snapshotObj, queue);
     ObjectXRay::VisitObjectBody<VisitType::SNAPSHOT_VISIT>(objectHeader, objectHeader->GetClass(), visitor);
 }
 
@@ -1596,17 +1649,22 @@ void SnapshotProcessor::Relocate(SnapshotType type, const JSPandaFile *jsPandaFi
         RelocateSpaceObject(largeRegions_, type, methods, methodNums, rootObjSize);
     } else {
         auto heap = vm_->GetHeap();
-        auto oldSpace = heap->GetOldSpace();
         auto nonMovableSpace = heap->GetNonMovableSpace();
         auto machineCodeSpace = heap->GetMachineCodeSpace();
         auto snapshotSpace = heap->GetSnapshotSpace();
         auto hugeObjectSpace = heap->GetHugeObjectSpace();
 
-        RelocateSpaceObject(oldSpace, type, methods, methodNums, rootObjSize);
-        RelocateSpaceObject(nonMovableSpace, type, methods, methodNums, rootObjSize);
-        RelocateSpaceObject(machineCodeSpace, type, methods, methodNums, rootObjSize);
-        RelocateSpaceObject(snapshotSpace, type, methods, methodNums, rootObjSize);
-        RelocateSpaceObject(hugeObjectSpace, type, methods, methodNums, rootObjSize);
+#if USE_CMS_GC
+        RelocateSlotSpaceObject(type, rootObjSize);
+#else
+        auto oldSpace = heap->GetOldSpace();
+        RelocateSpaceObject(oldSpace, MemSpaceType::OLD_SPACE, type, methods, methodNums, rootObjSize);
+#endif
+        RelocateSpaceObject(nonMovableSpace, MemSpaceType::NON_MOVABLE, type, methods, methodNums, rootObjSize);
+        RelocateSpaceObject(machineCodeSpace, MemSpaceType::MACHINE_CODE_SPACE, type,
+                            methods, methodNums, rootObjSize);
+        RelocateSpaceObject(snapshotSpace, MemSpaceType::SNAPSHOT_SPACE, type, methods, methodNums, rootObjSize);
+        RelocateSpaceObject(hugeObjectSpace, MemSpaceType::HUGE_OBJECT_SPACE, type, methods, methodNums, rootObjSize);
     }
 }
 
@@ -1633,7 +1691,7 @@ void SnapshotProcessor::RelocateSpaceObject(std::vector<std::pair<uintptr_t, siz
                 break;
             }
             TaggedObject *objectHeader = reinterpret_cast<TaggedObject *>(begin);
-            DeserializeClassWord(objectHeader);
+            DeserializeClassWord(objectHeader, MemSpaceType::SPACE_TYPE_LAST);
             DeserializeField(objectHeader);
             if (builtinsDeserialize_ &&
                 (JSType(objType) >= JSType::STRING_FIRST && JSType(objType) <= JSType::STRING_LAST)) {
@@ -1651,15 +1709,15 @@ void SnapshotProcessor::RelocateSpaceObject(std::vector<std::pair<uintptr_t, siz
     };
 }
 
-void SnapshotProcessor::RelocateSpaceObject(MonoSpace* space, SnapshotType type, MethodLiteral* methods,
-                                            size_t methodNums, size_t rootObjSize)
+void SnapshotProcessor::RelocateSpaceObject(MonoSpace* space, MemSpaceType spaceType, SnapshotType type,
+                                            MethodLiteral* methods, size_t methodNums, size_t rootObjSize)
 {
     size_t others = 0;
     size_t objIndex = 0;
     size_t constSpecialIndex = 0;
     EcmaStringTable *stringTable = vm_->GetEcmaStringTable();
     space->EnumerateRegions([stringTable, &others, &objIndex, &rootObjSize, &constSpecialIndex,
-                            &type, this, methods, &methodNums](Region *current) {
+                            &type, this, methods, &methodNums, &spaceType](Region *current) {
         if (!current->NeedRelocate()) {
             return;
         }
@@ -1681,7 +1739,7 @@ void SnapshotProcessor::RelocateSpaceObject(MonoSpace* space, SnapshotType type,
                 break;
             }
             TaggedObject *objectHeader = reinterpret_cast<TaggedObject *>(begin);
-            DeserializeClassWord(objectHeader);
+            DeserializeClassWord(objectHeader, spaceType);
             DeserializeField(objectHeader);
             if (builtinsDeserialize_ &&
                 (JSType(objType) >= JSType::STRING_FIRST && JSType(objType) <= JSType::STRING_LAST)) {
@@ -1700,31 +1758,29 @@ void SnapshotProcessor::RelocateSpaceObject(MonoSpace* space, SnapshotType type,
 }
 
 EncodeBit SnapshotProcessor::SerializeObjectHeader(TaggedObject *objectHeader, size_t objectType,
-                                                   CQueue<TaggedObject *> *queue,
-                                                   std::unordered_map<uint64_t, ObjectEncode> *data)
+                                                   CQueue<TaggedObject *> *queue)
 {
     auto hclass = objectHeader->GetClass();
     ASSERT(hclass != nullptr);
     EncodeBit encodeBit(0);
-    if (data->find(ToUintPtr(hclass)) == data->end()) {
-        encodeBit = EncodeTaggedObject(hclass, queue, data);
+    auto it = objectEncodeMap_.find(ToUintPtr(hclass));
+    if (it == objectEncodeMap_.end()) {
+        encodeBit = EncodeTaggedObject<ReferenceType::NORMAL>(hclass, queue);
     } else {
-        ObjectEncode objectEncodePair = data->find(ToUintPtr(hclass))->second;
-        encodeBit = objectEncodePair.second;
+        encodeBit = DeriveEncodeBit<ReferenceType::NORMAL>(it->second);
     }
     encodeBit.SetObjectType(objectType);
     return encodeBit;
 }
 
-uint64_t SnapshotProcessor::SerializeTaggedField(JSTaggedType *tagged, CQueue<TaggedObject *> *queue,
-                                                 std::unordered_map<uint64_t, ObjectEncode> *data)
+uint64_t SnapshotProcessor::SerializeTaggedField(JSTaggedType *tagged, CQueue<TaggedObject *> *queue)
 {
     JSThread *thread = vm_->GetAssociatedJSThread();
     JSTaggedValue taggedValue(Barriers::GetTaggedValue(thread, ToUintPtr(tagged)));
     if (taggedValue.IsWeak()) {
         taggedValue.RemoveWeakTag();
         if (taggedValue.IsJSHClass()) {
-            EncodeBit encodeBit = GetObjectEncode(taggedValue, queue, data);
+            EncodeBit encodeBit = GetObjectEncode<ReferenceType::NORMAL>(taggedValue, queue);
             encodeBit.SetTSWeakObject();
             return encodeBit.GetValue();
         }
@@ -1743,12 +1799,34 @@ uint64_t SnapshotProcessor::SerializeTaggedField(JSTaggedType *tagged, CQueue<Ta
         return taggedValue.GetRawData();  // not object
     }
 
-    EncodeBit encodeBit = GetObjectEncode(taggedValue, queue, data);
+    EncodeBit encodeBit = GetObjectEncode<ReferenceType::NORMAL>(taggedValue, queue);
 
     if (taggedValue.IsString()) {
-        encodeBit.SetReferenceToString(true);
+        encodeBit.SetIsReferenceToString();
     }
     return encodeBit.GetValue();  // object
+}
+
+CompressedEncodeBit SnapshotProcessor::SerializeCompressedTaggedField(CompressedJSTaggedType *tagged,
+    CQueue<TaggedObject *> *queue)
+{
+    JSThread *thread = vm_->GetAssociatedJSThread();
+    TemporaryJSTaggedValue value(Barriers::GetFromCompressedTaggedValue(thread, ToUintPtr(tagged)));
+
+    if (value.IsHeapObject()) {
+        ASSERT(!value.IsWeakForHeapObject());
+        JSTaggedValue val = value.ConvertHeapObjectToJSTaggedValue();
+        CompressedEncodeBit encodeBit = GetObjectEncode<ReferenceType::COMPRESSED>(val, queue);
+
+        encodeBit.SetIsReference();
+        if (val.IsString()) {
+            encodeBit.SetIsReferenceToString();
+        }
+        return encodeBit;
+    }
+
+    CompressedEncodeBit encodeBit(CompressedJSTaggedValue::Compress(value).GetCompressedRawData());
+    return encodeBit;
 }
 
 void SnapshotProcessor::DeserializeTaggedField(uint64_t *value, TaggedObject *root)
@@ -1773,7 +1851,7 @@ void SnapshotProcessor::DeserializeTaggedField(uint64_t *value, TaggedObject *ro
     }
 
     if (encodeBit.IsReference() && !encodeBit.IsSpecial()) {
-        uintptr_t taggedObjectAddr = TaggedObjectEncodeBitToAddr(encodeBit);
+        uintptr_t taggedObjectAddr = TaggedObjectEncodeBitToAddr<ReferenceType::NORMAL>(encodeBit);
 #ifdef USE_CMC_GC
         *value = taggedObjectAddr;
         WriteBarrier<WriteBarrierType::AOT_DESERIALIZE>(vm_->GetJSThread(), reinterpret_cast<void *>(root), offset,
@@ -1792,7 +1870,47 @@ void SnapshotProcessor::DeserializeTaggedField(uint64_t *value, TaggedObject *ro
     }
 }
 
-void SnapshotProcessor::DeserializeClassWord(TaggedObject *object)
+void SnapshotProcessor::DeserializeCompressedTaggedField(CompressedJSTaggedType *value, TaggedObject *root)
+{
+    CompressedEncodeBit encodeBit(*value);
+    size_t offset = ToUintPtr(value) - ToUintPtr(root);
+    if (!builtinsDeserialize_ && encodeBit.IsReference() && encodeBit.IsGlobalConstOrBuiltins()) {
+        size_t index = encodeBit.GetNativePointerOrObjectIndex();
+        JSTaggedType object = vm_->GetSnapshotEnv()->RelocateRootObjectAddr(index);
+        CompressedJSTaggedType compressedObject =
+            CompressedJSTaggedValue::Compress(JSTaggedValue(object)).GetCompressedRawData();
+#ifdef USE_CMC_GC
+        *value = compressedObject;
+        WriteBarrier<WriteBarrierType::NORMAL, ReferenceType::COMPRESSED>(vm_->GetJSThread(),
+            reinterpret_cast<void *>(root), offset, object);
+#else
+        WriteBarrier<WriteBarrierType::NORMAL, ReferenceType::COMPRESSED>(vm_->GetJSThread(),
+            reinterpret_cast<void *>(root), offset, object);
+        *value = compressedObject;
+#endif
+        return;
+    }
+
+    if (!encodeBit.IsReference()) {
+        return;
+    }
+
+    uintptr_t taggedObjectAddr = TaggedObjectEncodeBitToAddr<ReferenceType::COMPRESSED>(encodeBit);
+    CompressedJSTaggedType compressedObject =
+        CompressedJSTaggedValue::Compress(JSTaggedValue(static_cast<JSTaggedType>(taggedObjectAddr))).
+        GetCompressedRawData();
+#ifdef USE_CMC_GC
+    *value = compressedObject;
+    WriteBarrier<WriteBarrierType::AOT_DESERIALIZE, ReferenceType::COMPRESSED>(vm_->GetJSThread(),
+        reinterpret_cast<void *>(root), offset, static_cast<JSTaggedType>(taggedObjectAddr));
+#else
+    WriteBarrier<WriteBarrierType::AOT_DESERIALIZE, ReferenceType::COMPRESSED>(vm_->GetJSThread(),
+        reinterpret_cast<void *>(root), offset, static_cast<JSTaggedType>(taggedObjectAddr));
+    *value = compressedObject;
+#endif
+}
+
+void SnapshotProcessor::DeserializeClassWord(TaggedObject *object, MemSpaceType spaceType)
 {
     // During AOT deserialization, setting the hclass on an object does not require atomic operations, but a write
     // barrier is still needed to track cross-generation references. Besides this, if the hclass is created during
@@ -1809,10 +1927,31 @@ void SnapshotProcessor::DeserializeClassWord(TaggedObject *object)
 #else
         WriteBarrier(vm_->GetJSThread(), object, JSHClass::HCLASS_OFFSET, hclassValue.GetRawData());
         object->SetClassWithoutBarrier(JSHClass::Cast(hclassValue.GetTaggedObject()));
+#if USE_STICKY_CMS_GC
+        switch (spaceType) {
+            case MemSpaceType::READ_ONLY_SPACE:
+            case MemSpaceType::APPSPAWN_SPACE:
+            case MemSpaceType::NON_MOVABLE:
+                object->SetObjectState(ObjectState::OLD);
+                break;
+            case MemSpaceType::MACHINE_CODE_SPACE:
+            case MemSpaceType::SLOT_SPACE:
+            case MemSpaceType::HUGE_OBJECT_SPACE:
+            case MemSpaceType::OLD_SPACE:
+            case MemSpaceType::SEMI_SPACE:
+                object->SetObjectState(ObjectState::YOUNG);
+                break;
+            case MemSpaceType::SHARED_OLD_SPACE:
+            case MemSpaceType::SHARED_NON_MOVABLE:
+                break;
+            default:
+                break;
+        }
+#endif
 #endif
         return;
     }
-    uintptr_t hclassAddr = TaggedObjectEncodeBitToAddr(encodeBit);
+    uintptr_t hclassAddr = TaggedObjectEncodeBitToAddr<ReferenceType::NORMAL>(encodeBit);
     JSHClass *hclass = reinterpret_cast<JSHClass *>(hclassAddr);
 #ifdef USE_CMC_GC
     object->SetClassWithoutBarrier(hclass);
@@ -1822,17 +1961,36 @@ void SnapshotProcessor::DeserializeClassWord(TaggedObject *object)
     WriteBarrier<WriteBarrierType::AOT_DESERIALIZE>(vm_->GetJSThread(), object, JSHClass::HCLASS_OFFSET,
                                                     JSTaggedValue(hclass).GetRawData());
     object->SetClassWithoutBarrier(hclass);
+#if USE_STICKY_CMS_GC
+    switch (spaceType) {
+        case MemSpaceType::READ_ONLY_SPACE:
+        case MemSpaceType::APPSPAWN_SPACE:
+        case MemSpaceType::NON_MOVABLE:
+            object->SetObjectState(ObjectState::OLD);
+            break;
+        case MemSpaceType::MACHINE_CODE_SPACE:
+        case MemSpaceType::SLOT_SPACE:
+        case MemSpaceType::HUGE_OBJECT_SPACE:
+        case MemSpaceType::OLD_SPACE:
+        case MemSpaceType::SEMI_SPACE:
+            object->SetObjectState(ObjectState::YOUNG);
+            break;
+        case MemSpaceType::SHARED_OLD_SPACE:
+        case MemSpaceType::SHARED_NON_MOVABLE:
+            break;
+        default:
+            break;
+    }
+#endif
 #endif
 }
 
 SnapshotProcessor::DeserializeFieldVisitor::DeserializeFieldVisitor(SnapshotProcessor *processor)
     : processor_(processor) {}
 
-void SnapshotProcessor::DeserializeFieldVisitor::VisitObjectRangeImpl(BaseObject *rootObject, uintptr_t startAddr,
-                                                                      uintptr_t endAddr, VisitObjectArea area)
+void SnapshotProcessor::DeserializeFieldVisitor::VisitObjectRangeImpl(BaseObject *rootObject, ObjectSlot start,
+                                                                      ObjectSlot end, VisitObjectArea area)
 {
-    ObjectSlot start(startAddr);
-    ObjectSlot end(endAddr);
     auto root = TaggedObject::Cast(rootObject);
     for (ObjectSlot slot = start; slot < end; slot++) {
         auto encodeBitAddr = reinterpret_cast<uint64_t *>(slot.SlotAddress());
@@ -1841,6 +1999,16 @@ void SnapshotProcessor::DeserializeFieldVisitor::VisitObjectRangeImpl(BaseObject
         } else {
             processor_->DeserializeTaggedField(encodeBitAddr, root);
         }
+    }
+}
+
+void SnapshotProcessor::DeserializeFieldVisitor::VisitCompressedObjectRangeImpl(BaseObject *rootObject,
+    CompressedObjectSlot start, CompressedObjectSlot end)
+{
+    TaggedObject *root = TaggedObject::Cast(rootObject);
+    for (CompressedObjectSlot slot = start; slot < end; slot++) {
+        CompressedJSTaggedType *encodeBitAddr = reinterpret_cast<CompressedJSTaggedType *>(slot.SlotAddress());
+        processor_->DeserializeCompressedTaggedField(encodeBitAddr, root);
     }
 }
 
@@ -1885,7 +2053,8 @@ size_t SnapshotProcessor::SearchNativeMethodIndex(void *nativePointer)
     UNREACHABLE();
 }
 
-uintptr_t SnapshotProcessor::TaggedObjectEncodeBitToAddr(EncodeBit taggedBit)
+template <ReferenceType refType>
+uintptr_t SnapshotProcessor::TaggedObjectEncodeBitToAddr(EncodeBitType<refType> taggedBit)
 {
     ASSERT(taggedBit.IsReference());
     if (!builtinsDeserialize_ && taggedBit.IsReferenceToString()) {
@@ -1900,10 +2069,12 @@ uintptr_t SnapshotProcessor::TaggedObjectEncodeBitToAddr(EncodeBit taggedBit)
     size_t objectOffset = taggedBit.GetObjectOffsetInRegion();
 
     uintptr_t addr = region + objectOffset;
-    if (taggedBit.IsTSWeakObject()) {
-        JSTaggedValue object(static_cast<JSTaggedType>(addr));
-        object.CreateWeakRef();
-        addr = object.GetRawData();
+    if constexpr (!ReferenceIsCompressed<refType>) {
+        if (taggedBit.IsTSWeakObject()) {
+            JSTaggedValue object(static_cast<JSTaggedType>(addr));
+            object.CreateWeakRef();
+            addr = object.GetRawData();
+        }
     }
     return addr;
 }
@@ -1969,6 +2140,12 @@ SnapshotProcessor::AllocResult SnapshotProcessor::GetNewObj(size_t objectSize, T
                 UNREACHABLE();
         }
     } else {
+#if USE_CMS_GC
+        auto region = Region::ObjectAddressToRange(objectHeader);
+        if (region->InSlotSpace() || region->InSharedOldSpace()) {
+            return slotRegionAllocator_.Allocate(objectSize, regionIndex_);
+        }
+#endif
         uintptr_t newObj = GetNewObjAddress(objectSize, objectHeader);
         auto currentRegion = Region::ObjectAddressToRange(newObj);
         // region snapshotData_ low 32 bits is used to record region index for snapshot
@@ -1985,9 +2162,11 @@ uintptr_t SnapshotProcessor::GetNewObjAddress(size_t objectSize, TaggedObject *o
         return AllocateObjectToLocalSpace(snapshotLocalSpace_, objectSize);
     }
     auto region = Region::ObjectAddressToRange(objectHeader);
+#if !USE_CMS_GC
     if (region->InYoungOrOldSpace() || region->InSharedOldSpace()) {
         return AllocateObjectToLocalSpace(oldLocalSpace_, objectSize);
     }
+#endif
     if (region->InMachineCodeSpace()) {
         return AllocateObjectToLocalSpace(machineCodeLocalSpace_, objectSize);
     }
@@ -2001,30 +2180,61 @@ uintptr_t SnapshotProcessor::GetNewObjAddress(size_t objectSize, TaggedObject *o
     return AllocateObjectToLocalSpace(snapshotLocalSpace_, objectSize);
 }
 
-EncodeBit SnapshotProcessor::EncodeTaggedObject(TaggedObject *objectHeader, CQueue<TaggedObject *> *queue,
-                                                std::unordered_map<uint64_t, ObjectEncode> *data)
+template <ReferenceType refType>
+EncodeBitType<refType> SnapshotProcessor::DeriveEncodeBit(const CanonicalObjectEncode &entry)
 {
+    switch (entry.kind) {
+        case CanonicalObjectEncode::Kind::STRING:
+            return EncodeBitType<refType>(entry.nativeIndex);
+        case CanonicalObjectEncode::Kind::BUILTINS: {
+            EncodeBitType<refType> encodeBit(entry.nativeIndex);
+            encodeBit.SetIsGlobalConstOrBuiltins();
+            return encodeBit;
+        }
+        case CanonicalObjectEncode::Kind::ALLOCATED: {
+            EncodeBitType<refType> encodeBit(static_cast<uint64_t>(entry.regionIndex));
+            encodeBit.SetObjectOffsetInRegion(entry.objectOffset);
+            return encodeBit;
+        }
+        default:
+            LOG_ECMA(FATAL) << "unsupported entry kind " << static_cast<int>(entry.kind);
+            UNREACHABLE();
+    }
+}
+
+template <ReferenceType refType>
+EncodeBitType<refType> SnapshotProcessor::EncodeTaggedObject(TaggedObject *objectHeader, CQueue<TaggedObject *> *queue)
+{
+    // Callers (GetObjectEncode / SerializeObjectHeader / EncodeTaggedObjectRange) must consult
+    // objectEncodeMap_ first and only hand a not-yet-seen object to EncodeTaggedObject, which
+    // allocates and registers exactly one canonical snapshot copy per source object. Both
+    // encode-bit widths are then derived from that single entry, so object identity survives
+    // the round trip instead of producing two divergent copies.
+    ASSERT(objectEncodeMap_.find(ToUintPtr(objectHeader)) == objectEncodeMap_.end());
+
+    CanonicalObjectEncode entry;
     if (!builtinsSerialize_) {
         // String duplicate
         if (objectHeader->GetClass()->IsString()) {
             ASSERT(stringVector_.size() < Constants::MAX_OBJECT_INDEX);
-            EncodeBit encodeBit(stringVector_.size());
+            entry.kind = CanonicalObjectEncode::Kind::STRING;
+            entry.nativeIndex = stringVector_.size();
             if (EcmaStringAccessor(objectHeader).IsTreeString()) {
-                data->emplace(ToUintPtr(objectHeader), std::make_pair(0U, encodeBit));
+                objectEncodeMap_.emplace(ToUintPtr(objectHeader), entry);
                 objectHeader = EcmaStringAccessor::FlattenNoGCForSnapshot(vm_, EcmaString::Cast(objectHeader));
             }
             stringVector_.emplace_back(ToUintPtr(objectHeader));
-            data->emplace(ToUintPtr(objectHeader), std::make_pair(0U, encodeBit));
-            return encodeBit;
+            objectEncodeMap_.emplace(ToUintPtr(objectHeader), entry);
+            return DeriveEncodeBit<refType>(entry);
         }
 
         // builtins object reuse
         size_t index = vm_->GetSnapshotEnv()->FindEnvObjectIndex(ToUintPtr(objectHeader));
         if (index != SnapshotEnv::MAX_UINT_32) {
-            EncodeBit encodeBit(index);
-            encodeBit.SetGlobalConstOrBuiltins();
-            data->emplace(ToUintPtr(objectHeader), std::make_pair(0U, encodeBit));
-            return encodeBit;
+            entry.kind = CanonicalObjectEncode::Kind::BUILTINS;
+            entry.nativeIndex = index;
+            objectEncodeMap_.emplace(ToUintPtr(objectHeader), entry);
+            return DeriveEncodeBit<refType>(entry);
         }
     }
     auto oldObjHeader = objectHeader;
@@ -2046,43 +2256,35 @@ EncodeBit SnapshotProcessor::EncodeTaggedObject(TaggedObject *objectHeader, CQue
         LOG_FULL(FATAL) << "memcpy_s failed";
         UNREACHABLE();
     }
-    EncodeBit encodeBit(static_cast<uint64_t>(allocResult.regionIndex));
-    encodeBit.SetObjectOffsetInRegion(allocResult.offset);
-    if (oldObjHeader->GetClass()->IsString()) {
-        if (EcmaStringAccessor(oldObjHeader).IsTreeString()) {
-            data->emplace(ToUintPtr(oldObjHeader), std::make_pair(0U, encodeBit));
-        }
+    entry.snapshotAddr = allocResult.address;
+    entry.regionIndex = allocResult.regionIndex;
+    entry.objectOffset = allocResult.offset;
+    if (oldObjHeader->GetClass()->IsString() && EcmaStringAccessor(oldObjHeader).IsTreeString()) {
+        objectEncodeMap_.emplace(ToUintPtr(oldObjHeader), entry);
     }
-    data->emplace(ToUintPtr(objectHeader), std::make_pair(allocResult.address, encodeBit));
-    return encodeBit;
+    objectEncodeMap_.emplace(ToUintPtr(objectHeader), entry);
+    return DeriveEncodeBit<refType>(entry);
 }
 
-EncodeBit SnapshotProcessor::GetObjectEncode(JSTaggedValue object, CQueue<TaggedObject *> *queue,
-                                             std::unordered_map<uint64_t, ObjectEncode> *data)
+template <ReferenceType refType>
+EncodeBitType<refType> SnapshotProcessor::GetObjectEncode(JSTaggedValue object, CQueue<TaggedObject *> *queue)
 {
     JSTaggedType addr = object.GetRawData();
-    EncodeBit encodeBit(0);
-
-    if (data->find(addr) == data->end()) {
-        encodeBit = EncodeTaggedObject(object.GetTaggedObject(), queue, data);
-    } else {
-        ObjectEncode objectEncodePair = data->find(object.GetRawData())->second;
-        encodeBit = objectEncodePair.second;
+    auto it = objectEncodeMap_.find(addr);
+    if (it == objectEncodeMap_.end()) {
+        return EncodeTaggedObject<refType>(object.GetTaggedObject(), queue);
     }
-    return encodeBit;
+    return DeriveEncodeBit<refType>(it->second);
 }
 
-void SnapshotProcessor::EncodeTaggedObjectRange(ObjectSlot start, ObjectSlot end, CQueue<TaggedObject *> *queue,
-                                                std::unordered_map<uint64_t, ObjectEncode> *data)
+void SnapshotProcessor::EncodeTaggedObjectRange(ObjectSlot start, ObjectSlot end, CQueue<TaggedObject *> *queue)
 {
     while (start < end) {
         JSTaggedValue object(start.GetTaggedType());
         start++;
-        if (object.IsHeapObject()) {
-            EncodeBit encodeBit(0);
-            if (data->find(object.GetRawData()) == data->end()) {
-                encodeBit = EncodeTaggedObject(object.GetTaggedObject(), queue, data);
-            }
+        if (object.IsHeapObject() &&
+            objectEncodeMap_.find(object.GetRawData()) == objectEncodeMap_.end()) {
+            EncodeTaggedObject<ReferenceType::NORMAL>(object.GetTaggedObject(), queue);
         }
     }
 }
@@ -2200,4 +2402,139 @@ void SnapshotProcessor::AllocateProxy::WriteToFile(std::fstream &writer)
         writer.flush();
     }
 }
+
+#if USE_CMS_GC
+void SnapshotProcessor::RelocateSlotSpaceObject(SnapshotType type, size_t rootObjSize)
+{
+    size_t others = 0;
+    size_t objIndex = 0;
+    size_t constSpecialIndex = 0;
+    EcmaStringTable *stringTable = vm_->GetEcmaStringTable();
+    for (auto it = slotRegions_.begin(); it != slotRegions_.end(); it++) {
+        auto [region, slotSize] = it->second;
+        size_t allocated = region->GetAllocatedBytes();
+        uintptr_t begin = region->GetBegin();
+        uintptr_t end = begin + allocated;
+        while (begin < end) {
+            EncodeBit encodeBit(*reinterpret_cast<uint64_t *>(begin));
+            auto objType = encodeBit.GetObjectType();
+            ASSERT(objType != Constants::MASK_METHOD_SPACE_BEGIN);
+            TaggedObject *objectHeader = reinterpret_cast<TaggedObject *>(begin);
+            DeserializeClassWord(objectHeader, MemSpaceType::SLOT_SPACE);
+            DeserializeField(objectHeader);
+            if (builtinsDeserialize_ &&
+                (JSType(objType) >= JSType::STRING_FIRST && JSType(objType) <= JSType::STRING_LAST)) {
+                EcmaString *str = reinterpret_cast<EcmaString *>(begin);
+                EcmaStringAccessor(str).ClearInternString();
+                stringTable->GetOrInternFlattenString(vm_, str);
+            }
+            if (objIndex < rootObjSize) {
+                HandleRootObject(type, begin, objType, constSpecialIndex);
+            }
+            begin += slotSize;
+            objIndex++;
+        }
+    };
+}
+
+
+void SnapshotProcessor::DeserializeSlotSpaceObject(uintptr_t beginAddr, size_t spaceObjSize)
+{
+    auto *slotSpace = vm_->GetHeap()->GetSlotSpace();
+    size_t endAddr = beginAddr + spaceObjSize;
+    while (beginAddr < endAddr) {
+        auto info = ToNativePtr<SnapshotRegionHeadInfo>(beginAddr);
+        uintptr_t objectBeginAddr = ToUintPtr(info) + SnapshotRegionHeadInfo::RegionHeadInfoSize();
+        size_t regionIndex = info->regionIndex_;
+        size_t liveObjectSize = info->aliveObjectSize_;
+        beginAddr += (liveObjectSize + SnapshotRegionHeadInfo::RegionHeadInfoSize());
+        Region *region = slotSpace->ExpandRegionForSnapshot(info->slotSize_, liveObjectSize);
+        regionIndexMap_.emplace(regionIndex, ToUintPtr(region));
+        ASAN_UNPOISON_MEMORY_REGION(reinterpret_cast<void *>(region->packedData_.begin_), liveObjectSize);
+        if (errno_t ret = memcpy_s(ToVoidPtr(region->packedData_.begin_),
+                                   liveObjectSize,
+                                   ToVoidPtr(objectBeginAddr),
+                                   liveObjectSize); ret != EOK) {
+            LOG_FULL(FATAL) << "memcpy_s failed: " << ret;
+            UNREACHABLE();
+        }
+        // Other information like highWaterMark etc. in the region object to restore.
+        region->highWaterMark_ = region->packedData_.begin_ + liveObjectSize;
+        slotRegions_.emplace(regionIndex, std::make_pair(region, info->slotSize_));
+    }
+    ASSERT(beginAddr == endAddr);
+}
+
+void SnapshotProcessor::SlotRegionAllocateProxy::Expand(SlotRegionProxy &tlab, uintptr_t &regionIndex)
+{
+    size_t regionSize = GetRegionSize();
+    void *ptr = malloc(regionSize);
+    if (ptr == nullptr) {
+        LOG_ECMA(FATAL) << "malloc failed, size = " << regionSize;
+        UNREACHABLE();
+    }
+    uintptr_t start = ToUintPtr(ptr);
+    uintptr_t end = start + regionSize;
+    tlab.Reset(start, end, regionIndex++);
+}
+
+SnapshotProcessor::AllocResult SnapshotProcessor::SlotRegionAllocateProxy::Allocate(size_t size, uintptr_t &regionIndex)
+{
+    size_t idx = SlotSpace::GetSlotIdxBySize(size);
+    SlotRegionProxy &tlab = tlabAllocators_[idx];
+    AllocResult result = tlab.Allocate();
+    if (result.address != 0) {
+        return result;
+    }
+    if (!tlab.IsEmpty()) {
+        regions_.push_back(tlab);
+    }
+    Expand(tlab, regionIndex);
+    ASSERT(!tlab.IsEmpty());
+    result = tlab.Allocate();
+    ASSERT(result.address != 0);
+    return result;
+}
+
+void SnapshotProcessor::SlotRegionAllocateProxy::StopAllocate()
+{
+    for (auto &currentTlab : tlabAllocators_) {
+        if (!currentTlab.IsEmpty()) {
+            regions_.push_back(currentTlab);
+            currentTlab.Reset(0, 0, -1);
+        }
+    }
+    for (SlotRegionProxy &region : regions_) {
+        ASSERT(!region.IsEmpty());
+        uintptr_t begin = region.GetBegin();
+        uintptr_t top = region.GetTop();
+        uintptr_t end = region.GetEnd();
+        allocatedSize_ += top - begin;
+    }
+    allocatedSize_ += regions_.size() * SnapshotRegionHeadInfo::RegionHeadInfoSize();
+}
+
+void SnapshotProcessor::SlotRegionAllocateProxy::Initialize()
+{
+    regionSize_ = CMSRegion::GetRegionAvailableSize();
+}
+
+void SnapshotProcessor::SlotRegionAllocateProxy::WriteToFile(std::fstream &writer)
+{
+    for (SlotRegionProxy &region : regions_) {
+        ASSERT(!region.IsEmpty());
+        uintptr_t begin = region.GetBegin();
+        uintptr_t top = region.GetTop();
+        size_t objSize = top - begin;
+        size_t regionIndex = region.GetRegionIndex();
+        size_t slotSize = region.GetSlotSize();
+        SnapshotRegionHeadInfo info {regionIndex, objSize, slotSize};
+        // Firstly, serialize the region head information into the file;
+        writer.write(reinterpret_cast<char *>(&info), SnapshotRegionHeadInfo::RegionHeadInfoSize());
+        // Secondly, write the valid region memory (exclude region head and GC bit set).
+        writer.write(reinterpret_cast<char *>(begin), objSize);
+        writer.flush();
+    }
+}
+#endif
 }  // namespace panda::ecmascript

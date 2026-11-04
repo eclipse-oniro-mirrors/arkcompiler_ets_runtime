@@ -17,9 +17,9 @@
 #define ECMASCRIPT_COMPILER_CALL_SIGNATURE_H
 
 #include <array>
-#include <functional>
 #include <memory>
 
+#include "ecmascript/base/config.h"
 #include "ecmascript/compiler/variable_type.h"
 
 #include "libpandabase/macros.h"
@@ -32,9 +32,60 @@ enum class ArgumentsOrder {
     DEFAULT_ORDER,  // Push Arguments in stack from right -> left
 };
 
+// Fixed C ABI; ARGC counts only user arguments in the caller-rooted ARGV.
+struct ArkSteedCallConstructorBodyInputs {
+    enum : uint32_t { GLUE, ARGC, TARGET, NEW_TARGET, RECEIVER, ARGV, NUM_INPUTS };
+};
+
+// Lightweight replacement for std::function<void*(void*)>.
+// Avoids type-erasure overhead per stub (~956 unique lambda closures → a few template factories).
+class TargetConstructor {
+public:
+    using FactoryFn = void *(*)(void *env, void *data);
+
+    TargetConstructor() : fn_(nullptr), data_(nullptr) {}
+    TargetConstructor(std::nullptr_t) : fn_(nullptr), data_(nullptr) {}  // NOLINT
+    TargetConstructor(FactoryFn fn, void *data) : fn_(fn), data_(data) {}
+
+    void *operator()(void *env) const
+    {
+        return fn_(env, data_);
+    }
+
+    explicit operator bool() const
+    {
+        return fn_ != nullptr;
+    }
+
+    bool operator==(std::nullptr_t) const
+    {
+        return fn_ == nullptr;
+    }
+
+    bool operator!=(std::nullptr_t) const
+    {
+        return fn_ != nullptr;
+    }
+
+private:
+    FactoryFn fn_;
+    void *data_;
+};
+
+class CallSignature;
+class Environment;
+
+// Shared template factory for stubs with (CallSignature*, Environment*) constructor.
+// Used by BC, Common, and Baseline stubs. Replaces per-stub lambda closures.
+template <typename BuilderT>
+static inline void *StubBuilderFactory(void *env, void *data)
+{
+    return static_cast<void *>(
+        new BuilderT(static_cast<CallSignature *>(data), static_cast<Environment *>(env)));
+}
+
 class CallSignature {
 public:
-    using TargetConstructor = std::function<void *(void *)>;
     enum class TargetKind : uint8_t {
         COMMON_STUB = 0,
         RUNTIME_STUB,
@@ -47,8 +98,12 @@ public:
         BYTECODE_HANDLER,
         BYTECODE_DEBUGGER_HANDLER,
         BYTECODE_HELPER_HANDLER,
+    #if ECMASCRIPT_ENABLE_INTERPRETER_PGO_STUBS
         BYTECODE_PROFILE_HANDLER,
+    #if ECMASCRIPT_ENABLE_INTERPRETER_JIT_STUBS
         BYTECODE_JIT_PROFILE_HANDLER,
+    #endif
+    #endif
         BYTECODE_STW_COPY_HANDLER,
         JSFUNCTION,
         BUILTINS_STUB,
@@ -419,6 +474,8 @@ private:
     V(ToBooleanTrue)                            \
     V(ToBooleanFalse)                           \
     V(SetPropertyByName)                        \
+    V(EnsurePropertiesCapacity)                 \
+    V(CopyCOWElements)                          \
     V(DeprecatedSetPropertyByName)              \
     V(SetPropertyByNameWithOwn)                 \
     V(SetPropertyByValue)                       \
@@ -459,6 +516,8 @@ private:
     V(GetCallSpreadArgs)                        \
     V(NewThisObjectChecked)                     \
     V(ConstructorCheck)                         \
+    V(BaseConstructResultCheck)                 \
+    V(DerivedConstructResultCheck)              \
     V(CreateEmptyArray)                         \
     V(CreateArrayWithBuffer)                    \
     V(NewJSObject)                              \
@@ -483,6 +542,10 @@ private:
     V(CallNewAndCheckToBaseline)                \
     V(SuperCallAndCheckToBaseline)              \
     V(CallThisRangeAndCheckToBaseline)          \
+    V(ArkSteedCallEntry)                        \
+    V(ArkSteedDeoptimizationEntry)              \
+    V(SteedCallAndPushArgv)                     \
+    V(SteedCallWithArgVAndPushArgv)             \
     V(GeneratorReEnterAsmInterp)                \
     V(CallRuntimeWithArgv)                      \
     V(OptimizedCallAndPushArgv)                 \
@@ -536,7 +599,9 @@ private:
     V(Comment)                                  \
     V(FatalPrint)                               \
     V(FatalPrintCustom)                         \
+    V(FatalPrintIfFalse)                            \
     V(GetActualArgvNoGC)                        \
+    V(ArkSteedDeoptimize)                       \
     V(InsertOldToNewRSet)                       \
     V(InsertLocalToShareRSet)                   \
     V(SetBitAtomic)                             \
@@ -680,6 +745,7 @@ private:
     V(NewFloat32Array)                               \
     V(StringLoadElement)                             \
     V(GetStringFromConstPool)                        \
+    V(GetObjectFromConstPool)                        \
     V(GetPrototype)                                  \
     V(FastCallSelector)                              \
     V(CheckSuperAndNew)                              \
@@ -689,6 +755,7 @@ private:
     V(ConvertCharToString)                           \
     V(ASMFastWriteBarrier)                           \
     V(VerifyBarrier)                                 \
+    V(VerifyStoreJSValueForCompressedPointer)        \
     V(SortTypedArray)                                \
     V(ReverseTypedArray)                             \
     V(IsFastRegExp)                                  \
@@ -710,10 +777,15 @@ private:
     V(ReverseBarrier)                                \
     V(FindPatchModule)                               \
     V(FatalPrintMisstakenResolvedBinding)            \
+    V(TryResolveSendableModule)                      \
     V(LoadNativeModuleFailed)                        \
     V(GetExternalModuleVar)                          \
     V(GetValueWithBarrier)                           \
+    V(GetValueFromCompressedWithBarrier)             \
+    V(LdLexVar)                                      \
+    V(StLexVar)                                      \
     V(ReadBarrier)                                   \
+    V(ReadBarrierForCompressed)                      \
     V(ComputeStringHashcode)                         \
     V(CopyCallTarget)                                \
     V(CopyArgvArray)                                 \
@@ -721,7 +793,11 @@ private:
     V(MarkInBuffer)                                  \
     V(BatchMarkInBuffer)                             \
     V(LoadBarrierCopyBack)                           \
-    V(CMCSetValueWithBarrier)
+    V(CMCSetValueWithBarrier)                        \
+    V(CheckObjectForCMS)                             \
+    V(ArkSteedStringToNumber)                        \
+    V(ArkSteedNewObjectFromPrimitive)                \
+    V(ArkSteedCallConstructorBody)
 
 #define DECL_CALL_SIGNATURE(name)                                  \
 class name##CallSignature final {                                  \

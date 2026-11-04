@@ -15,11 +15,16 @@
         "subsystem": "arkcompiler",
         "syscap": [],
         "features": [
+          "ets_runtime_feature_enable_baseline_stub",
+          "ets_runtime_enable_compressed_pointer",
           "ets_runtime_feature_enable_pgo",
+          "ets_runtime_feature_enable_back_annotation",
           "ets_runtime_feature_enable_codemerge",
           "ets_runtime_feature_enable_inst_prefetch",
+          "ets_runtime_feature_enable_stub_function_reordering",
           "ets_runtime_feature_pgo_path",
           "ets_runtime_feature_enable_list",
+          "ets_runtime_feature_enable_static_backtrace",
           "ets_runtime_support_jit_code_sign",
           "ets_runtime_feature_enable_bsymbolic",
           "ets_runtime_feature_enable_dfx"
@@ -45,6 +50,7 @@
               "c_utils",
               "code_signature",
               "libuv",
+              "protobuf",
               "zlib",
               "bounds_checking_function",
               "icu",
@@ -57,7 +63,8 @@
               "ffrt",
               "cJSON",
               "hiview",
-              "json"
+              "json",
+              "security_guard"
             ],
             "third_party": [
             ]
@@ -72,7 +79,6 @@
                 "//arkcompiler/ets_runtime/compiler_service:ark_aot_compiler.cfg",
                 "//arkcompiler/ets_runtime/compiler_service:compiler_service",
                 "//arkcompiler/ets_runtime/compiler_service:system_framework_aot_enable_list.conf",
-                "//arkcompiler/ets_runtime/compiler_service:static_app_install_aot_enable_list.conf",
                 "//arkcompiler/ets_runtime/etc:arkcompiler.jsruntime.para"
             ],
             "inner_kits": [
@@ -99,6 +105,15 @@
                     }
                 },
                 {
+                    "name": "//arkcompiler/ets_runtime/ecmascript/dfx/hprof/rawheap_translate:rawheap_translate_static",
+                    "header": {
+                      "header_files": [
+                        "rawheap_translate.h"
+                      ],
+                      "header_base": "//arkcompiler/ets_runtime/ecmascript/dfx/hprof/rawheap_translate"
+                    }
+                },
+                {
                     "name": "//arkcompiler/ets_runtime/compiler_service:libcompiler_service",
                     "header": {
                       "header_files": [
@@ -112,7 +127,57 @@
                 "//arkcompiler/ets_runtime:ark_js_unittest",
                 "//arkcompiler/ets_runtime/compiler_service/test:compiler_service_unittest",
                 "//arkcompiler/ets_runtime/compiler_service/test:compiler_service_fuzztest"
-            ]
+            ],
+            "conditions": {
+                "//arkcompiler/ets_runtime:ark_js_host_linux_tools_packages": {
+                    "compile_mode": ["host"]
+                },
+                "//arkcompiler/ets_runtime:app_aot_jit_enable_list": {
+                    "compile_mode": ["cross"]
+                },
+                "//arkcompiler/ets_runtime:app_startup_snapshot": {
+                    "compile_mode": ["cross"]
+                },
+                "//arkcompiler/ets_runtime:ark_js_packages": {
+                    "compile_mode": ["cross"]
+                },
+                "//arkcompiler/ets_runtime/etc:arkcompiler.para.dac": {
+                    "compile_mode": ["cross"]
+                },
+                "//arkcompiler/ets_runtime/compiler_service:ark_aot_compiler.cfg": {
+                    "compile_mode": ["cross"]
+                },
+                "//arkcompiler/ets_runtime/compiler_service:compiler_service": {
+                    "compile_mode": ["cross"]
+                },
+                "//arkcompiler/ets_runtime/compiler_service:system_framework_aot_enable_list.conf": {
+                    "compile_mode": ["cross"]
+                },
+                "//arkcompiler/ets_runtime/compiler_service:static_app_install_aot_enable_list.conf": {
+                    "compile_mode": ["cross"]
+                },
+                "//arkcompiler/ets_runtime/etc:arkcompiler.jsruntime.para": {
+                    "compile_mode": ["cross"]
+                },
+                "//arkcompiler/ets_runtime:libark_jsruntime": {
+                    "compile_mode": ["host", "cross"]
+                },
+                "//arkcompiler/ets_runtime:libark_jsruntime_static": {
+                    "compile_mode": ["cross"]
+                },
+                "//arkcompiler/ets_runtime/compiler_service:libcompiler_service": {
+                    "compile_mode": ["cross"]
+                },
+                "//arkcompiler/ets_runtime:ark_js_unittest": {
+                    "compile_mode": ["cross"]
+                },
+                "//arkcompiler/ets_runtime/compiler_service/test:compiler_service_unittest": {
+                    "compile_mode": ["cross"]
+                },
+                "//arkcompiler/ets_runtime/compiler_service/test:compiler_service_fuzztest": {
+                    "compile_mode": ["cross"]
+                }
+            }
         }
     }
 }

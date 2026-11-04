@@ -23,7 +23,7 @@
 #include "ecmascript/ecma_string.h"
 #include "ecmascript/ecma_vm.h"
 #include "ecmascript/global_env.h"
-#include "ecmascript/js_tagged_value-inl.h"
+#include "ecmascript/js_tagged_value_wrapper-inl.h"
 #include "ecmascript/jspandafile/js_pandafile.h"
 /*
  * Intra-application cross hap:
@@ -59,17 +59,30 @@ using StringHelper = base::StringHelper;
 
 enum ValidateFilePath { ABC, ETS_MODULES };
 
+enum class ModulePathType : uint8_t {
+    INVALID_MODULE_PATH = 0,
+    SHORT_MODULE_PATH,
+    SYSTEM_MODULE_PATH,
+    HAP_MODULE_PATH,
+    ABC_MODULE_PATH,
+};
+
 class ModulePathHelper {
 public:
     static constexpr std::string_view EXT_NAME_ABC = ".abc";
+    static constexpr std::string_view EXT_NAME_ABC_WITH_RSQBRKT = ".abc]";
     static constexpr std::string_view EXT_NAME_ETS = ".ets";
     static constexpr std::string_view EXT_NAME_TS = ".ts";
     static constexpr std::string_view EXT_NAME_JS = ".js";
     static constexpr std::string_view EXT_NAME_JSON = ".json";
+    static constexpr std::string_view EXT_NAME_SO = ".so";
     static constexpr std::string_view EXT_NAME_Z_SO = ".z.so";
     static constexpr std::string_view EXT_NAME_D_TS = ".d.ts";
     static constexpr std::string_view EXT_NAME_MJS = ".mjs";
+    static constexpr std::string_view EXT_NAME_HAP = ".hap";
+    static constexpr std::string_view EXT_NAME_HSP = ".hsp";
     static constexpr std::string_view EXT_NAME_HQF = ".hqf";
+    static constexpr std::string_view PREFIX_ARKTS_CODE = "[anon:ArkTS Code:";
     static constexpr std::string_view PREFIX_NORMALIZED = "@normalized:";
     static constexpr std::string_view PREFIX_NORMALIZED_SO = "@normalized:Y";
     static constexpr std::string_view PREFIX_NORMALIZED_NOT_SO = "@normalized:N";
@@ -77,9 +90,10 @@ public:
     static constexpr std::string_view PREFIX_BUNDLE = "@bundle:";
     static constexpr std::string_view PREFIX_MODULE = "@module:";
     static constexpr std::string_view PREFIX_PACKAGE = "@package:";
-    static constexpr std::string_view PREFIX_HMS = "hms:";
+    static constexpr std::string_view PREFIX_HMS = "hms";
     static constexpr std::string_view PREFIX_ETS = "ets/";
     static constexpr std::string_view PREFIX_LIB = "lib";
+    static constexpr std::string_view PREFIX_SYSTEM_LIB64_MODULE = "/system/lib64/module";
     static constexpr std::string_view REQUIRE_NAITVE_MODULE_PREFIX = "@native:";
     static constexpr std::string_view REQUIRE_NAPI_OHOS_PREFIX = "@ohos:";
     static constexpr std::string_view REQUIRE_NAPI_APP_PREFIX = "@app:";
@@ -95,7 +109,7 @@ public:
     static constexpr std::string_view PREVIEW_OF_ACROSS_HAP_FLAG = "[preview]";
     static constexpr std::string_view PREVIER_TEST_DIR = ".test";
     static constexpr std::string_view PHYCICAL_FILE_PATH = "/src/main";
-    static constexpr std::string_view VMA_NAME_ARKTS_CODE = "ArkTS Code";
+    static constexpr std::string_view VMA_NAME_ARKTS_CODE = "ArkTS Code:";
     static constexpr std::string_view ENTRY_MAIN_FUNCTION = "_GLOBAL::func_main_0";
     static constexpr std::string_view ENTRY_FUNCTION_NAME = "func_main_0";
     static constexpr std::string_view TRUE_FLAG = "true";
@@ -103,10 +117,15 @@ public:
     static constexpr size_t MAX_PACKAGE_LEVEL = 1;
     static constexpr size_t SEGMENTS_LIMIT_TWO = 2;
     static constexpr size_t EXT_NAME_ABC_LEN = 4;
+    static constexpr size_t EXT_NAME_ABC_WITH_RSQBRKT_LEN = 4;
     static constexpr size_t EXT_NAME_ETS_LEN = 4;
+    static constexpr size_t EXT_NAME_SO_LEN = 3;
     static constexpr size_t EXT_NAME_TS_LEN = 3;
     static constexpr size_t EXT_NAME_JS_LEN = 3;
     static constexpr size_t EXT_NAME_JSON_LEN = 5;
+    static constexpr size_t VMA_NAME_ARKTS_CODE_LEN = 11;
+    static constexpr size_t PREFIX_ARKTS_CODE_LEN = 17;
+    static constexpr size_t PREFIX_SYSTEM_LIB64_MODULE_LEN = 20;
     static constexpr size_t PREFIX_BUNDLE_LEN = 8;
     static constexpr size_t PREFIX_MODULE_LEN = 8;
     static constexpr size_t PREFIX_PACKAGE_LEN = 9;
@@ -126,12 +145,32 @@ public:
     static constexpr size_t SO_PREFIX_LEN = 3;
     static constexpr size_t SO_SUFFIX_LEN = 3;
 
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+    static constexpr std::string_view PKGINFO_PACKAGE_NAME = "packageName";
+    static constexpr std::string_view PKGINFO_BUNDLE_NAME = "bundleName";
+    static constexpr std::string_view PKGINFO_MODULE_NAME = "moduleName";
+    static constexpr std::string_view PKGINFO_VERSION = "version";
+    static constexpr std::string_view PKGINFO_ENTRY_PATH = "entryPath";
+    static constexpr std::string_view PKGINFO_IS_SO = "isSO";
+
+    // Returns the value for key if present, otherwise empty string.
+    static CString GetPkgInfoValueOrEmpty(const CVector<std::pair<CString, CString>> &data, std::string_view key)
+    {
+        for (const auto &item : data) {
+            if (item.first == key) {
+                return item.second;
+            }
+        }
+        return CString();
+    }
+#else
     static constexpr size_t PKGINFO_PACKAGE_NAME_INDEX = 1;
     static constexpr size_t PKGINFO_BUDNLE_NAME_INDEX = 3;
     static constexpr size_t PKGINFO_MODULE_NAME_INDEX = 5;
     static constexpr size_t PKGINFO_VERSION_INDEX = 7;
     static constexpr size_t PKGINFO_ENTRY_PATH_INDEX = 9;
     static constexpr size_t PKGINFO_IS_SO_INDEX = 11;
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
 
     static CString PUBLIC_API ConcatFileNameWithMerge(JSThread *thread, const JSPandaFile *jsPandaFile,
         CString &baseFileName, const CString &recordName, const CString &requestName);
@@ -171,9 +210,9 @@ public:
                                          const CString &packagePath);
     static bool IsImportFile(const CString &moduleRequestName);
     static CString RemoveSuffix(const CString &requestName);
-    static bool NeedTranstale(const CString &requestName);
+    static bool NeedTranslate(const CString &requestName);
     static bool NeedTranslateToNormalized(const CString &requestName);
-    static void TranstaleExpressionInput(const JSPandaFile *jsPandaFile, CString &requestPath);
+    static void TranslateExpressionInput(const JSPandaFile *jsPandaFile, CString &requestPath);
     static CString GetModuleNameWithBaseFile(const CString &baseFileName);
     static CString TranslateExpressionInputWithEts(JSThread *thread, const JSPandaFile *jsPandaFile,
                                                    const CString &baseFileName, const CString &requestName);
@@ -183,8 +222,13 @@ public:
                                                    [[maybe_unused]] CString &baseFileName, const CString &recordName,
                                                    CString &requestPath);
 #if !ENABLE_LATEST_OPTIMIZATION
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+    static CVector<std::pair<CString, CString>> GetPkgContextInfoListElements(EcmaVM *vm, const CString &moduleName,
+                                                          const CString &packageName);
+#else
     static CVector<CString> GetPkgContextInfoListElements(EcmaVM *vm, const CString &moduleName,
                                                           const CString &packageName);
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
 #endif
     static CString TranslateNapiFileRequestPath(JSThread *thread, const CString &modulePath,
                                                 const CString &requestName);
@@ -205,12 +249,19 @@ public:
                                                                   const CString &requestName);
     static void ConcatOtherNormalizedOhmurl(EcmaVM *vm, const JSPandaFile *jsPandaFile,
                                             [[maybe_unused]] const CString &baseFileName, CString &requestPath);
-    static CString ConcatNormalizedOhmurlWithData(const CVector<CString> &data, const CString &pkgName,
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+    static CString ConcatNormalizedOhmurlWithData(const CVector<std::pair<CString, CString>> &data,
+        const CString &pkgName,
                                                   CString &entryPath);
+#else
+    static CString ConcatNormalizedOhmurlWithData(const CVector<CString> &data, const CString &pkgName,
+        CString &entryPath);
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
     static CString GetBundleNameWithRecordName(EcmaVM *vm, const CString &recordName);
     static CString Utf8ConvertToString(JSThread *thread, JSTaggedValue str);
 
-    static CString ParseFileNameToVMAName(const CString &filename);
+    static std::string ParseFileNameToVMAName(const void *buffer, const std::string &filename);
+    static ModulePathType ParseVMANameToFileName(const CString &inputPath, uintptr_t &offset, CString &outputPath);
     static CString ConcatOtherNormalizedOhmurlWithFilePath(EcmaVM *vm, size_t filePathPos, const CString &moduleName,
                                                            const CString &requestPath);
     static bool IsOhmUrl(const CString &str);
@@ -223,6 +274,8 @@ public:
                                        const CString &importOhmurl);
     static CString GetPkgNameWithNormalizedOhmurl(const CString &ohmurl);
     static bool IsCrossBundleHsp(const EcmaVM *vm, const CString &ohmurl);
+    static CString GetBundleModuleName(const CString &baseFileName);
+    static bool CheckCrossBundleHsp(EcmaVM *vm, const CString &filename);
 
     inline static std::pair<CString, CString> ResolvePath(const char *path)
     {

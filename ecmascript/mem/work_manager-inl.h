@@ -127,10 +127,6 @@ void WorkNodeHolder::Setup(Heap *heap, WorkManager *workManager,
 #undef SETUP_WEAK_AGGREGATE
     continuousQueue_ = new ProcessQueue();
     continuousWeakLinkedHashMapQueue_ = new WeakLinkedHashMapProcessQueue();
-    // fixme: refactor?
-    if constexpr (G_USE_CMS_GC) {
-        slotGCAllocator_.Setup(heap->GetSlotSpace());
-    }
 }
 
 void WorkNodeHolder::Destroy()
@@ -159,7 +155,8 @@ void WorkNodeHolder::Initialize(TriggerGCType gcType, ParallelGCTaskPhase taskPh
     if (gcType == TriggerGCType::FULL_GC) {
         // fixme: refactor?
         if constexpr (G_USE_CMS_GC) {
-            slotGCAllocator_.Initialize();
+            slotGCAllocator_ = new SlotGCAllocator();
+            slotGCAllocator_->Setup(heap_->GetSlotSpace());
         } else {
             allocator_ = new TlabAllocator(heap_);
         }
@@ -183,9 +180,10 @@ void WorkNodeHolder::Finish()
         delete allocator_;
         allocator_ = nullptr;
     }
-    // fixme: refactor?
-    if constexpr (G_USE_CMS_GC) {
-        slotGCAllocator_.Finalize();
+    if (slotGCAllocator_ != nullptr) {
+        slotGCAllocator_->Finalize();
+        delete slotGCAllocator_;
+        slotGCAllocator_ = nullptr;
     }
 }
 
@@ -226,7 +224,7 @@ TlabAllocator *WorkNodeHolder::GetTlabAllocator() const
 
 SlotGCAllocator *WorkNodeHolder::GetSlotGCAllocator()
 {
-    return &slotGCAllocator_;
+    return slotGCAllocator_;
 }
 
 WorkManagerBase::WorkManagerBase(NativeAreaAllocator *allocator)
@@ -314,11 +312,8 @@ void WorkManager::Finish(size_t &aliveSize, size_t &promotedSize)
     for (uint32_t i = 0; i < threadNum_; i++) {
         WorkNodeHolder &holder = works_.at(i);
         promotedSize += holder.promotedSize_;
-        if (holder.allocator_ != nullptr) {
-            holder.allocator_->Finalize();
-            delete holder.allocator_;
-            holder.allocator_ = nullptr;
-        }
+        ASSERT(holder.allocator_ == nullptr);
+        ASSERT(holder.slotGCAllocator_ == nullptr);
     }
     initialized_.store(false, std::memory_order_release);
 }
@@ -455,6 +450,7 @@ SharedGCWorkManager::SharedGCWorkManager(SharedHeap *heap, uint32_t threadNum)
 SharedGCWorkManager::~SharedGCWorkManager()
 {
     Finish();
+    FinishBase();
     for (uint32_t i = 0; i < threadNum_; i++) {
         works_.at(i).Destroy();
     }
@@ -490,7 +486,6 @@ size_t SharedGCWorkManager::Finish()
     }
     FinishAndDestroyExtraTemporaryHolders();
     markStack_.Clear();
-    FinishBase();
     initialized_.store(false, std::memory_order_release);
     return aliveSize;
 }
@@ -565,5 +560,108 @@ void SharedGCWorkManager::ForEachExtraTemporaryWorkNodeHolder(Visitor &&visitor)
         visitor(holder);
     }
 }
+// --- GlobalGCWorkNodeHolder ---
+
+void GlobalGCWorkNodeHolder::Setup(SharedHeap *sHeap, WorkManagerBase *workManager,
+    GlobalMarkStack *markStack)
+{
+    sHeap_ = sHeap;
+    workManager_ = workManager;
+    markStack_ = markStack;
+}
+
+void GlobalGCWorkNodeHolder::Initialize()
+{
+    inNode_ = workManager_->AllocateWorkNode<MarkWorkNode>();
+    cachedInNode_ = workManager_->AllocateWorkNode<MarkWorkNode>();
+    outNode_ = workManager_->AllocateWorkNode<MarkWorkNode>();
+}
+
+void GlobalGCWorkNodeHolder::Finish() {}
+
+void GlobalGCWorkNodeHolder::Push(TaggedObject *object)
+{
+    if (UNLIKELY(inNode_->IsFull())) {
+        PushWorkNodeToGlobal();
+    }
+    inNode_->Push(object);
+}
+
+bool GlobalGCWorkNodeHolder::Pop(TaggedObject **object)
+{
+    if (UNLIKELY(outNode_->IsEmpty())) {
+        if (!inNode_->IsEmpty()) {
+            MarkWorkNode *tmp = outNode_;
+            outNode_ = inNode_;
+            inNode_ = tmp;
+        } else {
+            MarkWorkNode *tmp = outNode_;
+            if (!PopWorkNodeFromGlobal()) {
+                return false;
+            }
+            tmp->SetNext(cachedInNode_);
+            cachedInNode_ = tmp;
+        }
+    }
+    outNode_->Pop(object);
+    return true;
+}
+
+void GlobalGCWorkNodeHolder::PushWorkNodeToGlobal()
+{
+    if (!inNode_->IsEmpty()) {
+        markStack_->Push(inNode_);
+        inNode_ = cachedInNode_;
+        ASSERT(inNode_ != nullptr);
+        cachedInNode_ = cachedInNode_->GetNext();
+        if (cachedInNode_ == nullptr) {
+            cachedInNode_ = workManager_->AllocateWorkNode<MarkWorkNode>();
+        }
+        if (sHeap_->IsParallelGCEnabled() && sHeap_->CheckCanDistributeGlobalGCTask()) {
+            sHeap_->TryPostGlobalGCMarkingTask();
+        }
+    }
+}
+
+bool GlobalGCWorkNodeHolder::PopWorkNodeFromGlobal()
+{
+    return markStack_->Pop(&outNode_);
+}
+
+// --- GlobalGCWorkManager ---
+
+GlobalGCWorkManager::GlobalGCWorkManager(SharedHeap *sHeap, uint32_t threadNum)
+    : WorkManagerBase(sHeap->GetNativeAreaAllocator()), sHeap_(sHeap), threadNum_(threadNum)
+{
+    for (uint32_t i = 0; i < threadNum_; i++) {
+        works_.at(i).Setup(sHeap_, this, &markStack_);
+    }
+}
+
+GlobalGCWorkManager::~GlobalGCWorkManager()
+{
+    Finish();
+}
+
+void GlobalGCWorkManager::Initialize()
+{
+    InitializeBase();
+    for (uint32_t i = 0; i < threadNum_; i++) {
+        works_.at(i).Initialize();
+    }
+    initialized_.store(true, std::memory_order_release);
+}
+
+size_t GlobalGCWorkManager::Finish()
+{
+    for (uint32_t i = 0; i < threadNum_; i++) {
+        works_.at(i).Finish();
+    }
+    markStack_.Clear();
+    FinishBase();
+    initialized_.store(false, std::memory_order_release);
+    return 0;
+}
+
 }  // namespace panda::ecmascript
 #endif  //  ECMASCRIPT_MEM_WORK_MANAGER_INL_H

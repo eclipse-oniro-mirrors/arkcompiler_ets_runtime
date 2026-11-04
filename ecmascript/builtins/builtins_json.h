@@ -21,7 +21,7 @@
 #include "ecmascript/ecma_runtime_call_info.h"
 #include "ecmascript/ecma_vm.h"
 #include "ecmascript/js_handle.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 
 namespace panda::ecmascript::builtins {
 
@@ -43,6 +43,7 @@ class BuiltinsSendableJson : public base::BuiltinsBase {
 public:
     static JSTaggedValue Parse(EcmaRuntimeCallInfo *argv);
     static JSTaggedValue Stringify(EcmaRuntimeCallInfo *argv);
+    static JSTaggedValue ParseSendable(EcmaRuntimeCallInfo *argv);
 };
 
 class BuiltinsBigIntJson : public base::BuiltinsBase {

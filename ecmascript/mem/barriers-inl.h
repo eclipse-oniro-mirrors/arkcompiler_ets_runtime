@@ -18,7 +18,7 @@
 
 #include "ecmascript/base/config.h"
 #include "ecmascript/daemon/daemon_thread.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/js_thread.h"
 #include "ecmascript/mem/assert_scope.h"
 #include "ecmascript/mem/barriers.h"
@@ -28,7 +28,7 @@
 #include "ecmascript/tagged_array.h"
 
 namespace panda::ecmascript {
-template<WriteBarrierType writeType = WriteBarrierType::NORMAL>
+template<WriteBarrierType writeType = WriteBarrierType::NORMAL, ReferenceType refType = ReferenceType::NORMAL>
 static ARK_INLINE void WriteBarrier(const JSThread *thread, void *obj, size_t offset, JSTaggedType value)
 {
     if (UNLIKELY(thread->IsEnableCMCGC())) {
@@ -53,9 +53,22 @@ static ARK_INLINE void WriteBarrier(const JSThread *thread, void *obj, size_t of
     }
 #endif
     uintptr_t slotAddr = ToUintPtr(obj) + offset;
-    ASSERT(!valueRegion->IsFromRegion());
-    if (objectRegion->InGeneralOldSpace() && valueRegion->InYoungSpace()) {
-        // Should align with '8' in 64 and 32 bit platform
+#if USE_STICKY_CMS_GC
+    TaggedObject *heapValue = JSTaggedValue(value).GetHeapObject();
+#ifndef NDEBUG
+    if constexpr (writeType == WriteBarrierType::NORMAL) {
+        if (offset != 0) {
+            Barriers::CheckObjectForCMS(thread, obj, offset, JSTaggedValue(value), true);
+        } else {
+            if (!valueRegion->InSharedHeap() && !heapValue->IsInOld()) {
+                LOG_ECMA(FATAL) << "value hclass is not old";
+            }
+        }
+    }
+#endif
+    if (thread->IsReadyToConcurrentMark() && !valueRegion->InSharedHeap() &&
+        static_cast<TaggedObject *>(obj)->IsInOld() && heapValue->IsInYoung()) {
+        ASSERT(!objectRegion->InSharedHeap());
         ASSERT((slotAddr % static_cast<uint8_t>(MemAlignment::MEM_ALIGN_OBJECT)) == 0);
         objectRegion->InsertOldToNewRSet(slotAddr);
     } else if (!objectRegion->InSharedHeap() && valueRegion->InSharedSweepableSpace()) {
@@ -66,16 +79,39 @@ static ARK_INLINE void WriteBarrier(const JSThread *thread, void *obj, size_t of
 #endif
         objectRegion->InsertLocalToShareRSet(slotAddr);
     }
+#else
+    // !USE_STICKY_CMS_GC
+    ASSERT(!valueRegion->IsFromRegion());
+    if (objectRegion->InGeneralOldSpace() && valueRegion->InYoungSpace()) {
+        if constexpr (ReferenceIsCompressed<refType>) {
+            // Should align with '4' in 64 and 32 bit platform for compressed pointer
+            ASSERT((slotAddr % (static_cast<uint8_t>(MemAlignment::MEM_ALIGN_OBJECT)
+                / CompressedJSTaggedValue::CompressFactorToJSTaggedValue())) == 0);
+        } else {
+            // Should align with '8' in 64 and 32 bit platform
+            ASSERT((slotAddr % static_cast<uint8_t>(MemAlignment::MEM_ALIGN_OBJECT)) == 0);
+        }
+        objectRegion->InsertOldToNewRSet<refType>(slotAddr);
+    } else if (!objectRegion->InSharedHeap() && valueRegion->InSharedSweepableSpace()) {
+#ifndef NDEBUG
+        if (UNLIKELY(JSTaggedValue(value).IsWeakForHeapObject())) {
+            CHECK_NO_LOCAL_TO_SHARE_WEAK_REF_HANDLE;
+        }
+#endif
+        objectRegion->InsertLocalToShareRSet<refType>(slotAddr);
+    }
+#endif
+
     ASSERT(!objectRegion->InSharedHeap() || valueRegion->InSharedHeap());
     if (!valueRegion->InSharedHeap() && thread->IsConcurrentMarkingOrFinished()) {
-        Barriers::Update(thread, slotAddr, objectRegion, reinterpret_cast<TaggedObject *>(value),
-                         valueRegion, writeType);
+        Barriers::Update<refType>(thread, slotAddr, objectRegion, reinterpret_cast<TaggedObject *>(value),
+                                  valueRegion);
         // NOTE: ConcurrentMarking and SharedConcurrentMarking can be enabled at the same time, but a specific value
         // can't be "not shared heap" and "in SharedSweepableSpace" at the same time. So using "if - else if" is safe.
     } else if (valueRegion->InSharedSweepableSpace() && thread->IsSharedConcurrentMarkingOrFinished()) {
         if constexpr (writeType == WriteBarrierType::NORMAL) {
-            Barriers::UpdateShared(thread, slotAddr, objectRegion, reinterpret_cast<TaggedObject *>(value),
-                                   valueRegion);
+            Barriers::UpdateShared<refType>(thread, slotAddr, objectRegion, reinterpret_cast<TaggedObject *>(value),
+                                            valueRegion);
         } else {
             // In deserialize, will never add references from old object(not allocated by deserialing) to
             // new object(allocated by deserializing), only two kinds of references(new->old, new->new) will
@@ -83,8 +119,8 @@ static ARK_INLINE void WriteBarrier(const JSThread *thread, void *obj, size_t of
             // SharedGC::MarkRoots, so just mark all the new object is enough, do not need to push them to
             // workmanager and recursively visit slots of that.
             ASSERT(DaemonThread::GetInstance()->IsConcurrentMarkingOrFinished());
-            if (valueRegion->InSCollectSet() && objectRegion->InSharedHeap()) {
-                objectRegion->AtomicInsertCrossRegionRSet(slotAddr);
+            if (valueRegion->InSCollectSet() && objectRegion->InSharedHeap() && (valueRegion != objectRegion)) {
+                objectRegion->AtomicInsertCrossRegionRSet<refType>(slotAddr);
             }
             valueRegion->AtomicMark(JSTaggedValue(value).GetHeapObject());
         }
@@ -126,9 +162,32 @@ inline void Barriers::SetObject(const JSThread *thread, void *obj, size_t offset
 #endif
 }
 
+template<bool needWriteBarrier>
+inline void Barriers::SetCompressedObject(const JSThread *thread, void *obj, size_t offset, JSTaggedType value)
+{
+    // If WriteBarrier comes after setting object field, gc thread will access uninitialized
+    // field value during concurrent mark when all the following conditions are satisfied.
+    // 1. the target field of [obj] is set to [value] and visible to gc thread
+    // 2. gc thread is visiting [obj] simultaneously and marks [value] one step ahead before current thread,
+    //    making that [value] is pushed to the work stack of gc thread but not the expected work stack of
+    //    main thread which will be processed later in remarking phase
+    // 3. [value] is a newly allocated object and its initialization is still not visible to gc thread
+    //    when [value] is popped from the work stack of gc thread and visited by gc thread
+    // To deal with the above problem, WriteBarrier is now ordered before setting object field,
+    // and atomic thread fence is added in marking barrier to prevent the instruction reordering.
+    if constexpr (needWriteBarrier) {
+        WriteBarrier<WriteBarrierType::NORMAL, ReferenceType::COMPRESSED>(thread, obj, offset, value);
+    }
+    // NOLINTNEXTLINE(clang-analyzer-core.NullDereference)
+    *reinterpret_cast<CompressedJSTaggedType *>(reinterpret_cast<uintptr_t>(obj) + offset)
+        = CompressedJSTaggedValue::Compress(JSTaggedValue(value)).GetCompressedRawData();
+}
+
 // explicit Instantiation to avoid compile optimization
 template void Barriers::SetObject<true>(const JSThread*, void*, size_t, JSTaggedType);
 template void Barriers::SetObject<false>(const JSThread*, void*, size_t, JSTaggedType);
+template void Barriers::SetCompressedObject<true>(const JSThread*, void*, size_t, JSTaggedType);
+template void Barriers::SetCompressedObject<false>(const JSThread*, void*, size_t, JSTaggedType);
 
 inline void Barriers::SynchronizedSetObject(const JSThread *thread, void *obj, size_t offset, JSTaggedType value,
                                             bool isPrimitive)
@@ -209,6 +268,13 @@ void Barriers::CopyObject(const JSThread *thread, const TaggedObject *dstObj, JS
     Region* objectRegion = Region::ObjectAddressToRange(ToUintPtr(dstObj));
     if (!objectRegion->InSharedHeap()) {
         bool allValueNotHeap = false;
+#if USE_STICKY_CMS_GC
+        if (thread->IsReadyToConcurrentMark() && dstObj->IsInOld()) {
+            allValueNotHeap = BatchBitSet<Region::InGeneralOld>(thread, objectRegion, dstAddr, count);
+        } else {
+            allValueNotHeap = BatchBitSet<Region::InYoung>(thread, objectRegion, dstAddr, count);
+        }
+#else
         if (objectRegion->InYoungSpace()) {
             allValueNotHeap = BatchBitSet<Region::InYoung>(thread, objectRegion, dstAddr, count);
         } else if (objectRegion->InGeneralOldSpace()) {
@@ -216,6 +282,8 @@ void Barriers::CopyObject(const JSThread *thread, const TaggedObject *dstObj, JS
         } else {
             allValueNotHeap = BatchBitSet<Region::Other>(thread, objectRegion, dstAddr, count);
         }
+#endif
+
         if (allValueNotHeap) {
             return;
         }
@@ -235,13 +303,15 @@ void Barriers::CopyObject(const JSThread *thread, const TaggedObject *dstObj, JS
         ASSERT(!objectRegion->InSharedHeap() || valueRegion->InSharedHeap());
         if (marking && !valueRegion->InSharedHeap()) {
             const uintptr_t slotAddr = ToUintPtr(dstAddr) + JSTaggedValue::TaggedTypeSize() * i;
-            Barriers::Update(thread, slotAddr, objectRegion, taggedValue.GetTaggedObject(), valueRegion);
+            Barriers::Update<ReferenceType::NORMAL>(thread, slotAddr, objectRegion, taggedValue.GetTaggedObject(),
+                                                    valueRegion);
             // NOTE: ConcurrentMarking and SharedConcurrentMarking can be enabled at the same time, but a specific
             // value can't be "not shared heap" and "in SharedSweepableSpace" at the same time. So using "if - else if"
             // is safe.
         } else if (sharedMarking && valueRegion->InSharedSweepableSpace()) {
             const uintptr_t slotAddr = ToUintPtr(dstAddr) + JSTaggedValue::TaggedTypeSize() * i;
-            Barriers::UpdateShared(thread, slotAddr, objectRegion, taggedValue.GetTaggedObject(), valueRegion);
+            Barriers::UpdateShared<ReferenceType::NORMAL>(thread, slotAddr, objectRegion,
+                                                          taggedValue.GetTaggedObject(), valueRegion);
         }
     }
 }

@@ -191,7 +191,7 @@ void GlobalEnvConstants::InitSharedStrings(ObjectFactory *factory)
     #undef INIT_GLOBAL_ENV_CONSTANT_STRING
 }
 
-void GlobalEnvConstants::InitCompositeBaseClasses(ObjectFactory* factory, JSHClass* hClass)
+void GlobalEnvConstants::InitCompositeBaseClasses(ObjectFactory* factory, JSHandle<JSHClass> hClass)
 {
     auto compositeBaseClassClass = factory->
         NewSEcmaReadOnlyHClass(hClass, CompositeBaseClass::SIZE, JSType::COMPOSITE_BASE_CLASS);
@@ -208,16 +208,14 @@ void GlobalEnvConstants::InitCompositeBaseClasses(ObjectFactory* factory, JSHCla
 void GlobalEnvConstants::InitSharedRootsClasses(ObjectFactory *factory)
 {
     // Global constants are readonly.
-    JSHClass *hClass = *factory->InitSClassClass();
+    JSHandle<JSHClass> hClass = factory->InitSClassClass();
     if (g_isEnableCMCGC) {
         InitCompositeBaseClasses(factory, hClass);
     }
-    SetConstant(ConstantIndex::HCLASS_CLASS_INDEX, JSTaggedValue(hClass));
+    SetConstant(ConstantIndex::HCLASS_CLASS_INDEX, hClass.GetTaggedValue());
     // To reverse the order, the hclass of string needs to load default supers
     SetConstant(ConstantIndex::TAGGED_ARRAY_CLASS_INDEX,
         factory->NewSEcmaReadOnlyHClass(hClass, 0, JSType::TAGGED_ARRAY));
-    SetConstant(ConstantIndex::FUNC_SLOT_CLASS_INDEX,
-        factory->NewSEcmaReadOnlyHClass(hClass, 0, JSType::FUNC_SLOT));
     SetConstant(ConstantIndex::FREE_OBJECT_WITH_NONE_FIELD_CLASS_INDEX,
                 factory->NewSEcmaReadOnlyHClass(hClass, FreeObject::NEXT_OFFSET, JSType::FREE_OBJECT_WITH_NONE_FIELD));
     SetConstant(ConstantIndex::FREE_OBJECT_WITH_ONE_FIELD_CLASS_INDEX,
@@ -386,10 +384,6 @@ void GlobalEnvConstants::InitSharedRootsClasses(ObjectFactory *factory)
         SetConstant(ConstantIndex::SHARED_TAGGED_ARRAY_CLASS_INDEX,
             factory->NewSEcmaReadOnlySharedHClass(hClass, 0, JSType::TAGGED_ARRAY));
         ASSERT(GetSharedTaggedArrayClass().IsInSharedHeap());
-        
-        SetConstant(ConstantIndex::SHARED_FUNC_SLOT_CLASS_INDEX,
-            factory->NewSEcmaReadOnlySharedHClass(hClass, 0, JSType::FUNC_SLOT));
-        ASSERT(GetSharedFuncSlotClass().IsInSharedHeap());
 
         SetConstant(ConstantIndex::SHARED_CONSTANT_POOL_CLASS_INDEX,
             factory->NewSEcmaReadOnlySharedHClass(hClass, 0, JSType::CONSTANT_POOL));
@@ -487,7 +481,7 @@ void GlobalEnvConstants::InitSharedMiscellaneous(JSThread *thread, ObjectFactory
                 factory->NewSEmptyNativeFunctionMethod(FunctionKind::ASYNC_GENERATOR_FUNCTION));
 }
 
-void GlobalEnvConstants::InitRootsClassesPartOne(JSHClass *hClass, ObjectFactory *factory)
+void GlobalEnvConstants::InitRootsClassesPartOne(JSHandle<JSHClass> hClass, ObjectFactory *factory)
 {
     SetConstant(ConstantIndex::JS_API_LINKED_LIST_ITERATOR_CLASS_INDEX,
                 factory->NewEcmaHClass(hClass, JSAPILinkedListIterator::SIZE, JSType::JS_API_LINKED_LIST_ITERATOR));
@@ -523,7 +517,7 @@ void GlobalEnvConstants::InitRootsClassesPartOne(JSHClass *hClass, ObjectFactory
     }
 }
 
-void GlobalEnvConstants::InitRootsClassesPartTwo(JSHClass *hClass, ObjectFactory *factory)
+void GlobalEnvConstants::InitRootsClassesPartTwo(JSHandle<JSHClass> hClass, ObjectFactory *factory)
 {
     SetConstant(ConstantIndex::JS_REALM_CLASS_INDEX,
                 factory->NewEcmaHClass(hClass, JSRealm::SIZE, JSType::JS_REALM));
@@ -563,7 +557,7 @@ void GlobalEnvConstants::InitRootsClassesPartTwo(JSHClass *hClass, ObjectFactory
 
 void GlobalEnvConstants::InitRootsClasses(ObjectFactory *factory)
 {
-    JSHClass *hClass = JSHClass::Cast(GetHClassClass().GetTaggedObject());
+    JSHandle<JSHClass> hClass(GetHandledHClassClass());
 
     InitRootsClassesPartOne(hClass, factory);
     InitRootsClassesPartTwo(hClass, factory);

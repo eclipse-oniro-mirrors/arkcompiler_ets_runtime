@@ -85,6 +85,13 @@ public:
 
     inline std::pair<uintptr_t, size_t> TryAllocateBuffer(size_t bufferSize);
 
+    // Fold the in-flight [top_, end_) tail into a free segment so a read-only
+    // region walk (SpecializedSlotSpace::IterateOverObjects) sees settled
+    // headers. Non-destructive: the allocator cursor is left untouched, so the
+    // next TryAllocate overwrites this segment header — same contract as
+    // SparseSpace/FreeListAllocator::FillBumpPointer.
+    inline void FillInFlightSegment();
+
 private:
     enum class Index : size_t {
         TopIndex = 0,

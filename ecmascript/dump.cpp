@@ -50,8 +50,6 @@ CString JSHClass::DumpJSType(JSType type)
             return "CompositeBaseClass";
         case JSType::TAGGED_ARRAY:
             return "TaggedArray";
-        case JSType::FUNC_SLOT:
-            return "FuncSlot";
         case JSType::LEXICAL_ENV:
             return "LexicalEnv";
         case JSType::WEAK_LINKED_HASH_MAP:
@@ -531,25 +529,23 @@ static void DumpCOWMutantTaggedArray(const JSThread *thread, const COWMutantTagg
     }
 }
 
-static void DumpFuncSlot(const JSThread *thread, const FuncSlot *arr, std::ostream &os)
-{
-    DISALLOW_GARBAGE_COLLECTION;
-    os << " <FuncSlot>\n";
-    for (uint32_t i = 0; i < FuncSlot::FUNC_SLOT_SIZE; i++) {
-        JSTaggedValue val(arr->Get(thread, i));
-        os << std::right << std::setw(DUMP_PROPERTY_OFFSET) << i << ": ";
-        os << std::left << std::setw(DUMP_TYPE_OFFSET) << "[JSTaggedType] : " << val.GetRawData();
-        os << "\n";
-    }
-}
-
 static void DumpConstantPoolClass(const JSThread *thread, const ConstantPool *pool, std::ostream &os)
 {
     DISALLOW_GARBAGE_COLLECTION;
-    uint32_t len = pool->GetCacheLength();
+    uint32_t cacheLen = pool->GetNumOfCacheElement();
+    uint32_t extendLen = pool->GetNumOfExtendElement();
+    uint32_t len = cacheLen + extendLen;
     os << " <ConstantPool[" << std::dec << len << "]>\n";
-    for (uint32_t i = 0; i < len; i++) {
+    for (uint32_t i = 0; i < cacheLen; i++) {
         JSTaggedValue val(pool->GetObjectFromCache(thread, i));
+        if (!val.IsHole()) {
+            os << std::right << std::setw(DUMP_PROPERTY_OFFSET) << i << ": ";
+            val.DumpTaggedValue(thread, os);
+            os << "\n";
+        }
+    }
+    for (uint32_t i = 0; i < extendLen; i++) {
+        JSTaggedValue val(pool->GetFromExtend(thread, i));
         if (!val.IsHole()) {
             os << std::right << std::setw(DUMP_PROPERTY_OFFSET) << i << ": ";
             val.DumpTaggedValue(thread, os);
@@ -673,7 +669,7 @@ static void DumpHClass(const JSThread *thread, const JSHClass *jshclass, std::os
         os << "\n";
     }
 
-    os << " - ProfileType : " << std::hex << jshclass->GetProfileType() << "\n";
+    os << " - ProfileType : " << std::hex << jshclass->GetBitField2() << "\n";
 
     os << " - Flags : " << std::setw(DUMP_TYPE_OFFSET);
     os << "IsCtor :" << std::boolalpha << jshclass->IsConstructor();
@@ -721,9 +717,6 @@ static void DumpObject(const JSThread *thread, TaggedObject *obj, std::ostream &
         case JSType::COW_MUTANT_TAGGED_ARRAY:
             DumpCOWMutantTaggedArray(thread, COWMutantTaggedArray::Cast(obj), os);
             break;
-        case JSType::FUNC_SLOT:
-            DumpFuncSlot(thread, FuncSlot::Cast(obj), os);
-            break;
         case JSType::CONSTANT_POOL:
             DumpConstantPoolClass(thread, ConstantPool::Cast(obj), os);
             break;
@@ -755,6 +748,7 @@ static void DumpObject(const JSThread *thread, TaggedObject *obj, std::ostream &
             os << "\n";
             break;
         case JSType::JS_NATIVE_POINTER:
+            JSNativePointer::Cast(obj)->Dump(thread, os);
             break;
         case JSType::JS_OBJECT:
         case JSType::JS_SHARED_OBJECT:
@@ -1778,10 +1772,10 @@ void ConstantPool::Dump(const JSThread *thread, std::ostream &os) const
 void ProfileTypeInfo::Dump(const JSThread *thread, std::ostream &os) const
 {
     DISALLOW_GARBAGE_COLLECTION;
-    uint32_t len = GetIcSlotLength();
+    uint32_t len = GetICSlotLength();
     os << " <ProfileTypeInfo[" << std::dec << len << "]>\n";
     for (uint32_t i = 0; i < len; i++) {
-        JSTaggedValue val(Get(thread, i));
+        JSTaggedValue val(GetICSlot(thread, i));
         if (!val.IsHole()) {
             os << std::right << std::setw(DUMP_PROPERTY_OFFSET) << i << ": ";
             val.DumpTaggedValue(thread, os);
@@ -2747,7 +2741,6 @@ void JSTypedArray::Dump(const JSThread *thread, std::ostream &os) const
     os << " - viewed-array-buffer: ";
     GetViewedArrayBufferOrByteArray(thread).Dump(thread, os);
     os << " - typed-array-name: ";
-    GetTypedArrayName(thread).Dump(thread, os);
     os << " - byte-length: " << GetByteLength();
     os << " - byte-offset: " << GetByteOffset();
     os << " - array-length: " << GetArrayLength();
@@ -2758,8 +2751,6 @@ void JSSharedTypedArray::Dump(const JSThread *thread, std::ostream &os) const
 {
     os << " - viewed-array-buffer: ";
     GetViewedArrayBufferOrByteArray(thread).Dump(thread, os);
-    os << " - typed-array-name: ";
-    GetTypedArrayName(thread).Dump(thread, os);
     os << " - byte-length: " << GetByteLength();
     os << " - byte-offset: " << GetByteOffset();
     os << " - array-length: " << GetArrayLength();
@@ -2840,10 +2831,6 @@ void MutantTaggedArray::Dump(const JSThread *thread, std::ostream &os) const
 void COWMutantTaggedArray::Dump(const JSThread *thread, std::ostream &os) const
 {
     DumpCOWMutantTaggedArray(thread, this, os);
-}
-void FuncSlot::Dump(const JSThread *thread, std::ostream &os) const
-{
-    DumpFuncSlot(thread, this, os);
 }
 
 // NOLINTNEXTLINE(readability-function-size)
@@ -3951,19 +3938,21 @@ void ResolvedIndexBinding::Dump(const JSThread *thread, std::ostream &os) const
 void ResolvedRecordIndexBinding::Dump(const JSThread *thread, std::ostream &os) const
 {
     os << " - Module: ";
-    GetModuleRecord(thread).Dump(thread, os);
+    os << GetModuleRecordNameString();
     os << "\n";
     os << " - AbcFileName: ";
-    GetAbcFileName(thread).Dump(thread, os);
+    os << GetAbcFileNameString();
     os << "\n";
     os << " - Index: " << GetIndex();
+    os << "\n";
+    os << " - IsUpdatedFromResolvedRecordBinding: " << GetIsUpdatedFromResolvedRecordBinding();
     os << "\n";
 }
 
 void ResolvedRecordBinding::Dump(const JSThread *thread, std::ostream &os) const
 {
     os << " - Module: ";
-    GetModuleRecord(thread).Dump(thread, os);
+    os << GetModuleRecordNameString();
     os << "\n";
     os << " - BindingName: ";
     GetBindingName(thread).Dump(thread, os);
@@ -4119,17 +4108,6 @@ static void DumpCOWMutantTaggedArrayClass(const JSThread *thread, const COWMutan
     }
 }
 
-static void DumpFuncSlotClass(const JSThread *thread, const FuncSlot *arr, std::vector<Reference> &vec)
-{
-    DISALLOW_GARBAGE_COLLECTION;
-    vec.reserve(vec.size() + FuncSlot::FUNC_SLOT_SIZE);
-    for (uint32_t i = 0; i < FuncSlot::FUNC_SLOT_SIZE; i++) {
-        JSTaggedValue val(arr->Get(thread, i));
-        CString str = ToCString(i);
-        vec.emplace_back(str, val);
-    }
-}
-
 static void DumpElementClass(const JSThread *thread, const TaggedArray *arr, std::vector<Reference> &vec)
 {
     DISALLOW_GARBAGE_COLLECTION;
@@ -4144,10 +4122,16 @@ static void DumpElementClass(const JSThread *thread, const TaggedArray *arr, std
 static void DumpConstantPoolClass(const JSThread *thread, const ConstantPool *arr, std::vector<Reference> &vec)
 {
     DISALLOW_GARBAGE_COLLECTION;
-    uint32_t len = arr->GetCacheLength();
-    vec.reserve(vec.size() + len);
-    for (uint32_t i = 0; i < len; i++) {
+    uint32_t cacheLen = arr->GetNumOfCacheElement();
+    uint32_t extendLen = arr->GetNumOfExtendElement();
+    vec.reserve(vec.size() + cacheLen + extendLen);
+    for (uint32_t i = 0; i < cacheLen; i++) {
         JSTaggedValue val(arr->GetObjectFromCache(thread, i));
+        CString str = ToCString(i);
+        vec.emplace_back(str, val);
+    }
+    for (uint32_t i = 0; i < extendLen; i++) {
+        JSTaggedValue val(arr->GetFromExtend(thread, i));
         CString str = ToCString(i);
         vec.emplace_back(str, val);
     }
@@ -4186,9 +4170,6 @@ static void DumpObject(const JSThread *thread, TaggedObject *obj, std::vector<Re
         case JSType::COW_MUTANT_TAGGED_ARRAY:
             DumpCOWMutantTaggedArrayClass(thread, COWMutantTaggedArray::Cast(obj), vec);
             break;
-        case JSType::FUNC_SLOT:
-            DumpFuncSlotClass(thread, FuncSlot::Cast(obj), vec);
-            break;
         case JSType::CONSTANT_POOL:
             DumpConstantPoolClass(thread, ConstantPool::Cast(obj), vec);
             break;
@@ -4216,6 +4197,7 @@ static void DumpObject(const JSThread *thread, TaggedObject *obj, std::vector<Re
             DumpStringClass(EcmaString::Cast(obj), vec);
             break;
         case JSType::JS_NATIVE_POINTER:
+            JSNativePointer::Cast(obj)->DumpForSnapshot(thread, vec);
             break;
         case JSType::JS_OBJECT:
         case JSType::JS_ERROR:
@@ -5035,9 +5017,80 @@ void JSObject::DumpForSnapshot(const JSThread *thread, std::vector<Reference> &v
     }
 }
 
+void JSNativePointer::Dump(const JSThread *thread, std::ostream &os) const
+{
+    void *externalPointer = GetExternalPointer();
+    if (externalPointer == nullptr) {
+        return;
+    }
+    JSTaggedType addr = reinterpret_cast<JSTaggedType>(this);
+    const auto& wrappedMap = thread->GetEcmaVM()->GetWrappedNativePointerAddrsMap();
+    auto it = wrappedMap.find(addr);
+    void *nativeAddr = nullptr;
+    if (it != wrappedMap.end()) {
+        nativeAddr = it->second;
+    } else {
+        nativeAddr = externalPointer;
+    }
+    if (nativeAddr != nullptr) {
+        os << " - ExternalPointer: " << std::hex << "0x" << reinterpret_cast<uintptr_t>(nativeAddr) << "\n";
+    }
+}
+
+void JSNativePointer::DumpForSnapshot(const JSThread *thread, std::vector<Reference> &vec) const
+{
+    void *externalPointer = GetExternalPointer();
+    if (externalPointer == nullptr) {
+        return;
+    }
+    JSTaggedType addr = reinterpret_cast<JSTaggedType>(this);
+    const auto& wrappedMap = thread->GetEcmaVM()->GetWrappedNativePointerAddrsMap();
+    auto it = wrappedMap.find(addr);
+    void *nativeAddr = nullptr;
+    if (it !=  wrappedMap.end()) {
+        nativeAddr = it->second;
+    } else {
+        nativeAddr = externalPointer;
+    }
+    if (nativeAddr != nullptr) {
+        vec.emplace_back(CString("ExternalPointer"),
+                         JSTaggedValue(static_cast<JSTaggedType>(reinterpret_cast<uintptr_t>(nativeAddr))),
+                         EdgeType::NATIVE);
+    }
+}
+
+static void ProcessNativePointerItem(const JSThread *thread, std::vector<Reference> &vec,
+                                     uint32_t index, JSTaggedValue itemValue)
+{
+    if (!itemValue.IsJSNativePointer()) {
+        return;
+    }
+    JSNativePointer *native = JSNativePointer::Cast(itemValue.GetTaggedObject());
+    void* externalPointer = native->GetExternalPointer();
+    auto cb = thread->GetEcmaVM()->GetNativeReferenceDataCallbackGetter();
+    if (cb == nullptr || externalPointer == nullptr) {
+        return;
+    }
+    void* externalData = cb(externalPointer);
+    if (externalData != nullptr) {
+        thread->GetEcmaVM()->InsertWrappedNativePointerAddrsMap(itemValue.GetRawData(), externalData);
+        vec.emplace_back(CString("NativeAddress") + CString(std::to_string(index)),
+                         JSTaggedValue(static_cast<JSTaggedType>(reinterpret_cast<uintptr_t>(externalData))),
+                         EdgeType::NATIVE);
+    }
+}
+
 void JSWrappedNapiObject::DumpForSnapshot(const JSThread *thread, std::vector<Reference> &vec) const
 {
-    vec.emplace_back(CString("NativePointers"), GetNativePointers(thread));
+    JSTaggedValue nativePoint = GetNativePointers(thread);
+    vec.emplace_back(CString("NativePointers"), nativePoint);
+    if (nativePoint.IsTaggedArray()) {
+        TaggedArray* array = TaggedArray::Cast(nativePoint.GetTaggedObject());
+        for (uint32_t i = 0; i < array->GetExtraLength(); i++) {
+            JSTaggedValue itemValue = array->Get(thread, i);
+            ProcessNativePointerItem(thread, vec, i, itemValue);
+        }
+    }
     JSObject::DumpForSnapshot(thread, vec);
 }
 
@@ -5144,10 +5197,12 @@ void VTable::DumpForSnapshot(const JSThread *thread, std::vector<Reference> &vec
 void ProfileTypeInfo::DumpForSnapshot(const JSThread *thread, std::vector<Reference> &vec) const
 {
     DISALLOW_GARBAGE_COLLECTION;
-    uint32_t len = GetIcSlotLength();
-    vec.reserve(vec.size() + len);
+    uint32_t len = GetICSlotLength();
+    vec.reserve(vec.size() + len + HEADER_TAGGED_SLOTS);
+    vec.emplace_back(CString("ExtraInfoMap"), GetExtraInfoMap(thread));
+    vec.emplace_back(CString("JitOsr"), GetJitOsr(thread));
     for (uint32_t i = 0; i < len; i++) {
-        JSTaggedValue val(Get(thread, i));
+        JSTaggedValue val(GetICSlot(thread, i));
         CString str = ToCString(i);
         vec.emplace_back(str, val);
     }
@@ -5178,11 +5233,6 @@ void MutantTaggedArray::DumpForSnapshot(const JSThread *thread, std::vector<Refe
 void COWMutantTaggedArray::DumpForSnapshot(const JSThread *thread, std::vector<Reference> &vec) const
 {
     DumpCOWMutantTaggedArrayClass(thread, this, vec);
-}
-
-void FuncSlot::DumpForSnapshot(const JSThread *thread, std::vector<Reference> &vec) const
-{
-    DumpFuncSlotClass(thread, this, vec);
 }
 
 void JSBoundFunction::DumpForSnapshot(const JSThread *thread, std::vector<Reference> &vec) const
@@ -5578,7 +5628,6 @@ void JSTypedArray::DumpForSnapshot(const JSThread *thread, std::vector<Reference
     constexpr int16_t NUM_OF_ITEMS = 5;
     vec.reserve(vec.size() + NUM_OF_ITEMS);
     vec.emplace_back(CString("viewed-array-buffer"), GetViewedArrayBufferOrByteArray(thread));
-    vec.emplace_back(CString("typed-array-name"), GetTypedArrayName(thread));
     vec.emplace_back(CString("byte-length"), JSTaggedValue(GetByteLength()));
     vec.emplace_back(CString("byte-offset"), JSTaggedValue(GetByteOffset()));
     vec.emplace_back(CString("array-length"), JSTaggedValue(GetArrayLength()));
@@ -5591,7 +5640,6 @@ void JSSharedTypedArray::DumpForSnapshot(const JSThread *thread, std::vector<Ref
     constexpr int16_t NUM_OF_ITEMS = 5;
     vec.reserve(vec.size() + NUM_OF_ITEMS);
     vec.emplace_back(CString("viewed-array-buffer"), GetViewedArrayBufferOrByteArray(thread));
-    vec.emplace_back(CString("typed-array-name"), GetTypedArrayName(thread));
     vec.emplace_back(CString("byte-length"), JSTaggedValue(GetByteLength()));
     vec.emplace_back(CString("byte-offset"), JSTaggedValue(GetByteOffset()));
     vec.emplace_back(CString("array-length"), JSTaggedValue(GetArrayLength()));
@@ -6195,7 +6243,7 @@ void ClassInfoExtractor::DumpForSnapshot(const JSThread *thread, std::vector<Ref
 void SourceTextModule::DumpForSnapshot(const JSThread *thread, std::vector<Reference> &vec) const
 {
     // please update the NUM_OF_ITEMS if you change the items below
-    constexpr int16_t NUM_OF_ITEMS = 14;
+    constexpr int16_t NUM_OF_ITEMS = 22;
     vec.reserve(vec.size() + NUM_OF_ITEMS);
     vec.emplace_back(CString("Environment"), GetEnvironment(thread));
     vec.emplace_back(CString("Namespace"), GetNamespace(thread));
@@ -6217,6 +6265,14 @@ void SourceTextModule::DumpForSnapshot(const JSThread *thread, std::vector<Refer
     vec.emplace_back(CString("HasTLA"), JSTaggedValue(GetHasTLA()));
     vec.emplace_back(CString("AsyncEvaluatingOrdinal"), JSTaggedValue(GetAsyncEvaluatingOrdinal()));
     vec.emplace_back(CString("PendingAsyncDependencies"), JSTaggedValue(GetPendingAsyncDependencies()));
+
+    CString *recordNamePtr = reinterpret_cast<CString *>(GetEcmaModuleRecordName());
+    JSTaggedValue recordNameValue(reinterpret_cast<JSTaggedType>(recordNamePtr));
+    vec.emplace_back(CString("EcmaModuleRecordName"), recordNameValue, EdgeType::NATIVE_STRING);
+
+    CString *fileNamePtr = reinterpret_cast<CString *>(GetEcmaModuleFilename());
+    JSTaggedValue fileNameValue(reinterpret_cast<JSTaggedType>(fileNamePtr));
+    vec.emplace_back(CString("EcmaModuleFileName"), fileNameValue, EdgeType::NATIVE_STRING);
 }
 
 void ImportEntry::DumpForSnapshot(const JSThread *thread, std::vector<Reference> &vec) const
@@ -6259,14 +6315,20 @@ void ResolvedIndexBinding::DumpForSnapshot(const JSThread *thread, std::vector<R
 
 void ResolvedRecordIndexBinding::DumpForSnapshot(const JSThread *thread, std::vector<Reference> &vec) const
 {
-    vec.emplace_back(CString("ModuleRecord"), GetModuleRecord(thread));
-    vec.emplace_back(CString("AbcFileName"), GetAbcFileName(thread));
+    JSTaggedValue moduleRecordValue(reinterpret_cast<JSTaggedType>(GetModuleRecordName()));
+    vec.emplace_back(CString("ModuleRecord"), moduleRecordValue, EdgeType::NATIVE_STRING);
+    CString *abcFileNamePtr = reinterpret_cast<CString *>(GetAbcFileName());
+    JSTaggedValue abcNameValue(reinterpret_cast<JSTaggedType>(abcFileNamePtr));
+    vec.emplace_back(CString("AbcFileName"), abcNameValue, EdgeType::NATIVE_STRING);
     vec.emplace_back(CString("Index"), JSTaggedValue(GetIndex()));
+    vec.emplace_back(CString("IsUpdatedFromResolvedRecordBinding"),
+                     JSTaggedValue(GetIsUpdatedFromResolvedRecordBinding()));
 }
 
 void ResolvedRecordBinding::DumpForSnapshot(const JSThread *thread, std::vector<Reference> &vec) const
 {
-    vec.emplace_back(CString("ModuleRecord"), GetModuleRecord(thread));
+    JSTaggedValue moduleRecordValue(reinterpret_cast<JSTaggedType>(GetModuleRecordName()));
+    vec.emplace_back(CString("ModuleRecord"), moduleRecordValue, EdgeType::NATIVE_STRING);
     vec.emplace_back(CString("BindingName"), GetBindingName(thread));
 }
 

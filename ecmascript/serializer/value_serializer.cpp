@@ -18,6 +18,7 @@
 #include "ecmascript/base/config.h"
 #include "ecmascript/checkpoint/thread_state_transition.h"
 #include "ecmascript/base/array_helper.h"
+#include "ecmascript/module/js_shared_module.h"
 
 namespace panda::ecmascript {
 
@@ -58,6 +59,11 @@ bool ValueSerializer::CheckObjectCanSerialize(TaggedObject *object, bool &findSh
         case JSType::JS_ARRAY_BUFFER:
         case JSType::JS_SHARED_ARRAY_BUFFER:
         case JSType::JS_API_TREE_SET:
+        case JSType::JS_API_ARRAY_LIST:
+        case JSType::JS_API_HASH_MAP:
+        case JSType::JS_API_HASH_SET:
+        case JSType::JS_API_LIST:
+        case JSType::JS_API_LINKED_LIST:
         case JSType::LINE_STRING:
         case JSType::TREE_STRING:
         case JSType::SLICED_STRING:
@@ -206,7 +212,7 @@ bool ValueSerializer::SerializeSharedObj([[maybe_unused]] TaggedObject *object)
     }
 }
 
-void ValueSerializer::SerializeObjectImpl(TaggedObject *object, bool isWeak)
+void ValueSerializer::SerializeObjectImpl(TaggedObject *object, bool isWeak, bool isCompressed)
 {
     if (notSupport_) {
         return;
@@ -217,7 +223,14 @@ void ValueSerializer::SerializeObjectImpl(TaggedObject *object, bool isWeak)
         return;
     }
     if (isWeak) {
+        // fixme: compressed pointer : support weak for compressed pointer
+        ASSERT(!isCompressed);
         data_->WriteEncodeFlag(EncodeFlag::WEAK);
+    }
+    if (isCompressed) {
+        // fixme: compressed pointer : support weak for compressed pointer
+        ASSERT(!isWeak);
+        data_->WriteEncodeFlag(EncodeFlag::COMPRESSED_POINTER);
     }
     if (SerializeReference(object) || SerializeRootObject(object)) {
         return;
@@ -289,12 +302,26 @@ void ValueSerializer::SerializeObjectImpl(TaggedObject *object, bool isWeak)
             }
             break;
         }
+        case JSType::RESOLVEDRECORDINDEXBINDING_RECORD: {
+            if (!SerializeResolvedRecordIndexBindingNativeObjects(object)) {
+                notSupport_ = true;
+                return;
+            }
+            break;
+        }
+        case JSType::RESOLVEDRECORDBINDING_RECORD: {
+            if (!SerializeResolvedRecordBindingNativeObjects(object)) {
+                notSupport_ = true;
+                return;
+            }
+            break;
+        }
         default:
             break;
     }
 
     // serialize object here
-    SerializeTaggedObject<SerializeType::VALUE_SERIALIZE>(object);
+    SerializeTaggedObject(object);
 
     // serialize epilogue
     switch (type) {
@@ -578,8 +605,7 @@ bool ValueSerializer::SerializeModuleCNativeObjects(TaggedObject *object)
         data_->WriteUint32(moduleFileName.size());
         data_->WriteRawData(reinterpret_cast<uint8_t *>(moduleFileName.data()), moduleFileName.size());
     } else {
-        LOG_ECMA(ERROR) << "ValueSerialize::SerializeModuleCNativeObjects moduleFileName is empty";
-        return false;
+        data_->WriteUint32(0);
     }
 
     CString moduleRecordName = module->GetEcmaModuleRecordNameString();
@@ -589,6 +615,12 @@ bool ValueSerializer::SerializeModuleCNativeObjects(TaggedObject *object)
         data_->WriteRawData(reinterpret_cast<uint8_t *>(moduleRecordName.data()), moduleRecordName.size());
     } else {
         data_->WriteUint32(0);
+    }
+
+    if (moduleFileName.empty() && moduleRecordName.empty()) {
+        LOG_ECMA(ERROR) << "ValueSerialize::SerializeModuleCNativeObjects moduleFileName and " <<
+             "moduleRecordName are both empty";
+        return false;
     }
 
     bool *lazyArray = module->GetLazyImportStatusArray();
@@ -609,5 +641,49 @@ bool ValueSerializer::SerializeModuleCNativeObjects(TaggedObject *object)
     }
     return true;
 }
-}  // namespace panda::ecmascript
 
+bool ValueSerializer::SerializeResolvedRecordIndexBindingNativeObjects(TaggedObject *object)
+{
+    ResolvedRecordIndexBinding *binding = ResolvedRecordIndexBinding::Cast(object);
+    const CString *moduleRecord = binding->GetModuleRecordName();
+    ASSERT(moduleRecord != nullptr);
+    data_->WriteEncodeFlag(EncodeFlag::MODULE_RECORD_NAME);
+    if (!moduleRecord->empty()) {
+        data_->WriteUint32(moduleRecord->size());
+        data_->WriteRawData(reinterpret_cast<uint8_t *>(const_cast<char *>(moduleRecord->data())),
+                            moduleRecord->size());
+    } else {
+        data_->WriteUint32(0);
+    }
+
+    // AbcFileName is an optional lazy-load hint, not the module identity key.
+    // Serialize both nullptr and empty CString as length 0, matching SourceTextModule native string fields.
+    CString abcFileName = binding->GetAbcFileNameString();
+    data_->WriteEncodeFlag(EncodeFlag::MODULE_FILE_NAME);
+    if (!abcFileName.empty()) {
+        data_->WriteUint32(abcFileName.size());
+        data_->WriteRawData(reinterpret_cast<uint8_t *>(abcFileName.data()), abcFileName.size());
+    } else {
+        data_->WriteUint32(0);
+    }
+
+    return true;
+}
+
+bool ValueSerializer::SerializeResolvedRecordBindingNativeObjects(TaggedObject *object)
+{
+    ResolvedRecordBinding *binding = ResolvedRecordBinding::Cast(object);
+    const CString *moduleRecord = binding->GetModuleRecordName();
+    ASSERT(moduleRecord != nullptr);
+    data_->WriteEncodeFlag(EncodeFlag::MODULE_RECORD_NAME);
+    if (!moduleRecord->empty()) {
+        data_->WriteUint32(moduleRecord->size());
+        data_->WriteRawData(reinterpret_cast<uint8_t *>(const_cast<char *>(moduleRecord->data())),
+                            moduleRecord->size());
+    } else {
+        data_->WriteUint32(0);
+    }
+
+    return true;
+}
+}  // namespace panda::ecmascript

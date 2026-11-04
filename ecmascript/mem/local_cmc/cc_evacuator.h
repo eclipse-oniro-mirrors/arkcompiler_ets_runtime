@@ -16,7 +16,9 @@
 #ifndef ECMASCRIPT_MEM_LOCAL_CMC_CC_EVACUATOR_H
 #define ECMASCRIPT_MEM_LOCAL_CMC_CC_EVACUATOR_H
 
+#include "ecmascript/base/config.h"
 #include "ecmascript/mem/heap.h"
+#include "ecmascript/mem/gc_root.h"
 
 namespace panda {
 namespace ecmascript {
@@ -37,6 +39,7 @@ public:
 
     TaggedObject* Copy(TaggedObject *fromObj, const MarkWord &markWord);
 private:
+    TaggedObject* CopyObject(TaggedObject *fromObj, const MarkWord &markWord);
     Heap *heap_ {nullptr};
     SlotGCAllocator *tlab_ {nullptr};
 };
@@ -57,6 +60,7 @@ public:
 
     TaggedObject* Copy(TaggedObject *fromObj, const MarkWord &markWord);
 private:
+    TaggedObject* CopyObject(TaggedObject *fromObj, const MarkWord &markWord);
     Heap *heap_ {nullptr};
     CCTlabAllocator *tlab_ {nullptr};
 };
@@ -79,16 +83,31 @@ private:
     CCEvacuator *evacuator_ {nullptr};
 };
 
+class CCConcurrentUpdateRootVisitor final {
+public:
+    inline explicit CCConcurrentUpdateRootVisitor(CCEvacuator *evacuator) : evacuator_(evacuator) {}
+    ~CCConcurrentUpdateRootVisitor() = default;
+
+    inline void VisitRoot(GCRoot &root);
+
+private:
+    CCEvacuator *evacuator_ {nullptr};
+};
+
 template<bool needUpdateLocalToShare>
 class CCUpdateVisitor final : public BaseObjectVisitor<CCUpdateVisitor<needUpdateLocalToShare>> {
 public:
     explicit CCUpdateVisitor(JSThread *thread) : thread_(thread) {}
     ~CCUpdateVisitor() = default;
 
-    inline void VisitObjectRangeImpl(BaseObject *root, uintptr_t start, uintptr_t end,
+    inline void VisitObjectRangeImpl(BaseObject *root, ObjectSlot start, ObjectSlot end,
                                      VisitObjectArea area) override;
+
+    inline void VisitCompressedObjectRangeImpl(BaseObject *root, CompressedObjectSlot start,
+                                               CompressedObjectSlot end) override;
 private:
-    inline void HandleSlot(ObjectSlot slot, Region *rootRegion);
+    template <ReferenceType refType>
+    inline void HandleSlot(ObjectSlotBase<refType> slot, Region *rootRegion);
 
     JSThread *thread_ {nullptr};
 };

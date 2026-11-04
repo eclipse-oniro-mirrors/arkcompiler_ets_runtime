@@ -17,6 +17,8 @@
 #define ECMASCRIPT_MEM_SHARED_HEAP_SHARED_GC_EVACUATOR_H
 
 #include "ecmascript/mem/heap-inl.h"
+#include "ecmascript/mem/rset_worklist_handler-inl.h"
+#include "ecmascript/mem/tlab_allocator-inl.h"
 
 namespace panda::ecmascript {
 class SharedGCEvacuator {
@@ -26,15 +28,84 @@ public:
     NO_COPY_SEMANTIC(SharedGCEvacuator);
     NO_MOVE_SEMANTIC(SharedGCEvacuator);
     void Evacuate();
+
+    void ProcessAndWaitSRegionUpdateFinished()
+    {
+        ProcessWorkloads(MAIN_THREAD_INDEX);
+    }
+
+    void CollectLocalVMRSet(EcmaVM *localVM)
+    {
+        Heap *heap = const_cast<Heap*>(localVM->GetHeap());
+        RSetWorkListHandler *handler = new RSetWorkListHandler(heap, localVM->GetJSThreadNoCheck());
+        heap->SetRSetWorkListHandler(handler);
+        handler->GetOwnerThreadUnsafe()->SetProcessingLocalToSharedRset(true);
+        rSetHandlers_.emplace_back(handler);
+    }
+
+    void MergeBackAndResetRSetWorkListHandler()
+    {
+        for (RSetWorkListHandler *handler : rSetHandlers_) {
+            handler->MergeBack();
+            delete handler;
+        }
+        rSetHandlers_.clear();
+    }
+
+    void ProcessThenMergeBackRSetFromBoundJSThread(RSetWorkListHandler *handler)
+    {
+        ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "SharedGCEvacuator::ProcessRSet", "");
+        ASSERT(JSThread::GetCurrent() == handler->GetHeap()->GetEcmaVM()->GetJSThread());
+        ASSERT(JSThread::GetCurrent()->IsInRunningState());
+        auto visitor = [this](void *mem) -> bool {
+            ObjectSlot slot(ToUintPtr(mem));
+            return UpdateObjectSlot(slot);
+        };
+        handler->ProcessAll(visitor);
+        handler->WaitFinishedThenMergeBack();
+    }
+
+    void ProcessLocalToShareRSet()
+    {
+        auto visitor = [this](void *mem) -> bool {
+            ObjectSlot slot(ToUintPtr(mem));
+            return UpdateObjectSlot(slot);
+        };
+        for (RSetWorkListHandler *handler : rSetHandlers_) {
+            ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "SharedGCEvacuator::ProcessRSet", "");
+            handler->ProcessAll(visitor);
+            // The localThread may have been released or reused.
+            auto localThread = handler->GetOwnerThreadUnsafe();
+            Runtime::GetInstance()->GCIterateThreadList([localThread](JSThread *thread) {
+                if (localThread == thread) {
+                    thread->SetProcessingLocalToSharedRset(false);
+                    return;
+                }
+            });
+        }
+    }
+
+    void FlipUpdateLocalRoot(EcmaVM *vm);
 private:
     void EvacuateRegions();
     void UpdateReference();
-    bool UpdateObjectSlot(ObjectSlot slot);
+    template <ReferenceType refType>
+    bool UpdateObjectSlot(ObjectSlotBase<refType> slot);
     void UpdateObjectSlotRoot(ObjectSlot slot);
     void ProcessObjectField(TaggedObject *object, JSHClass *hclass);
-    void UpdateCrossRegionRSet(ObjectSlot slot, Region *objectRegion);
+    void PostParallelTasks();
     void WaitFinished();
-    int CalculateUpdateThreadNum();
+    SharedTlabAllocator *GetOrCreateTlab(uint32_t index)
+    {
+        SharedTlabAllocator *tlab = sTlabs_[index];
+        if UNLIKELY(tlab == nullptr) {
+            tlab = new SharedTlabAllocator(sHeap_);
+            sTlabs_[index] = tlab;
+        }
+        return tlab;
+    }
+
+    int CalculateParallelThreadNum();
 
     class UpdateRootVisitor final : public RootVisitor {
     public:
@@ -54,7 +125,10 @@ private:
         explicit ObjectFieldCSetVisitor(SharedGCEvacuator *evacuator) : evacuator_(evacuator) {}
         ~ObjectFieldCSetVisitor() override = default;
 
-        void VisitObjectRangeImpl(BaseObject *root, uintptr_t start, uintptr_t end, VisitObjectArea area) override;
+        void VisitObjectRangeImpl(BaseObject *root, ObjectSlot start, ObjectSlot end, VisitObjectArea area) override;
+
+        void VisitCompressedObjectRangeImpl(BaseObject *root, CompressedObjectSlot start,
+                                            CompressedObjectSlot end) override;
     private:
         SharedGCEvacuator *evacuator_ {nullptr};
     };
@@ -63,7 +137,7 @@ private:
     public:
         Workload(SharedGCEvacuator *evacuator, Region *region) : evacuator_(evacuator), region_(region) {}
         virtual ~Workload() = default;
-        virtual void Process(bool isMain) = 0;
+        virtual void Process(uint32_t threadIndex) = 0;
     protected:
         SharedGCEvacuator *evacuator_ {nullptr};
         Region *region_ {nullptr};
@@ -72,52 +146,73 @@ private:
     void AddWorkload(std::unique_ptr<Workload> workload)
     {
         workloads_.emplace_back(std::move(workload));
+        totalTasks_++;
     }
 
     std::unique_ptr<Workload> GetWorkload()
     {
-        LockHolder holder(lock_);
         std::unique_ptr<Workload> workload;
-        if (!workloads_.empty()) {
-            workload = std::move(workloads_.back());
-            workloads_.pop_back();
+        size_t idx = taskIter_.fetch_add(1U, std::memory_order_relaxed);
+        if (idx < totalTasks_) {
+            workload = std::move(workloads_[idx]);
         }
         return workload;
     }
 
-    void ProcessWorkloads(bool isMain)
+    void ProcessWorkloads(uint32_t threadIndex)
     {
         std::unique_ptr<Workload> workload = GetWorkload();
         while (workload != nullptr) {
-            workload->Process(isMain);
+            workload->Process(threadIndex);
             workload = GetWorkload();
         }
-        if (!isMain) {
+        if (threadIndex != MAIN_THREAD_INDEX) {
             LockHolder holder(lock_);
             if (--parallel_ <= 0) {
                 condition_.SignalAll();
             }
+        } else {
+            WaitFinished();
+            workloads_.clear();
+            taskIter_ = 0;
+            totalTasks_ = 0;
         }
     }
+
+    class EvacuateRegionWorkload : public Workload {
+    public:
+        EvacuateRegionWorkload(SharedGCEvacuator *evacuator, Region *region, SharedHeap *sHeap, bool profilerEnabled)
+            : Workload(evacuator, region), sHeap_(sHeap), profilerEnabled_(profilerEnabled) {}
+        void Process(uint32_t threadIndex) override;
+    private:
+        SharedHeap *sHeap_ {nullptr};
+        bool profilerEnabled_ {false};
+    };
 
     class UpdateLocalReferenceWorkload : public Workload {
     public:
         UpdateLocalReferenceWorkload(SharedGCEvacuator *evacuator, Region *region) : Workload(evacuator, region) {}
-        void Process(bool isMain) override;
+        void Process(uint32_t threadIndex) override;
     };
 
     class UpdateSharedReferenceWorkload : public Workload {
     public:
         UpdateSharedReferenceWorkload(SharedGCEvacuator *evacuator, Region *region) : Workload(evacuator, region) {}
-        void Process(bool isMain) override;
+        void Process(uint32_t threadIndex) override;
     };
 
-    class UpdateReferenceTask : public common::Task {
+    class UpdateToRegionReferenceWorkload : public Workload {
     public:
-        UpdateReferenceTask(int32_t id, SharedGCEvacuator *evacuator) : common::Task(id), evacuator_(evacuator) {};
-        ~UpdateReferenceTask() override = default;
-        NO_COPY_SEMANTIC(UpdateReferenceTask);
-        NO_MOVE_SEMANTIC(UpdateReferenceTask);
+        UpdateToRegionReferenceWorkload(SharedGCEvacuator *evacuator, Region *region) : Workload(evacuator, region) {}
+        void Process(uint32_t threadIndex) override;
+    };
+
+    class ParallelTask : public common::Task {
+    public:
+        ParallelTask(int32_t id, SharedGCEvacuator *evacuator) : common::Task(id), evacuator_(evacuator) {};
+        ~ParallelTask() override = default;
+        NO_COPY_SEMANTIC(ParallelTask);
+        NO_MOVE_SEMANTIC(ParallelTask);
 
         bool Run(uint32_t threadIndex) override;
 
@@ -126,9 +221,13 @@ private:
     };
 
     SharedHeap *sHeap_ {nullptr};
+    std::array<SharedTlabAllocator*, common::MAX_TASKPOOL_THREAD_NUM + 1> sTlabs_ {};
+    std::vector<RSetWorkListHandler*> rSetHandlers_ {};
     Mutex lock_;
     ConditionVariable condition_;
     std::vector<std::unique_ptr<Workload>> workloads_;
+    std::atomic<size_t> taskIter_ {0};
+    size_t totalTasks_ {0};
     UpdateRootVisitor rootVisitor_;
     ObjectFieldCSetVisitor objectFieldCSetVisitor_;
     int parallel_ {0};

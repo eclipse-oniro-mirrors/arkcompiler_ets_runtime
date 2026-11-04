@@ -16,7 +16,7 @@
 #include "ecmascript/builtins/builtins_gc.h"
 #include "ecmascript/builtins/builtins_ark_tools.h"
 #include "ecmascript/mem/heap-inl.h"
-#include "ecmascript/js_tagged_value-inl.h"
+#include "ecmascript/js_tagged_value_wrapper-inl.h"
 #include "ecmascript/interpreter/interpreter-inl.h"
 #include "common_components/heap/heap.h"
 
@@ -105,6 +105,26 @@ JSTaggedValue BuiltinsGc::WaitForFinishGC(EcmaRuntimeCallInfo *info)
     return JSTaggedValue::Undefined();
 }
 
+static bool TriggerSharedGC(JSThread *thread, TriggerGCType cause)
+{
+    switch (cause) {
+        case SHARED_GC:
+        case SHARED_PARTIAL_GC:
+            SharedHeap::GetInstance()->CollectGarbage<TriggerGCType::SHARED_GC, GCReason::EXTERNAL_TRIGGER>(thread);
+            return true;
+        case SHARED_FULL_GC:
+            SharedHeap::GetInstance()
+                ->CollectGarbage<TriggerGCType::SHARED_FULL_GC, GCReason::EXTERNAL_TRIGGER>(thread);
+            return true;
+        case APPSPAWN_SHARED_FULL_GC:
+            SharedHeap::GetInstance()
+                ->CollectGarbage<TriggerGCType::APPSPAWN_SHARED_FULL_GC, GCReason::EXTERNAL_TRIGGER>(thread);
+            return true;
+        default:
+            return false;
+    }
+}
+
 JSTaggedValue BuiltinsGc::StartGC(EcmaRuntimeCallInfo *info)
 {
     RETURN_IF_DISALLOW_ARKTOOLS(info->GetThread());
@@ -117,24 +137,10 @@ JSTaggedValue BuiltinsGc::StartGC(EcmaRuntimeCallInfo *info)
     if (cause == GC_TYPE_LAST) {
         THROW_TYPE_ERROR_AND_RETURN(thread, "Invalid GC trigger type", JSTaggedValue::Exception());
     }
-    switch (cause) {
-        case SHARED_GC:
-        case SHARED_PARTIAL_GC:
-            SharedHeap::GetInstance()->CollectGarbage<TriggerGCType::SHARED_GC, GCReason::EXTERNAL_TRIGGER>(thread);
-            return JSTaggedValue(0);
-        case SHARED_FULL_GC:
-            SharedHeap::GetInstance()->CollectGarbage<TriggerGCType::SHARED_FULL_GC, GCReason::EXTERNAL_TRIGGER>(
-                thread);
-            return JSTaggedValue(0);
-        case APPSPAWN_SHARED_FULL_GC:
-            SharedHeap::GetInstance()
-                ->CollectGarbage<TriggerGCType::APPSPAWN_SHARED_FULL_GC, GCReason::EXTERNAL_TRIGGER>(thread);
-            return JSTaggedValue(0);
-        default:
-            break;
+    if (TriggerSharedGC(thread, cause)) {
+        return JSTaggedValue(0);
     }
     if (cause != OLD_GC) {
-        // except OLD_GC all run in place implicitly
         heap->CollectGarbage(cause, GCReason::EXTERNAL_TRIGGER);
         return JSTaggedValue(0);
     }
@@ -198,12 +204,12 @@ JSTaggedValue BuiltinsGc::AllocateArrayObject(EcmaRuntimeCallInfo *info)
         THROW_NEW_ERROR_AND_RETURN_VALUE(thread, err.GetTaggedValue(), JSTaggedValue::Exception());
     }
 
-    sizeInBytes = RoundUp(sizeInBytes, sizeof(TaggedType)) - JSArray::SIZE;
+    sizeInBytes = RoundUp(sizeInBytes, sizeof(JSTaggedType)) - JSArray::SIZE;
     if (sizeInBytes < 0) {
         sizeInBytes = 0;
     }
 
-    uint32_t numElements = static_cast<uint32_t>(sizeInBytes / sizeof(TaggedType));
+    uint32_t numElements = static_cast<uint32_t>(sizeInBytes / sizeof(JSTaggedType));
     auto array = factory->NewJSArray();
 
     if (numElements > 0) {
@@ -221,7 +227,7 @@ JSTaggedValue BuiltinsGc::AllocateArrayObject(EcmaRuntimeCallInfo *info)
 
 TriggerGCType BuiltinsGc::StringToGcType(JSThread *thread, JSTaggedValue cause)
 {
-    static_assert(GC_TYPE_LAST == 11, "Update this method after TrigerGCType change");
+    static_assert(GC_TYPE_LAST == 14, "Update this method after TrigerGCType change");
     if (JSTaggedValue::StrictEqual(thread, thread->GlobalConstants()->GetYoungGcCause(), cause)) {
         return YOUNG_GC;
     }
@@ -252,6 +258,9 @@ TriggerGCType BuiltinsGc::StringToGcType(JSThread *thread, JSTaggedValue cause)
     }
     if (JSTaggedValue::StrictEqual(thread, thread->GlobalConstants()->GetCMSGcCause(), cause)) {
         return CMS_GC;
+    }
+    if (JSTaggedValue::StrictEqual(thread, thread->GlobalConstants()->GetStickyCMSGcCause(), cause)) {
+        return STICKY_CMS_GC;
     }
     if (JSTaggedValue::StrictEqual(thread, thread->GlobalConstants()->GetLocalCCGcCause(), cause)) {
         return LOCAL_CC;

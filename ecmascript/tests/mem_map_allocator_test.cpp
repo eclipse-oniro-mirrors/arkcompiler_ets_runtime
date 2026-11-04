@@ -35,26 +35,36 @@ HWTEST_F_L0(MemMapAllocatorTest, GetMemFromList)
 {
     MemMap memMap = PageMap(HUGE_OBJECT_CAPACITY, PAGE_PROT_NONE, DEFAULT_REGION_SIZE);
     PageRelease(memMap.GetMem(), memMap.GetSize());
-    MemMapFreeList memMapFreeList;
-    memMapFreeList.Initialize(memMap);
 
-    // From FreeList
-    size_t size1 = 256 * 1024 * 1024;
-    auto mem1 = memMapFreeList.GetMemFromList(size1);
-    EXPECT_EQ(mem1.GetSize(), size1);
+    size_t cap = MemMapAllocator::GetInstance()->GetCapacity();
+    ASSERT_NE(cap, 0U);
+    // Mirror initialHugeObjectCapacity in InitializeHugeRegionMap: min(capacity_/3, INITIAL_HUGE_OBJECT_CAPACITY)
+    size_t initialHuge = (cap / 3 < INITIAL_HUGE_OBJECT_CAPACITY) ? cap / 3 : INITIAL_HUGE_OBJECT_CAPACITY;
+    size_t allocSize = AlignUp(initialHuge / 2, PageSize());
 
-    // From FreeList
-    size_t size2 = 512 * 1024 * 1024;
-    auto mem2 = memMapFreeList.GetMemFromList(size2);
-    EXPECT_EQ(mem2.GetSize(), size2);
+    constexpr size_t LOOP_TIMES = 10;
+    for (size_t i = 0; i < LOOP_TIMES; ++i) {
+        // From FreeList
+        auto mem1 = MemMapAllocator::GetInstance()->
+            Allocate(0, allocSize, DEFAULT_REGION_SIZE, "", false, false, false, false, false, false);
+        EXPECT_EQ(mem1.GetSize(), allocSize);
 
-    // From PageMap
-    size_t size3 = 512 * 1024 * 1024;
-    auto mem3 = memMapFreeList.GetMemFromList(size3);
-    EXPECT_EQ(mem3.GetSize(), size3);
+        // From FreeList
+        auto mem2 = MemMapAllocator::GetInstance()->
+            Allocate(0, allocSize, DEFAULT_REGION_SIZE, "", false, false, false, false, false, false);
+        EXPECT_EQ(mem2.GetSize(), allocSize);
 
-    memMapFreeList.AddMemToList(mem3);
-    memMapFreeList.Finalize();
+        // From PageMap
+        auto mem3 = MemMapAllocator::GetInstance()->
+            Allocate(0, allocSize, DEFAULT_REGION_SIZE, "", false, false, false, false, false, false);
+        EXPECT_EQ(mem3.GetSize(), allocSize);
+
+        thread->GetEcmaVM()->CollectGarbage(TriggerGCType::FULL_GC);
+        MemMapAllocator::GetInstance()->CacheOrFree(mem1.GetMem(), mem1.GetSize(), false, false, 0, false, false);
+        MemMapAllocator::GetInstance()->CacheOrFree(mem2.GetMem(), mem2.GetSize(), false, false, 0, false, false);
+        MemMapAllocator::GetInstance()->CacheOrFree(mem3.GetMem(), mem3.GetSize(), false, false, 0, false, false);
+        thread->GetEcmaVM()->CollectGarbage(TriggerGCType::FULL_GC);
+    }
 }
 
 HWTEST_F_L0(MemMapAllocatorTest, GetMemOverflow)
@@ -77,11 +87,141 @@ HWTEST_F_L0(MemMapAllocatorTest, AsyncFreeTest)
                                                          ToSpaceTypeName(space->GetSpaceType()),
                                                          false, false, false, false, false, false);
     EXPECT_EQ(mem.GetSize(), TEST_SIZE);
-    MemMapAllocator::GetInstance()->DecreaseMemUsage(TEST_SIZE, false);
+    MemMapAllocator::GetInstance()->DecreaseMemMapTotalSize(TEST_SIZE);
     MemMapAllocator::GetInstance()->AsyncFree(mem.GetMem(), TEST_SIZE, false, false, false);
     MemMap mem2 = MemMapAllocator::GetInstance()->Allocate(thread->GetThreadId(), TEST_SIZE, DEFAULT_REGION_SIZE,
                                                          ToSpaceTypeName(space->GetSpaceType()),
                                                          false, false, false, false, false, false);
     EXPECT_EQ(mem2.GetSize(), TEST_SIZE);
+}
+
+HWTEST_F_L0(MemMapAllocatorTest, InitialMemPool_RegularWithPageTag)
+{
+    Heap *heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    SemiSpace *space = heap->GetNewSpace();
+    constexpr size_t TEST_SIZE = DEFAULT_REGION_SIZE;
+    MemMap mem = MemMapAllocator::GetInstance()->Allocate(
+        thread->GetThreadId(), TEST_SIZE, DEFAULT_REGION_SIZE,
+        ToSpaceTypeName(space->GetSpaceType()),
+        true, false, false, false, true, false);
+    EXPECT_NE(mem.GetMem(), nullptr);
+    EXPECT_EQ(mem.GetSize(), TEST_SIZE);
+}
+
+HWTEST_F_L0(MemMapAllocatorTest, InitialMemPool_RegularWithoutPageTag)
+{
+    Heap *heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    SemiSpace *space = heap->GetNewSpace();
+    constexpr size_t TEST_SIZE = DEFAULT_REGION_SIZE;
+    MemMap mem = MemMapAllocator::GetInstance()->Allocate(
+        thread->GetThreadId(), TEST_SIZE, DEFAULT_REGION_SIZE,
+        ToSpaceTypeName(space->GetSpaceType()),
+        true, false, false, false, false, false);
+    EXPECT_NE(mem.GetMem(), nullptr);
+    EXPECT_EQ(mem.GetSize(), TEST_SIZE);
+}
+
+HWTEST_F_L0(MemMapAllocatorTest, InitialMemPool_CompressWithPageTag)
+{
+    Heap *heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    NonMovableSpace *space = heap->GetNonMovableSpace();
+    constexpr size_t TEST_SIZE = DEFAULT_REGION_SIZE;
+    MemMap mem = MemMapAllocator::GetInstance()->Allocate(
+        thread->GetThreadId(), TEST_SIZE, DEFAULT_REGION_SIZE,
+        ToSpaceTypeName(space->GetSpaceType()),
+        true, true, false, false, true, false);
+    EXPECT_NE(mem.GetMem(), nullptr);
+    EXPECT_EQ(mem.GetSize(), TEST_SIZE);
+}
+
+HWTEST_F_L0(MemMapAllocatorTest, InitialMemPool_CompressWithoutPageTag)
+{
+    Heap *heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    NonMovableSpace *space = heap->GetNonMovableSpace();
+    constexpr size_t TEST_SIZE = DEFAULT_REGION_SIZE;
+    MemMap mem = MemMapAllocator::GetInstance()->Allocate(
+        thread->GetThreadId(), TEST_SIZE, DEFAULT_REGION_SIZE,
+        ToSpaceTypeName(space->GetSpaceType()),
+        true, true, false, false, false, false);
+    EXPECT_NE(mem.GetMem(), nullptr);
+    EXPECT_EQ(mem.GetSize(), TEST_SIZE);
+}
+
+HWTEST_F_L0(MemMapAllocatorTest, InitialMemPool_MachineCodeWithPageTag)
+{
+    Heap *heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    MachineCodeSpace *space = heap->GetMachineCodeSpace();
+    constexpr size_t TEST_SIZE = DEFAULT_REGION_SIZE;
+    MemMap mem = MemMapAllocator::GetInstance()->Allocate(
+        thread->GetThreadId(), TEST_SIZE, DEFAULT_REGION_SIZE,
+        ToSpaceTypeName(space->GetSpaceType()),
+        true, false, true,
+        Jit::GetInstance()->IsEnableJitFort(), true, false);
+    EXPECT_NE(mem.GetMem(), nullptr);
+    EXPECT_EQ(mem.GetSize(), TEST_SIZE);
+}
+
+HWTEST_F_L0(MemMapAllocatorTest, InitialMemPool_MachineCodeWithoutPageTag)
+{
+    Heap *heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    MachineCodeSpace *space = heap->GetMachineCodeSpace();
+    constexpr size_t TEST_SIZE = DEFAULT_REGION_SIZE;
+    MemMap mem = MemMapAllocator::GetInstance()->Allocate(
+        thread->GetThreadId(), TEST_SIZE, DEFAULT_REGION_SIZE,
+        ToSpaceTypeName(space->GetSpaceType()),
+        true, false, true,
+        Jit::GetInstance()->IsEnableJitFort(), false, false);
+    EXPECT_NE(mem.GetMem(), nullptr);
+    EXPECT_EQ(mem.GetSize(), TEST_SIZE);
+}
+
+HWTEST_F_L0(MemMapAllocatorTest, InitialMemPool_HugeObjectWithPageTag)
+{
+    Heap *heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    HugeObjectSpace *space = heap->GetHugeObjectSpace();
+    constexpr size_t TEST_SIZE = 2_MB;
+    MemMap mem = MemMapAllocator::GetInstance()->Allocate(
+        thread->GetThreadId(), TEST_SIZE, DEFAULT_REGION_SIZE,
+        ToSpaceTypeName(space->GetSpaceType()),
+        false, false, false, false, true, false);
+    EXPECT_EQ(mem.GetSize(), TEST_SIZE);
+}
+
+HWTEST_F_L0(MemMapAllocatorTest, InitialMemPool_HugeObjectWithoutPageTag)
+{
+    Heap *heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    HugeObjectSpace *space = heap->GetHugeObjectSpace();
+    constexpr size_t TEST_SIZE = 2_MB;
+    MemMap mem = MemMapAllocator::GetInstance()->Allocate(
+        thread->GetThreadId(), TEST_SIZE, DEFAULT_REGION_SIZE,
+        ToSpaceTypeName(space->GetSpaceType()),
+        false, false, false, false, false, false);
+    EXPECT_EQ(mem.GetSize(), TEST_SIZE);
+}
+
+HWTEST_F_L0(MemMapAllocatorTest, InitialMemPool_HugeMachineCodeWithPageTag)
+{
+    Heap *heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    HugeMachineCodeSpace *space = heap->GetHugeMachineCodeSpace();
+    constexpr size_t TEST_SIZE = 2_MB;
+    MemMap mem = MemMapAllocator::GetInstance()->Allocate(
+        thread->GetThreadId(), TEST_SIZE, DEFAULT_REGION_SIZE,
+        ToSpaceTypeName(space->GetSpaceType()),
+        false, false, true,
+        Jit::GetInstance()->IsEnableJitFort(), true, false);
+    EXPECT_EQ(mem.GetSize(), TEST_SIZE);
+}
+
+HWTEST_F_L0(MemMapAllocatorTest, InitialMemPool_HugeMachineCodeWithoutPageTag)
+{
+    Heap *heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    HugeMachineCodeSpace *space = heap->GetHugeMachineCodeSpace();
+    constexpr size_t TEST_SIZE = 2_MB;
+    MemMap mem = MemMapAllocator::GetInstance()->Allocate(
+        thread->GetThreadId(), TEST_SIZE, DEFAULT_REGION_SIZE,
+        ToSpaceTypeName(space->GetSpaceType()),
+        false, false, true,
+        Jit::GetInstance()->IsEnableJitFort(), false, false);
+    EXPECT_EQ(mem.GetSize(), TEST_SIZE);
 }
 }  // namespace panda::test

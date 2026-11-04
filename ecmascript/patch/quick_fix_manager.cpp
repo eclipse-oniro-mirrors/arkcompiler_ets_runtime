@@ -16,7 +16,7 @@
 
 #include "ecmascript/global_env_constants-inl.h"
 #include "ecmascript/jspandafile/js_pandafile_manager.h"
-#include "ecmascript/js_tagged_value-inl.h"
+#include "ecmascript/js_tagged_value_wrapper-inl.h"
 #include "ecmascript/module/module_path_helper.h"
 
 namespace panda::ecmascript {
@@ -35,6 +35,9 @@ void QuickFixManager::RegisterQuickFixQueryFunc(const std::function<bool(std::st
 
 void QuickFixManager::LoadPatchIfNeeded(JSThread *thread, const JSPandaFile *baseFile)
 {
+#if defined(CROSS_PLATFORM) && !defined(ECMASCRIPT_SUPPORT_DEBUGGER)
+    return;
+#else
     // callback and load patch.
     if (!HasQueryQuickFixInfoFunc()) {
         return;
@@ -75,11 +78,16 @@ void QuickFixManager::LoadPatchIfNeeded(JSThread *thread, const JSPandaFile *bas
     }
     thread->GetEcmaVM()->SetStageOfColdReload(StageOfColdReload::IS_COLD_RELOAD);
     methodInfos_.emplace(baseFileName, std::move(patchInfo));
+#endif
 }
 
 PatchErrorCode QuickFixManager::LoadPatch(JSThread *thread, const std::string &patchFileName,
                                           const std::string &baseFileName)
 {
+#if defined(CROSS_PLATFORM) && !defined(ECMASCRIPT_SUPPORT_DEBUGGER)
+    LOG_ECMA(INFO) << "LoadPatch is not supported in cross-platform mode without debugger";
+    return PatchErrorCode::MODIFY_IMPORT_EXPORT_NOT_SUPPORT;
+#else
     LOG_ECMA(INFO) << "Load patch, patch: " << patchFileName << ", base:" << baseFileName;
     if (methodInfos_.find(baseFileName.c_str()) != methodInfos_.end()) {
         LOG_ECMA(ERROR) << "Cannot repeat load patch!";
@@ -117,12 +125,17 @@ PatchErrorCode QuickFixManager::LoadPatch(JSThread *thread, const std::string &p
     methodInfos_.emplace(baseFileName.c_str(), patchInfo);
     LOG_ECMA(INFO) << "Load patch success!";
     return PatchErrorCode::SUCCESS;
+#endif
 }
 
 PatchErrorCode QuickFixManager::LoadPatch(JSThread *thread,
                                           const std::string &patchFileName, uint8_t *patchBuffer, size_t patchSize,
                                           const std::string &baseFileName, uint8_t *baseBuffer, size_t baseSize)
 {
+#if defined(CROSS_PLATFORM) && !defined(ECMASCRIPT_SUPPORT_DEBUGGER)
+    LOG_ECMA(INFO) << "LoadPatch is not supported in cross-platform mode without debugger";
+    return PatchErrorCode::MODIFY_IMPORT_EXPORT_NOT_SUPPORT;
+#else
     LOG_ECMA(INFO) << "Load patch, patch: " << patchFileName << ", base:" << baseFileName;
     if (methodInfos_.find(baseFileName.c_str()) != methodInfos_.end()) {
         LOG_ECMA(ERROR) << "Cannot repeat load patch!";
@@ -157,10 +170,15 @@ PatchErrorCode QuickFixManager::LoadPatch(JSThread *thread,
     methodInfos_.emplace(baseFileName.c_str(), patchInfo);
     LOG_ECMA(INFO) << "Load patch success!";
     return PatchErrorCode::SUCCESS;
+#endif
 }
 
 PatchErrorCode QuickFixManager::UnloadPatch(JSThread *thread, const std::string &patchFileName)
 {
+#if defined(CROSS_PLATFORM) && !defined(ECMASCRIPT_SUPPORT_DEBUGGER)
+    LOG_ECMA(INFO) << "UnloadPatch is not supported in cross-platform mode without debugger";
+    return PatchErrorCode::MODIFY_IMPORT_EXPORT_NOT_SUPPORT;
+#else
     LOG_ECMA(INFO) << "Unload patch, patch: " << patchFileName;
     CString baseFileName;
     for (const auto &item : methodInfos_) {
@@ -184,10 +202,14 @@ PatchErrorCode QuickFixManager::UnloadPatch(JSThread *thread, const std::string 
     methodInfos_.erase(baseFileName.c_str());
     LOG_ECMA(INFO) << "Unload patch success!";
     return PatchErrorCode::SUCCESS;
+#endif
 }
 
 JSTaggedValue QuickFixManager::CheckAndGetPatch(JSThread *thread, const JSPandaFile *baseFile, EntityId baseMethodId)
 {
+#if defined(CROSS_PLATFORM) && !defined(ECMASCRIPT_SUPPORT_DEBUGGER)
+    return JSTaggedValue::Hole();
+#else
     if (methodInfos_.empty()) {
         return JSTaggedValue::Hole();
     }
@@ -213,7 +235,8 @@ JSTaggedValue QuickFixManager::CheckAndGetPatch(JSThread *thread, const JSPandaF
     ASSERT(patchFile != nullptr);
 
     EcmaVM *vm = thread->GetEcmaVM();
-    JSHandle<Method> method = vm->GetFactory()->NewSMethod(patchMethodLiteral);
+    JSHandle<Method> method = vm->GetFactory()->NewSMethod(patchMethodLiteral, SHARED_OLD_SPACE,
+                                                           patchFile.get());
     JSHandle<ConstantPool> newConstpool = vm->FindOrCreateConstPool(
         patchFile.get(), patchMethodLiteral->GetMethodId());
     method->SetConstantPool(thread, newConstpool);
@@ -229,6 +252,7 @@ JSTaggedValue QuickFixManager::CheckAndGetPatch(JSThread *thread, const JSPandaF
         }
     }
     return method.GetTaggedValue();
+#endif
 }
 
 bool QuickFixManager::IsQuickFixCausedException(JSThread *thread,

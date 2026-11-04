@@ -20,6 +20,27 @@
 
 namespace panda::ecmascript {
 class Heap;
+class SpecializedSlotSpace;
+class SharedLocalSpace;
+
+class SpecializedSlotTlabAllocator {
+public:
+    inline explicit SpecializedSlotTlabAllocator(SpecializedSlotSpace *space);
+    ~SpecializedSlotTlabAllocator() = default;
+
+    inline uintptr_t Allocate();
+    inline void Reset(SpecializedSlotSpace *space);
+    inline void Finalize();
+
+private:
+    inline void Discard();
+    inline uintptr_t Refill();
+
+    SpecializedSlotSpace *space_ {nullptr};
+    size_t slotSize_ {0};
+    uintptr_t top_ {0};
+    uintptr_t end_ {0};
+};
 
 class TlabAllocatorBase {
 public:
@@ -49,17 +70,21 @@ private:
     inline uintptr_t AllocateInYoungSpace(size_t size);
     inline uintptr_t AllocateInOldSpace(size_t size);
     inline uintptr_t AllocateInCompressSpace(size_t size);
+    inline uintptr_t AllocateInNonMovableSpace(size_t size);
 
     inline bool ExpandYoung();
     inline bool ExpandCompressFromOld(size_t size);
+    inline void ExpandNonMovable();
 
     Heap *heap_;
 
     bool enableExpandYoung_;
     bool enableStealOldRegion_;
     BumpPointerAllocator youngAllocator_;
+    BumpPointerAllocator nonMovableAllocator_ {};
 
     LocalSpace *localSpace_;
+    NonMovableSpace *nonMovableSpace_ {nullptr};
 };
 
 class CCTlabAllocator : public TlabAllocatorBase {
@@ -97,6 +122,11 @@ public:
     inline void Finalize();
 
     inline uintptr_t Allocate(size_t size, MemSpaceType space);
+
+    SharedLocalSpace *GetSharedLocalSpace() const
+    {
+        return sLocalSpace_;
+    }
 
 private:
     inline uintptr_t AllocateInCompressSpace(size_t size);

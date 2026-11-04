@@ -19,6 +19,7 @@
 #include <atomic>
 #include <cstdint>
 #include <fstream>
+#include <sstream>
 #include <sys/time.h>
 
 #include "ecmascript/dfx/hprof/heap_profiler.h"
@@ -26,7 +27,7 @@
 #include "ecmascript/dfx/hprof/string_hashmap.h"
 #include "ecmascript/js_hclass.h"
 #include "ecmascript/js_object.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/jspandafile/method_literal.h"
 #include "ecmascript/mem/c_containers.h"
 #include "ecmascript/dfx/hprof/file_stream.h"
@@ -54,17 +55,20 @@ enum class NodeType {
     SLICEDSTRING,
     SYMBOL,
     BIGINT,
+    CLASS,
     FRAMEWORK,
-    HANDLE,
+    ROOT,
     DEFAULT = NATIVE,
 };
 
-enum class EdgeType { CONTEXT, ELEMENT, PROPERTY, INTERNAL, HIDDEN, SHORTCUT, WEAK, DEFAULT = PROPERTY };
+enum class EdgeType {
+    CONTEXT, ELEMENT, PROPERTY, INTERNAL, HIDDEN, SHORTCUT, WEAK, NATIVE, NATIVE_STRING, XREF, DEFAULT = PROPERTY
+};
 
-class Node {
+class HprofNode {
 public:
-    Node(NodeId id, uint32_t index, const CString *name, NodeType type, size_t size, size_t nativeSize,
-         uint32_t traceId, JSTaggedType address, bool isLive = true)
+    HprofNode(NodeId id, uint32_t index, const CString *name, NodeType type, size_t size, size_t nativeSize,
+              uint32_t traceId, JSTaggedType address, bool isLive = true)
         : id_(id),
           index_(index),
           name_(name),
@@ -151,19 +155,27 @@ public:
     {
         isLive_ = isLive;
     }
+    bool IsDynamic() const
+    {
+        return isDynamic_;
+    }
+    void SetDynamic(bool isDynamic)
+    {
+        isDynamic_ = isDynamic;
+    }
     void SetTraceId(uint32_t traceId)
     {
         traceId_ = traceId;
     }
-    static Node *NewNode(Chunk &chunk, NodeId id, size_t index, const CString *name, NodeType type, size_t size,
-                         size_t nativeSize, JSTaggedType entry, bool isLive = true);
+    static HprofNode *NewNode(Chunk &chunk, NodeId id, size_t index, const CString *name, NodeType type, size_t size,
+                              size_t nativeSize, JSTaggedType entry, bool isLive = true);
     template<typename T>
     static JSTaggedType NewAddress(T *addr)
     {
         return reinterpret_cast<JSTaggedType>(addr);
     }
     static constexpr int NODE_FIELD_COUNT = 8;
-    ~Node() = default;
+    ~HprofNode() = default;
 
 private:
     NodeId id_ {0};  // Range from 1
@@ -176,23 +188,24 @@ private:
     uint32_t traceId_ {0};
     JSTaggedType address_ {0};
     bool isLive_ {true};
+    bool isDynamic_ {true};  // true = dynamic heap node, false = static heap node
 };
 
 class Edge {
 public:
-    Edge(EdgeType type, Node *from, Node *to, CString *name)
+    Edge(EdgeType type, HprofNode *from, HprofNode *to, CString *name)
         : edgeType_(type), from_(from), to_(to), name_(name) {}
-    Edge(EdgeType type, Node *from, Node *to, uint32_t index)
+    Edge(EdgeType type, HprofNode *from, HprofNode *to, uint32_t index)
         : edgeType_(type), from_(from), to_(to), index_(index) {}
     EdgeType GetType() const
     {
         return edgeType_;
     }
-    const Node *GetFrom() const
+    const HprofNode *GetFrom() const
     {
         return from_;
     }
-    const Node *GetTo() const
+    const HprofNode *GetTo() const
     {
         return to_;
     }
@@ -211,23 +224,23 @@ public:
         ASSERT(GetType() != EdgeType::ELEMENT);
         name_ = name;
     }
-    void UpdateFrom(Node *node)
+    void UpdateFrom(HprofNode *node)
     {
         from_ = node;
     }
-    void UpdateTo(Node *node)
+    void UpdateTo(HprofNode *node)
     {
         to_ = node;
     }
-    static Edge *NewEdge(Chunk &chunk, EdgeType type, Node *from, Node *to, CString *name);
-    static Edge *NewEdge(Chunk &chunk, EdgeType type, Node *from, Node *to, uint32_t index);
+    static Edge *NewEdge(Chunk &chunk, EdgeType type, HprofNode *from, HprofNode *to, CString *name);
+    static Edge *NewEdge(Chunk &chunk, EdgeType type, HprofNode *from, HprofNode *to, uint32_t index);
     static constexpr int EDGE_FIELD_COUNT = 3;
     ~Edge() = default;
 
 private:
     EdgeType edgeType_ {EdgeType::DEFAULT};
-    Node *from_ {nullptr};
-    Node *to_ {nullptr};
+    HprofNode *from_ {nullptr};
+    HprofNode *to_ {nullptr};
     union {
         CString *name_;
         uint32_t index_;
@@ -293,13 +306,13 @@ public:
     ~HeapEntryMap() = default;
     NO_MOVE_SEMANTIC(HeapEntryMap);
     NO_COPY_SEMANTIC(HeapEntryMap);
-    Node *FindOrInsertNode(Node *node);
-    Node *FindAndEraseNode(JSTaggedType addr);
-    Node *FindEntry(JSTaggedType addr);
-    void InsertEntry(Node *node);
+    HprofNode *FindOrInsertNode(HprofNode *node);
+    HprofNode *FindAndEraseNode(JSTaggedType addr);
+    HprofNode *FindEntry(JSTaggedType addr);
+    void InsertEntry(HprofNode *node);
 
 private:
-    CUnorderedMap<JSTaggedType, Node *> nodesMap_ {};
+    CUnorderedMap<JSTaggedType, HprofNode *> nodesMap_ {};
 };
 
 struct FunctionInfo {
@@ -413,16 +426,23 @@ public:
     NO_COPY_SEMANTIC(HeapSnapshot);
     HeapSnapshot(const EcmaVM *vm, StringHashMap *stringTable, const DumpSnapShotOption &dumpOption,
                  const bool trackAllocations, EntryIdMap *entryIdMap)
-        : vm_(vm), stringTable_(stringTable), isVmMode_(dumpOption.isVmMode), isPrivate_(dumpOption.isPrivate),
-          captureNumericValue_(dumpOption.captureNumericValue), trackAllocations_(trackAllocations),
+        : vm_(vm), stringTable_(stringTable), isVmMode_(dumpOption.isVmMode),
+          captureNumericValue_(dumpOption.captureNumericValue), isPrivate_(dumpOption.isPrivate),
+          trackAllocations_(trackAllocations),
           entryIdMap_(entryIdMap), chunk_(vm->GetNativeAreaAllocator()) {}
-    ~HeapSnapshot();
+    HeapSnapshot(const EcmaVM *vm, StringHashMap *stringTable, const DumpSnapShotOption &dumpOption,
+                 const bool trackAllocations, EntryIdMap *entryIdMap, NativeAreaAllocator *allocator)
+        : vm_(vm), stringTable_(stringTable), isVmMode_(dumpOption.isVmMode),
+          captureNumericValue_(dumpOption.captureNumericValue), isPrivate_(dumpOption.isPrivate),
+          trackAllocations_(trackAllocations),
+          entryIdMap_(entryIdMap), chunk_(allocator) {}
+    virtual ~HeapSnapshot();
     bool BuildUp(bool isSimplify = false);
     bool Verify();
 
     void PrepareSnapshot();
     void UpdateNodes(bool isInFinish = false);
-    Node *AddNode(TaggedObject *address, size_t size);
+    HprofNode *AddNode(TaggedObject *address, size_t size);
     void MoveNode(uintptr_t address, TaggedObject *forwardAddress, size_t size);
     void RecordSampleTime();
     bool FinishSnapshot();
@@ -457,11 +477,11 @@ public:
     {
         totalNodesSize_ -= size;
     }
-    CString *GenerateNodeName(TaggedObject *entry);
+    CString *GenerateNodeName(TaggedObject *entry, bool needProxySuffix = false);
     static CString GetNodeName(JSType type, bool isVmMode);
     CString GetProxyClassNameSuffix(TaggedObject *entry);
     NodeType GenerateNodeType(TaggedObject *entry);
-    const CVector<Node *> *GetNodes() const
+    const CVector<HprofNode *> *GetNodes() const
     {
         return &nodes_;
     }
@@ -514,7 +534,11 @@ public:
     {
         JSTaggedValue entry(obj);
         if (entry.IsOnlyJSObject()) {
-            return stringTable_->InsertStrAndGetStringId(ParseObjectName(obj));
+            CString objectName = ParseObjectName(obj);
+            if (objectName == "JSObject") {
+                return 1;
+            }
+            return stringTable_->InsertStrAndGetStringId(objectName);
         }
         if (entry.IsJSFunction()) {
             return stringTable_->InsertStrAndGetStringId(ParseFunctionName(obj, true));
@@ -538,49 +562,79 @@ public:
         return stringTable_->InsertStrAndGetStringId(str);
     }
 
+protected:
+    virtual void FillNodes(bool isInFinish = false, bool isSimplify = false);
+    HprofNode *GenerateNode(JSTaggedValue entry, size_t size = 0,
+                            bool isInFinish = false, bool isSimplify = false, bool isBinMod = false,
+                            bool needProxySuffix = false);
+    HprofNode *InsertNodeUnique(HprofNode *node);
+    Edge *InsertEdgeUnique(Edge *edge);
+    HprofNode *CreateSpecificSyntheticRoot(const CUnorderedSet<HprofNode *> &specificRootSet,
+                                        const CString &rootNamePrefix, size_t insertPosition);
+    void ProcessNativeEdge(const Reference &it, HprofNode *entryFrom);
+    void ProcessRegularEdge(const Reference &it, HprofNode *entryFrom, bool isSimplify);
+    void ProcessNativeStringEdge(const Reference &it, HprofNode *entryFrom);
+    void ReindexAllNodes();
+
+    const EcmaVM *vm_;
+    StringHashMap *stringTable_ {nullptr};
+    bool isVmMode_ {true};
+    bool captureNumericValue_ {false};
+
 private:
-    void FillNodes(bool isInFinish = false, bool isSimplify = false);
-    Node *GenerateNode(JSTaggedValue entry, size_t size = 0,
-                       bool isInFinish = false, bool isSimplify = false, bool isBinMod = false);
-    Node *HandleStringNode(JSTaggedValue &entry, size_t &size, bool &isInFinish, bool isBinMod);
-    Node *HandleFunctionNode(JSTaggedValue &entry, size_t &size, bool &isInFinish);
-    Node *HandleObjectNode(JSTaggedValue &entry, size_t &size, bool &isInFinish);
-    Node *HandleBaseClassNode(size_t size, bool idExist, NodeId &sequenceId,
-                              TaggedObject* obj, JSTaggedType &addr);
+    bool isPrivate_ {false};
+    bool trackAllocations_ {false};
+
+protected:
+    uint32_t nodeCount_ {0};
+    HeapEntryMap entryMap_;
+    EntryIdMap* entryIdMap_;
+    Chunk chunk_;
+    CVector<HprofNode *> nodes_ {};
+    CUnorderedSet<HprofNode *> localHandleRoots_ {};
+    CUnorderedSet<HprofNode *> globalHandleRoots_ {};
+    CUnorderedSet<HprofNode *> vmRoots_ {};
+    CUnorderedSet<HprofNode *> frameRoots_ {};
+    // The address of the native pointer storing the reference to the ArkTS object
+    CVector<HprofNode *> nativeAddressNodes_ {};
+
+private:
+    HprofNode *HandleStringNode(JSTaggedValue &entry, size_t &size, bool &isInFinish, bool isBinMod);
+    HprofNode *HandleFunctionNode(JSTaggedValue &entry, size_t &size, bool &isInFinish);
+    HprofNode *HandleObjectNode(JSTaggedValue &entry, size_t &size, bool &isInFinish);
+    HprofNode *HandleBaseClassNode(size_t size, bool idExist, NodeId &sequenceId,
+                                   TaggedObject* obj, JSTaggedType &addr, bool needProxySuffix = false);
     CString GeneratePrimitiveNameString(JSTaggedValue &entry);
-    Node *GeneratePrivateStringNode(size_t size);
-    Node *GenerateStringNode(JSTaggedValue entry, size_t size, bool isInFinish = false, bool isBinMod = false);
-    Node *GenerateFunctionNode(JSTaggedValue entry, size_t size, bool isInFinish = false);
-    Node *GenerateObjectNode(JSTaggedValue entry, size_t size, bool isInFinish = false);
+    HprofNode *GeneratePrivateStringNode(size_t size);
+    HprofNode *GenerateStringNode(JSTaggedValue entry, size_t size, bool isInFinish = false, bool isBinMod = false);
+    HprofNode *GenerateFunctionNode(JSTaggedValue entry, size_t size, bool isInFinish = false);
+    HprofNode *GenerateObjectNode(JSTaggedValue entry, size_t size, bool isInFinish = false);
     void FillEdges(bool isSimplify = false);
-    void RenameFunction(const CString &edgeName, Node *entryFrom, Node *entryTo);
+    void FillGlobalEdges();
+    void RenameFunction(const CString &edgeName, HprofNode *entryFrom, HprofNode *entryTo);
     CString ParseFunctionName(TaggedObject *obj, bool isRawHeap = false);
     const CString ParseObjectName(TaggedObject *obj);
 
-    Node *InsertNodeUnique(Node *node);
-    void EraseNodeUnique(Node *node);
-    Edge *InsertEdgeUnique(Edge *edge);
+    void EraseNodeUnique(HprofNode *node);
     void AddSyntheticRoot();
-    void CreateSyntheticRootToRootEdges(Node *syntheticRoot, CVector<Edge *> &rootEdges);
-    Node *InsertNodeAt(size_t pos, Node *node);
+    void CreateSyntheticRootToRootEdges(HprofNode *syntheticRoot, CVector<Edge *> &rootEdges);
+    HprofNode *InsertNodeAt(size_t pos, HprofNode *node);
     Edge *InsertEdgeAt(size_t pos, Edge *edge);
 
-    Node *CreateSpecificSyntheticRoot(const CUnorderedSet<Node *> &specificRootSet,
-                                      const CString &rootNamePrefix, size_t insertPosition);
-    void CreateSyntheticRootToSpecificSyntheticRootEdge(Node *syntheticRoot, Node *handleSyntheticRoot,
+    void CreateSyntheticRootToSpecificSyntheticRootEdge(HprofNode *syntheticRoot, HprofNode *handleSyntheticRoot,
                                                         CVector<Edge *> &rootEdges);
-    void CreateSpecificSyntheticRootToRootEdges(Node *specificSyntheticRoot,
-                                                const CUnorderedSet<Node *> &specificRootSet,
+    void CreateSpecificSyntheticRootToRootEdges(HprofNode *specificSyntheticRoot,
+                                                const CUnorderedSet<HprofNode *> &specificRootSet,
                                                 CVector<Edge *> &rootEdges);
-    void ReindexAllNodes();
 
     void LogLeakedLocalHandleBackTrace(ObjectSlot slot);
     void LogLeakedLocalHandleBackTrace(common::RefField<> &refField);
 
     class GenerateNodeRootVisitor final : public RootVisitor {
     public:
-        GenerateNodeRootVisitor(HeapSnapshot &snapshot, bool isInFinish, bool isSimplify)
-            : snapshot_(snapshot), isInFinish_(isInFinish), isSimplify_(isSimplify) {}
+        GenerateNodeRootVisitor(HeapSnapshot &snapshot, bool isInFinish, bool isSimplify, bool needProxySuffix)
+            : snapshot_(snapshot), isInFinish_(isInFinish), isSimplify_(isSimplify),
+              needProxySuffix_(needProxySuffix) {}
         ~GenerateNodeRootVisitor() override = default;
 
         void VisitRoot(Root type, ObjectSlot slot) override;
@@ -588,16 +642,17 @@ private:
         void VisitBaseAndDerivedRoot(Root type, ObjectSlot base, ObjectSlot derived, uintptr_t baseOldObject) override;
 
     private:
-        void ProcessRoot(Root type, const JSTaggedValue &value);
+        void ProcessRoot(Root type, const JSTaggedValue &value, ObjectSlot slot);
 
         HeapSnapshot &snapshot_;
         bool isInFinish_;
         bool isSimplify_;
+        bool needProxySuffix_;
     };
 
     class EdgeBuilderRootVisitor : public RootVisitor {
     public:
-        EdgeBuilderRootVisitor(HeapSnapshot &snapshot, Node *syntheticRoot, CVector<Edge *> &rootEdges)
+        EdgeBuilderRootVisitor(HeapSnapshot &snapshot, HprofNode *syntheticRoot, CVector<Edge *> &rootEdges)
             : snapshot_(snapshot), syntheticRoot_(syntheticRoot), rootEdges_(rootEdges) {}
         ~EdgeBuilderRootVisitor() override = default;
 
@@ -610,7 +665,7 @@ private:
         void NewRootEdge(const JSTaggedValue &value);
 
     private:
-        Node *syntheticRoot_;
+        HprofNode *syntheticRoot_;
         CVector<Edge *> &rootEdges_;
         CUnorderedSet<JSTaggedType> visitedRoots_;
     };
@@ -627,32 +682,94 @@ private:
     };
 #endif
 
-    CVector<Node *> nodes_ {};
+    // ReachableVisitor: RootVisitor + BaseObjectVisitor for BFS reachability marking.
+    // The onMark_ callback is a lambda captured inside UpdateNodes, granting it
+    // access to HeapSnapshot's private GenerateNode() without exposing that method.
+    template <typename Fn>
+    class ReachableVisitor final : public RootVisitor,
+                                   public BaseObjectVisitor<ReachableVisitor<Fn>> {
+    public:
+        ReachableVisitor(HeapMarker &marker, CQueue<TaggedObject *> &worklist, const Fn &onMark)
+            : marker_(marker), worklist_(worklist), onMark_(onMark) {}
+        ~ReachableVisitor() override = default;
+
+        void VisitRoot([[maybe_unused]] Root type, ObjectSlot slot) override
+        {
+            TryMark(JSTaggedValue(slot.GetTaggedType()));
+        }
+        void VisitRangeRoot([[maybe_unused]] Root type, ObjectSlot start, ObjectSlot end) override
+        {
+            for (ObjectSlot slot = start; slot < end; slot++) {
+                TryMark(JSTaggedValue(slot.GetTaggedType()));
+            }
+        }
+        void VisitBaseAndDerivedRoot([[maybe_unused]] Root type, [[maybe_unused]] ObjectSlot base,
+                                      [[maybe_unused]] ObjectSlot derived,
+                                      [[maybe_unused]] uintptr_t baseOldObject) override
+        {
+        }
+
+        // BaseObjectVisitor interface – called by ObjectXRay::VisitObjectBody for
+        // each contiguous slot range in an object.
+        void VisitObjectRangeImpl([[maybe_unused]] BaseObject *rootObject,
+                                   ObjectSlot start, ObjectSlot end,
+                                   VisitObjectArea area) override
+        {
+            // NATIVE_POINTER: raw C++ pointers, not tagged heap refs
+            // RAW_DATA: primitive data (e.g. numeric array elements), not heap refs
+            if (area == VisitObjectArea::NATIVE_POINTER || area == VisitObjectArea::RAW_DATA) {
+                return;
+            }
+            for (ObjectSlot slot = start; slot < end; slot++) {
+                JSTaggedValue value(slot.GetTaggedType());
+                TryMark(value);
+            }
+        }
+        void VisitCompressedObjectRangeImpl([[maybe_unused]] BaseObject *rootObject,
+                                            CompressedObjectSlot start, CompressedObjectSlot end) override
+        {
+            for (CompressedObjectSlot slot = start; slot < end; slot++) {
+                TemporaryJSTaggedValue value = slot.GetTaggedValue();
+                if (value.IsHeapObject()) {
+                    TryMark(value.ConvertHeapObjectToJSTaggedValue());
+                }
+            }
+        }
+
+    private:
+        void TryMark(JSTaggedValue value)
+        {
+            if (value.GetRawData() == 0 || !value.IsHeapObject() || value.IsWeak()) {
+                return;
+            }
+            // Mark() returns true only on first visit, preventing cycles
+            if (!marker_.Mark(value.GetRawData())) {
+                return;
+            }
+            onMark_(value);
+            worklist_.push(value.GetTaggedObject());
+        }
+
+        HeapMarker &marker_;
+        CQueue<TaggedObject *> &worklist_;
+        Fn onMark_;
+    };
+
     CVector<Edge *> edges_ {};
-    CUnorderedSet<Node *> localHandleRoots_ {};
-    CUnorderedSet<Node *> globalHandleRoots_ {};
+    CUnorderedSet<HprofNode *> globalObjectRoots_ {};
+    CMap<uintptr_t, JSTaggedType> globalHandleAddrMap_ {};
     CVector<TimeStamp> timeStamps_ {};
-    uint32_t nodeCount_ {0};
     uint32_t edgeCount_ {0};
     size_t totalNodesSize_ {0};
-    HeapEntryMap entryMap_;
     HeapRootVisitor rootVisitor_;
-    const EcmaVM *vm_;
-    StringHashMap *stringTable_ {nullptr};
-    bool isVmMode_ {true};
-    bool isPrivate_ {false};
-    bool captureNumericValue_ {false};
-    Node* privateStringNode_ {nullptr};
-    bool trackAllocations_ {false};
+    HprofNode* privateStringNode_ {nullptr};
     CVector<FunctionInfo> traceInfoStack_ {};
     CMap<MethodLiteral *, FunctionInfo> stackInfo_;
     CMap<std::string, int> scriptIdMap_;
     TraceTree traceTree_;
     CMap<MethodLiteral *, uint32_t> methodToTraceNodeId_;
     CVector<uint32_t> traceNodeIndex_;
-    EntryIdMap* entryIdMap_;
     CUnorderedMap<uintptr_t, NodeId> nodeAddressIdMap_;
-    Chunk chunk_;
     friend class HeapSnapShotFriendTest;
 };
 

@@ -23,7 +23,7 @@
 #include "ecmascript/ic/property_box.h"
 #include "ecmascript/js_handle.h"
 #include "ecmascript/js_hclass.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/mem/layout_visitor.h"
 #include "ecmascript/mem/slots.h"
 #include "ecmascript/mem/visitor.h"
@@ -394,6 +394,8 @@ public:
                                                  size_t nativeBindingsize = 0,
                                                  Concurrent isConcurrent = Concurrent::NO);
     int32_t GetNativePointerFieldCountOnHashField(const JSThread *thread) const;
+    static int32_t GetObjectHash(const JSThread *thread, const JSHandle<JSTaggedValue> &tagged);
+    static int32_t GetObjectHashCode(const JSThread *thread, const JSHandle<JSTaggedValue> &tagged);
     static void SetNativePointerFieldCountOnHashField(const JSThread *thread, const JSHandle<JSObject> &obj,
                                                       int32_t count);
 
@@ -414,6 +416,7 @@ public:
     static constexpr int FAST_ELEMENTS_FACTOR = 3;
     static constexpr int MIN_GAP = 256;
     static constexpr int MAX_GAP = 1_KB;
+    static constexpr uint32_t LARGE_ARRAY_DELETE_EAGER_LENGTH = 20000;
     static constexpr uint32_t MAX_ELEMENT_INDEX = std::numeric_limits<uint32_t>::max();
     static constexpr int MIN_ELEMENTS_HINT_LENGTH = 1_KB;
     static constexpr int MAX_ELEMENTS_HINT_LENGTH = 2_MB;
@@ -809,6 +812,11 @@ public:
     static void PUBLIC_API TryMigrateToGenericKindForJSObject(const JSThread *thread, const JSHandle<JSObject> &obj,
                                                   const ElementsKind oldKind);
     static void ElementsToDictionary(const JSThread *thread, JSHandle<JSObject> obj);
+#if ENABLE_V70_OPTIMIZATION
+    static void NormalizeElements(const JSThread *thread, JSHandle<JSObject> obj);
+    static bool ShouldNormalizeElementsOnDeletion(JSThread *thread, JSHandle<JSObject> obj, uint32_t deletedIndex);
+    static void DeleteElementsAtEnd(const JSThread *thread, JSHandle<JSObject> obj, uint32_t entry);
+#endif
 
     // Find function in JsObject For Hook
     static JSHandle<JSTaggedValue> FindFuncInObjectForHook(JSThread *thread, JSHandle<JSTaggedValue> object,
@@ -829,6 +837,8 @@ private:
     friend class StoreICRuntime;
     friend class ObjectFastOperator;
     friend class ICRuntimeStub;
+    friend class NapiLoadICRuntime;
+    friend class NapiStoreICRuntime;
     friend class RuntimeStubs;
     friend class JSSharedArray;
     friend class builtins::BuiltinsArkTools;

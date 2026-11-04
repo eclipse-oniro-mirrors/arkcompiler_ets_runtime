@@ -1,0 +1,2 @@
+empty-object-gc:ok
+empty-array-gc:ok

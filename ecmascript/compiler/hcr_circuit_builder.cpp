@@ -1,5 +1,5 @@
-/*
- * Copyright (c) 2023-2024 Huawei Device Co., Ltd.
+/**
+ * Copyright (c) 2023-2026 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -55,8 +55,16 @@ GateRef CircuitBuilder::ToLength(GateRef receiver)
 GateRef CircuitBuilder::CallStub(GateRef glue, GateRef hirGate, int index, const std::vector<GateRef> &args,
                                  const char* comment)
 {
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
     const CallSignature *cs = env_->IsBaselineBuiltin() ? BaselineStubCSigns::Get(index) :
                                                           CommonStubCSigns::Get(index);
+#else
+    if (env_->IsBaselineBuiltin()) {
+        LOG_COMPILER(FATAL) << "Baseline stubs are disabled in this build";
+        UNREACHABLE();
+    }
+    const CallSignature *cs = CommonStubCSigns::Get(index);
+#endif
     ASSERT(cs->IsCommonStub() || cs->IsBaselineStub());
     GateRef target = IntPtr(index);
     auto label = GetCurrentLabel();
@@ -511,6 +519,7 @@ GateRef CircuitBuilder::CallInternal(GateRef hirGate, std::vector<GateRef> args,
 GateRef CircuitBuilder::CallNew(GateRef hirGate, std::vector<GateRef> args,
                                 bool needPushArgv, bool isFastCall)
 {
+    // Both opcodes carry a bytecode offset; zero is valid for a call at method entry.
     ASSERT(acc_.GetOpCode(hirGate) == OpCode::JS_BYTECODE ||
            acc_.GetOpCode(hirGate) == OpCode::FLOAT32_ARRAY_CONSTRUCTOR);
     auto currentLabel = env_->GetCurrentLabel();
@@ -518,7 +527,6 @@ GateRef CircuitBuilder::CallNew(GateRef hirGate, std::vector<GateRef> args,
     auto currentDepend = currentLabel->GetDepend();
     uint64_t bitfield = args.size();
     uint64_t pcOffset = acc_.TryGetPcOffset(hirGate);
-    ASSERT(pcOffset != 0);
     args.insert(args.begin(), currentDepend);
     args.insert(args.begin(), currentControl);
     AppendFrameState(args, hirGate);

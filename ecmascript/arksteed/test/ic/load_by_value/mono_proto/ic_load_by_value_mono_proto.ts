@@ -1,0 +1,45 @@
+/*
+ * Copyright (c) 2025 Huawei Device Co., Ltd.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// @ts-nocheck
+// G11.1 additive evidence: an explicit hotness threshold keeps the 1000-call
+// warm-up in the interpreter, so the installation performed by the existing
+// `ArkTools.arkSteedCompileSync` call is deterministic and the positive entry
+// counter is attributable to the generated code of `foo` (V2). Existing
+// assertions and printed values are unchanged.
+//! PARAMS --compiler-jit-hotness-threshold=10000
+//! METHOD foo
+//! HAS LoadTaggedField
+//! COMPILE_COUNT_GE *foo* 1
+//! EXEC_COUNT_GE *foo* 1
+//! DEOPT_COUNT *Deoptimize* 0
+declare function print(arg: any): string;
+let A = {cc:1, cc2:2};
+function B() {};
+B.prototype = A;
+let b = new B();
+
+function foo(obj, key) {
+    return obj[key];
+}
+
+for (let i = 0; i < 1000; i++) {
+    foo(b, "cc");
+}
+ArkTools.arkSteedCompileSync(foo);
+print(true);
+print(foo(b, "cc"));
+ArkTools.printTypedOpProfiler("MONO_LOAD_PROPERTY_ON_PROTO");
+ArkTools.clearTypedOpProfiler();

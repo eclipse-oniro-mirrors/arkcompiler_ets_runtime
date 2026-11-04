@@ -16,8 +16,8 @@
 #include "ecmascript/module/module_logger.h"
 
 #include "ecmascript/module/module_path_helper.h"
-#include "ecmascript/platform/file.h"
 #include "ecmascript/platform/parameters.h"
+#include "ecmascript/module/module_message_helper.h"
 #include "ecmascript/runtime_lock.h"
 namespace panda::ecmascript {
 
@@ -36,42 +36,6 @@ void ModuleLogger::PrintModuleLoadInfo()
     PrintSummary();
     PrintUsedFileInfo();
     PrintUnusedFileInfo();
-}
-
-bool ModuleLogger::CreateResultFile(std::string &path) const
-{
-    path = base::ConcatToCString(FILEDIR, vm_->GetBundleName());
-    if (vm_->IsWorkerThread()) {
-        base::AppendToBaseString(path, "_", std::to_string(tid_));
-    }
-    path += SUFFIX;
-    constexpr mode_t defaultMode = S_IRUSR | S_IWUSR | S_IRGRP; // -rw-r--
-    int fd = creat(path.c_str(), defaultMode);
-    if (fd == -1) {
-        LOG_ECMA(ERROR) << "file create failed, errno = "<< errno;
-        return false;
-    }
-    FdsanExchangeOwnerTag(reinterpret_cast<fd_t>(fd));
-    Close(reinterpret_cast<fd_t>(fd));
-    return true;
-}
-
-bool ModuleLogger::OpenResultFile(std::string &path) const
-{
-    path = base::ConcatToCString(FILEDIR, vm_->GetBundleName());
-    if (vm_->IsWorkerThread()) {
-        base::AppendToBaseString(path, "_", std::to_string(tid_));
-    }
-    path += SUFFIX;
-    if (access(path.c_str(), F_OK) == 0) {
-        if (access(path.c_str(), W_OK) == 0) {
-            LOG_ECMA(DEBUG) << "file open success";
-            return true;
-        }
-        LOG_ECMA(ERROR) << "file create failed, W_OK false";
-        return false;
-    }
-    return CreateResultFile(path);
 }
 
 void ModuleLogger::InsertModuleLoadInfo(JSHandle<SourceTextModule> currentModule,
@@ -128,8 +92,8 @@ void ModuleLogger::InsertEntryPointModule(JSHandle<SourceTextModule> currentModu
 void ModuleLogger::PrintSummary() const
 {
     std::string path;
-    if (!CreateResultFile(path)) {
-        LOG_ECMA(ERROR) << "open file fail, no log anymore";
+    if (!ModuleMessageHelper::GetOrCreateWritableFile(vm_, tid_, SUFFIX, path)) {
+        LOG_ECMA(ERROR) << "create file fail, no log anymore";
         return;
     }
     std::ofstream fileHandle;
@@ -146,7 +110,7 @@ void ModuleLogger::PrintSummary() const
 void ModuleLogger::PrintUsedFileInfo() const
 {
     std::string path;
-    if (!OpenResultFile(path)) {
+    if (!ModuleMessageHelper::GetOrCreateWritableFile(vm_, tid_, SUFFIX, path)) {
         LOG_ECMA(ERROR) << "open file fail, no log anymore";
         return;
     }
@@ -184,7 +148,7 @@ void ModuleLogger::PrintUsedFileInfo() const
 void ModuleLogger::PrintUnusedFileInfo() const
 {
     std::string path;
-    if (!OpenResultFile(path)) {
+    if (!ModuleMessageHelper::GetOrCreateWritableFile(vm_, tid_, SUFFIX, path)) {
         LOG_ECMA(ERROR) << "open file fail, no log anymore";
         return;
     }

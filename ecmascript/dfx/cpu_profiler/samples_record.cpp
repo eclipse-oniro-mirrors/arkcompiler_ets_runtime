@@ -1,5 +1,5 @@
-/*
- * Copyright (c) 2021 Huawei Device Co., Ltd.
+/**
+ * Copyright (c) 2021-2026 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -18,6 +18,7 @@
 
 #include "ecmascript/dfx/cpu_profiler/cpu_profiler.h"
 #include "ecmascript/dfx/tracing/tracing.h"
+#include "ecmascript/extractortool/src/source_map.h"
 
 namespace panda::ecmascript {
 const std::string JS_PATH = "entry/build/default/cache/default/default@CompileArkTS/esmodule/debug/";
@@ -67,40 +68,64 @@ void SamplesRecord::NodeInit()
     profileInfo_->nodes[0].children.push_back(methodNode.id);
 }
 
-void SamplesRecord::AddSample(FrameStackAndInfo *frame)
+int SamplesRecord::ResolveProfileNodeId(struct NodeKey &nodeKey)
 {
-    int frameStackLength = frame->frameStackLength;
+    auto result = nodeMap_.find(nodeKey);
+    if (result != nodeMap_.end()) {
+        previousId_ = result->second;
+        return result->second;
+    }
+    if (profileInfo_->nodeCount >= MAX_NODE_COUNT) {
+        LOG_ECMA(ERROR) << "AddSample: nodeCount exceeds MAX_NODE_COUNT";
+        return NODE_ID_OVERFLOW;
+    }
+    int id = static_cast<int>(nodeMap_.size() + 1);
+    nodeMap_.emplace(nodeKey, id);
+    previousId_ = id;
+    struct CpuProfileNode methodNode;
+    methodNode.id = id;
+    methodNode.parentId = nodeKey.parentId;
+    methodNode.codeEntry = GetMethodInfo(nodeKey.methodKey);
+    profileInfo_->nodes[profileInfo_->nodeCount++] = methodNode;
+    if (methodNode.parentId > 0 && methodNode.parentId <= profileInfo_->nodeCount) {
+        profileInfo_->nodes[methodNode.parentId - 1].children.push_back(id);
+    }
+    return id;
+}
+
+void SamplesRecord::AddSample(const FrameStackAndInfo &frame)
+{
+    int frameStackLength = frame.frameStackLength;
     if (frameStackLength == 0) {
-        AddEmptyStackSample(frame->timeStamp);
+        AddEmptyStackSample(frame.timeStamp);
         return;
     }
 
-    FrameInfoTempToMap(frame->frameInfoTemps, frame->frameInfoTempsLength);
+    FrameInfoTempToMap(frame.frameInfoTemps, frame.frameInfoTempsLength);
 
     struct NodeKey nodeKey;
     struct CpuProfileNode methodNode;
     methodNode.id = 1;
     for (; frameStackLength >= 1; frameStackLength--) {
-        nodeKey.methodKey = frame->frameStack[frameStackLength - 1];
-        methodNode.parentId = nodeKey.parentId = methodNode.id;
-        auto result = nodeMap_.find(nodeKey);
-        if (result == nodeMap_.end()) {
-            int id = static_cast<int>(nodeMap_.size() + 1);
-            nodeMap_.emplace(nodeKey, id);
-            previousId_ = methodNode.id = id;
-            methodNode.codeEntry = GetMethodInfo(nodeKey.methodKey);
-            profileInfo_->nodes[profileInfo_->nodeCount++] = methodNode;
-            if (methodNode.parentId > 0 && methodNode.parentId <= profileInfo_->nodeCount) {
-                profileInfo_->nodes[methodNode.parentId - 1].children.push_back(id);
-            }
-        } else {
-            previousId_ = methodNode.id = result->second;
+        nodeKey.methodKey = frame.frameStack[frameStackLength - 1];
+        nodeKey.parentId = methodNode.id;
+        int nodeId = ResolveProfileNodeId(nodeKey);
+        if (nodeId == NODE_ID_OVERFLOW) {
+            previousTimeStamp_ = frame.timeStamp;
+            return;
         }
+        methodNode.id = nodeId;
     }
 
     int sampleNodeId = previousId_ == 0 ? 1 : methodNode.id;
-    int timeDelta = static_cast<int>(frame->timeStamp -
+    int timeDelta = static_cast<int>(frame.timeStamp -
         (previousTimeStamp_ == 0 ? profileInfo_->startTime : previousTimeStamp_));
+    if (timeDelta < MIN_TIME_DELTA) {
+        // Fire-and-forget sampling can deliver a sample stamped (request time)
+        // before the previously consumed one; clamp to keep deltas monotonic
+        // (Oracle review F2).
+        timeDelta = MIN_TIME_DELTA;
+    }
 
     // delete abnormal sample
     if (timeDelta > static_cast<int>(timeDeltaThreshold_) && previousState_ != RunningState::NAPI) {
@@ -115,13 +140,16 @@ void SamplesRecord::AddSample(FrameStackAndInfo *frame)
     profileInfo_->nodes[sampleNodeId - 1].hitCount++;
     profileInfo_->samples.push_back(sampleNodeId);
     profileInfo_->timeDeltas.push_back(timeDelta);
-    previousTimeStamp_ = frame->timeStamp;
+    previousTimeStamp_ = frame.timeStamp;
 }
 
 void SamplesRecord::AddEmptyStackSample(uint64_t sampleTimeStamp)
 {
     int timeDelta = static_cast<int>(sampleTimeStamp -
         (previousTimeStamp_ == 0 ? profileInfo_->startTime : previousTimeStamp_));
+    if (timeDelta < MIN_TIME_DELTA) {
+        timeDelta = MIN_TIME_DELTA;
+    }
 
     // delete abnormal sample
     if (timeDelta > static_cast<int>(timeDeltaThreshold_) && previousState_ != RunningState::NAPI) {
@@ -173,15 +201,11 @@ void SamplesRecord::StringifyNodes()
     sampleData_ += "\"nodes\":[";
     size_t nodeCount = static_cast<size_t>(profileInfo_->nodeCount);
     bool translateCallback = false;
-    if (sourceMapTranslateCallback_ != nullptr) {
-        translateCallback = true;
-    }
+
     for (size_t i = 0; i < nodeCount; i++) {
         struct CpuProfileNode node = profileInfo_->nodes[i];
         struct FrameInfo codeEntry = node.codeEntry;
-        if (translateCallback) {
-            TranslateUrlPositionBySourceMap(codeEntry);
-        }
+        TranslateUrlPositionBySourceMap(codeEntry);
         std::string url = codeEntry.url;
         replace(url.begin(), url.end(), '\\', '/');
         sampleData_ += "{\"id\":"
@@ -245,7 +269,7 @@ struct FrameInfo SamplesRecord::GetMethodInfo(struct MethodKey &methodKey)
     return entry;
 }
 
-std::string SamplesRecord::AddRunningState(char *functionName, RunningState state, kungfu::DeoptType type)
+std::string SamplesRecord::AddRunningState(const char *functionName, RunningState state, kungfu::DeoptType type)
 {
     std::string temp = functionName;
     switch (state) {
@@ -407,6 +431,26 @@ int SamplesRecord::SemDestroy(int index)
     return sem_destroy(&sem_[index]);
 }
 
+int SamplesRecord::SemInit(int pshared, int value)
+{
+    return SemInit(1, pshared, value); // 1: processor-exit handshake slot
+}
+
+int SamplesRecord::SemPost()
+{
+    return SemPost(1);
+}
+
+int SamplesRecord::SemWait()
+{
+    return SemWait(1);
+}
+
+int SamplesRecord::SemDestroy()
+{
+    return SemDestroy(1);
+}
+
 const CMap<struct MethodKey, struct FrameInfo> &SamplesRecord::GetStackInfo() const
 {
     return stackInfoMap_;
@@ -494,7 +538,7 @@ bool SamplesRecord::PushNapiStackInfo(const FrameInfoTemp &frameInfoTemp)
     return true;
 }
 
-std::string SamplesRecord::GetModuleName(char *recordName)
+std::string SamplesRecord::GetModuleName(const char *recordName)
 {
     std::string recordNameStr = recordName;
     std::string::size_type atPos = recordNameStr.find("@");
@@ -510,7 +554,7 @@ std::string SamplesRecord::GetModuleName(char *recordName)
     return recordNameStr.substr(slashPos + 1, atPos - slashPos - 1);
 }
 
-void SamplesRecord::FrameInfoTempToMap(FrameInfoTemp *frameInfoTemps, int frameInfoTempLength)
+void SamplesRecord::FrameInfoTempToMap(const FrameInfoTemp *frameInfoTemps, int frameInfoTempLength)
 {
     if (frameInfoTempLength == 0) {
         return;
@@ -581,6 +625,37 @@ void SamplesRecord::PostNapiFrame()
     samplesQueue_->PostNapiFrame(napiFrameInfoTemps_, napiFrameStack_);
 }
 
+void SamplesRecord::PostHybridStackFrame(const arkplatform::HybridFrameInfo &frameInfo)
+{
+    struct MethodKey methodKey = {};
+    methodKey.methodIdentifier = frameInfo.nativePtr;
+    methodKey.deoptType = kungfu::DeoptType::NONE;
+    methodKey.state = RunningState::OTHER;
+
+    if (stackInfoMap_.count(methodKey) == 0) {
+        struct FrameInfoTemp frameInfoTemp = {};
+        frameInfoTemp.scriptId = frameInfo.scriptId;
+        frameInfoTemp.lineNumber = frameInfo.lineNumber;
+        frameInfoTemp.columnNumber = frameInfo.columnNumber;
+
+        const char *functionName =
+            frameInfo.GetFunctionName().empty() ? "anonymous" : frameInfo.GetFunctionName().data();
+        if (JsStackGetter::CheckAndCopy(frameInfoTemp.functionName, sizeof(frameInfoTemp.functionName), functionName) &&
+            JsStackGetter::CheckAndCopy(frameInfoTemp.url, sizeof(frameInfoTemp.url), frameInfo.GetUrl().data())) {
+            frameInfoTemp.methodKey = methodKey;
+            if (UNLIKELY(!PushStackInfo(frameInfoTemp))) {
+                return;
+            }
+        }
+    }
+
+    if (UNLIKELY(!PushFrameStack(methodKey))) {
+        return;
+    }
+
+    PostFrame();
+}
+
 void SamplesRecord::ResetFrameLength()
 {
     frameStackLength_ = 0;
@@ -602,8 +677,9 @@ void SamplesRecord::TranslateUrlPositionBySourceMap(struct FrameInfo &codeEntry)
     if (codeEntry.url.empty()) {
         return;
     }
-    if (!sourceMapTranslateCallback_(codeEntry.url, codeEntry.lineNumber, codeEntry.columnNumber,
-                                     codeEntry.packageName)) {
+
+    if (!SourceMap::GetInstance().TranslateUrlPositionBySourceMap(codeEntry.url, codeEntry.lineNumber,
+        codeEntry.columnNumber, codeEntry.packageName)) {
         size_t find = codeEntry.url.rfind("_.js");
         if (find == std::string::npos) {
             size_t start = codeEntry.url.find("entry/");
@@ -737,15 +813,27 @@ void SamplesQueue::PostNapiFrame(CVector<FrameInfoTemp> &napiFrameInfoTemps,
     }
 }
 
-FrameStackAndInfo *SamplesQueue::PopFrame()
+bool SamplesQueue::PopFrame(FrameStackAndInfo &out)
 {
-    LockHolder holder(mtx_);
-    if (!IsEmpty()) {
-        FrameStackAndInfo *frame = &frames_[front_];
-        front_ = (front_ + 1) % QUEUE_CAPACITY;
-        return frame;
+    int index = 0;
+    {
+        LockHolder holder(mtx_);
+        if (IsEmpty()) {
+            return false;
+        }
+        index = front_;
+        out.frameInfoTempsLength =  frames_[index].frameInfoTempsLength;
+        out.frameStackLength = frames_[index].frameStackLength;
+        out.timeStamp = frames_[index].timeStamp;
+        front_ = (front_ + 1) % QUEUE_CAPACITY;  // 递增索引，允许PostFrame写入
     }
-    return nullptr;
+    for (int i = 0; i < out.frameInfoTempsLength; i++) {
+        out.frameInfoTemps[i] = frames_[index].frameInfoTemps[i];
+    }
+    for (int i = 0; i < out.frameStackLength; ++i) {
+        out.frameStack[i] = frames_[index].frameStack[i];
+    }
+    return true;
 }
 
 bool SamplesQueue::IsEmpty()

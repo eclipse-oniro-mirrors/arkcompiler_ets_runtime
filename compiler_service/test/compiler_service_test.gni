@@ -24,6 +24,13 @@ declare_args() {
       global_parts_info.security_code_signature) {
     code_sign_enable_test = true
   }
+
+  security_guard_enable_test = false
+  if (defined(global_parts_info) &&
+      defined(global_parts_info.security_guard) &&
+      global_parts_info.security_guard) {
+    security_guard_enable_test = true
+  }
 }
 
 compiler_service_include_dirs = [

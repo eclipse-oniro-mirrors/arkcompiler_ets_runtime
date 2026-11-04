@@ -21,8 +21,8 @@
 #include "ecmascript/js_handle.h"
 #include "ecmascript/js_object.h"
 #include "ecmascript/containers/containers_errors.h"
-#include "ecmascript/js_tagged_value-inl.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper-inl.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/js_typed_array.h"
 #include "ecmascript/base/typed_array_helper-inl.h"
 #include <iomanip>
@@ -72,6 +72,13 @@ using BuiltinsArrayBuffer = builtins::BuiltinsArrayBuffer;
             JSTaggedValue error = ContainerError::BusinessError(thread, ErrorFlag::RANGE_ERROR, oss.str().c_str());   \
             THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, JSTaggedValue::Exception());                              \
         }                                                                                                             \
+        if (offset > buffer->GetLength() ||                                                             \
+            static_cast<uint32_t>(NumberSize::type) > buffer->GetLength() - offset) {                        \
+            /* "offset + size" wrapped around the check above, so the access  */                             \
+            /* below goes out of bounds. Detection only, the original flow continues. */                    \
+            ContainerError::ReportSecurityFault("JSAPIFastBuffer.Write" #name, "offset-overflow", -1,              \
+                static_cast<int32_t>(buffer->GetLength()), static_cast<int32_t>(offset));                    \
+        }                                                                                                    \
         JSAPIFastBuffer::SetValueByIndex(thread, typedArray.GetTaggedValue(), buffer->GetOffset() + offset,           \
                                          value.GetTaggedValue(), type, littleEndian);                                 \
         return JSTaggedValue(offset + byteSize);                                                                      \
@@ -90,6 +97,13 @@ using BuiltinsArrayBuffer = builtins::BuiltinsArrayBuffer;
             JSTaggedValue error = ContainerError::BusinessError(thread, ErrorFlag::RANGE_ERROR, oss.str().c_str());   \
             THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, JSTaggedValue::Exception());                              \
         }                                                                                                             \
+        if (offset > buffer->GetLength() ||                                                             \
+            static_cast<uint32_t>(NumberSize::type) > buffer->GetLength() - offset) {                        \
+            /* "offset + size" wrapped around the check above, so the access  */                             \
+            /* below goes out of bounds. Detection only, the original flow continues. */                    \
+            ContainerError::ReportSecurityFault("JSAPIFastBuffer.Read" #name, "offset-overflow", -1,              \
+                static_cast<int32_t>(buffer->GetLength()), static_cast<int32_t>(offset));                    \
+        }                                                                                                    \
         return JSAPIFastBuffer::GetValueByIndex(thread, typedArray.GetTaggedValue(), buffer->GetOffset() + offset,    \
                                                 type, littleEndian);                                                  \
     }
@@ -250,8 +264,8 @@ private:
     JSTaggedValue SetValueByIndex(JSThread *thread, uint32_t index, JSTaggedValue value, JSType jsType,
                                   bool littleEndian = true)
     {
-        auto typeArray = this->GetFastBufferData(thread);
-        return SetValueByIndex(thread, typeArray, index, value, jsType, littleEndian);
+        auto typedArray = this->GetFastBufferData(thread);
+        return SetValueByIndex(thread, typedArray, index, value, jsType, littleEndian);
     }
     static JSTaggedValue SetValueByIndex(JSThread *thread, const JSTaggedValue typedarray, uint32_t index,
                                          JSTaggedValue value, JSType jsType, bool littleEndian = true);

@@ -14,6 +14,7 @@
  */
 
 #include "ecmascript/jit/compile_decision.h"
+#include "ecmascript/jit/tiering_manager.h"
 #include "ecmascript/jspandafile/js_pandafile.h"
 #include "ecmascript/ic/profile_type_info.h"
 #include "ecmascript/platform/aot_crash_info.h"
@@ -192,7 +193,7 @@ bool CompileDecision::IsJsFunctionSupportCompile() const
         return false;
     }
 
-    uint32_t maxSize = 9000;
+    uint32_t maxSize = TieringManager::MAX_BYTECODE_SIZE_FOR_ARKSTEED;
     if (vm_->GetJSOptions().IsEnableJitFastCompile()) {
         maxSize = 15; // 15 is method codesize threshold during fast compiling
     }
@@ -242,7 +243,7 @@ bool CompileDecision::IsSupportFunctionKind() const
 
 bool CompileDecision::CheckJsFunctionStatus() const
 {
-    if (tier_.IsFast() && jsFunction_->IsJitCompiling()) {
+    if (tier_.IsFastJit() && jsFunction_->IsJitCompiling()) {
         return false;
     }
 
@@ -250,7 +251,7 @@ bool CompileDecision::CheckJsFunctionStatus() const
         return false;
     }
 
-    if (tier_.IsFast() && jsFunction_->IsCompiledCode()) {
+    if (tier_.IsFastJit() && jsFunction_->IsCompiledCode()) {
         JSTaggedValue machineCode = jsFunction_->GetMachineCode(vm_->GetJSThread());
         if (machineCode.IsMachineCodeObject() &&
             MachineCode::Cast(machineCode.GetTaggedObject())->GetOSROffset() == MachineCode::INVALID_OSR_OFFSET) {
@@ -267,7 +268,9 @@ bool CompileDecision::CheckJsFunctionStatus() const
 
 void CompileDecision::DisableJitCompile() const
 {
-    jsFunction_->SetJitHotnessCnt(vm_->GetJSThread(), ProfileTypeInfo::JIT_DISABLE_FLAG);
+    JSThread *thread = vm_->GetJSThread();
+    JSHandle<Method> method(thread, jsFunction_->GetMethod(thread));
+    method->SetTieringDecision(TieringDecision::DISABLED);
 }
 
 bool CompileDecision::CheckVmState() const

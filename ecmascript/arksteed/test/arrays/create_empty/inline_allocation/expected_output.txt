@@ -1,0 +1,10 @@
+compiled:true
+interpreted-empty:true
+imm16-empty:true
+empty-and-fresh:true
+length-accessor:true
+transitions:true
+register-pressure:true
+buffer-exhaustion:true
+young-gc-survivors:true
+full-gc-survivors:true

@@ -288,8 +288,8 @@ void PGOProfiler::UpdateRootProfileTypeSafe(JSHClass* oldHClass, JSHClass* newHC
     }
     ProfileType oldPt = GetProfileType(oldHClass);
     if (oldPt.IsRootType()) {
-        newHClass->SetProfileType(oldPt.GetRaw());
-        oldHClass->SetProfileType(0);
+        newHClass->SetPGOProfileType(oldPt.GetRaw());
+        oldHClass->ClearPGOProfileType();
     }
 }
 
@@ -337,7 +337,7 @@ void PGOProfiler::UpdateTrackInfo(JSTaggedValue trackInfoVal)
             return;
         }
         auto profileTypeInfoVal = function->GetProfileTypeInfo(thread);
-        if (profileTypeInfoVal.IsUndefined() || !profileTypeInfoVal.IsTaggedArray()) {
+        if (!profileTypeInfoVal.IsProfileTypeInfo()) {
             return;
         }
         auto profileTypeInfo = ProfileTypeInfo::Cast(profileTypeInfoVal.GetTaggedObject());
@@ -803,6 +803,7 @@ void PGOProfiler::ProfileBytecode(ApEntityId abcId, const CString& recordName, J
             case EcmaOpcode::GREATEREQ_IMM8_V8:
             case EcmaOpcode::STRICTNOTEQ_IMM8_V8:
             case EcmaOpcode::STRICTEQ_IMM8_V8:
+            case EcmaOpcode::TONUMBER_IMM8:
             case EcmaOpcode::TONUMERIC_IMM8: {
                 uint8_t slotId = READ_INST_8_0();
                 CHECK_SLOTID_BREAK(slotId);
@@ -948,7 +949,7 @@ void PGOProfiler::DumpICByName(ApEntityId abcId, const CString &recordName, Enti
                                uint32_t slotId, ProfileTypeInfo *profileTypeInfo, BCType type)
 {
     const JSThread *thread = vm_->GetJSThread();
-    JSTaggedValue firstValue = profileTypeInfo->Get(thread, slotId);
+    JSTaggedValue firstValue = profileTypeInfo->GetICSlot(thread, slotId);
     if (!firstValue.IsHeapObject()) {
         if (firstValue.IsHole()) {
             // Mega state
@@ -959,7 +960,7 @@ void PGOProfiler::DumpICByName(ApEntityId abcId, const CString &recordName, Enti
     if (firstValue.IsWeak()) {
         TaggedObject *object = firstValue.GetWeakReferentUnChecked();
         if (object->GetClass()->IsHClass()) {
-            JSTaggedValue secondValue = profileTypeInfo->Get(thread, slotId + 1);
+            JSTaggedValue secondValue = profileTypeInfo->GetICSlot(thread, slotId + 1);
             JSHClass *hclass = JSHClass::Cast(object);
             DumpICByNameWithHandler(abcId, recordName, methodId, bcOffset, hclass, secondValue, type);
         }
@@ -972,7 +973,7 @@ void PGOProfiler::DumpICByValue(ApEntityId abcId, const CString &recordName, Ent
                                 uint32_t slotId, ProfileTypeInfo *profileTypeInfo, BCType type)
 {
     const JSThread *thread = vm_->GetJSThread();
-    JSTaggedValue firstValue = profileTypeInfo->Get(thread, slotId);
+    JSTaggedValue firstValue = profileTypeInfo->GetICSlot(thread, slotId);
     if (!firstValue.IsHeapObject()) {
         if (firstValue.IsHole()) {
             // Mega state
@@ -983,7 +984,7 @@ void PGOProfiler::DumpICByValue(ApEntityId abcId, const CString &recordName, Ent
     if (firstValue.IsWeak()) {
         TaggedObject *object = firstValue.GetWeakReferentUnChecked();
         if (object->GetClass()->IsHClass()) {
-            JSTaggedValue secondValue = profileTypeInfo->Get(thread, slotId + 1);
+            JSTaggedValue secondValue = profileTypeInfo->GetICSlot(thread, slotId + 1);
             JSHClass *hclass = JSHClass::Cast(object);
             DumpICByValueWithHandler(abcId, recordName, methodId, bcOffset, hclass, secondValue, type);
         }
@@ -991,7 +992,7 @@ void PGOProfiler::DumpICByValue(ApEntityId abcId, const CString &recordName, Ent
     }
     // Check key
     if ((firstValue.IsString() || firstValue.IsSymbol())) {
-        JSTaggedValue secondValue = profileTypeInfo->Get(thread, slotId + 1);
+        JSTaggedValue secondValue = profileTypeInfo->GetICSlot(thread, slotId + 1);
         DumpICByValueWithPoly(abcId, recordName, methodId, bcOffset, secondValue, type);
         return;
     }
@@ -1311,7 +1312,7 @@ void PGOProfiler::TryDumpProtoTransitionType(JSHClass *hclass)
 void PGOProfiler::DumpOpType(ApEntityId abcId, const CString &recordName, EntityId methodId, int32_t bcOffset,
                              uint32_t slotId, ProfileTypeInfo *profileTypeInfo)
 {
-    JSTaggedValue slotValue = profileTypeInfo->Get(vm_->GetJSThread(), slotId);
+    JSTaggedValue slotValue = profileTypeInfo->GetICSlot(vm_->GetJSThread(), slotId);
     if (slotValue.IsInt()) {
         auto type = slotValue.GetInt();
         ProfileType recordType = GetRecordProfileType(abcId, recordName);
@@ -1331,7 +1332,7 @@ void PGOProfiler::DumpDefineClass(ApEntityId abcId, const CString &recordName, E
                                   uint32_t slotId, ProfileTypeInfo *profileTypeInfo)
 {
     const JSThread *thread = vm_->GetJSThread();
-    JSTaggedValue slotValue = profileTypeInfo->Get(thread, slotId);
+    JSTaggedValue slotValue = profileTypeInfo->GetICSlot(thread, slotId);
     if (!slotValue.IsProfileTypeInfoCell0()) {
         return;
     }
@@ -1398,7 +1399,7 @@ void PGOProfiler::DumpCreateObject(ApEntityId abcId, const CString &recordName, 
                                    uint32_t slotId, ProfileTypeInfo *profileTypeInfo, int32_t traceId)
 {
     const JSThread *thread = vm_->GetJSThread();
-    JSTaggedValue slotValue = profileTypeInfo->Get(thread, slotId);
+    JSTaggedValue slotValue = profileTypeInfo->GetICSlot(thread, slotId);
     if (!slotValue.IsHeapObject()) {
         return;
     }
@@ -1440,14 +1441,10 @@ void PGOProfiler::DumpCall(ApEntityId abcId, const CString &recordName, EntityId
                            uint32_t slotId, ProfileTypeInfo *profileTypeInfo)
 {
     const JSThread *thread = vm_->GetJSThread();
-    JSTaggedValue slotValue = profileTypeInfo->Get(thread, slotId);
+    JSTaggedValue slotValue = profileTypeInfo->GetICSlot(thread, slotId);
     ProfileType::Kind kind;
     int calleeMethodId = 0;
     ApEntityId calleeAbcId = 0;
-    if (slotValue.IsFuncSlot()) {
-        auto funcSlot = FuncSlot::Cast(slotValue);
-        slotValue = funcSlot->GetFunction(thread);
-    }
     if (slotValue.IsInt()) {
         calleeMethodId = slotValue.GetInt();
         calleeAbcId = abcId;
@@ -1478,7 +1475,7 @@ void PGOProfiler::DumpGetIterator(ApEntityId abcId, const CString &recordName, E
     if (thread->GetEnableLazyBuiltins()) {
         return;
     }
-    JSTaggedValue value = profileTypeInfo->Get(thread, slotId);
+    JSTaggedValue value = profileTypeInfo->GetICSlot(thread, slotId);
     if (!value.IsInt()) {
         return;
     }
@@ -1494,12 +1491,8 @@ void PGOProfiler::DumpNewObjRange(ApEntityId abcId, const CString &recordName, E
                                   uint32_t slotId, ProfileTypeInfo *profileTypeInfo)
 {
     const JSThread *thread = vm_->GetJSThread();
-    JSTaggedValue slotValue = profileTypeInfo->Get(thread, slotId);
+    JSTaggedValue slotValue = profileTypeInfo->GetICSlot(thread, slotId);
     int ctorMethodId = 0;
-    if (slotValue.IsFuncSlot()) {
-        auto funcSlot = FuncSlot::Cast(slotValue);
-        slotValue = funcSlot->GetFunction(thread);
-    }
     if (slotValue.IsInt()) {
         ctorMethodId = slotValue.GetInt();
     } else if (slotValue.IsJSFunction()) {
@@ -1524,7 +1517,7 @@ void PGOProfiler::DumpInstanceof(ApEntityId abcId, const CString &recordName, En
                                  uint32_t slotId, ProfileTypeInfo *profileTypeInfo)
 {
     const JSThread *thread = vm_->GetJSThread();
-    JSTaggedValue firstValue = profileTypeInfo->Get(thread, slotId);
+    JSTaggedValue firstValue = profileTypeInfo->GetICSlot(thread, slotId);
     if (!firstValue.IsHeapObject()) {
         if (firstValue.IsHole()) {
             // Mega state
@@ -1896,13 +1889,13 @@ bool PGOProfiler::IsRecoredTransRootType(ProfileType type)
 
 void PGOProfiler::SetRootProfileType(JSHClass *root, ApEntityId abcId, uint32_t type, ProfileType::Kind kind)
 {
-    ProfileType traceType(root->GetProfileType());
+    ProfileType traceType(root->GetPGOProfileType());
     if (traceType.IsNone()) {
         traceType = ProfileType(abcId, type, kind, true);
         if (IsRecoredTransRootType(traceType)) {
             return;
         }
-        root->SetProfileType(traceType.GetRaw());
+        root->SetPGOProfileType(traceType.GetRaw());
     }
 }
 
@@ -1918,14 +1911,14 @@ ProfileType PGOProfiler::GetOrInsertProfileType(JSHClass *child, ProfileType roo
     if (childType.IsNone()) {
         ASSERT(rootType.IsRootType());
         childType = PGOTypeGenerator::GenerateProfileType(vm_->GetJSThread(), JSTaggedType(child), rootType);
-        child->SetProfileType(childType.GetRaw());
+        child->SetPGOProfileType(childType.GetRaw());
     }
     return childType;
 }
 
 ProfileType PGOProfiler::GetProfileType(JSHClass *hclass, bool check)
 {
-    auto result = ProfileType(hclass->GetProfileType());
+    auto result = ProfileType(hclass->GetPGOProfileType());
     if (check) {
         if (IsSkippableObjectTypeSafe(result)) {
             result = ProfileType::PROFILE_TYPE_NONE;
@@ -2279,7 +2272,7 @@ bool PGOProfiler::InsertDefinedCtor(uint32_t entityId)
 bool PGOProfiler::IsProfileTypeInfoDumped(JSThread *thread, JSFunction *function)
 {
     auto profileTypeInfoVal = function->GetProfileTypeInfo(thread);
-    if (profileTypeInfoVal.IsUndefined() || !profileTypeInfoVal.IsTaggedArray()) {
+    if (!profileTypeInfoVal.IsProfileTypeInfo()) {
         return false;
     }
     auto profileTypeInfo = ProfileTypeInfo::Cast(profileTypeInfoVal.GetTaggedObject());

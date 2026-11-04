@@ -17,7 +17,7 @@
 #define ECMASCRIPT_JS_API_JS_API_ARRAYLIST_H
 
 #include "ecmascript/js_object.h"
-#include "ecmascript/js_tagged_value-inl.h"
+#include "ecmascript/js_tagged_value_wrapper-inl.h"
 
 namespace panda::ecmascript {
 /**
@@ -85,7 +85,7 @@ public:
     static constexpr size_t LENGTH_OFFSET = JSObject::SIZE;
     ACCESSORS(Length, LENGTH_OFFSET, SIZE);
 
-    DECL_VISIT_OBJECT_FOR_JS_OBJECT(JSObject, SIZE, SIZE)
+    DECL_VISIT_OBJECT_FOR_JS_OBJECT(JSObject, LENGTH_OFFSET, SIZE)
     DECL_DUMP()
 
 private:

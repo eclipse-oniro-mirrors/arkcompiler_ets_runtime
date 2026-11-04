@@ -37,7 +37,11 @@ void DFXHiSysEvent::SendLongGCEvent([[maybe_unused]] LongGCStats *longGCStats)
         << ";GC_TOTAL_TIME" << longGCStats->GetGCTotalTime();
     int32_t ret = HiSysEventWrite(OHOS::HiviewDFX::HiSysEvent::Domain::ARKTS_RUNTIME,
         "ARK_GC_LONG_TIME", OHOS::HiviewDFX::HiSysEvent::EventType::BEHAVIOR,
+#ifdef EXCLUDE_PGO
+        "BUNDLE_NAME", "",
+#else
         "BUNDLE_NAME", PGOProfilerManager::GetInstance()->GetBundleName(),
+#endif
         "PID", getpid(),
         "TID", syscall(SYS_gettid),
         "GC_TYPE", longGCStats->GetGCType(),

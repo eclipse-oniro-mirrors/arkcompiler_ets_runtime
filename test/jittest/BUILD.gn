@@ -76,8 +76,10 @@ group("ark_jit_ts_test") {
     "catch_with_osr",
     "jit_test_0001",
     "jit_test_0002",
+    "jit_array_map_filter",
     "wide_call_range_pref_imm16v8",
     "string_length",
+    "jit_recursive_fact",
     "ts_inline",
     "count_based_inline_test",
     "depth_based_inline_test",
@@ -141,6 +143,7 @@ group("ark_jit_ts_test") {
     "error",
     "function_advanced",
     "bigint",
+    "jit_string_builder",
   ]
 
   callable_test_list = [

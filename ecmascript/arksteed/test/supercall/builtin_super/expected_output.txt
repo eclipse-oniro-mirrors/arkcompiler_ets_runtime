@@ -1,0 +1,5 @@
+array: 3 11 undefined 33 true
+error: true true boom true
+map: 1 42 true
+date: 86400000 true true
+object: 7 true true

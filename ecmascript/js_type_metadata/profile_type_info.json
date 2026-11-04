@@ -1,9 +1,36 @@
 {
     "name": "PROFILE_TYPE_INFO",
     "node_name": "ArkInternalProfileTypeInfo",
-    "offsets": [],
+    "offsets": [
+        {
+            "name": "Length",
+            "offset": 0,
+            "size": 4
+        },
+        {
+            "name": "Method",
+            "offset": 16,
+            "size": 8
+        },
+        {
+            "name": "ExtraInfoMap",
+            "offset": 24,
+            "size": 8
+        },
+        {
+            "name": "JitOsr",
+            "offset": 32,
+            "size": 8
+        },
+        {
+            "name": "Data",
+            "offset": 40,
+            "size": 8
+        }
+    ],
     "end_offset": 0,
     "parents": [
-        "IC_INFO"
-    ]
+        "TAGGED_OBJECT"
+    ],
+    "visit_type": "Array"
 }

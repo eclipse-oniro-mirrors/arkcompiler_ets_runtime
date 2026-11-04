@@ -16,6 +16,10 @@
 #include "ecmascript/jit/jit.h"
 #include "ecmascript/base/config.h"
 #include "ecmascript/jit/jit_task.h"
+#if ECMASCRIPT_ENABLE_ARK_STEED
+#include "ecmascript/arksteed/arksteed_task.h"
+#endif
+#include "ecmascript/compiler/bytecodes.h"
 #include "ecmascript/dfx/vmstat/jit_warmup_profiler.h"
 #include "ecmascript/ohos/jit_tools.h"
 #include "ecmascript/platform/os.h"
@@ -65,10 +69,14 @@ void Jit::SetJitEnablePostFork(EcmaVM *vm, const std::string &bundleName)
         options.SetEnableAPPJIT(true);
         isApp_ = true;
         // for app threshold
-        uint32_t defaultSize = 150;
+        // 400/500 is set to align with jsvm
+        uint32_t defaultSize = 400;
         uint32_t threshold = ohos::JitTools::GetJitHotnessThreshold(defaultSize);
         options.SetJitHotnessThreshold(threshold);
         hotnessThreshold_ = threshold;
+        uint32_t defaultIcFeedback = 500;
+        uint32_t jitIcFeedbackThreshold = ohos::JitTools::GetJitIcFeedbackThreshold(defaultIcFeedback);
+        options.SetJitIcFeedbackThreshold(jitIcFeedbackThreshold);
         bundleName_ = bundleName;
         SetEnableOrDisable(options, isEnableFastJit, isEnableBaselineJit);
         if (fastJitEnable_ || baselineJitEnable_) {
@@ -79,6 +87,7 @@ void Jit::SetJitEnablePostFork(EcmaVM *vm, const std::string &bundleName)
 
 void Jit::SwitchProfileStubs(EcmaVM *vm)
 {
+#if ECMASCRIPT_ENABLE_INTERPRETER_JIT_STUBS
     JSThread *thread = vm->GetAssociatedJSThread();
     JSRuntimeOptions &options = vm->GetJSOptions();
     std::shared_ptr<PGOProfiler> pgoProfiler = vm->GetPGOProfiler();
@@ -98,6 +107,9 @@ void Jit::SwitchProfileStubs(EcmaVM *vm)
         }
         pgoProfiler->InitJITProfiler();
     }
+#else
+    (void)vm;
+#endif
 }
 
 void Jit::ConfigOptions(EcmaVM *vm) const
@@ -115,6 +127,10 @@ void Jit::ConfigOptions(EcmaVM *vm) const
 
     uint32_t jitHotnessThreshold = GetHotnessThreshold();
     options.SetJitHotnessThreshold(jitHotnessThreshold);
+
+    uint32_t jitIcFeedbackThreshold = ohos::JitTools::GetJitIcFeedbackThreshold(
+        options.GetJitIcFeedbackThreshold());
+    options.SetJitIcFeedbackThreshold(jitIcFeedbackThreshold);
 
     bool jitDisableCodeSign = ohos::JitTools::GetCodeSignDisable(options.GetDisableCodeSign());
     options.SetDisableCodeSign(jitDisableCodeSign);
@@ -137,6 +153,7 @@ void Jit::ConfigOptions(EcmaVM *vm) const
         ", litecg:" << jitEnableLitecg <<
         ", call threshold:" << static_cast<int>(jitCallThreshold) <<
         ", hotness threshold:" << jitHotnessThreshold <<
+        ", ic feedback threshold:" << jitIcFeedbackThreshold <<
         ", disable codesigner:" << jitDisableCodeSign;
 }
 
@@ -160,8 +177,24 @@ void Jit::ConfigJitFortOptions(EcmaVM *vm)
 void Jit::SetEnableOrDisable(const JSRuntimeOptions &options, bool isEnableFastJit, bool isEnableBaselineJit)
 {
     LockHolder holder(setEnableLock_);
+#if !ECMASCRIPT_ENABLE_ARK_STEED
+    if (isEnableFastJit && options.GetCompilerJitBackend() == JitBackend::ARKSTEED) {
+        LOG_JIT(ERROR) << "ArkSteed JIT backend is not available in this build";
+        return;
+    }
+#endif
+#if !defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
+    // Keep this clamp before enableJit/resource initialization. Runtime options must not
+    // enable Baseline handlers absent from stub.an; Fast JIT remains independently available.
+    isEnableBaselineJit = false;
+#endif
     bool enableJit = isEnableFastJit || isEnableBaselineJit;
     if (enableJit) {
+        if (!initialized_) {
+            jitBackend_ = options.GetCompilerJitBackend();
+        }
+        // disable evacuate nonmovable space in jit.
+        Runtime::GetInstance()->DisableEvacuateNonMovableSpace();
         CreateJitResources();
     }
 
@@ -175,7 +208,9 @@ void Jit::SetEnableOrDisable(const JSRuntimeOptions &options, bool isEnableFastJ
         if (!IsAppJit()) {
             JitFort::InitJitFort();
         }
-        jitResources_->InitJitEnv(options);
+        if (!jitResources_->InitJitEnv(options)) {
+            return;
+        }
         initialized_ = true;
     }
 
@@ -264,8 +299,18 @@ void Jit::Compile(EcmaVM *vm, JSHandle<JSFunction> &jsFunction, CompilerTier tie
 {
     auto jit = Jit::GetInstance();
     if ((!jit->IsEnableBaselineJit() && tier.IsBaseLine()) ||
-        (!jit->IsEnableFastJit() && tier.IsFast())) {
+        (!jit->IsEnableFastJit() && tier.IsFastJit())) {
         return;
+    }
+
+    if (tier.IsFastJit()) {
+#if ECMASCRIPT_ENABLE_ARK_STEED
+        if (jit->GetJitBackend() == JitBackend::ARKSTEED) {
+            CompileArkSteed(vm, jsFunction, CompilerTier::Tier::ARKSTEED, osrOffset, mode);
+            return;
+        }
+#endif
+        tier = CompilerTier::Tier::FAST;
     }
 
     if (!vm->IsEnableOsr() && osrOffset != MachineCode::INVALID_OSR_OFFSET) {
@@ -295,7 +340,7 @@ void Jit::Compile(EcmaVM *vm, const CompileDecision &decision)
 
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK,
         ConvertToStdString("JIT::Compile:" + methodInfo).c_str(), "");
-    if (tier.IsFast()) {
+    if (tier.IsFastJit()) {
         jsFunction->SetJitCompilingFlag(true);
     } else {
         ASSERT(tier.IsBaseLine());
@@ -385,9 +430,9 @@ void *Jit::CreateJitCompilerTask(JitTask *jitTask)
     return jitResources_->CreateJitCompilerTask(jitTask);
 }
 
-void Jit::DeleteJitCompilerTask(void *compiler)
+void Jit::DeleteJitCompilerTask(void *compiler, bool isArkSteed)
 {
-    jitResources_->DeleteJitCompilerTask(compiler);
+    jitResources_->DeleteJitCompilerTask(compiler, isArkSteed);
 }
 
 void Jit::ClearTask(const std::function<bool(common::Task *task)> &checkClear)
@@ -490,4 +535,123 @@ Jit::TimeScope::~TimeScope()
         LOG_JIT(INFO) << tier_ << message_ << ", compile time: " << TotalSpentTime() << "ms";
     }
 }
+
+#if ECMASCRIPT_ENABLE_ARK_STEED
+bool Jit::IsArkSteedBytecodeSupported(EcmaVM *vm, JSHandle<JSFunction> &jsFunction)
+{
+    JSThread *hostThread = vm->GetJSThread();
+    Method *method = Method::Cast(jsFunction->GetMethod(hostThread).GetTaggedObject());
+    uint32_t bytecodeSize = method->GetCodeSize(hostThread);
+    const uint8_t *bytecodeArray = method->GetBytecodeArray();
+    const uint8_t *pc = bytecodeArray;
+    const uint8_t *end = bytecodeArray + bytecodeSize;
+    while (pc < end) {
+        kungfu::EcmaOpcode opcode = kungfu::Bytecodes::GetOpcode(pc);
+        if (!kungfu::IsArkSteedSupportedOpcode(opcode)) {
+            LOG_JIT(INFO) << "ArkSteed: skip compilation due to unsupported bytecode";
+            return false;
+        }
+        pc += BytecodeInstruction::Size(opcode);
+    }
+    return true;
+}
+
+bool Jit::WaitForInFlightArkSteedTask(EcmaVM *vm, JSHandle<JSFunction> &jsFunction)
+{
+    JSThread *hostThread = vm->GetJSThread();
+    while (jsFunction->IsJitCompiling() && GetRunningTaskCnt(vm) > 0) {
+        hostThread->SetInstallMachineCode(true);
+        hostThread->CheckSafepoint();
+    }
+    return jsFunction->IsCompiledCode();
+}
+
+// ArkSteed compilation entry point
+void Jit::CompileArkSteed(EcmaVM *vm, JSHandle<JSFunction> &jsFunction,
+                          CompilerTier tier, int32_t osrOffset, JitCompileMode mode)
+{
+    auto jit = Jit::GetInstance();
+    if (!jit->IsEnableFastJit() || jit->GetJitBackend() != JitBackend::ARKSTEED) {
+        return;
+    }
+    ASSERT(tier.IsArkSteed());
+
+    if (!vm->IsEnableOsr() && osrOffset != MachineCode::INVALID_OSR_OFFSET) {
+        return;
+    }
+
+    if (mode.IsSync() && jsFunction->IsJitCompiling()) {
+        if (jit->WaitForInFlightArkSteedTask(vm, jsFunction)) {
+            return;
+        }
+    }
+
+    CompileDecision compileDecision(vm, jsFunction, tier, osrOffset, mode);
+    if (!compileDecision.Decision()) {
+        return;
+    }
+
+    // Check if bytecode is supported by ArkSteed
+    if (!IsArkSteedBytecodeSupported(vm, jsFunction)) {
+        return;
+    }
+
+    [[maybe_unused]] EcmaHandleScope handleScope(vm->GetJSThread());
+    CString methodInfo = "ArkSteed compile method";
+    TimeScope scope(vm, "ArkSteed compile method:" + methodInfo, tier, true, true);
+
+    ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK,
+        ConvertToStdString("ArkSteed::Compile:" + methodInfo).c_str(), "");
+
+    if (tier.IsArkSteed()) {
+        jsFunction->SetJitCompilingFlag(true);
+    } else {
+        // to do: fit baseline
+        UNREACHABLE();
+        ASSERT(tier.IsBaseLine());
+        jsFunction->SetBaselinejitCompilingFlag(true);
+    }
+    jit->GetJitDfx()->SetTriggerCount(tier);
+
+    jit->SubmitArkSteedCompileTask(vm, jsFunction, tier, osrOffset, mode, scope);
+}
+
+void Jit::SubmitArkSteedCompileTask(EcmaVM *vm, JSHandle<JSFunction> &jsFunction, CompilerTier tier,
+                                    int32_t osrOffset, JitCompileMode mode, TimeScope &timeScope)
+{
+    {
+        ThreadNativeScope scope(vm->GetJSThread());
+        JitTaskpool::GetCurrentTaskpool()->WaitForJitTaskPoolReady();
+    }
+
+    EcmaVM *compilerVm = JitTaskpool::GetCurrentTaskpool()->GetCompilerVm();
+    JSThread *hostThread = vm->GetJSThread();
+    JSThread *compilerThread = compilerVm->GetJSThreadNoCheck();
+
+    Method *method = Method::Cast(jsFunction->GetMethod(hostThread).GetTaggedObject());
+    CString methodName = method->GetMethodName(hostThread);
+
+    auto arkSteedTask = std::make_shared<arksteed::ArkSteedTask>(
+        hostThread, compilerThread, this, jsFunction, tier, methodName, osrOffset, mode);
+
+    arkSteedTask->PrepareCompile();
+
+    JitTaskpool::GetCurrentTaskpool()->PostTask(
+        std::make_unique<arksteed::ArkSteedTask::AsyncTask>(
+            arkSteedTask, vm->GetJSThread()->GetThreadId()));
+
+    if (mode.IsSync()) {
+        {
+            // move to native scope to avoid deadlock among (MAIN, GC. JIT) threads
+            ThreadNativeScope scope(vm->GetJSThread());
+            arkSteedTask->WaitFinish();
+        }
+        arkSteedTask->InstallCode();
+    }
+
+    int spendTime = timeScope.TotalSpentTimeInMicroseconds();
+    arkSteedTask->SetMainThreadCompilerTime(spendTime);
+    GetJitDfx()->RecordSpentTimeAndPrintStatsLogInJsThread(spendTime);
+}
+#endif
 }  // namespace panda::ecmascript

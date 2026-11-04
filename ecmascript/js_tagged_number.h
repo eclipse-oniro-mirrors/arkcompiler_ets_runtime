@@ -21,7 +21,7 @@
 #include "ecmascript/ecma_macros.h"
 #include "ecmascript/ecma_vm.h"
 #include "ecmascript/js_hclass.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/js_thread.h"
 #include "ecmascript/object_factory.h"
 
@@ -130,12 +130,7 @@ public:
             }
             return JSTaggedNumber(value + 1);
         }
-        ASSERT(IsDouble());
-        double doubleVal = GetDouble();
-        if (UNLIKELY(std::isnan(doubleVal) || !std::isfinite(doubleVal))) {
-            return JSTaggedNumber(doubleVal);
-        }
-        return JSTaggedNumber(doubleVal + 1.0);
+        return JSTaggedNumber(GetDouble() + 1.0);
     }
 
     JSTaggedNumber operator--() const
@@ -147,12 +142,7 @@ public:
             }
             return JSTaggedNumber(value - 1);
         }
-        ASSERT(IsDouble());
-        double doubleVal = GetDouble();
-        if (UNLIKELY(std::isnan(doubleVal) || !std::isfinite(doubleVal))) {
-            return JSTaggedNumber(doubleVal);
-        }
-        return JSTaggedNumber(doubleVal - 1.0);
+        return JSTaggedNumber(GetDouble() - 1.0);
     }
 
     inline bool operator!=(const JSTaggedNumber &number) const

@@ -16,11 +16,12 @@
 #ifndef ECMASCRIPT_JIT_H
 #define ECMASCRIPT_JIT_H
 
+#include "ecmascript/base/config.h"
 #include "ecmascript/common.h"
 #include "ecmascript/compiler/compilation_env.h"
 #include "ecmascript/platform/mutex.h"
 #include "ecmascript/ecma_vm.h"
-#include "ecmascript/mem/clock_scope.h"
+#include "ecmascript/mem/cpu_clock_scope.h"
 #include "ecmascript/mem/machine_code.h"
 #include "ecmascript/compiler/compiler_log.h"
 #include "ecmascript/jit/jit_thread.h"
@@ -52,10 +53,15 @@ public:
     void ConfigJitFortOptions(EcmaVM *vm);
     void SetEnableOrDisable(const JSRuntimeOptions &options, bool isEnableFastJit, bool isEnableBaselineJit);
     bool PUBLIC_API IsEnableFastJit() const;
+    JitBackend GetJitBackend() const
+    {
+        return jitBackend_;
+    }
+
     bool PUBLIC_API IsEnableBaselineJit() const;
     bool PUBLIC_API IsEnableJitFort() const;
     void SetEnableJitFort(bool isEnableJitFort);
-    bool IsDisableCodeSign() const;
+    bool PUBLIC_API IsDisableCodeSign() const;
     void SetDisableCodeSign(bool isEnableCodeSign);
     bool PUBLIC_API IsEnableAsyncCopyToFort() const;
     void SetEnableAsyncCopyToFort(bool isEnableiAsyncCopyToFort);
@@ -76,7 +82,7 @@ public:
         return initialized_;
     }
 
-    void DeleteJitCompilerTask(void *compiler);
+    void DeleteJitCompilerTask(void *compiler, bool isArkSteed);
 
     void RequestInstallCode(std::shared_ptr<JitTask> jitTask);
     void InstallTasks(JSThread *jsThread);
@@ -121,7 +127,8 @@ public:
     NO_COPY_SEMANTIC(Jit);
     NO_MOVE_SEMANTIC(Jit);
 
-    class TimeScope : public ClockScope {
+    // Compile time in thread CPU time, see CPUClockScope
+    class TimeScope : public CPUClockScope {
     public:
         PUBLIC_API explicit TimeScope(EcmaVM *vm, CString message, CompilerTier tier, bool outPutLog = true,
             bool isDebugLevel = false);
@@ -156,11 +163,13 @@ public:
         {
             if (thread->IsJitThread()) {
                 thread_ = static_cast<JitThread*>(thread);
+                // Wait in native state if this legacy mutex is contended.
+                // No-GC scopes reject a hidden pause while raw inputs are live.
+                thread_->GetHostThread()->LockJitMutex(thread_);
                 if (!thread_->IsInRunningState()) {
                     thread_->ManagedCodeBegin();
                     isInManagedCode_ = true;
                 }
-                thread_->GetHostThread()->GetJitLock()->Lock();
                 auto hostHeap = thread_->GetHostThread()->GetEcmaVM()->GetHeap();
                 hostHeap->WaitCCFinished();
             }
@@ -174,11 +183,11 @@ public:
                 JSThread *thread = env->GetJSThread();
                 ASSERT(thread->IsJitThread());
                 thread_ = static_cast<JitThread*>(thread);
+                thread_->GetHostThread()->LockJitMutex(thread_);
                 if (!thread_->IsInRunningState()) {
                     thread_->ManagedCodeBegin();
                     isInManagedCode_ = true;
                 }
-                thread_->GetHostThread()->GetJitLock()->Lock();
                 auto hostHeap = thread_->GetHostThread()->GetEcmaVM()->GetHeap();
                 hostHeap->WaitCCFinished();
             }
@@ -206,7 +215,8 @@ public:
         explicit JitGCLockHolder(JSThread *thread) : thread_(thread)
         {
             ASSERT(!thread->IsJitThread());
-            if (Jit::GetInstance()->IsEnableFastJit() || Jit::GetInstance()->IsEnableBaselineJit()) {
+            if (!g_isEnableCMCGC || Jit::GetInstance()->IsEnableFastJit() ||
+                Jit::GetInstance()->IsEnableBaselineJit()) {
                 LockJit(thread_);
                 locked_ = true;
             }
@@ -215,13 +225,17 @@ public:
         static void LockJit(JSThread *thread)
         {
             Clock::time_point start = Clock::now();
-            thread->GetJitLock()->Lock();
-            Jit::GetInstance()->GetJitDfx()->SetLockHoldingTime(
-            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start).count());
+            thread->LockJitMutex(thread);
+            thread->SuspendJitThreads();
+            if (auto *dfx = Jit::GetInstance()->GetJitDfx(); dfx != nullptr) {
+                dfx->SetLockHoldingTime(
+                    std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start).count());
+            }
         }
 
         static void UnlockJit(JSThread *thread)
         {
+            thread->ResumeJitThreads();
             thread->GetJitLock()->Unlock();
         }
 
@@ -240,16 +254,35 @@ public:
         NO_COPY_SEMANTIC(JitGCLockHolder);
         NO_MOVE_SEMANTIC(JitGCLockHolder);
     };
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    static void CompileArkSteed(EcmaVM *vm, JSHandle<JSFunction> &jsFunction,
+                               CompilerTier tier = CompilerTier::Tier::ARKSTEED,
+                               int32_t offset = MachineCode::INVALID_OSR_OFFSET,
+                               JitCompileMode mode = JitCompileMode::Mode::ASYNC);
+#endif
 
 private:
     void Compile(EcmaVM *vm, const CompileDecision &decision);
     static void Compile(EcmaVM *vm, JSHandle<JSFunction> &jsFunction, CompilerTier tier,
                         int32_t offset, JitCompileMode mode);
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    static bool IsArkSteedBytecodeSupported(EcmaVM *vm, JSHandle<JSFunction> &jsFunction);
+    bool WaitForInFlightArkSteedTask(EcmaVM *vm, JSHandle<JSFunction> &jsFunction);
+    void SubmitArkSteedCompileTask(EcmaVM *vm, JSHandle<JSFunction> &jsFunction, CompilerTier tier,
+                                   int32_t osrOffset, JitCompileMode mode, TimeScope &timeScope);
+#endif
     void CreateJitResources();
     bool IsLibResourcesResolved() const;
     bool initialized_ { false };
     bool fastJitEnable_ { false };
+    // Effective capability, not a copy of the runtime option. Keep enabling writes in
+    // SetEnableOrDisable(): bypassing its build guard can call absent Baseline handlers.
     bool baselineJitEnable_ { false };
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    JitBackend jitBackend_ { JitBackend::ARKSTEED };
+#else
+    JitBackend jitBackend_ { JitBackend::FASTJIT };
+#endif
     bool isApp_ { false };
     bool isProfileNeedDump_ { true };
     uint32_t hotnessThreshold_ { 0 };

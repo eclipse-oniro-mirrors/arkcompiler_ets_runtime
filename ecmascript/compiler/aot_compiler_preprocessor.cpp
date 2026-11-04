@@ -19,6 +19,7 @@
 #include "ecmascript/compiler/pass_manager.h"
 #include "ecmascript/module/module_resolver.h"
 #include "ecmascript/ohos/ohos_pgo_processor.h"
+#include "ecmascript/platform/file.h"
 
 namespace panda::ecmascript::kungfu {
 
@@ -48,6 +49,9 @@ CompilationOptions::CompilationOptions(JSRuntimeOptions &runtimeOptions)
     isEnableTypeLowering_ = runtimeOptions.IsEnableTypeLowering();
     isEnableEarlyElimination_ = runtimeOptions.IsEnableEarlyElimination();
     isEnableLaterElimination_ = runtimeOptions.IsEnableLaterElimination();
+#ifdef CONTROLFLOW_OPTIMIZATION
+    isEnableControlFlowOptimization_ = runtimeOptions.IsEnableControlFlowOptimization();
+#endif
     isEnableValueNumbering_ = runtimeOptions.IsEnableValueNumbering();
     isEnableOptInlining_ = runtimeOptions.IsEnableOptInlining();
     isEnableOptString_ = runtimeOptions.IsEnableOptString();
@@ -68,6 +72,12 @@ CompilationOptions::CompilationOptions(JSRuntimeOptions &runtimeOptions)
     isEnableVerifierPass_ = !runtimeOptions.IsTargetCompilerMode();
     isEnableBaselinePgo_ = runtimeOptions.IsEnableBaselinePgo();
     isEnableMergePoly_ = runtimeOptions.IsEnableMergePoly();
+#ifdef ENABLE_BRANCH_ELIMINATION
+    isEnableBranchElimination_ = runtimeOptions.IsEnableBranchElimination();
+#endif
+#ifdef ENABLE_BRANCH_PROFILE
+    isEnableBreProfiling_ = runtimeOptions.IsEnableBreProfiling();
+#endif
     std::string optionSelectMethods = runtimeOptions.GetCompilerSelectMethods();
     std::string optionSkipMethods = runtimeOptions.GetCompilerSkipMethods();
     if (!optionSelectMethods.empty() && !optionSkipMethods.empty()) {
@@ -229,7 +239,8 @@ void AotCompilerPreprocessor::AnalyzeGraph(BCInfo &bytecodeInfo, CompilationOpti
     AotMethodLogList logList(cOptions.logMethodsList_);
     AOTCompilationEnv aotCompilationEnv(vm_);
     CompilerLog log(cOptions.logOption_);
-    AOTFileGenerator generator(&log, &logList, &aotCompilationEnv, cOptions.triple_, false);
+    AOTFileGenerator generator(&log, &logList, &aotCompilationEnv, cOptions.triple_,
+                               IsLiteCGEnabled(&aotCompilationEnv));
     PGOProfilerDecoder profilerDecoder;
     LOptions lOptions = LOptions(DEFAULT_OPT_LEVEL, FPFlag::RESERVE_FP, DEFAULT_REL_MODE);
     Module *m = generator.AddModule("", cOptions.triple_, lOptions, false);
@@ -302,15 +313,24 @@ std::shared_ptr<JSPandaFile> AotCompilerPreprocessor::CreateAndVerifyJSPandaFile
         auto pkgArgsIter = pkgsArgs_.find(fileName);
         if (pkgArgsIter == pkgsArgs_.end()) {
             jsPandaFile = jsPandaFileManager->OpenJSPandaFile(fileName.c_str());
-        } else if (!(pkgArgsIter->second->GetJSPandaFile(runtimeOptions_, jsPandaFile,
-            pkgArgsIter->second->GetPkgFd()))) {
-            return nullptr;
+        } else {
+            // If a pkgFd was pre-set (from --hap-fd passed by compiler_service), use fd-based path
+            int pkgFd = pkgArgsIter->second->GetPkgFd();
+            if (pkgFd >= 0) {
+                jsPandaFile = jsPandaFileManager->OpenJSPandaFileFromFd(pkgFd,
+                    pkgArgsIter->second->GetAbcName().c_str(), fileName.c_str());
+            } else {
+                // External HSP packages without FD: open from filesystem using zip path format (pkgPath!/abcName)
+                std::string zipPath = std::string(pkgArgsIter->second->GetPath()) + "!/" +
+                                      std::string(pkgArgsIter->second->GetAbcName());
+                jsPandaFile = jsPandaFileManager->OpenJSPandaFile(zipPath.c_str(), fileName.c_str());
+            }
         }
     } else {
         jsPandaFile = jsPandaFileManager->OpenJSPandaFile(fileName.c_str());
     }
     if (jsPandaFile == nullptr) {
-        LOG_ECMA(ERROR) << "open file " << fileName << " error";
+        LOG_ECMA(ERROR) << "CreateAndVerifyJSPandaFile: jsPandaFile is null for '" << fileName << "'";
         return nullptr;
     }
 
@@ -491,44 +511,5 @@ bool AotCompilerPreprocessor::HasSkipMethod(const CVector<std::string> &methodLi
 std::string AotCompilerPreprocessor::GetMainPkgArgsAppSignature() const
 {
     return GetMainPkgArgs() == nullptr ? "" : GetMainPkgArgs()->GetAppSignature();
-}
-
-bool AotCompilerPreprocessor::ForbidenRebuildAOT(std::string &fileName) const
-{
-    std::string realPath;
-    if (!RealPath(fileName, realPath, false)) {
-        LOG_COMPILER(ERROR) << "Fail to get realPath: " << fileName;
-        return true;
-    }
-    if (FileExist(realPath.c_str())) {
-        LOG_COMPILER(ERROR) << "AOT file: " << realPath << " exist";
-        return true;
-    }
-    return false;
-}
-
-bool AotCompilerPreprocessor::HasPreloadAotFile() const
-{
-    std::string hapPath;
-    std::string moduleName;
-    if (GetMainPkgArgs()) {
-        hapPath = GetMainPkgArgs()->GetPath();
-        moduleName = GetMainPkgArgs()->GetModuleName();
-    }
-    std::string fileName = OhosPreloadAppInfo::GetPreloadAOTFileName(hapPath, moduleName);
-    std::string aiFileName = fileName + AOTFileManager::FILE_EXTENSION_AI;
-    std::string anFileName = fileName + AOTFileManager::FILE_EXTENSION_AN;
-    bool existsAnFile = ForbidenRebuildAOT(anFileName);
-    bool existsAiFile = ForbidenRebuildAOT(aiFileName);
-    return (existsAnFile || existsAiFile);
-}
-
-bool AotCompilerPreprocessor::HasExistsAOTFiles(CompilationOptions &cOptions) const
-{
-    std::string anFileName = cOptions.outputFileName_ + AOTFileManager::FILE_EXTENSION_AN;
-    std::string aiFileName = cOptions.outputFileName_ + AOTFileManager::FILE_EXTENSION_AI;
-    bool existsAnFile = ForbidenRebuildAOT(anFileName);
-    bool existsAiFile = ForbidenRebuildAOT(aiFileName);
-    return (existsAnFile || existsAiFile);
 }
 } // namespace panda::ecmascript::kungfu

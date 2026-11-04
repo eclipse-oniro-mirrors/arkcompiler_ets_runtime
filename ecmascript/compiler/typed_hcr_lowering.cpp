@@ -580,7 +580,7 @@ void TypedHCRLowering::LowerMapSize(GateRef gate)
     GateRef receiver = acc_.GetValueIn(gate, 0);
 
     GateRef linkedMap = builder_.LoadConstOffset(VariableType::JS_ANY(), receiver, JSMap::LINKED_MAP_OFFSET);
-    GateRef mapSizeTagged = builder_.LoadFromTaggedArray(linkedMap, LinkedHashMap::NUMBER_OF_ELEMENTS_INDEX);
+    GateRef mapSizeTagged = builder_.LoadFromTaggedArray(glue_, linkedMap, LinkedHashMap::NUMBER_OF_ELEMENTS_INDEX);
     GateRef mapSize = builder_.TaggedGetInt(mapSizeTagged);
 
     acc_.ReplaceGate(gate, builder_.GetState(), builder_.GetDepend(), mapSize);
@@ -916,14 +916,6 @@ void TypedHCRLowering::LowerPrimitiveToNumber(GateRef dst, GateRef src, ParamTyp
         UNREACHABLE();
     }
     acc_.ReplaceGate(dst, builder_.GetState(), builder_.GetDepend(), *result);
-}
-
-GateRef TypedHCRLowering::LoadFromConstPool(GateRef glue, GateRef unsharedConstPool, size_t index, size_t valVecType)
-{
-    GateRef constPoolSize = builder_.GetLengthOfTaggedArray(unsharedConstPool);
-    GateRef valVecIndex = builder_.Int32Sub(constPoolSize, builder_.Int32(valVecType));
-    GateRef valVec = builder_.GetValueFromTaggedArray(glue, unsharedConstPool, valVecIndex);
-    return builder_.LoadFromTaggedArray(valVec, index);
 }
 
 void TypedHCRLowering::LowerLoadProperty(GateRef gate)
@@ -1443,7 +1435,7 @@ void TypedHCRLowering::LowerArrayStoreElement(GateRef gate, GateRef glue, TypedS
 
     GateRef element = builder_.LoadConstOffset(VariableType::JS_POINTER(), receiver, JSObject::ELEMENTS_OFFSET);
     // Because at retype stage, we have set output according to op
-    // there is not need to consider about the convertion here.
+    // there is not need to consider about the conversion here.
     if (op == TypedStoreOp::ARRAY_STORE_INT_ELEMENT) {
         GateRef convertedValue = builder_.ZExtInt32ToInt64(value);
         builder_.SetValueToTaggedArray(VariableType::INT64(), glue, element, index, convertedValue);
@@ -1476,9 +1468,34 @@ void TypedHCRLowering::LowerTypedArrayStoreElement(GateRef gate, BuiltinTypeId i
         case BuiltinTypeId::UINT16_ARRAY:
             value = builder_.TruncInt32ToInt16(value);
             break;
-        case BuiltinTypeId::FLOAT32_ARRAY:
-            value = builder_.TruncDoubleToFloat32(value);
+        case BuiltinTypeId::FLOAT32_ARRAY: {
+            DEFVALUE(result, (&builder_), VariableType::FLOAT64(), value);
+            Label isNaN(&builder_);
+            Label passResult(&builder_);
+            BRANCH_CIR(builder_.DoubleIsNAN(value), &isNaN, &passResult);
+            builder_.Bind(&isNaN);
+            {
+                result = builder_.Double(base::NAN_VALUE);
+                builder_.Jump(&passResult);
+            }
+            builder_.Bind(&passResult);
+            value = builder_.TruncDoubleToFloat32(*result);
             break;
+        }
+        case BuiltinTypeId::FLOAT64_ARRAY: {
+            DEFVALUE(result, (&builder_), VariableType::FLOAT64(), value);
+            Label isNaN(&builder_);
+            Label passResult(&builder_);
+            BRANCH_CIR(builder_.DoubleIsNAN(value), &isNaN, &passResult);
+            builder_.Bind(&isNaN);
+            {
+                result = builder_.Double(base::NAN_VALUE);
+                builder_.Jump(&passResult);
+            }
+            builder_.Bind(&passResult);
+            value = *result;
+            break;
+        }
         default:
             break;
     }
@@ -1678,8 +1695,12 @@ void TypedHCRLowering::LowerJSCallTargetTypeCheck(GateRef gate, GateRef glue)
     CallTargetIsCompiledCheck(func, frameState, &checkAlreadyDeopt, &exit);
 
     GateRef funcMethodTarget = builder_.GetMethodFromFunction(glue, func);
-    GateRef methodTarget = builder_.GetValueFromTaggedArray(glue, sharedConstPool, methodIndex);
-    GateRef check = builder_.Equal(funcMethodTarget, methodTarget);
+    // `temporaryMethodTarget` may be a fake JSTaggedValue, see `TemporaryJSTaggedValue`,
+    // but for HeapObject, it will have the same bit value as `JSTaggedValue`, so it's safe to check equal
+    // with funcMethodTarget.
+    // DO NOT direct use `temporaryMethodTarget` further more without convertion
+    GateRef temporaryMethodTarget = builder_.GetObjectFromConstPoolCacheUnsafe(glue, sharedConstPool, methodIndex);
+    GateRef check = builder_.Equal(funcMethodTarget, temporaryMethodTarget);
     builder_.DeoptCheck(check, frameState, DeoptType::NOTJSCALLTGT2);
     acc_.ReplaceGate(gate, builder_.GetState(), builder_.GetDepend(), Circuit::NullGate());
 }
@@ -1698,8 +1719,12 @@ void TypedHCRLowering::LowerJSFastCallTargetTypeCheck(GateRef gate, GateRef glue
     CallTargetIsCompiledCheck(func, frameState, &checkAlreadyDeopt, &exit);
 
     GateRef funcMethodTarget = builder_.GetMethodFromFunction(glue, func);
-    GateRef methodTarget = builder_.GetValueFromTaggedArray(glue, sharedConstPool, methodIndex);
-    GateRef check = builder_.Equal(funcMethodTarget, methodTarget);
+    // `temporaryMethodTarget` may be a fake JSTaggedValue, see `TemporaryJSTaggedValue`,
+    // but for HeapObject, it will have the same bit value as `JSTaggedValue`, so it's safe to check equal
+    // with funcMethodTarget.
+    // DO NOT direct use `temporaryMethodTarget` further more without convertion
+    GateRef temporaryMethodTarget = builder_.GetObjectFromConstPoolCacheUnsafe(glue, sharedConstPool, methodIndex);
+    GateRef check = builder_.Equal(funcMethodTarget, temporaryMethodTarget);
     builder_.DeoptCheck(check, frameState, DeoptType::NOTJSFASTCALLTGT1);
     acc_.ReplaceGate(gate, builder_.GetState(), builder_.GetDepend(), Circuit::NullGate());
 }
@@ -1914,7 +1939,7 @@ GateRef TypedHCRLowering::GetLengthFromSupers(GateRef supers)
 
 GateRef TypedHCRLowering::GetValueFromSupers(GateRef supers, size_t index)
 {
-    GateRef val = builder_.LoadFromTaggedArray(supers, index);
+    GateRef val = builder_.LoadFromTaggedArray(glue_, supers, index);
     return builder_.LoadObjectFromWeakRef(val);
 }
 
@@ -2185,9 +2210,9 @@ void TypedHCRLowering::LowerArrayConstructorCheck(GateRef gate, GateRef glue)
             BRANCH_CIR(*check, &getHclass, &exit);
             builder_.Bind(&getHclass);
             {
-                GateRef intialHClass = builder_.Load(VariableType::JS_ANY(), glue, newTarget,
-                                                     builder_.IntPtr(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
-                check = builder_.IsJSHClass(glue, intialHClass);
+                GateRef initialHClass = builder_.Load(VariableType::JS_ANY(), glue, newTarget,
+                                                      builder_.IntPtr(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
+                check = builder_.IsJSHClass(glue, initialHClass);
                 builder_.Jump(&exit);
             }
         }
@@ -2210,7 +2235,7 @@ void TypedHCRLowering::LowerArrayConstructor(GateRef gate, GateRef glue)
     Label exit(&builder_);
     GateRef newTarget = acc_.GetValueIn(gate, 0);
     GateRef arg0 = acc_.GetValueIn(gate, 1);
-    GateRef intialHClass =
+    GateRef initialHClass =
         builder_.Load(VariableType::JS_ANY(), glue, newTarget, builder_.IntPtr(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
     DEFVALUE(arrayLength, (&builder_), VariableType::INT64(), builder_.Int64(0));
     Label argIsNumber(&builder_);
@@ -2260,11 +2285,11 @@ void TypedHCRLowering::LowerArrayConstructor(GateRef gate, GateRef glue)
         {
             NewObjectStubBuilder newBuilder(builder_.GetCurrentEnvironment(), circuit_->GetGlobalEnvCache());
             newBuilder.SetParameters(glue, 0);
-            res = newBuilder.NewJSArrayWithSize(intialHClass, *arrayLength);
+            res = newBuilder.NewJSArrayWithSize(initialHClass, *arrayLength);
             GateRef lengthOffset = builder_.IntPtr(JSArray::LENGTH_OFFSET);
             builder_.Store(VariableType::INT32(), glue, *res, lengthOffset, builder_.TruncInt64ToInt32(*arrayLength));
             GateRef accessor = builder_.GetGlobalConstantValue(ConstantIndex::ARRAY_LENGTH_ACCESSOR);
-            builder_.SetPropertyInlinedProps(glue, *res, intialHClass, accessor,
+            builder_.SetPropertyInlinedProps(glue, *res, initialHClass, accessor,
                 builder_.Int32(JSArray::LENGTH_INLINE_PROPERTY_INDEX), VariableType::JS_ANY());
             builder_.SetExtensibleToBitfield(glue, *res, true);
             builder_.Jump(&exit);
@@ -2405,16 +2430,16 @@ void TypedHCRLowering::LowerFloat32ArrayConstructor(GateRef gate, GateRef glue)
 void TypedHCRLowering::NewArrayConstructorWithNoArgs(GateRef gate, GateRef glue)
 {
     GateRef newTarget = acc_.GetValueIn(gate, 0);
-    GateRef intialHClass =
+    GateRef initialHClass =
         builder_.Load(VariableType::JS_ANY(), glue, newTarget, builder_.IntPtr(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
     GateRef arrayLength = builder_.Int64(0);
     NewObjectStubBuilder newBuilder(builder_.GetCurrentEnvironment(), circuit_->GetGlobalEnvCache());
     newBuilder.SetParameters(glue, 0);
-    GateRef res = newBuilder.NewJSArrayWithSize(intialHClass, arrayLength);
+    GateRef res = newBuilder.NewJSArrayWithSize(initialHClass, arrayLength);
     GateRef lengthOffset = builder_.IntPtr(JSArray::LENGTH_OFFSET);
     builder_.Store(VariableType::INT32(), glue, res, lengthOffset, builder_.TruncInt64ToInt32(arrayLength));
     GateRef accessor = builder_.GetGlobalConstantValue(ConstantIndex::ARRAY_LENGTH_ACCESSOR);
-    builder_.SetPropertyInlinedProps(glue, res, intialHClass, accessor,
+    builder_.SetPropertyInlinedProps(glue, res, initialHClass, accessor,
                                      builder_.Int32(JSArray::LENGTH_INLINE_PROPERTY_INDEX), VariableType::JS_ANY());
     builder_.SetExtensibleToBitfield(glue, res, true);
     ReplaceGateWithPendingException(glue, gate, builder_.GetState(), builder_.GetDepend(), res);
@@ -2445,9 +2470,9 @@ void TypedHCRLowering::LowerObjectConstructorCheck(GateRef gate, GateRef glue)
             BRANCH_CIR(*check, &getHclass, &exit);
             builder_.Bind(&getHclass);
             {
-                GateRef intialHClass = builder_.Load(VariableType::JS_ANY(), glue, newTarget,
-                                                     builder_.IntPtr(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
-                check = builder_.IsJSHClass(glue, intialHClass);
+                GateRef initialHClass = builder_.Load(VariableType::JS_ANY(), glue, newTarget,
+                                                      builder_.IntPtr(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
+                check = builder_.IsJSHClass(glue, initialHClass);
                 builder_.Jump(&exit);
             }
         }
@@ -2578,9 +2603,9 @@ void TypedHCRLowering::LowerBooleanConstructorCheck(GateRef gate, GateRef glue)
             BRANCH_CIR(*check, &getHclass, &exit);
             builder_.Bind(&getHclass);
             {
-                GateRef intialHClass = builder_.Load(VariableType::JS_ANY(), glue, newTarget,
-                                                     builder_.IntPtr(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
-                check = builder_.IsJSHClass(glue, intialHClass);
+                GateRef initialHClass = builder_.Load(VariableType::JS_ANY(), glue, newTarget,
+                                                      builder_.IntPtr(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
+                check = builder_.IsJSHClass(glue, initialHClass);
                 builder_.Jump(&exit);
             }
         }
@@ -3285,7 +3310,8 @@ void TypedHCRLowering::LowerTypedCreateObjWithBuffer(GateRef gate, GateRef glue)
     {
         builder_.StartAllocate();
         GateRef newObj = builder_.HeapAlloc(glue, objSize, GateType::TaggedValue(), RegionSpaceFlag::IN_YOUNG_SPACE);
-        builder_.StoreHClass(glue, newObj, hclass, MemoryAttribute::NeedBarrierAndAtomic());
+        builder_.StoreHClass(glue, newObj, hclass, RegionSpaceFlag::IN_YOUNG_SPACE,
+                             MemoryAttribute::NeedBarrierAndAtomic());
         builder_.StoreConstOffset(VariableType::INT64(), newObj,
             JSObject::HASH_OFFSET, builder_.Int64(JSTaggedValue(0).GetRawData()));
         builder_.StoreConstOffset(VariableType::INT64(), newObj, JSObject::PROPERTIES_OFFSET, emptyArray);

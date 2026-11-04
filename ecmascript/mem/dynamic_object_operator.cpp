@@ -51,11 +51,9 @@ void DynamicObjectOperator::IterateXRef([[maybe_unused]] const BaseObject *objec
 #endif
 }
 
-void RefFieldObjectVisitor::VisitObjectRangeImpl(BaseObject *root, uintptr_t startAddr,
-                                                 uintptr_t endAddr, VisitObjectArea area)
+void RefFieldObjectVisitor::VisitObjectRangeImpl(BaseObject *root, ObjectSlot start,
+                                                 ObjectSlot end, VisitObjectArea area)
 {
-    ObjectSlot start(startAddr);
-    ObjectSlot end(endAddr);
     if (UNLIKELY(area == VisitObjectArea::IN_OBJECT)) {
         VisitBodyInObj(TaggedObject::Cast(root), start, end, [this](ObjectSlot slot) {
             visit(slot);
@@ -67,7 +65,7 @@ void RefFieldObjectVisitor::VisitObjectRangeImpl(BaseObject *root, uintptr_t sta
     }
 }
 
-void RefFieldObjectVisitor::VisitObjectHClassImpl(BaseObject *hclass)
+void RefFieldObjectVisitor::VisitObjectHClassImpl([[maybe_unused]] BaseObject *rootObject, BaseObject *hclass)
 {
     JSTaggedValue clz(reinterpret_cast<TaggedObject *>(hclass));
     visitor_(reinterpret_cast<common::RefField<>&>(clz));
@@ -77,7 +75,7 @@ void RefFieldObjectVisitor::VisitAllRefFields(TaggedObject *obj)
 {
     // Note this will update the stack param, not the slot of object hclass
     // But sinc hclass in non-movable, so current all visitor will not update hlass field, so it's ok
-    VisitObjectHClassImpl(obj->GetClass());
+    VisitObjectHClassImpl(obj, obj->GetClass());
     ObjectXRay::VisitObjectBodyFast<VisitType::OLD_GC_VISIT>(obj, obj->GetClass(), *this);
 }
 

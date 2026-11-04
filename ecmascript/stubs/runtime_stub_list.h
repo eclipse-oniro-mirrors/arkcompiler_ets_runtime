@@ -16,15 +16,25 @@
 #ifndef ECMASCRIPT_RUNTIME_STUB_LIST_H
 #define ECMASCRIPT_RUNTIME_STUB_LIST_H
 
+#include "ecmascript/base/config.h"
 #include "ecmascript/stubs/test_runtime_stubs.h"
 
 namespace panda::ecmascript {
 
+#if ECMASCRIPT_ENABLE_ARK_STEED
+#define RUNTIME_ASM_STUB_LIST(V)             \
+    JS_CALL_TRAMPOLINE_LIST(V)               \
+    FAST_CALL_TRAMPOLINE_LIST(V)             \
+    ASM_INTERPRETER_TRAMPOLINE_LIST(V)       \
+    BASELINE_TRAMPOLINE_LIST(V)              \
+    ARKSTEED_TRAMPOLINE_LIST(V)
+#else
 #define RUNTIME_ASM_STUB_LIST(V)             \
     JS_CALL_TRAMPOLINE_LIST(V)               \
     FAST_CALL_TRAMPOLINE_LIST(V)             \
     ASM_INTERPRETER_TRAMPOLINE_LIST(V)       \
     BASELINE_TRAMPOLINE_LIST(V)
+#endif
 
 #define ASM_INTERPRETER_TRAMPOLINE_LIST(V)   \
     V(AsmInterpreterEntry)                   \
@@ -98,6 +108,12 @@ namespace panda::ecmascript {
     V(CallThisRangeAndCheckToBaselineFromBaseline)    \
     V(GetBaselineBuiltinFp)
 
+#define ARKSTEED_TRAMPOLINE_LIST(V)                      \
+    V(ArkSteedCallEntry)                                 \
+    V(ArkSteedDeoptimizationEntry)                       \
+    V(SteedCallAndPushArgv)                              \
+    V(SteedCallWithArgVAndPushArgv)
+
 #define JS_CALL_TRAMPOLINE_LIST(V)           \
     V(CallRuntime)                           \
     V(CallRuntimeWithArgv)                   \
@@ -140,6 +156,13 @@ namespace panda::ecmascript {
     V(TraceLazyDeoptNum)                        \
     V(TraceLazyDeoptFailNum)
 
+#if ECMASCRIPT_ENABLE_ARK_STEED
+#define ARKSTEED_DEOPT_NOGC_STUB_LIST(V)        \
+    V(ArkSteedDeoptimize)
+#else
+#define ARKSTEED_DEOPT_NOGC_STUB_LIST(V)
+#endif
+
 #define RUNTIME_STUB_WITHOUT_GC_LIST(V)        \
     V(Dump)                                    \
     V(DebugDump)                               \
@@ -153,7 +176,9 @@ namespace panda::ecmascript {
     V(Comment)                                 \
     V(FatalPrint)                              \
     V(FatalPrintCustom)                        \
+    V(FatalPrintIfFalse)                       \
     V(GetActualArgvNoGC)                       \
+    ARKSTEED_DEOPT_NOGC_STUB_LIST(V)           \
     V(InsertOldToNewRSet)                      \
     V(InsertLocalToShareRSet)                  \
     V(SetBitAtomic)                            \
@@ -190,6 +215,7 @@ namespace panda::ecmascript {
     V(FloatCeil)                               \
     V(CallDateNow)                             \
     V(UpdateFieldType)                         \
+    V(TryResolveSendableModule)                \
     V(BigIntEquals)                            \
     V(TimeClip)                                \
     V(LazyDeoptEntry)                          \
@@ -223,11 +249,13 @@ namespace panda::ecmascript {
     V(LoadNativeModuleFailed)                  \
     V(GetExternalModuleVar)                    \
     V(ReadBarrier)                             \
+    V(ReadBarrierForCompressed)                \
     V(CopyCallTarget)                          \
     V(CopyArgvArray)                           \
     V(MarkRSetCardTable)                       \
     V(MarkInBuffer)                            \
-    V(BatchMarkInBuffer)
+    V(BatchMarkInBuffer)                       \
+    V(CheckObjectForCMS)
 
 // When ASM enters C++ via CallNGCRuntime, if the C++ process requires GetGlobalEnv(),
 // the current globalenv in ASM must be set to glue before CallNGCRuntime!
@@ -245,6 +273,7 @@ namespace panda::ecmascript {
     V(ToPropertyKey)                                           \
     V(ThrowTypeError)                                          \
     V(ThrowTypeErrorWithParam)                                 \
+    V(ThrowContainerBusinessError)                             \
     V(MismatchError)                                           \
     V(NotifyArrayPrototypeChanged)                             \
     V(NumberToString)                                          \
@@ -339,6 +368,8 @@ namespace panda::ecmascript {
     V(ToIndex)                                                 \
     V(NewJSObjectByConstructor)                                \
     V(AllocateTypedArrayBuffer)                                \
+    V(AllocateSharedTypedArrayBuffer)                          \
+    V(CopyArrayToSharedTypedArrayForCtor)                      \
     V(ToNumber)                                                \
     V(CreateEmptyObject)                                       \
     V(GetUnmapedArgs)                                          \
@@ -363,6 +394,8 @@ namespace panda::ecmascript {
     V(DefineGetterSetterByValue)                               \
     V(SuperCall)                                               \
     V(OptSuperCall)                                            \
+    V(CallRange)                                               \
+    V(CallThisRange)                                           \
     V(LdBigInt)                                                \
     V(ToNumeric)                                               \
     V(ToNumericConvertBigInt)                                  \
@@ -378,8 +411,8 @@ namespace panda::ecmascript {
     V(OptAsyncGeneratorResolve)                                \
     V(OptCreateObjectWithExcludedKeys)                         \
     V(OptNewObjRange)                                          \
-    V(SetTypeArrayPropertyByIndex)                             \
-    V(SetTypeArrayPropertyByIndexSlowPath)                     \
+    V(SetTypedArrayPropertyByIndex)                             \
+    V(SetTypedArrayPropertyByIndexSlowPath)                     \
     V(FastCopyElementToArray)                                  \
     V(GetPropertyByName)                                       \
     V(JSObjectGetMethod)                                       \
@@ -398,6 +431,7 @@ namespace panda::ecmascript {
     V(ArraySort)                                               \
     V(FastStringify)                                           \
     V(ObjectSlowAssign)                                        \
+    V(ObjectToStringWithTag)                                   \
     V(LocaleCompareWithGc)                                     \
     V(ParseInt)                                                \
     V(LocaleCompareCacheable)                                  \
@@ -433,6 +467,13 @@ namespace panda::ecmascript {
     V(ReportHiEvents)                                          \
     V(CallNumTrace)
 
+#if ECMASCRIPT_ENABLE_ARK_STEED
+#define ARKSTEED_RUNTIME_STUB_LIST(V)                          \
+    V(ArkSteedCompile)
+#else
+#define ARKSTEED_RUNTIME_STUB_LIST(V)
+#endif
+
 // When ASM enters C++ via CallRuntime, if the C++ process requires GetGlobalEnv(),
 // the current globalenv in ASM must be set to glue before CallRuntime!
 // Use CallRuntimeWithGlobalEnv or CallRuntimeWithCurrentEnv.
@@ -460,9 +501,9 @@ namespace panda::ecmascript {
     V(UpdateLayOutAndAddTransition)                            \
     V(CopyAndUpdateObjLayout)                                  \
     V(RuntimeDump)                                             \
+    V(DumpJSCallFunctionInfo)                                  \
     V(ForceGC)                                                 \
     V(NoticeThroughChainAndRefreshUser)                        \
-    V(JumpToCInterpreter)                                      \
     V(UpFrame)                                                 \
     V(Neg)                                                     \
     V(Not)                                                     \
@@ -488,6 +529,9 @@ namespace panda::ecmascript {
     V(Mod2)                                                    \
     V(SetClassConstructorLength)                               \
     V(UpdateHotnessCounter)                                    \
+    V(TryJitCompile)                                           \
+    V(SubmitJitTask)                                            \
+    V(RefreshHotnessCounter)                                   \
     V(CheckSafePoint)                                          \
     V(PGODump)                                                 \
     V(PGOPreDump)                                              \
@@ -500,6 +544,7 @@ namespace panda::ecmascript {
     V(LdSendableExternalModuleVarByIndex)                      \
     V(LdSendableLocalModuleVarByIndex)                         \
     V(LdLazySendableExternalModuleVarByIndex)                  \
+    V(TryGetSendableLocalModuleValue)                          \
     V(GetModuleName)                                           \
     V(NewResolvedIndexBindingRecord)                           \
     V(Throw)                                                   \
@@ -514,7 +559,7 @@ namespace panda::ecmascript {
     V(NotifyDebuggerStatement)                                 \
     V(MethodEntry)                                             \
     V(MethodExit)                                              \
-    V(GetTypeArrayPropertyByIndex)                             \
+    V(GetTypedArrayPropertyByIndex)                             \
     V(DebugAOTPrint)                                           \
     V(ProfileOptimizedCode)                                    \
     V(ProfileTypedOp)                                          \
@@ -529,8 +574,7 @@ namespace panda::ecmascript {
     V(StringEqual)                                             \
     V(StringIndexOf)                                           \
     V(DeoptHandler)                                            \
-    V(InsertStringToTable)                                     \
-    V(GetOrInternStringFromHashTrieTable)                      \
+    V(GetOrInternStringFromHashTable)                          \
     V(SlowFlattenString)                                       \
     V(NotifyConcurrentResult)                                  \
     V(UpdateAOTHClass)                                         \
@@ -554,8 +598,10 @@ namespace panda::ecmascript {
     V(AotCallBuiltinTrace)                                     \
     V(NumberBigIntNativePointerToString)                       \
     V(ComputeHashcode)                                         \
-    V(UpdateSharedModule)
-
+    V(UpdateSharedModule)                                      \
+    V(PrintMethodName)                                         \
+    V(RuntimeBranchProfile)                                    \
+    ARKSTEED_RUNTIME_STUB_LIST(V)
 
 #define RUNTIME_STUB_WITH_GC_LIST(V)               \
     RUNTIME_STUB_WITH_GC_WITH_GLOBALENV_LIST(V)    \

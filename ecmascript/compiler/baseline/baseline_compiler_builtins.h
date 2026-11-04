@@ -16,6 +16,9 @@
 #define ECMASCRIPT_COMPILER_BASELINE_BASELINE_COMPILER_BUILTINS_H
 namespace panda::ecmascript::kungfu {
 
+// Keep this ID/count list independent of ECMASCRIPT_ENABLE_BASELINE_STUB. It also
+// defines the thread's Baseline entry-table layout; trimming it shifts GlueData offsets.
+// The build option removes implementations and generated handlers, not these IDs.
 #define BASELINE_COMPILER_BUILTIN_LIST(V)                                  \
     V(BaselineTryLdGLobalByNameImm8ID16)                                   \
     V(BaselineStToGlobalRecordImm16ID16)                                   \

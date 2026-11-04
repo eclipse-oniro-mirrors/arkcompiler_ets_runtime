@@ -410,7 +410,7 @@ host_unittest_action("JSHelper_StringHelper_Test") {
   deps += hiviewdfx_deps
 }
 
-host_unittest_action("JSHelper_TypeArrayHelper_Test") {
+host_unittest_action("JSHelper_TypedArrayHelper_Test") {
   module_out_path = module_output_path
 
   sources = [
@@ -444,6 +444,34 @@ host_unittest_action("JSHelper_UtfHelper_Test") {
   sources = [
     # test file
     "utf_helper_test.cpp",
+  ]
+
+  configs = [
+    "../../../:ecma_test_config",
+    "../../../:icu_path_test_config",
+  ]
+
+  deps = [ "../../../:libark_jsruntime_test" ]
+
+  # hiviewdfx libraries
+  external_deps = hiviewdfx_ext_deps
+  external_deps += [
+    "icu:shared_icui18n",
+    "icu:shared_icuuc",
+    "runtime_core:libarkassembler_static",
+    "zlib:libz",
+
+    #sdk_libc_secshared_dep,
+  ]
+  deps += hiviewdfx_deps
+}
+
+host_unittest_action("JSHelper_LogManager_Test") {
+  module_out_path = module_output_path
+
+  sources = [
+    # test file
+    "log_manager_test.cpp",
   ]
 
   configs = [
@@ -508,10 +536,11 @@ group("unittest") {
     ":JSHelper_ErrorHelper_Test",
     ":JSHelper_FilePathHelper_Test",
     ":JSHelper_JsonHelper_Test",
+    ":JSHelper_LogManager_Test",
     ":JSHelper_MathHelper_Test",
     ":JSHelper_NumberHelper_Test",
     ":JSHelper_StringHelper_Test",
-    ":JSHelper_TypeArrayHelper_Test",
+    ":JSHelper_TypedArrayHelper_Test",
     ":JSHelper_UtfHelper_Test",
     ":JS_Ason_Test",
     ":JS_JsonParser_Test",
@@ -533,10 +562,11 @@ group("host_unittest") {
     ":JSHelper_ErrorHelper_TestAction",
     ":JSHelper_FilePathHelper_TestAction",
     ":JSHelper_JsonHelper_TestAction",
+    ":JSHelper_LogManager_TestAction",
     ":JSHelper_MathHelper_TestAction",
     ":JSHelper_NumberHelper_TestAction",
     ":JSHelper_StringHelper_TestAction",
-    ":JSHelper_TypeArrayHelper_TestAction",
+    ":JSHelper_TypedArrayHelper_TestAction",
     ":JSHelper_UtfHelper_TestAction",
     ":JS_Ason_TestAction",
     ":JS_JsonParser_TestAction",
@@ -553,10 +583,11 @@ group("host_unittest") {
       ":JSHelper_ErrorHelper_TestAction",
       ":JSHelper_FilePathHelper_TestAction",
       ":JSHelper_JsonHelper_TestAction",
+      ":JSHelper_LogManager_TestAction",
       ":JSHelper_MathHelper_TestAction",
       ":JSHelper_NumberHelper_TestAction",
       ":JSHelper_StringHelper_TestAction",
-      ":JSHelper_TypeArrayHelper_TestAction",
+      ":JSHelper_TypedArrayHelper_TestAction",
       ":JSHelper_UtfHelper_TestAction",
       ":JS_Ason_TestAction",
       ":JS_JsonParser_TestAction",

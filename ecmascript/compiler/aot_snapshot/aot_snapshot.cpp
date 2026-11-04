@@ -26,9 +26,9 @@ void AOTSnapshot::InitSnapshot(uint32_t compileFilesCount)
     snapshotData_.SetData(data.GetTaggedValue());
 }
 
-JSHandle<ConstantPool> AOTSnapshot::NewSnapshotConstantPool(uint32_t cacheSize)
+JSHandle<ConstantPool> AOTSnapshot::NewSnapshotConstantPool(uint32_t numOfCache)
 {
-    JSHandle<ConstantPool> cp = factory_->NewConstantPool(cacheSize);
+    JSHandle<ConstantPool> cp = factory_->NewConstantPool(numOfCache);
 
     ASSERT(!snapshotData_.GetHClassInfo().IsHole());
     cp->SetAotSymbolInfo(vm_->GetJSThread(), snapshotData_.GetSymbolInfo());
@@ -52,13 +52,13 @@ void AOTSnapshot::GenerateSnapshotConstantPools(const CMap<int32_t, JSTaggedValu
         int32_t cpId = iter.first;
         cp.Update(iter.second);
         // cachedSize should not have extra data included
-        uint32_t cacheSize = cp->GetCacheLength() - ConstantPool::EXTEND_DATA_NUM;
+        uint32_t numOfCache = cp->GetNumOfCacheElement();
         if (vm_->GetJSOptions().IsEnableCompilerLogSnapshot()) {
             LOG_COMPILER(INFO) << "[aot-snapshot] constantPoolID: " << cpId;
-            LOG_COMPILER(INFO) << "[aot-snapshot] cacheSize: " << cacheSize;
+            LOG_COMPILER(INFO) << "[aot-snapshot] numOfCache: " << numOfCache;
         }
 
-        JSHandle<ConstantPool> newCp = NewSnapshotConstantPool(cacheSize);
+        JSHandle<ConstantPool> newCp = NewSnapshotConstantPool(numOfCache);
         snapshotCpArr->Set(thread_, pos++, JSTaggedValue(cpId));
         snapshotData_.RecordCpArrIdx(cpId, pos);
         snapshotCpArr->Set(thread_, pos++, newCp.GetTaggedValue());
@@ -75,6 +75,7 @@ void AOTSnapshot::StoreConstantPoolInfo(BytecodeInfoCollector *bcInfoCollector)
         return;
     }
     const CMap<int32_t, JSTaggedValue> &allConstantPools = constpoolsOptional.value();
+#ifndef EXCLUDE_PGO
     pgo::ApEntityId fileId = INVALID_INDEX;
     if (!pgo::PGOProfilerManager::GetInstance()->GetPandaFileId(jsPandaFile->GetJSPandaFileDesc(), fileId)) {
         LOG_COMPILER(ERROR) << "StoreConstantPoolInfo failed. no file id found for "
@@ -83,5 +84,6 @@ void AOTSnapshot::StoreConstantPoolInfo(BytecodeInfoCollector *bcInfoCollector)
     }
     GenerateSnapshotConstantPools(allConstantPools, jsPandaFile->GetNormalizedFileDesc(), fileId);
     bcInfoCollector->StoreDataToGlobalData(snapshotData_);
+#endif
 }
 }  // namespace panda::ecmascript

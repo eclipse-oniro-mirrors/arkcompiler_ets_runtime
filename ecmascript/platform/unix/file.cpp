@@ -18,6 +18,12 @@
 #include <dirent.h>
 #include <climits>
 #include <sys/stat.h>
+#include <unistd.h>
+#if defined(PANDA_TARGET_LINUX) || defined(PANDA_TARGET_ANDROID) || defined(PANDA_TARGET_OHOS)
+#include <sys/syscall.h>
+#define PANDA_PLATFORM_HAS_RAW_SYSCALL 1
+#endif
+#include <functional>
 #include <system_error>
 #include "common_components/log/log.h"
 #include "ecmascript/module/js_module_source_text.h"
@@ -146,7 +152,7 @@ MemMap CreateFileMap([[maybe_unused]] const char *fileName, [[maybe_unused]] int
         return MemMap();
     }
     FdsanExchangeOwnerTag(fd);
-    
+
     if (ftruncate(fd, fileSize) == -1) {
         LOG_ECMA(ERROR) << fileName << " file ftruncate failed";
         Close(fd);
@@ -260,27 +266,55 @@ char *LoadLibError()
 
 void DeleteFilesWithSuffix(const std::string &dirPath, const std::string &suffix)
 {
-    DIR* dir = opendir(dirPath.data());
+    Iterdir(dirPath, [&suffix, &dirPath](const std::string_view& fileName, FileType fileType) {
+        if (fileType != FileType::REGULAR) {
+            return;
+        }
+        if (fileName.find(suffix) == std::string::npos) {
+            return;
+        }
+        std::string fullPath(dirPath);
+        fullPath += fileName;
+        if (remove(fullPath.c_str()) == 0) {
+            LOG_ECMA(INFO) << "DeleteFilesWithSuffix remove path success: " << fullPath;
+        } else {
+            LOG_ECMA(ERROR) << "DeleteFilesWithSuffix remove path failed: " << fullPath;
+        }
+    });
+}
+
+std::error_code Iterdir(const std::string& path, const IterdirCallback& callback)
+{
+    DIR* dir = opendir(path.data());
     if (!dir) {
-        LOG_FULL(ERROR) << "DeleteFilesWithSuffix open dir Failed";
-        return;
+        LOG_FULL(ERROR) << "open dir failed, path: " << path;
+        return std::error_code(errno, std::generic_category());
     }
+    static const auto toFileType = [](unsigned char type) -> FileType {
+        switch (type) {
+            case DT_CHR:
+                return FileType::CHARACTER;
+            case DT_DIR:
+                return FileType::DIRECTORY;
+            case DT_FIFO:
+                return FileType::FIFO;
+            case DT_LNK:
+                return FileType::SYMLINK;
+            case DT_REG:
+                return FileType::REGULAR;
+            case DT_SOCK:
+                return FileType::SOCKET;
+            case DT_UNKNOWN:
+            default:
+                return FileType::UNKNOWN;
+        }
+    };
     struct dirent* entry;
     while ((entry = readdir(dir)) != nullptr) {
-        if (entry->d_type == DT_REG) {
-            const std::string &fileName = entry->d_name;
-            if (fileName.find(suffix) == std::string::npos) {
-                continue;
-            }
-            std::string fullPath = std::string(dirPath) + fileName;
-            if (remove(fullPath.c_str()) == 0) {
-                LOG_ECMA(INFO) << "DeleteFilesWithSuffix remove path success: " << fullPath;
-            } else {
-                LOG_ECMA(ERROR) << "DeleteFilesWithSuffix remove path failed: " << fullPath;
-            }
-        }
+        callback(entry->d_name, toFileType(entry->d_type));
     }
     closedir(dir);
+    return std::error_code();
 }
 
 int StrToPosixFlags(const std::string_view &flags)
@@ -337,14 +371,14 @@ constexpr mode_t StrToPosixMode(const std::string_view &mode)
     return posixMode;
 }
 
-int SeekOriginToValue(PosixFile::SeekOrigin whence)
+int SeekOriginToValue(SeekOrigin whence)
 {
     switch (whence) {
-        case PosixFile::SeekOrigin::SET:
+        case SeekOrigin::SET:
             return SEEK_SET;
-        case PosixFile::SeekOrigin::CURRENT:
+        case SeekOrigin::CURRENT:
             return SEEK_CUR;
-        case PosixFile::SeekOrigin::END:
+        case SeekOrigin::END:
             return SEEK_END;
         default:
             errno = EINVAL;
@@ -371,7 +405,82 @@ bool Chmod(const std::string_view &path, const std::string_view &mode, std::erro
     return false;
 }
 
-PosixFile::PosixFile(
+std::error_code Rename(const char *oldPath, const char *newPath, bool existOk)
+{
+    if (!existOk && FileExist(newPath)) {
+        return std::error_code(EEXIST, std::generic_category());
+    }
+    if (rename(oldPath, newPath) == 0) {
+        return std::error_code();
+    }
+    return std::error_code(errno, std::generic_category());
+}
+
+namespace {
+/*
+ * Raw syscall wrappers used by PosixFile<true> (async-signal-safe path).
+ * They bypass libc fdsan instrumentation and any libc internal state so the
+ * calls can be used from a signal handler. On platforms without a usable
+ * syscall() (e.g. macOS), fall back to the libc calls.
+ */
+inline fd_t SysOpen(const char *path, int posixFlags, mode_t mode)
+{
+#ifdef PANDA_PLATFORM_HAS_RAW_SYSCALL
+    // arm64 has no SYS_open; openat with AT_FDCWD keeps open() semantics
+    return static_cast<fd_t>(syscall(SYS_openat, AT_FDCWD, path, posixFlags, mode));
+#else
+    return open(path, posixFlags, mode);
+#endif
+}
+
+inline ssize_t SysRead(fd_t fd, void *buf, size_t size)
+{
+#ifdef PANDA_PLATFORM_HAS_RAW_SYSCALL
+    return syscall(SYS_read, fd, buf, size);
+#else
+    return read(fd, buf, size);
+#endif
+}
+
+inline ssize_t SysWrite(fd_t fd, const void *data, size_t size)
+{
+#ifdef PANDA_PLATFORM_HAS_RAW_SYSCALL
+    return syscall(SYS_write, fd, data, size);
+#else
+    return write(fd, data, size);
+#endif
+}
+
+inline off_t SysLseek(fd_t fd, off_t off, int whence)
+{
+#ifdef PANDA_PLATFORM_HAS_RAW_SYSCALL
+    return static_cast<off_t>(syscall(SYS_lseek, fd, off, whence));
+#else
+    return lseek(fd, off, whence);
+#endif
+}
+
+inline int SysFstat(fd_t fd, struct stat *sa)
+{
+#ifdef PANDA_PLATFORM_HAS_RAW_SYSCALL
+    return static_cast<int>(syscall(SYS_fstat, fd, sa));
+#else
+    return fstat(fd, sa);
+#endif
+}
+
+inline int SysClose(fd_t fd)
+{
+#ifdef PANDA_PLATFORM_HAS_RAW_SYSCALL
+    return static_cast<int>(syscall(SYS_close, fd));
+#else
+    return close(fd);
+#endif
+}
+} // namespace
+
+template<bool asyncSafe>
+PosixFile<asyncSafe>::PosixFile(
     const std::string_view &path, const std::string_view &flags, const std::string_view &mode /* = DEFAULT_MODE */)
 {
     auto m = StrToPosixMode(mode);
@@ -379,17 +488,32 @@ PosixFile::PosixFile(
         errno = EINVAL;
         return;
     }
-    fd_ = open(path.data(), StrToPosixFlags(flags), m);
-}
-
-PosixFile::~PosixFile()
-{
-    if (fd_ != INVALID_FD) {
-        close(fd_);
+    auto posixFlags = StrToPosixFlags(flags);
+    if constexpr (asyncSafe) {
+        fd_ = SysOpen(path.data(), posixFlags, m);
+    } else {
+        fd_ = open(path.data(), posixFlags, m);
+        if (fd_ != INVALID_FD) {
+            FdsanExchangeOwnerTag(fd_);
+        }
     }
 }
 
-int64_t PosixFile::Write(const char *data, size_t size)
+template<bool asyncSafe>
+PosixFile<asyncSafe>::~PosixFile()
+{
+    if (fd_ == INVALID_FD) {
+        return;
+    }
+    if constexpr (asyncSafe) {
+        SysClose(fd_);
+    } else {
+        Close(fd_);
+    }
+}
+
+template<bool asyncSafe>
+int64_t PosixFile<asyncSafe>::Write(const char *data, size_t size)
 {
     if (fd_ == INVALID_FD) {
         errno = EBADF;
@@ -399,10 +523,15 @@ int64_t PosixFile::Write(const char *data, size_t size)
         errno = EINVAL;
         return -1;
     }
-    return write(fd_, data, size);
+    if constexpr (asyncSafe) {
+        return SysWrite(fd_, data, size);
+    } else {
+        return write(fd_, data, size);
+    }
 }
 
-int64_t PosixFile::Read(char *buf, size_t size)
+template<bool asyncSafe>
+int64_t PosixFile<asyncSafe>::Read(char *buf, size_t size)
 {
     if (fd_ == INVALID_FD) {
         errno = EBADF;
@@ -412,10 +541,15 @@ int64_t PosixFile::Read(char *buf, size_t size)
         errno = EINVAL;
         return -1;
     }
-    return read(fd_, buf, size);
+    if constexpr (asyncSafe) {
+        return SysRead(fd_, buf, size);
+    } else {
+        return read(fd_, buf, size);
+    }
 }
 
-int64_t PosixFile::Seek(int64_t off, SeekOrigin whence)
+template<bool asyncSafe>
+int64_t PosixFile<asyncSafe>::Seek(int64_t off, SeekOrigin whence)
 {
     auto w = SeekOriginToValue(whence);
     if (fd_ == INVALID_FD || w == -1) {
@@ -426,19 +560,29 @@ int64_t PosixFile::Seek(int64_t off, SeekOrigin whence)
         errno = EINVAL;
         return -1;
     }
-    return lseek(fd_, off, w);
+    if constexpr (asyncSafe) {
+        return SysLseek(fd_, off, w);
+    } else {
+        return lseek(fd_, off, w);
+    }
 }
 
-int64_t PosixFile::Tell()
+template<bool asyncSafe>
+int64_t PosixFile<asyncSafe>::Tell()
 {
     if (fd_ == INVALID_FD) {
         errno = EBADF;
         return -1;
     }
-    return lseek(fd_, 0, SEEK_CUR);
+    if constexpr (asyncSafe) {
+        return SysLseek(fd_, 0, SEEK_CUR);
+    } else {
+        return lseek(fd_, 0, SEEK_CUR);
+    }
 }
 
-int64_t PosixFile::Size()
+template<bool asyncSafe>
+int64_t PosixFile<asyncSafe>::Size()
 {
     if (fd_ == INVALID_FD) {
         errno = EBADF;
@@ -446,10 +590,19 @@ int64_t PosixFile::Size()
     }
 
     struct stat sa {};
-    if (fstat(fd_, &sa) != 0) {
-        return -1;
+    if constexpr (asyncSafe) {
+        if (SysFstat(fd_, &sa) != 0) {
+            return -1;
+        }
+    } else {
+        if (fstat(fd_, &sa) != 0) {
+            return -1;
+        }
     }
     return sa.st_size;
 }
+
+template class PosixFile<true>;
+template class PosixFile<false>;
 
 } // namespace panda::ecmascript

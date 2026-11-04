@@ -470,7 +470,9 @@ JSHandle<JSFunction> ClassHelper::DefineClassFromExtractor(JSThread *thread, con
     constructor->SetHomeObject(thread, prototype);
     constructor->SetProtoOrHClass(thread, prototype);
     if (thread->GetEcmaVM()->IsEnablePGOProfiler()) {
+#ifndef EXCLUDE_PGO
         thread->GetEcmaVM()->GetPGOProfiler()->ProfileDefineClass(constructor.GetTaggedType());
+#endif
     }
     return constructor;
 }
@@ -584,7 +586,9 @@ JSHandle<JSFunction> ClassHelper::DefineClassWithIHClass(JSThread *thread, const
     constructor->SetProtoOrHClass(thread, prototypeOrHClass);
 
     if (thread->GetEcmaVM()->IsEnablePGOProfiler()) {
+#ifndef EXCLUDE_PGO
         thread->GetEcmaVM()->GetPGOProfiler()->ProfileDefineClass(constructor.GetTaggedType());
+#endif
     }
     return constructor;
 }
@@ -1007,7 +1011,11 @@ void SendableClassDefiner::AddFieldTypeToHClass(JSThread *thread, const JSHandle
         key.Update(fieldTypeArray->Get(thread, i));
         ASSERT(key->IsString());
         SharedFieldType type = FromFieldType(FieldType(fieldTypeArray->Get(thread, i + 1).GetInt()));
+#if ENABLE_V70_OPTIMIZATION
+        int entry = layout->FindElement(thread, *hclass, key.GetTaggedValue(), index);
+#else
         int entry = layout->FindElementWithCache(thread, *hclass, key.GetTaggedValue(), index);
+#endif
         if (entry != -1) {
             attributes = layout->GetAttr(thread, entry);
             attributes.SetSharedFieldType(type);
@@ -1139,7 +1147,7 @@ void SendableClassDefiner::DefineSendableInstanceHClass(JSThread *thread, const 
         JSHandle<JSObject>::Cast(ctor)->SetPropertyInlinedProps(
             thread, ClassInfoExtractor::SENDABLE_ELEMENTS_INDEX, elementsDic.GetTaggedValue());
     }
-    iHClass->SetPrototype(thread, JSHandle<JSTaggedValue>(clsPrototype));
+    JSHClass::SetPrototype(thread, iHClass, JSHandle<JSTaggedValue>(clsPrototype));
     iHClass->SetExtensible(false);
     ctor->SetProtoOrHClass(thread, iHClass);
     ctor->GetJSHClass()->SetExtensible(false);

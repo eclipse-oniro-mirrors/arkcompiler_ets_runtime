@@ -15,7 +15,9 @@
 
 
 #include "ecmascript/compiler/jit_compiler.h"
-
+#if ECMASCRIPT_ENABLE_ARK_STEED && defined(COMPILE_MAPLE)
+#include "ecmascript/arksteed/arksteed_compiler.h"
+#endif
 
 namespace panda::ecmascript::kungfu {
 JitCompiler *JitCompiler::GetInstance(JSRuntimeOptions *options)
@@ -113,6 +115,7 @@ JitCompilerTask *JitCompilerTask::CreateJitCompilerTask(JitTask *jitTask)
 bool JitCompilerTask::Compile()
 {
     if (compilerTier_.IsBaseLine()) {
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
         auto baselineCompiler = new (std::nothrow) BaselineCompiler(jitCompilationEnv_->GetHostThread()->GetEcmaVM(),
             jitCompilationEnv_.get());
         if (baselineCompiler == nullptr) {
@@ -121,6 +124,9 @@ bool JitCompilerTask::Compile()
         baselineCompiler_.reset(baselineCompiler);
         baselineCompiler_->Compile(jitCompilationEnv_->GetJSPandaFile(), jitCompilationEnv_->GetMethodLiteral());
         return true;
+#else
+        return false;
+#endif
     }
 
     JitCompiler *jitCompiler = JitCompiler::GetInstance();
@@ -139,7 +145,7 @@ bool JitCompilerTask::Compile()
     passManager_.reset(jitPassManager);
     auto aotFileGenerator = new (std::nothrow) AOTFileGenerator(&jitCompiler->GetCompilerLog(),
         &jitCompiler->GetLogList(), jitCompilationEnv_.get(),
-        jitCompiler->GetJitOptions().triple_, jitCompilationEnv_->GetJSOptions().IsCompilerEnableLiteCG());
+        jitCompiler->GetJitOptions().triple_, IsLiteCGEnabled(jitCompilationEnv_.get()));
     if (aotFileGenerator == nullptr) {
         return false;
     }
@@ -161,7 +167,11 @@ bool JitCompilerTask::Finalize(JitTask *jitTask)
         return false;
     }
     if (compilerTier_.IsBaseLine()) {
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
         return baselineCompiler_->CollectMemoryCodeInfos(jitTask->GetMachineCodeDesc());
+#else
+        return false;
+#endif
     }
     jitCodeGenerator_->JitCreateLitecgModule();
     bool result = true;
@@ -251,8 +261,16 @@ ARK_INLINE bool JitCompiler::AllocFromFortAndCopy(CompilationEnv &compilationEnv
 
 void InitJitCompiler(JSRuntimeOptions options)
 {
-    JitCompiler *jitCompiler = JitCompiler::GetInstance(&options);
-    jitCompiler->Init(options);
+#if ECMASCRIPT_ENABLE_ARK_STEED && defined(COMPILE_MAPLE)
+    if (options.IsEnableJIT() && options.GetCompilerJitBackend() == JitBackend::ARKSTEED) {
+        arksteed::InitArkSteedCompiler(options);
+    }
+#endif
+    if (options.IsEnableBaselineJIT() ||
+        (options.IsEnableJIT() && options.GetCompilerJitBackend() == JitBackend::FASTJIT)) {
+        JitCompiler *jitCompiler = JitCompiler::GetInstance(&options);
+        jitCompiler->Init(options);
+    }
 }
 
 void *CreateJitCompilerTask(JitTask *jitTask)
@@ -260,6 +278,11 @@ void *CreateJitCompilerTask(JitTask *jitTask)
     if (jitTask == nullptr) {
         return nullptr;
     }
+#if ECMASCRIPT_ENABLE_ARK_STEED && defined(COMPILE_MAPLE)
+    if (jitTask->GetCompilerTier().IsArkSteed()) {
+        return arksteed::CreateArkSteedCompilerTask(static_cast<arksteed::ArkSteedTask *>(jitTask));
+    }
+#endif
     return JitCompilerTask::CreateJitCompilerTask(jitTask);
 }
 
@@ -268,6 +291,11 @@ bool JitCompile(void *compilerTask, JitTask *jitTask)
     if (jitTask == nullptr || compilerTask == nullptr) {
         return false;
     }
+#if ECMASCRIPT_ENABLE_ARK_STEED && defined(COMPILE_MAPLE)
+    if (jitTask->GetCompilerTier().IsArkSteed()) {
+        return arksteed::ArkSteedCompile(compilerTask, static_cast<arksteed::ArkSteedTask *>(jitTask));
+    }
+#endif
     auto jitCompilerTask = reinterpret_cast<JitCompilerTask*>(compilerTask);
     return jitCompilerTask->Compile();
 }
@@ -277,15 +305,26 @@ bool JitFinalize(void *compilerTask, JitTask *jitTask)
     if (jitTask == nullptr || compilerTask == nullptr) {
         return false;
     }
+#if ECMASCRIPT_ENABLE_ARK_STEED && defined(COMPILE_MAPLE)
+    if (jitTask->GetCompilerTier().IsArkSteed()) {
+        return arksteed::ArkSteedFinalize(compilerTask, static_cast<arksteed::ArkSteedTask *>(jitTask));
+    }
+#endif
     auto jitCompilerTask = reinterpret_cast<JitCompilerTask*>(compilerTask);
     return jitCompilerTask->Finalize(jitTask);
 }
 
-void DeleteJitCompilerTask(void *compilerTask)
+void DeleteJitCompilerTask(void *compilerTask, [[maybe_unused]] bool isArkSteed)
 {
     if (compilerTask == nullptr) {
         return;
     }
+#if ECMASCRIPT_ENABLE_ARK_STEED && defined(COMPILE_MAPLE)
+    if (isArkSteed) {
+        arksteed::DeleteArkSteedCompilerTask(compilerTask);
+        return;
+    }
+#endif
     delete reinterpret_cast<JitCompilerTask*>(compilerTask);
 }
 }  // namespace panda::ecmascript::kungfu

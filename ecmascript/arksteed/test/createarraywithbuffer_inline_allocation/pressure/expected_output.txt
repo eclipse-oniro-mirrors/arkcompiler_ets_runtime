@@ -1,0 +1,6 @@
+compiled:true
+imm16:true
+register-pressure-and-exhaustion:true
+young-gc-survivors:true
+full-gc-survivors:true
+template-after-gc:true

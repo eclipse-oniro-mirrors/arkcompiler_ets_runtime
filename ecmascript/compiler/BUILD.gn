@@ -41,9 +41,29 @@ config("include_maple") {
   cflags_cc = [ "-Wno-gnu-zero-variadic-macro-arguments" ]
 }
 
+# Numeric C++ coverage measurement of the ArkSteed JIT compiler. Both configs
+# are inert unless `arksteed_coverage` (js_runtime_config.gni) is true. The
+# compile config instruments the translation units of
+# `libark_jsoptimizer_set_with_maple`, which is where the ArkSteed compiler
+# sources (`arksteed_jit_sources`) are compiled, and of `libark_jsruntime_set`
+# (js_runtime_config.gni), which is where the ArkSteed runtime sources
+# (`arksteed_deopt_helper.cpp`, `arksteed_safepoint_table.cpp`,
+# `arksteed_task.cpp`) are compiled; together these cover every production
+# translation unit of `ecmascript/arksteed`. The link config is published as a
+# public config so every target that links those objects also links the
+# coverage runtime and flushes the profile on exit.
+config("arksteed_coverage_compile") {
+  cflags_cc = [ "--coverage" ]
+}
+
+config("arksteed_coverage_link") {
+  ldflags = [ "--coverage" ]
+}
+
 libark_jsoptimizer_sources = [
   "access_object_stub_builder.cpp",
   "aot_compilation_env.cpp",
+  "aot_compat_util.cpp",
   "aot_compiler_preprocessor.cpp",
   "aot_compiler_stats.cpp",
   "argument_accessor.cpp",
@@ -58,10 +78,6 @@ libark_jsoptimizer_sources = [
   "async_function_lowering.cpp",
   "barrier_stub_builder.cpp",
   "base/depend_chain_helper.cpp",
-  "baseline/baseline_assembler.cpp",
-  "baseline/baseline_call_signature.cpp",
-  "baseline/baseline_compiler.cpp",
-  "baseline/baseline_stubs.cpp",
   "bc_call_signature.cpp",
   "builtins/builtins_array_indexof_stub_builder.cpp",
   "builtins/builtins_array_stub_builder.cpp",
@@ -78,6 +94,12 @@ libark_jsoptimizer_sources = [
   "builtins/builtins_proxy_stub_builder.cpp",
   "builtins/builtins_reflect_stub_builder.cpp",
   "builtins/builtins_regexp_stub_builder.cpp",
+  "builtins/builtins_shared_array_indexof_stub_builder.cpp",
+  "builtins/builtins_shared_array_stub_builder.cpp",
+  "builtins/builtins_shared_function_stub_builder.cpp",
+  "builtins/builtins_shared_map_stub_builder.cpp",
+  "builtins/builtins_shared_set_stub_builder.cpp",
+  "builtins/builtins_shared_typedarray_stub_builder.cpp",
   "builtins/builtins_string_stub_builder.cpp",
   "builtins/builtins_stubs.cpp",
   "builtins/builtins_typedarray_stub_builder.cpp",
@@ -104,16 +126,12 @@ libark_jsoptimizer_sources = [
   "circuit.cpp",
   "circuit_builder.cpp",
   "circuit_builder_helper.cpp",
-  "codegen/llvm/aarch64/aarch64_builder.cpp",
-  "codegen/llvm/llvm_codegen.cpp",
-  "codegen/llvm/llvm_ir_builder.cpp",
-  "codegen/llvm/x64/x64_builder.cpp",
+  "code_generator.cpp",
   "combined_pass_visitor.cpp",
   "common_stubs.cpp",
   "compilation_driver.cpp",
   "compilation_env.cpp",
   "compiler_log.cpp",
-  "constant_folding.cpp",
   "dead_code_elimination.cpp",
   "debug_info.cpp",
   "early_elimination.cpp",
@@ -191,6 +209,88 @@ libark_jsoptimizer_sources = [
   "verifier.cpp",
 ]
 
+arksteed_jit_sources = []
+
+if (compile_baseline_stub) {
+  libark_jsoptimizer_sources += [
+    "baseline/baseline_assembler.cpp",
+    "baseline/baseline_call_signature.cpp",
+    "baseline/baseline_compiler.cpp",
+    "baseline/baseline_stubs.cpp",
+  ]
+}
+
+if (enable_branch_elimination) {
+  libark_jsoptimizer_sources += [
+    "branch_elimination.cpp",
+    "constant.cpp",
+    "constant_folding2.cpp",
+  ]
+} else {
+  libark_jsoptimizer_sources += [
+    "constant_folding.cpp"
+  ]
+}
+
+if (enable_branch_profile) {
+  libark_jsoptimizer_sources += [
+    "branch_profile.cpp"
+  ]
+}
+
+if (enable_controlflow_optimization) {
+  libark_jsoptimizer_sources += [ "controlflow_optimization.cpp" ]
+}
+
+if (ets_runtime_enable_ark_steed) {
+  # These trampolines are part of the generated stub ABI and must remain in
+  # ark_stub_compiler.
+  libark_jsoptimizer_sources += [
+    "trampoline/aarch64/arksteed_call.cpp",
+    "trampoline/x64/arksteed_call.cpp",
+  ]
+
+  # ArkSteed's JIT implementation is only needed by the full optimizer. Keep
+  # it out of libark_jsoptimizer_set so changes here do not relink
+  # ark_stub_compiler or regenerate stub.an.
+  arksteed_jit_sources += [
+    "${ARK_STEED_ROOT}/arksteed_access_info_factory.cpp",
+    "${ARK_STEED_ROOT}/arksteed_assembler.cpp",
+    "${ARK_STEED_ROOT}/arksteed_bytecode_analysis.cpp",
+    "${ARK_STEED_ROOT}/arksteed_bytecode_preprocessor.cpp",
+    "${ARK_STEED_ROOT}/arksteed_codegen.cpp",
+    "${ARK_STEED_ROOT}/arksteed_comment.cpp",
+    "${ARK_STEED_ROOT}/arksteed_compile_info_facts.cpp",
+    "${ARK_STEED_ROOT}/arksteed_compiler.cpp",
+    "${ARK_STEED_ROOT}/arksteed_constant_folding.cpp",
+    "${ARK_STEED_ROOT}/arksteed_dce.cpp",
+    "${ARK_STEED_ROOT}/arksteed_disassembler.cpp",
+    "${ARK_STEED_ROOT}/arksteed_feedback_reader.cpp",
+    "${ARK_STEED_ROOT}/arksteed_graph_builder.cpp",
+    "${ARK_STEED_ROOT}/arksteed_graph_printer.cpp",
+    "${ARK_STEED_ROOT}/arksteed_graph_verifier.cpp",
+    "${ARK_STEED_ROOT}/arksteed_heap_broker.cpp",
+    "${ARK_STEED_ROOT}/arksteed_loop_effects.cpp",
+    "${ARK_STEED_ROOT}/arksteed_opcode.cpp",
+    "${ARK_STEED_ROOT}/arksteed_regalloc_types.cpp",
+    "${ARK_STEED_ROOT}/arksteed_regalloc.cpp",
+    "${ARK_STEED_ROOT}/arksteed_vertex.cpp",
+    "${ARK_STEED_ROOT}/arksteed_vreg.cpp",
+    "${ARK_STEED_ROOT}/arksteed_write_barrier.cpp",
+    "${ARK_STEED_ROOT}/arksteed_write_barrier_value_kind_pass.cpp",
+  ]
+
+  # Platform-specific ArkSteed assembler implementations
+  if (current_cpu == "amd64" || current_cpu == "x64" ||
+      current_cpu == "x86_64") {
+    arksteed_jit_sources +=
+        [ "${ARK_STEED_ROOT}/arch/x64/arksteed_assembler_x64.cpp" ]
+  } else if (current_cpu == "arm64") {
+    arksteed_jit_sources +=
+        [ "${ARK_STEED_ROOT}/arch/arm64/arksteed_assembler_arm64.cpp" ]
+  }
+}
+
 config("libark_jsoptimizer_set_config") {
   # Setting up IS_RELEASE_VERSION if compiling as release version
   if (build_variant == "user") {
@@ -211,9 +311,19 @@ config("libark_jsoptimizer_set_config") {
   }
 }
 
+# LLVM codegen sources are only built when LLVM is not excluded (ets_runtime_disable_llvm_backend=false).
+# They are added per-target (libark_jsoptimizer_set always, libark_jsoptimizer_set_with_maple only when !ets_runtime_disable_llvm_backend).
+libark_llvmcodegen_sources = [
+  "codegen/llvm/aarch64/aarch64_builder.cpp",
+  "codegen/llvm/llvm_codegen.cpp",
+  "codegen/llvm/llvm_ir_builder.cpp",
+  "codegen/llvm/x64/x64_builder.cpp",
+]
+
 ohos_source_set("libark_jsoptimizer_set") {
   stack_protector_ret = false
   sources = libark_jsoptimizer_sources
+  sources += libark_llvmcodegen_sources
   if (enable_local_code_sign) {
     sources += [ "$js_root/ecmascript/platform/unix/ohos/code_sign.cpp" ]
   } else if (is_mingw) {
@@ -223,7 +333,7 @@ ohos_source_set("libark_jsoptimizer_set") {
   }
   public_configs = [
     "$js_root:include_llvm",
-    "$js_root:ark_jsruntime_compiler_config",
+    "$js_root:ark_jsruntime_common_config",
     "$js_root:ark_jsruntime_public_config",
     ":libark_jsoptimizer_set_config",
   ]
@@ -241,6 +351,10 @@ ohos_source_set("libark_jsoptimizer_set") {
   external_deps += hiviewdfx_ext_deps
   deps += hiviewdfx_deps
   defines = []
+
+  if (ets_runtime_enable_ark_steed) {
+    defines += [ "ECMASCRIPT_ENABLE_ARK_STEED_GN" ]
+  }
 
   # init library for parameters.h
   if (!ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) &&
@@ -275,7 +389,10 @@ ohos_source_set("libark_jsoptimizer_set_with_maple") {
     branch_protector_ret = "pac_ret"
   }
   cflags_cc = [ "-fvisibility=hidden" ]
-  sources = libark_jsoptimizer_sources
+  sources = libark_jsoptimizer_sources + arksteed_jit_sources
+  if (!ets_runtime_disable_llvm_backend || !is_ohos) {
+    sources += libark_llvmcodegen_sources
+  }
   if (enable_local_code_sign) {
     sources += [ "$js_root/ecmascript/platform/unix/ohos/code_sign.cpp" ]
   } else if (is_mingw) {
@@ -293,13 +410,26 @@ ohos_source_set("libark_jsoptimizer_set_with_maple") {
   public_configs = [
     "$js_root:include_llvm",
     ":include_maple",
-    "$js_root:ark_jsruntime_compiler_config",
+    "$js_root:ark_jsruntime_common_config",
     "$js_root:ark_jsruntime_public_config",
     ":libark_jsoptimizer_set_config",
     ":enable_maple_config",
   ]
 
+  if (arksteed_coverage) {
+    # Coverage measurement build (off by default): instrument every translation
+    # unit of this source set, including the ArkSteed production files
+    # (`arksteed_jit_sources`), and publish the link flag to the targets that
+    # link them.
+    configs = [ ":arksteed_coverage_compile" ]
+    public_configs += [ ":arksteed_coverage_link" ]
+  }
+
   defines = []
+
+  if (ets_runtime_enable_ark_steed) {
+    defines += [ "ECMASCRIPT_ENABLE_ARK_STEED_GN" ]
+  }
   external_deps = [ "zlib:libz" ]
 
   if (enable_jit_code_sign) {
@@ -314,11 +444,17 @@ ohos_source_set("libark_jsoptimizer_set_with_maple") {
     defines += [ "ARK_LITECG_DEBUG" ]
   }
 
+  if (ets_runtime_disable_llvm_backend && is_ohos) {
+    defines += [ "DISABLE_LLVM_BACKEND" ]
+  }
+
   deps = []
-  if (is_ohos) {
-    deps += [ "${LLVM_LIB_ROOT}:libark_llvmcodegen" ]
-  } else {
-    deps += [ "${LLVM_LIB_ROOT}:libark_llvmcodegen_set" ]
+  if (!ets_runtime_disable_llvm_backend || !is_ohos) {
+    if (is_ohos) {
+      deps += [ "${LLVM_LIB_ROOT}:libark_llvmcodegen" ]
+    } else {
+      deps += [ "${LLVM_LIB_ROOT}:libark_llvmcodegen_set" ]
+    }
   }
   if (!is_arkui_x) {
     external_deps += [ "runtime_core:arkfile_header_deps" ]
@@ -387,6 +523,9 @@ ohos_shared_library("libark_jsoptimizer") {
     }
     branch_protector_ret = "pac_ret"
   }
+  if (!is_mac) {
+    version_script = "libark_jsoptimizer.map"
+  }
   deps = [
     ":libark_jsoptimizer_set_with_maple",
     "$js_root:libark_jsruntime",
@@ -427,7 +566,7 @@ ohos_executable("ark_stub_compiler") {
 
   configs = [
     "$js_root:include_llvm",
-    "$js_root:ark_jsruntime_compiler_config",
+    "$js_root:ark_jsruntime_common_config",
     "$js_root:ark_jsruntime_public_config",
   ]
 
@@ -492,7 +631,7 @@ ohos_executable("ark_aot_compiler") {
   configs = [
     "$js_root:include_llvm",
     ":include_maple",
-    "$js_root:ark_jsruntime_compiler_config",
+    "$js_root:ark_jsruntime_common_config",
     "$js_root:ark_jsruntime_public_config",
   ]
 
@@ -577,6 +716,11 @@ action("gen_stub_file") {
         " --stub-file=" + rebase_path(stub_file_gen_dir) + "/stub.an" +
         " --compiler-target-triple=aarch64-unknown-linux-gnu" +
         " --compiler-log=allasm" + " --log-level=info"
+  } else if (current_os == "mac" && current_cpu == "arm64") {
+    # The stub compiler defaults to x64 when no target triple is supplied.
+    stub_option =
+        " --stub-file=" + rebase_path(stub_file_gen_dir) + "/stub.an" +
+        " --compiler-target-triple=aarch64-unknown-linux-gnu"
   } else if (current_toolchain == host_toolchain) {
     stub_option = " --stub-file=" + rebase_path(stub_file_gen_dir) + "/stub.an"
   } else if (current_cpu == "x86_64") {
@@ -589,9 +733,15 @@ action("gen_stub_file") {
         " --compiler-target-triple=aarch64-unknown-linux-gnu" +
         " --compiler-log=allasm" + " --log-level=info"
   }
+  if (ets_runtime_feature_enable_stub_function_reordering) {
+     stub_option += " --stub-ordering-file=" + rebase_path(js_root) +
+                    "/ecmascript/compiler/stub-function-ordering.txt"
+  }
   stub_option += " --enable-force-gc=false"
 
-  if (host_cpu == "arm64") {
+  if (host_os == "mac" && host_cpu == "arm64") {
+    llvm_lib_dir = "//prebuilts/clang/ohos/darwin-arm64/llvm/lib/"
+  } else if (host_cpu == "arm64") {
     llvm_lib_dir = "//prebuilts/clang/ohos/linux-aarch64/llvm/lib/"
   } else {
     llvm_lib_dir = "//prebuilts/clang/ohos/linux-x86_64/llvm/lib/"
@@ -622,6 +772,11 @@ action("gen_stub_file") {
     ]
     not_needed([ "llvm_lib_dir" ])
   } else {
+    libuv_lib_dir = ""
+    if (host_os == "mac" && host_cpu == "arm64") {
+      libuv_lib_dir =
+          rebase_path(root_out_dir_with_host_toolchain) + "/thirdparty/libuv:"
+    }
     args += [
       "--env-path",
       rebase_path(root_out_dir_with_host_toolchain) +
@@ -637,7 +792,8 @@ action("gen_stub_file") {
           "/resourceschedule/frame_aware_sched:" +
           rebase_path(root_out_dir_with_host_toolchain) + "/hiviewdfx/hilog:" +
           rebase_path(root_out_dir_with_host_toolchain) +
-          "/thirdparty/bounds_checking_function:" + rebase_path(llvm_lib_dir),
+          "/thirdparty/bounds_checking_function:" +
+          libuv_lib_dir + rebase_path(llvm_lib_dir),
     ]
   }
 

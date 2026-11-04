@@ -38,8 +38,18 @@ ohos_shared_library("libcompiler_service") {
     "$js_root:ark_jsruntime_public_config",
     "$js_root:ark_jsruntime_common_config",
   ]
+  stack_protector_ret = true
+  if (!ark_standalone_build) {
+    sanitize = {
+      cfi = true
+      cfi_cross_dso = true
+      debug = false
+    }
+    branch_protector_ret = "pac_ret"
+  }
   shlib_type = "sa"
   version_script = "libaot_compiler_service.map"
+  ldflags = [ "-Wl,--exclude-libs,ALL" ]
   sources = [
     "${js_root}/common_components/log/log.cpp",
     "${js_root}/ecmascript/compiler/aot_compiler_stats.cpp",
@@ -54,6 +64,7 @@ ohos_shared_library("libcompiler_service") {
     "src/aot_compiler_service.cpp",
     "src/power_disconnected_listener.cpp",
     "src/screen_status_listener.cpp",
+    "src/security_guard_report.cpp",
     "src/thermal_mgr_listener.cpp",
   ]
   if (enable_target_compilation) {
@@ -68,6 +79,7 @@ ohos_shared_library("libcompiler_service") {
     ]
   } else {
     sources += [
+      "${js_root}/ecmascript/platform/common/filesystem.cpp",
       "${js_root}/ecmascript/platform/unix/directory.cpp",
       "${js_root}/ecmascript/platform/unix/linux/os.cpp",
     ]
@@ -105,6 +117,20 @@ ohos_shared_library("libcompiler_service") {
     defines += [ "CODE_SIGN_ENABLE" ]
   }
 
+  # security_guard_enable is already declared in
+  # //base/security/security_guard/security_guard.gni, so gate on part
+  # presence instead to avoid a duplicate build argument declaration.
+  # The REPORT_SECURITY_EVENT permission is granted declaratively via the
+  # "permission" field in compiler_service.cfg (registered by init).
+  if (defined(global_parts_info) &&
+      defined(global_parts_info.security_guard)) {
+    external_deps += [
+      "cJSON:cjson_static",
+      "security_guard:libsg_collect_sdk",
+    ]
+    defines += [ "SECURITY_GUARD_ENABLE" ]
+  }
+
   if (!ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) &&
       is_ohos && is_standard_system) {
     external_deps += [ "init:libbegetutil" ]
@@ -137,15 +163,6 @@ ohos_prebuilt_etc("ark_aot_compiler.cfg") {
 ohos_prebuilt_etc("system_framework_aot_enable_list.conf") {
   relative_install_dir = "ark"
   source = "system_framework_aot_enable_list.conf"
-
-  # Set the subsystem name
-  part_name = "ets_runtime"
-  subsystem_name = "arkcompiler"
-}
-
-ohos_prebuilt_etc("static_app_install_aot_enable_list.conf") {
-  relative_install_dir = "ark"
-  source = "static_app_install_aot_enable_list.conf"
 
   # Set the subsystem name
   part_name = "ets_runtime"

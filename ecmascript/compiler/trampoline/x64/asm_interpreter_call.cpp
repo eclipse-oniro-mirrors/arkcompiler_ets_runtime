@@ -775,8 +775,6 @@ void AsmInterpreterCall::DispatchCall(ExtendedAssembler *assembler, Register pcR
     }
     // sp: rbp
     __ Movq(newSpRegister, rbp);
-    // hotnessCounter: rdi
-    __ Movzwq(Operand(methodRegister, Method::LITERAL_INFO_OFFSET), rdi);
     // constantPool: rbx
     __ Movq(Operand(methodRegister, Method::CONSTANT_POOL_OFFSET), rbx);
     // pc: r12
@@ -1185,7 +1183,7 @@ void AsmInterpreterCall::CallNativeInternal(ExtendedAssembler *assembler, Regist
 }
 
 // ResumeRspAndDispatch(uintptr_t glue, uintptr_t sp, uintptr_t pc, uintptr_t constantPool,
-//     uint64_t profileTypeInfo, uint64_t acc, uint32_t hotnessCounter, size_t jumpSize)
+//     uint64_t profileTypeInfo, uint64_t acc, size_t jumpSize)
 // GHC calling convention
 // %r13 - glue
 // %rbp - sp
@@ -1193,8 +1191,7 @@ void AsmInterpreterCall::CallNativeInternal(ExtendedAssembler *assembler, Regist
 // %rbx - constantPool
 // %r14 - profileTypeInfo
 // %rsi - acc
-// %rdi - hotnessCounter
-// %r8  - jumpSizeAfterCall
+// %rdi - jumpSizeAfterCall
 void AsmInterpreterCall::ResumeRspAndDispatch(ExtendedAssembler *assembler)
 {
     __ BindAssemblerStub(RTSTUB_ID(ResumeRspAndDispatch));
@@ -1202,7 +1199,7 @@ void AsmInterpreterCall::ResumeRspAndDispatch(ExtendedAssembler *assembler)
     Register spRegister = rbp;
     Register pcRegister = r12;
     Register ret = rsi;
-    Register jumpSizeRegister = r8;
+    Register jumpSizeRegister = rdi;
 
     Register frameStateBaseRegister = r11;
     __ Movq(spRegister, frameStateBaseRegister);
@@ -1483,7 +1480,7 @@ void AsmInterpreterCall::ResumeRspAndReturnBaseline(ExtendedAssembler *assembler
 }
 
 // ResumeCaughtFrameAndDispatch(uintptr_t glue, uintptr_t sp, uintptr_t pc, uintptr_t constantPool,
-//     uint64_t profileTypeInfo, uint64_t acc, uint32_t hotnessCounter)
+//     uint64_t profileTypeInfo, uint64_t acc)
 // GHC calling convention
 // %r13 - glue
 // %rbp - sp
@@ -1491,7 +1488,6 @@ void AsmInterpreterCall::ResumeRspAndReturnBaseline(ExtendedAssembler *assembler
 // %rbx - constantPool
 // %r14 - profileTypeInfo
 // %rsi - acc
-// %rdi - hotnessCounter
 void AsmInterpreterCall::ResumeCaughtFrameAndDispatch(ExtendedAssembler *assembler)
 {
     __ BindAssemblerStub(RTSTUB_ID(ResumeCaughtFrameAndDispatch));
@@ -1540,7 +1536,7 @@ void AsmInterpreterCall::ResumeUncaughtFrameAndReturn(ExtendedAssembler *assembl
 }
 
 // ResumeRspAndRollback(uintptr_t glue, uintptr_t sp, uintptr_t pc, uintptr_t constantPool,
-//     uint64_t profileTypeInfo, uint64_t acc, uint32_t hotnessCounter, size_t jumpSize)
+//     uint64_t profileTypeInfo, uint64_t acc, size_t jumpSize)
 // GHC calling convention
 // %r13 - glue
 // %rbp - sp
@@ -1548,8 +1544,7 @@ void AsmInterpreterCall::ResumeUncaughtFrameAndReturn(ExtendedAssembler *assembl
 // %rbx - constantPool
 // %r14 - profileTypeInfo
 // %rsi - acc
-// %rdi - hotnessCounter
-// %r8  - jumpSizeAfterCall
+// %rdi - jumpSizeAfterCall
 void AsmInterpreterCall::ResumeRspAndRollback(ExtendedAssembler *assembler)
 {
     __ BindAssemblerStub(RTSTUB_ID(ResumeRspAndRollback));
@@ -1557,7 +1552,7 @@ void AsmInterpreterCall::ResumeRspAndRollback(ExtendedAssembler *assembler)
     Register spRegister = rbp;
     Register pcRegister = r12;
     Register ret = rsi;
-    Register jumpSizeRegister = r8;
+    Register jumpSizeRegister = rdi;
 
     Register frameStateBaseRegister = r11;
     __ Movq(spRegister, frameStateBaseRegister);
@@ -1687,6 +1682,40 @@ void AsmInterpreterCall::ASMFastWriteBarrier(ExtendedAssembler* assembler)
         __ Jae(&valueMaybeSweepableShare);
         // if value may be SweepableShare, goto valueMaybeSweepableShare
     }
+#if USE_STICKY_CMS_GC
+    __ Bind(&valueNotShare);
+    {
+        // valueNotShare:
+        // rcx & WeakTag removeWeakTag
+        // %rd1 - glue
+        // %rsi - obj
+        // %rdx - offset
+        // %rcx - value
+        // *rcx loadHClass-> r11 hclass
+        // hclass & ~TaggedObject::GC_STATE_MASK r11
+        // r11 compare TaggedStateWord::YOUNG_STATE
+        // if false goto checkMark
+        // rsi loadHClass-> r11 hclass
+        // hclass & ~TaggedObject::GC_STATE_MASK r11
+        // r11 compare TaggedStateWord::OLD_STATE
+        // if true goto needCallNotShare
+
+        __ Movabs(~(JSTaggedValueInternals::TAG_WEAK), r11); // r11 is weakMask
+        __ And(rcx, r11); // RemoveWeakTag of value
+        static_assert(TaggedStateWord::OLD_STATE == (static_cast<uint64_t>(ObjectState::OLD) <<
+                                                     TaggedStateWord::ADDRESS_WIDTH));
+        static_assert(TaggedStateWord::YOUNG_STATE == (static_cast<uint64_t>(ObjectState::YOUNG) <<
+                                                       TaggedStateWord::ADDRESS_WIDTH));
+        static_assert(TaggedStateWord::ADDRESS_WIDTH % GCBitset::BIT_PER_BYTE == 0);
+        __ Movzbl(Operand(r11, static_cast<uint32_t>(TaggedStateWord::ADDRESS_WIDTH) / GCBitset::BIT_PER_BYTE), r11);
+        __ Cmpl(Immediate(static_cast<uint32_t>(ObjectState::YOUNG)), r11);
+        __ Jne(&checkMark);
+
+        __ Movzbl(Operand(rsi, static_cast<uint32_t>(TaggedStateWord::ADDRESS_WIDTH) / GCBitset::BIT_PER_BYTE), r11);
+        __ Cmpl(Immediate(static_cast<uint32_t>(ObjectState::YOUNG)), r11);
+        __ Jne(&needCallNotShare);
+    }
+#else
     __ Bind(&valueNotShare);
     {
         // valueNotShare:
@@ -1710,6 +1739,7 @@ void AsmInterpreterCall::ASMFastWriteBarrier(ExtendedAssembler* assembler)
         __ Jne(&needCallNotShare);
         // if obj is not in young, goto needCallNotShare
     }
+#endif
 
     __ Bind(&checkMark);
     {

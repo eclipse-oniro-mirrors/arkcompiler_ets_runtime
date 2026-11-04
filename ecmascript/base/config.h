@@ -20,6 +20,14 @@
 #include "base/common.h"
 #include <cstdint>
 
+// Set to 0 to use the LocalCC implementation without the reference-processing
+// and module-root scanning optimizations. May be overridden with -D at build time.
+// The runtime and users of its internal headers must use the same value because
+// this switch changes internal class layouts.
+#ifndef ENABLE_LOCALCC_OPTIMIZATION
+#define ENABLE_LOCALCC_OPTIMIZATION 0
+#endif
+
 namespace panda::ecmascript {
 #ifdef USE_CMC_GC
 extern uint32_t g_isEnableCMCGC;
@@ -31,6 +39,15 @@ extern uint32_t g_isEnableCMCGCConcurrentRootMarking;
 constexpr bool G_USE_CMS_GC = true;
 #else
 constexpr bool G_USE_CMS_GC = false;
+#endif
+
+#if USE_STICKY_CMS_GC
+constexpr bool G_USE_STICKY_CMS_GC = true;
+#if !USE_CMS_GC
+#error "USE_STICKY_CMS_GC requires USE_CMS_GC to be defined as 1"
+#endif
+#else
+constexpr bool G_USE_STICKY_CMS_GC = false;
 #endif
 
 enum class PUBLIC_API RBMode : uint8_t {
@@ -53,6 +70,13 @@ enum class PUBLIC_API RBMode : uint8_t {
 #define ECMASCRIPT_ENABLE_HEAP_DETAIL_STATISTICS 0
 #define ECMASCRIPT_ENABLE_OPT_CODE_PROFILER 0
 #define ECMASCRIPT_ENABLE_JIT_WARMUP_PROFILER 0
+#if defined(CROSS_PLATFORM)
+#define ECMASCRIPT_ENABLE_INTERPRETER_JIT_STUBS 0
+#define ECMASCRIPT_ENABLE_INTERPRETER_PGO_STUBS 0
+#else
+#define ECMASCRIPT_ENABLE_INTERPRETER_JIT_STUBS 1
+#define ECMASCRIPT_ENABLE_INTERPRETER_PGO_STUBS 1
+#endif
 #define ECMASCRIPT_ENABLE_FUNCTION_CALL_TIMER 0
 #define ECMASCRIPT_ENABLE_ELEMENTSKIND_ALWAY_GENERIC 0
 #define ECMASCRIPT_ENABLE_SCOPE_LOCK_STAT 0
@@ -67,6 +91,11 @@ enum class PUBLIC_API RBMode : uint8_t {
 #define ECMASCRIPT_ENABLE_TRACE_CALL  0
 #define ECMASCRIPT_ENABLE_TRACE_DEFINEFUNC 0
 #define ECMASCRIPT_ENABLE_NOT_FOUND_IC_CHECK 0
+#ifdef ECMASCRIPT_ENABLE_ARK_STEED_GN
+#define ECMASCRIPT_ENABLE_ARK_STEED 1
+#else
+#define ECMASCRIPT_ENABLE_ARK_STEED 0
+#endif
 
 #ifndef NDEBUG
 #define ECMASCRIPT_ENABLE_INTERPRETER_LOG 1
@@ -107,6 +136,7 @@ enum class PUBLIC_API RBMode : uint8_t {
     #define ECMASCRIPT_ENABLE_NAPI_SPECIAL_CHECK 1
     #define ECMASCRIPT_ENABLE_STUB_ARGV_CHECK 1
     #define ECMASCRIPT_ENABLE_STUB_RESULT_CHECK 1
+    #define ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK 0
 #elif defined(ECMASCRIPT_ENABLE_ASAN_DFX_CONFIG)
     #define ECMASCRIPT_ENABLE_IC 1
     #define ECMASCRIPT_ENABLE_ZAP_MEM 0
@@ -117,6 +147,7 @@ enum class PUBLIC_API RBMode : uint8_t {
     #define ECMASCRIPT_ENABLE_NAPI_SPECIAL_CHECK 1
     #define ECMASCRIPT_ENABLE_STUB_ARGV_CHECK 0
     #define ECMASCRIPT_ENABLE_STUB_RESULT_CHECK 0
+    #define ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK 0
 #elif defined(ECMASCRIPT_ENABLE_GC_DFX_OPTIONS)
     #define ECMASCRIPT_ENABLE_IC 1
     #define ECMASCRIPT_ENABLE_ZAP_MEM 1
@@ -127,6 +158,7 @@ enum class PUBLIC_API RBMode : uint8_t {
     #define ECMASCRIPT_ENABLE_NAPI_SPECIAL_CHECK 0
     #define ECMASCRIPT_ENABLE_STUB_ARGV_CHECK 1
     #define ECMASCRIPT_ENABLE_STUB_RESULT_CHECK 1
+    #define ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK 0
 #else
     #define ECMASCRIPT_ENABLE_IC 1
     #define ECMASCRIPT_ENABLE_ZAP_MEM 0
@@ -137,6 +169,7 @@ enum class PUBLIC_API RBMode : uint8_t {
     #define ECMASCRIPT_ENABLE_NAPI_SPECIAL_CHECK 0
     #define ECMASCRIPT_ENABLE_STUB_ARGV_CHECK 0
     #define ECMASCRIPT_ENABLE_STUB_RESULT_CHECK 0
+    #define ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK 0
 #endif
 
 #if ECMASCRIPT_ENABLE_ZAP_MEM

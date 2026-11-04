@@ -975,7 +975,7 @@ GateRef CircuitBuilder::TypedConditionJump(MachineType type, TypedJumpOp jumpOp,
 GateRef CircuitBuilder::TypeConvert(MachineType type, ParamType typeFrom, GateType typeTo,
                                     const std::vector<GateRef>& inList)
 {
-    // merge types of valueIns before and after convertion
+    // merge types of valueIns before and after conversion
     uint64_t operandTypes = TypeConvertAccessor::ToValue(typeFrom, typeTo);
     return GetCircuit()->NewGate(circuit_->TypedConvert(operandTypes),
         type, inList.size(), inList.data(), GateType::AnyType());
@@ -1094,6 +1094,9 @@ GateRef CircuitBuilder::LoadHClassFromConstpool(GateRef constpool, size_t index)
 GateRef CircuitBuilder::StoreConstOffset(VariableType type,
                                          GateRef receiver, size_t offset, GateRef value, MemoryAttribute mAttr)
 {
+    if (G_USE_STICKY_CMS_GC && (type == VariableType::JS_ANY() || type == VariableType::JS_POINTER()) && offset == 0) {
+        LOG_ECMA(FATAL) << "store with zero offset should use StoreHClass";
+    }
     auto currentLabel = env_->GetCurrentLabel();
     auto currentDepend = currentLabel->GetDepend();
     auto bits = LoadStoreConstOffsetAccessor::ToValue(offset, mAttr);

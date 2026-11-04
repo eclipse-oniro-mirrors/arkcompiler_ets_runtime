@@ -35,7 +35,7 @@ public:
           acc_(circuit),
           builder_(circuit, cmpCfg),
           compilationEnv_(ctx->GetCompilationEnv()),
-          isLiteCG_(ctx->GetCompilationEnv()->GetJSOptions().IsCompilerEnableLiteCG()),
+          isLiteCG_(IsLiteCGEnabled(ctx->GetCompilationEnv())),
           glue_(acc_.GetGlueFromArgList()) {}
     ~TypedNativeInlineLowering() = default;
     GateRef VisitGate(GateRef gate) override;

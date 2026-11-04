@@ -1,0 +1,9 @@
+compiled before mutation: true
+probe result identity: true
+probe element identity: true
+post result identity: true
+post element identity: true
+post element tag: 42
+post untouched element tag: 2
+post mutated property: 1
+compiled after mutation: false

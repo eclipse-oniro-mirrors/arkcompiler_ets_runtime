@@ -19,21 +19,17 @@
 #include "ecmascript/ecma_string.h"
 #include "ecmascript/ecma_string_table.h"
 #include "ecmascript/runtime_lock.h"
-#include "ecmascript/string/hashtriemap-inl.h"
+#include "ecmascript/string/chained_hash_map-inl.h"
 
 namespace panda::ecmascript {
-#if ENABLE_NEXT_OPTIMIZATION
-
-template <typename Traits, typename LoaderCallback, typename EqualsCallback>
+template <typename LoaderCallback, typename EqualsCallback>
 EcmaString* EcmaStringTableImpl::GetOrInternString(EcmaVM* vm, uint32_t hashcode, LoaderCallback loaderCallback,
                                                    EqualsCallback equalsCallback)
 {
-    typename Traits::HashTrieMapOperationType hashTrieMapOperation(
-        reinterpret_cast<typename Traits::HashTrieMapType *>(GetHashTrieMap()));
-    typename Traits::HashTrieMapInUseScopeType mapInUse(
-        reinterpret_cast<typename Traits::HashTrieMapType *>(GetHashTrieMap()));
-    typename Traits::ThreadType* holder = GetThreadHolder<Traits>(vm->GetJSThread());
-    BaseString *result = hashTrieMapOperation.template LoadOrStore<true>(holder, hashcode, loaderCallback,
+    ChainedHashMapOperation<ChainedHashMapConfig::NoSlotBarrier> chainedHashMapOperation(GetChainedHashMap());
+    ChainedHashMapInUseScope mapInUse(GetChainedHashMap());
+    JSThread* holder = vm->GetJSThread();
+    BaseString *result = chainedHashMapOperation.template LoadOrStore<true>(holder, hashcode, loaderCallback,
                                                                          equalsCallback);
     ASSERT(result != nullptr);
     return EcmaString::FromBaseString(result);
@@ -43,32 +39,7 @@ template <typename LoaderCallback, typename EqualsCallback>
 EcmaString* EcmaStringTable::GetOrInternString(EcmaVM* vm, uint32_t hashcode, LoaderCallback loaderCallback,
                                                EqualsCallback equalsCallback)
 {
-#ifdef USE_CMC_GC
-    if (enableCMCGC_) {
-        return impl_.GetOrInternString<EnableCMCGCTrait>(vm, hashcode, loaderCallback, equalsCallback);
-    }
-#endif
-    if (IsSweeping()) {
-        return impl_.GetOrInternString<DisableCMCGCConcurrentSweepTrait>(vm, hashcode, loaderCallback, equalsCallback);
-    }
-    return impl_.GetOrInternString<DisableCMCGCNormalTrait>(vm, hashcode, loaderCallback, equalsCallback);
+    return impl_.GetOrInternString(vm, hashcode, loaderCallback, equalsCallback);
 }
-
-template <typename Traits>
-typename Traits::ThreadType* EcmaStringTableImpl::GetThreadHolder(JSThread* thread)
-{
-    if constexpr (Traits::EnableCMCGC) {
-        return thread->GetThreadHolder();
-    } else {
-        return thread;
-    }
-}
-
-inline void EcmaStringTableMutex::LockWithThreadState(JSThread* thread)
-{
-    return RuntimeLock(thread, mtx_);
-}
-
-#endif
 }  // namespace panda::ecmascript
 #endif  // ECMASCRIPT_STRING_TABLE_OPTIMIZ_INL_H

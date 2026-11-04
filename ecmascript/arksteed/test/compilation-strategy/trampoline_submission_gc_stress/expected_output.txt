@@ -1,0 +1,6 @@
+true
+false
+88000
+true
+true
+45

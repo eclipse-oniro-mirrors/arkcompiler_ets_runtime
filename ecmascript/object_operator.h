@@ -249,6 +249,16 @@ public:
         return elementsOutOfBounds_;
     }
 
+    inline void SetElementsWereCOW(bool value)
+    {
+        elementsWereCOW_ = value;
+    }
+
+    inline bool GetElementsWereCOW() const
+    {
+        return elementsWereCOW_;
+    }
+
     inline bool HasHolder() const
     {
         return !holder_.IsEmpty();
@@ -378,6 +388,7 @@ private:
     int receiverHoleEntry_{-1};
     bool keyFromStringType_{false};
     bool elementsOutOfBounds_{false};
+    bool elementsWereCOW_{false};
 };
 }  // namespace panda::ecmascript
 #endif  // ECMASCRIPT_OBJECT_OPERATOR_H

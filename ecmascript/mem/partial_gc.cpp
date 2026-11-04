@@ -37,6 +37,7 @@ void PartialGC::RunPhases()
         + ";GCReason" + std::to_string(static_cast<int>(gcStats->GetGCReason()))
         + ";MarkReason" + std::to_string(static_cast<int>(gcStats->GetMarkReason()))
         + ";Sensitive" + std::to_string(static_cast<int>(heap_->GetSensitiveStatus()))
+        + ";Cms" + std::to_string(static_cast<int>(heap_->GetCmsGC()))
         + ";IsInBackground" + std::to_string(Runtime::GetInstance()->IsInBackground())
         + ";Startup" + std::to_string(static_cast<int>(heap_->GetStartupStatus()))
         + ";ConMark" + std::to_string(static_cast<int>(heap_->GetJSThread()->GetMarkStatus()))
@@ -57,15 +58,24 @@ void PartialGC::RunPhases()
     ASSERT(!heap_->GetJSThread()->IsConcurrentCopying());
     markingInProgress_ = heap_->CheckOngoingConcurrentMarking();
     LOG_GC(DEBUG) << "markingInProgress_" << markingInProgress_;
+    LOG_GC(DEBUG) << "trigger cms gc " << heap_->GetCmsGC();
     Initialize();
     Mark();
     if (UNLIKELY(heap_->ShouldVerifyHeap())) {
         Verification::VerifyMark(heap_);
     }
     ProcessSharedGCRSetWorkList();
+    if (!Runtime::GetInstance()->IsEnableEvacuateNonMovableSpace()) {
+        if (heap_->GetEvacuateNonMovableSpace()) {
+            LOG_GC(ERROR) << "enable evacuate nonmovable space incorrectly.";
+            heap_->SetEvacuateNonMovableSpace(false);
+            heap_->GetNonMovableSpace()->RevertCSet();
+        }
+    }
+    LOG_GC(DEBUG) << "evacuate nonmovable space " << heap_->GetEvacuateNonMovableSpace();
     Sweep();
     Evacuate();
-    if (heap_->IsConcurrentFullMark()) {
+    if (heap_->IsFullMark() || heap_->GetCmsGC()) {
         heap_->GetSweeper()->PostTask(TriggerGCType::OLD_GC);
     }
     if (UNLIKELY(heap_->ShouldVerifyHeap())) {
@@ -82,10 +92,20 @@ void PartialGC::Initialize()
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "PartialGC::Initialize", "");
     TRACE_GC(GCStats::Scope::ScopeId::Initialize, heap_->GetEcmaVM()->GetEcmaGCStats());
     if (!markingInProgress_) {
+        ASSERT(!heap_->GetCmsGC());
         LOG_GC(DEBUG) << "No ongoing Concurrent marking. Initializing...";
         heap_->Prepare();
+#if ENABLE_MEMORY_OPTIMIZATION
+        if (heap_->IsFullMark()) {
+            bool evacuateNonMovableSpace = Runtime::GetInstance()->IsEnableEvacuateNonMovableSpace();
+            heap_->SetEvacuateNonMovableSpace(evacuateNonMovableSpace);
+        }
+#endif
         if (heap_->IsConcurrentFullMark()) {
             heap_->GetOldSpace()->SelectCSet();
+            if (heap_->GetEvacuateNonMovableSpace()) {
+                heap_->GetNonMovableSpace()->SelectCSet();
+            }
             heap_->GetAppSpawnSpace()->EnumerateRegions([](Region *current) {
                 current->ClearMarkGCBitset();
                 current->ClearCrossRegionRSet();
@@ -102,6 +122,7 @@ void PartialGC::Finish()
 {
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "PartialGC::Finish", "");
     TRACE_GC(GCStats::Scope::ScopeId::Finish, heap_->GetEcmaVM()->GetEcmaGCStats());
+    bool cmsGC = heap_->GetCmsGC();
     if (markingInProgress_) {
         ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "ConcurrentMarker::Reset", "");
         auto marker = heap_->GetConcurrentMarker();
@@ -110,14 +131,19 @@ void PartialGC::Finish()
         ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "WorkManager::Finish", "");
         workManager_->Finish();
     }
-    heap_->Resume(OLD_GC);
-    if (heap_->IsConcurrentFullMark()) {
+    heap_->Resume(OLD_GC, cmsGC);
+    if (heap_->IsFullMark() || cmsGC) {
         heap_->GetSweeper()->TryFillSweptRegion();
+    }
+    if (heap_->IsFullMark()) {
         heap_->SetFullMarkRequestedState(false);
     }
     if (heap_->IsNearGCInSensitive()) {
         heap_->SetNearGCInSensitive(false);
     }
+    heap_->SetCmsGC(false);
+    heap_->SetDisableCmsGC(false);
+    heap_->SetEvacuateNonMovableSpace(false);
 }
 
 void PartialGC::MarkRoots()
@@ -153,14 +179,27 @@ void PartialGC::Mark()
     }
     heap_->WaitRunningMarkTaskFinished();
     // MarkJitCodeMap must be call after other mark work finish to make sure which jserror object js alive.
-    heap_->GetNonMovableMarker()->MarkJitCodeMap(MAIN_THREAD_INDEX);
+    Marker *marker = heap_->GetNonMovableMarker();
+    marker->MarkJitCodeMap(MAIN_THREAD_INDEX);
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    if (!heap_->GetEmbeddedCodeRefSet()->IsEmpty()) {
+        marker->MarkEmbeddedCodeRefs(MAIN_THREAD_INDEX);
+        marker->ProcessMarkStack(MAIN_THREAD_INDEX);
+        heap_->WaitRunningMarkTaskFinished();
+    }
+#endif
 }
 
 void PartialGC::Sweep()
 {
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "PartialGC::Sweep", "");
     ProcessNativeDelete();
-    if (heap_->IsConcurrentFullMark()) {
+    if (heap_->IsYoungMark()) {
+        if (heap_->GetCmsGC()) {
+            heap_->GetSweeper()->Sweep(TriggerGCType::YOUNG_GC);
+        }
+    } else {
+        ASSERT(heap_->IsFullMark());
         heap_->GetOldSpace()->EnumerateRegions([](Region *current) {
             current->SetGCAliveSize();
         });
@@ -185,11 +224,17 @@ void PartialGC::ProcessNativeDelete()
         return header;
     };
     heap_->GetEcmaVM()->ProcessNativeDelete(gcUpdateWeak);
+    heap_->GetEcmaVM()->ProcessPendingRemovalLocalModules(gcUpdateWeak);
 }
 
 void PartialGC::Evacuate()
 {
-    ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "PartialGC::Evacuate", "");
+    static constexpr const char *EVACUATE_PHASE_NAME[] = {
+        "PartialGC::Evacuate",
+        "PartialGC::UpdateReference",
+    };
+    size_t phaseNameIdx = static_cast<size_t>(heap_->GetCmsGC());
+    ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, EVACUATE_PHASE_NAME[phaseNameIdx], "");
     TRACE_GC(GCStats::Scope::ScopeId::Evacuate, heap_->GetEcmaVM()->GetEcmaGCStats());
     heap_->GetEvacuator()->Evacuate();
 }

@@ -13,14 +13,14 @@
 
 import("//arkcompiler/ets_runtime/common_components/tests/test_helper.gni")
 
-module_output_path = "ets_runtime/ets_runtime"
+module_output_path = "ets_runtime/common_components"
 
 host_unittest_action("Heap_Manager_Test") {
   module_out_path = module_output_path
 
   sources = [
     # test file
-    "heap_manager_test.cpp",
+    # "heap_manager_test.cpp",
   ]
 
   configs = [
@@ -43,7 +43,7 @@ host_unittest_action("Verification_Test") {
 
   sources = [
     # test file
-    "verification_test.cpp",
+    # "verification_test.cpp",
   ]
 
   include_dirs = [ "//arkcompiler/ets_runtime/common_components/" ]

@@ -77,6 +77,30 @@ host_unittest_action("JitTimeScopeTest") {
   deps += hiviewdfx_deps
 }
 
+host_unittest_action("JitCompatUtilTest") {
+  module_out_path = module_output_path
+
+  sources = [
+    # test file
+    "jit_compat_util_test.cpp",
+  ]
+
+  configs = [
+    "../../../:asm_interp_enable_config",
+    "../../../:ecma_test_config",
+  ]
+
+  deps = [ "../../../:libark_jsruntime_test" ]
+
+  # hiviewdfx libraries
+  external_deps = hiviewdfx_ext_deps
+  external_deps += [
+    "icu:shared_icui18n",
+    "icu:shared_icuuc",
+  ]
+  deps += hiviewdfx_deps
+}
+
 group("unittest") {
   testonly = true
 
@@ -84,6 +108,7 @@ group("unittest") {
   deps = [
     ":JIT_001_Test",
     ":JitTimeScopeTest",
+    ":JitCompatUtilTest",
   ]
 }
 
@@ -95,6 +120,7 @@ group("host_unittest") {
     deps = [
       ":JIT_001_TestAction",
       ":JitTimeScopeTestAction",
+      ":JitCompatUtilTestAction",
     ]
   }
 
@@ -102,6 +128,7 @@ group("host_unittest") {
     deps = [
       ":JIT_001_TestAction",
       ":JitTimeScopeTestAction",
+      ":JitCompatUtilTestAction",
     ]
   }
 }

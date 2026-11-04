@@ -22,8 +22,15 @@
 #include "ecmascript/js_array_iterator.h"
 #include "ecmascript/js_primitive_ref.h"
 #include "ecmascript/lexical_env.h"
+#include "ecmascript/mem/machine_code.h"
 
 namespace panda::ecmascript::kungfu {
+
+GateRef CircuitBuilder::HasArkSteedEntry(GateRef jsFunc)
+{
+    GateRef bitField = LoadWithoutBarrier(VariableType::INT32(), jsFunc, IntPtr(JSFunctionBase::BIT_FIELD_OFFSET));
+    return Int32NotEqual(Int32And(bitField, Int32(JSFunctionBase::IsArkSteedEntryBit::Mask())), Int32(0));
+}
 
 GateRef CircuitBuilder::Merge(const std::vector<GateRef> &inList)
 {
@@ -157,6 +164,12 @@ GateRef CircuitBuilder::Arguments(size_t index)
     return GetCircuit()->NewArg(MachineType::I64, index, GateType::NJSValue(), argListOfCircuit);
 }
 
+void CircuitBuilder::Assert(int messageId, int line, GateRef glue, GateRef condition)
+{
+    CallNGCRuntime(glue, RTSTUB_ID(FatalPrintIfFalse), Gate::InvalidGateRef,
+                   {condition, Int32(messageId), Int32(line)}, glue);
+}
+
 GateRef CircuitBuilder::IsJsCOWArray(GateRef glue, GateRef obj)
 {
     // Elements of JSArray are shared and properties are not yet.
@@ -202,6 +215,12 @@ GateRef CircuitBuilder::IsMutantTaggedArray(GateRef objectType)
 {
     return BitOr(Int32Equal(objectType, Int32(static_cast<int32_t>(JSType::MUTANT_TAGGED_ARRAY))),
                  Int32Equal(objectType, Int32(static_cast<int32_t>(JSType::COW_MUTANT_TAGGED_ARRAY))));
+}
+
+GateRef CircuitBuilder::IsConstantPool(GateRef glue, GateRef object)
+{
+    GateRef objectType = GetObjectType(LoadHClass(glue, object));
+    return Int32Equal(objectType, Int32(static_cast<int32_t>(JSType::CONSTANT_POOL)));
 }
 
 GateRef CircuitBuilder::GetElementsArray(GateRef glue, GateRef object)
@@ -452,6 +471,16 @@ GateRef CircuitBuilder::HoleConstant()
     return GetCircuit()->GetConstantGate(MachineType::I64, JSTaggedValue::VALUE_HOLE, type);
 }
 
+GateRef CircuitBuilder::TemporaryHoleConstant()
+{
+    auto type = GateType::TaggedValue();
+#ifdef USE_COMPRESSED_POINTER
+    return GetCircuit()->GetConstantGate(MachineType::I64, TemporaryJSTaggedValue::Hole().GetRawDataUnsafe(), type);
+#else
+    return HoleConstant();
+#endif
+}
+
 GateRef CircuitBuilder::SpecialHoleConstant()
 {
     auto type = GateType::NJSValue();
@@ -485,11 +514,6 @@ GateRef CircuitBuilder::ExceptionConstant()
 GateRef CircuitBuilder::NanValue()
 {
     return Double(std::numeric_limits<double>::quiet_NaN());
-}
-
-GateRef CircuitBuilder::LoadObjectFromConstPool(GateRef glue, GateRef constPool, GateRef index)
-{
-    return GetValueFromTaggedArray(glue, constPool, TruncInt64ToInt32(index));
 }
 
 GateRef CircuitBuilder::IsAccessorInternal(GateRef glue, GateRef accessor)
@@ -685,7 +709,7 @@ GateRef CircuitBuilder::GetUnsharedConstpoolIndex(GateRef glue, GateRef constpoo
 {
     GateRef constPoolSize = GetLengthOfTaggedArray(constpool);
     GateRef unshareIdx = Int32Sub(constPoolSize, Int32(ConstantPool::UNSHARED_CONSTPOOL_INDEX));
-    return GetValueFromTaggedArray(glue, constpool, unshareIdx);
+    return GetExtendElementFromConstPool(glue, constpool, unshareIdx);
 }
 
 GateRef CircuitBuilder::GetUnsharedConstpool(GateRef glue, GateRef arrayAddr, GateRef index)
@@ -971,6 +995,55 @@ GateRef CircuitBuilder::GetObjectByIndexFromConstPool(GateRef glue, GateRef hirG
     return obj;
 }
 
+GateRef CircuitBuilder::GetLengthOfConstPoolCacheElement(GateRef constpool)
+{
+    GateRef length = GetLengthOfTaggedArray(constpool);
+    return Int32Sub(Int32Sub(length, Int32(ConstantPool::RESERVED_POOL_LENGTH)),
+                    Int32(ConstantPool::EXTEND_DATA_NUM));
+}
+
+GateRef CircuitBuilder::GetNumOfConstPoolCacheElement(GateRef constpool)
+{
+    GateRef cacheLength = GetLengthOfConstPoolCacheElement(constpool);
+    return Int32Mul(cacheLength, Int32(ConstantPool::CACHE_NUM_TO_SIZE_FACTOR));
+}
+
+GateRef CircuitBuilder::OffsetOfConstPoolValid(GateRef constpool, GateRef offset)
+{
+    GateRef length = GetLengthOfTaggedArray(constpool);
+    GateRef maxOffset = Int32Mul(length, Int32(JSTaggedValue::TaggedTypeSize()));
+    return IntPtrLessThan(offset, ZExtInt32ToPtr(maxOffset));
+}
+
+// may return a fake JSTaggedValue, which consists of the high bit of heap address and the
+// low bit of `JSTaggedValue::Hole`. Thus `IsHeapObject()` and `IsHole()` will both return false,
+// and need to do some conversion before use
+GateRef CircuitBuilder::GetFromCompressedTaggedValueFromConstPoolUnsafe(GateRef glue, GateRef constpool, GateRef index)
+{
+    GateRef offset = PtrMul(ZExtInt32ToPtr(index), IntPtr(CompressedJSTaggedValue::CompressedTaggedTypeSize()));
+    ASSERT_ASM(GET_MESSAGE_STRING_ID(GetObjectFromConstPoolCacheOutOfBounds),
+               OffsetOfConstPoolValid(constpool, offset), glue);
+    GateRef dataOffset = PtrAdd(offset, IntPtr(TaggedArray::DATA_OFFSET));
+    return LoadFromCompressedTaggedValue(VariableType::JS_ANY(), glue, constpool, dataOffset);
+}
+
+GateRef CircuitBuilder::IndexOfConstPoolCacheElementValid(GateRef constpool, GateRef index)
+{
+    GateRef numOfCacheElement = GetNumOfConstPoolCacheElement(constpool);
+    return Int32LessThan(TruncInt64ToInt32(ZExtInt32ToInt64(index)), numOfCacheElement);
+}
+
+// may return a fake JSTaggedValue, which consists of the high bit of heap address and the
+// low bit of `JSTaggedValue::Hole`. Thus `IsHeapObject()` and `IsHole()` will both return false,
+// and need to do some conversion before use
+GateRef CircuitBuilder::GetObjectFromConstPoolCacheUnsafe([[maybe_unused]] GateRef glue, GateRef constpool,
+                                                          GateRef index)
+{
+    ASSERT_ASM(GET_MESSAGE_STRING_ID(GetObjectFromConstPoolCacheOutOfBounds),
+               IndexOfConstPoolCacheElementValid(constpool, index), glue);
+    return GetFromCompressedTaggedValueFromConstPoolUnsafe(glue, constpool, index);
+}
+
 GateRef CircuitBuilder::GetObjectFromConstPool(GateRef glue, GateRef hirGate, GateRef sharedConstPool,
                                                GateRef unsharedConstPool, GateRef module, GateRef index,
                                                ConstPoolType type)
@@ -988,21 +1061,27 @@ GateRef CircuitBuilder::GetObjectFromConstPool(GateRef glue, GateRef hirGate, Ga
         hirGate = index;
     }
     // Call runtime to create unshared constpool when current context's cache is hole in multi-thread.
-    DEFVALUE(cacheValue, env_, VariableType::JS_ANY(), Hole());
+    // `temporaryCacheValue` may be a fake JSTaggedValue, see `TemporaryJSTaggedValue`,
+    // DO NOT direct use `temporaryCacheValue` further more without convertion
+    DEFVALUE(temporaryCacheValue, env_, VariableType::JS_ANY(), TemporaryHole());
     if (type == ConstPoolType::ARRAY_LITERAL || type == ConstPoolType::OBJECT_LITERAL) {
         BRANCH(TaggedIsNotHole(unsharedConstPool), &unshareCpHit, &unshareCpMiss);
         Bind(&unshareCpHit);
         {
-            cacheValue = GetValueFromTaggedArray(glue, unsharedConstPool, index);
+            temporaryCacheValue = GetObjectFromConstPoolCacheUnsafe(glue, unsharedConstPool, index);
             Jump(&unshareCpMiss);
         }
     } else {
-        cacheValue = GetValueFromTaggedArray(glue, sharedConstPool, index);
+        temporaryCacheValue = GetObjectFromConstPoolCacheUnsafe(glue, sharedConstPool, index);
         Jump(&unshareCpMiss);
     }
     Bind(&unshareCpMiss);
-    DEFVALUE(result, env_, VariableType::JS_ANY(), *cacheValue);
-    BRANCH(BitOr(TaggedIsHole(*result), TaggedIsNullPtr(*result)), &cacheMiss, &cache);
+    // `temporaryResult` may be a fake JSTaggedValue, see `TemporaryJSTaggedValue`,
+    // DO NOT direct use `temporaryResult` further more without convertion
+    DEFVALUE(temporaryResult, env_, VariableType::JS_ANY(), *temporaryCacheValue);
+    DEFVALUE(result, env_, VariableType::JS_ANY(), Hole());
+    BRANCH(BitOr(BoolNot(TemporaryTaggedIsHeapObject(*temporaryResult)), TemporaryTaggedIsNullPtr(*temporaryResult)),
+        &cacheMiss, &cache);
     Bind(&cacheMiss);
     {
         if (type == ConstPoolType::STRING) {
@@ -1028,9 +1107,10 @@ GateRef CircuitBuilder::GetObjectFromConstPool(GateRef glue, GateRef hirGate, Ga
             Label checkCalleeUnsharedConstpool(env_);
             Label checkCalleeUnsharedConstpoolNotHole(env_);
             Label initCalleeUnsharedConstpool(env_);
-            BRANCH(TaggedIsHeapObject(*result), &isHeapObj, &checkInteger);
+            BRANCH(TemporaryTaggedIsHeapObject(*temporaryResult), &isHeapObj, &checkInteger);
             Bind(&isHeapObj);
             {
+                result = ConvertTemporaryTaggedObjectToTaggedValue(glue, *temporaryResult);
                 Label isAOTLiteralInfo(env_);
                 BRANCH(IsAOTLiteralInfo(glue, *result), &isAOTLiteralInfo, &checkCalleeUnsharedConstpool);
                 Bind(&isAOTLiteralInfo);
@@ -1060,7 +1140,7 @@ GateRef CircuitBuilder::GetObjectFromConstPool(GateRef glue, GateRef hirGate, Ga
             Bind(&checkInteger);
             {
                 Label isInteger(env_);
-                BRANCH(TaggedIsInt(*result), &isInteger, &exit);
+                BRANCH(TemporaryTaggedIsInt(*temporaryResult), &isInteger, &exit);
                 Bind(&isInteger);
                 {
                     result = CallRuntime(glue, RTSTUB_ID(GetMethodFromCache), Gate::InvalidGateRef,
@@ -1070,9 +1150,10 @@ GateRef CircuitBuilder::GetObjectFromConstPool(GateRef glue, GateRef hirGate, Ga
             }
         } else if (type == ConstPoolType::ARRAY_LITERAL) {
             Label isHeapObj(env_);
-            BRANCH(TaggedIsHeapObject(*result), &isHeapObj, &exit);
+            BRANCH(TemporaryTaggedIsHeapObject(*temporaryResult), &isHeapObj, &exit);
             Bind(&isHeapObj);
             {
+                result = ConvertTemporaryTaggedObjectToTaggedValue(glue, *temporaryResult);
                 Label isAOTLiteralInfo(env_);
                 BRANCH(IsAOTLiteralInfo(glue, *result), &isAOTLiteralInfo, &exit);
                 Bind(&isAOTLiteralInfo);
@@ -1084,9 +1165,10 @@ GateRef CircuitBuilder::GetObjectFromConstPool(GateRef glue, GateRef hirGate, Ga
             }
         } else if (type == ConstPoolType::OBJECT_LITERAL) {
             Label isHeapObj(env_);
-            BRANCH(TaggedIsHeapObject(*result), &isHeapObj, &exit);
+            BRANCH(TemporaryTaggedIsHeapObject(*temporaryResult), &isHeapObj, &exit);
             Bind(&isHeapObj);
             {
+                result = ConvertTemporaryTaggedObjectToTaggedValue(glue, *temporaryResult);
                 Label isAOTLiteralInfo(env_);
                 BRANCH(IsAOTLiteralInfo(glue, *result), &isAOTLiteralInfo, &exit);
                 Bind(&isAOTLiteralInfo);
@@ -1097,6 +1179,7 @@ GateRef CircuitBuilder::GetObjectFromConstPool(GateRef glue, GateRef hirGate, Ga
                 }
             }
         } else {
+            result = ConvertTemporaryTaggedObjectToTaggedValue(glue, *temporaryResult);
             Jump(&exit);
         }
     }
@@ -1104,6 +1187,14 @@ GateRef CircuitBuilder::GetObjectFromConstPool(GateRef glue, GateRef hirGate, Ga
     auto ret = *result;
     SubCfgExit();
     return ret;
+}
+
+// only use to get extend element, do not use to get cache
+GateRef CircuitBuilder::GetExtendElementFromConstPool(GateRef glue, GateRef constpool, GateRef index)
+{
+    GateRef offset = PtrMul(ZExtInt32ToPtr(index), IntPtr(JSTaggedValue::TaggedTypeSize()));
+    GateRef dataOffset = PtrAdd(offset, IntPtr(TaggedArray::DATA_OFFSET));
+    return Load(VariableType::JS_ANY(), glue, constpool, dataOffset);
 }
 
 GateRef CircuitBuilder::GetFunctionLexicalEnv(GateRef glue, GateRef function)
@@ -1612,12 +1703,12 @@ void CircuitBuilder::UpdateProfileTypeInfoCellToFunction(GateRef glue, GateRef f
     BRANCH(TaggedIsUndefined(profileTypeInfo), &profileTypeInfoEnd, &profileTypeInfoNotUndefined);
     Bind(&profileTypeInfoNotUndefined);
     {
-        GateRef slotValue = GetValueFromTaggedArray(glue, profileTypeInfo, slotId);
+        GateRef slotValue = GetICSlot(glue, profileTypeInfo, slotId);
         BRANCH(TaggedIsUndefined(slotValue), &slotValueUpdate, &slotValueNotUndefined);
         Bind(&slotValueUpdate);
         {
             GateRef newProfileTypeInfoCell = newBuilder.NewProfileTypeInfoCell(glue, Undefined());
-            SetValueToTaggedArray(VariableType::JS_ANY(), glue, profileTypeInfo, slotId, newProfileTypeInfoCell);
+            SetICSlot(VariableType::JS_ANY(), glue, profileTypeInfo, slotId, newProfileTypeInfoCell);
             SetRawProfileTypeInfoToFunction(glue, function, newProfileTypeInfoCell);
             Jump(&profileTypeInfoEnd);
         }
@@ -1793,7 +1884,7 @@ GateRef CircuitBuilder::FloatArrayElementConvert(GateRef value, bool isFloat32)
     Label ResultIsNumber(env_);
 
     GateRef tmpResult = isFloat32 ? ExtFloat32ToDouble(value) : value;
-    BRANCH_UNLIKELY(DoubleIsImpureNaN(tmpResult), &ResultIsNan, &ResultIsNumber);
+    BRANCH_UNLIKELY(DoubleIsNAN(tmpResult), &ResultIsNan, &ResultIsNumber);
     Bind(&ResultIsNan);
     {
         result = Double(base::NAN_VALUE);
@@ -1809,4 +1900,19 @@ GateRef CircuitBuilder::FloatArrayElementConvert(GateRef value, bool isFloat32)
     env_->SubCfgExit();
     return ret;
 }
+
+GateRef CircuitBuilder::GetICSlot(GateRef glue, GateRef profileTypeInfo, GateRef index)
+{
+    GateRef offset = PtrMul(ZExtInt32ToPtr(index), IntPtr(JSTaggedValue::TaggedTypeSize()));
+    GateRef dataOffset = PtrAdd(offset, IntPtr(ProfileTypeInfo::SIZE));
+    return Load(VariableType::JS_ANY(), glue, profileTypeInfo, dataOffset);
+}
+
+void CircuitBuilder::SetICSlot(VariableType valType, GateRef glue, GateRef profileTypeInfo, GateRef index, GateRef val)
+{
+    GateRef offset = PtrMul(ZExtInt32ToPtr(index), IntPtr(JSTaggedValue::TaggedTypeSize()));
+    GateRef dataOffset = PtrAdd(offset, IntPtr(ProfileTypeInfo::SIZE));
+    Store(valType, glue, profileTypeInfo, dataOffset, val);
+}
+
 }  // namespace panda::ecmascript::kungfu

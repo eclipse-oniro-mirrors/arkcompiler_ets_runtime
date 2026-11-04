@@ -1,5 +1,5 @@
-/*
- * Copyright (c) 2025 Huawei Device Co., Ltd.
+/**
+ * Copyright (c) 2025-2026 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -26,8 +26,12 @@
 #include "ecmascript/js_thread.h"
 #include "ecmascript/mem/heap.h"
 #include "ecmascript/mem/visitor.h"
+#include "ecmascript/module/js_module_source_text.h"
 #include "ecmascript/module/js_shared_module_manager.h"
 #include "ecmascript/mutator_lock.h"
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+#include "ecmascript/ohos/adapter/modulemanager/pkg_context_store.h"
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
 #include "ecmascript/platform/dfx_hisys_event.h"
 #include "ecmascript/platform/mutex.h"
 #include "ecmascript/serializer/serialize_chunk.h"
@@ -45,6 +49,7 @@ using AppFreezeFilterCallback =
     std::function<bool(const int32_t pid, const bool needDecreaseQuota, std::string &eventConfig)>;
 using ReleaseSecureMemCallback = std::function<void(void* fileMapper)>;
 using NotifyDeferFreezeCallback = std::function<void(bool needFreeze)>;
+using TaskPoolShrinkCallback = std::function<void(bool inBackground)>;
 
 class Runtime {
 public:
@@ -66,6 +71,11 @@ public:
     void ResumeOther(JSThread *current, JSThread *target);
     void IterateSerializeRoot(RootVisitor &v);
 
+    __attribute__((retain)) __attribute__((used)) static uintptr_t GetMainThreadGlueData(Runtime &runtime_)
+    {
+        return runtime_.GetMainThread()->GetGlueAddr();
+    }
+
     JSThread *GetMainThread() const
     {
         return mainThread_;
@@ -81,12 +91,51 @@ public:
         return isMainThreadAliveForMemoryPressure_;
     }
 
+    void SetIsMainProcess(bool isMainProcess)
+    {
+        isMainProcess_ = isMainProcess;
+    }
+
+    bool IsMainProcess() const
+    {
+        return isMainProcess_;
+    }
+
     template<class Callback>
     void GCIterateThreadList(const Callback &cb)
     {
         LockHolder lock(threadsLock_);
         GCIterateThreadListUnsafe(cb);
     }
+
+    // Iterate ALL threads including JIT thread (skipped by GCIterateThreadList
+    // due to readyForGCIterating_=false). Used for CC_SUSPEND on JIT thread.
+    template<class Callback>
+    void IterateAllThreadList(const Callback &cb)
+    {
+        LockHolder lock(threadsLock_);
+        for (auto thread : threads_) {
+            cb(thread);
+        }
+    }
+
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+    template<class Callback>
+    void IterateThreadList(const Callback &cb)
+    {
+        LockHolder lock(threadsLock_);
+        for (auto thread : threads_) {
+            if (!thread->IsJSThread()) {
+                cb(thread);
+            }
+        }
+    }
+
+    GlobalEnv *GetGlobalEnvRaw() const
+    {
+        return reinterpret_cast<GlobalEnv*>(globalEnv_.GetTaggedObject());
+    }
+#endif
 
     void SetEnableLargeHeap(bool value)
     {
@@ -134,11 +183,6 @@ public:
     inline EcmaStringTable *GetEcmaStringTable() const
     {
         return stringTable_.get();
-    }
-
-    BaseStringTableInterface<BaseStringTableImpl> &GetBaseStringTable() const
-    {
-        return *baseStringTable_;
     }
 
     BaseClassRoots &GetBaseClassRoots() const
@@ -209,14 +253,17 @@ public:
                                                 int32_t index = 0);
     std::optional<std::reference_wrapper<CMap<int32_t, JSTaggedValue>>> FindConstpools(
         const JSPandaFile *jsPandaFile);
+    void ForEachConstpools(const JSPandaFile* jsPandaFile, const ForEachCallback<JSTaggedValue>& cb);
     void EraseUnusedConstpool(const JSPandaFile *jsPandaFile, int32_t index, int32_t constpoolIndex);
 
     void ProcessNativeDeleteInSharedGC(const WeakRootVisitor &visitor);
     void IteratorNativeDeleteInSharedGC(WeakVisitor &visitor);
-
     void ProcessSharedDelete(const WeakRootVisitor &visitor);
     void ProcessSharedNativeDelete(const WeakRootVisitor &visitor);
     void InvokeSharedNativePointerCallbacks();
+    // Dead sendable func module handling: extract-and-queue during GC, release after GC.
+    void QueueSendableModuleNativeFields(TaggedObject *dead);
+    void InvokeSendableModuleCleanup();
     void PushToSharedNativePointerList(JSNativePointer *pointer);
 
     inline bool CreateStringCacheTable(uint32_t size)
@@ -343,7 +390,12 @@ public:
         return stsVMInterface_;
     }
 #endif
-    
+
+    bool ForEachFrameInUnionStack([[maybe_unused]] const EcmaVM *vm,
+        [[maybe_unused]] const std::function<void(const void *frame, bool isStaticFrame)> &callback);
+
+    bool UnionStackIsEmpty([[maybe_unused]] const EcmaVM *vm, [[maybe_unused]] bool *isEmpty);
+
     uint32_t AddIncompatibleEvent(DFXHiSysEvent::IncompatibleType type)
     {
         WriteLockHolder lock(incompatibleEventLock_);
@@ -366,6 +418,29 @@ public:
         return isProcDumpInSharedOOMEnabled_.load(std::memory_order_acquire);
     }
 
+    void SetTrackGlobalRef(bool flag)
+    {
+        trackGlobalRefEnabled_.store(flag, std::memory_order_release);
+    }
+
+    bool IsTrackGlobalRefEnabled() const
+    {
+        return trackGlobalRefEnabled_.load(std::memory_order_acquire);
+    }
+
+    void SetTaskpoolShrinkCallback(TaskPoolShrinkCallback callback)
+    {
+        taskpoolShrinkCallback_ = callback;
+    }
+
+    void ExecuteTaskpoolShrinkCallback(bool inBackground)
+    {
+        if (taskpoolShrinkCallback_ == nullptr) {
+            return;
+        }
+        taskpoolShrinkCallback_(inBackground);
+    }
+
     bool IsInBackground() const
     {
         return inBackground_;
@@ -375,6 +450,55 @@ public:
     {
         inBackground_ = inBackground;
     }
+
+    void DisableEvacuateNonMovableSpace()
+    {
+        enableEvacuateNonMovableSpace_ = false;
+    }
+
+    bool IsEnableEvacuateNonMovableSpace() const
+    {
+        return enableEvacuateNonMovableSpace_;
+    }
+
+    void SetHiProfilerEnabled(bool enabled)
+    {
+        hiProfilerEnabled_.store(enabled, std::memory_order_release);
+    }
+
+    bool IsHiProfilerEnabled() const
+    {
+        return hiProfilerEnabled_.load(std::memory_order_acquire);
+    }
+
+    static void SetFork(bool isFork)
+    {
+        isFork_ = isFork;
+    }
+
+    static bool GetFork()
+    {
+        return isFork_;
+    }
+
+    void SetEntryAbilityName(const CString &abilityName)
+    {
+        if (entryAbilityName_.empty()) {
+            entryAbilityName_ = abilityName;
+        }
+    }
+
+    CString GetEntryAbilityName() const
+    {
+        return entryAbilityName_;
+    }
+
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+    PkgContextStore &GetPkgContextStore()
+    {
+        return pkgContextStore_;
+    }
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
 
 private:
     static constexpr int32_t WORKER_DESTRUCTION_COUNT = 3;
@@ -435,6 +559,12 @@ private:
         return sharedNativePointerCallbacks_;
     }
 
+    // Native fields of dead sendable modules, released after GC.
+    std::vector<SourceTextModule::NativeFields> &GetSendableModuleCleanupQueue()
+    {
+        return sendableModuleCleanupQueue_;
+    }
+
     RecursiveMutex threadsLock_;
     ConditionVariable threadSuspendCondVar_;
     Mutex serializeLock_;
@@ -453,7 +583,6 @@ private:
     std::unique_ptr<HeapRegionAllocator> heapRegionAllocator_;
     // for stringTable.
     std::unique_ptr<EcmaStringTable> stringTable_;
-    BaseStringTableInterface<BaseStringTableImpl>* baseStringTable_ = nullptr;
     BaseClassRoots* baseClassRoots_ = nullptr;
     std::unordered_map<uint32_t, std::unique_ptr<SerializationChunk>> serializeRootMap_;
     std::vector<uint32_t> serializeDataIndexVector_;
@@ -467,6 +596,10 @@ private:
 
     CMap<DFXHiSysEvent::IncompatibleType, uint32_t> incompatibleEventMap_;
     RWLock incompatibleEventLock_;
+
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+    PkgContextStore pkgContextStore_;
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
 
     // Runtime instance and VMs creation.
     static int32_t vmCount_;
@@ -485,6 +618,7 @@ private:
 
     // for shared native pointer
     std::vector<std::pair<NativePointerCallback, std::pair<void *, void *>>> sharedNativePointerCallbacks_ {};
+    std::vector<SourceTextModule::NativeFields> sendableModuleCleanupQueue_ {};
 
     // for appfreeze filter function
     AppFreezeFilterCallback appfreezeFilterCallback_ {nullptr};
@@ -504,6 +638,9 @@ private:
     // - Acquire (load): subsequent reads see all writes that happened before flag was set
     std::atomic<bool> isProcDumpInSharedOOMEnabled_ {false};
 
+    // Process-level switch: when true, track napi global-ref mappings for rawheap or snapshotheap dumps.
+    std::atomic<bool> trackGlobalRefEnabled_ {false};
+
     // sendable global reference
     Mutex sendableGlobalStorageLock_;
     EcmaGlobalStorage<Node> *sendableGlobalStorage_ {nullptr};
@@ -515,10 +652,21 @@ private:
     int32_t aliveSendableGlobalHandleCount_ {0};
 
     bool inBackground_ {false};
+    bool isMainProcess_ {false};
+    TaskPoolShrinkCallback taskpoolShrinkCallback_ {nullptr};
+    bool enableEvacuateNonMovableSpace_ {true};
+    CString entryAbilityName_;
+
+    std::atomic<bool> hiProfilerEnabled_ {false};
+
+    static bool isFork_;
 
     friend class EcmaVM;
     friend class JSThread;
     friend class SharedHeap;
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+    friend bool CheckAddrValid(uintptr_t);
+#endif
 
     NO_COPY_SEMANTIC(Runtime);
     NO_MOVE_SEMANTIC(Runtime);

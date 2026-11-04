@@ -23,7 +23,7 @@
 #include "ecmascript/interpreter/interpreter.h"
 #include "ecmascript/js_regexp.h"
 #include "ecmascript/js_regexp_iterator.h"
-#include "ecmascript/js_tagged_value-inl.h"
+#include "ecmascript/js_tagged_value_wrapper-inl.h"
 #include "ecmascript/object_fast_operator-inl.h"
 #include "ecmascript/regexp/regexp_executor.h"
 #include "ecmascript/regexp/regexp_parser_cache.h"
@@ -1713,6 +1713,7 @@ JSTaggedValue BuiltinsRegExp::RegExpSplitFast(JSThread *thread, const JSHandle<J
     }
     JSHandle<JSTaggedValue> undefined = thread->GlobalConstants()->GetHandledUndefined();
     JSHandle<RegExpExecResultCache> cacheTable(thread->GetGlobalEnv()->GetRegExpCache());
+    RegExpExecResultCache::CacheGuardScope cacheGuardScope(cacheTable);
     if (useCache) {
         JSTaggedValue cacheResult;
         if (UNLIKELY(thread->NeedReadBarrier())) {
@@ -2062,6 +2063,7 @@ JSTaggedValue BuiltinsRegExp::RegExpBuiltinExec(JSThread *thread, const JSHandle
     RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread);
     JSHandle<JSTaggedValue> undefined = thread->GlobalConstants()->GetHandledUndefined();
     JSHandle<RegExpExecResultCache> cacheTable(thread->GetGlobalEnv()->GetRegExpCache());
+    RegExpExecResultCache::CacheGuardScope cacheGuardScope(cacheTable);
     cacheTable->SetUseLastMatch(thread, false);
     if (useCache) {
         JSTaggedValue cacheResult;

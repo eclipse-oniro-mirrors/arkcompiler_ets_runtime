@@ -22,7 +22,7 @@
 #include "ecmascript/jobs/pending_job.h"
 #include "ecmascript/js_native_pointer.h"
 #include "ecmascript/js_object.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/js_arraybuffer.h"
 #include "ecmascript/js_array_iterator.h"
 #include "ecmascript/js_async_function.h"
@@ -130,6 +130,7 @@
 #include <fstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include "cJSON.h"
 
@@ -160,8 +161,7 @@ public:
             {JSType::INVALID, {"INVALID"}},
             {JSType::HCLASS, {
                 "BitField", "BitField1", "Proto", "Layout", "Transitions", "Parent", "ProtoChangeMarker",
-                "ProtoChangeDetails", "EnumCache", "DependentInfos",
-                "ProfilerType", "HCLASS"}},
+                "ProtoChangeDetails", "EnumCache", "DependentInfos", "BitField2", "HCLASS"}},
             {JSType::ACCESSOR_DATA, {"Getter", "Setter", "ACCESSOR_DATA"}},
             {JSType::AOT_LITERAL_INFO, {"AOT_LITERAL_INFO"}},
             {JSType::ASYNC_GENERATOR_REQUEST, {"Completion", "Capability", "ASYNC_GENERATOR_REQUEST"}},
@@ -238,8 +238,8 @@ public:
                 "AsyncGeneratorObject", "JS_ASYNC_GENERATOR_RESUME_NEXT_RETURN_PROCESSOR_RST_FTN"}},
             {JSType::JS_ASYNC_MODULE_FULFILLED_FUNCTION, {"JS_ASYNC_MODULE_FULFILLED_FUNCTION"}},
             {JSType::JS_ASYNC_MODULE_REJECTED_FUNCTION, {"JS_ASYNC_MODULE_REJECTED_FUNCTION"}},
-            {JSType::JS_BIGINT64_ARRAY, {"ViewedArrayBufferOrByteArray", "TypedArrayName", "JS_BIGINT64_ARRAY"}},
-            {JSType::JS_BIGUINT64_ARRAY, {"ViewedArrayBufferOrByteArray", "TypedArrayName", "JS_BIGUINT64_ARRAY"}},
+            {JSType::JS_BIGINT64_ARRAY, {"ViewedArrayBufferOrByteArray", "JS_BIGINT64_ARRAY"}},
+            {JSType::JS_BIGUINT64_ARRAY, {"ViewedArrayBufferOrByteArray", "JS_BIGUINT64_ARRAY"}},
             {JSType::JS_BOUND_FUNCTION, {"BoundTarget", "BoundThis", "BoundArguments", "JS_BOUND_FUNCTION"}},
             {JSType::JS_CJS_EXPORTS, {"Exports", "JS_CJS_EXPORTS"}},
             {JSType::JS_CJS_MODULE, {"Id", "Path", "Exports", "Filename", "JS_CJS_MODULE"}},
@@ -255,8 +255,8 @@ public:
             {JSType::JS_EVAL_ERROR, {"Properties", "Elements", "JS_EVAL_ERROR"}},
             {JSType::JS_FINALIZATION_REGISTRY, {"CleanupCallback", "NoUnregister",
                                                 "MaybeUnregister", "Next", "Prev", "JS_FINALIZATION_REGISTRY"}},
-            {JSType::JS_FLOAT32_ARRAY, {"ViewedArrayBufferOrByteArray", "TypedArrayName", "JS_FLOAT32_ARRAY"}},
-            {JSType::JS_FLOAT64_ARRAY, {"ViewedArrayBufferOrByteArray", "TypedArrayName", "JS_FLOAT64_ARRAY"}},
+            {JSType::JS_FLOAT32_ARRAY, {"ViewedArrayBufferOrByteArray", "JS_FLOAT32_ARRAY"}},
+            {JSType::JS_FLOAT64_ARRAY, {"ViewedArrayBufferOrByteArray", "JS_FLOAT64_ARRAY"}},
             {JSType::JS_FORIN_ITERATOR, {"Object", "CachedHClass", "Keys", "JS_FORIN_ITERATOR"}},
             {JSType::JS_FUNCTION, { "RawProfileTypeInfo", "MachineCode", "BaselineCode", "Module", "JS_FUNCTION"}},
             {JSType::JS_API_FUNCTION, {"ProtoOrHClass", "LexicalEnv", "HomeObject", "JS_API_FUNCTION"}},
@@ -266,9 +266,9 @@ public:
             {JSType::JS_GENERATOR_FUNCTION, {"JS_GENERATOR_FUNCTION"}},
             {JSType::JS_GENERATOR_OBJECT, {"GeneratorContext", "ResumeResult", "JS_GENERATOR_OBJECT"}},
             {JSType::JS_GLOBAL_OBJECT, {"JS_GLOBAL_OBJECT"}},
-            {JSType::JS_INT16_ARRAY, {"ViewedArrayBufferOrByteArray", "TypedArrayName", "JS_INT16_ARRAY"}},
-            {JSType::JS_INT32_ARRAY, {"ViewedArrayBufferOrByteArray", "TypedArrayName", "JS_INT32_ARRAY"}},
-            {JSType::JS_INT8_ARRAY, {"ViewedArrayBufferOrByteArray", "TypedArrayName", "JS_INT8_ARRAY"}},
+            {JSType::JS_INT16_ARRAY, {"ViewedArrayBufferOrByteArray", "JS_INT16_ARRAY"}},
+            {JSType::JS_INT32_ARRAY, {"ViewedArrayBufferOrByteArray", "JS_INT32_ARRAY"}},
+            {JSType::JS_INT8_ARRAY, {"ViewedArrayBufferOrByteArray", "JS_INT8_ARRAY"}},
             {JSType::JS_INTL, {"FallbackSymbol", "JS_INTL"}},
             {JSType::JS_INTL_BOUND_FUNCTION, {"NumberFormat", "DateTimeFormat",
                                               "Collator", "JS_INTL_BOUND_FUNCTION"}},
@@ -278,7 +278,7 @@ public:
             {JSType::JS_MAP, {"LinkedMap", "JS_MAP"}},
             {JSType::JS_MAP_ITERATOR, {"IteratorMap", "JS_MAP_ITERATOR"}},
             {JSType::JS_MODULE_NAMESPACE, {"Module", "Exports", "DeregisterProcession", "JS_MODULE_NAMESPACE"}},
-            {JSType::JS_NATIVE_POINTER, {"BindingSize", "JS_NATIVE_POINTER"}},
+            {JSType::JS_NATIVE_POINTER, {"ExternalPointer", "BindingSize", "JS_NATIVE_POINTER"}},
             {JSType::JS_NUMBER_FORMAT, {"Locale", "NumberingSystem", "Currency", "Unit", "MinimumIntegerDigits",
                                               "MinimumFractionDigits", "MaximumFractionDigits",
                                               "MinimumSignificantDigits", "MaximumSignificantDigits",
@@ -345,13 +345,12 @@ public:
             {JSType::JS_STRING_ITERATOR, {"IteratedString", "JS_STRING_ITERATOR"}},
             {JSType::JS_SYNTAX_ERROR, {"Properties", "Elements", "JS_SYNTAX_ERROR"}},
             {JSType::JS_TERMINATION_ERROR, {"Properties", "Elements", "JS_TERMINATION_ERROR"}},
-            {JSType::JS_TYPED_ARRAY, {"ViewedArrayBufferOrByteArray", "TypedArrayName", "JS_TYPED_ARRAY"}},
+            {JSType::JS_TYPED_ARRAY, {"ViewedArrayBufferOrByteArray", "JS_TYPED_ARRAY"}},
             {JSType::JS_TYPE_ERROR, {"Properties", "Elements", "JS_TYPE_ERROR"}},
-            {JSType::JS_UINT16_ARRAY, {"ViewedArrayBufferOrByteArray", "TypedArrayName", "JS_UINT16_ARRAY"}},
-            {JSType::JS_UINT32_ARRAY, {"ViewedArrayBufferOrByteArray", "TypedArrayName", "JS_UINT32_ARRAY"}},
-            {JSType::JS_UINT8_ARRAY, {"ViewedArrayBufferOrByteArray", "TypedArrayName", "JS_UINT8_ARRAY"}},
-            {JSType::JS_UINT8_CLAMPED_ARRAY, {"ViewedArrayBufferOrByteArray",
-                                              "TypedArrayName", "JS_UINT8_CLAMPED_ARRAY"}},
+            {JSType::JS_UINT16_ARRAY, {"ViewedArrayBufferOrByteArray", "JS_UINT16_ARRAY"}},
+            {JSType::JS_UINT32_ARRAY, {"ViewedArrayBufferOrByteArray", "JS_UINT32_ARRAY"}},
+            {JSType::JS_UINT8_ARRAY, {"ViewedArrayBufferOrByteArray", "JS_UINT8_ARRAY"}},
+            {JSType::JS_UINT8_CLAMPED_ARRAY, {"ViewedArrayBufferOrByteArray", "JS_UINT8_CLAMPED_ARRAY"}},
             {JSType::JS_URI_ERROR, {"Properties", "Elements", "JS_URI_ERROR"}},
             {JSType::JS_WEAK_MAP, {"LinkedMap", "JS_WEAK_MAP"}},
             {JSType::JS_WEAK_REF, {"WeakObject", "JS_WEAK_REF"}},
@@ -362,13 +361,13 @@ public:
             {JSType::LOCAL_EXPORTENTRY_RECORD, {"ExportName", "LocalName", "LOCAL_EXPORTENTRY_RECORD"}},
             {JSType::MACHINE_CODE_OBJECT, {"MACHINE_CODE_OBJECT"}},
             {JSType::MARKER_CELL, {"MARKER_CELL"}},
-            {JSType::METHOD, {"ConstantPool", "METHOD"}},
+            {JSType::METHOD, {"ConstantPool", "HotnessCounter", "METHOD"}},
             {JSType::MICRO_JOB_QUEUE, {"PromiseJobQueue", "ScriptJobQueue", "MICRO_JOB_QUEUE"}},
             {JSType::MODULE_RECORD, {"MODULE_RECORD"}},
             {JSType::MUTANT_TAGGED_ARRAY, {"MUTANT_TAGGED_ARRAY"}},
             {JSType::NATIVE_MODULE_FAILURE_INFO, {"ArkNativeModuleFailureInfo", "NATIVE_MODULE_FAILURE_INFO"}},
             {JSType::PENDING_JOB, {"Job", "Arguments", "PENDING_JOB"}},
-            {JSType::PROFILE_TYPE_INFO, {"PROFILE_TYPE_INFO"}},
+            {JSType::PROFILE_TYPE_INFO, {"Length", "Method", "ExtraInfoMap", "JitOsr", "Data", "PROFILE_TYPE_INFO"}},
             {JSType::PROFILE_TYPE_INFO_CELL_0, {"Value", "MachineCode", "Handle", "PROFILE_TYPE_INFO_CELL_0"}},
             {JSType::PROFILE_TYPE_INFO_CELL_1, {"Value", "MachineCode", "Handle", "PROFILE_TYPE_INFO_CELL_1"}},
             {JSType::PROFILE_TYPE_INFO_CELL_N, {"Value", "MachineCode", "Handle", "PROFILE_TYPE_INFO_CELL_N"}},
@@ -381,14 +380,14 @@ public:
             {JSType::PROTOTYPE_HANDLER, {"HandlerInfo", "ProtoCell", "Holder",
                                          "AccessorJSFunction", "PROTOTYPE_HANDLER"}},
             {JSType::PROTOTYPE_INFO, {"ChangeListener", "PROTOTYPE_INFO"}},
-            {JSType::ENUM_CACHE, {"ENUM_CACHE"}},
+            {JSType::ENUM_CACHE, {"EnumCacheOwn", "EnumCacheAll", "ProtoChainInfoEnumCache", "ENUM_CACHE"}},
             {JSType::PROTO_CHANGE_MARKER, {"PROTO_CHANGE_MARKER"}},
             {JSType::RB_TREENODE, {"Left", "Right", "IsRed", "RB_TREENODE"}},
             {JSType::RESOLVEDBINDING_RECORD, {"Module", "BindingName", "RESOLVEDBINDING_RECORD"}},
             {JSType::RESOLVEDINDEXBINDING_RECORD, {"Module", "Index", "BitField", "RESOLVEDINDEXBINDING_RECORD"}},
             {JSType::RESOLVEDRECORDBINDING_RECORD, {"ModuleRecord", "BindingName", "RESOLVEDRECORDBINDING_RECORD"}},
-            {JSType::RESOLVEDRECORDINDEXBINDING_RECORD, {"ModuleRecord",
-                                                         "AbcFileName", "RESOLVEDRECORDINDEXBINDING_RECORD"}},
+            {JSType::RESOLVEDRECORDINDEXBINDING_RECORD, {"ModuleRecord", "AbcFileName", "Index", "BitField",
+                                                         "RESOLVEDRECORDINDEXBINDING_RECORD"}},
             {JSType::RESOLVING_FUNCTIONS_RECORD, {"ResolveFunction", "RejectFunction", "RESOLVING_FUNCTIONS_RECORD"}},
             {JSType::SENDABLE_ENV, {"SENDABLE_ENV"}},
             {JSType::SFUNCTION_ENV, {"SFUNCTION_ENV"}},
@@ -399,6 +398,7 @@ public:
                                                  "IndirectExportEntries", "StarExportEntries",
                                                  "NameDictionary", "CycleRoot", "TopLevelCapability",
                                                  "AsyncParentModules", "SendableEnv", "Exception",
+                                                 "EcmaModuleFileName", "EcmaModuleRecordName",
                                                  "SOURCE_TEXT_MODULE_RECORD"}},
             {JSType::STAR_EXPORTENTRY_RECORD, {"ModuleRequest", "STAR_EXPORTENTRY_RECORD"}},
             {JSType::STORE_TS_HANDLER, {"HandlerInfo", "ProtoCell", "Holder", "STORE_TS_HANDLER"}},
@@ -426,7 +426,7 @@ public:
                 JSHClass::LAYOUT_OFFSET, JSHClass::TRANSTIONS_OFFSET, JSHClass::PARENT_OFFSET,
                 JSHClass::PROTO_CHANGE_MARKER_OFFSET, JSHClass::PROTO_CHANGE_DETAILS_OFFSET,
                 JSHClass::ENUM_CACHE_OFFSET,
-                JSHClass::DEPENDENT_INFOS_OFFSET, JSHClass::PROFILE_TYPE_OFFSET,
+                JSHClass::DEPENDENT_INFOS_OFFSET, JSHClass::BIT_FIELD2_OFFSET,
                 JSHClass::LAST_OFFSET - JSHClass::BIT_FIELD_OFFSET}},
             {JSType::ACCESSOR_DATA, {AccessorData::GETTER_OFFSET, AccessorData::SETTER_OFFSET,
                                      AccessorData::SIZE - AccessorData::GETTER_OFFSET}},
@@ -543,7 +543,8 @@ public:
             {JSType::JS_API_PLAIN_ARRAY, {JSAPIPlainArray::KEYS_OFFSET,
                                           JSAPIPlainArray::VALUES_OFFSET,
                                           JSAPIPlainArray::SIZE - JSAPIPlainArray::KEYS_OFFSET}},
-            {JSType::JS_API_FAST_BUFFER, {JSAPIFastBuffer::TYPEDARRAY_OFFSET}},
+            {JSType::JS_API_FAST_BUFFER, {JSAPIFastBuffer::TYPEDARRAY_OFFSET,
+                                          JSAPIFastBuffer::SIZE - JSAPIFastBuffer::TYPEDARRAY_OFFSET}},
             {JSType::JS_API_PLAIN_ARRAY_ITERATOR, {
                 JSAPIPlainArrayIterator::ITERATED_PLAIN_ARRAY_OFFSET,
                 JSAPIPlainArrayIterator::LAST_OFFSET - JSAPIPlainArrayIterator::ITERATED_PLAIN_ARRAY_OFFSET}},
@@ -610,10 +611,8 @@ public:
             {JSType::JS_ASYNC_MODULE_REJECTED_FUNCTION, {
                 JSAsyncModuleRejectedFunction::SIZE - JSAsyncModuleRejectedFunction::SIZE}},
             {JSType::JS_BIGINT64_ARRAY, {JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
-                                         JSTypedArray::TYPED_ARRAY_NAME_OFFSET,
                                          JSTypedArray::SIZE - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
             {JSType::JS_BIGUINT64_ARRAY, {JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
-                                          JSTypedArray::TYPED_ARRAY_NAME_OFFSET,
                                           JSTypedArray::SIZE - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
             {JSType::JS_BOUND_FUNCTION, {JSBoundFunction::BOUND_TARGET_OFFSET,
                                          JSBoundFunction::BOUND_THIS_OFFSET,
@@ -666,10 +665,8 @@ public:
                 JSFinalizationRegistry::PREV_OFFSET,
                 JSFinalizationRegistry::SIZE - JSFinalizationRegistry::CLEANUP_CALLBACK_OFFSET}},
             {JSType::JS_FLOAT32_ARRAY, {JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
-                                        JSTypedArray::TYPED_ARRAY_NAME_OFFSET,
                                         JSTypedArray::SIZE - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
             {JSType::JS_FLOAT64_ARRAY, {JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
-                                        JSTypedArray::TYPED_ARRAY_NAME_OFFSET,
                                         JSTypedArray::SIZE - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
             {JSType::JS_FORIN_ITERATOR, {JSForInIterator::OBJECT_OFFSET,
                                          JSForInIterator::CACHED_HCLASS_OFFSET,
@@ -703,13 +700,10 @@ public:
                 JSGeneratorObject::SIZE - JSGeneratorObject::GENERATOR_CONTEXT_OFFSET}},
             {JSType::JS_GLOBAL_OBJECT, {JSGlobalObject::SIZE - JSGlobalObject::SIZE}},
             {JSType::JS_INT16_ARRAY, {JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
-                                      JSTypedArray::TYPED_ARRAY_NAME_OFFSET,
                                       JSTypedArray::SIZE - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
             {JSType::JS_INT32_ARRAY, {JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
-                                      JSTypedArray::TYPED_ARRAY_NAME_OFFSET,
                                       JSTypedArray::SIZE - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
             {JSType::JS_INT8_ARRAY, {JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
-                                     JSTypedArray::TYPED_ARRAY_NAME_OFFSET,
                                      JSTypedArray::SIZE - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
             {JSType::JS_INTL, {JSIntl::FALLBACK_SYMBOL,
                                JSIntl::SIZE - JSIntl::FALLBACK_SYMBOL}},
@@ -733,7 +727,8 @@ public:
                                            ModuleNamespace::EXPORTS_OFFSET,
                                            ModuleNamespace::DEREGISTER_PROCESSION_OFFSET,
                                            ModuleNamespace::SIZE - ModuleNamespace::MODULE_OFFSET}},
-            {JSType::JS_NATIVE_POINTER, {JSNativePointer::DATA_SIZE_OFFSET,
+            {JSType::JS_NATIVE_POINTER, {JSNativePointer::POINTER_OFFSET,
+                                         JSNativePointer::DATA_SIZE_OFFSET,
                                          JSNativePointer::LAST_OFFSET - JSNativePointer::POINTER_OFFSET}},
             {JSType::JS_NUMBER_FORMAT, {JSNumberFormat::LOCALE_OFFSET,
                                         JSNumberFormat::NUMBER_STRING_SYSTEM_OFFSET,
@@ -895,22 +890,21 @@ public:
                                        JSObject::SIZE - JSObject::PROPERTIES_OFFSET}},
             {JSType::JS_TERMINATION_ERROR, {JSObject::PROPERTIES_OFFSET, JSObject::ELEMENTS_OFFSET,
                                             JSObject::SIZE - JSObject::PROPERTIES_OFFSET}},
-            {JSType::JS_TYPED_ARRAY, {JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET, JSTypedArray::TYPED_ARRAY_NAME_OFFSET,
+            {JSType::JS_TYPED_ARRAY, {JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
                                       JSTypedArray::SIZE - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
             {JSType::JS_TYPE_ERROR, {JSObject::PROPERTIES_OFFSET, JSObject::ELEMENTS_OFFSET,
                                      JSObject::SIZE - JSObject::PROPERTIES_OFFSET}},
             {JSType::JS_UINT16_ARRAY, {
-                JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET, JSTypedArray::TYPED_ARRAY_NAME_OFFSET,
+                JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
                 JSTypedArray::SIZE - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
             {JSType::JS_UINT32_ARRAY, {
-                JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET, JSTypedArray::TYPED_ARRAY_NAME_OFFSET,
+                JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
                 JSTypedArray::SIZE - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
             {JSType::JS_UINT8_ARRAY, {
-                JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET, JSTypedArray::TYPED_ARRAY_NAME_OFFSET,
+                JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
                 JSTypedArray::SIZE - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
             {JSType::JS_UINT8_CLAMPED_ARRAY, {
                 JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
-                JSTypedArray::TYPED_ARRAY_NAME_OFFSET,
                 JSTypedArray::SIZE - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
             {JSType::JS_URI_ERROR, {JSObject::PROPERTIES_OFFSET, JSObject::ELEMENTS_OFFSET,
                                     JSObject::SIZE - JSObject::PROPERTIES_OFFSET}},
@@ -929,7 +923,9 @@ public:
                 LocalExportEntry::SIZE - LocalExportEntry::LOCAL_EXPORT_ENTRY_OFFSET}},
             {JSType::MACHINE_CODE_OBJECT, {MachineCode::LAST_OFFSET - MachineCode::INS_SIZE_OFFSET}},
             {JSType::MARKER_CELL, {MarkerCell::SIZE - MarkerCell::BIT_FIELD_OFFSET}},
-            {JSType::METHOD, {Method::CONSTANT_POOL_OFFSET, Method::LAST_OFFSET - Method::CONSTANT_POOL_OFFSET}},
+            {JSType::METHOD, {Method::CONSTANT_POOL_OFFSET,
+                              Method::HOTNESS_COUNTER_OFFSET,
+                              Method::LAST_OFFSET - Method::CONSTANT_POOL_OFFSET}},
             {JSType::MICRO_JOB_QUEUE, {job::MicroJobQueue::PROMISE_JOB_QUEUE_OFFSET,
                                        job::MicroJobQueue::SCRIPT_JOB_QUEUE_OFFSET,
                                        job::MicroJobQueue::SIZE - job::MicroJobQueue::PROMISE_JOB_QUEUE_OFFSET}},
@@ -941,7 +937,13 @@ public:
             {JSType::PENDING_JOB, {job::PendingJob::JOB_OFFSET,
                                    job::PendingJob::ARGUMENT_OFFSET,
                                    job::PendingJob::SIZE - job::PendingJob::ARGUMENT_OFFSET}},
-            {JSType::PROFILE_TYPE_INFO, {ProfileTypeInfo::SIZE - ProfileTypeInfo::SIZE}},
+            {JSType::PROFILE_TYPE_INFO, {
+                ProfileTypeInfo::LENGTH_OFFSET,
+                ProfileTypeInfo::METHOD_OFFSET,
+                ProfileTypeInfo::EXTRA_INFO_MAP_OFFSET,
+                ProfileTypeInfo::JIT_OSR_OFFSET,
+                ProfileTypeInfo::DATA_OFFSET,
+                ProfileTypeInfo::SIZE - ProfileTypeInfo::SIZE}},
             {JSType::PROFILE_TYPE_INFO_CELL_0, {
                 ProfileTypeInfoCell::VALUE_OFFSET,
                 ProfileTypeInfoCell::MACHINE_CODE_OFFSET,
@@ -977,6 +979,9 @@ public:
                                          PrototypeHandler::SIZE - PrototypeHandler::HANDLER_INFO_OFFSET}},
             {JSType::PROTOTYPE_INFO, {ProtoChangeDetails::CHANGE_LISTENER_OFFSET,
                                       ProtoChangeDetails::SIZE - ProtoChangeDetails::CHANGE_LISTENER_OFFSET}},
+            {JSType::ENUM_CACHE, {EnumCache::ENUM_CACHE_OWN_OFFSET, EnumCache::ENUM_CACHE_ALL_OFFSET,
+                                  EnumCache::PROTO_CHAIN_INFO_ENUM_CACHE_OFFSET,
+                                  EnumCache::SIZE - EnumCache::ENUM_CACHE_OWN_OFFSET}},
             {JSType::PROTO_CHANGE_MARKER, {ProtoChangeMarker::SIZE - ProtoChangeMarker::BIT_FIELD_OFFSET}},
             {JSType::RB_TREENODE, {RBTreeNode::LEFT_OFFSET, RBTreeNode::RIGHT_OFFSET, RBTreeNode::ISRED_OFFSET,
                                    RBTreeNode::SIZE - RBTreeNode::LEFT_OFFSET}},
@@ -994,6 +999,8 @@ public:
             {JSType::RESOLVEDRECORDINDEXBINDING_RECORD, {
                 ResolvedRecordIndexBinding::MODULE_RECORD_INDEX_OFFSET,
                 ResolvedRecordIndexBinding::ABC_FILE_NAME,
+                ResolvedRecordIndexBinding::INDEX_OFFSET,
+                ResolvedRecordIndexBinding::BIT_FIELD_OFFSET,
                 ResolvedRecordIndexBinding::SIZE - ResolvedRecordIndexBinding::MODULE_RECORD_INDEX_OFFSET}},
             {JSType::RESOLVING_FUNCTIONS_RECORD, {
                 ResolvingFunctionsRecord::RESOLVE_FUNCTION_OFFSET,
@@ -1018,6 +1025,8 @@ public:
                 SourceTextModule::ASYNC_PARENT_MODULES_OFFSET,
                 SourceTextModule::SENDABLE_ENV_OFFSET,
                 SourceTextModule::EXCEPTION_OFFSET,
+                SourceTextModule::ECMA_MODULE_FILENAME,
+                SourceTextModule::ECMA_MODULE_RECORDNAME,
                 SourceTextModule::SIZE - SourceTextModule::SOURCE_TEXT_MODULE_OFFSET}},
             {JSType::STAR_EXPORTENTRY_RECORD, {StarExportEntry::STAR_EXPORT_ENTRY_OFFSET,
                                                StarExportEntry::SIZE - StarExportEntry::STAR_EXPORT_ENTRY_OFFSET}},
@@ -1228,7 +1237,7 @@ public:
             {JSType::MUTANT_TAGGED_ARRAY, {"TAGGED_ARRAY"}},
             {JSType::NATIVE_MODULE_FAILURE_INFO, {"JS_OBJECT"}},
             {JSType::PENDING_JOB, {"RECORD"}},
-            {JSType::PROFILE_TYPE_INFO, {"IC_INFO"}},
+            {JSType::PROFILE_TYPE_INFO, {"TAGGED_OBJECT"}},
             {JSType::PROFILE_TYPE_INFO_CELL_0, {"TAGGED_OBJECT"}},
             {JSType::PROFILE_TYPE_INFO_CELL_1, {"TAGGED_OBJECT"}},
             {JSType::PROFILE_TYPE_INFO_CELL_N, {"TAGGED_OBJECT"}},
@@ -1240,6 +1249,7 @@ public:
             {JSType::PROPERTY_BOX, {"TAGGED_OBJECT"}},
             {JSType::PROTOTYPE_HANDLER, {"TAGGED_OBJECT"}},
             {JSType::PROTOTYPE_INFO, {"TAGGED_OBJECT"}},
+            {JSType::ENUM_CACHE, {"TAGGED_OBJECT"}},
             {JSType::PROTO_CHANGE_MARKER, {"TAGGED_OBJECT"}},
             {JSType::RB_TREENODE, {"TAGGED_NODE"}},
             {JSType::RESOLVEDBINDING_RECORD, {"RECORD"}},
@@ -1276,8 +1286,8 @@ public:
                               JSHClass::PROTO_CHANGE_DETAILS_OFFSET - JSHClass::PROTO_CHANGE_MARKER_OFFSET,
                               JSHClass::ENUM_CACHE_OFFSET - JSHClass::PROTO_CHANGE_DETAILS_OFFSET,
                               JSHClass::DEPENDENT_INFOS_OFFSET - JSHClass::ENUM_CACHE_OFFSET,
-                              JSHClass::PROFILE_TYPE_OFFSET - JSHClass::DEPENDENT_INFOS_OFFSET,
-                              JSHClass::LAST_OFFSET - JSHClass::PROFILE_TYPE_OFFSET}},
+                              JSHClass::BIT_FIELD2_OFFSET - JSHClass::DEPENDENT_INFOS_OFFSET,
+                              JSHClass::LAST_OFFSET - JSHClass::BIT_FIELD2_OFFSET}},
             {JSType::ACCESSOR_DATA, {AccessorData::SETTER_OFFSET - AccessorData::GETTER_OFFSET,
                                      AccessorData::SIZE - AccessorData::SETTER_OFFSET}},
             {JSType::AOT_LITERAL_INFO, {}},
@@ -1416,12 +1426,8 @@ public:
                 JSAsyncGeneratorResNextRetProRstFtn::SIZE - JSAsyncGeneratorResNextRetProRstFtn::ASYNC_GENERATOR_OBJECT_OFFSET}},
             {JSType::JS_ASYNC_MODULE_FULFILLED_FUNCTION, {}},
             {JSType::JS_ASYNC_MODULE_REJECTED_FUNCTION, {}},
-            {JSType::JS_BIGINT64_ARRAY, {
-                JSTypedArray::TYPED_ARRAY_NAME_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
-                JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::TYPED_ARRAY_NAME_OFFSET}},
-            {JSType::JS_BIGUINT64_ARRAY, {
-                JSTypedArray::TYPED_ARRAY_NAME_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
-                JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::TYPED_ARRAY_NAME_OFFSET}},
+            {JSType::JS_BIGINT64_ARRAY, {JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
+            {JSType::JS_BIGUINT64_ARRAY, {JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
             {JSType::JS_BOUND_FUNCTION, {
                 JSBoundFunction::BOUND_THIS_OFFSET - JSBoundFunction::BOUND_TARGET_OFFSET,
                 JSBoundFunction::BOUND_ARGUMENTS_OFFSET - JSBoundFunction::BOUND_THIS_OFFSET,
@@ -1462,12 +1468,8 @@ public:
                 JSFinalizationRegistry::NEXT_OFFSET - JSFinalizationRegistry::MAYBE_UNREGISTER_OFFSET,
                 JSFinalizationRegistry::PREV_OFFSET - JSFinalizationRegistry::NEXT_OFFSET,
                 JSFinalizationRegistry::SIZE - JSFinalizationRegistry::PREV_OFFSET}},
-            {JSType::JS_FLOAT32_ARRAY, {
-                JSTypedArray::TYPED_ARRAY_NAME_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
-                JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::TYPED_ARRAY_NAME_OFFSET}},
-            {JSType::JS_FLOAT64_ARRAY, {
-                JSTypedArray::TYPED_ARRAY_NAME_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
-                JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::TYPED_ARRAY_NAME_OFFSET}},
+            {JSType::JS_FLOAT32_ARRAY, {JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
+            {JSType::JS_FLOAT64_ARRAY, {JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
             {JSType::JS_FORIN_ITERATOR, {
                 JSForInIterator::CACHED_HCLASS_OFFSET - JSForInIterator::OBJECT_OFFSET,
                 JSForInIterator::KEYS_OFFSET - JSForInIterator::CACHED_HCLASS_OFFSET,
@@ -1494,15 +1496,9 @@ public:
                 JSGeneratorObject::GENERATOR_RESUME_RESULT_OFFSET - JSGeneratorObject::GENERATOR_CONTEXT_OFFSET,
                 JSGeneratorObject::TASK_INFO_OFFSET - JSGeneratorObject::GENERATOR_RESUME_RESULT_OFFSET}},
             {JSType::JS_GLOBAL_OBJECT, {}},
-            {JSType::JS_INT16_ARRAY, {
-                JSTypedArray::TYPED_ARRAY_NAME_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
-                JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::TYPED_ARRAY_NAME_OFFSET}},
-            {JSType::JS_INT32_ARRAY, {
-                JSTypedArray::TYPED_ARRAY_NAME_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
-                JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::TYPED_ARRAY_NAME_OFFSET}},
-            {JSType::JS_INT8_ARRAY, {
-                JSTypedArray::TYPED_ARRAY_NAME_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
-                JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::TYPED_ARRAY_NAME_OFFSET}},
+            {JSType::JS_INT16_ARRAY, {JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
+            {JSType::JS_INT32_ARRAY, {JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
+            {JSType::JS_INT8_ARRAY, {JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
             {JSType::JS_INTL, {JSIntl::SIZE - JSIntl::FALLBACK_SYMBOL}},
             {JSType::JS_INTL_BOUND_FUNCTION, {
                 JSIntlBoundFunction::DATETIME_FORMAT_OFFSET - JSIntlBoundFunction::NUMBER_FORMAT_OFFSET,
@@ -1520,6 +1516,7 @@ public:
                 ModuleNamespace::DEREGISTER_PROCESSION_OFFSET - ModuleNamespace::EXPORTS_OFFSET,
                 ModuleNamespace::SIZE - ModuleNamespace::DEREGISTER_PROCESSION_OFFSET}},
             {JSType::JS_NATIVE_POINTER, {
+                JSNativePointer::DELETER_OFFSET - JSNativePointer::POINTER_OFFSET,
                 JSNativePointer::FLAG_OFFSET- JSNativePointer::DATA_SIZE_OFFSET}},
             {JSType::JS_NUMBER_FORMAT, {
                 JSNumberFormat::NUMBER_STRING_SYSTEM_OFFSET - JSNumberFormat::LOCALE_OFFSET,
@@ -1653,23 +1650,14 @@ public:
                 JSObject::ELEMENTS_OFFSET - JSObject::PROPERTIES_OFFSET, JSObject::SIZE - JSObject::ELEMENTS_OFFSET}},
             {JSType::JS_TERMINATION_ERROR, {
                 JSObject::ELEMENTS_OFFSET - JSObject::PROPERTIES_OFFSET, JSObject::SIZE - JSObject::ELEMENTS_OFFSET}},
-            {JSType::JS_TYPED_ARRAY, {
-                JSTypedArray::TYPED_ARRAY_NAME_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
-                JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::TYPED_ARRAY_NAME_OFFSET}},
+            {JSType::JS_TYPED_ARRAY, {JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
             {JSType::JS_TYPE_ERROR, {
                 JSObject::ELEMENTS_OFFSET - JSObject::PROPERTIES_OFFSET, JSObject::SIZE - JSObject::ELEMENTS_OFFSET}},
-            {JSType::JS_UINT16_ARRAY, {
-                JSTypedArray::TYPED_ARRAY_NAME_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
-                JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::TYPED_ARRAY_NAME_OFFSET}},
-            {JSType::JS_UINT32_ARRAY, {
-                JSTypedArray::TYPED_ARRAY_NAME_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
-                JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::TYPED_ARRAY_NAME_OFFSET}},
-            {JSType::JS_UINT8_ARRAY, {
-                JSTypedArray::TYPED_ARRAY_NAME_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
-                JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::TYPED_ARRAY_NAME_OFFSET}},
-            {JSType::JS_UINT8_CLAMPED_ARRAY, {
-                JSTypedArray::TYPED_ARRAY_NAME_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET,
-                JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::TYPED_ARRAY_NAME_OFFSET}},
+            {JSType::JS_UINT16_ARRAY, {JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
+            {JSType::JS_UINT32_ARRAY, {JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
+            {JSType::JS_UINT8_ARRAY, {JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
+            {JSType::JS_UINT8_CLAMPED_ARRAY,
+                {JSTypedArray::BYTE_LENGTH_OFFSET - JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET}},
             {JSType::JS_URI_ERROR, {
                 JSObject::ELEMENTS_OFFSET - JSObject::PROPERTIES_OFFSET,
                 JSObject::SIZE - JSObject::ELEMENTS_OFFSET}},
@@ -1684,7 +1672,8 @@ public:
                 LocalExportEntry::LOCAL_INDEX_OFFSET - LocalExportEntry::LOCAL_NAME_OFFSET}},
             {JSType::MACHINE_CODE_OBJECT, {}},
             {JSType::MARKER_CELL, {}},
-            {JSType::METHOD, {Method::CALL_FIELD_OFFSET - Method::CONSTANT_POOL_OFFSET}},
+            {JSType::METHOD, {Method::CALL_FIELD_OFFSET - Method::CONSTANT_POOL_OFFSET,
+                              Method::LAST_OFFSET - Method::HOTNESS_COUNTER_OFFSET}},
             {JSType::MICRO_JOB_QUEUE, {
                 job::MicroJobQueue::SCRIPT_JOB_QUEUE_OFFSET - job::MicroJobQueue::PROMISE_JOB_QUEUE_OFFSET,
                 job::MicroJobQueue::SIZE - job::MicroJobQueue::SCRIPT_JOB_QUEUE_OFFSET}},
@@ -1694,7 +1683,12 @@ public:
                 NativeModuleFailureInfo::SIZE - NativeModuleFailureInfo::ARK_NATIVE_MODULE_FAILURE_INFO_OFFSET}},
             {JSType::PENDING_JOB, {job::PendingJob::ARGUMENT_OFFSET - job::PendingJob::JOB_OFFSET,
                                    job::PendingJob::SIZE - job::PendingJob::ARGUMENT_OFFSET}},
-            {JSType::PROFILE_TYPE_INFO, {}},
+            {JSType::PROFILE_TYPE_INFO, {
+                ProfileTypeInfo::INVOCATION_COUNT_OFFSET - ProfileTypeInfo::LENGTH_OFFSET,
+                ProfileTypeInfo::EXTRA_INFO_MAP_OFFSET - ProfileTypeInfo::METHOD_OFFSET,
+                ProfileTypeInfo::JIT_OSR_OFFSET - ProfileTypeInfo::EXTRA_INFO_MAP_OFFSET,
+                ProfileTypeInfo::SIZE - ProfileTypeInfo::JIT_OSR_OFFSET,
+                JSTaggedValue::TaggedTypeSize()}},
             {JSType::PROFILE_TYPE_INFO_CELL_0, {
                 ProfileTypeInfoCell::MACHINE_CODE_OFFSET - ProfileTypeInfoCell::VALUE_OFFSET,
                 ProfileTypeInfoCell::HANDLE_OFFSET - ProfileTypeInfoCell::MACHINE_CODE_OFFSET,
@@ -1726,6 +1720,10 @@ public:
                 PrototypeHandler::ACCESSOR_METHOD_ID_OFFSET - PrototypeHandler::PrototypeHandler::ACCESSOR_JSFUNCTION_OFFSET}},
             {JSType::PROTOTYPE_INFO, {
                 ProtoChangeDetails::REGISTER_INDEX_OFFSET - ProtoChangeDetails::CHANGE_LISTENER_OFFSET}},
+            {JSType::ENUM_CACHE, {
+                EnumCache::ENUM_CACHE_ALL_OFFSET - EnumCache::ENUM_CACHE_OWN_OFFSET,
+                EnumCache::PROTO_CHAIN_INFO_ENUM_CACHE_OFFSET - EnumCache::ENUM_CACHE_ALL_OFFSET,
+                EnumCache::ENUM_CACHE_KIND_OFFSET - EnumCache::PROTO_CHAIN_INFO_ENUM_CACHE_OFFSET}},
             {JSType::PROTO_CHANGE_MARKER, {}},
             {JSType::RB_TREENODE, {
                 RBTreeNode::RIGHT_OFFSET - RBTreeNode::LEFT_OFFSET,
@@ -1743,7 +1741,9 @@ public:
                 ResolvedRecordBinding::SIZE - ResolvedRecordBinding::BINDING_NAME_OFFSET}},
             {JSType::RESOLVEDRECORDINDEXBINDING_RECORD, {
                 ResolvedRecordIndexBinding::ABC_FILE_NAME - ResolvedRecordIndexBinding::MODULE_RECORD_INDEX_OFFSET,
-                ResolvedRecordIndexBinding::INDEX_OFFSET - ResolvedRecordIndexBinding::ABC_FILE_NAME}},
+                ResolvedRecordIndexBinding::INDEX_OFFSET - ResolvedRecordIndexBinding::ABC_FILE_NAME,
+                ResolvedRecordIndexBinding::BIT_FIELD_OFFSET - ResolvedRecordIndexBinding::INDEX_OFFSET,
+                ResolvedRecordIndexBinding::END_OFFSET - ResolvedRecordIndexBinding::BIT_FIELD_OFFSET}},
             {JSType::RESOLVING_FUNCTIONS_RECORD, {
                 ResolvingFunctionsRecord::REJECT_FUNCTION_OFFSET - ResolvingFunctionsRecord::RESOLVE_FUNCTION_OFFSET,
                 ResolvingFunctionsRecord::SIZE - ResolvingFunctionsRecord::REJECT_FUNCTION_OFFSET}},
@@ -1765,7 +1765,9 @@ public:
                 SourceTextModule::ASYNC_PARENT_MODULES_OFFSET - SourceTextModule::TOP_LEVEL_CAPABILITY_OFFSET,
                 SourceTextModule::SENDABLE_ENV_OFFSET - SourceTextModule::ASYNC_PARENT_MODULES_OFFSET,
                 SourceTextModule::EXCEPTION_OFFSET - SourceTextModule::SENDABLE_ENV_OFFSET,
-                SourceTextModule::DFS_ANCESTOR_INDEX_OFFSET - SourceTextModule::EXCEPTION_OFFSET}},
+                SourceTextModule::DFS_ANCESTOR_INDEX_OFFSET - SourceTextModule::EXCEPTION_OFFSET,
+                SourceTextModule::ECMA_MODULE_RECORDNAME - SourceTextModule::ECMA_MODULE_FILENAME,
+                SourceTextModule::BIT_FIELD_OFFSET - SourceTextModule::ECMA_MODULE_RECORDNAME}},
             {JSType::STAR_EXPORTENTRY_RECORD, {StarExportEntry::SIZE - StarExportEntry::STAR_EXPORT_ENTRY_OFFSET}},
             {JSType::STORE_TS_HANDLER, {StoreAOTHandler::PROTO_CELL_OFFSET - StoreAOTHandler::HANDLER_INFO_OFFSET,
                                         StoreAOTHandler::HOLDER_OFFSET - StoreAOTHandler::PROTO_CELL_OFFSET,
@@ -2108,11 +2110,129 @@ public:
         return true;
     }
 
+    // Directly check all 4 compiled-in metadata tables against type_enums.json (bidirectional):
+    //  - Forward:  every type listed in type_enums.json must have an entry in each of the 4 tables.
+    //  - Reverse:  none of the 4 tables may contain stale/extra entries absent from type_enums.json.
+    // This complements TestTypeEnumOrder (type_enums.json <-> C++ enum) by providing a direct
+    // cross-check between type_enums.json and the tables, so the correspondence does not
+    // solely rely on transitivity through the C++ enum.
+    bool TestForMetadataTablesConsistency(const CVector<std::string> &typeEnums)
+    {
+        bool passed = true;
+        size_t whitelistedCount = 0;
+        for (size_t i = 0; i < typeEnums.size(); i++) {
+            if (IsWhitelisted(typeEnums[i], tablesWhitelist_)) {
+                whitelistedCount++;
+            }
+        }
+        size_t expectedSize = typeEnums.size() - whitelistedCount;
+        CheckForwardTable(fieldNameTable_, "fieldNameTable_", typeEnums, passed);
+        CheckForwardTable(fieldOffsetTable_, "fieldOffsetTable_", typeEnums, passed);
+        CheckForwardTable(parentsTable_, "parentsTable_", typeEnums, passed);
+        CheckForwardTable(fieldSizeTable_, "fieldSizeTable_", typeEnums, passed);
+        CheckReverseTable(fieldNameTable_, "fieldNameTable_", typeEnums, expectedSize, passed);
+        CheckReverseTable(fieldOffsetTable_, "fieldOffsetTable_", typeEnums, expectedSize, passed);
+        CheckReverseTable(parentsTable_, "parentsTable_", typeEnums, expectedSize, passed);
+        CheckReverseTable(fieldSizeTable_, "fieldSizeTable_", typeEnums, expectedSize, passed);
+        return passed;
+    }
+
+    // Check that every type listed in type_enums.json has a corresponding
+    // per-type metadata .json file on disk. The expected file name is the
+    // lower-cased type name with a ".json" suffix, e.g. "HCLASS" -> "hclass.json".
+    // This catches the regression where a new JSType is added to type_enums.json
+    // but the matching per-type metadata file is forgotten.
+    bool TestForMetadataJsonFileExistence(const CVector<std::string> &typeEnums)
+    {
+        bool passed = true;
+        std::string dir(METADATA_SOURCE_FILE_DIR);
+        for (size_t i = 0; i < typeEnums.size(); i++) {
+            const std::string &typeName = typeEnums[i];
+            if (IsWhitelisted(typeName, jsonFileWhitelist_)) {
+                continue;
+            }
+            std::string fileName = typeName;
+            for (char &c : fileName) {
+                if (c >= 'A' && c <= 'Z') {
+                    c = c - 'A' + 'a';
+                }
+            }
+            fileName += ".json";
+            std::string filePath = dir + fileName;
+            std::ifstream file(filePath);
+            if (!file.is_open()) {
+                std::cout << "Type " << typeName << " (JSType " << i
+                          << ") is in type_enums.json but has no metadata file: " << filePath << std::endl;
+                passed = false;
+            }
+            file.close();
+        }
+        return passed;
+    }
+
     static std::unordered_map<JSType, std::vector<std::string>> fieldNameTable_;
     static std::unordered_map<JSType, std::vector<size_t>> fieldOffsetTable_;
     static std::unordered_map<JSType, std::vector<std::string>> parentsTable_;
     static std::unordered_map<JSType, std::vector<size_t>> fieldSizeTable_;
+    // Types that are known to lack complete metadata.  Two separate whitelists
+    // are used so that each coverage test only skips a type for the specific
+    // deficiency it has:
+    //  - tablesWhitelist_:   types missing from one or more of the 4 compiled-in tables.
+    //  - jsonFileWhitelist_: types whose per-type .json metadata file is missing or
+    //    whose file name does not match the type name.
+    // When metadata is fully added for a type, remove it from the relevant set(s)
+    // so the tests enforce its presence.
+    static const std::unordered_set<std::string> tablesWhitelist_;
+    static const std::unordered_set<std::string> jsonFileWhitelist_;
+
+    bool IsWhitelisted(const std::string &typeName,
+                       const std::unordered_set<std::string> &whitelist) const
+    {
+        return whitelist.find(typeName) != whitelist.end();
+    }
 private:
+    template<typename Table>
+    void CheckForwardTable(const Table &table, const char *tableName,
+                           const CVector<std::string> &typeEnums, bool &passed) const
+    {
+        for (size_t i = 0; i < typeEnums.size(); i++) {
+            if (IsWhitelisted(typeEnums[i], tablesWhitelist_)) {
+                continue;
+            }
+            auto type = static_cast<JSType>(i);
+            if (table.find(type) == table.end()) {
+                std::cout << "Type " << typeEnums[i] << " (JSType " << i
+                          << ") is in type_enums.json but missing from " << tableName << std::endl;
+                passed = false;
+            }
+        }
+    }
+
+    template<typename Table>
+    void CheckReverseTable(const Table &table, const char *tableName,
+                           const CVector<std::string> &typeEnums,
+                           size_t expectedSize, bool &passed) const
+    {
+        size_t nonWhitelistedInTable = 0;
+        for (const auto &entry : table) {
+            int intType = static_cast<int>(entry.first);
+            if (intType < 0 || intType >= static_cast<int>(typeEnums.size())) {
+                std::cout << "  " << tableName << " has stale entry JSType " << intType
+                          << " not in type_enums.json range" << std::endl;
+                passed = false;
+                continue;
+            }
+            if (!IsWhitelisted(typeEnums[intType], tablesWhitelist_)) {
+                nonWhitelistedInTable++;
+            }
+        }
+        if (nonWhitelistedInTable != expectedSize) {
+            std::cout << "Count mismatch: " << tableName << " has " << nonWhitelistedInTable
+                      << " non-whitelisted entries, but expected " << expectedSize << std::endl;
+            passed = false;
+        }
+    }
+
     std::vector<std::string> GetFieldNamesByType(JSType type)
     {
         return HasTypeInFieldNameTable(type) ? fieldNameTable_.at(type) : std::vector<std::string>();
@@ -2278,6 +2398,31 @@ std::unordered_map<JSType, std::vector<size_t>> JSMetadataTestHelper::fieldOffse
 std::unordered_map<JSType, std::vector<std::string>> JSMetadataTestHelper::parentsTable_ {};
 std::unordered_map<JSType, std::vector<size_t>> JSMetadataTestHelper::fieldSizeTable_ {};
 
+// Types that are known to lack complete metadata.  Two separate whitelists
+// are used so that each coverage test only skips a type for the specific
+// deficiency it has:
+//  - tablesWhitelist_:   types missing from one or more of the 4 compiled-in tables.
+//  - jsonFileWhitelist_: types whose per-type .json metadata file is missing or
+//    whose file name does not match the type name.
+// When metadata is fully added for a type, remove it from the relevant set(s)
+// so the tests enforce its presence.
+const std::unordered_set<std::string> JSMetadataTestHelper::tablesWhitelist_ {
+    "INVALID",
+    "COMPOSITE_BASE_CLASS",
+    "FREE_OBJECT_WITH_ONE_FIELD",
+    "FREE_OBJECT_WITH_NONE_FIELD",
+    "FREE_OBJECT_WITH_TWO_FIELD",
+};
+
+// Types whose per-type .json metadata file is missing (no corresponding file on disk).
+const std::unordered_set<std::string> JSMetadataTestHelper::jsonFileWhitelist_ {
+    "INVALID",
+    "COMPOSITE_BASE_CLASS",
+    "FREE_OBJECT_WITH_ONE_FIELD",
+    "FREE_OBJECT_WITH_NONE_FIELD",
+    "FREE_OBJECT_WITH_TWO_FIELD",
+};
+
 HWTEST_F_L0(JSMetadataTest, TestTypeEnumOrder)
 {
     JSMetadataTestHelper tester {};
@@ -2287,6 +2432,30 @@ HWTEST_F_L0(JSMetadataTest, TestTypeEnumOrder)
     tester.ReadAndParseTypeEnums(metadataFilePath, typeEnums);
     ASSERT_EQ(typeEnums.size(), static_cast<size_t>(JSType::TYPE_LAST) + 1);
     ASSERT_TRUE(tester.TestForTypeEnums(typeEnums));
+}
+
+// Check type_enums.json <-> 4 compiled-in metadata tables bidirectional consistency.
+HWTEST_F_L0(JSMetadataTest, TestMetadataTablesConsistentWithTypeEnums)
+{
+    JSMetadataTestHelper tester {};
+    std::string metadataFilePath = METADATA_SOURCE_FILE_DIR"type_enums.json";
+    CVector<std::string> typeEnums {};
+
+    tester.ReadAndParseTypeEnums(metadataFilePath, typeEnums);
+    ASSERT_EQ(typeEnums.size(), static_cast<size_t>(JSType::TYPE_LAST) + 1);
+    ASSERT_TRUE(tester.TestForMetadataTablesConsistency(typeEnums));
+}
+
+// Check that every type in type_enums.json has a corresponding per-type .json metadata file on disk.
+HWTEST_F_L0(JSMetadataTest, TestTypeEnumsHaveMetadataJsonFile)
+{
+    JSMetadataTestHelper tester {};
+    std::string metadataFilePath = METADATA_SOURCE_FILE_DIR"type_enums.json";
+    CVector<std::string> typeEnums {};
+
+    tester.ReadAndParseTypeEnums(metadataFilePath, typeEnums);
+    ASSERT_EQ(typeEnums.size(), static_cast<size_t>(JSType::TYPE_LAST) + 1);
+    ASSERT_TRUE(tester.TestForMetadataJsonFileExistence(typeEnums));
 }
 
 HWTEST_F_L0(JSMetadataTest, TestHClassMetadata)
@@ -2753,6 +2922,17 @@ HWTEST_F_L0(JSMetadataTest, TestJsApiPlainArrayMetadata)
     ASSERT_TRUE(tester.Test(JSType::JS_API_PLAIN_ARRAY, metadata));
 }
 
+HWTEST_F_L0(JSMetadataTest, TestJsApiFastBufferMetadata)
+{
+    JSMetadataTestHelper tester {};
+    std::string metadataFilePath = METADATA_SOURCE_FILE_DIR"js_api_fast_buffer.json";
+    JSMetadataTestHelper::Metadata metadata {};
+
+    tester.ReadAndParseMetadataJson(metadataFilePath, metadata);
+    ASSERT_TRUE(metadata.status == JSMetadataTestHelper::INITIALIZED);
+    ASSERT_TRUE(tester.Test(JSType::JS_API_FAST_BUFFER, metadata));
+}
+
 HWTEST_F_L0(JSMetadataTest, TestJsApiPlainArrayIteratorMetadata)
 {
     JSMetadataTestHelper tester {};
@@ -3010,7 +3190,7 @@ HWTEST_F_L0(JSMetadataTest, TestJsAsyncGeneratorResumeNextReturnProcessorRstFtnM
 {
     JSMetadataTestHelper tester {};
     std::string metadataFilePath =
-        METADATA_SOURCE_FILE_DIR"js_async_generator_resume_next.json";
+        METADATA_SOURCE_FILE_DIR"js_async_generator_resume_next_return_processor_rst_ftn.json";
     JSMetadataTestHelper::Metadata metadata {};
 
     tester.ReadAndParseMetadataJson(metadataFilePath, metadata);
@@ -4272,6 +4452,12 @@ HWTEST_F_L0(JSMetadataTest, TestProfileTypeInfoMetadata)
 
     tester.ReadAndParseMetadataJson(metadataFilePath, metadata);
     ASSERT_TRUE(metadata.status == JSMetadataTestHelper::INITIALIZED);
+    ASSERT_EQ(metadata.offsets.size(), 5U);
+    EXPECT_EQ(metadata.offsets.at("Length"), std::make_pair(0, 4));
+    EXPECT_EQ(metadata.offsets.at("Method"), std::make_pair(16, 8));
+    EXPECT_EQ(metadata.offsets.at("ExtraInfoMap"), std::make_pair(24, 8));
+    EXPECT_EQ(metadata.offsets.at("JitOsr"), std::make_pair(32, 8));
+    EXPECT_EQ(metadata.offsets.at("Data"), std::make_pair(40, 8));
     ASSERT_TRUE(tester.Test(JSType::PROFILE_TYPE_INFO, metadata));
 }
 
@@ -4396,6 +4582,17 @@ HWTEST_F_L0(JSMetadataTest, TestPrototypeInfoMetadata)
     ASSERT_TRUE(tester.Test(JSType::PROTOTYPE_INFO, metadata));
 }
 
+HWTEST_F_L0(JSMetadataTest, TestEnumCacheMetadata)
+{
+    JSMetadataTestHelper tester {};
+    std::string metadataFilePath = METADATA_SOURCE_FILE_DIR"enum_cache.json";
+    JSMetadataTestHelper::Metadata metadata {};
+
+    tester.ReadAndParseMetadataJson(metadataFilePath, metadata);
+    ASSERT_TRUE(metadata.status == JSMetadataTestHelper::INITIALIZED);
+    ASSERT_TRUE(tester.Test(JSType::ENUM_CACHE, metadata));
+}
+
 HWTEST_F_L0(JSMetadataTest, TestProtoChangeMarkerMetadata)
 {
     JSMetadataTestHelper tester {};
@@ -4453,6 +4650,7 @@ HWTEST_F_L0(JSMetadataTest, TestResolvedrecordbindingRecordMetadata)
 
 HWTEST_F_L0(JSMetadataTest, TestResolvedrecordindexbindingRecordMetadata)
 {
+#if defined(PANDA_TARGET_AMD64) || defined(PANDA_TARGET_ARM64)
     JSMetadataTestHelper tester {};
     std::string metadataFilePath = METADATA_SOURCE_FILE_DIR"resolvedrecordindexbinding_record.json";
     JSMetadataTestHelper::Metadata metadata {};
@@ -4460,6 +4658,7 @@ HWTEST_F_L0(JSMetadataTest, TestResolvedrecordindexbindingRecordMetadata)
     tester.ReadAndParseMetadataJson(metadataFilePath, metadata);
     ASSERT_TRUE(metadata.status == JSMetadataTestHelper::INITIALIZED);
     ASSERT_TRUE(tester.Test(JSType::RESOLVEDRECORDINDEXBINDING_RECORD, metadata));
+#endif
 }
 
 HWTEST_F_L0(JSMetadataTest, TestResolvingFunctionsRecordMetadata)

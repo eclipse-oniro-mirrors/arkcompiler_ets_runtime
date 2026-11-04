@@ -19,6 +19,7 @@
 #include "ecmascript/compiler/assembler/aarch64/assembler_aarch64.h"
 #include "ecmascript/compiler/assembler/aarch64/extend_assembler.h"
 #include "ecmascript/frames.h"
+#include "ecmascript/js_function.h"
 
 namespace panda::ecmascript::aarch64 {
 
@@ -136,6 +137,7 @@ private:
     static void CallBuiltinConstructorStub(ExtendedAssembler *assembler, Register builtinStub, Register argv,
                                            Register glue, Register temp);
     friend class OptimizedFastCall;
+    friend class ArkSteedCall;
 };
 
 class OptimizedFastCall : public CommonCall {
@@ -278,6 +280,7 @@ private:
     static void PreserveMostCall(ExtendedAssembler* assembler);
     friend class OptimizedCall;
     friend class BaselineCall;
+    friend class ArkSteedCall;
 };
 
 class BaselineCall : public CommonCall {
@@ -325,5 +328,31 @@ public:
     static void GetBaselineBuiltinFp(ExtendedAssembler *assembler);
 };
 
-}  // namespace panda::ecmascript::x64
+#if ECMASCRIPT_ENABLE_ARK_STEED
+class ArkSteedCall : public CommonCall {
+public:
+    static void ArkSteedCallEntry(ExtendedAssembler *assembler);
+    static void ArkSteedDeoptimizationEntry(ExtendedAssembler *assembler);
+    static void SteedCallAndPushArgv(ExtendedAssembler *assembler);
+    static void SteedCallWithArgVAndPushArgv(ExtendedAssembler *assembler);
+
+private:
+    static void LoadSteedCallTargetInfo(ExtendedAssembler *assembler, Register jsfunc, Register method,
+                                        Register codeAddr, Register expectedNumArgs);
+    static void CopyUserArgsFromCCallArgs(ExtendedAssembler *assembler, Register actualArgc, Register currentSp,
+                                          Label *invokeSteedCode);
+    static void CopyUserArgsFromArgV(ExtendedAssembler *assembler, Register glue, Register actualArgc,
+                                     Register argV, Register currentSp, Label *invokeSteedCode);
+    static void PrepareSteedCallFrame(ExtendedAssembler *assembler, Register glue, Register actualNumArgs,
+                                      Register expectedNumArgs, Label *copyArguments);
+    static void RestoreSteedCallFrame(ExtendedAssembler *assembler);
+
+    template <typename CopyUserArgs>
+    static void EmitSteedCall(ExtendedAssembler *assembler, Register glue, Register jsfunc, Register codeAddr,
+                              Register newTarget, Register thisObj, Register actualNumArgs,
+                              Register expectedNumArgs, CopyUserArgs copyUserArgs);
+};
+#endif
+
+}  // namespace panda::ecmascript::aarch64
 #endif  // ECMASCRIPT_COMPILER_ASSEMBLER_MODULE_X64_H

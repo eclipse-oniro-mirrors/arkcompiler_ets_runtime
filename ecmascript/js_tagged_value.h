@@ -381,6 +381,21 @@ public:
         return IsInt() ? GetInt() : GetDouble();
     }
 
+    // just a fake func for the convenience of
+    // calling `TaggedValueType<ReferenceType>::ConvertHeapObjectToJSTaggedValue()`
+    ARK_INLINE JSTaggedValue ConvertHeapObjectToJSTaggedValue() const
+    {
+        ASSERT(IsHeapObject());
+        return * this;
+    }
+
+    // just a fake func for the convenience of
+    // calling `TaggedValueType<ReferenceType>::ConvertToJSTaggedValue()`
+    ARK_INLINE JSTaggedValue ConvertToJSTaggedValue() const
+    {
+        return *this;
+    }
+
     ARK_INLINE TaggedObject *GetTaggedObject() const
     {
         ASSERT_PRINT(IsHeapObject() && ((value_ & TAG_WEAK) == 0U),
@@ -394,11 +409,6 @@ public:
             return GetTaggedWeakRef();
         }
         return GetTaggedObject();
-    }
-
-    ARK_INLINE TaggedObject *GetRawTaggedObject() const
-    {
-        return reinterpret_cast<TaggedObject *>(GetRawHeapObject());
     }
 
     ARK_INLINE TaggedObject *GetTaggedWeakRef() const
@@ -542,12 +552,13 @@ public:
     bool IsWeakLinkedHashMap() const;
     bool IsSFunctionEnv() const;
     bool PUBLIC_API IsTaggedArray() const;
-    bool PUBLIC_API IsFuncSlot() const;
     bool IsDictionary() const;
     bool IsByteArray() const;
     bool IsConstantPool() const;
+    bool PUBLIC_API IsConstantPoolSlowForTest() const;
     bool IsAOTLiteralInfo() const;
     bool IsExtraProfileTypeInfo() const;
+    bool IsProfileTypeInfo() const;
     bool IsICInfo() const;
     bool IsProfileTypeInfoCell() const;
     bool IsProfileTypeInfoCell0() const;

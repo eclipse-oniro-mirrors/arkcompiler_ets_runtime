@@ -17,7 +17,7 @@
 #define ECMASCRIPT_INTERPRETER_INTERPRETER_H
 
 #include "ecmascript/ecma_runtime_call_info.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/js_handle.h"
 #include "ecmascript/js_thread.h"
 #include "ecmascript/frames.h"
@@ -38,7 +38,6 @@ class EcmaInterpreter {
 public:
     static const int16_t METHOD_HOTNESS_THRESHOLD = 0x700;
     static const int16_t METHOD_HOTNESS_THRESHOLD_FACTOR = 10;
-    static const int16_t CANCEL_METHOD_HOTNESS_THRESHOLD = 0;
     enum ActualNumArgsOfCall : uint8_t { CALLARG0 = 0, CALLARG1, CALLARGS2, CALLARGS3 };
 
     static JSTaggedValue Execute(EcmaRuntimeCallInfo *info);
@@ -76,7 +75,7 @@ public:
     static uint32_t GetNumArgs(JSThread *thread, JSTaggedType *sp, uint32_t restIdx, uint32_t &startIdx);
     static bool IsFastNewFrameEnter(JSThread *thread, JSFunction *ctor, JSHandle<Method> method);
     static bool IsFastNewFrameExit(JSTaggedType *sp);
-    static int16_t GetHotnessCounter(uint32_t codeSize, bool cancelThreshold);
+    static int32_t GetHotnessCounter(uint32_t codeSize);
     static JSTaggedType *GetInterpreterFrameEnd(JSThread *thread, JSTaggedType *sp);
     static void UpdateProfileTypeInfoCellToFunction(JSThread *thread, JSHandle<JSFunction> &function,
                                                     JSTaggedValue profileTypeInfo, uint16_t slotId);

@@ -2324,7 +2324,6 @@ JSTaggedValue BuiltinsString::Pad(EcmaRuntimeCallInfo *argv, bool isStart)
 
 JSTaggedValue BuiltinsString::StringToList(JSThread *thread, JSHandle<EcmaString> &str)
 {
-    ASSERT(EcmaStringAccessor(str).IsUtf8());
     JSHandle<StringToListResultCache> cacheTable(thread->GetGlobalEnv()->GetStringToListResultCache());
     JSTaggedValue cacheResult = StringToListResultCache::FindCachedResult(thread, cacheTable, str);
     if (cacheResult != JSTaggedValue::Undefined()) {
@@ -2360,10 +2359,9 @@ JSTaggedValue BuiltinsString::StringToList(JSThread *thread, JSHandle<EcmaString
 
 JSTaggedValue BuiltinsString::StringToSList(JSThread *thread, JSHandle<EcmaString> &str)
 {
-    ASSERT(EcmaStringAccessor(str).IsUtf8());
     JSHandle<StringToListResultCache> cacheTable(thread->GetGlobalEnv()->GetStringToListResultCache());
     JSTaggedValue cacheResult = StringToListResultCache::FindCachedResult(thread, cacheTable, str);
-    if (cacheResult != JSTaggedValue::Undefined()) {
+    if (cacheResult != JSTaggedValue::Undefined() && cacheResult.IsInSharedHeap()) {
         JSHandle<JSTaggedValue> resultArray(
             JSSharedArray::CreateArrayFromList(thread, JSHandle<TaggedArray>(thread, cacheResult)));
         return resultArray.GetTaggedValue();

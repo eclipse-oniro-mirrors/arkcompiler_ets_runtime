@@ -948,4 +948,50 @@
     let s = JSON.stringify(obj);
 }
 
+{
+    const target = {};
+    const high = 400;
+    const inner = {};
+    Object.defineProperty(inner, 'trigger', {
+        get() {
+            delete target[high];
+            return 1;
+        },
+        enumerable: true,
+    });
+    target[0] = inner;
+    target[high] = 1;
+    JSON.stringify(target);
+}
+
+{
+    const victim = {a:1,b:2,c:3};
+    Object.keys(victim);
+    function replacer(k,v) {
+        if (k=='a') {
+            delete this.b;
+        }
+        return v;
+    }
+    assert_equal(JSON.stringify(victim,replacer), '{"a":1,"c":3}');
+}
+
+// Test82: Replacer triggers fast-to-dict transition causing heap OOB read
+{
+    let obj = {};
+    obj[387] = 1;
+    obj[390] = 2;
+    let result = JSON.stringify(obj, function(k, v) {
+        if (String(k) === '387') {
+            Object.defineProperty(obj, 387, { writable: false });
+        }
+        return v;
+    });
+    let parsed = JSON.parse(result);
+    let keys = Object.keys(parsed);
+    assert_equal(keys.length, 2);
+    assert_equal(parsed[387], 1);
+    assert_equal(parsed[390], 2);
+}
+
 test_end();

@@ -40,6 +40,7 @@ group("ark_aot_js_test") {
     "fallback_type_conversion",
     "pgo_stobjbyvalue",
     "typedarray_to_reversed",
+    "controlflow_opt"
   ]
 
   deps = []
@@ -143,6 +144,7 @@ group("ark_aot_ts_test") {
     "enum_cache_sendable",
     "shr_overflow",
     "equal_nan",
+    "impure_nan",
     "exception_case1",
     "exception_case10",
     "exception_case11",
@@ -397,6 +399,7 @@ group("ark_aot_ts_test") {
     "shared_module",
     "func_profile_type_info",
     "sendable",
+    "sendableobj",
     "sendablewithfunc",
     "webkit_call_convention",
     "retype_isnan",
@@ -447,10 +450,7 @@ group("ark_aot_ts_test") {
     ]
   }
 
-  deps = []
-  if (enable_next_optimization) {
-    deps += [ "builtin_inlining:ark_aot_builtin_inlining_test" ]
-  }
+  deps = [ "builtin_inlining:ark_aot_builtin_inlining_test" ]
 
   foreach(test, test_list) {
     deps += [ "${test}:${test}AotAction" ]

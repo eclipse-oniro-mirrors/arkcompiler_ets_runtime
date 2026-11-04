@@ -93,17 +93,42 @@ char *LoadLibError();
 void PUBLIC_API DeleteFilesWithSuffix(const std::string &dirPath, const std::string &suffix);
 bool Chmod(const std::string_view &path, const std::string_view &mode);
 bool Chmod(const std::string_view &path, const std::string_view &mode, std::error_code &errorCode);
+// `existOk` default to true for compatibility, when `existOk` is false.
+// if `newPath` already exist, rename will fail with `EEXIST` error.
+std::error_code Rename(const char *oldPath, const char *newPath, bool existOk = true);
+
+enum class FileType : uint8_t {
+    BLOCK,
+    CHARACTER,
+    DIRECTORY,
+    FIFO,
+    SYMLINK,
+    REGULAR,
+    SOCKET,
+    UNKNOWN,
+};
+using IterdirCallback = std::function<void(const std::string_view&, FileType fileType)>;
+std::error_code Iterdir(const std::string& path, const IterdirCallback& callback);
 
 class MemMapScope {
 public:
     MemMapScope(MemMap memMap) : memMap_(memMap) {}
     ~MemMapScope()
     {
+        if (escaped_) {
+            return;
+        }
         FileUnMap(memMap_);
+    }
+
+    void Escape()
+    {
+        escaped_ = true;
     }
 
 private:
     MemMap memMap_ {};
+    bool escaped_ {false};
 };
 
 class FileMemMapReader {
@@ -160,10 +185,14 @@ public:
         return true;
     }
 
-    void Step(const size_t stepSize)
+    bool Step(const size_t stepSize)
     {
+        if (remainingSize_ < stepSize) {
+            return false;
+        }
         readPtr_ += stepSize;
         remainingSize_ -= stepSize;
+        return true;
     }
 
     uint8_t *GetReadPtr() const
@@ -189,7 +218,7 @@ public:
     template<typename T>
     bool WriteSingleData(T *writeSrc, const size_t writeSize, const CString &message)
     {
-        if (memcpy_s(writePtr_, writeSize, writeSrc, writeSize) != EOK) {
+        if (memcpy_s(writePtr_, GetRemainingSize(), writeSrc, writeSize) != EOK) {
             LOG_ECMA(ERROR) << logTag_ << " memcpy_s write " << message << " failed";
             return false;
         }
@@ -207,12 +236,28 @@ public:
         if (paddingSize <= 0) {
             return true;
         }
-        if (memset_s(writePtr_, paddingSize, 0, paddingSize) != EOK) {
+        if (memset_s(writePtr_, GetRemainingSize(), 0, paddingSize) != EOK) {
             LOG_ECMA(ERROR) << logTag_ << " memset_s WriteAlignUpPadding " << paddingSize << " failed";
             return false;
         }
         writePtr_ += paddingSize;
         return true;
+    }
+
+    inline size_t GetWrittenSize() const
+    {
+        if (writePtr_ <= memMap_.GetOriginAddr()) {
+            return 0;
+        }
+        return writePtr_ - static_cast<uint8_t*>(memMap_.GetOriginAddr());
+    }
+
+    inline size_t GetRemainingSize() const
+    {
+        if (GetWrittenSize() >= fileSize_) {
+            return 0;
+        }
+        return fileSize_ - GetWrittenSize();
     }
 
 private:
@@ -223,15 +268,29 @@ private:
 };
 
 /**
- * @brief posix file reader/writer, safe to use in signal handler (without malloc)
+ * @brief seek origin of PosixFile::Seek/Tell
  */
+enum class SeekOrigin {
+    SET = 0,
+    CURRENT,
+    END,
+};
+
+/**
+ * @brief posix file reader/writer.
+ *
+ * @tparam asyncSafe when true, libc calls are replaced with raw syscalls so that
+ *         the instance is safe to use in a signal handler (without malloc, and
+ *         bypassing fdsan-instrumented libc wrappers);
+ *         when false, the fdsan owner tag is exchanged on open and the fd is
+ *         closed with the matching tag via fdsan-aware Close().
+ */
+template<bool asyncSafe>
 class PosixFile {
 public:
-    enum class SeekOrigin {
-        SET = 0,
-        CURRENT,
-        END,
-    };
+    // kept as a member alias so that `PosixFile<asyncSafe>::SeekOrigin` keeps working
+    using SeekOrigin = panda::ecmascript::SeekOrigin;
+
     PosixFile(const std::string_view &path, const std::string_view &flags, const std::string_view &mode = DEFAULT_MODE);
     ~PosixFile();
     int64_t Write(const char *data, size_t size);

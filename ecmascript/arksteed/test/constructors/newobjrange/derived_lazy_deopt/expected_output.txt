@@ -1,0 +1,1 @@
+derived_lazy_deopt passed

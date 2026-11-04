@@ -30,7 +30,7 @@
 #include "ecmascript/jspandafile/program_object.h"
 #include "ecmascript/js_async_generator_object.h"
 #include "ecmascript/js_generator_object.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/mem/concurrent_marker.h"
 #include "ecmascript/module/js_module_manager.h"
 #include "ecmascript/module/js_module_source_text.h"
@@ -315,9 +315,13 @@ using CommonStubCSigns = kungfu::CommonStubCSigns;
                 [[maybe_unused]] EcmaHandleScope handleScope(thread);           \
                 JSHandle<JSTaggedValue> funcName(                               \
                     thread, GET_STR_FROM_CACHE(stringId));                      \
-                std::string message = JSTaggedValue::ExceptionToString(         \
+                std::string name = JSTaggedValue::ExceptionToString(            \
                     thread, funcName);                                          \
-                message.append(" is not callable");                             \
+                JSHandle<JSTaggedValue> funcHandle(thread, funcValue);          \
+                std::string value = JSTaggedValue::ExceptionToString(           \
+                    thread, funcHandle);                                        \
+                std::string message = base::ConcatToStdString(                  \
+                    name, " is not callable, ", name, " is ", value);           \
                 JSHandle<JSObject> error = factory->GetJSError(                 \
                     ErrorType::TYPE_ERROR, message.c_str(), StackCheck::NO);    \
                 thread->SetException(error.GetTaggedValue());                   \

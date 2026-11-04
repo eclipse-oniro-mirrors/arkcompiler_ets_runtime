@@ -15,6 +15,8 @@
 
 #include "ecmascript/js_runtime_options.h"
 
+#include <chrono>
+#include <fstream>
 #include <getopt.h>
 #include <type_traits>
 
@@ -26,213 +28,6 @@
 #include "ecmascript/platform/os.h"
 
 namespace panda::ecmascript {
-const std::string PUBLIC_API COMMON_HELP_HEAD_MSG =
-    "Usage: jsvm  <option>  <filename.abc>\n"
-    "\n"
-    "Options:\n";
-
-const std::string PUBLIC_API COMPILER_HELP_HEAD_MSG =
-    "Usage: ark_aot_compiler  <option>  --aot-file=<filename>  <filename.abc>\n"
-    "\n"
-    "Options:\n";
-
-const std::string PUBLIC_API STUB_HELP_HEAD_MSG =
-    "Usage: ark_stub_compiler <option>\n"
-    "\n"
-    "Options:\n";
-
-const std::string PUBLIC_API HELP_OPTION_MSG =
-    "--help:                               Print this message and exit\n"
-    "--aot-file:                           Path (file suffix not needed) to AOT output file. Default: 'aot_file'\n"
-    "--ark-properties:                     Set ark properties\n"
-    "--ark-bundle-name:                    Set ark bundle name\n"
-    "--asm-interpreter:                    Enable asm interpreter. Default: 'true'\n"
-    "--asm-opcode-disable-range:           Opcode range when asm interpreter is enabled.\n"
-    "--builtins-lazy:                      Load some builtins function later.This option is only valid in workervm.\n"
-    "--compiler-log:                       Log Option For aot compiler and stub compiler,\n"
-    "                                      'none': no log,\n"
-    "                                      'allllircirasm' or 'all012': print all log for all methods,\n"
-    "                                      'allcir' or 'all0': print IR info for all methods,\n"
-    "                                      'allllir' or 'all1': print llir info for all methods,\n"
-    "                                      'allasm' or 'all2': print asm log for all methods,\n"
-    "                                      'alltype' or 'all3': print type infer log for all methods,\n"
-    "                                      'cerllircirasm' or 'cer0112': print all log for certain method defined\n"
-    "                                       in 'mlist-for-log',\n"
-    "                                      'cercir' or 'cer0': print IR for methods in 'mlist-for-log',\n"
-    "                                      'cerasm' or 'cer2': print log for methods in 'mlist-for-log',\n"
-    "                                      Default: 'none'\n"
-    "--compiler-log-methods:               Specific method list for compiler log, only used when compiler-log. "
-    "                                      Default: 'none'\n"
-    "--compiler-type-threshold:            enable to skip methods whose type is no more than threshold. Default: -1\n"
-    "--compiler-log-snapshot:              Enable to print snapshot information. Default: 'false'\n"
-    "--compiler-log-time:                  Enable to print pass compiler time. Default: 'false'\n"
-    "--compiler-log-all-methods-time:      Enable timing statistics for all methods with node count.\n"
-    "                                      Default: 'false'. When true, prints all method timings.\n"
-    "                                      Use with --compiler-log-time.\n"
-    "--enable-ark-tools:                   Enable ark tools to debug. Default: 'false'\n"
-    "--open-ark-tools:                     Open ark tools to return specific implementation. Default: 'false'\n"
-    "--pgo-trace:                          Enable pgo trace for JS runtime. Default: 'false'\n"
-    "--compiler-trace-bc:                  Enable tracing bytecode for aot runtime. Default: 'false'\n"
-    "--compiler-trace-deopt:               Enable tracing deopt for aot runtime. Default: 'false'\n"
-    "--compiler-trace-inline:              Enable tracing inline function for aot runtime. Default: 'false'\n"
-    "--compiler-trace-builtins:            Enable tracing builtins function for aot runtime. Default: 'false'\n"
-    "--compiler-trace-value-numbering:     Enable tracing value numbering for aot runtime. Default: 'false'\n"
-    "--compiler-max-inline-bytecodes       Set max bytecodes count which aot function can be inlined. Default: '45'\n"
-    "--compiler-min-inline-call-frequency  Set min call frequency which aot function can be inlined. Default: '0.95'\n"
-    "--compiler-max-inline-depth-small     Set max inline depth which small aot function can be inlined. Default: '3'\n"
-    "--compiler-max-inline-depth-large     Set max inline depth which large aot function can be inlined. Default: '1'\n"
-    "--compiler-max-inline-count           Set max inline count which aot function can be inlined. Default: '6'\n"
-    "--compiler-max-inline-size-large      Set max inline size which large aot function can be inlined. Default: '45'\n"
-    "--compiler-deopt-threshold:           Set max count which aot function can occur deoptimization. Default: '10'\n"
-    "--compiler-stress-deopt:              Enable stress deopt for aot compiler. Default: 'false'\n"
-    "--compiler-opt-code-profiler:         Enable opt code Bytecode Statistics for aot runtime. Default: 'false'\n"
-    "--compiler-opt-bc-range:              Range list for EcmaOpCode range Example '1:2,5:8'\n"
-    "--compiler-opt-bc-range-help:         Range list for EcmaOpCode range help. Default: 'false''\n"
-    "--enable-loading-stubs-log:           Enable Loading Stubs Log. Default: 'false'\n"
-    "--enable-force-gc:                    Enable force gc when allocating object. Default: 'true'\n"
-#ifdef USE_CMC_GC
-    "--enable-cmc-gc:                      Enable cmc gc. Default: 'true'\n"
-#else
-    "--enable-cmc-gc:                      Enable cmc gc. Default: 'false'\n"
-#endif
-    "--enable-cmc-gc-concurrent-root-marking:         Enable concurrent root marking in cmc gc. Default: 'true'\n"
-    "--force-shared-gc-frequency:          How frequency force shared gc . Default: '1'\n"
-    "--enable-ic:                          Switch of inline cache. Default: 'true'\n"
-    "--enable-runtime-stat:                Enable statistics of runtime state. Default: 'false'\n"
-    "--compiler-opt-array-bounds-check-elimination: Enable Index Check elimination. Default: 'true'\n"
-    "--compiler-opt-constant-folding:      Enable constant folding. Default: 'true'\n"
-    "--compiler-opt-type-lowering:         Enable all type optimization pass for aot compiler. Default: 'true'\n"
-    "--compiler-opt-early-elimination:     Enable EarlyElimination for aot compiler. Default: 'true'\n"
-    "--compiler-opt-later-elimination:     Enable LaterElimination for aot compiler. Default: 'true'\n"
-    "--compiler-opt-string:                Enable string optimization pass for aot compiler. Default: 'true'\n"
-    "--compiler-opt-value-numbering:       Enable ValueNumbering for aot compiler. Default: 'true'\n"
-    "--compiler-opt-inlining:              Enable inlining function for aot compiler: Default: 'true'\n"
-    "--compiler-opt-pgotype:               Enable pgo type for aot compiler: Default: 'true'\n"
-    "--compiler-opt-track-field:           Enable track field for aot compiler: Default: 'false'\n"
-    "--entry-point:                        Full name of entrypoint function. Default: '_GLOBAL::func_main_0'\n"
-    "--force-full-gc:                      If true trigger full gc, else trigger semi and old gc. Default: 'true'\n"
-    "--framework-abc-file:                 Snapshot file. Default: 'strip.native.min.abc'\n"
-    "--gc-long-paused-time:                Set gc's longPauseTime in millisecond. Default: '40'\n"
-    "--gc-thread-num:                      Set gc thread number. Default: '7'\n"
-    "--icu-data-path:                      Path to generated icu data file. Default: 'default'\n"
-    "--enable-worker:                      Whether is worker vm. Default: 'false'\n"
-    "--log-level:                          Log level: ['debug', 'info', 'warning', 'error', 'fatal'].\n"
-    "--log-components:                     Enable logs from specified components: ['all', 'gc', 'ecma','interpreter',\n"
-    "                                      'debugger', 'compiler', 'builtins', 'trace', 'jit', 'baselinejit', 'all'].\n"
-    "                                      Default: 'all'\n"
-    "--log-debug:                          Enable debug or above logs for components: ['all', 'gc', 'ecma',\n"
-    "                                      'interpreter', 'debugger', 'compiler', 'builtins', 'trace', 'jit',\n"
-    "                                      'baselinejit', 'all']. Default: 'all'\n"
-    "--log-error:                          Enable error log for components: ['all', 'gc', 'ecma',\n"
-    "                                      'interpreter', 'debugger', 'compiler', 'builtins', 'trace', 'jit',\n"
-    "                                      'baselinejit', 'all']. Default: 'all'\n"
-    "--log-fatal:                          Enable fatal log for components: ['all', 'gc', 'ecma',\n"
-    "                                      'interpreter', 'debugger', 'compiler', 'builtins', 'trace', 'jit',\n"
-    "                                      'baselinejit', 'all']. Default: 'all'\n"
-    "--log-info:                           Enable info log for components: ['all', 'gc', 'ecma',\n"
-    "                                      'interpreter', 'debugger', 'compiler', 'builtins', 'trace', 'jit',\n"
-    "                                      'baselinejit', 'all']. Default: 'all'\n"
-    "--log-warning:                        Enable warning log for components: ['all', 'gc', 'ecma',\n"
-    "                                      'interpreter', 'debugger', 'compiler', 'trace', 'jit', \n"
-    "                                      'baselinejit', 'builtins', 'all']. Default: 'all'\n"
-    "--compiler-opt-max-method:            Enable aot compiler to skip method larger than limit (KB). Default: '32'\n"
-    "--compiler-module-methods:            The number of max compiled methods in a module. Default: '100'\n"
-    "--max-unmovable-space:                Set max unmovable space capacity\n"
-    "--merge-abc:                          ABC file is merge abc. Default: 'false'\n"
-    "--compiler-opt-level:                 Optimization level configuration of aot compiler. Default: '3'\n"
-    "--options:                            Print compiler and runtime options\n"
-    "--serializer-buffer-size-limit:       Max serializer buffer size used by the VM in Byte. Default size is 2GB\n"
-    "--snapshot-file:                      Snapshot file. Default: '/system/etc/snapshot'\n"
-    "--startup-time:                       Print the start time of command execution. Default: 'false'\n"
-    "--stub-file:                          Path of file includes common stubs module compiled by stub compiler. \n"
-    "                                      Default: 'stub.an'\n"
-    "--enable-pgo-profiler:                Enable pgo profiler to sample jsfunction call and output to file. "
-                                           "Default: 'false'\n"
-    "--enable-mutant-array:                Enable transition between mutant array and tagged array. Default: 'false'\n"
-    "--enable-elements-kind:               Enable initialization of elements kind in array. Default: 'false'\n"
-    "--compiler-pgo-hotness-threshold:     Set hotness threshold for pgo in aot compiler. Default: '2'\n"
-    "--compiler-pgo-profiler-path:         The pgo file output dir or the pgo file dir of AOT compiler. Default: ''\n"
-    "--compiler-pgo-save-min-interval:     Set the minimum time interval for automatically saving profile, "
-    "Unit seconds. Default: '30s'\n"
-    "--compiler-baseline-pgo:              Enable compile the baseline Ap file. \n"
-    "                                      Default: 'false'\n"
-    "--compiler-target-triple:             CPU triple for aot compiler or stub compiler. \n"
-    "                                      values: ['x86_64-unknown-linux-gnu', 'arm-unknown-linux-gnu', \n"
-    "                                      'aarch64-unknown-linux-gnu'], Default: 'x86_64-unknown-linux-gnu'\n"
-    "--enable-print-execute-time:          Enable print execute panda file spent time\n"
-    "--compiler-verify-vtable:             Verify vtable result for aot compiler. Default: 'false'\n"
-    "--compiler-select-methods             Compiler selected methods for aot. Only work in full compiling mode\n"
-    "                                      Format:--compile-methods=record1:m1,m2,record2:m3\n"
-    "--compiler-skip-methods               Compiler skpped methods for aot. Only work in full compiling mode\n"
-    "                                      Format:--compile-skip-methods=record1:m1,m2,record2:m3\n"
-    "--target-compiler-mode                The compilation mode at the device side, including partial, full and none.\n"
-    "                                      Default: ''\n"
-    "--hap-path(Deprecated)                The path of the app hap. Default: ''\n"
-    "--hap-abc-offset(Deprecated)          The offset of the abc file in app hap. Default: '0'\n"
-    "--hap-abc-size(Deprecated)            The size of the abc file in app hap. Default: '0'\n"
-    "--compiler-fast-compile               Disable some time-consuming pass. Default: 'true'\n"
-    "--compiler-no-check                   Enable remove checks for aot compiler. Default: 'false'\n"
-    "--compiler-pipeline-host-aot          Enable pipeline host aot compiler. Default: 'false'\n"
-    "--compiler-opt-loop-peeling:          Enable loop peeling for aot compiler: Default: 'true'\n"
-    "--compiler-pkg-info                   Specify the package json info for ark aot compiler\n"
-    "--compiler-external-pkg-info          Specify the external package json info for ark aot compiler\n"
-    "--compiler-enable-external-pkg        Enable compile with external package for ark aot compiler\n"
-    "--compiler-enable-lexenv-specialization: Enable replace ldlexvar with specific values: Default: 'true'\n"
-    "--compiler-enable-native-inline:      Enable inline native function: Default: 'false'\n"
-    "--compiler-enable-lowering-builtin:   Enable lowering global object: Default: 'false'\n"
-    "--compiler-opt-array-onheap-check:    Enable TypedArray on heap check for aot compiler: Default: 'false'\n"
-    "--compiler-enable-litecg:             Enable LiteCG: Default: 'false'\n"
-    "--compiler-enable-jit:                Enable jit: Default: 'false'\n"
-    "--compiler-enable-osr:                Enable osr: Default: 'false'\n"
-    "--compiler-enable-framework-aot:      Enable frame aot: Default: 'true'\n"
-    "--compiler-enable-pgo-space:          Enable pgo space used for compiler. Default: 'true'\n"
-    "--compiler-jit-hotness-threshold:     Set hotness threshold for jit. Default: '2'\n"
-    "--compiler-jit-call-threshold:        Set call threshold for jit. Default: '0'\n"
-    "--compiler-osr-hotness-threshold:     Set hotness threshold for osr. Default: '2'\n"
-    "--compiler-force-jit-compile-main:    Enable jit compile main function: Default: 'false'\n"
-    "--compiler-trace-jit:                 Enable trace jit: Default: 'false'\n"
-    "--compiler-enable-jit-pgo:            Enable jit pgo: Default: 'true'\n"
-    "--compiler-typed-op-profiler:         Enable Typed Opcode Statistics for aot runtime. Default: 'false'\n"
-    "--compiler-opt-branch-profiling:      Enable branch profiling for aot compiler. Default: 'true'\n"
-    "--test-assert:                        Set Assert Model. Default: 'false'\n"
-    "--compiler-methods-range:             Enable aot compiler to compile only in-range methods.\n"
-    "                                      Default: '0:4294967295'\n"
-    "--compiler-codegen-options:           Compile options passed to codegen. Default: ''\n"
-    "--compiler-opt-escape-analysis:       Enable escape analysis for aot compiler. Default: 'true'\n"
-    "--compiler-trace-escape-analysis:     Enable tracing escape analysis for aot compiler. Default: 'false'\n"
-    "--compiler-opt-induction-variable:    Enable induciton variable analysis for aot compiler. Default: 'false'\n"
-    "--compiler-trace-induction-variable:  Enable tracing induction variable for aot compiler. Default: 'false'\n"
-    "--compiler-memory-analysis:           Enable memory analysis for aot compiler. Default: 'true'\n"
-    "--compiler-enable-jit-fast-compile:   Enable jit fast compile. Default: 'false'\n"
-    "--compiler-enable-jit-lite-compile:   Enable lite compile, less PASS but faster compile time. Default: 'false'\n"
-    "--compiler-enable-jitfort:            Enable jit fort memory space. Default: 'false'\n"
-    "--compiler-codesign-disable:          Disable codesign for jit fort. Default: 'true'\n"
-    "--compiler-enable-async-copytofort:   Enable jit fort allocation and code copy in Jit thread. Default: 'true'\n"
-    "--compiler-pgo-force-dump:            Enable pgo dump not interrupted by GC. Default: 'true'\n"
-    "--async-load-abc:                     Enable asynchronous load abc. Default: 'true'\n"
-    "--async-load-abc-test:                Enable asynchronous load abc test. Default: 'false'\n"
-    "--compiler-enable-store-barrier:      Enable store barrier optimization. Default: 'true'\n"
-    "--compiler-enable-ldobjvalue-opt:     Enable ldobjvalue optimization. Default: 'true'\n"
-    "--compiler-enable-concurrent:         Enable concurrent compile(only support in ark_stub_compiler).\n"
-    "--compile-enable-jit-verify-pass:     Enable jit compile with verify pass. Default: 'false'\n\n"
-    "                                      Default: 'true'\n"
-    "--compiler-opt-frame-state-elimination: Enable frame state elimination. Default: 'true'\n"
-    "--enable-inline-property-optimization:  Enable inline property optimization(also enable slack tracking).\n"
-    "--compiler-enable-aot-code-comment    Enable generate aot_code_comment.txt file during compilation.\n"
-    "                                      Default : 'false'\n"
-    "--compiler-enable-aot-lazy-deopt:     Enable lazy deopt for aot compiler. Default: 'false'\n"
-    "--compiler-enable-jit-lazy-deopt:     Enable lazy deopt for jit compiler. Default: 'false'\n"
-    "--compiler-an-file-max-size:          Max size of compiler .an file in MB. '0' means Default\n"
-    "                                      Default: No limit for Host, '100' for TargetCompilerMode\n"
-    "--compiler-jit-method-dichotomy:      Find problematic method by dichotomy. Default: 'disable'\n"
-    "                                      'collect': collect methods during JIT runtime.\n"
-    "                                      'filter': only compile specified methods during JIT runtime.\n"
-    "--compiler-jit-method-path:           Store method names for jit method dichotomy.\n"
-    "                                      Default: 'method_compiled_by_jit.cfg'\n"
-    "--compiler-enable-merge-poly:         Enable poly-merge optimization for ldobjbyname. Default: 'true'\n"
-    "--enable-pgo-napi:                    Enable pgo napi. Default: 'false'\n"
-    // Please add new options above this line line after help message.
-    "\n";
 
 bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
 {
@@ -242,10 +37,25 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
         {"ark-properties", required_argument, nullptr, OPTION_ARK_PROPERTIES},
         {"ark-bundleName", required_argument, nullptr, OPTION_ARK_BUNDLENAME},
         {"asm-interpreter", required_argument, nullptr, OPTION_ENABLE_ASM_INTERPRETER},
-        {"asm-opcode-disable-range", required_argument, nullptr, OPTION_ASM_OPCODE_DISABLE_RANGE},
         {"builtins-lazy", required_argument, nullptr, OPTION_ENABLE_BUILTINS_LAZY},
         {"compiler-log", required_argument, nullptr, OPTION_COMPILER_LOG_OPT},
         {"compiler-log-methods", required_argument, nullptr, OPTION_COMPILER_LOG_METHODS},
+        {"compiler-arksteed-print-graph", required_argument, nullptr, OPTION_COMPILER_ARKSTEED_PRINT_GRAPH},
+        {"compiler-arksteed-print-method-name", required_argument, nullptr, OPTION_COMPILER_ARKSTEED_PRINT_METHOD_NAME},
+        {"compiler-arksteed-enable-code-comment", required_argument, nullptr,
+         OPTION_COMPILER_ARKSTEED_ENABLE_CODE_COMMENT},
+        {"compiler-arksteed-print-code", required_argument, nullptr, OPTION_COMPILER_ARKSTEED_PRINT_CODE},
+        {"compiler-arksteed-print-with-colors", required_argument, nullptr,
+         OPTION_COMPILER_ARKSTEED_PRINT_WITH_COLORS},
+        {"compiler-arksteed-reuse-stack-slots", required_argument, nullptr,
+         OPTION_COMPILER_ARKSTEED_REUSE_STACK_SLOTS},
+        {"compiler-arksteed-deopt-on-insufficient-profile", required_argument, nullptr,
+         OPTION_COMPILER_ARKSTEED_DEOPT_ON_INSUFFICIENT_PROFILE},
+        {"compiler-arksteed-source-position-table", required_argument, nullptr,
+         OPTION_COMPILER_ARKSTEED_SOURCE_POSITION_TABLE},
+        {"compiler-arksteed-pass-trace", required_argument, nullptr, OPTION_COMPILER_ARKSTEED_PASS_TRACE},
+        {"compiler-arksteed-pass-trace-methods", required_argument, nullptr,
+         OPTION_COMPILER_ARKSTEED_PASS_TRACE_METHODS},
         {"compiler-log-snapshot", required_argument, nullptr, OPTION_COMPILER_LOG_SNAPSHOT},
         {"compiler-log-time", required_argument, nullptr, OPTION_COMPILER_LOG_TIME},
         {"compiler-log-all-methods-time", required_argument, nullptr, OPTION_COMPILER_LOG_ALL_METHODS_TIME},
@@ -317,6 +127,9 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
         {"serializer-buffer-size-limit", required_argument, nullptr, OPTION_SERIALIZER_BUFFER_SIZE_LIMIT},
         {"startup-time", required_argument, nullptr, OPTION_STARTUP_TIME},
         {"stub-file", required_argument, nullptr, OPTION_STUB_FILE},
+#if defined(STUB_FUNCTION_REORDERING)
+        {"stub-ordering-file", required_argument, nullptr, OPTION_STUB_ORDERING_FILE},
+#endif
         {"compiler-target-triple", required_argument, nullptr, OPTION_COMPILER_TARGET_TRIPLE},
         {"enable-print-execute-time", required_argument, nullptr, OPTION_PRINT_EXECUTE_TIME},
         {"enable-pgo-profiler", required_argument, nullptr, OPTION_ENABLE_PGO_PROFILER},
@@ -338,7 +151,12 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
         {"compiler-fast-compile", required_argument, nullptr, OPTION_FAST_AOT_COMPILE_MODE},
         {"compiler-opt-loop-peeling", required_argument, nullptr, OPTION_COMPILER_OPT_LOOP_PEELING},
         {"compiler-opt-array-onheap-check", required_argument, nullptr, OPTION_COMPILER_OPT_ON_HEAP_CHECK},
+#ifdef CONTROLFLOW_OPTIMIZATION
+        {"compiler-opt-controlflow-opt", required_argument, nullptr, OPTION_COMPILER_OPT_CONTROLFLOW_OPT},
+#endif
         {"compiler-pkg-info", required_argument, nullptr, OPTION_COMPILER_PKG_INFO},
+        {"an-fd", required_argument, nullptr, OPTION_AN_FD},
+        {"hap-fd", required_argument, nullptr, OPTION_HAP_FD},
         {"compiler-external-pkg-info", required_argument, nullptr, OPTION_COMPILER_EXTERNAL_PKG_INFO},
         {"compiler-enable-external-pkg", required_argument, nullptr, OPTION_COMPILER_ENABLE_EXTERNAL_PKG},
         {"compiler-framework-abc-path", required_argument, nullptr, OPTION_COMPILER_FRAMEWORK_ABC_PATH},
@@ -348,11 +166,14 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
         {"compiler-enable-lowering-builtin", required_argument, nullptr, OPTION_COMPILER_ENABLE_LOWERING_BUILTIN},
         {"compiler-enable-litecg", required_argument, nullptr, OPTION_COMPILER_ENABLE_LITECG},
         {"compiler-enable-jit", required_argument, nullptr, OPTION_COMPILER_ENABLE_JIT},
+        {"compiler-jit-backend", required_argument, nullptr, OPTION_COMPILER_JIT_BACKEND},
         {"compiler-enable-dfx-hisys-event", required_argument, nullptr, OPTION_COMPILER_ENABLE_DFX_HISYS_EVENT},
         {"compiler-enable-osr", required_argument, nullptr, OPTION_COMPILER_ENABLE_OSR},
         {"compiler-trace-jit", required_argument, nullptr, OPTION_COMPILER_TRACE_JIT},
         {"compiler-jit-hotness-threshold", required_argument, nullptr, OPTION_COMPILER_JIT_HOTNESS_THRESHOLD},
         {"compiler-jit-call-threshold", required_argument, nullptr, OPTION_COMPILER_JIT_CALL_THRESHOLD},
+        {"compiler-jit-ic-feedback-threshold", required_argument, nullptr,
+         OPTION_COMPILER_JIT_IC_FEEDBACK_THRESHOLD},
         {"compiler-osr-hotness-threshold", required_argument, nullptr, OPTION_COMPILER_OSR_HOTNESS_THRESHOLD},
         {"compiler-force-jit-compile-main", required_argument, nullptr, OPTION_COMPILER_FORCE_JIT_COMPILE_MAIN},
         {"compiler-enable-jit-pgo", required_argument, nullptr, OPTION_COMPILER_ENABLE_JIT_PGO},
@@ -404,6 +225,12 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
         {"mem-config", required_argument, nullptr, OPTION_MEM_CONFIG},
         {"multi-context", required_argument, nullptr, OPTION_MULTI_CONTEXT},
         {"enable-pgo-napi", required_argument, nullptr, OPTION_PGO_NAPI},
+#ifdef ENABLE_BRANCH_ELIMINATION
+        {"compiler-opt-branch-elimination", required_argument, nullptr, OPTION_ENABLE_BRANCH_ELIMINATION},
+#endif
+#ifdef ENABLE_BRANCH_PROFILE
+        {"compiler-enable-bre-profiling", required_argument, nullptr, OPTION_ENABLE_BRE_PROFILE},
+#endif
         {nullptr, 0, nullptr, 0},
     };
 
@@ -475,9 +302,6 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
                     return false;
                 }
                 break;
-            case OPTION_ASM_OPCODE_DISABLE_RANGE:
-                SetAsmOpcodeDisableRange(optarg);
-                break;
             case OPTION_ENABLE_BUILTINS_LAZY:
                 ret = ParseBoolParam(&argBool);
                 if (ret) {
@@ -486,6 +310,16 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
                     return false;
                 }
                 break;
+#ifdef ENABLE_BRANCH_PROFILE
+            case OPTION_ENABLE_BRE_PROFILE:
+                ret = ParseBoolParam(&argBool);
+                if (ret) {
+                    SetEnableBreProfiling(argBool);
+                } else {
+                    return false;
+                }
+                break;
+#endif
             case OPTION_COMPILER_LOG_OPT:
                 SetCompilerLogOption(optarg);
                 break;
@@ -846,6 +680,81 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
             case OPTION_COMPILER_LOG_METHODS:
                 SetMethodsListForLog(optarg);
                 break;
+            case OPTION_COMPILER_ARKSTEED_PRINT_GRAPH:
+                ret = ParseBoolParam(&argBool);
+                if (ret) {
+                    SetCompilerArkSteedPrintGraph(argBool);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_ARKSTEED_PRINT_METHOD_NAME:
+                ret = ParseBoolParam(&argBool);
+                if (ret) {
+                    SetCompilerArkSteedPrintMethodName(argBool);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_ARKSTEED_ENABLE_CODE_COMMENT:
+                ret = ParseBoolParam(&argBool);
+                if (ret) {
+                    SetCompilerArkSteedEnableCodeComment(argBool);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_ARKSTEED_PRINT_CODE:
+                ret = ParseBoolParam(&argBool);
+                if (ret) {
+                    SetCompilerArkSteedPrintCode(argBool);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_ARKSTEED_PRINT_WITH_COLORS:
+                ret = ParseBoolParam(&argBool);
+                if (ret) {
+                    SetCompilerArkSteedPrintWithColors(argBool);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_ARKSTEED_REUSE_STACK_SLOTS:
+                ret = ParseBoolParam(&argBool);
+                if (ret) {
+                    SetCompilerArkSteedReuseStackSlots(argBool);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_ARKSTEED_DEOPT_ON_INSUFFICIENT_PROFILE:
+                ret = ParseBoolParam(&argBool);
+                if (ret) {
+                    SetCompilerArkSteedDeoptOnInsufficientProfile(argBool);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_ARKSTEED_SOURCE_POSITION_TABLE:
+                ret = ParseBoolParam(&argBool);
+                if (ret) {
+                    SetCompilerArkSteedSourcePositionTable(argBool);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_ARKSTEED_PASS_TRACE:
+                ret = ParseBoolParam(&argBool);
+                if (ret) {
+                    SetCompilerArkSteedPassTrace(argBool);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_ARKSTEED_PASS_TRACE_METHODS:
+                SetCompilerArkSteedPassTraceMethods(optarg);
+                break;
             case OPTION_ASM_OPT_LEVEL:
                 ret = ParseUint32Param("compiler-opt-level", &argUint32);
                 if (ret) {
@@ -943,6 +852,11 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
             case OPTION_STUB_FILE:
                 SetStubFile(optarg);
                 break;
+#if defined(STUB_FUNCTION_REORDERING)
+            case OPTION_STUB_ORDERING_FILE:
+                SetStubOrderingFile(optarg);
+                break;
+#endif
             case OPTION_COMPILER_TARGET_TRIPLE:
                 SetTargetTriple(optarg);
                 break;
@@ -973,6 +887,16 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
                     return false;
                 }
                 break;
+#ifdef CONTROLFLOW_OPTIMIZATION
+            case OPTION_COMPILER_OPT_CONTROLFLOW_OPT:
+                ret = ParseBoolParam(&argBool);
+                if (ret) {
+                    SetControlFlowOptimization(argBool);
+                } else {
+                    return false;
+                }
+                break;
+#endif
             case OPTION_COMPILER_OPT_ARRAY_BOUNDS_CHECK_ELIMINATION:
                 ret = ParseBoolParam(&argBool);
                 if (ret) {
@@ -1146,6 +1070,30 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
             case OPTION_COMPILER_PKG_INFO:
                 SetCompilerPkgJsonInfo(optarg);
                 break;
+            case OPTION_AN_FD: {
+                char* end = nullptr;
+                errno = 0;
+                long fd = std::strtol(optarg, std::addressof(end), 10);
+                if (end == optarg || errno != 0 || fd < 0 || fd > INT_MAX) {
+                    LOG_ECMA(ERROR) << "invalid --an-fd value: " << optarg;
+                    return false;
+                }
+                LOG_ECMA(INFO) << "parsed --an-fd=" << fd;
+                SetAnFd(static_cast<int>(fd));
+                break;
+            }
+            case OPTION_HAP_FD: {
+                char* end = nullptr;
+                errno = 0;
+                long fd = std::strtol(optarg, std::addressof(end), 10);
+                if (end == optarg || errno != 0 || fd < 0 || fd > INT_MAX) {
+                    LOG_ECMA(ERROR) << "invalid --hap-fd value: " << optarg;
+                    return false;
+                }
+                LOG_ECMA(INFO) << "parsed --hap-fd=" << fd;
+                SetHapFd(static_cast<int>(fd));
+                break;
+            }
             case OPTION_COMPILER_EXTERNAL_PKG_INFO:
                 SetCompilerExternalPkgJsonInfo(optarg);
                 break;
@@ -1197,6 +1145,17 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
                     return false;
                 }
                 break;
+            case OPTION_COMPILER_JIT_BACKEND:
+                if (std::string(optarg) == "arksteed") {
+                    SetCompilerJitBackend(JitBackend::ARKSTEED);
+                } else if (std::string(optarg) == "fastjit") {
+                    SetCompilerJitBackend(JitBackend::FASTJIT);
+                } else {
+                    LOG_ECMA(ERROR) << "Invalid compiler-jit-backend: '" << optarg
+                                    << "', expected 'arksteed' or 'fastjit'";
+                    return false;
+                }
+                break;
             case OPTION_COMPILER_ENABLE_DFX_HISYS_EVENT:
                 ret = ParseBoolParam(&argBool);
                 if (ret) {
@@ -1229,6 +1188,16 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
                     uint16_t val =  argUint32 > std::numeric_limits<uint16_t>::max() ?
                         std::numeric_limits<uint16_t>::max() : static_cast<uint16_t>(argUint32);
                     SetJitCallThreshold(val);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_JIT_IC_FEEDBACK_THRESHOLD:
+                ret = ParseUint32Param("compiler-jit-ic-feedback-threshold", &argUint32);
+                if (ret) {
+                    uint16_t val = argUint32 > std::numeric_limits<uint16_t>::max() ?
+                        std::numeric_limits<uint16_t>::max() : static_cast<uint16_t>(argUint32);
+                    SetJitIcFeedbackThreshold(val);
                 } else {
                     return false;
                 }
@@ -1598,6 +1567,16 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
                     return false;
                 }
                 break;
+#ifdef ENABLE_BRANCH_ELIMINATION
+            case OPTION_ENABLE_BRANCH_ELIMINATION:
+                ret = ParseBoolParam(&argBool);
+                if (ret) {
+                    SetEnableBranchElimination(argBool);
+                } else {
+                    return false;
+                }
+                break;
+#endif
             default:
                 LOG_ECMA(ERROR) << "Invalid option\n";
                 return false;
@@ -1793,34 +1772,6 @@ void JSRuntimeOptions::SetOptionsForTargetCompilation()
 void JSRuntimeOptions::ParseAsmInterOption()
 {
     asmInterParsedOption_.enableAsm = enableAsmInterpreter_;
-    std::string strAsmOpcodeDisableRange = asmOpcodeDisableRange_;
-    if (strAsmOpcodeDisableRange.empty()) {
-        return;
-    }
-
-    // asm interpreter handle disable range
-    size_t pos = strAsmOpcodeDisableRange.find(",");
-    if (pos != std::string::npos) {
-        std::string strStart = strAsmOpcodeDisableRange.substr(0, pos);
-        std::string strEnd = strAsmOpcodeDisableRange.substr(pos + 1);
-        int64_t inputStart;
-        int64_t inputEnd;
-        if (!StringToInt64(strStart, inputStart)) {
-            inputStart = 0;
-            LOG_ECMA_IF(!strStart.empty(), INFO) << "when get start, strStart is " << strStart;
-        }
-        if (!StringToInt64(strEnd, inputEnd)) {
-            inputEnd = kungfu::BYTECODE_STUB_END_ID;
-            LOG_ECMA_IF(!strEnd.empty(), INFO) << "when get end, strEnd is " << strEnd;
-        }
-        int start = static_cast<int>(inputStart);
-        int end = static_cast<int>(inputEnd);
-        if (start >= 0 && start < kungfu::BytecodeStubCSigns::NUM_OF_ALL_NORMAL_STUBS && end >= 0 &&
-            end < kungfu::BytecodeStubCSigns::NUM_OF_ALL_NORMAL_STUBS && start <= end) {
-            asmInterParsedOption_.handleStart = start;
-            asmInterParsedOption_.handleEnd = end;
-        }
-    }
 }
 
 JSRuntimeOptions::JSRuntimeOptions()

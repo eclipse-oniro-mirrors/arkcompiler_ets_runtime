@@ -112,6 +112,15 @@ GateRef CircuitBuilder::Alloca(size_t size)
 void CircuitBuilder::Store(VariableType type, GateRef glue, GateRef base, GateRef offset, GateRef value,
                            MemoryAttribute mAttr)
 {
+    if (G_USE_STICKY_CMS_GC && (type == VariableType::JS_ANY() || type == VariableType::JS_POINTER())) {
+        if (acc_.IsConstant(offset) && static_cast<int>(acc_.GetConstantValue(offset)) == 0) {
+            LOG_ECMA(FATAL) << "store with zero offset should use StoreHClass";
+        }
+#ifndef NDEBUG
+        CallNGCRuntime(glue, RTSTUB_ID(CheckObjectForCMS), Circuit::NullGate(),
+                       { glue, base, offset, value, Boolean(true) }, Circuit::NullGate());
+#endif
+    }
     auto label = GetCurrentLabel();
     auto depend = label->GetDepend();
     auto bit = LoadStoreAccessor::ToValue(mAttr);
@@ -127,6 +136,29 @@ GateRef CircuitBuilder::FetchOr(GateRef ptr, GateRef value, MemoryAttribute mAtt
     auto bits = LoadStoreAccessor::ToValue(mAttr);
     GateRef result = GetCircuit()->NewGate(circuit_->FetchOr(bits),
         MachineType::I64, { depend, ptr, value }, acc_.GetGateType(value));
+    label->SetDepend(result);
+    return result;
+}
+
+GateRef CircuitBuilder::AtomicCmpXchg(VariableType type, GateRef address,
+                                      GateRef expected, GateRef desired)
+{
+    auto label = GetCurrentLabel();
+    auto depend = label->GetDepend();
+    // AtomicCmpXchg uses fixed memory ordering (acquire_release on success, monotonic on failure)
+    // This matches C++ Barriers::AtomicSetPrimitive semantics
+    GateRef result = GetCircuit()->NewGate(circuit_->AtomicCmpXchg(),
+        type.GetMachineType(), { depend, address, expected, desired }, type.GetGateType());
+    label->SetDepend(result);
+    return result;
+}
+
+GateRef CircuitBuilder::AtomicLoadAcquire(VariableType type, GateRef address)
+{
+    auto label = GetCurrentLabel();
+    auto depend = label->GetDepend();
+    GateRef result = GetCircuit()->NewGate(circuit_->AtomicLoadAcquire(),
+        type.GetMachineType(), { depend, address }, type.GetGateType());
     label->SetDepend(result);
     return result;
 }
@@ -175,6 +207,19 @@ GateRef CircuitBuilder::Load(VariableType type, GateRef glue, GateRef base, Gate
     auto bits = LoadStoreAccessor::ToValue(mAttr);
     GateRef result = GetCircuit()->NewGate(GetCircuit()->Load(bits), type.GetMachineType(),
                                            { depend, glue, val }, type.GetGateType());
+    return result;
+}
+
+GateRef CircuitBuilder::LoadFromCompressedTaggedValue(VariableType type, GateRef glue, GateRef base, GateRef offset)
+{
+    ASSERT(type == VariableType::JS_ANY());
+    auto label = GetCurrentLabel();
+    auto depend = label->GetDepend();
+    GateRef val = PtrAdd(base, offset);
+    auto bits = LoadStoreAccessor::ToValue(MemoryAttribute::NeedBarrier());
+    GateRef result = GetCircuit()->NewGate(GetCircuit()->LoadFromCompressed(bits), type.GetMachineType(),
+                                           { depend, glue, val }, type.GetGateType());
+    label->SetDepend(result);
     return result;
 }
 

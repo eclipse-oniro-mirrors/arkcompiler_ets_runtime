@@ -13,18 +13,122 @@
  * limitations under the License.
  */
 
+#include <atomic>
+#include <csignal>
+
 #include "common_components/heap/heap.h"
 #include "ecmascript/base/config.h"
 #include "ecmascript/dfx/hprof/rawheap_dump.h"
 #include "ecmascript/dfx/hprof/rawheap_translate/common.h"
+#include "ecmascript/jspandafile/program_object.h"
 #include "ecmascript/object_fast_operator-inl.h"
 
 #ifdef ENABLE_HISYSEVENT
-    #include "hisysevent.h"
     #include "dfx_signal_handler.h"
+    #include "hisysevent.h"
 #endif
 
 namespace panda::ecmascript {
+
+// Signal handling: send hisysevent before OOM dump abort/crash
+static std::atomic<bool> g_inDumpZone(false);
+static std::atomic<bool> g_isForSharedOOM(false);
+
+static std::atomic<int32_t> g_dumpStatus(DUMP_STATUS_FAILED);
+static std::chrono::time_point<std::chrono::steady_clock> g_dumpStartTime;
+
+void SetDumpStatus(int32_t status)
+{
+    g_dumpStatus.store(status);
+    auto now = std::chrono::steady_clock::now();
+    if (g_dumpStartTime == std::chrono::time_point<std::chrono::steady_clock>{}) {
+        g_dumpStartTime = now;
+    }
+}
+
+static double GetDumpCost()
+{
+    return std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - g_dumpStartTime).count();
+}
+
+// Map signal number to description
+static const char* GetSignalName(int sig)
+{
+    switch (sig) {
+        case SIGABRT:  return "dump_abort_before_finalize";
+        case SIGSEGV:  return "dump_segfault_before_finalize";
+        case SIGFPE:   return "dump_fpe_before_finalize";
+        case SIGILL:   return "dump_illegal_instruction_before_finalize";
+        case SIGBUS:   return "dump_bus_error_before_finalize";
+        case SIGALRM:  return "dump_timeout_before_finalize";
+        case SIGPIPE:  return "dump_broken_pipe_before_finalize";
+        case SIGXFSZ:  return "dump_file_size_limit_before_finalize";
+        case SIGTERM:  return "dump_terminated_before_finalize";
+        default:       return "dump_unknown_signal_before_finalize";
+    }
+}
+
+static void DumpAbortSignalHandler(int sig)
+{
+    if (g_inDumpZone.load()) {
+        if (g_dumpStatus.load() == DUMP_STATUS_SUCCESS) {
+            return;
+        }
+        double dumpCost = GetDumpCost();
+        SEND_HISYSEVENT(ARKTS_RUNTIME, ARK_STATS_OOM, STATISTIC,
+            "STATUS", g_dumpStatus.load(),
+            "MESSAGE", GetSignalName(sig),
+            "OOM_TYPE", g_isForSharedOOM.load() ? "SHARED_OOM" : "LOCAL_OOM",
+            "DUMP_COST", dumpCost,
+            "APP_RUNNING_UNIQUE_ID", &DFX_GetAppRunningUniqueId == nullptr ? "" : DFX_GetAppRunningUniqueId(),
+            "EVENT_VERSION", "1.0.0");
+        if (sig == SIGALRM) {
+            // Timeout warning only; do not exit, let DFX's 20s SIGKILL handle termination
+            return;
+        }
+        // Do not reset; let crash proceed, child process exits directly
+        _exit(0);
+    }
+    _exit(0);
+}
+
+DumpAbortSignalScope::DumpAbortSignalScope(bool enable, bool isForSharedOOM)
+{
+    if (!enable) {
+        return;
+    }
+    g_isForSharedOOM.store(isForSharedOOM);
+    g_dumpStartTime = std::chrono::steady_clock::time_point{};
+    struct sigaction newAction;
+    newAction.sa_handler = DumpAbortSignalHandler;
+    sigemptyset(&newAction.sa_mask);
+    for (int sig : SIGNALS_TO_CATCH) {
+        sigaddset(&newAction.sa_mask, sig);
+    }
+    newAction.sa_flags = 0;
+
+    for (int i = 0; i < SIGNAL_COUNT; i++) {
+        sigaction(SIGNALS_TO_CATCH[i], &newAction, &oldActions_[i]);
+    }
+
+    alarm(DUMP_TIMEOUT_WARNING_SECONDS);
+    g_inDumpZone.store(true);
+    active_ = true;
+}
+
+DumpAbortSignalScope::~DumpAbortSignalScope()
+{
+    if (active_) {
+        alarm(0);
+        g_inDumpZone.store(false);
+        for (int i = 0; i < SIGNAL_COUNT; i++) {
+            sigaction(SIGNALS_TO_CATCH[i], &oldActions_[i], nullptr);
+        }
+        active_ = false;
+    }
+}
+
 void ObjectMarker::VisitRoot([[maybe_unused]]Root type, ObjectSlot slot)
 {
     JSTaggedValue value(slot.GetTaggedType());
@@ -36,6 +140,12 @@ void ObjectMarker::VisitRoot([[maybe_unused]]Root type, ObjectSlot slot)
                 break;
             case Root::ROOT_GLOBAL_HANDLE:
                 globalHandleRoots_.insert(slot.GetTaggedType());
+                break;
+            case Root::ROOT_VM:
+                vmRoots_.insert(slot.GetTaggedType());
+                break;
+            case Root::ROOT_FRAME:
+                frameRoots_.insert(slot.GetTaggedType());
                 break;
             default:
                 break;
@@ -54,14 +164,45 @@ void ObjectMarker::VisitBaseAndDerivedRoot(Root type, ObjectSlot base, ObjectSlo
 {
 }
 
-void ObjectMarker::VisitObjectRangeImpl([[maybe_unused]]BaseObject *root, uintptr_t start,
-                                        uintptr_t endAddr, [[maybe_unused]]VisitObjectArea area)
+void ObjectMarker::VisitObjectRangeImpl([[maybe_unused]]BaseObject *root, ObjectSlot start,
+                                        ObjectSlot end, [[maybe_unused]]VisitObjectArea area)
 {
-    ObjectSlot end(endAddr);
-    for (ObjectSlot slot(start); slot < end; slot++) {
+    for (ObjectSlot slot = start; slot < end; slot++) {
         JSTaggedValue value(slot.GetTaggedType());
         if (value.GetRawData() != 0 && value.IsHeapObject() && !value.IsWeak()) {
             MarkObject(slot.GetTaggedType());
+        }
+    }
+}
+
+void ObjectMarker::VisitCompressedObjectRangeImpl([[maybe_unused]]BaseObject *root, CompressedObjectSlot start,
+                                                  CompressedObjectSlot end)
+{
+    for (CompressedObjectSlot slot = start; slot < end; slot++) {
+        TemporaryJSTaggedValue value = slot.GetTaggedValue();
+        if (value.IsHeapObject()) {
+            JSTaggedValue val = value.ConvertHeapObjectToJSTaggedValue();
+            if (val.GetRawData() != 0 && !val.IsWeak()) {
+                MarkObject(val.GetRawData());
+            }
+        }
+    }
+}
+
+static void ProcessJSWrappedNapiObject(const EcmaVM *vm, JSTaggedValue value,
+    CUnorderedSet<JSTaggedType> &nativePointerAddrs)
+{
+    auto wrappedObj = JSWrappedNapiObject::Cast(value.GetTaggedObject());
+    JSTaggedValue nativePointers = wrappedObj->GetNativePointers(vm->GetAssociatedJSThread());
+    if (!nativePointers.IsTaggedArray()) {
+        return;
+    }
+    TaggedArray* array = TaggedArray::Cast(nativePointers.GetTaggedObject());
+    uint32_t length = array->GetExtraLength();
+    for (uint32_t i = 0; i < length; i++) {
+        JSTaggedValue itemValue = array->Get(vm->GetAssociatedJSThread(), i);
+        if (itemValue.IsJSNativePointer()) {
+            nativePointerAddrs.insert(itemValue.GetRawData());
         }
     }
 }
@@ -78,6 +219,10 @@ void ObjectMarker::ProcessMarkObjectsFromRoot()
         MarkObject(reinterpret_cast<JSTaggedType>(hclass));
         if (hclass->IsString()) {
             continue;
+        }
+        // Handle JSWrappedNapiObject: collect JSNativePointer addresses from NativePointers
+        if (value.IsJSWrappedNapiObject()) {
+            ProcessJSWrappedNapiObject(vm_, value, nativePointerAddrs_);
         }
         ObjectXRay::VisitObjectBody<VisitType::OLD_GC_VISIT>(object, hclass, *this);
     }
@@ -115,32 +260,52 @@ void ObjectMarker::MarkRootObjects()
     Runtime::GetInstance()->IterateSendableGlobalStorage(*this);
 
     LOG_ECMA(INFO) << "rawheap dump, local handle count " << localHandleRoots_.size()
-                   << ", global handle count " << globalHandleRoots_.size();
+                   << ", global handle count " << globalHandleRoots_.size()
+                   << ", vm root count " << vmRoots_.size()
+                   << ", frame root count " << frameRoots_.size();
 }
 
 RawHeapDump::RawHeapDump(const EcmaVM *vm, Stream *stream, HeapSnapshot *snapshot,
                          EntryIdMap *entryIdMap, const DumpSnapShotOption &dumpOption)
-    : vm_(vm), dumpOption_(&dumpOption), snapshot_(snapshot), entryIdMap_(entryIdMap),
-      writer_(stream), marker_(vm, &dumpOption)
+    : vm_(vm), dumpOption_(dumpOption), snapshot_(snapshot), entryIdMap_(entryIdMap),
+      writer_(stream), marker_(vm, &dumpOption_)
 {
     startTime_ = std::chrono::steady_clock::now();
 }
 
 RawHeapDump::~RawHeapDump()
 {
-    writer_.EndOfWriteBinBlock();
+    // Finalize() performs the flush / success log / HiSysEvent at a defined
+    // point (end of BinaryDump). The destructor must NOT repeat those side
+    // effects: in the hybrid fork model the parent process never calls
+    // BinaryDump but still destroys this instance, and flushing the parent's
+    // stale buffer / emitting a duplicate OOM event would corrupt the child's
+    // output and double-report. Only release in-memory state that is safe to
+    // drop in either process.
     secIndexVec_.clear();
+}
+
+void RawHeapDump::Finalize()
+{
+    writer_.EndOfWriteBinBlock();
     auto endTime = std::chrono::steady_clock::now();
     double duration = std::chrono::duration<double>(endTime - startTime_).count();
     LOG_ECMA(INFO) << "rawheap dump success, cost " << duration << "s, " << "file size " << GetRawHeapFileOffset();
-    if (dumpOption_->isDumpOOM) {
-        SEND_HISYSEVENT(ARKTS_RUNTIME, ARK_STATS_OOM, STATISTIC, "STATUS", 0, "MESSAGE", "OK",
-                        "OOM_TYPE", dumpOption_->isForSharedOOM ? "SHARED_OOM" : "LOCAL_OOM",
+    if (dumpOption_.isDumpOOM) {
+#ifdef ENABLE_HISYSEVENT
+        const char *uniqueId = &DFX_GetAppRunningUniqueId == nullptr ? "" : DFX_GetAppRunningUniqueId();
+        SetDumpStatus(DUMP_STATUS_SUCCESS);
+        SEND_HISYSEVENT(ARKTS_RUNTIME, ARK_STATS_OOM, STATISTIC, "STATUS", g_dumpStatus.load(), "MESSAGE", "OK",
+                        "OOM_TYPE", dumpOption_.isForSharedOOM ? "SHARED_OOM" : "LOCAL_OOM",
                         "OBJ_COUNT", GetObjectCount(),
                         "STR_COUNT", GetEcmaStringTable()->GetCapcity(),
                         "HEAP_SIZE", marker_.GetHeapSize(),
                         "FILE_SIZE", GetRawHeapFileOffset(),
-                        "DURATION", duration, "VERSION", GetRawheapVersion());
+                        "DURATION", duration,
+                        "APP_RUNNING_UNIQUE_ID", uniqueId,
+                        "EVENT_VERSION", "1.0.0",
+                        "VERSION", GetRawheapVersion());
+#endif
     }
 }
 
@@ -176,27 +341,64 @@ RawHeapDump::~RawHeapDump()
 void RawHeapDump::BinaryDump()
 {
     DumpVersion(GetRawheapVersion());
+    DumpMetadataFields();
 
+    SetDumpStatus(DUMP_STATUS_MARK_ROOT_OBJECTS);
     marker_.MarkRootObjects();
+
+    SetDumpStatus(DUMP_STATUS_ROOT_TABLE);
     DumpRootTable();
 
+    SetDumpStatus(DUMP_STATUS_MARK_PROCESS_OBJECTS);
     marker_.ProcessMarkObjectsFromRoot();
     // properties name was only exempted in mode RawHeapDumpCropLevel::LEVEL_V1
     if (Runtime::GetInstance()->GetRawHeapDumpCropLevel() == RawHeapDumpCropLevel::LEVEL_V1) {
         AddExemptedStringNode();
     }
 
+    SetDumpStatus(DUMP_STATUS_UPDATE_STRING_TABLE);
     UpdateStringTable();
+
+    SetDumpStatus(DUMP_STATUS_DUMP_STRING_TABLE);
     DumpStringTable();
+
+    SetDumpStatus(DUMP_STATUS_DUMP_OBJECT_TABLE);
     DumpObjectTable();
+
+    SetDumpStatus(DUMP_STATUS_DUMP_OBJECT_MEMORY);
     DumpObjectMemory();
 
     DumpSectionIndex();
+    // Flush the writer buffer and emit the success/OOM events at a defined
+    // point rather than from the destructor (see ~RawHeapDump).
+    Finalize();
 }
 
 void RawHeapDump::IterateMarkedObjects(const std::function<void(JSTaggedType)> &visitor)
 {
     marker_.IterateMarkedObjects(visitor);
+}
+
+void RawHeapDump::UpdateSourceTextModuleStringTable(JSTaggedType addr, int &strCnt)
+{
+    JSTaggedValue entry(addr);
+    if (!entry.IsSourceTextModule()) {
+        return;
+    }
+
+    SourceTextModule *module = SourceTextModule::Cast(entry.GetTaggedObject());
+    // Add EcmaModuleRecordName string to the snapshot
+    CString moduleRecordName = module->GetEcmaModuleRecordNameString();
+    StringId moduleRecordNameStrId = snapshot_->InsertString(moduleRecordName);
+    JSTaggedType moduleRecordNameAddr = static_cast<JSTaggedType>(module->GetEcmaModuleRecordName());
+    UpdateStringTable(moduleRecordNameAddr, moduleRecordNameStrId);
+    moduleRecordNameStrId != 1 ? strCnt++ : 0;
+    // Add EcmaModuleFilename string to the snapshot
+    CString moduleFileName = module->GetEcmaModuleFilenameString();
+    StringId moduleFileNameStrId = snapshot_->InsertString(moduleFileName);
+    JSTaggedType moduleFileNameAddr = static_cast<JSTaggedType>(module->GetEcmaModuleFilename());
+    UpdateStringTable(moduleFileNameAddr, moduleFileNameStrId);
+    moduleFileNameStrId != 1 ? strCnt++ : 0;
 }
 
 // Update string table for all marked objects and property name strings.
@@ -210,6 +412,9 @@ void RawHeapDump::UpdateStringTable()
         StringId strId = GenerateStringId(reinterpret_cast<TaggedObject *>(addr));
         UpdateStringTable(addr, strId);
         strId != 1 ? strCnt++ : 0;
+
+        // Update string table for SourceTextModule's EcmaModuleRecordName and EcmaModuleFilename
+        UpdateSourceTextModuleStringTable(addr, strCnt);
     });
     IterateExemptedStringNode([&strCnt, this](JSTaggedType addr) {
         StringId strId = GenerateStringId(reinterpret_cast<TaggedObject *>(addr), true);
@@ -221,17 +426,34 @@ void RawHeapDump::UpdateStringTable()
 
 void RawHeapDump::DumpVersion(const std::string &version)
 {
-    char versionId[8];  // 8: means the size of rawheap version
+    char versionId[8] = { 0 };  // 8: size of rawheap version
     if (strcpy_s(versionId, sizeof(versionId), version.c_str()) != 0) {
         LOG_ECMA(ERROR) << "rawheap dump, version id strcpy_s failed!";
         return;
     }
     WriteChunk(versionId, sizeof(versionId));
 
-    char timeStamp[8];  // 8: means the size of current timestamp
+    char timeStamp[8] = { 0 };  // 8: size of current timestamp
     *reinterpret_cast<uint64_t *>(timeStamp) = std::chrono::system_clock::now().time_since_epoch().count();
     WriteChunk(timeStamp, sizeof(timeStamp));
     LOG_ECMA(INFO) << "rawheap dump, version " << version;
+}
+
+void RawHeapDump::DumpMetadataFields()
+{
+    DumpStringField(dumpOption_.spaceType, 32, "space type");  // 32: space type size
+    DumpStringField(dumpOption_.heapType, 16, "heap type");    // 16: heap type size
+    DumpStringField("dynamic", 8, "vm type");                   // 8: vm type size
+}
+
+void RawHeapDump::DumpStringField(const std::string &value, size_t bufSize, const char *fieldName)
+{
+    std::vector<char> buffer(bufSize);
+    std::fill(buffer.begin(), buffer.end(), '\0');
+    if (!value.empty() && strcpy_s(buffer.data(), bufSize, value.c_str()) != 0) {
+        LOG_ECMA(ERROR) << "rawheap dump, " << fieldName << " strcpy_s failed!" << value;
+    }
+    WriteChunk(buffer.data(), bufSize);
 }
 
 void RawHeapDump::DumpSectionIndex()
@@ -252,14 +474,27 @@ void RawHeapDump::DumpSectionIndex()
 */
 NodeId RawHeapDump::GenerateNodeId(JSTaggedType addr)
 {
-    NodeId nodeId = dumpOption_->isDumpOOM ? entryIdMap_->GetNextId() : entryIdMap_->FindOrInsertNodeId(addr);
-    if (!dumpOption_->isJSLeakWatcher) {
+    NodeId nodeId = dumpOption_.isDumpOOM && !dumpOption_.isForHybridXRef
+                        ? entryIdMap_->GetNextId()
+                        : entryIdMap_->FindOrInsertNodeId(addr);
+    if (!dumpOption_.isJSLeakWatcher) {
         return nodeId;
     }
 
     JSTaggedValue value {addr};
-    int32_t hash = value.IsJSObject() ? JSObject::Cast(value)->GetHash(vm_->GetJSThread()) : 0;
+    int32_t hash = value.IsJSObject() ? JSObject::Cast(value)->GetHash(vm_->GetJSThreadNoCheck()) : 0;
     return (static_cast<uint64_t>(hash) << 32) | (nodeId & 0xFFFFFFFF);  // 32: 32-bits means a half of uint64_t
+}
+
+uint32_t RawHeapDump::FindNodeId(uint64_t addr) const
+{
+    if (entryIdMap_ == nullptr) {
+        return 0;
+    }
+    // EntryIdMap keys by JSTaggedType (uint64_t); jsAddr from STS XRef maps is
+    // the same tagged value the dumper registered (the legacy hybrid path also
+    // resolves jsToEts by the dynamic node's address). FindNodeId is read-only.
+    return entryIdMap_->FindNodeId(static_cast<JSTaggedType>(addr));
 }
 
 void RawHeapDump::WriteChunk(char *data, size_t size)
@@ -318,6 +553,38 @@ void RawHeapDump::AddSectionBlockSize()
     secIndexVec_.push_back(GetRawHeapFileOffset() - preOffset_);
 }
 
+void RawHeapDump::WriteGlobalRefGroup()
+{
+    if (!JSNApi::IsTrackGlobalRefEnabled()) {
+        WriteU32(rawheap_translate::GLOBAL_REF_TRACK_OFF_MARK);
+        return;
+    }
+    CVector<GlobalRefMappingEntry> entries;
+    auto collector = [&entries](uintptr_t slotAddr, void *ref) {
+        JSTaggedType raw = *reinterpret_cast<JSTaggedType *>(slotAddr);
+        JSTaggedValue value(raw);
+        if (!value.IsHeapObject()) {
+            return;
+        }
+        if (value.IsWeak()) {
+            value.RemoveWeakTag();
+        }
+        entries.push_back({reinterpret_cast<uintptr_t>(ref), value.GetRawData()});
+    };
+    if (dumpOption_.isProcDump) {
+        Runtime::GetInstance()->GCIterateThreadList([&](JSThread *thread) {
+            thread->IterateGlobalRefMappings(collector);
+        });
+    } else {
+        vm_->GetAssociatedJSThread()->IterateGlobalRefMappings(collector);
+    }
+    WriteU32(static_cast<uint32_t>(entries.size()));
+    for (const auto &e : entries) {
+        WriteU64(static_cast<uint64_t>(e.refAddr));
+        WriteGlobalRefHeapObjAddr(e.heapObjAddr);
+    }
+}
+
 StringId RawHeapDump::GenerateStringIdForJSObject(TaggedObject *object, JSThread *thread)
 {
     JSTaggedValue entry(object);
@@ -353,7 +620,7 @@ StringId RawHeapDump::GenerateStringIdForString(TaggedObject *object, JSThread *
 {
     EcmaString *str = EcmaString::Cast(object);
     if (EcmaStringAccessor(str).GetLength() > 0) {
-        CString string = ConvertToString(vm_->GetJSThread(), str);
+        CString string = ConvertToString(vm_->GetJSThreadNoCheck(), str);
         return snapshot_->InsertString(string);
     }
     return 1;  // 1 : invalid id
@@ -412,7 +679,7 @@ void RawHeapDump::AddExemptedStringNode()
         }
 
         std::vector<Reference> refs {};
-        value.DumpForSnapshot(vm_->GetJSThread(), refs, true);
+        value.DumpForSnapshot(vm_->GetJSThreadNoCheck(), refs, true);
         for (auto &ref : refs) {
             if (ref.key_.IsHole()) {
                 continue;
@@ -447,6 +714,42 @@ RawHeapDumpV1::~RawHeapDumpV1()
     strIdMapObjVec_.clear();
 }
 
+/*
+ *  Root table section layout (V1 / V2 share the same shape; only the
+ *  per-address width W differs — W = 8 bytes in V1, W = 4 bytes in V2).
+ *  The marked-root header's `rootUnit` field equals W.
+ *
+ *  AddSectionOffset() / AddSectionBlockSize() bracket ONLY the marked-root
+ *  list (header + address array). The four root-type groups and the global-
+ *  ref group below are appended afterwards but still inside the file region
+ *  [sections_[0], sections_[2]].
+ *
+ *  +-----------------------------+----------+-----------------------+
+ *  | region                      | size     | encoding              |
+ *  +-----------------------------+----------+-----------------------+
+ *  | marked-root header          |    8 B   | rootCnt | rootUnit=W  |
+ *  | marked-root address list    |  N * W   | one addr per entry    |
+ *  +-----------------------------+----------+-----------------------+
+ *  | localHandle  group header   |    4 B   | localHandleCnt        |
+ *  | localHandle  address list   | M1 * W   | one addr per entry    |
+ *  +-----------------------------+----------+-----------------------+
+ *  | globalHandle group header   |    4 B   | globalHandleCnt       |
+ *  | globalHandle address list   | M2 * W   | one addr per entry    |
+ *  +-----------------------------+----------+-----------------------+
+ *  | vmRoot       group header   |    4 B   | vmRootCnt             |
+ *  | vmRoot       address list   | M3 * W   | one addr per entry    |
+ *  +-----------------------------+----------+-----------------------+
+ *  | frameRoot    group header   |    4 B   | frameRootCnt          |
+ *  | frameRoot    address list   | M4 * W   | one addr per entry    |
+ *  +-----------------------------+----------+-----------------------+
+ *  | globalRef    group header   |    4 B   | globalRefCnt          |
+ *  | globalRef    entry payload  | K * (8+W)| refAddr | heapObjAddr |
+ *  +-----------------------------+----------+-----------------------+
+ *
+ *  The globalRef group header is ALWAYS emitted. When track-global-ref is
+ *  off, globalRefCnt = GLOBAL_REF_TRACK_OFF_MARK (0xFFFFFFFF) and no payload
+ *  follows; when on, globalRefCnt = K and K entries follow.
+ */
 void RawHeapDumpV1::DumpRootTable()
 {
     AddSectionOffset();
@@ -459,8 +762,17 @@ void RawHeapDumpV1::DumpRootTable()
     // dump address of various root nodes
     CollectRootAddrByType(GetLocalHandleRoots()); // ROOT_LOCAL_HANDLE
     CollectRootAddrByType(GetGlobalHandleRoots()); // ROOT_GLOBAL_HANDLE
+    CollectRootAddrByType(GetVmRoots()); // ROOT_VM
+    CollectRootAddrByType(GetFrameRoots()); // ROOT_FRAME
+
+    WriteGlobalRefGroup();
 
     LOG_ECMA(INFO) << "rawheap dump, root count " << GetObjectCount();
+}
+
+void RawHeapDumpV1::WriteGlobalRefHeapObjAddr(JSTaggedType addr)
+{
+    WriteU64(static_cast<uint64_t>(addr));
 }
 
 void RawHeapDumpV1::CollectRootAddrByType(const CSet<JSTaggedType>& rootSet)
@@ -489,6 +801,87 @@ void RawHeapDumpV1::DumpStringTable()
     LOG_ECMA(INFO) << "rawheap dump, string table capcity " << strTable->GetCapcity();
 }
 
+class CompressedSlotCounter : public BaseObjectVisitor<CompressedSlotCounter> {
+public:
+    size_t compressedSlots = 0;
+    void VisitObjectRangeImpl(BaseObject *, ObjectSlot, ObjectSlot, VisitObjectArea) {}
+    void VisitCompressedObjectRangeImpl(BaseObject *, CompressedObjectSlot start, CompressedObjectSlot end)
+    {
+        for (CompressedObjectSlot s = start; s < end; s++) {
+            compressedSlots++;
+        }
+    }
+};
+
+static size_t GetDecompressedObjectSize(TaggedObject *object)
+{
+    CompressedSlotCounter counter;
+    ObjectXRay::VisitObjectBody<VisitType::OLD_GC_VISIT>(object, object->GetClass(), counter);
+    constexpr size_t DELTA_SIZE =
+        JSTaggedValue::TaggedTypeSize() - CompressedJSTaggedValue::CompressedTaggedTypeSize();
+    return object->GetSize() + counter.compressedSlots * DELTA_SIZE;
+}
+
+template <typename RefFn, typename ZeroFn>
+class SlotEmitVisitor : public BaseObjectVisitor<SlotEmitVisitor<RefFn, ZeroFn>> {
+    RefFn emitRef_;
+    ZeroFn emitZero_;
+public:
+    size_t normalSlots = 0;
+    size_t compressedSlots = 0;
+    SlotEmitVisitor(RefFn r, ZeroFn z) : emitRef_(r), emitZero_(z) {}
+    void VisitObjectRangeImpl(BaseObject *, ObjectSlot start, ObjectSlot end, VisitObjectArea)
+    {
+        for (ObjectSlot s = start; s < end; s++) {
+            normalSlots++;
+            JSTaggedValue v(s.GetTaggedType());
+            if (v.GetRawData() != 0 && v.IsHeapObject() && !v.IsWeak()) {
+                emitRef_(v.GetRawData());
+            } else {
+                emitZero_();
+            }
+        }
+    }
+    void VisitCompressedObjectRangeImpl(BaseObject *, CompressedObjectSlot start, CompressedObjectSlot end)
+    {
+        for (CompressedObjectSlot s = start; s < end; s++) {
+            compressedSlots++;
+            TemporaryJSTaggedValue tv = s.GetTaggedValue();
+            if (tv.IsHeapObject()) {
+                JSTaggedValue v = tv.ConvertHeapObjectToJSTaggedValue();
+                if (v.GetRawData() != 0 && !v.IsWeak()) {
+                    emitRef_(v.GetRawData());
+                    continue;
+                }
+            }
+            emitZero_();
+        }
+    }
+};
+
+template <typename RawFn>
+class RawEmitVisitor : public BaseObjectVisitor<RawEmitVisitor<RawFn>> {
+    RawFn emit_;
+public:
+    size_t normalSlots = 0;
+    size_t compressedSlots = 0;
+    explicit RawEmitVisitor(RawFn fn) : emit_(fn) {}
+    void VisitObjectRangeImpl(BaseObject *, ObjectSlot start, ObjectSlot end, VisitObjectArea)
+    {
+        for (ObjectSlot s = start; s < end; s++) {
+            normalSlots++;
+            emit_(s.GetTaggedType());
+        }
+    }
+    void VisitCompressedObjectRangeImpl(BaseObject *, CompressedObjectSlot start, CompressedObjectSlot end)
+    {
+        for (CompressedObjectSlot s = start; s < end; s++) {
+            compressedSlots++;
+            emit_(s.GetTaggedValue().ConvertToJSTaggedValue().GetRawData());
+        }
+    }
+};
+
 void RawHeapDumpV1::DumpObjectTable()
 {
     AddSectionOffset();
@@ -499,6 +892,11 @@ void RawHeapDumpV1::DumpObjectTable()
         AddrTableItem table = { addr, GenerateNodeId(addr), obj->GetSize(), memOffset };
         if (obj->GetClass()->IsString()) {
             memOffset += sizeof(JSHClass *);
+            EcmaString *str = EcmaString::Cast(obj);
+            table.objSize = EcmaStringAccessor(str).GetLength();
+        } else if (obj->GetClass()->IsConstantPool()) {
+            table.objSize = static_cast<uint32_t>(GetDecompressedObjectSize(obj));
+            memOffset += table.objSize;
         } else {
             memOffset += table.objSize;
         }
@@ -510,22 +908,67 @@ void RawHeapDumpV1::DumpObjectTable()
 void RawHeapDumpV1::DumpObjectMemory()
 {
     uint32_t memSize = 0;
-    IterateMarkedObjects([this, &memSize](JSTaggedType addr) {
+    const CUnorderedSet<JSTaggedType> &nativePointerAddrs = GetNativePointerAddrs();
+    IterateMarkedObjects([this, &memSize, &nativePointerAddrs](JSTaggedType addr) {
         auto obj = reinterpret_cast<TaggedObject *>(addr);
         size_t size = obj->GetSize();
         memSize += size;
         if (obj->GetClass()->IsString()) {
             size = sizeof(JSHClass *);
         }
-        if (g_isEnableCMCGC) {
+        if (obj->GetClass()->IsConstantPool()) {
+            uintptr_t base = reinterpret_cast<uintptr_t>(obj);
+            size_t decompressedSize = GetDecompressedObjectSize(obj);
+            uint32_t decompressedLength = static_cast<uint32_t>(
+                (decompressedSize - ConstantPool::DATA_OFFSET) / JSTaggedValue::TaggedTypeSize());
+            WriteU64(reinterpret_cast<JSTaggedType>(obj->GetClass()));
+            WriteU32(decompressedLength);
+            WriteU32(ConstantPool::Cast(obj)->GetExtraLength());
+            RawEmitVisitor visitor([this](uint64_t v) { WriteU64(v); });
+            ObjectXRay::VisitObjectBody<VisitType::OLD_GC_VISIT>(obj, obj->GetClass(), visitor);
+            size_t visitedBytes = visitor.compressedSlots * CompressedJSTaggedValue::CompressedTaggedTypeSize() +
+                                  visitor.normalSlots * JSTaggedValue::TaggedTypeSize();
+            size_t reservedStart = ConstantPool::DATA_OFFSET + visitedBytes;
+            if (obj->GetSize() > reservedStart) {
+                WriteChunk(reinterpret_cast<char *>(base + reservedStart), obj->GetSize() - reservedStart);
+            }
+        } else if (g_isEnableCMCGC) {
             WriteU64(reinterpret_cast<JSTaggedType>(obj->GetClass()));
             WriteChunk(reinterpret_cast<char *>(addr + sizeof(JSTaggedType)), size - sizeof(JSTaggedType));
         } else {
-            WriteChunk(reinterpret_cast<char *>(addr), size);
+            DumpNonCMGCObject(addr, size, nativePointerAddrs);
         }
     });
     AddSectionBlockSize();
     LOG_ECMA(INFO) << "rawheap dump, objects memory size " << memSize;
+}
+
+void RawHeapDumpV1::DumpNonCMGCObject(JSTaggedType addr, size_t size,
+    const CUnorderedSet<JSTaggedType> &nativePointerAddrs)
+{
+    void* externalData = nullptr;
+    if (nativePointerAddrs.find(addr) != nativePointerAddrs.end()) {
+        JSNativePointer *native = JSNativePointer::Cast(reinterpret_cast<TaggedObject *>(addr));
+        void* externalPointer = native->GetExternalPointer();
+        if (externalPointer != nullptr) {
+            auto cb = vm_->GetNativeReferenceDataCallbackGetter();
+            if (cb != nullptr) {
+                externalData = cb(externalPointer);
+            }
+        }
+        WriteU64(reinterpret_cast<JSTaggedType>(reinterpret_cast<TaggedObject *>(addr)->GetClass()));
+        WriteU64(reinterpret_cast<JSTaggedType>(externalData));
+        WriteChunk(reinterpret_cast<char *>(addr + 2 * sizeof(JSTaggedType)),
+            size - 2 * sizeof(JSTaggedType));  // 2 : Skip the addresses of hclass and externalData
+    } else {
+        if constexpr (G_USE_STICKY_CMS_GC) {
+            WriteU64(reinterpret_cast<JSTaggedType>(reinterpret_cast<TaggedObject *>(addr)->GetClass()));
+            WriteChunk(reinterpret_cast<char *>(addr + sizeof(JSTaggedType)),
+                size - sizeof(JSTaggedType));
+        } else {
+            WriteChunk(reinterpret_cast<char *>(addr), size);
+        }
+    }
 }
 
 void RawHeapDumpV1::UpdateStringTable(JSTaggedType addr, StringId strId)
@@ -556,6 +999,10 @@ RawHeapDumpV2::~RawHeapDumpV2()
     regionIdMap_.clear();
 }
 
+/*
+ *  Root table section layout — see RawHeapDumpV1::DumpRootTable for the
+ *  full table. V2 differs only in W = 4 (synthetic 32-bit addresses).
+ */
 void RawHeapDumpV2::DumpRootTable()
 {
     AddSectionOffset();
@@ -568,8 +1015,17 @@ void RawHeapDumpV2::DumpRootTable()
     // dump address of various root nodes
     CollectRootAddrByType(GetLocalHandleRoots()); // ROOT_LOCAL_HANDLE
     CollectRootAddrByType(GetGlobalHandleRoots()); // ROOT_GLOBAL_HANDLE
+    CollectRootAddrByType(GetVmRoots()); // ROOT_VM
+    CollectRootAddrByType(GetFrameRoots()); // ROOT_FRAME
+
+    WriteGlobalRefGroup();
 
     LOG_ECMA(INFO) << "rawheap dump, root count " << GetObjectCount();
+}
+
+void RawHeapDumpV2::WriteGlobalRefHeapObjAddr(JSTaggedType addr)
+{
+    WriteU32(GenerateSyntheticAddr(addr));
 }
 
 void RawHeapDumpV2::CollectRootAddrByType(const CSet<JSTaggedType>& rootSet)
@@ -605,13 +1061,20 @@ void RawHeapDumpV2::DumpObjectTable()
     uint32_t memOffset = GetObjectCount() * sizeof(AddrTableItem);
     IterateMarkedObjects([this, &memOffset](JSTaggedType addr) {
         TaggedObject *obj = reinterpret_cast<TaggedObject *>(addr);
+        size_t dumpSize = obj->GetClass()->IsConstantPool()
+                              ? GetDecompressedObjectSize(obj)
+                              : obj->GetSize();
         AddrTableItem table = {
             GenerateSyntheticAddr(addr),
-            obj->GetSize(),
+            static_cast<uint32_t>(dumpSize),
             GenerateNodeId(addr),
             obj->GetClass()->IsJSNativePointer() ? JSNativePointer::Cast(obj)->GetBindingSize() : 0,
             static_cast<uint32_t>(obj->GetClass()->GetObjectType())
         };
+        if (obj->GetClass()->IsString()) {
+            EcmaString *str = EcmaString::Cast(obj);
+            table.size = EcmaStringAccessor(str).GetLength();
+        }
         WriteChunk(reinterpret_cast<char *>(&table), sizeof(AddrTableItem));
     });
     LOG_ECMA(INFO) << "rawheap dump, objects total count " << GetObjectCount();
@@ -626,6 +1089,32 @@ void RawHeapDumpV2::DumpObjectMemory()
 
         WriteU32(GenerateSyntheticAddr(reinterpret_cast<JSTaggedType>(object->GetClass())));
         if (object->GetClass()->IsString()) {
+            return;
+        }
+        if (object->GetClass()->IsConstantPool()) {
+            // Header [hclass+8, DATA_OFFSET): non-pointer, emit zero tokens
+            for (ObjectSlot s(addr + sizeof(JSTaggedType));
+                 s < ObjectSlot(addr + ConstantPool::DATA_OFFSET); s++) {
+                WriteU8(rawheap_translate::ZERO_VALUE);
+            }
+            // Data region: visitor-driven (compressed cache decompressed + normal extend)
+            SlotEmitVisitor visitor(
+                [this](JSTaggedType v) { WriteU32(GenerateSyntheticAddr(v)); },
+                [this]() { WriteU8(rawheap_translate::ZERO_VALUE); });
+            ObjectXRay::VisitObjectBody<VisitType::OLD_GC_VISIT>(object, object->GetClass(), visitor);
+            // Reserved region [visitedEnd, end): generic 8B tokens
+            size_t visitedBytes = visitor.compressedSlots * CompressedJSTaggedValue::CompressedTaggedTypeSize() +
+                                  visitor.normalSlots * JSTaggedValue::TaggedTypeSize();
+            ObjectSlot reservedStart(static_cast<uintptr_t>(addr + ConstantPool::DATA_OFFSET + visitedBytes));
+            ObjectSlot objEnd(static_cast<uintptr_t>(addr + object->GetSize()));
+            for (ObjectSlot s = reservedStart; s < objEnd; s++) {
+                JSTaggedValue value(s.GetTaggedType());
+                if (value.GetRawData() != 0 && value.IsHeapObject() && !value.IsWeak()) {
+                    WriteU32(GenerateSyntheticAddr(value.GetRawData()));
+                } else {
+                    WriteU8(rawheap_translate::ZERO_VALUE);
+                }
+            }
             return;
         }
         ObjectSlot end(static_cast<uintptr_t>(addr + object->GetSize()));
@@ -691,4 +1180,18 @@ uint32_t RawHeapDumpV2::GenerateSyntheticAddr(JSTaggedType addr)
     }
 #endif
 }
+
+#ifdef OHOS_UNIT_TEST
+// Test helper: expose GetSignalName for direct unit testing of switch branches
+const char* GetSignalNameForTest(int sig)
+{
+    return GetSignalName(sig);
+}
+
+// Test helper: expose GetDumpCost for direct unit testing
+double GetDumpCostForTest()
+{
+    return GetDumpCost();
+}
+#endif
 } // namespace panda::ecmascript

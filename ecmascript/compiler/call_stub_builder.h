@@ -157,8 +157,7 @@ enum class FastCallType {
 class CallStubBuilder : public StubBuilder {
 public:
     explicit CallStubBuilder(StubBuilder *parent, GateRef glue, GateRef func, GateRef actualNumArgs, GateRef jumpSize,
-                             Variable *result, GateRef hotnessCounter, JSCallArgs callArgs,
-                             ProfileOperation callback = ProfileOperation(),
+                             Variable *result, JSCallArgs callArgs, ProfileOperation callback = ProfileOperation(),
                              bool checkIsCallable = true, GateRef hir = Circuit::NullGate(),
                              GateRef stringId = Circuit::NullGate(), GateRef constPool = Circuit::NullGate())
         : StubBuilder(parent)
@@ -168,7 +167,6 @@ public:
         this->jumpSize_ = jumpSize;
         this->actualNumArgs_ = actualNumArgs;
         this->result_ = result;
-        this->hotnessCounter_ = hotnessCounter;
         this->callArgs_ = callArgs;
         this->callback_ = callback;
         this->checkIsCallable_ = checkIsCallable;
@@ -193,7 +191,6 @@ private:
     GateRef func_ {0};
     GateRef jumpSize_ {0};
     GateRef actualNumArgs_ {0};
-    GateRef hotnessCounter_ {0};
     Variable *result_ {nullptr};
     JSCallArgs callArgs_;
     ProfileOperation callback_;
@@ -226,6 +223,10 @@ private:
     GateRef CallConstructorBridge(const int idxForAot, const std::vector<GateRef> &argsForAot);
     void CallBridge(GateRef code, GateRef expectedNum, Label *exit);
     void JSCallAsmInterpreter(bool hasBaselineCode, Label *methodNotAot, Label *exit, Label *noNeedCheckException);
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    void JSCallArkSteed(Label *exit);
+    GateRef CallArkSteedConstructorBridge(const int idxForSteed, const std::vector<GateRef> &argsForSteed);
+#endif
 
     int PrepareIdxForNative();
     std::vector<GateRef> PrepareArgsForNative();
@@ -246,6 +247,10 @@ private:
     std::vector<GateRef> PrepareArgsForAsmInterpreter();
     std::vector<GateRef> PrepareBasicArgsForAsmInterpreter();
     std::vector<GateRef> PrepareAppendArgsForAsmInterpreter();
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    std::vector<GateRef> PrepareArgsForArkSteedPushArgv();
+    std::vector<GateRef> PrepareArgsForArkSteedWithArgV();
+#endif
 
     void CallFastBuiltin(Label* notFastBuiltins, Label *exit, GateRef hir = Circuit::NullGate());
     std::vector<GateRef> PrepareArgsForFastBuiltin();

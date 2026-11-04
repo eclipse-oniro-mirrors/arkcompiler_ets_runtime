@@ -135,25 +135,24 @@ using WeakRefClearCallBack = void (*)(void *);
 using WeakFinalizeTaskCallback = std::function<void()>;
 using NativePointerCallbackFinishNotify = std::function<void(size_t totalBindSize_)>;
 using NativePointerCallbackData = std::pair<NativePointerCallback, std::tuple<void*, void*, void*>>;
-using TriggerGCData = std::pair<void*, uint8_t>;
+using TriggerGCData = std::pair<void*, uint16_t>;
 using TriggerGCTaskCallback = std::function<void(TriggerGCData& data)>;
 using StartIdleMonitorCallback = std::function<void()>;
+using PostTaskToThreadCallback = std::function<void(std::function<void()> task)>;
 using NotifyDeferFreezeCallback = std::function<void(bool needFreeze)>;
 using EcmaVM = ecmascript::EcmaVM;
 using JSThread = ecmascript::JSThread;
 using JSTaggedType = uint64_t;
 using ConcurrentCallback = void (*)(Local<JSValueRef> result, bool success, void *taskInfo, void *data);
-using SourceMapCallback = std::function<std::string(const std::string& rawStack)>;
 using TimerCallbackFunc = void (*)(void *data);
 using TimerTaskCallback = void* (*)(EcmaVM *vm, void *data, TimerCallbackFunc func, uint64_t timeout, bool repeat);
 using CancelTimerCallback = void (*)(void *timerCallbackInfo);
 using ReleaseSecureMemCallback = std::function<void(void* fileMapper)>;
-using SourceMapTranslateCallback = std::function<bool(std::string& url, int& line, int& column,
-    std::string& packageName)>;
 using DeviceDisconnectCallback = std::function<bool()>;
 using QueueType = ecmascript::job::QueueType;
 using OnErrorCallback = std::function<void(Local<ObjectRef> value, void *data)>;
 using StopPreLoadSoCallback = std::function<void()>;
+using TaskPoolShrinkCallback = std::function<void(bool inBackground)>;
 
 #define ECMA_DISALLOW_COPY(className)      \
     className(const className &) = delete; \
@@ -530,6 +529,11 @@ public:
         return vm_;
     }
 
+    uintptr_t GetSlotAddress() const
+    {
+        return address_;
+    }
+
     // This method must be called before Global is released.
     GLOBAL_PUBLIC_HYBRID_EXTENSION();
 private:
@@ -639,6 +643,7 @@ public:
     bool IsArray(const EcmaVM *vm);
     bool IsJSArray(const EcmaVM *vm);
     bool IsConstructor(const EcmaVM *vm);
+    bool IsClassConstructor(const EcmaVM *vm);
     bool IsFunction(const EcmaVM *vm);
 
     bool IsJSFunction(const EcmaVM *vm);
@@ -1089,7 +1094,7 @@ public:
     JSValueRef* CallForNapi(const EcmaVM *vm, JSValueRef *thisObj, JSValueRef *const argv[],
         int32_t length);
     Local<JSValueRef> Call(const EcmaVM *vm, Local<JSValueRef> thisObj, const Local<JSValueRef> argv[],
-        int32_t length);
+        int32_t length, bool clearSingleStepper = true);
     Local<JSValueRef> Constructor(const EcmaVM *vm, const Local<JSValueRef> argv[], int32_t length);
     JSValueRef* ConstructorOptimize(const EcmaVM *vm, JSValueRef* argv[], int32_t length);
 
@@ -1289,6 +1294,7 @@ private:
     void *prevPrimitiveNext_ = nullptr;
     void *prevPrimitiveEnd_ = nullptr;
     void *thread_ = nullptr;
+    [[maybe_unused]] uint64_t scopeLevel_ {-1};
 };
 
 class PUBLIC_API EscapeLocalScope final : public LocalScope {
@@ -1554,10 +1560,23 @@ private:
     JSThread *thread_ {nullptr};
     uint16_t oldThreadState_ {0};
     uint32_t isEnableCMCGC_ {0};
-    uint32_t hasSwitchState_{0};
+    uint32_t hasSwitchState_ {0};
     // This is a temporary impl to adapt interop to cmc, because some interop
     // call napi without transfering to NATIVE
     [[maybe_unused]] bool extraCoroutineSwitchedForInterop_{false};
+};
+
+class PUBLIC_API JsiMicrotaskScope {
+public:
+    static bool IsOpened(const EcmaVM *vm);
+    explicit JsiMicrotaskScope(const EcmaVM *vm);
+    ~JsiMicrotaskScope();
+    ECMA_DISALLOW_COPY(JsiMicrotaskScope);
+    ECMA_DISALLOW_MOVE(JsiMicrotaskScope);
+
+private:
+    const EcmaVM *vm_ {nullptr};
+    bool ownsExclusiveOpen_ {false};
 };
 
 /**
@@ -1611,6 +1630,11 @@ public:
     inline Local<JSValueRef> GetCallArgRef(uint32_t idx) const
     {
         return GetArgRef(FIRST_ARGS_INDEX + idx);
+    }
+
+    inline Local<JSValueRef> GetCallArgRefUnchecked(uint32_t idx) const
+    {
+        return Local<JSValueRef>(reinterpret_cast<uintptr_t>(&stackArgs_[FIRST_ARGS_INDEX + idx]));
     }
 
 private:
@@ -1794,10 +1818,11 @@ public:
         OLD_GC,
         FULL_GC,
         SHARED_GC,
-        SHARED_FULL_GC
+        SHARED_FULL_GC,
+        SHARED_CC
     };
 
-    enum class PUBLIC_API TRIGGER_IDLE_GC_TYPE : uint8_t {
+    enum class PUBLIC_API TRIGGER_IDLE_GC_TYPE : uint16_t {
         LOCAL_CONCURRENT_YOUNG_MARK = 1,
         LOCAL_CONCURRENT_FULL_MARK = 1 << 1,
         LOCAL_REMARK = 1 << 2,
@@ -1806,6 +1831,7 @@ public:
         SHARED_CONCURRENT_PARTIAL_MARK = 1 << 5,
         SHARED_FULL_GC = 1 << 6,
         LOCAL_CC_GC = 1 << 7,
+        SHARED_CC = 1 << 8,
     };
 
     enum class PUBLIC_API MemoryReduceDegree : uint8_t {
@@ -1845,7 +1871,18 @@ public:
     // merge abc, execute module buffer
     static bool ExecuteModuleBuffer(EcmaVM *vm, const uint8_t *data, int32_t size, const std::string &filename = "",
                                     bool needUpdate = false);
-    static bool ExecuteModuleFromBuffer(EcmaVM *vm, const void *data, int32_t size, const std::string &file);
+    /**
+     * @brief Return the abc file type
+     * @param[in] vm : The virtual machine of the current thread
+     * @param[in] data : begin pos of abc file
+     * @param[in] size : length of abc file
+     * @param[in] file : The module name of abc
+     * @param[in] filePath : The absolute path of abc file
+     * @return 0 Success
+     *         1 Failure
+     */
+    static bool ExecuteModuleFromBuffer(EcmaVM *vm, const void *data, int32_t size, const std::string &file,
+                                        const std::string &filePath = "");
     /**
      * @brief Return the abc file type
      * @param[in] data : begin pos of abc file
@@ -1856,6 +1893,11 @@ public:
      */
     static PandaFileType GetFileType(const uint8_t *data, int32_t size);
     static Local<ObjectRef> GetExportObject(EcmaVM *vm, const std::string &file, const std::string &key);
+    /*
+     * test-only
+     * Only use in host(linux) to load abc file
+     */
+    static Local<ObjectRef> GetExportsFromFile(EcmaVM *vm, const std::string &file, const std::string &entryPoint);
     static Local<ObjectRef> GetExportObjectFromBuffer(EcmaVM *vm, const std::string &file, const std::string &key);
     static Local<ObjectRef> GetExportObjectFromOhmUrl(EcmaVM *vm, const std::string &ohmUrl, const std::string &key);
     static Local<ObjectRef> ExecuteNativeModule(EcmaVM *vm, const std::string &key);
@@ -1870,6 +1912,8 @@ public:
     static bool IsCrossBundleHsp(const EcmaVM *vm, const std::string &ohmurl);
     static Local<ObjectRef> GetModuleNameSpaceWithOhmurlForHybridApp(EcmaVM *vm, const std::string &ohmurl,
                                                                      const std::string &fileName = "");
+    static bool GetOhmurlByObject(EcmaVM *vm, const Local<JSValueRef> object, std::string &moduleName,
+                                  std::string &ohmurl);
     /*
      * Execute panda file from secure mem. secure memory lifecycle managed externally.
      * The data parameter needs to be created externally by an external caller and managed externally
@@ -1886,7 +1930,7 @@ public:
      * is used to uniquely identify this memory internally.
      */
     static bool ExecuteModuleBufferSecure(EcmaVM *vm, uint8_t *data, int32_t size, const std::string &filename = "",
-                                          bool needUpdate = false);
+                                          bool needUpdate = false, void *fileMapper = nullptr);
 
     static bool ExecuteSecureWithOhmUrl(EcmaVM *vm, uint8_t *data, int32_t size, const std::string &srcFilename,
                                         const std::string &ohmUrl);
@@ -1906,6 +1950,8 @@ public:
     static void HintGC(const EcmaVM *vm, MemoryReduceDegree degree, ecmascript::GCReason reason);
     static void TriggerIdleGC(const EcmaVM *vm, TRIGGER_IDLE_GC_TYPE gcType);
     static size_t GetEcmaVMExpectedMemoryReclamationSize(const EcmaVM *vm);
+    // One-way enable of the proportional handle/primitive storage shrink.
+    static void EnableHandleMemoryOptimization(EcmaVM *vm);
     static void SetStartIdleMonitorCallback(const StartIdleMonitorCallback& callback);
     static StartIdleMonitorCallback GetStartIdleMonitorCallback();
     static void SetNotifyDeferFreezeCallback(const NotifyDeferFreezeCallback& callback);
@@ -1960,6 +2006,15 @@ public:
                                          Local<JSValueRef> cloneList, std::string &error,
                                          const SerializeOptions& options);
     static Local<JSValueRef> DeserializeValue(const EcmaVM *vm, void *recoder, void *hint);
+    // Serialize & Deserialize (in-memory flat buffer, for cross-process deep copy).
+    // SerializeValue returns a malloc'd uint8_t* buffer (caller must free) containing
+    // a self-contained flat representation; outSize receives the buffer size in bytes.
+    // DeserializeValue reconstructs the value from such a flat buffer in the current
+    // (possibly different) process, deep-copying every referenced object.
+    static uint8_t* SerializeValue(const EcmaVM *vm, Local<JSValueRef> data, Local<JSValueRef> transfer,
+                                   Local<JSValueRef> cloneList, bool defaultTransfer,
+                                   bool defaultCloneShared, bool needSerializeStack, size_t &outSize);
+    static Local<JSValueRef> DeserializeValue(const EcmaVM *vm, uint8_t *recorder, void *hint);
     // InterOp Serialize & Deserialize.
     static void* InterOpSerializeValue(const EcmaVM *vm, Local<JSValueRef> data, Local<JSValueRef> transfer,
         Local<JSValueRef> cloneList, bool defaultTransfer = false, bool defaultCloneShared = true);
@@ -1977,8 +2032,7 @@ public:
                                             uint8_t **buff, size_t *buffSize, std::string &errorMsg)> cb);
     static void SetUnloadNativeModuleCallback(EcmaVM *vm, const std::function<bool(const std::string &moduleKey)> &cb);
     static void SetNativePtrGetter(EcmaVM *vm, void* cb);
-    static void SetSourceMapCallback(EcmaVM *vm, SourceMapCallback cb);
-    static void SetSourceMapTranslateCallback(EcmaVM *vm, SourceMapTranslateCallback cb);
+    static void SetNativeReferenceDataGetter(EcmaVM *vm, void* cb);
     static void SetHostEnqueueJob(const EcmaVM* vm, Local<JSValueRef> cb,
                                 QueueType queueType = QueueType::QUEUE_PROMISE);
     static EcmaVM* CreateEcmaVM(const ecmascript::JSRuntimeOptions &options);
@@ -2024,6 +2078,7 @@ public:
         std::pair<std::unique_ptr<uint8_t[]>, size_t>> &pkgInfoMap);
     static void UpdatePkgContextInfoList(EcmaVM *vm, const std::unordered_map<std::string,
         std::pair<std::unique_ptr<uint8_t[]>, size_t>> &pkgInfoMap);
+    static void SetAbilityName(const std::string &abilityName);
     static void SetExecuteBufferMode(const EcmaVM *vm);
     // Stop preloading so task callback.
     static void SetStopPreLoadSoCallback(EcmaVM *vm, const StopPreLoadSoCallback &callback);
@@ -2032,6 +2087,7 @@ public:
     static void SetAsyncCleanTaskCallback(EcmaVM *vm, const NativePointerTaskCallback &callback);
     static void SetTriggerGCTaskCallback(EcmaVM *vm, const TriggerGCTaskCallback& callback);
     static void SetStartIdleMonitorCallback(EcmaVM *vm, const StartIdleMonitorCallback& callback);
+    static void SetPostTaskToThreadCallback(EcmaVM *vm, PostTaskToThreadCallback callback);
     static std::string GetAssetPath(EcmaVM *vm);
     static bool InitForConcurrentThread(EcmaVM *vm, ConcurrentCallback cb, void *data);
     static bool InitForConcurrentFunction(EcmaVM *vm, Local<JSValueRef> func, void *taskInfo);
@@ -2048,6 +2104,9 @@ public:
     static void AllowCrossThreadExecution(EcmaVM *vm);
     static bool CheckAndSetAllowCrossThreadExecution(EcmaVM *vm);
     static void DisallowCrossThreadExecution(EcmaVM *vm);
+    static bool IsCrossThreadExecutionAllowed(EcmaVM *vm);
+    static bool GetEnableAsmInterpreter(const EcmaVM *vm);
+    static std::string GetStubFile(const EcmaVM *vm);
     static void SynchronizVMInfo(EcmaVM *vm, const EcmaVM *hostVM);
     static bool IsProfiling(EcmaVM *vm);
     static void SetProfilerState(const EcmaVM *vm, bool value);
@@ -2060,6 +2119,7 @@ public:
     static void SetEnv(EcmaVM *vm, void *env);
     static void SetMultiThreadCheck(bool multiThreadCheck = true);
     static void SetErrorInfoEnhance(bool errorInfoEnhance = true);
+    static void SetIsMainProcess(bool isMainProcess);
 
     // Napi Heavy Logics fast path
     static Local<JSValueRef> NapiHasProperty(const EcmaVM *vm, uintptr_t nativeObj, uintptr_t key);
@@ -2102,6 +2162,21 @@ public:
 
     static uintptr_t CreateStrongRef(const EcmaVM *vm, Local<JSValueRef> local);
     static void DeleteStrongRef(const EcmaVM *vm, uintptr_t strongRef);
+    static void NotifyOnANR();
+
+    static void SetTrackGlobalRef(bool enable);
+    static bool IsTrackGlobalRefEnabled();
+    static void StoreGlobalRefMapping(EcmaVM *vm, uintptr_t slotAddr, void *ref);
+    static void EraseGlobalRefMapping(EcmaVM *vm, uintptr_t slotAddr);
+    static void *FindGlobalRefMapping(const EcmaVM *vm, uintptr_t slotAddr);
+    static void SetTaskpoolShrinkCallback(const EcmaVM *vm, TaskPoolShrinkCallback callback);
+    static void ExecuteTaskpoolShrinkCallback(bool inBackground);
+    // Get the number of workers for the current thread.
+    // Only available for cross platform.
+    static uint32_t GetCurrentWorkerCount(const EcmaVM *vm);
+
+    static constexpr size_t INVALID_GLOBAL_HANDLE_SIZE = static_cast<size_t>(-1);
+    static size_t GetGlobalHandleCount(const EcmaVM *vm);
 
     JSNAPI_PUBLIC_HYBRID_EXTENSION();
 private:

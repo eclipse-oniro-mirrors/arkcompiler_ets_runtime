@@ -30,6 +30,28 @@
 
 namespace panda::ecmascript {
 
+#ifndef EXCLUDE_JIT
+static bool IsDisableCodeSign()
+{
+    return Jit::GetInstance()->IsDisableCodeSign();
+}
+
+static bool IsEnableJitFort()
+{
+    return Jit::GetInstance()->IsEnableJitFort();
+}
+#else
+static bool IsDisableCodeSign()
+{
+    return true;
+}
+
+static bool IsEnableJitFort()
+{
+    return false;
+}
+#endif
+
 template <>
 FreeListAllocator<MemDesc>::FreeListAllocator(BaseHeap *heap, MemDescPool *pool, JitFort *fort)
     : memDescPool_(pool), heap_(heap)
@@ -39,9 +61,9 @@ FreeListAllocator<MemDesc>::FreeListAllocator(BaseHeap *heap, MemDescPool *pool,
 
 JitFort::JitFort()
 {
-    jitFortMem_ = JitFortPageMap(JIT_FORT_REG_SPACE_MAX,
-                                 PageProtectProt(Jit::GetInstance()->IsDisableCodeSign() || !IsResourceAvailable()),
-                                 DEFAULT_REGION_SIZE, nullptr, MAP_JITFORT);
+    jitFortMem_ = PageMap(JIT_FORT_REG_SPACE_MAX,
+                          PageProtectProt(IsDisableCodeSign() || !IsResourceAvailable()),
+                          DEFAULT_REGION_SIZE, nullptr, MAP_JITFORT, true);
     jitFortBegin_ = reinterpret_cast<uintptr_t>(jitFortMem_.GetMem());
     jitFortSize_ = JIT_FORT_REG_SPACE_MAX;
     memDescPool_ = new MemDescPool(jitFortBegin_, jitFortSize_);
@@ -56,9 +78,9 @@ void JitFort::InitHugeRegion()
 {
     if (hugeInUse_)
         return;
-    hugeJitFortMem_ = JitFortPageMap(HUGE_JITFORT_REGION_SIZE,
-                                     PageProtectProt(Jit::GetInstance()->IsDisableCodeSign() || !IsResourceAvailable()),
-                                     HUGE_JITFORT_REGION_SIZE, nullptr, MAP_JITFORT);
+    hugeJitFortMem_ = PageMap(HUGE_JITFORT_REGION_SIZE,
+                              PageProtectProt(IsDisableCodeSign() || !IsResourceAvailable()),
+                              HUGE_JITFORT_REGION_SIZE, nullptr, MAP_JITFORT, true);
 
     hugeJitFortBegin_ = reinterpret_cast<uintptr_t>(hugeJitFortMem_.GetMem());
     hugeJitFortSize_ = HUGE_JITFORT_REGION_SIZE;
@@ -88,13 +110,13 @@ JitFort::~JitFort()
     if (memDescPool_ != nullptr) {
         delete memDescPool_;
     }
-    JitFortPageUnmap(jitFortMem_);
+    PageUnmap(jitFortMem_, true);
     if (hugeInUse_) {
         hugeRegion_->DestroyFreeObjectSets();
         delete hugeRegion_;
         delete hugeAlloc_;
         delete hugeMemDescPool_;
-        JitFortPageUnmap(hugeJitFortMem_);
+        PageUnmap(hugeJitFortMem_, true);
     }
 }
 
@@ -268,7 +290,7 @@ uint32_t JitFort::AddrToFortRegionIdx(uint64_t addr)
  */
 void JitFort::UpdateFreeSpace(bool inHuge)
 {
-    if (!Jit::GetInstance()->IsEnableJitFort()) {
+    if (!IsEnableJitFort()) {
         return;
     }
 
@@ -454,7 +476,7 @@ bool JitFort::IsResourceAvailable()
     return isResourceAvailable_;
 }
 
-void JitFort::InitJitFort()
+bool JitFort::InitJitFort()
 {
 #if defined(JIT_ENABLE_CODE_SIGN) && !defined(JIT_FORT_DISABLE)
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "JIT::InitJitFortResource", "");
@@ -462,18 +484,19 @@ void JitFort::InitJitFort()
     if (fd < 0) {
         isResourceAvailable_ = false;
         LOG_JIT(ERROR) << "Failed to init jitfort resource, open xpm failed: " << strerror(errno);
-        return;
+        return false;
     }
     FdsanExchangeOwnerTag(reinterpret_cast<fd_t>(fd));
     int rc = ioctl(fd, XPM_SET_JITFORT_ENABLE, 0);
-    if (rc < 0) {
+    if (rc < 0 && errno != EEXIST) {
         isResourceAvailable_ = false;
         LOG_JIT(ERROR) << "Failed to init jitfort resource, enable xpm failed: " << strerror(errno);
         Close(reinterpret_cast<fd_t>(fd));
-        return;
+        return false;
     }
     Close(reinterpret_cast<fd_t>(fd));
 #endif
+    return true;
 }
 
 void JitFort::InitJitFortResource()

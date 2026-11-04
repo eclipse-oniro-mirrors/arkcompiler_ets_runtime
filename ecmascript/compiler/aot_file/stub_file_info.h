@@ -19,6 +19,13 @@
 #include "ecmascript/compiler/aot_file/gdb_jit.h"
 
 namespace panda::ecmascript {
+
+#if defined(STUB_FUNCTION_REORDERING)
+struct StubIndexMapping {
+    uint32_t runtimePosition;   // Actual position in stub.an
+    uint32_t compileTimeIndex;  // Original enum index
+};
+#endif
 class PUBLIC_API StubFileInfo : public AOTFileInfo {
 public:
     StubFileInfo() = default;
@@ -106,8 +113,37 @@ public:
     void Dump() const DUMP_API_ATTR;
 
     void Destroy() override {};
+#if defined(STUB_FUNCTION_REORDERING)
+    const std::unordered_map<uint32_t, uint32_t> &GetBCStubIndexMap() const
+    {
+        return bcStubIndexMap_;
+    }
+    uint32_t GetRuntimeStubIndex(uint32_t compileTimeIndex) const;
+#endif
+
+#if ENABLE_MEMORY_OPTIMIZATION
+    uint64_t GetCodeAddr(uint32_t index) const
+    {
+        if (rawEntries_ != nullptr) {
+            const FuncEntryDes &e = rawEntries_[index];
+            if (e.IsGeneralRTStub()) {
+                return e.codeAddr_ + GetAsmStubAddr();
+            }
+            return e.codeAddr_ + des_[e.moduleIndex_].GetSecAddr(ElfSecName::TEXT);
+        }
+        return 0;
+    }
+#endif
 private:
+#if defined(STUB_FUNCTION_REORDERING)
+    std::unordered_map<uint32_t, uint32_t> bcStubIndexMap_;
+    void AddIndexMapping(uint32_t compileTimeIndex, uint32_t runtimePosition);
+#endif
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
     static constexpr uint32_t ASMSTUB_MODULE_NUM = 6;
+#else
+    static constexpr uint32_t ASMSTUB_MODULE_NUM = 5;
+#endif
 
     bool MmapLoad(const std::string &fileName);
 #ifndef PANDA_TARGET_OHOS

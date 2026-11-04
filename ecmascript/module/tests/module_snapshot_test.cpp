@@ -24,6 +24,7 @@
 #include "ecmascript/module/module_snapshot.h"
 #include "ecmascript/module/module_value_accessor.h"
 #include "ecmascript/object_fast_operator-inl.h"
+#include "ecmascript/serializer/serialize_data.h"
 #define private public
 #include "ecmascript/snapshot/common/modules_snapshot_helper.h"
 #undef private
@@ -47,7 +48,8 @@ public:
         if (serializeData == nullptr) {
             return false;
         }
-        return WriteDataToFile(thread, serializeData, filePath, version);
+        auto header = NewHeader(vm->GetApplicationVersionCode(), version);
+        return ModulesSnapshotHelper::WriteDataToFile(serializeData, filePath, header, "ModuleSnapshot");
     }
     static bool MockSerializeAndSavingBufferEmpty(const EcmaVM *vm, const CString &path, const CString &version)
     {
@@ -58,7 +60,8 @@ public:
         if (serializeData == nullptr) {
             return false;
         }
-        return WriteDataToFile(thread, serializeData, filePath, version);
+        auto header = NewHeader(vm->GetApplicationVersionCode(), version);
+        return ModulesSnapshotHelper::WriteDataToFile(serializeData, filePath, header, "ModuleSnapshot");
     }
     static bool MockSerializeAndSavingHasIncompleteData(const EcmaVM *vm, const CString &path, const CString &version)
     {
@@ -69,17 +72,18 @@ public:
         if (serializeData == nullptr) {
             return false;
         }
-        return WriteDataToFile(thread, serializeData, filePath, version);
+        auto header = NewHeader(vm->GetApplicationVersionCode(), version);
+        return ModulesSnapshotHelper::WriteDataToFile(serializeData, filePath, header, "ModuleSnapshot");
     }
-    static bool MockWriteDataToFile(JSThread *thread, const std::unique_ptr<SerializeData>& data,
-        const CString& filePath, const CString &version)
+    static bool MockWriteDataToFile(const std::unique_ptr<SerializeData>& data,
+        const CString& filePath, ModulesSnapshotHelper::SnapshotVersionInfo::UniquePtr header)
     {
-        return WriteDataToFile(thread, data, filePath, version);
+        return ModulesSnapshotHelper::WriteDataToFile(data, filePath, header, "ModuleSnapshot");
     }
-    static bool MockReadDataFromFile(JSThread *thread, std::unique_ptr<SerializeData>& data,
-        const CString& path, const CString &version)
+    static bool MockReadDataFromFile(std::unique_ptr<SerializeData>& data,
+        const CString& path, ModulesSnapshotHelper::SnapshotVersionInfo::UniquePtr header)
     {
-        return ReadDataFromFile(thread, data, path, version);
+        return ModulesSnapshotHelper::ReadDataFromFile(data, path, header, "ModuleSnapshot");
     }
     static JSHandle<TaggedArray> MockGetModuleSerializeArray(JSThread *thread)
     {
@@ -95,7 +99,7 @@ public:
     }
     static size_t MockGetAlignUpPadding(const uint8_t *curPtr, void *originAddr, const size_t alignment)
     {
-        return GetAlignUpPadding(curPtr, originAddr, alignment);
+        return ModulesSnapshotHelper::GetAlignUpPadding(curPtr, originAddr, alignment);
     }
     static bool MockSerializeAndSavingWithZeroBuffer(const EcmaVM *vm, const CString &path, const CString &version)
     {
@@ -105,7 +109,13 @@ public:
         if (serializeData == nullptr) {
             return false;
         }
-        return WriteDataToFile(thread, serializeData, filePath, version);
+        auto header = NewHeader(vm->GetApplicationVersionCode(), version);
+        return ModulesSnapshotHelper::WriteDataToFile(serializeData, filePath, header, "ModuleSnapshot");
+    }
+
+    static ModulesSnapshotHelper::SnapshotVersionInfo::UniquePtr NewHeader(uint32_t versionCode, const CString& version)
+    {
+        return ModulesSnapshotHelper::SnapshotVersionInfo::New(versionCode, version, "");
     }
 };
 class ModuleSnapshotTest : public testing::Test {
@@ -161,6 +171,17 @@ public:
         return currentPath;
     }
 
+    ModulesSnapshotHelper::SnapshotVersionInfo::UniquePtr NewHeader(const CString& version)
+    {
+        return MockModuleSnapshot::NewHeader(instance->GetApplicationVersionCode(), version);
+    }
+
+    bool TryInsertInSModuleManager(JSThread *thread, const CString &recordName,
+                                   const JSHandle<SourceTextModule> &moduleRecord) const
+    {
+        return SharedModuleManager::GetInstance()->TryInsertInSModuleManager(thread, recordName, moduleRecord);
+    }
+
     void InitEntries(JSHandle<SourceTextModule> module, JSHandle<SourceTextModule> jsonModule) const
     {
         ObjectFactory *objectFactory = thread->GetEcmaVM()->GetFactory();
@@ -209,15 +230,15 @@ public:
         size_t environmentArraySize = 4;
         JSHandle<TaggedArray> environmentArray = objectFactory->NewTaggedArray(environmentArraySize);
         // sendable binding
-        JSHandle<EcmaString> recordNameHdl = objectFactory->NewFromUtf8("sendable binding recordName");
-        JSHandle<EcmaString> baseFileNameHdl = objectFactory->NewFromUtf8("sendable binding baseFileNameHdl");
+        CString recordName = "sendable binding recordName";
+        CString baseFileName = "sendable binding baseFileNameHdl";
         JSHandle<ResolvedRecordIndexBinding> recordIndexBinding =
-            objectFactory->NewSResolvedRecordIndexBindingRecord(recordNameHdl, baseFileNameHdl, index0);
+            objectFactory->NewSResolvedRecordIndexBindingRecord(recordName, baseFileName, index0);
         environmentArray->Set(thread, index0, recordIndexBinding.GetTaggedValue());
 
         JSHandle<JSTaggedValue> val2 = JSHandle<JSTaggedValue>::Cast(objectFactory->NewFromUtf8("val2"));
         JSHandle<ResolvedRecordBinding> nameBinding =
-            objectFactory->NewSResolvedRecordBindingRecord(recordNameHdl, val2);
+            objectFactory->NewSResolvedRecordBindingRecord(recordName, val2);
         environmentArray->Set(thread, index1, nameBinding.GetTaggedValue());
         // mormal binding
         JSHandle<ResolvedBinding> resolvedBinding = objectFactory->NewResolvedBindingRecord(bindingModule, val2);
@@ -235,7 +256,7 @@ public:
         JSHandle<SourceTextModule> module = objectFactory->NewSourceTextModule();
         CString baseFileName = "modules.abc";
         CString recordName = "a";
-        module->SetEcmaModuleFilenameString(baseFileName);
+        module->SetEcmaModuleFilenameString(thread, baseFileName);
         module->SetEcmaModuleRecordNameString(recordName);
         module->SetTypes(ModuleTypes::ECMA_MODULE);
         module->SetStatus(ModuleStatus::INSTANTIATED);
@@ -243,17 +264,17 @@ public:
         module->SetRequestedModules(thread, requestedModules.GetTaggedValue());
         JSHandle<SourceTextModule> module1 = objectFactory->NewSourceTextModule();
         CString recordName1 = "b";
-        module1->SetEcmaModuleFilenameString(baseFileName);
+        module1->SetEcmaModuleFilenameString(thread, baseFileName);
         module1->SetEcmaModuleRecordNameString(recordName1);
         requestedModules->Set(thread, index0, module1);
         JSHandle<SourceTextModule> module2 = objectFactory->NewSourceTextModule();
         CString recordName2 = "c";
-        module2->SetEcmaModuleFilenameString(baseFileName);
+        module2->SetEcmaModuleFilenameString(thread, baseFileName);
         module2->SetEcmaModuleRecordNameString(recordName2);
         module2->SetStatus(ModuleStatus::EVALUATED);
         JSHandle<SourceTextModule> module3 = objectFactory->NewSourceTextModule();
         CString recordName3 = "d";
-        module3->SetEcmaModuleFilenameString(baseFileName);
+        module3->SetEcmaModuleFilenameString(thread, baseFileName);
         module3->SetEcmaModuleRecordNameString(recordName3);
         module3->SetStatus(ModuleStatus::EVALUATED);
         module3->SetTypes(ModuleTypes::JSON_MODULE);
@@ -345,14 +366,17 @@ public:
                         ResolvedRecordIndexBinding::Cast(serializeResolvedBinding.GetTaggedObject());
                     auto deserializeBinding =
                         ResolvedRecordIndexBinding::Cast(deserializeResolvedBinding.GetTaggedObject());
-                    EXPECT_EQ(serializeBinding->GetModuleRecord(thread), deserializeBinding->GetModuleRecord(thread));
-                    EXPECT_EQ(serializeBinding->GetAbcFileName(thread), deserializeBinding->GetAbcFileName(thread));
+                    EXPECT_EQ(serializeBinding->GetModuleRecordNameString(),
+                              deserializeBinding->GetModuleRecordNameString());
+                    EXPECT_EQ(serializeBinding->GetAbcFileNameString(),
+                              deserializeBinding->GetAbcFileNameString());
                     EXPECT_EQ(serializeBinding->GetIndex(), deserializeBinding->GetIndex());
                 } else if (serializeResolvedBinding.IsResolvedRecordBinding()) {
                     ASSERT_TRUE(serializeResolvedBinding.IsResolvedRecordBinding());
                     auto serializeBinding = ResolvedRecordBinding::Cast(serializeResolvedBinding.GetTaggedObject());
                     auto deserializeBinding = ResolvedRecordBinding::Cast(deserializeResolvedBinding.GetTaggedObject());
-                    EXPECT_EQ(serializeBinding->GetModuleRecord(thread), deserializeBinding->GetModuleRecord(thread));
+                    EXPECT_EQ(serializeBinding->GetModuleRecordNameString(),
+                              deserializeBinding->GetModuleRecordNameString());
                     EXPECT_EQ(serializeBinding->GetBindingName(thread), deserializeBinding->GetBindingName(thread));
                 }
             }
@@ -399,7 +423,7 @@ public:
         JSHandle<SourceTextModule> etsModule = factory->NewSourceTextModule();
         CString baseFileName = "modules.abc";
         CString recordName = "etsModule";
-        etsModule->SetEcmaModuleFilenameString(baseFileName);
+        etsModule->SetEcmaModuleFilenameString(thread, baseFileName);
         etsModule->SetEcmaModuleRecordNameString(recordName);
         etsModule->SetTypes(ModuleTypes::ECMA_MODULE);
         etsModule->SetStatus(ModuleStatus::INSTANTIATED);
@@ -407,7 +431,7 @@ public:
         etsModule->SetRequestedModules(thread, requestedModules.GetTaggedValue());
         JSHandle<SourceTextModule> nativeModule = factory->NewSourceTextModule();
         CString nativeModuleRecordName = "nativeModule";
-        nativeModule->SetEcmaModuleFilenameString(baseFileName);
+        nativeModule->SetEcmaModuleFilenameString(thread, baseFileName);
         nativeModule->SetEcmaModuleRecordNameString(nativeModuleRecordName);
         nativeModule->SetTypes(ModuleTypes::APP_MODULE);
         nativeModule->SetStatus(ModuleStatus::INSTANTIATED);
@@ -522,6 +546,32 @@ HWTEST_F_L0(ModuleSnapshotTest, SerializeAndDeserializeTest)
     CheckModule(serializeModule1, deserializeModule1);
     CheckModule(serializeModule2, deserializeModule2);
     CheckModule(serializeModule3, deserializeModule3);
+}
+
+HWTEST_F_L0(ModuleSnapshotTest, SerializeAndDeserializeWithStatsTest)
+{
+    CString path = GetSnapshotPath();
+    CString version = TEST_ROM_VERSION.data();
+    // module name resolved by both HostGetImportedModule lookups below
+    constexpr std::string_view testModuleName = "a";
+    InitMockSourceTextModule();
+    EcmaVM *vm = thread->GetEcmaVM();
+    ModuleManager *moduleManager = thread->GetModuleManager();
+    JSHandle<SourceTextModule> serializeModule = moduleManager->HostGetImportedModule(testModuleName.data());
+    // ENABLE_SNAPSHOT_STATS is a high bit (1ULL << 37), keep the whole int64_t properties word
+    int64_t arkProperties = vm->GetJSOptions().GetArkProperties();
+    vm->GetJSOptions().SetArkProperties(arkProperties | ArkProperties::ENABLE_SNAPSHOT_STATS);
+    // EXPECT so arkProperties is restored below even on failure.
+    EXPECT_TRUE(MockModuleSnapshot::SerializeDataAndSaving(vm, path, version));
+    moduleManager->ClearResolvedModules();
+    // DeserializeData runs with the stats option on: exercises the stats log branch and still succeeds.
+    EXPECT_TRUE(ModuleSnapshot::DeserializeData(vm, path, version));
+    // HostGetImportedModule FATALs on unresolved modules; skip when a step failed.
+    if (!HasFailure()) {
+        JSHandle<SourceTextModule> deserializeModule = moduleManager->HostGetImportedModule(testModuleName.data());
+        CheckModule(serializeModule, deserializeModule);
+    }
+    vm->GetJSOptions().SetArkProperties(arkProperties);
 }
 
 HWTEST_F_L0(ModuleSnapshotTest, ShouldNotSerializeWhenFileIsExists)
@@ -742,7 +792,7 @@ HWTEST_F_L0(ModuleSnapshotTest, SerializeSlicedString)
 
     JSHandle<SourceTextModule> module = factory->NewSourceTextModule();
     CString recordName = "SlicedString";
-    module->SetEcmaModuleFilenameString(recordName);
+    module->SetEcmaModuleFilenameString(thread, recordName);
     module->SetEcmaModuleRecordNameString(recordName);
     thread->GetModuleManager()->AddResolveImportedModule(recordName, module.GetTaggedValue());
     // create subString
@@ -777,13 +827,13 @@ HWTEST_F_L0(ModuleSnapshotTest, SerializeSlicedString)
 
 HWTEST_F_L0(ModuleSnapshotTest, DisableSnapshotFeatureByOption)
 {
-    auto oldLoaded = ModulesSnapshotHelper::g_featureState_;
+    auto oldFeatureLoaded = ModulesSnapshotHelper::g_featureLoaded_;
     ModulesSnapshotHelper::g_featureState_ = 0;
     ModulesSnapshotHelper::MarkSnapshotDisabledByOption();
     ASSERT_EQ(ModulesSnapshotHelper::g_featureState_,
         static_cast<int>(SnapshotFeatureState::MODULE) |
             static_cast<int>(SnapshotFeatureState::PANDAFILE));
-    ASSERT_EQ(ModulesSnapshotHelper::g_featureLoaded_, oldLoaded);
+    ASSERT_EQ(ModulesSnapshotHelper::g_featureLoaded_, oldFeatureLoaded);
 }
 
 HWTEST_F_L0(ModuleSnapshotTest, ShouldDisableModuleSnapshot)
@@ -836,7 +886,7 @@ HWTEST_F_L0(ModuleSnapshotTest, RestoreUpdatedBindingWithUndefinedEnvironment)
     JSHandle<SourceTextModule> module = factory->NewSourceTextModule();
     CString baseFileName = "modules.abc";
     CString recordName = "undefinedEnvModule";
-    module->SetEcmaModuleFilenameString(baseFileName);
+    module->SetEcmaModuleFilenameString(thread, baseFileName);
     module->SetEcmaModuleRecordNameString(recordName);
     module->SetTypes(ModuleTypes::ECMA_MODULE);
     module->SetStatus(ModuleStatus::INSTANTIATED);
@@ -861,26 +911,30 @@ HWTEST_F_L0(ModuleSnapshotTest, RestoreUpdatedBindingWithNonUpdatedBinding)
     JSHandle<SourceTextModule> module = factory->NewSourceTextModule();
     CString baseFileName = "modules.abc";
     CString recordName = "nonUpdatedModule";
-    module->SetEcmaModuleFilenameString(baseFileName);
+    module->SetEcmaModuleFilenameString(thread, baseFileName);
     module->SetEcmaModuleRecordNameString(recordName);
     module->SetTypes(ModuleTypes::ECMA_MODULE);
     module->SetStatus(ModuleStatus::INSTANTIATED);
 
     JSHandle<SourceTextModule> bindingModule = factory->NewSourceTextModule();
     CString bindingRecordName = "bindingNonUpdated";
-    bindingModule->SetEcmaModuleFilenameString(baseFileName);
+    bindingModule->SetEcmaModuleFilenameString(thread, baseFileName);
     bindingModule->SetEcmaModuleRecordNameString(bindingRecordName);
 
-    // Create environment with a ResolvedIndexBinding where IsUpdatedFromResolvedBinding is false
-    size_t envSize = 2;
+    // Create environment with index bindings where IsUpdatedFromResolvedBinding is false
+    size_t envSize = 3;
     JSHandle<TaggedArray> envArray = factory->NewTaggedArray(envSize);
     JSHandle<ResolvedIndexBinding> resolvedIndexBinding =
         factory->NewResolvedIndexBindingRecord(bindingModule, index0);
     // IsUpdatedFromResolvedBinding defaults to false, do NOT set it to true
     ASSERT_FALSE(resolvedIndexBinding->GetIsUpdatedFromResolvedBinding());
     envArray->Set(thread, index0, resolvedIndexBinding.GetTaggedValue());
+    JSHandle<ResolvedRecordIndexBinding> resolvedRecordIndexBinding =
+        factory->NewSResolvedRecordIndexBindingRecord(bindingRecordName, baseFileName, index0);
+    ASSERT_FALSE(resolvedRecordIndexBinding->GetIsUpdatedFromResolvedRecordBinding());
+    envArray->Set(thread, index1, resolvedRecordIndexBinding.GetTaggedValue());
     // Also put an undefined (hole) entry
-    envArray->Set(thread, index1, JSTaggedValue::Undefined());
+    envArray->Set(thread, index2, JSTaggedValue::Undefined());
     module->SetEnvironment(thread, envArray);
 
     JSHandle<TaggedArray> serializeArray = factory->NewTaggedArray(1);
@@ -892,6 +946,162 @@ HWTEST_F_L0(ModuleSnapshotTest, RestoreUpdatedBindingWithNonUpdatedBinding)
     // Verify binding is still ResolvedIndexBinding (not converted)
     JSHandle<TaggedArray> resultEnv(thread, module->GetEnvironment(thread));
     ASSERT_TRUE(resultEnv->Get(thread, index0).IsResolvedIndexBinding());
+    ASSERT_TRUE(resultEnv->Get(thread, index1).IsResolvedRecordIndexBinding());
+    ASSERT_TRUE(resultEnv->Get(thread, index2).IsUndefined());
+}
+
+HWTEST_F_L0(ModuleSnapshotTest, RestoreUpdatedBindingWithUpdatedRecordIndexBinding)
+{
+    auto vm = thread->GetEcmaVM();
+    ObjectFactory *factory = vm->GetFactory();
+    CString baseFileName = "modules.abc";
+
+    JSHandle<SourceTextModule> module = factory->NewSourceTextModule();
+    CString recordName = "recordIndexModule";
+    module->SetEcmaModuleFilenameString(thread, baseFileName);
+    module->SetEcmaModuleRecordNameString(recordName);
+    module->SetTypes(ModuleTypes::ECMA_MODULE);
+    module->SetStatus(ModuleStatus::INSTANTIATED);
+
+    JSHandle<SourceTextModule> nativeModule = factory->NewSourceTextModule();
+    CString nativeRecordName = "nativeRecordIndex";
+    nativeModule->SetEcmaModuleFilenameString(thread, baseFileName);
+    nativeModule->SetEcmaModuleRecordNameString(nativeRecordName);
+    nativeModule->SetTypes(ModuleTypes::APP_MODULE);
+    // EVALUATED keeps this test on the skip-lazy path: CreateBindingByRecordIndexBinding
+    // only skips LazyExecuteModule for evaluated targets, and the fake "modules.abc"
+    // above cannot be lazy-executed.
+    nativeModule->SetStatus(ModuleStatus::EVALUATED);
+
+    JSHandle<EcmaString> exportName = factory->NewFromStdString("recordIndexValue");
+    JSHandle<JSTaggedValue> exportNameValue = JSHandle<JSTaggedValue>::Cast(exportName);
+    JSHandle<LocalExportEntry> localExportEntry =
+        factory->NewLocalExportEntry(exportNameValue, exportNameValue, index0, SharedTypes::UNSENDABLE_MODULE);
+    SourceTextModule::AddLocalExportEntry(thread, nativeModule, localExportEntry, index0, 1);
+
+    JSHandle<JSTaggedValue> objFuncProto = vm->GetGlobalEnv()->GetObjectFunctionPrototype();
+    JSHandle<JSHClass> hClassHandle = factory->NewEcmaHClass(JSObject::SIZE, 0, JSType::JS_OBJECT, objFuncProto);
+    JSHandle<JSObject> exports = factory->NewJSObject(hClassHandle);
+    PropertyDescriptor desc(thread, thread->GlobalConstants()->GetHandledUndefined(), true, true, true);
+    JSObject::DefineOwnProperty(thread, exports, exportNameValue, desc);
+    SourceTextModule::StoreModuleValue(thread, nativeModule, index0, JSHandle<JSTaggedValue>::Cast(exports));
+
+    JSHandle<TaggedArray> envArray = factory->NewTaggedArray(1);
+    JSHandle<ResolvedRecordIndexBinding> updatedBinding =
+        factory->NewSResolvedRecordIndexBindingRecord(nativeRecordName, baseFileName, index0);
+    updatedBinding->SetIsUpdatedFromResolvedRecordBinding(true);
+    envArray->Set(thread, index0, updatedBinding.GetTaggedValue());
+    module->SetEnvironment(thread, envArray);
+
+    thread->GetModuleManager()->AddResolveImportedModule(recordName, module.GetTaggedValue());
+    thread->GetModuleManager()->AddResolveImportedModule(nativeRecordName, nativeModule.GetTaggedValue());
+
+    JSHandle<TaggedArray> serializeArray = factory->NewTaggedArray(1);
+    serializeArray->Set(thread, 0, module.GetTaggedValue());
+
+    MockModuleSnapshot::MockRestoreUpdatedBinding(thread, serializeArray);
+
+    JSHandle<TaggedArray> resultEnv(thread, module->GetEnvironment(thread));
+    JSTaggedValue restoredBindingValue = resultEnv->Get(thread, index0);
+    ASSERT_TRUE(restoredBindingValue.IsResolvedRecordBinding());
+    auto restoredBinding = ResolvedRecordBinding::Cast(restoredBindingValue.GetTaggedObject());
+    EXPECT_EQ(restoredBinding->GetModuleRecordNameString(), nativeRecordName);
+    CString bindingName = EcmaStringAccessor(restoredBinding->GetBindingName(thread)).Utf8ConvertToString(thread);
+    EXPECT_EQ(bindingName, "recordIndexValue");
+    EXPECT_TRUE(thread->GetModuleManager()->IsEvaluatedModule(nativeRecordName));
+}
+
+HWTEST_F_L0(ModuleSnapshotTest, RestoreUpdatedBindingLoadsAndKeepsTemporaryCjsModule)
+{
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    ModuleManager *moduleManager = thread->GetModuleManager();
+    CString cjsFileName = MODULE_ABC_PATH "module_unexecute_C.abc";
+    CString cjsRecordName = "module_unexecute_C";
+
+    JSHandle<SourceTextModule> module = factory->NewSourceTextModule();
+    CString moduleRecordName = "snapshotModuleWithTemporaryCjsBinding";
+    module->SetEcmaModuleFilenameString(thread, cjsFileName);
+    module->SetEcmaModuleRecordNameString(moduleRecordName);
+    module->SetTypes(ModuleTypes::ECMA_MODULE);
+    module->SetStatus(ModuleStatus::INSTANTIATED);
+
+    JSHandle<TaggedArray> environment = factory->NewTaggedArray(1);
+    JSHandle<ResolvedRecordIndexBinding> recordIndexBinding = factory->NewSResolvedRecordIndexBindingRecord(
+        cjsRecordName, cjsFileName, SourceTextModule::UNDEFINED_INDEX);
+    recordIndexBinding->SetIsUpdatedFromResolvedRecordBinding(true);
+    environment->Set(thread, index0, recordIndexBinding.GetTaggedValue());
+    module->SetEnvironment(thread, environment);
+    moduleManager->AddResolveImportedModule(moduleRecordName, module.GetTaggedValue());
+
+    uint32_t resolvedModuleCount = moduleManager->GetResolvedModulesSize();
+    ASSERT_FALSE(moduleManager->IsLocalModuleLoaded(cjsRecordName));
+    JSHandle<TaggedArray> serializeArray = factory->NewTaggedArray(1);
+    serializeArray->Set(thread, index0, module.GetTaggedValue());
+
+    MockModuleSnapshot::MockRestoreUpdatedBinding(thread, serializeArray);
+
+    ASSERT_TRUE(environment->Get(thread, index0).IsResolvedRecordBinding());
+    JSHandle<ResolvedRecordBinding> restoredBinding(thread, environment->Get(thread, index0));
+    EXPECT_EQ(restoredBinding->GetModuleRecordNameString(), cjsRecordName);
+    EXPECT_EQ(restoredBinding->GetBindingName(thread),
+        thread->GlobalConstants()->GetHandledDefaultString().GetTaggedValue());
+    EXPECT_TRUE(moduleManager->IsLocalModuleLoaded(cjsRecordName));
+    EXPECT_TRUE(moduleManager->IsLocalModuleLoaded(moduleRecordName));
+    EXPECT_EQ(moduleManager->GetResolvedModulesSize(), resolvedModuleCount + 1);
+}
+
+HWTEST_F_L0(ModuleSnapshotTest, RestoreUpdatedBindingEvaluatesLoadedButUnevaluatedCjsModule)
+{
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    ModuleManager *moduleManager = thread->GetModuleManager();
+    CString cjsFileName = MODULE_ABC_PATH "module_unexecute_C.abc";
+    CString cjsRecordName = "module_unexecute_C";
+
+    JSHandle<SourceTextModule> module = factory->NewSourceTextModule();
+    CString moduleRecordName = "snapshotModuleWithUnevaluatedCjsBinding";
+    module->SetEcmaModuleFilenameString(thread, cjsFileName);
+    module->SetEcmaModuleRecordNameString(moduleRecordName);
+    module->SetTypes(ModuleTypes::ECMA_MODULE);
+    module->SetStatus(ModuleStatus::INSTANTIATED);
+
+    // The target CJS module is registered in resolvedModules_ but not evaluated yet,
+    // e.g. restored from snapshot in INSTANTIATED state. Restore must evaluate it
+    // before resolving the binding name.
+    JSHandle<SourceTextModule> unevaluatedCjsModule = factory->NewSourceTextModule();
+    unevaluatedCjsModule->SetEcmaModuleFilenameString(thread, cjsFileName);
+    unevaluatedCjsModule->SetEcmaModuleRecordNameString(cjsRecordName);
+    unevaluatedCjsModule->SetTypes(ModuleTypes::CJS_MODULE);
+    unevaluatedCjsModule->SetStatus(ModuleStatus::INSTANTIATED);
+    moduleManager->AddResolveImportedModule(cjsRecordName, unevaluatedCjsModule.GetTaggedValue());
+
+    JSHandle<TaggedArray> environment = factory->NewTaggedArray(1);
+    JSHandle<ResolvedRecordIndexBinding> recordIndexBinding = factory->NewSResolvedRecordIndexBindingRecord(
+        cjsRecordName, cjsFileName, SourceTextModule::UNDEFINED_INDEX);
+    recordIndexBinding->SetIsUpdatedFromResolvedRecordBinding(true);
+    environment->Set(thread, index0, recordIndexBinding.GetTaggedValue());
+    module->SetEnvironment(thread, environment);
+    moduleManager->AddResolveImportedModule(moduleRecordName, module.GetTaggedValue());
+
+    uint32_t resolvedModuleCount = moduleManager->GetResolvedModulesSize();
+    ASSERT_TRUE(moduleManager->IsLocalModuleLoaded(cjsRecordName));
+    ASSERT_FALSE(moduleManager->IsEvaluatedModule(cjsRecordName));
+    JSHandle<TaggedArray> serializeArray = factory->NewTaggedArray(1);
+    serializeArray->Set(thread, index0, module.GetTaggedValue());
+
+    MockModuleSnapshot::MockRestoreUpdatedBinding(thread, serializeArray);
+
+    // The CJS module is executed in place during restore: a loaded-but-unevaluated
+    // target must not skip the lazy path, otherwise the binding name is resolved
+    // from an unevaluated module.
+    EXPECT_TRUE(moduleManager->IsEvaluatedModule(cjsRecordName));
+    // The executed module replaces the stale record instead of adding a duplicate entry.
+    EXPECT_EQ(moduleManager->GetResolvedModulesSize(), resolvedModuleCount);
+    EXPECT_TRUE(moduleManager->IsLocalModuleLoaded(moduleRecordName));
+    ASSERT_TRUE(environment->Get(thread, index0).IsResolvedRecordBinding());
+    JSHandle<ResolvedRecordBinding> restoredBinding(thread, environment->Get(thread, index0));
+    EXPECT_EQ(restoredBinding->GetModuleRecordNameString(), cjsRecordName);
+    EXPECT_EQ(restoredBinding->GetBindingName(thread),
+        thread->GlobalConstants()->GetHandledDefaultString().GetTaggedValue());
 }
 
 HWTEST_F_L0(ModuleSnapshotTest, RestoreUpdatedBindingMixedEnvEntries)
@@ -902,14 +1112,14 @@ HWTEST_F_L0(ModuleSnapshotTest, RestoreUpdatedBindingMixedEnvEntries)
     JSHandle<SourceTextModule> module = factory->NewSourceTextModule();
     CString baseFileName = "modules.abc";
     CString recordName = "mixedEnvModule";
-    module->SetEcmaModuleFilenameString(baseFileName);
+    module->SetEcmaModuleFilenameString(thread, baseFileName);
     module->SetEcmaModuleRecordNameString(recordName);
     module->SetTypes(ModuleTypes::ECMA_MODULE);
     module->SetStatus(ModuleStatus::INSTANTIATED);
 
     JSHandle<SourceTextModule> nativeModule = factory->NewSourceTextModule();
     CString nativeRecordName = "nativeMixed";
-    nativeModule->SetEcmaModuleFilenameString(baseFileName);
+    nativeModule->SetEcmaModuleFilenameString(thread, baseFileName);
     nativeModule->SetEcmaModuleRecordNameString(nativeRecordName);
     nativeModule->SetTypes(ModuleTypes::APP_MODULE);
     nativeModule->SetStatus(ModuleStatus::INSTANTIATED);
@@ -973,7 +1183,7 @@ HWTEST_F_L0(ModuleSnapshotTest, GetModuleSerializeArrayTest)
     JSHandle<SourceTextModule> module1 = factory->NewSourceTextModule();
     CString baseFileName = "modules.abc";
     CString recordName1 = "serArrayMod1";
-    module1->SetEcmaModuleFilenameString(baseFileName);
+    module1->SetEcmaModuleFilenameString(thread, baseFileName);
     module1->SetEcmaModuleRecordNameString(recordName1);
     module1->SetTypes(ModuleTypes::ECMA_MODULE);
     module1->SetStatus(ModuleStatus::INSTANTIATED);
@@ -981,7 +1191,7 @@ HWTEST_F_L0(ModuleSnapshotTest, GetModuleSerializeArrayTest)
 
     JSHandle<SourceTextModule> module2 = factory->NewSourceTextModule();
     CString recordName2 = "serArrayMod2";
-    module2->SetEcmaModuleFilenameString(baseFileName);
+    module2->SetEcmaModuleFilenameString(thread, baseFileName);
     module2->SetEcmaModuleRecordNameString(recordName2);
     module2->SetTypes(ModuleTypes::ECMA_MODULE);
     module2->SetStatus(ModuleStatus::INSTANTIATED);
@@ -990,7 +1200,7 @@ HWTEST_F_L0(ModuleSnapshotTest, GetModuleSerializeArrayTest)
     // Get module serialize array and verify it includes all modules
     JSHandle<TaggedArray> serializeArray = MockModuleSnapshot::MockGetModuleSerializeArray(thread);
     uint32_t normalModuleSize = thread->GetModuleManager()->GetResolvedModulesSize();
-    uint32_t sharedModuleSize = SharedModuleManager::GetInstance()->GetResolvedSharedModulesSize();
+    uint32_t sharedModuleSize = SharedModuleManager::GetInstance()->GetResolvedSharedModulesSize(thread);
     ASSERT_EQ(serializeArray->GetLength(), normalModuleSize + sharedModuleSize);
     ASSERT_GE(serializeArray->GetLength(), static_cast<uint32_t>(2));
 }
@@ -1008,7 +1218,8 @@ HWTEST_F_L0(ModuleSnapshotTest, SerializeAndDeserializeWithZeroBuffer)
     ASSERT_TRUE(FileExist(fileName.c_str()));
     // read back the file to verify the zero-buffer read path (bufferSize_ == 0 branch in ReadDataFromFile)
     std::unique_ptr<SerializeData> readData = std::make_unique<SerializeData>(thread);
-    ASSERT_TRUE(MockModuleSnapshot::MockReadDataFromFile(thread, readData, path, version));
+    auto header = NewHeader(version);
+    ASSERT_TRUE(MockModuleSnapshot::MockReadDataFromFile(readData, fileName, std::move(header)));
     // Verify the read data has zero buffer size and nullptr buffer
     ASSERT_EQ(readData->Size(), static_cast<size_t>(0));
     ASSERT_EQ(readData->Data(), nullptr);
@@ -1025,7 +1236,8 @@ HWTEST_F_L0(ModuleSnapshotTest, WriteDataToFileMmapFailed)
     CString invalidPath = base::ConcatToCString("/non_existent_dir/deep/nested/path/",
         ModuleSnapshot::MODULE_SNAPSHOT_FILE_NAME);
     CString version = TEST_ROM_VERSION.data();
-    ASSERT_FALSE(MockModuleSnapshot::MockWriteDataToFile(jsThread, serializeData, invalidPath, version));
+    auto header = NewHeader(version);
+    ASSERT_FALSE(MockModuleSnapshot::MockWriteDataToFile(serializeData, invalidPath, std::move(header)));
 }
 
 HWTEST_F_L0(ModuleSnapshotTest, GetAlignUpPaddingTest)
@@ -1112,7 +1324,10 @@ HWTEST_F_L0(ModuleSnapshotTest, ReadDataFromFileTest)
     ASSERT_TRUE(MockModuleSnapshot::SerializeDataAndSaving(vm, path, version));
     // Read data from file using MockReadDataFromFile
     std::unique_ptr<SerializeData> data = std::make_unique<SerializeData>(thread);
-    ASSERT_TRUE(MockModuleSnapshot::MockReadDataFromFile(thread, data, path, version));
+    auto header = NewHeader(version);
+    ASSERT_TRUE(MockModuleSnapshot::MockReadDataFromFile(
+        data, path + CString(ModuleSnapshot::MODULE_SNAPSHOT_FILE_NAME),
+        std::move(header)));
     ASSERT_NE(data, nullptr);
 }
 
@@ -1122,7 +1337,8 @@ HWTEST_F_L0(ModuleSnapshotTest, ReadDataFromFileWithInvalidPath)
     CString version = TEST_ROM_VERSION.data();
     // Read from non-existent file - should fail
     std::unique_ptr<SerializeData> data = std::make_unique<SerializeData>(thread);
-    ASSERT_FALSE(MockModuleSnapshot::MockReadDataFromFile(thread, data, invalidPath, version));
+    auto header = NewHeader(version);
+    ASSERT_FALSE(MockModuleSnapshot::MockReadDataFromFile(data, invalidPath, std::move(header)));
 }
 
 HWTEST_F_L0(ModuleSnapshotTest, RestoreUpdatedBindingWithMultipleModules)
@@ -1134,14 +1350,14 @@ HWTEST_F_L0(ModuleSnapshotTest, RestoreUpdatedBindingWithMultipleModules)
     // Module 1: has environment with updated binding
     JSHandle<SourceTextModule> module1 = factory->NewSourceTextModule();
     CString recordName1 = "multiMod1";
-    module1->SetEcmaModuleFilenameString(baseFileName);
+    module1->SetEcmaModuleFilenameString(thread, baseFileName);
     module1->SetEcmaModuleRecordNameString(recordName1);
     module1->SetTypes(ModuleTypes::ECMA_MODULE);
     module1->SetStatus(ModuleStatus::INSTANTIATED);
 
     JSHandle<SourceTextModule> nativeModule = factory->NewSourceTextModule();
     CString nativeRecordName = "nativeMulti";
-    nativeModule->SetEcmaModuleFilenameString(baseFileName);
+    nativeModule->SetEcmaModuleFilenameString(thread, baseFileName);
     nativeModule->SetEcmaModuleRecordNameString(nativeRecordName);
     nativeModule->SetTypes(ModuleTypes::APP_MODULE);
     nativeModule->SetStatus(ModuleStatus::INSTANTIATED);
@@ -1169,7 +1385,7 @@ HWTEST_F_L0(ModuleSnapshotTest, RestoreUpdatedBindingWithMultipleModules)
     // Module 2: has undefined environment
     JSHandle<SourceTextModule> module2 = factory->NewSourceTextModule();
     CString recordName2 = "multiMod2";
-    module2->SetEcmaModuleFilenameString(baseFileName);
+    module2->SetEcmaModuleFilenameString(thread, baseFileName);
     module2->SetEcmaModuleRecordNameString(recordName2);
     module2->SetTypes(ModuleTypes::ECMA_MODULE);
     module2->SetStatus(ModuleStatus::INSTANTIATED);
@@ -1188,4 +1404,127 @@ HWTEST_F_L0(ModuleSnapshotTest, RestoreUpdatedBindingWithMultipleModules)
     // module2: environment should still be undefined
     ASSERT_TRUE(module2->GetEnvironment(thread).IsUndefined());
 }
+
+/**
+ * @tc.name: DeserializeDataWithSharedModule
+ * @tc.desc: Test DeserializeData with shared module in serialize array (line 71-74)
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ModuleSnapshotTest, DeserializeDataWithSharedModule)
+{
+    auto vm = thread->GetEcmaVM();
+    ObjectFactory *factory = vm->GetFactory();
+
+    JSHandle<SourceTextModule> sharedModule = factory->NewSSourceTextModule();
+    CString baseFileName = "modules.abc";
+    CString recordName = "sharedDeserializeMod";
+    sharedModule->SetEcmaSharedModuleFilenameString(baseFileName);
+    sharedModule->SetEcmaModuleRecordNameString(recordName);
+    sharedModule->SetSharedType(SharedTypes::SHARED_MODULE);
+    sharedModule->SetTypes(ModuleTypes::ECMA_MODULE);
+    sharedModule->SetStatus(ModuleStatus::INSTANTIATED);
+
+    TryInsertInSModuleManager(thread, recordName, sharedModule);
+    thread->GetModuleManager()->AddResolveImportedModule(recordName, sharedModule.GetTaggedValue());
+
+    CString path = GetSnapshotPath();
+    CString version = TEST_ROM_VERSION.data();
+    ASSERT_TRUE(MockModuleSnapshot::SerializeDataAndSaving(vm, path, version));
+
+    thread->GetModuleManager()->ClearResolvedModules();
+    SharedModuleManager::GetInstance()->Destroy();
+
+    ASSERT_TRUE(ModuleSnapshot::DeserializeData(vm, path, version));
+
+    JSHandle<SourceTextModule> deserializedModule = thread->GetModuleManager()->GetImportedModule(recordName);
+    EXPECT_TRUE(SourceTextModule::IsSharedModule(deserializedModule));
+    EXPECT_EQ(deserializedModule->GetEcmaModuleRecordNameString(), recordName);
+}
+
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+/**
+ * @tc.name: DeserializeSharedModuleFilenameUsesSharedStorage
+ * @tc.desc: Test that a deserialized shared module filename is stored in shared filename storage
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ModuleSnapshotTest, DeserializeSharedModuleFilenameUsesSharedStorage)
+{
+    auto vm = thread->GetEcmaVM();
+    ObjectFactory *factory = vm->GetFactory();
+    ModuleManager *moduleManager = thread->GetModuleManager();
+    SharedModuleManager *sharedModuleManager = SharedModuleManager::GetInstance();
+
+    JSHandle<SourceTextModule> sharedModule = factory->NewSSourceTextModule();
+    CString baseFileName = "shared_filename_storage.abc";
+    CString recordName = "sharedFilenameStorageMod";
+    sharedModule->SetSharedType(SharedTypes::SHARED_MODULE);
+    sharedModule->SetEcmaSharedModuleFilenameString(baseFileName);
+    sharedModule->SetEcmaModuleRecordNameString(recordName);
+    sharedModule->SetTypes(ModuleTypes::ECMA_MODULE);
+    sharedModule->SetStatus(ModuleStatus::INSTANTIATED);
+
+    TryInsertInSModuleManager(thread, recordName, sharedModule);
+    moduleManager->AddResolveImportedModule(recordName, sharedModule.GetTaggedValue());
+
+    CString path = GetSnapshotPath();
+    CString version = TEST_ROM_VERSION.data();
+    ASSERT_TRUE(MockModuleSnapshot::SerializeDataAndSaving(vm, path, version));
+
+    sharedModule->DestroyEcmaSharedModuleFilenameString();
+    moduleManager->ClearResolvedModules();
+    sharedModuleManager->Destroy();
+    size_t localStorageSize = moduleManager->GetModuleFilenameStorageSizeForTest();
+    size_t sharedStorageSize = sharedModuleManager->GetModuleFilenameStorageSizeForTest();
+
+    ASSERT_TRUE(ModuleSnapshot::DeserializeData(vm, path, version));
+
+    JSHandle<SourceTextModule> deserializedModule = moduleManager->GetImportedModule(recordName);
+    ASSERT_TRUE(SourceTextModule::IsSharedModule(deserializedModule));
+    ASSERT_NE(deserializedModule->GetEcmaModuleFilename(), 0U);
+    EXPECT_EQ(deserializedModule->GetEcmaModuleFilenameString(), baseFileName);
+    EXPECT_EQ(moduleManager->GetModuleFilenameStorageSizeForTest(), localStorageSize);
+    EXPECT_EQ(sharedModuleManager->GetModuleFilenameStorageSizeForTest(), sharedStorageSize + 1);
+
+    deserializedModule->DestroyEcmaSharedModuleFilenameString();
+    EXPECT_EQ(moduleManager->GetModuleFilenameStorageSizeForTest(), localStorageSize);
+    EXPECT_EQ(sharedModuleManager->GetModuleFilenameStorageSizeForTest(), sharedStorageSize);
+}
+#endif
+
+/**
+ * @tc.name: GetModuleSerializeArrayWithSharedModules
+ * @tc.desc: Test GetModuleSerializeArray includes shared modules (line 86-91)
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ModuleSnapshotTest, GetModuleSerializeArrayWithSharedModules)
+{
+    auto vm = thread->GetEcmaVM();
+    ObjectFactory *factory = vm->GetFactory();
+
+    JSHandle<SourceTextModule> normalModule = factory->NewSourceTextModule();
+    CString baseFileName = "modules.abc";
+    CString normalRecordName = "serArrayNormal";
+    normalModule->SetEcmaModuleFilenameString(thread, baseFileName);
+    normalModule->SetEcmaModuleRecordNameString(normalRecordName);
+    normalModule->SetTypes(ModuleTypes::ECMA_MODULE);
+    normalModule->SetStatus(ModuleStatus::INSTANTIATED);
+    thread->GetModuleManager()->AddResolveImportedModule(normalRecordName, normalModule.GetTaggedValue());
+
+    JSHandle<SourceTextModule> sharedModule = factory->NewSSourceTextModule();
+    CString sharedRecordName = "serArrayShared";
+    sharedModule->SetEcmaSharedModuleFilenameString(baseFileName);
+    sharedModule->SetEcmaModuleRecordNameString(sharedRecordName);
+    sharedModule->SetSharedType(SharedTypes::SHARED_MODULE);
+    sharedModule->SetTypes(ModuleTypes::ECMA_MODULE);
+    sharedModule->SetStatus(ModuleStatus::INSTANTIATED);
+    TryInsertInSModuleManager(thread, sharedRecordName, sharedModule);
+
+    JSHandle<TaggedArray> serializeArray = MockModuleSnapshot::MockGetModuleSerializeArray(thread);
+    uint32_t normalSize = thread->GetModuleManager()->GetResolvedModulesSize();
+    uint32_t sharedSize = SharedModuleManager::GetInstance()->GetResolvedSharedModulesSize(thread);
+    ASSERT_EQ(serializeArray->GetLength(), normalSize + sharedSize);
+    ASSERT_GE(normalSize, static_cast<uint32_t>(1));
+    ASSERT_GE(sharedSize, static_cast<uint32_t>(1));
+}
+
 }  // namespace panda::test

@@ -163,4 +163,24 @@ void JSNApi::InitHybridVMEnv(EcmaVM *vm)
     vm->CreateHybridParam();
 }
 
+void JSNApi::SetHybridVMFlag(EcmaVM *vm, bool isHybrid)
+{
+    auto instance = ecmascript::Runtime::GetInstance();
+    ASSERT(instance != nullptr);
+
+    CROSS_THREAD_AND_EXCEPTION_CHECK(vm);
+    ecmascript::ThreadManagedScope managedScope(thread);
+
+    instance->SetHybridVm(isHybrid);
+}
+
+bool JSNApi::IsHybridVM(const EcmaVM *vm)
+{
+    auto instance = ecmascript::Runtime::GetInstance();
+    ASSERT(instance != nullptr);
+    if (instance == nullptr) { return false; }
+    CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, false);
+ 
+    return instance->IsHybridVm();
+}
 }  // namespace panda

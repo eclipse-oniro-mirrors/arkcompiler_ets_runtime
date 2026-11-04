@@ -16,7 +16,6 @@
 #ifndef ECMASCRIPT_MODULE_VALUE_ACCESSOR_H
 #define ECMASCRIPT_MODULE_VALUE_ACCESSOR_H
 
-#include "ecmascript/debugger/debugger_api.h"
 #include "ecmascript/module/js_module_source_text.h"
 #include "ecmascript/stubs/runtime_stubs.h"
 
@@ -45,7 +44,8 @@ public:
 
     static void StoreModuleValue(JSThread *thread, int32_t index, JSTaggedValue value);
     static void StoreModuleValue(JSThread *thread, int32_t index, JSTaggedValue value, JSTaggedValue jsFunc);
-    static JSHandle<JSTaggedValue> GetNativeOrCjsExports(JSThread *thread, JSTaggedValue resolvedModule);
+    static JSHandle<JSTaggedValue> GetNativeOrCjsExports(JSThread *thread, JSHandle<SourceTextModule> resolvedModule);
+
 protected:
     struct GetModuleValueFromBindingInfo {
         JSThread *thread;
@@ -80,19 +80,24 @@ protected:
     static JSTaggedValue GetModuleValueFromRecordIndexBinding(const GetModuleValueFromBindingInfo &info);
     template <bool isLazy>
     static JSTaggedValue GetModuleValueFromRecordBinding(const GetModuleValueFromBindingInfo &info);
-    static JSTaggedValue UpdateBindingAndGetModuleValue(JSThread *thread,
-                                                        JSHandle<SourceTextModule> module,
-                                                        JSHandle<SourceTextModule> requiredModule,
-                                                        int32_t index,
-                                                        JSTaggedValue bindingName);
+    static JSTaggedValue UpdateBindingAndGetModuleValue(JSThread *thread, JSHandle<SourceTextModule> module,
+                                                        JSHandle<SourceTextModule> requiredModule, int32_t index,
+                                                        JSHandle<JSTaggedValue> bindingName);
 
     template <bool isLazy>
     static void EvaluateModuleIfNeeded(JSThread *thread, JSHandle<SourceTextModule> module);
-    static void LogModuleLoadInfo(JSThread *thread,
-                                  JSHandle<SourceTextModule> module,
-                                  JSHandle<SourceTextModule> requiredModule,
-                                  int32_t index,
-                                  bool isSendable);
+
+    inline static void LogModuleLoadInfo(JSThread* thread, JSHandle<SourceTextModule> module,
+        JSHandle<SourceTextModule> requiredModule, int32_t index, bool isSendable)
+    {
+        if (isSendable) {
+            return;
+        }
+        ModuleLogger *moduleLogger = thread->GetModuleLogger();
+        if (moduleLogger != nullptr) {
+            moduleLogger->InsertModuleLoadInfo(module, requiredModule, index);
+        }
+    }
 
     template <bool isLazy, typename BindingType>
     static JSHandle<SourceTextModule> GetResolvedModule(JSThread *thread,
@@ -100,9 +105,11 @@ protected:
                                                         JSHandle<BindingType> binding,
                                                         const CString& requestModuleRecordName);
 
+    static bool TryGetEvaluatedImportedModuleValueByIndex(JSThread *thread,
+        const CString *moduleRecord, int32_t index, JSTaggedValue &result);
+
     friend class DeprecatedModuleValueAccessor;
     friend class RuntimeStubs;
-    friend class tooling::DebuggerApi;
 };
 class DeprecatedModuleValueAccessor {
 public:

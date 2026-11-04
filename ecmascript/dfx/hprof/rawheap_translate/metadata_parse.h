@@ -17,8 +17,8 @@
 #define METADATA_JSON_PARSE_H
 
 #include "cJSON.h"
-#include "ecmascript/dfx/hprof/rawheap_translate/common.h"
-#include "ecmascript/dfx/hprof/rawheap_translate/utils.h"
+#include "common.h"
+#include "utils.h"
 
 namespace rawheap_translate {
 class MetaParser {
@@ -37,7 +37,7 @@ public:
     JSType GetJSTypeFromHClass(Node *hclass);
     JSType GetJSTypeFromTypeName(const std::string &name);
     NodeType GetNodeType(JSType type);
-    uint32_t GetNativateSize(Node *node, JSType type);
+    uint32_t GetNativateSize(Node *node);
     uint32_t GetPropsNumberOfJSObject(Node *hclass);
     uint32_t GetInlinedPropertiesCount(Node *hclass);
     bool IsPropertyInlinedProps(uint64_t attrValue);
@@ -49,8 +49,10 @@ public:
     bool IsString(JSType type);
     bool IsDictionaryMode(JSType type);
     bool IsJSObject(JSType type);
+    bool IsJSWrappedNapiObject(JSType type);
     bool IsGlobalEnv(JSType type);
     bool IsArray(JSType type);
+    bool GetArrayLayout(JSType type, ArrayLayout &layout) const;
 
     BitField* GetBitField()
     {
@@ -77,6 +79,7 @@ private:
     void SetBitField(const std::string &metaName, const std::string &fieldName, Field &field);
     void FillMetaData(MetaData *parent, MetaData *meta);
     void GenerateMetaData();
+    void ResolveArrayLayout(MetaData *meta);
     MetaData* FindOrCreateMetaData(const std::string &name);
 
     static void IterateJSONArray(const cJSON *array, const std::function<void(const cJSON *)> &visitor);

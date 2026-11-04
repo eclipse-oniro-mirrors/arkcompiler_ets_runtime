@@ -61,12 +61,12 @@ public:
 
     bool operator==([[maybe_unused]] CAddressAllocator const &other) const
     {
-        return false;
+        return true;
     }
 
     bool operator!=([[maybe_unused]] CAddressAllocator const &other) const
     {
-        return true;
+        return false;
     }
 
     // NOLINTNEXTLINE(readability-identifier-naming)

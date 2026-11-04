@@ -1,0 +1,7 @@
+1,2
+2,3
+3,13
+45
+16
+true,1.5,text,null,undefined,true,7
+false,2,text,null,undefined,true,7

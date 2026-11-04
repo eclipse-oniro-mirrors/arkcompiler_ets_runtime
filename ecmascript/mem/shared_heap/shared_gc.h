@@ -46,17 +46,16 @@ protected:
     void Mark() override;
     void Sweep() override;
     void Finish() override;
+    virtual void PreSweep();
 
 private:
     void MarkRoots(SharedMarkType markType);
     void UpdateRecordWeakReference();
-    void Evacuate();
-    void PreSweep();
 
+protected:
     SharedHeap *sHeap_ {nullptr};
     SharedGCWorkManager *sWorkManager_ {nullptr};
     bool markingInProgress_ {false};
-    bool evacuated_ {false};
     bool concurrentProcessStringTable_ {false};
 };
 }  // namespace panda::ecmascript

@@ -21,10 +21,19 @@
 #include "ecmascript/mem/concurrent_marker.h"
 #include "ecmascript/mem/concurrent_sweeper.h"
 #include "ecmascript/napi/include/dfx_jsnapi.h"
+#include "ecmascript/napi/jsnapi_helper.h"
 #include "ecmascript/tests/test_helper.h"
 #include "ecmascript/dfx/cpu_profiler/samples_record.h"
 #include "ecmascript/dfx/tracing/tracing.h"
 #include "ecmascript/platform/backtrace.h"
+#include "ecmascript/platform/debug_signal.h"
+#include <chrono>
+#include <csignal>
+#include <cstdio>
+#include <fstream>
+#include <iterator>
+#include <thread>
+#include <vector>
 
 using namespace panda;
 using namespace panda::ecmascript;
@@ -37,28 +46,40 @@ public:
     {
         GTEST_LOG_(INFO) << "SetUpTestCase";
     }
-
     static void TearDownTestCase()
     {
         GTEST_LOG_(INFO) << "TearDownCase";
     }
-
     void SetUp() override
     {
         TestHelper::CreateEcmaVMWithScope(vm_, thread_, scope_);
         vm_->GetJSThread()->GetEcmaVM()->SetRuntimeStatEnable(true);
         vm_->SetEnableForceGC(false);
     }
-
     void TearDown() override
     {
         TestHelper::DestroyEcmaVMWithScope(vm_, scope_);
     }
-
 protected:
     EcmaVM *vm_ {nullptr};
     JSThread *thread_ = {nullptr};
     EcmaHandleScope *scope_ {nullptr};
+};
+
+class TestableDFXJSNApiTestsGCStats : public GCStats {
+public:
+    explicit TestableDFXJSNApiTestsGCStats(const Heap *heap) : GCStats(heap) {}
+
+    using GCStats::GetGCStatistic;
+    using GCStats::RecordGCStatisticEnd;
+    using GCStats::RecordGCStatisticStart;
+    using GCStats::SetRecordData;
+    using GCStats::SetRecordDuration;
+
+    void SetGCTypeForTest(GCType type)
+    {
+        gcType_ = type;
+    }
 };
 
 bool MatchJSONLineHeader(std::fstream &fs, const std::string filePath, int lineNum, CString lineContent)
@@ -78,7 +99,25 @@ bool MatchJSONLineHeader(std::fstream &fs, const std::string filePath, int lineN
     fs.clear();
     return false;
 }
+bool IsEmptyFile(const std::string &filePath)
+{
+    std::fstream fs(filePath, std::ios::in | std::ios::binary);
+    if (!fs.is_open()) {
+        return false;
+    }
+    return fs.peek() == std::fstream::traits_type::eof();
+}
 
+bool CreateEmptyFile(const std::string &filePath)
+{
+    std::fstream outputString(filePath, std::ios::out);
+    if (!outputString.is_open()) {
+        return false;
+    }
+    outputString.close();
+    outputString.clear();
+    return true;
+}
 HWTEST_F_L0(DFXJSNApiTests, DumpHeapSnapshot_001)
 {
     const std::string filePath = "DFXJSNApiTests_json_001.heapsnapshot";
@@ -107,7 +146,6 @@ HWTEST_F_L0(DFXJSNApiTests, DumpHeapSnapshot_001)
     EXPECT_TRUE(MatchJSONLineHeader(inputFile, filePath, 10, "\"location_fields\":"));
     std::remove(filePath.c_str());
 }
-
 HWTEST_F_L0(DFXJSNApiTests, DumpHeapSnapshot_002)
 {
     const std::string filePath = "DFXJSNApiTests_json_002.heapsnapshot";
@@ -140,7 +178,6 @@ HWTEST_F_L0(DFXJSNApiTests, DumpHeapSnapshot_002)
     EXPECT_TRUE(MatchJSONLineHeader(fStream, filePath, 10, "\"location_fields\":"));
     std::remove(filePath.c_str());
 }
-
 HWTEST_F_L0(DFXJSNApiTests, BuildNativeAndJsStackTrace)
 {
     bool result = false;
@@ -276,18 +313,21 @@ HWTEST_F_L0(DFXJSNApiTests, GetArrayBufferSize_GetHeapTotalSize_GetHeapUsedSize)
     size_t heapUsedSize = DFXJSNApi::GetHeapUsedSize(vm_);
     size_t heapObjectSize = DFXJSNApi::GetHeapObjectSize(vm_);
     size_t processHeapLimitSize = DFXJSNApi::GetProcessHeapLimitSize();
+    size_t sharedHeapObjectSize = DFXJSNApi::GetSharedHeapSize();
 
     size_t expectArrayBufferSize = 0;
     size_t expectHeapTotalSize = 0;
     size_t expectHeapUsedSize = 0;
     size_t expectHeapObjectSize = 0;
     size_t expectProcessHeapLimitSize = 0;
+    size_t expectSharedHeapObjectSize = 0;
 
     if (g_isEnableCMCGC) {
         expectHeapTotalSize = common::Heap::GetHeap().GetCurrentCapacity();
         expectHeapUsedSize = common::Heap::GetHeap().GetSurvivedSize();
         expectHeapObjectSize = common::Heap::GetHeap().GetAllocatedSize();
         expectProcessHeapLimitSize = common::Heap::GetHeap().GetMaxCapacity();
+        expectSharedHeapObjectSize = 0;
     } else {
         auto heap = vm_->GetHeap();
         expectArrayBufferSize = heap->GetArrayBufferSize();
@@ -295,6 +335,7 @@ HWTEST_F_L0(DFXJSNApiTests, GetArrayBufferSize_GetHeapTotalSize_GetHeapUsedSize)
         expectHeapUsedSize = heap->GetLiveObjectSize();
         expectHeapObjectSize = heap->GetHeapObjectSize();
         expectProcessHeapLimitSize = heap->GetEcmaParamConfiguration().GetMaxHeapSize();
+        expectSharedHeapObjectSize = SharedHeap::GetInstance()->GetHeapObjectSize();
         EXPECT_EQ(arrayBufferSize, expectArrayBufferSize);
         EXPECT_LE(processHeapLimitSize, MAX_MEM_POOL_CAPACITY);
     }
@@ -304,6 +345,7 @@ HWTEST_F_L0(DFXJSNApiTests, GetArrayBufferSize_GetHeapTotalSize_GetHeapUsedSize)
     EXPECT_EQ(heapUsedSize, expectHeapUsedSize);
     EXPECT_EQ(heapObjectSize, expectHeapObjectSize);
     EXPECT_GE(processHeapLimitSize, expectProcessHeapLimitSize);
+    EXPECT_EQ(sharedHeapObjectSize, expectSharedHeapObjectSize);
 }
 
 HWTEST_F_L0(DFXJSNApiTests, DFXJSNApiForGCInfo)
@@ -680,38 +722,6 @@ HWTEST_F_L0(DFXJSNApiTests, StopTracing)
 #endif
 }
 
-HWTEST_F_L0(DFXJSNApiTests, TranslateJSStackInfo)
-{
-    std::string resultUrl = "";
-    auto cb = [&resultUrl](std::string& url, int& line, int& column, std::string& packageName) -> bool {
-        line = 0;
-        column = 0;
-        packageName = "name";
-        if (url.find("TranslateJSStackInfo", 0) != std::string::npos) {
-            resultUrl = "true";
-            return true;
-        }
-        resultUrl = "false";
-        return false;
-    };
-
-    vm_->SetSourceMapTranslateCallback(nullptr);
-    std::string url = "TranslateJSStackInfo";
-    int32_t line = 0;
-    int32_t column = 0;
-    std::string packageName = "";
-    DFXJSNApi::TranslateJSStackInfo(vm_, url, line, column, packageName);
-
-    vm_->SetSourceMapTranslateCallback(cb);
-    url = "Translate";
-    DFXJSNApi::TranslateJSStackInfo(vm_, url, line, column, packageName);
-    ASSERT_STREQ(resultUrl.c_str(), "false");
-
-    url = "TranslateJSStackInfo";
-    DFXJSNApi::TranslateJSStackInfo(vm_, url, line, column, packageName);
-    ASSERT_STREQ(resultUrl.c_str(), "true");
-}
-
 HWTEST_F_L0(DFXJSNApiTests, GetCurrentThreadId)
 {
     ASSERT_EQ(DFXJSNApi::GetCurrentThreadId(), JSThread::GetCurrentThreadId());
@@ -791,16 +801,132 @@ HWTEST_F_L0(DFXJSNApiTests, GetMainThreadStackTrace_1)
 
 HWTEST_F_L0(DFXJSNApiTests, SetMultithreadingDetectionEnabled_1)
 {
-    DFXJSNApi::SetMultithreadingDetectionEnabled(vm_, true);
+    bool prevCheck = EcmaVM::GetMultiThreadCheck();
+    bool prevCountApi = EcmaVM::GetCheckCountApi();
+    bool prevAbort = EcmaVM::GetDetectionConfig().abort.load();
+    uint64_t prevFreq = EcmaVM::GetDetectionConfig().frequency.load();
+    uint64_t prevInterval = EcmaVM::GetDetectionConfig().interval.load();
+    DFXJSNApi::MultithreadingDetectionOptions options(true, 100, 5);
+    DFXJSNApi::SetMultithreadingDetectionEnabled(vm_, true, options);
     ASSERT_TRUE(EcmaVM::GetMultiThreadCheck());
     ASSERT_TRUE(EcmaVM::GetCheckCountApi());
+    ASSERT_TRUE(EcmaVM::GetDetectionConfig().abort.load());
+    ASSERT_EQ(EcmaVM::GetDetectionConfig().frequency.load(), 100U);
+    ASSERT_EQ(EcmaVM::GetDetectionConfig().interval.load(), 5U);
+    EcmaVM::SetMultiThreadCheck(prevCheck);
+    EcmaVM::SetCheckCountApi(prevCountApi);
+    EcmaVM::SetDetectionConfig(DFXJSNApi::MultithreadingDetectionOptions(prevAbort, prevFreq, prevInterval));
 }
 
 HWTEST_F_L0(DFXJSNApiTests, SetMultithreadingDetectionEnabled_2)
 {
-    DFXJSNApi::SetMultithreadingDetectionEnabled(vm_, false);
+    bool prevCheck = EcmaVM::GetMultiThreadCheck();
+    bool prevCountApi = EcmaVM::GetCheckCountApi();
+    DFXJSNApi::MultithreadingDetectionOptions options(false, 200, 10);
+    DFXJSNApi::SetMultithreadingDetectionEnabled(vm_, false, options);
     ASSERT_FALSE(EcmaVM::GetMultiThreadCheck());
     ASSERT_FALSE(EcmaVM::GetCheckCountApi());
+    EcmaVM::SetMultiThreadCheck(prevCheck);
+    EcmaVM::SetCheckCountApi(prevCountApi);
+}
+
+HWTEST_F_L0(DFXJSNApiTests, SetMultithreadingDetectionEnabled_WithAbortFalse)
+{
+    bool prevCheck = EcmaVM::GetMultiThreadCheck();
+    bool prevAbort = EcmaVM::GetDetectionConfig().abort.load();
+    uint64_t prevFreq = EcmaVM::GetDetectionConfig().frequency.load();
+    uint64_t prevInterval = EcmaVM::GetDetectionConfig().interval.load();
+    DFXJSNApi::MultithreadingDetectionOptions options(false, 100, 5);
+    DFXJSNApi::SetMultithreadingDetectionEnabled(vm_, true, options);
+    ASSERT_TRUE(EcmaVM::GetMultiThreadCheck());
+    ASSERT_FALSE(EcmaVM::GetDetectionConfig().abort.load());
+    EcmaVM::SetMultiThreadCheck(prevCheck);
+    EcmaVM::SetDetectionConfig(DFXJSNApi::MultithreadingDetectionOptions(prevAbort, prevFreq, prevInterval));
+}
+
+HWTEST_F_L0(DFXJSNApiTests, SetMultithreadingDetectionEnabled_DisabledNoOptionsApplied)
+{
+    bool prevAbort = EcmaVM::GetDetectionConfig().abort.load();
+    uint64_t prevFreq = EcmaVM::GetDetectionConfig().frequency.load();
+    uint64_t prevInterval = EcmaVM::GetDetectionConfig().interval.load();
+    EcmaVM::SetDetectionConfig(DFXJSNApi::MultithreadingDetectionOptions(true, 150, 8));
+    DFXJSNApi::MultithreadingDetectionOptions options(false, 50, 1);
+    DFXJSNApi::SetMultithreadingDetectionEnabled(vm_, false, options);
+    ASSERT_FALSE(EcmaVM::GetMultiThreadCheck());
+    ASSERT_TRUE(EcmaVM::GetDetectionConfig().abort.load());
+    ASSERT_EQ(EcmaVM::GetDetectionConfig().frequency.load(), 150U);
+    ASSERT_EQ(EcmaVM::GetDetectionConfig().interval.load(), 8U);
+    EcmaVM::SetDetectionConfig(DFXJSNApi::MultithreadingDetectionOptions(prevAbort, prevFreq, prevInterval));
+}
+
+HWTEST_F_L0(DFXJSNApiTests, SetDetectionConfig_ValidValue)
+{
+    bool prevAbort = EcmaVM::GetDetectionConfig().abort.load();
+    uint64_t prevFreq = EcmaVM::GetDetectionConfig().frequency.load();
+    uint64_t prevInterval = EcmaVM::GetDetectionConfig().interval.load();
+    EcmaVM::SetDetectionConfig(DFXJSNApi::MultithreadingDetectionOptions(true, 100, 0));
+    ASSERT_TRUE(EcmaVM::GetDetectionConfig().abort.load());
+    ASSERT_EQ(EcmaVM::GetDetectionConfig().frequency.load(), 100U);
+    ASSERT_EQ(EcmaVM::GetDetectionConfig().interval.load(), 0U);
+    EcmaVM::SetDetectionConfig(DFXJSNApi::MultithreadingDetectionOptions(true, 200, 1440));
+    ASSERT_EQ(EcmaVM::GetDetectionConfig().frequency.load(), 200U);
+    ASSERT_EQ(EcmaVM::GetDetectionConfig().interval.load(), 1440U);
+    EcmaVM::SetDetectionConfig(DFXJSNApi::MultithreadingDetectionOptions(prevAbort, prevFreq, prevInterval));
+}
+
+HWTEST_F_L0(DFXJSNApiTests, SetDetectionConfig_InvalidFrequency)
+{
+    uint64_t originalFreq = EcmaVM::GetDetectionConfig().frequency.load();
+    EcmaVM::SetDetectionConfig(DFXJSNApi::MultithreadingDetectionOptions(true, -1, 5));
+    ASSERT_EQ(EcmaVM::GetDetectionConfig().frequency.load(), originalFreq);
+    EcmaVM::SetDetectionConfig(DFXJSNApi::MultithreadingDetectionOptions(true, 99, 5));
+    ASSERT_EQ(EcmaVM::GetDetectionConfig().frequency.load(), originalFreq);
+}
+
+HWTEST_F_L0(DFXJSNApiTests, SetDetectionConfig_InvalidInterval)
+{
+    uint64_t originalInterval = EcmaVM::GetDetectionConfig().interval.load();
+    EcmaVM::SetDetectionConfig(DFXJSNApi::MultithreadingDetectionOptions(true, 100, 14401));
+    ASSERT_EQ(EcmaVM::GetDetectionConfig().interval.load(), originalInterval);
+    EcmaVM::SetDetectionConfig(DFXJSNApi::MultithreadingDetectionOptions(true, 100, -1));
+    ASSERT_EQ(EcmaVM::GetDetectionConfig().interval.load(), originalInterval);
+}
+
+HWTEST_F_L0(DFXJSNApiTests, CheckCountNum_TrueAndFalse)
+{
+    bool prevCheckCountApi = EcmaVM::GetCheckCountApi();
+    bool prevAbort = EcmaVM::GetDetectionConfig().abort.load();
+    uint64_t prevFreq = EcmaVM::GetDetectionConfig().frequency.load();
+    uint64_t prevInterval = EcmaVM::GetDetectionConfig().interval.load();
+    EcmaVM::SetCheckCountApi(false);
+    EcmaVM::SetDetectionConfig(DFXJSNApi::MultithreadingDetectionOptions(true, 100, 5));
+    while (!vm_->CheckCountNum()) {}
+    ASSERT_FALSE(vm_->CheckCountNum());
+    for (int i = 0; i < 98; i++) {
+        vm_->CheckCountNum();
+    }
+    ASSERT_TRUE(vm_->CheckCountNum());
+    EcmaVM::SetCheckCountApi(prevCheckCountApi);
+    EcmaVM::SetDetectionConfig(DFXJSNApi::MultithreadingDetectionOptions(prevAbort, prevFreq, prevInterval));
+}
+
+HWTEST_F_L0(DFXJSNApiTests, CheckTimeInterval_LastTimeZeroReturnsTrue)
+{
+    ASSERT_TRUE(vm_->CheckTimeInterval());
+}
+
+HWTEST_F_L0(DFXJSNApiTests, GetTimeStamp_ReturnsNonZero)
+{
+    uint64_t ts = vm_->GetTimeStamp();
+    ASSERT_GT(ts, 0U);
+}
+
+HWTEST_F_L0(DFXJSNApiTests, MultithreadingDetectionOptions_DefaultValues)
+{
+    DFXJSNApi::MultithreadingDetectionOptions opts(true, 100, 5);
+    ASSERT_TRUE(opts.abort);
+    ASSERT_EQ(opts.frequency, 100U);
+    ASSERT_EQ(opts.interval, 5U);
 }
 
 HWTEST_F_L0(DFXJSNApiTests, FindFunctionForHook_1)
@@ -813,7 +939,7 @@ HWTEST_F_L0(DFXJSNApiTests, FindFunctionForHook_1)
     std::string namespaceName = "TestNamespace2";
     std::string className = "TestClass1";
     std::string funcName = "testFunction";
-    JSHandle<JSTaggedValue> functionFound = DFXJSNApi::FindFunctionForHook(vm_, recordName,
+    Local<JSValueRef> functionFound = DFXJSNApi::FindFunctionForHook(vm_, recordName,
         namespaceName, className, funcName);
     EXPECT_TRUE(functionFound->IsUndefined());
 }
@@ -828,7 +954,7 @@ HWTEST_F_L0(DFXJSNApiTests, FindFunctionForHook_2)
     std::string namespaceName = "TestNamespace2";
     std::string className = "TestClass1";
     std::string funcName = "testFunction1";
-    JSHandle<JSTaggedValue> functionFound = DFXJSNApi::FindFunctionForHook(vm_, recordName,
+    Local<JSValueRef> functionFound = DFXJSNApi::FindFunctionForHook(vm_, recordName,
         namespaceName, className, funcName);
     EXPECT_TRUE(functionFound->IsUndefined());
 }
@@ -843,7 +969,7 @@ HWTEST_F_L0(DFXJSNApiTests, FindFunctionForHook_3)
     std::string namespaceName = "TestNamespace2";
     std::string className = "TestClass2";
     std::string funcName = "testFunction";
-    JSHandle<JSTaggedValue> functionFound = DFXJSNApi::FindFunctionForHook(vm_, recordName,
+    Local<JSValueRef> functionFound = DFXJSNApi::FindFunctionForHook(vm_, recordName,
         namespaceName, className, funcName);
     EXPECT_TRUE(functionFound->IsUndefined());
 }
@@ -858,7 +984,7 @@ HWTEST_F_L0(DFXJSNApiTests, FindFunctionForHook_4)
     std::string namespaceName = "";
     std::string className = "TestClass2";
     std::string funcName = "testFunction1";
-    JSHandle<JSTaggedValue> functionFound = DFXJSNApi::FindFunctionForHook(vm_, recordName,
+    Local<JSValueRef> functionFound = DFXJSNApi::FindFunctionForHook(vm_, recordName,
         namespaceName, className, funcName);
     EXPECT_TRUE(functionFound->IsUndefined());
 }
@@ -873,7 +999,7 @@ HWTEST_F_L0(DFXJSNApiTests, FindFunctionForHook_5)
     std::string namespaceName = "TestNamespace2";
     std::string className = "";
     std::string funcName = "testFunction";
-    JSHandle<JSTaggedValue> functionFound = DFXJSNApi::FindFunctionForHook(vm_, recordName,
+    Local<JSValueRef> functionFound = DFXJSNApi::FindFunctionForHook(vm_, recordName,
         namespaceName, className, funcName);
     EXPECT_TRUE(functionFound->IsUndefined());
 }
@@ -888,10 +1014,10 @@ HWTEST_F_L0(DFXJSNApiTests, FindFunctionForHook_6)
     std::string namespaceName = "TestNamespace1";
     std::string className = "";
     std::string funcName = "testFunction";
-    JSHandle<JSTaggedValue> functionFound = DFXJSNApi::FindFunctionForHook(vm_, recordName,
+    Local<JSValueRef> functionFound = DFXJSNApi::FindFunctionForHook(vm_, recordName,
         namespaceName, className, funcName);
-    EXPECT_TRUE(functionFound->IsJSFunction());
-    JSFunction *function = JSFunction::Cast(functionFound->GetTaggedObject());
+    EXPECT_TRUE(functionFound->IsJSFunction(vm_));
+    JSFunction *function = JSFunction::Cast(JSNApiHelper::ToJSHandle(functionFound)->GetTaggedObject());
     Method *method = Method::Cast(function->GetMethod(thread_));
     EXPECT_EQ("testFunction", method->ParseFunctionName(thread_));
 }
@@ -906,10 +1032,10 @@ HWTEST_F_L0(DFXJSNApiTests, FindFunctionForHook_7)
     std::string namespaceName = "TestNamespace2";
     std::string className = "TestClass1";
     std::string funcName = "testFunction";
-    JSHandle<JSTaggedValue> functionFound = DFXJSNApi::FindFunctionForHook(vm_, recordName,
+    Local<JSValueRef> functionFound = DFXJSNApi::FindFunctionForHook(vm_, recordName,
         namespaceName, className, funcName);
-    EXPECT_TRUE(functionFound->IsJSFunction());
-    JSFunction *function = JSFunction::Cast(functionFound->GetTaggedObject());
+    EXPECT_TRUE(functionFound->IsJSFunction(vm_));
+    JSFunction *function = JSFunction::Cast(JSNApiHelper::ToJSHandle(functionFound)->GetTaggedObject());
     Method *method = Method::Cast(function->GetMethod(thread_));
     EXPECT_EQ("testFunction", method->ParseFunctionName(thread_));
 }
@@ -924,10 +1050,10 @@ HWTEST_F_L0(DFXJSNApiTests, FindFunctionForHook_8)
     std::string namespaceName = "";
     std::string className = "TestClass2";
     std::string funcName = "testFunction";
-    JSHandle<JSTaggedValue> functionFound = DFXJSNApi::FindFunctionForHook(vm_, recordName,
+    Local<JSValueRef> functionFound = DFXJSNApi::FindFunctionForHook(vm_, recordName,
         namespaceName, className, funcName);
-    EXPECT_TRUE(functionFound->IsJSFunction());
-    JSFunction *function = JSFunction::Cast(functionFound->GetTaggedObject());
+    EXPECT_TRUE(functionFound->IsJSFunction(vm_));
+    JSFunction *function = JSFunction::Cast(JSNApiHelper::ToJSHandle(functionFound)->GetTaggedObject());
     Method *method = Method::Cast(function->GetMethod(thread_));
     EXPECT_EQ("testFunction", method->ParseFunctionName(thread_));
 }
@@ -942,10 +1068,10 @@ HWTEST_F_L0(DFXJSNApiTests, FindFunctionForHook_9)
     std::string namespaceName = "";
     std::string className = "";
     std::string funcName = "testFunction";
-    JSHandle<JSTaggedValue> functionFound = DFXJSNApi::FindFunctionForHook(vm_, recordName,
+    Local<JSValueRef> functionFound = DFXJSNApi::FindFunctionForHook(vm_, recordName,
         namespaceName, className, funcName);
-    EXPECT_TRUE(functionFound->IsJSFunction());
-    JSFunction *function = JSFunction::Cast(functionFound->GetTaggedObject());
+    EXPECT_TRUE(functionFound->IsJSFunction(vm_));
+    JSFunction *function = JSFunction::Cast(JSNApiHelper::ToJSHandle(functionFound)->GetTaggedObject());
     Method *method = Method::Cast(function->GetMethod(thread_));
     EXPECT_EQ("testFunction", method->ParseFunctionName(thread_));
 }
@@ -981,12 +1107,14 @@ HWTEST_F_L0(DFXJSNApiTests, ReplaceFunctionForHook_1) {
     backupFunction->SetLexicalEnv(thread_, lexicalEnv3.GetTaggedValue());
     EXPECT_FALSE(targetFunction->GetLexicalEnv(thread_) == hookFunction->GetLexicalEnv(thread_));
     EXPECT_FALSE(targetFunction->GetCodeEntryOrNativePointer() == hookFunction->GetCodeEntryOrNativePointer());
-    JSHandle<JSTaggedValue> target = JSHandle<JSTaggedValue>(targetFunction);
-    JSHandle<JSTaggedValue> hook = JSHandle<JSTaggedValue>(hookFunction);
-    JSHandle<JSTaggedValue> backup = JSHandle<JSTaggedValue>(backupFunction);
+    Local<JSValueRef> target = JSNApiHelper::ToLocal<JSValueRef>(JSHandle<JSTaggedValue>(targetFunction));
+    Local<JSValueRef> hook = JSNApiHelper::ToLocal<JSValueRef>(JSHandle<JSTaggedValue>(hookFunction));
+    Local<JSValueRef> backup = JSNApiHelper::ToLocal<JSValueRef>(JSHandle<JSTaggedValue>(backupFunction));
     DFXJSNApi::ReplaceFunctionForHook(vm_, target, hook, backup);
-    JSHandle<JSFunction> targetFunc = JSHandle<JSFunction>::Cast(target);
-    JSHandle<JSFunction> hookFunc = JSHandle<JSFunction>::Cast(hook);
+    JSHandle<JSTaggedValue> targetVal = JSNApiHelper::ToJSHandle(target);
+    JSHandle<JSTaggedValue> hookVal = JSNApiHelper::ToJSHandle(hook);
+    JSHandle<JSFunction> targetFunc = JSHandle<JSFunction>::Cast(targetVal);
+    JSHandle<JSFunction> hookFunc = JSHandle<JSFunction>::Cast(hookVal);
     EXPECT_TRUE(targetFunc->GetLexicalEnv(thread_) == targetFunc->GetLexicalEnv(thread_));
     EXPECT_TRUE(hookFunc->GetCodeEntryOrNativePointer() == hookFunc->GetCodeEntryOrNativePointer());
 }
@@ -1031,5 +1159,1425 @@ HWTEST_F_L0(DFXJSNApiTests, GetHybridStackTrace3) {
     std::string stackTraceStr;
     DFXJSNApi::GetHybridStackTrace(vm_, stackTraceStr);
     EXPECT_TRUE(stackTraceStr.empty());
+}
+
+HWTEST_F_L0(DFXJSNApiTests, GetGCStatisticMainThread001)
+{
+    auto expectStats = GCStats::MergeGCStatistic(vm_->GetEcmaGCStats()->GetGCStatistic(),
+        ecmascript::SharedHeap::GetInstance()->GetEcmaGCStats()->GetGCStatistic());
+    EXPECT_EQ(expectStats.count, 0U);
+
+    auto gcStats = DFXJSNApi::GetGCStatistic(vm_);
+    EXPECT_EQ(gcStats.count, expectStats.count);
+    EXPECT_FLOAT_EQ(gcStats.maxPause, expectStats.maxPause);
+    EXPECT_FLOAT_EQ(gcStats.minPause, expectStats.minPause);
+    EXPECT_FLOAT_EQ(gcStats.averagePause, 0.0f);
+    EXPECT_EQ(gcStats.lastStartTime, expectStats.lastStartTime);
+    EXPECT_EQ(gcStats.lastEndTime, expectStats.lastEndTime);
+    EXPECT_STREQ(gcStats.lastType, expectStats.lastType);
+}
+
+HWTEST_F_L0(DFXJSNApiTests, GetGCStatisticMainThread002)
+{
+    if constexpr (G_USE_CMS_GC) {
+        return;
+    }
+    if (g_isEnableCMCGC) {
+        return;
+    }
+
+    auto heap = const_cast<Heap *>(vm_->GetHeap());
+    heap->CollectGarbage(TriggerGCType::FULL_GC);
+    ecmascript::SharedHeap::GetInstance()->CollectGarbage<TriggerGCType::SHARED_GC, GCReason::OTHER>(thread_);
+
+    auto expectStats = GCStats::MergeGCStatistic(vm_->GetEcmaGCStats()->GetGCStatistic(),
+        ecmascript::SharedHeap::GetInstance()->GetEcmaGCStats()->GetGCStatistic());
+    EXPECT_GT(expectStats.count, 0U);
+
+    auto gcStats = DFXJSNApi::GetGCStatistic(vm_);
+    EXPECT_EQ(gcStats.count, expectStats.count);
+    EXPECT_FLOAT_EQ(gcStats.maxPause, expectStats.maxPause);
+    EXPECT_FLOAT_EQ(gcStats.minPause, expectStats.minPause);
+    EXPECT_FLOAT_EQ(gcStats.averagePause, expectStats.totalPause / expectStats.count);
+    EXPECT_EQ(gcStats.lastStartTime, expectStats.lastStartTime);
+    EXPECT_EQ(gcStats.lastEndTime, expectStats.lastEndTime);
+    EXPECT_STREQ(gcStats.lastType, expectStats.lastType);
+}
+
+HWTEST_F_L0(DFXJSNApiTests, GetGCStatisticMainThread003)
+{
+    auto expectStats = GCStats::MergeGCStatistic(vm_->GetEcmaGCStats()->GetGCStatistic(),
+        ecmascript::SharedHeap::GetInstance()->GetEcmaGCStats()->GetGCStatistic());
+    auto gcStats = DFXJSNApi::GetGCStatistic(vm_);
+
+    EXPECT_EQ(gcStats.count, expectStats.count);
+    EXPECT_EQ(gcStats.lastStartTime, expectStats.lastStartTime);
+    EXPECT_EQ(gcStats.lastEndTime, expectStats.lastEndTime);
+    if (gcStats.count == 0) {
+        EXPECT_FLOAT_EQ(gcStats.averagePause, 0.0f);
+    } else {
+        EXPECT_FLOAT_EQ(gcStats.averagePause, expectStats.totalPause / expectStats.count);
+    }
+}
+
+HWTEST_F_L0(DFXJSNApiTests, GetGCStatisticMainThread004)
+{
+    if constexpr (G_USE_CMS_GC) {
+        return;
+    }
+    if (g_isEnableCMCGC) {
+        return;
+    }
+
+    auto heap = const_cast<Heap *>(vm_->GetHeap());
+    heap->CollectGarbage(TriggerGCType::OLD_GC);
+    auto expectStats = GCStats::MergeGCStatistic(vm_->GetEcmaGCStats()->GetGCStatistic(),
+        ecmascript::SharedHeap::GetInstance()->GetEcmaGCStats()->GetGCStatistic());
+    auto gcStats = DFXJSNApi::GetGCStatistic(vm_);
+
+    EXPECT_EQ(gcStats.count, expectStats.count);
+    EXPECT_FLOAT_EQ(gcStats.maxPause, expectStats.maxPause);
+    EXPECT_FLOAT_EQ(gcStats.minPause, expectStats.minPause);
+    EXPECT_FLOAT_EQ(gcStats.averagePause, expectStats.totalPause / expectStats.count);
+    EXPECT_EQ(gcStats.lastStartTime, expectStats.lastStartTime);
+    EXPECT_EQ(gcStats.lastEndTime, expectStats.lastEndTime);
+    EXPECT_STREQ(gcStats.lastType, expectStats.lastType);
+}
+
+HWTEST_F_L0(DFXJSNApiTests, GetGCStatisticMainThread005)
+{
+    if constexpr (G_USE_CMS_GC) {
+        return;
+    }
+    if (g_isEnableCMCGC) {
+        return;
+    }
+
+    auto heap = const_cast<Heap *>(vm_->GetHeap());
+    heap->CollectGarbage(TriggerGCType::FULL_GC);
+    auto firstStats = DFXJSNApi::GetGCStatistic(vm_);
+    heap->CollectGarbage(TriggerGCType::FULL_GC);
+    auto secondStats = DFXJSNApi::GetGCStatistic(vm_);
+
+    EXPECT_GE(secondStats.count, firstStats.count);
+    EXPECT_GE(secondStats.maxPause, 0.0f);
+    EXPECT_GE(secondStats.minPause, 0.0f);
+    EXPECT_GE(secondStats.averagePause, 0.0f);
+    EXPECT_GE(secondStats.lastStartTime, firstStats.lastStartTime);
+    EXPECT_GE(secondStats.lastEndTime, firstStats.lastEndTime);
+}
+
+HWTEST_F_L0(DFXJSNApiTests, GetGCStatisticMainThread006)
+{
+    if constexpr (G_USE_CMS_GC) {
+        return;
+    }
+    if (g_isEnableCMCGC) {
+        return;
+    }
+
+    auto heap = const_cast<Heap *>(vm_->GetHeap());
+    ecmascript::SharedHeap *sharedHeap = ecmascript::SharedHeap::GetInstance();
+    heap->CollectGarbage(TriggerGCType::FULL_GC);
+    auto localStats = vm_->GetEcmaGCStats()->GetGCStatistic();
+    auto sharedStats = sharedHeap->GetEcmaGCStats()->GetGCStatistic();
+    auto mergedStats = GCStats::MergeGCStatistic(localStats, sharedStats);
+    auto gcStats = DFXJSNApi::GetGCStatistic(vm_);
+
+    EXPECT_EQ(gcStats.count, localStats.count + sharedStats.count);
+    EXPECT_EQ(gcStats.count, mergedStats.count);
+    EXPECT_FLOAT_EQ(gcStats.maxPause, mergedStats.maxPause);
+    EXPECT_FLOAT_EQ(gcStats.minPause, mergedStats.minPause);
+    EXPECT_FLOAT_EQ(gcStats.averagePause, mergedStats.totalPause / mergedStats.count);
+}
+
+HWTEST_F_L0(DFXJSNApiTests, GetGCStatisticMainThread007)
+{
+    auto expectStats = GCStats::MergeGCStatistic(vm_->GetEcmaGCStats()->GetGCStatistic(),
+        ecmascript::SharedHeap::GetInstance()->GetEcmaGCStats()->GetGCStatistic());
+    auto gcStats = DFXJSNApi::GetGCStatistic(vm_);
+
+    EXPECT_STREQ(gcStats.lastType, expectStats.lastType);
+    EXPECT_TRUE(std::strcmp(gcStats.lastType, "Local GC") == 0 ||
+        std::strcmp(gcStats.lastType, "Shared GC") == 0 ||
+        std::strcmp(gcStats.lastType, "UnknownType") == 0);
+}
+
+HWTEST_F_L0(DFXJSNApiTests, GetGCStatisticMainThread008)
+{
+    auto gcStats = DFXJSNApi::GetGCStatistic(vm_);
+
+    EXPECT_GE(gcStats.count, 0U);
+    EXPECT_GE(gcStats.maxPause, 0.0f);
+    EXPECT_GE(gcStats.minPause, 0.0f);
+    EXPECT_GE(gcStats.averagePause, 0.0f);
+    EXPECT_GE(gcStats.lastStartTime, 0U);
+    EXPECT_GE(gcStats.lastEndTime, 0U);
+    EXPECT_TRUE(gcStats.lastType != nullptr);
+}
+
+HWTEST_F_L0(DFXJSNApiTests, GetGCStatisticMainThread009)
+{
+    if constexpr (G_USE_CMS_GC) {
+        return;
+    }
+    if (g_isEnableCMCGC) {
+        return;
+    }
+
+    auto heap = const_cast<Heap *>(vm_->GetHeap());
+    heap->CollectGarbage(TriggerGCType::FULL_GC);
+    auto gcStats = DFXJSNApi::GetGCStatistic(vm_);
+
+    EXPECT_GT(gcStats.count, 0U);
+    EXPECT_GE(gcStats.maxPause, gcStats.minPause);
+    EXPECT_GE(gcStats.averagePause, 0.0f);
+    EXPECT_LE(gcStats.minPause, gcStats.maxPause);
+    EXPECT_LE(gcStats.lastStartTime, gcStats.lastEndTime);
+}
+
+HWTEST_F_L0(DFXJSNApiTests, GetGCStatisticMainThread010)
+{
+    if constexpr (G_USE_CMS_GC) {
+        return;
+    }
+    if (g_isEnableCMCGC) {
+        return;
+    }
+
+    auto sharedHeap = ecmascript::SharedHeap::GetInstance();
+    sharedHeap->CollectGarbage<TriggerGCType::SHARED_GC, GCReason::OTHER>(thread_);
+    auto expectStats = GCStats::MergeGCStatistic(vm_->GetEcmaGCStats()->GetGCStatistic(),
+        sharedHeap->GetEcmaGCStats()->GetGCStatistic());
+    auto gcStats = DFXJSNApi::GetGCStatistic(vm_);
+
+    EXPECT_EQ(gcStats.count, expectStats.count);
+    EXPECT_FLOAT_EQ(gcStats.maxPause, expectStats.maxPause);
+    EXPECT_FLOAT_EQ(gcStats.minPause, expectStats.minPause);
+    EXPECT_FLOAT_EQ(gcStats.averagePause, expectStats.totalPause / expectStats.count);
+    EXPECT_EQ(gcStats.lastStartTime, expectStats.lastStartTime);
+    EXPECT_EQ(gcStats.lastEndTime, expectStats.lastEndTime);
+    EXPECT_STREQ(gcStats.lastType, expectStats.lastType);
+}
+
+HWTEST_F_L0(DFXJSNApiTests, GetGCStatisticMainThread011)
+{
+    auto beforeStats = DFXJSNApi::GetGCStatistic(vm_);
+    auto afterStats = DFXJSNApi::GetGCStatistic(vm_);
+
+    EXPECT_EQ(afterStats.count, beforeStats.count);
+    EXPECT_FLOAT_EQ(afterStats.maxPause, beforeStats.maxPause);
+    EXPECT_FLOAT_EQ(afterStats.minPause, beforeStats.minPause);
+    EXPECT_FLOAT_EQ(afterStats.averagePause, beforeStats.averagePause);
+    EXPECT_EQ(afterStats.lastStartTime, beforeStats.lastStartTime);
+    EXPECT_EQ(afterStats.lastEndTime, beforeStats.lastEndTime);
+    EXPECT_STREQ(afterStats.lastType, beforeStats.lastType);
+}
+
+HWTEST_F_L0(DFXJSNApiTests, GetGCStatisticMainThread012)
+{
+    auto expectStats = GCStats::MergeGCStatistic(vm_->GetEcmaGCStats()->GetGCStatistic(),
+        ecmascript::SharedHeap::GetInstance()->GetEcmaGCStats()->GetGCStatistic());
+    auto gcStats = DFXJSNApi::GetGCStatistic(vm_);
+
+    float expectedAveragePause = expectStats.count == 0 ? 0.0f : (expectStats.totalPause / expectStats.count);
+    EXPECT_FLOAT_EQ(gcStats.averagePause, expectedAveragePause);
+    EXPECT_EQ(gcStats.count == 0, expectedAveragePause == 0.0f);
+}
+
+HWTEST_F_L0(DFXJSNApiTests, GetGCStatisticDataLocalAggregation001)
+{
+    auto heap = const_cast<Heap *>(vm_->GetHeap());
+    TestableDFXJSNApiTestsGCStats stats(heap);
+    stats.SetRecordData(RecordData::YOUNG_COUNT, 2);
+    stats.SetRecordDuration(RecordDuration::YOUNG_MIN_PAUSE, 2.0f);
+    stats.SetRecordDuration(RecordDuration::YOUNG_MAX_PAUSE, 6.0f);
+    stats.SetRecordDuration(RecordDuration::YOUNG_TOTAL_PAUSE, 7.0f);
+    stats.SetRecordData(RecordData::OLD_COUNT, 1);
+    stats.SetRecordDuration(RecordDuration::OLD_MIN_PAUSE, 4.0f);
+    stats.SetRecordDuration(RecordDuration::OLD_MAX_PAUSE, 5.0f);
+    stats.SetRecordDuration(RecordDuration::OLD_TOTAL_PAUSE, 5.0f);
+    stats.SetGCTypeForTest(GCType::PARTIAL_OLD_GC);
+    stats.RecordGCStatisticStart();
+    stats.RecordGCStatisticEnd();
+
+    auto gcStatistic = stats.GetGCStatistic();
+    EXPECT_EQ(gcStatistic.count, 3U);
+    EXPECT_FLOAT_EQ(gcStatistic.maxPause, 6.0f);
+    EXPECT_FLOAT_EQ(gcStatistic.minPause, 2.0f);
+    EXPECT_FLOAT_EQ(gcStatistic.totalPause, 12.0f);
+    EXPECT_STREQ(gcStatistic.lastType, "Local GC");
+}
+
+HWTEST_F_L0(DFXJSNApiTests, GetGCStatisticDataSharedAggregation001)
+{
+    auto heap = const_cast<Heap *>(vm_->GetHeap());
+    TestableDFXJSNApiTestsGCStats stats(heap);
+    stats.SetRecordData(RecordData::SHARED_COUNT, 2);
+    stats.SetRecordDuration(RecordDuration::SHARED_MIN_PAUSE, 1.0f);
+    stats.SetRecordDuration(RecordDuration::SHARED_MAX_PAUSE, 8.0f);
+    stats.SetRecordDuration(RecordDuration::SHARED_TOTAL_PAUSE, 9.0f);
+    stats.SetRecordData(RecordData::SWEEP_COUNT, 3);
+    stats.SetRecordDuration(RecordDuration::SWEEP_MIN_PAUSE, 2.0f);
+    stats.SetRecordDuration(RecordDuration::SWEEP_MAX_PAUSE, 7.0f);
+    stats.SetRecordDuration(RecordDuration::SWEEP_TOTAL_PAUSE, 12.0f);
+    stats.SetGCTypeForTest(GCType::SHARED_FULL_GC);
+    stats.RecordGCStatisticStart();
+    stats.RecordGCStatisticEnd();
+
+    auto gcStatistic = stats.GetGCStatistic();
+    EXPECT_EQ(gcStatistic.count, 5U);
+    EXPECT_FLOAT_EQ(gcStatistic.maxPause, 8.0f);
+    EXPECT_FLOAT_EQ(gcStatistic.minPause, 1.0f);
+    EXPECT_FLOAT_EQ(gcStatistic.totalPause, 21.0f);
+    EXPECT_STREQ(gcStatistic.lastType, "Shared GC");
+}
+
+HWTEST_F_L0(DFXJSNApiTests, GetGCStatisticDataUnknownType001)
+{
+    auto heap = const_cast<Heap *>(vm_->GetHeap());
+    TestableDFXJSNApiTestsGCStats stats(heap);
+    stats.SetGCTypeForTest(GCType::OTHER);
+    stats.RecordGCStatisticStart();
+    stats.RecordGCStatisticEnd();
+
+    auto gcStatistic = stats.GetGCStatistic();
+    EXPECT_EQ(gcStatistic.count, 0U);
+    EXPECT_FLOAT_EQ(gcStatistic.maxPause, 0.0f);
+    EXPECT_FLOAT_EQ(gcStatistic.minPause, 0.0f);
+    EXPECT_FLOAT_EQ(gcStatistic.totalPause, 0.0f);
+    EXPECT_STREQ(gcStatistic.lastType, "UnknownType");
+}
+
+HWTEST_F_L0(DFXJSNApiTests, MergeGCStatisticForDFX001)
+{
+    GCStatisticData localStats;
+    localStats.count = 2;
+    localStats.maxPause = 6.0f;
+    localStats.minPause = 2.0f;
+    localStats.totalPause = 8.0f;
+    localStats.lastStartTime = 10;
+    localStats.lastEndTime = 30;
+    localStats.lastType = "Local GC";
+
+    GCStatisticData sharedStats;
+    sharedStats.count = 4;
+    sharedStats.maxPause = 7.0f;
+    sharedStats.minPause = 1.0f;
+    sharedStats.totalPause = 20.0f;
+    sharedStats.lastStartTime = 50;
+    sharedStats.lastEndTime = 60;
+    sharedStats.lastType = "Shared GC";
+
+    auto merged = GCStats::MergeGCStatistic(localStats, sharedStats);
+    float averagePause = merged.count == 0 ? 0.0f : (merged.totalPause / merged.count);
+    EXPECT_EQ(merged.count, 6U);
+    EXPECT_FLOAT_EQ(merged.maxPause, 7.0f);
+    EXPECT_FLOAT_EQ(merged.minPause, 1.0f);
+    EXPECT_FLOAT_EQ(merged.totalPause, 28.0f);
+    EXPECT_FLOAT_EQ(averagePause, 28.0f / 6.0f);
+    EXPECT_STREQ(merged.lastType, "Shared GC");
+}
+
+HWTEST_F_L0(DFXJSNApiTests, MergeGCStatisticForDFX002)
+{
+    GCStatisticData localStats;
+    localStats.count = 0;
+    localStats.maxPause = 0.0f;
+    localStats.minPause = 0.0f;
+    localStats.totalPause = 0.0f;
+    localStats.lastStartTime = 0;
+    localStats.lastEndTime = 0;
+    localStats.lastType = "UnknownType";
+
+    GCStatisticData sharedStats;
+    sharedStats.count = 0;
+    sharedStats.maxPause = 0.0f;
+    sharedStats.minPause = 0.0f;
+    sharedStats.totalPause = 0.0f;
+    sharedStats.lastStartTime = 0;
+    sharedStats.lastEndTime = 0;
+    sharedStats.lastType = "UnknownType";
+
+    auto merged = GCStats::MergeGCStatistic(localStats, sharedStats);
+    float averagePause = merged.count == 0 ? 0.0f : (merged.totalPause / merged.count);
+    EXPECT_EQ(merged.count, 0U);
+    EXPECT_FLOAT_EQ(merged.maxPause, 0.0f);
+    EXPECT_FLOAT_EQ(merged.minPause, 0.0f);
+    EXPECT_FLOAT_EQ(merged.totalPause, 0.0f);
+    EXPECT_FLOAT_EQ(averagePause, 0.0f);
+    EXPECT_STREQ(merged.lastType, "UnknownType");
+}
+
+HWTEST_F_L0(DFXJSNApiTests, DumpHeapSnapshot_HybridEnv_DumpsDynamicSnapshot)
+{
+    // This API is used by dynamic hidebug and does not dispatch by languageEnv.
+    const std::string filePath = "DFXJSNApiTests_hybrid_dynamic.heapsnapshot";
+    ASSERT_TRUE(CreateEmptyFile(filePath));
+
+    DumpSnapShotOption dumpOption;
+    dumpOption.dumpFormat = ecmascript::DumpFormat::JSON;
+    dumpOption.languageEnv = ecmascript::LanguageEnv::HYBRID;
+    DFXJSNApi::DumpHeapSnapshot(vm_, filePath, dumpOption);
+
+    EXPECT_FALSE(IsEmptyFile(filePath));
+    std::remove(filePath.c_str());
+}
+
+HWTEST_F_L0(DFXJSNApiTests, DumpHeapSnapshot_StaticEnv_DumpsDynamicSnapshot)
+{
+    // This API is used by dynamic hidebug and does not dispatch by languageEnv.
+    const std::string filePath = "DFXJSNApiTests_static_dynamic.heapsnapshot";
+    ASSERT_TRUE(CreateEmptyFile(filePath));
+
+    DumpSnapShotOption dumpOption;
+    dumpOption.dumpFormat = ecmascript::DumpFormat::JSON;
+    dumpOption.languageEnv = ecmascript::LanguageEnv::STATIC;
+    DFXJSNApi::DumpHeapSnapshot(vm_, filePath, dumpOption);
+
+    EXPECT_FALSE(IsEmptyFile(filePath));
+    std::remove(filePath.c_str());
+}
+
+HWTEST_F_L0(DFXJSNApiTests, DumpHybridHeapSnapshot_NoFile)
+{
+    const std::string filePath = "DFXJSNApiTests_current_hybrid_nofile.heapsnapshot";
+    ASSERT_TRUE(CreateEmptyFile(filePath));
+
+    DumpSnapShotOption dumpOption;
+    dumpOption.dumpFormat = ecmascript::DumpFormat::JSON;
+    dumpOption.languageEnv = ecmascript::LanguageEnv::HYBRID;
+    EXPECT_FALSE(DFXJSNApi::DumpHybridHeapSnapshot(filePath, dumpOption));
+
+    EXPECT_TRUE(IsEmptyFile(filePath));
+    std::remove(filePath.c_str());
+}
+
+HWTEST_F_L0(DFXJSNApiTests, DumpHybridHeapSnapshot_StaticThreadReachesProfiler)
+{
+#if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER) && defined(PANDA_JS_ETS_HYBRID_MODE)
+    const std::string filePath = "DFXJSNApiTests_static_thread.heapsnapshot";
+    std::fstream outputStream(filePath, std::ios::out);
+    ASSERT_TRUE(outputStream.is_open());
+    outputStream << "sentinel";
+    outputStream.close();
+
+    bool hasNoCurrentJSThread = false;
+    bool result = true;
+    std::thread staticThread([&]() {
+        hasNoCurrentJSThread = JSThread::GetCurrent() == nullptr;
+        DumpSnapShotOption dumpOption;
+        dumpOption.dumpFormat = ecmascript::DumpFormat::JSON;
+        dumpOption.languageEnv = ecmascript::LanguageEnv::STATIC;
+        result = DFXJSNApi::DumpHybridHeapSnapshot(filePath, dumpOption);
+    });
+    staticThread.join();
+
+    EXPECT_TRUE(hasNoCurrentJSThread);
+    EXPECT_FALSE(result) << "Dump should fail without an attached STS runtime";
+    EXPECT_TRUE(IsEmptyFile(filePath))
+        << "A pure static thread should pass the NAPI guard and reach HybridHeapProfiler";
+    std::remove(filePath.c_str());
+#else
+    ASSERT_TRUE(true);
+#endif
+}
+
+HWTEST_F_L0(DFXJSNApiTests, DumpHybridRawHeapSnapshot_RejectsDynamicEnv)
+{
+    DumpSnapShotOption dumpOption;
+    dumpOption.dumpFormat = ecmascript::DumpFormat::BINARY;
+    dumpOption.languageEnv = ecmascript::LanguageEnv::DYNAMIC;
+    EXPECT_FALSE(DFXJSNApi::DumpHybridRawHeapSnapshot("dynamic.rawheap", "static.rawheap", dumpOption));
+}
+
+HWTEST_F_L0(DFXJSNApiTests, PerformHybridHeapDump_DumpOption)
+{
+    DumpSnapShotOption dumpOption;
+    dumpOption.dumpFormat = ecmascript::DumpFormat::JSON;
+    bool result = DFXJSNApi::PerformHybridHeapDump(vm_, dumpOption);
+    EXPECT_FALSE(result) << "PerformHybridHeapDump should fail without an attached STS runtime";
+}
+
+HWTEST_F_L0(DFXJSNApiTests, PerformHybridHeapDump_ValidatesOptionFlags)
+{
+    DumpSnapShotOption dumpOption;
+    dumpOption.dumpFormat = ecmascript::DumpFormat::JSON;
+    dumpOption.dumpDynamicHeap = true;
+    dumpOption.dumpStaticHeap = true;
+
+    bool result = DFXJSNApi::PerformHybridHeapDump(vm_, dumpOption);
+    EXPECT_FALSE(result) << "Caller-specified heap flags should not make hybrid dump succeed without STS runtime";
+    EXPECT_TRUE(dumpOption.dumpDynamicHeap);
+    EXPECT_TRUE(dumpOption.dumpStaticHeap);
+}
+
+HWTEST_F_L0(DFXJSNApiTests, DumpHeapSnapshot_Tid_HybridEnv)
+{
+    // DumpHeapSnapshot(vm, dumpOption, tid) with languageEnv=HYBRID
+    // routes to ScheduleHybridHeapDump which is a no-op in non-hybrid.
+    // Should not crash and should not produce output.
+    DumpSnapShotOption dumpOption;
+    dumpOption.dumpFormat = ecmascript::DumpFormat::JSON;
+    dumpOption.languageEnv = ecmascript::LanguageEnv::HYBRID;
+    uint32_t tid = vm_->GetTid();
+    ASSERT_NE(tid, 0U);
+    EXPECT_FALSE(vm_->IsWorkerThread());
+    DFXJSNApi::DumpHeapSnapshot(vm_, dumpOption, tid);
+}
+
+HWTEST_F_L0(DFXJSNApiTests, DumpHeapSnapshot_Tid_StaticEnv)
+{
+    DumpSnapShotOption dumpOption;
+    dumpOption.dumpFormat = ecmascript::DumpFormat::JSON;
+    dumpOption.languageEnv = ecmascript::LanguageEnv::STATIC;
+    uint32_t tid = vm_->GetTid();
+    ASSERT_NE(tid, 0U);
+    EXPECT_FALSE(vm_->IsWorkerThread());
+    DFXJSNApi::DumpHeapSnapshot(vm_, dumpOption, tid);
+}
+
+HWTEST_F_L0(DFXJSNApiTests, DumpHeapSnapshot_DynamicDefault_StillWorks)
+{
+    // Verify DYNAMIC (default) languageEnv still routes to old path and works
+    const std::string filePath = "DFXJSNApiTests_dynamic_default.heapsnapshot";
+    std::fstream outputString(filePath, std::ios::out);
+    outputString.close();
+    outputString.clear();
+
+    std::fstream inputFile {};
+    DumpSnapShotOption dumpOption;
+    dumpOption.dumpFormat = ecmascript::DumpFormat::JSON;
+    ASSERT_EQ(dumpOption.languageEnv, ecmascript::LanguageEnv::DYNAMIC);
+    DFXJSNApi::DumpHeapSnapshot(vm_, filePath, dumpOption);
+    EXPECT_TRUE(MatchJSONLineHeader(inputFile, filePath, 1, "{\"snapshot\":"));
+    std::remove(filePath.c_str());
+}
+
+HWTEST_F_L0(DFXJSNApiTests, InsertSoLoadFailure_InitialEmpty)
+{
+    EXPECT_EQ(vm_->GetSoLoadFailureNum(), 0U);
+    EXPECT_TRUE(vm_->GetAllSoLoadFailures().empty());
+}
+
+HWTEST_F_L0(DFXJSNApiTests, InsertSoLoadFailure_Single)
+{
+    LocalScope scope(vm_);
+    const std::string moduleName = "libsingle.so";
+    const std::string failureInfo = "dlopen failed: library not found";
+    DFXJSNApi::InsertSoLoadFailure(vm_, StringRef::NewFromUtf8(vm_, moduleName.c_str()), failureInfo);
+
+    EXPECT_EQ(vm_->GetSoLoadFailureNum(), 1U);
+    const auto &failures = vm_->GetAllSoLoadFailures();
+    ASSERT_EQ(failures.size(), 1U);
+    EXPECT_STREQ(failures[0].first.c_str(), moduleName.c_str());
+    EXPECT_STREQ(failures[0].second.c_str(), failureInfo.c_str());
+}
+
+HWTEST_F_L0(DFXJSNApiTests, InsertSoLoadFailure_Multiple)
+{
+    LocalScope scope(vm_);
+    DFXJSNApi::InsertSoLoadFailure(vm_, StringRef::NewFromUtf8(vm_, "moduleA"), "reasonA");
+    DFXJSNApi::InsertSoLoadFailure(vm_, StringRef::NewFromUtf8(vm_, "moduleB"), "reasonB");
+    DFXJSNApi::InsertSoLoadFailure(vm_, StringRef::NewFromUtf8(vm_, "moduleC"), "reasonC");
+
+    EXPECT_EQ(vm_->GetSoLoadFailureNum(), 3U);
+    const auto &failures = vm_->GetAllSoLoadFailures();
+    ASSERT_EQ(failures.size(), 3U);
+    // Records are kept in insertion order.
+    EXPECT_STREQ(failures[0].first.c_str(), "moduleA");
+    EXPECT_STREQ(failures[0].second.c_str(), "reasonA");
+    EXPECT_STREQ(failures[1].first.c_str(), "moduleB");
+    EXPECT_STREQ(failures[1].second.c_str(), "reasonB");
+    EXPECT_STREQ(failures[2].first.c_str(), "moduleC");
+    EXPECT_STREQ(failures[2].second.c_str(), "reasonC");
+}
+
+HWTEST_F_L0(DFXJSNApiTests, InsertSoLoadFailure_CapacityLimit)
+{
+    LocalScope scope(vm_);
+    // SO_LOAD_FAILURE_CAPACITY is 20: the list keeps at most 20 records, while
+    // the counter keeps growing with every distinct moduleName.
+    constexpr uint32_t capacity = 20;
+    constexpr uint32_t totalCount = 25;
+    for (uint32_t i = 0; i < totalCount; i++) {
+        std::string moduleName = "module_" + std::to_string(i);
+        std::string failureInfo = "reason_" + std::to_string(i);
+        DFXJSNApi::InsertSoLoadFailure(vm_, StringRef::NewFromUtf8(vm_, moduleName.c_str()), failureInfo);
+    }
+
+    EXPECT_EQ(vm_->GetSoLoadFailureNum(), static_cast<size_t>(totalCount));
+    const auto &failures = vm_->GetAllSoLoadFailures();
+    ASSERT_EQ(failures.size(), static_cast<size_t>(capacity));
+    // The list keeps the earliest records once the capacity is reached.
+    EXPECT_STREQ(failures.front().first.c_str(), "module_0");
+    EXPECT_STREQ(failures.front().second.c_str(), "reason_0");
+    EXPECT_STREQ(failures.back().first.c_str(), "module_19");
+    EXPECT_STREQ(failures.back().second.c_str(), "reason_19");
+}
+
+HWTEST_F_L0(DFXJSNApiTests, InsertSoLoadFailure_EmptyFailureInfo)
+{
+    LocalScope scope(vm_);
+    const std::string moduleName = "libempty.so";
+    DFXJSNApi::InsertSoLoadFailure(vm_, StringRef::NewFromUtf8(vm_, moduleName.c_str()), "");
+
+    EXPECT_EQ(vm_->GetSoLoadFailureNum(), 1U);
+    const auto &failures = vm_->GetAllSoLoadFailures();
+    ASSERT_EQ(failures.size(), 1U);
+    EXPECT_STREQ(failures[0].first.c_str(), moduleName.c_str());
+    EXPECT_STREQ(failures[0].second.c_str(), "");
+}
+
+HWTEST_F_L0(DFXJSNApiTests, InsertSoLoadFailure_EmptyModuleName)
+{
+    LocalScope scope(vm_);
+    const std::string failureInfo = "module name is empty";
+    DFXJSNApi::InsertSoLoadFailure(vm_, StringRef::NewFromUtf8(vm_, ""), failureInfo);
+
+    EXPECT_EQ(vm_->GetSoLoadFailureNum(), 1U);
+    const auto &failures = vm_->GetAllSoLoadFailures();
+    ASSERT_EQ(failures.size(), 1U);
+    EXPECT_STREQ(failures[0].first.c_str(), "");
+    EXPECT_STREQ(failures[0].second.c_str(), failureInfo.c_str());
+}
+
+HWTEST_F_L0(DFXJSNApiTests, InsertSoLoadFailure_DuplicateModuleName)
+{
+    LocalScope scope(vm_);
+    // Duplicate moduleName is de-duplicated: only the first record is kept and
+    // the counter only increments once.
+    const std::string moduleName = "libdup.so";
+    const std::string failureInfo = "same reason";
+    DFXJSNApi::InsertSoLoadFailure(vm_, StringRef::NewFromUtf8(vm_, moduleName.c_str()), failureInfo);
+    DFXJSNApi::InsertSoLoadFailure(vm_, StringRef::NewFromUtf8(vm_, moduleName.c_str()), failureInfo);
+    DFXJSNApi::InsertSoLoadFailure(vm_, StringRef::NewFromUtf8(vm_, moduleName.c_str()), failureInfo);
+
+    EXPECT_EQ(vm_->GetSoLoadFailureNum(), 1U);
+    const auto &failures = vm_->GetAllSoLoadFailures();
+    ASSERT_EQ(failures.size(), 1U);
+    EXPECT_STREQ(failures[0].first.c_str(), moduleName.c_str());
+    EXPECT_STREQ(failures[0].second.c_str(), failureInfo.c_str());
+}
+
+HWTEST_F_L0(DFXJSNApiTests, InsertSoLoadFailure_ExactlyAtCapacity)
+{
+    LocalScope scope(vm_);
+    // SO_LOAD_FAILURE_CAPACITY is 20: exactly 20 records must all be retained.
+    constexpr uint32_t capacity = 20;
+    for (uint32_t i = 0; i < capacity; i++) {
+        std::string moduleName = "module_" + std::to_string(i);
+        std::string failureInfo = "reason_" + std::to_string(i);
+        DFXJSNApi::InsertSoLoadFailure(vm_, StringRef::NewFromUtf8(vm_, moduleName.c_str()), failureInfo);
+    }
+
+    EXPECT_EQ(vm_->GetSoLoadFailureNum(), static_cast<size_t>(capacity));
+    const auto &failures = vm_->GetAllSoLoadFailures();
+    ASSERT_EQ(failures.size(), static_cast<size_t>(capacity));
+    EXPECT_STREQ(failures.front().first.c_str(), "module_0");
+    EXPECT_STREQ(failures.back().first.c_str(), "module_19");
+}
+
+HWTEST_F_L0(DFXJSNApiTests, InsertSoLoadFailure_SpecialCharacters)
+{
+    LocalScope scope(vm_);
+    // Symbols, whitespace and punctuation round-trip through ToString/ConvertToString.
+    const std::string moduleName = "lib@module#1.0/path with spaces.so";
+    const std::string failureInfo = "errno=42: <unknown> & status=FAILED!";
+    DFXJSNApi::InsertSoLoadFailure(vm_, StringRef::NewFromUtf8(vm_, moduleName.c_str()), failureInfo);
+
+    EXPECT_EQ(vm_->GetSoLoadFailureNum(), 1U);
+    const auto &failures = vm_->GetAllSoLoadFailures();
+    ASSERT_EQ(failures.size(), 1U);
+    EXPECT_STREQ(failures[0].first.c_str(), moduleName.c_str());
+    EXPECT_STREQ(failures[0].second.c_str(), failureInfo.c_str());
+}
+
+HWTEST_F_L0(DFXJSNApiTests, InsertSoLoadFailure_LongStrings)
+{
+    LocalScope scope(vm_);
+    const std::string moduleName(1024, 'm');  // 1 KiB module name
+    const std::string failureInfo(2048, 'e'); // 2 KiB failure message
+    DFXJSNApi::InsertSoLoadFailure(vm_, StringRef::NewFromUtf8(vm_, moduleName.c_str()), failureInfo);
+
+    EXPECT_EQ(vm_->GetSoLoadFailureNum(), 1U);
+    const auto &failures = vm_->GetAllSoLoadFailures();
+    ASSERT_EQ(failures.size(), 1U);
+    EXPECT_EQ(failures[0].first.size(), moduleName.size());
+    EXPECT_EQ(failures[0].second.size(), failureInfo.size());
+    EXPECT_STREQ(failures[0].first.c_str(), moduleName.c_str());
+    EXPECT_STREQ(failures[0].second.c_str(), failureInfo.c_str());
+}
+
+// No objects: function succeeds with header-only output.
+HWTEST_F_L0(DFXJSNApiTests, GetHandleNodeIdMap_Dump_NoObjects)
+{
+#if defined(ECMASCRIPT_SUPPORT_SNAPSHOT) && defined(ENABLE_HANDLE_NODE_ID_MAP_PROTO)
+    DumpSnapShotOption opt;
+    opt.nativeAddrToNodeIdMap = 0;
+    DFXJSNApi::DumpHeapSnapshot(vm_, "./dump_noobj.heapsnapshot", opt);
+    std::remove("./dump_noobj.heapsnapshot");
+    ASSERT_TRUE(DFXJSNApi::GetHandleNodeIdMap(vm_));
+    GTEST_LOG_(INFO) << "GetHandleNodeIdMap_Dump_NoObjects completed";
+#else
+    ASSERT_TRUE(true);
+#endif
+}
+
+// Dump with N objects: function succeeds.
+HWTEST_F_L0(DFXJSNApiTests, GetHandleNodeIdMap_Dump_WithObjects)
+{
+#if defined(ECMASCRIPT_SUPPORT_SNAPSHOT) && defined(ENABLE_HANDLE_NODE_ID_MAP_PROTO)
+    constexpr int N = 10;
+    ObjectFactory *factory = vm_->GetFactory();
+    Global<ObjectRef> globals[N];
+    for (int i = 0; i < N; i++) {
+        JSHandle<JSTaggedValue> obj(factory->CreateNapiObject());
+        globals[i] = Global<ObjectRef>(vm_, Local<JSTaggedValue>(obj.GetAddress()));
+    }
+
+    DumpSnapShotOption opt;
+    opt.nativeAddrToNodeIdMap = 1;
+    DFXJSNApi::DumpHeapSnapshot(vm_, "./dump_obj.heapsnapshot", opt);
+    std::remove("./dump_obj.heapsnapshot");
+    ASSERT_TRUE(DFXJSNApi::GetHandleNodeIdMap(vm_));
+    GTEST_LOG_(INFO) << "GetHandleNodeIdMap_Dump_WithObjects completed";
+#else
+    ASSERT_TRUE(true);
+#endif
+}
+
+// Dump without nativeAddrToNodeIdMap flag: function still succeeds.
+HWTEST_F_L0(DFXJSNApiTests, GetHandleNodeIdMap_Dump_WithoutFlag)
+{
+#if defined(ECMASCRIPT_SUPPORT_SNAPSHOT) && defined(ENABLE_HANDLE_NODE_ID_MAP_PROTO)
+    ObjectFactory *factory = vm_->GetFactory();
+    JSHandle<JSTaggedValue> obj(factory->CreateNapiObject());
+    Global<ObjectRef> g(vm_, Local<JSTaggedValue>(obj.GetAddress()));
+
+    DumpSnapShotOption opt;
+    opt.nativeAddrToNodeIdMap = 0;
+    DFXJSNApi::DumpHeapSnapshot(vm_, "./dump_noflag.heapsnapshot", opt);
+    std::remove("./dump_noflag.heapsnapshot");
+    ASSERT_TRUE(DFXJSNApi::GetHandleNodeIdMap(vm_));
+    GTEST_LOG_(INFO) << "GetHandleNodeIdMap_Dump_WithoutFlag completed";
+#else
+    ASSERT_TRUE(true);
+#endif
+}
+
+// Second dump after adding objects: function succeeds both times.
+HWTEST_F_L0(DFXJSNApiTests, GetHandleNodeIdMap_Dump_DataIsolation)
+{
+#if defined(ECMASCRIPT_SUPPORT_SNAPSHOT) && defined(ENABLE_HANDLE_NODE_ID_MAP_PROTO)
+    ObjectFactory *factory = vm_->GetFactory();
+    DumpSnapShotOption opt;
+    opt.nativeAddrToNodeIdMap = 1;
+
+    Global<ObjectRef> g1[5];
+    for (int i = 0; i < 5; i++) {
+        JSHandle<JSTaggedValue> o(factory->CreateNapiObject());
+        g1[i] = Global<ObjectRef>(vm_, Local<JSTaggedValue>(o.GetAddress()));
+    }
+    DFXJSNApi::DumpHeapSnapshot(vm_, "./dump_di1.heapsnapshot", opt);
+    std::remove("./dump_di1.heapsnapshot");
+    ASSERT_TRUE(DFXJSNApi::GetHandleNodeIdMap(vm_));
+
+    Global<ObjectRef> g2[5];
+    for (int i = 0; i < 5; i++) {
+        JSHandle<JSTaggedValue> o(factory->CreateNapiObject());
+        g2[i] = Global<ObjectRef>(vm_, Local<JSTaggedValue>(o.GetAddress()));
+    }
+    DFXJSNApi::DumpHeapSnapshot(vm_, "./dump_di2.heapsnapshot", opt);
+    std::remove("./dump_di2.heapsnapshot");
+    ASSERT_TRUE(DFXJSNApi::GetHandleNodeIdMap(vm_));
+    GTEST_LOG_(INFO) << "GetHandleNodeIdMap_Dump_DataIsolation completed";
+#else
+    ASSERT_TRUE(true);
+#endif
+}
+
+// 100k objects: measure elapsed time.
+HWTEST_F_L0(DFXJSNApiTests, GetHandleNodeIdMap_Perf_100k)
+{
+#if defined(ECMASCRIPT_SUPPORT_SNAPSHOT) && defined(ENABLE_HANDLE_NODE_ID_MAP_PROTO)
+    constexpr int kObjectCount = 100000;
+    ObjectFactory *factory = vm_->GetFactory();
+    std::vector<Global<ObjectRef>> globals;
+    globals.reserve(kObjectCount);
+    for (int i = 0; i < kObjectCount; i++) {
+        JSHandle<JSTaggedValue> obj(factory->CreateNapiObject());
+        globals.emplace_back(vm_, Local<JSTaggedValue>(obj.GetAddress()));
+    }
+
+    DumpSnapShotOption opt;
+    opt.nativeAddrToNodeIdMap = 1;
+    DFXJSNApi::DumpHeapSnapshot(vm_, "./dump_perf.heapsnapshot", opt);
+    std::remove("./dump_perf.heapsnapshot");
+
+    auto start = std::chrono::steady_clock::now();
+    ASSERT_TRUE(DFXJSNApi::GetHandleNodeIdMap(vm_));
+    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - start).count();
+    GTEST_LOG_(INFO) << "GetHandleNodeIdMap 100k objects: " << elapsed
+                     << "us (" << (elapsed / 1000.0) << "ms)";
+    GTEST_LOG_(INFO) << "GetHandleNodeIdMap_Perf_100k completed";
+#else
+    ASSERT_TRUE(true);
+#endif
+}
+
+HWTEST_F_L0(DFXJSNApiTests, PerformHybridHeapDump_BinaryFormat_ReturnsFalseWithoutSTS)
+{
+    // When DumpFormat::BINARY and no STS runtime, PerformHybridHeapDump
+    // should route to HybridHeapProfiler::BinaryDump which returns false.
+    DumpSnapShotOption dumpOption;
+    dumpOption.dumpFormat = ecmascript::DumpFormat::BINARY;
+    bool result = DFXJSNApi::PerformHybridHeapDump(vm_, dumpOption);
+    EXPECT_FALSE(result) << "BINARY format hybrid dump should fail without an attached STS runtime";
+}
+
+HWTEST_F_L0(DFXJSNApiTests, DumpHeapSnapshot_HybridBinaryPathPreservesExistingFile)
+{
+    const std::string filePath = "DFXJSNApiTests_binary_path.rawheap";
+    const std::string originalContent = "existing heap dump";
+    {
+        std::ofstream output(filePath, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(output.is_open());
+        output.write(originalContent.data(), originalContent.size());
+    }
+
+    DumpSnapShotOption dumpOption;
+    dumpOption.dumpFormat = ecmascript::DumpFormat::BINARY;
+    dumpOption.languageEnv = ecmascript::LanguageEnv::HYBRID;
+    bool callbackCalled = false;
+    uint8_t callbackStatus = 0;
+    DFXJSNApi::DumpHeapSnapshot(vm_, filePath, dumpOption, [&](uint8_t status) {
+        callbackCalled = true;
+        callbackStatus = status;
+    });
+
+    std::ifstream input(filePath, std::ios::binary);
+    std::string actualContent((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(actualContent, originalContent);
+    EXPECT_TRUE(callbackCalled);
+    EXPECT_EQ(callbackStatus, static_cast<uint8_t>(ecmascript::DumpHeapSnapshotStatus::FORK_FAILED));
+    std::remove(filePath.c_str());
+}
+
+HWTEST_F_L0(DFXJSNApiTests, PerformHybridHeapDump_JSONFormat_StillFailsWithoutSTS)
+{
+    // JSON format should still fail without STS (same as before)
+    DumpSnapShotOption dumpOption;
+    dumpOption.dumpFormat = ecmascript::DumpFormat::JSON;
+    bool result = DFXJSNApi::PerformHybridHeapDump(vm_, dumpOption);
+    EXPECT_FALSE(result) << "JSON format hybrid dump should still fail without STS runtime";
+}
+
+/**
+ * @tc.name: SourceMapSetInitStatus_EnumTransparency_001
+ * @tc.desc: Test DFXJSNApi::SourceMapSetInitStatus with InitStatus enum passes through correctly
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapSetInitStatus_EnumTransparency_001)
+{
+    // IN_EXECUTED
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::IN_EXECUTED);
+    EXPECT_EQ(ecmascript::SourceMap::GetInstance().GetInitStatus(),
+              ecmascript::InitStatus::IN_EXECUTED);
+
+    // EXECUTED_SUCCESSFULLY
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+    EXPECT_EQ(ecmascript::SourceMap::GetInstance().GetInitStatus(),
+              ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+
+    // NO_SOURCEMAP
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NO_SOURCEMAP);
+    EXPECT_EQ(ecmascript::SourceMap::GetInstance().GetInitStatus(),
+              ecmascript::InitStatus::NO_SOURCEMAP);
+
+    // NOT_EXECUTED
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+    EXPECT_EQ(ecmascript::SourceMap::GetInstance().GetInitStatus(),
+              ecmascript::InitStatus::NOT_EXECUTED);
+}
+
+/**
+ * @tc.name: SourceMapSetInitStatus_Transition_001
+ * @tc.desc: Test InitStatus transition through DFXJSNApi matches real usage in js_runtime
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapSetInitStatus_Transition_001)
+{
+    // Simulate the js_runtime SourceMapInit lifecycle (success path):
+    // NOT_EXECUTED -> IN_EXECUTED -> EXECUTED_SUCCESSFULLY
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+    EXPECT_EQ(ecmascript::SourceMap::GetInstance().GetInitStatus(),
+              ecmascript::InitStatus::NOT_EXECUTED);
+
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::IN_EXECUTED);
+    EXPECT_EQ(ecmascript::SourceMap::GetInstance().GetInitStatus(),
+              ecmascript::InitStatus::IN_EXECUTED);
+
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+    EXPECT_EQ(ecmascript::SourceMap::GetInstance().GetInitStatus(),
+              ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+}
+
+/**
+ * @tc.name: SourceMapSetInitStatus_Transition_NoSourceMap_001
+ * @tc.desc: Test InitStatus transition when no sourcemap is available (failure path)
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapSetInitStatus_Transition_NoSourceMap_001)
+{
+    // Simulate the js_runtime SourceMapInit lifecycle (failure path):
+    // NOT_EXECUTED -> IN_EXECUTED -> NO_SOURCEMAP
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+    EXPECT_EQ(ecmascript::SourceMap::GetInstance().GetInitStatus(),
+              ecmascript::InitStatus::NOT_EXECUTED);
+
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::IN_EXECUTED);
+    EXPECT_EQ(ecmascript::SourceMap::GetInstance().GetInitStatus(),
+              ecmascript::InitStatus::IN_EXECUTED);
+
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NO_SOURCEMAP);
+    EXPECT_EQ(ecmascript::SourceMap::GetInstance().GetInitStatus(),
+              ecmascript::InitStatus::NO_SOURCEMAP);
+}
+
+/**
+ * @tc.name: SourceMapSetInitStatus_NO_SOURCEMAP_001
+ * @tc.desc: Test SourceMapSetInitStatus covers EXECUTED_SUCCESSFULLY and NO_SOURCEMAP states
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapSetInitStatus_NO_SOURCEMAP_001)
+{
+    // ReadSourceMapData success -> EXECUTED_SUCCESSFULLY
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+    EXPECT_EQ(ecmascript::SourceMap::GetInstance().GetInitStatus(),
+              ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+
+    // ReadSourceMapData failure -> NO_SOURCEMAP
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NO_SOURCEMAP);
+    EXPECT_EQ(ecmascript::SourceMap::GetInstance().GetInitStatus(),
+              ecmascript::InitStatus::NO_SOURCEMAP);
+
+    // Success resets back to EXECUTED_SUCCESSFULLY
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+    EXPECT_EQ(ecmascript::SourceMap::GetInstance().GetInitStatus(),
+              ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+}
+
+/**
+ * @tc.name: SourceMapSplitSourceMap_EagerPath_001
+ * @tc.desc: Test DFXJSNApi::SourceMapSplitSourceMap populates eager path, then TranslateUrlPosition finds URL
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapSplitSourceMap_EagerPath_001)
+{
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+
+    // SplitSourceMap with valid eager-format data populates eagerSourceMaps_
+    // Format must match SplitSourceMap parser: FLAG_MAPPINGS = "    \"mappings\": \""
+    std::string eagerData =
+        "{\n"
+        "  \"entry/src/main/ets/pages/Index.ts\": {\n"
+        "    \"version\": 3,\n"
+        "    \"file\": \"Index.ets\",\n"
+        "    \"sources\": [\n"
+        "      \"entry/src/main/ets/pages/Index.ets\"\n"
+        "    ],\n"
+        "    \"names\": [],\n"
+        "    \"mappings\": \"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\"\n"
+        "    \"entry-package-info\": \"entry|1.0.0\"\n"
+        "  }\n"
+        "}";
+    DFXJSNApi::SourceMapSplitSourceMap(eagerData);
+
+    // TranslateUrlPosition should find the URL in eagerSourceMaps_
+    std::string url = "entry/src/main/ets/pages/Index.ts";
+    int line = 10;
+    int column = 5;
+    std::string packageName;
+    EXPECT_TRUE(DFXJSNApi::SourceMapTranslateUrlPosition(url, line, column, packageName));
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+}
+
+/**
+ * @tc.name: SourceMapSplitSourceMap_EmptyData_001
+ * @tc.desc: Test DFXJSNApi::SourceMapSplitSourceMap with empty string does not crash
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapSplitSourceMap_EmptyData_001)
+{
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+
+    DFXJSNApi::SourceMapSplitSourceMap("");
+
+    // Unknown URL should return false after loading empty data
+    std::string url = "any/path/file.ts";
+    int line = 1;
+    int column = 1;
+    std::string packageName;
+    EXPECT_FALSE(DFXJSNApi::SourceMapTranslateUrlPosition(url, line, column, packageName));
+
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+}
+
+/**
+ * @tc.name: SourceMapSplitSourceMap_InvalidData_001
+ * @tc.desc: Test DFXJSNApi::SourceMapSplitSourceMap with invalid JSON does not crash
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapSplitSourceMap_InvalidData_001)
+{
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+
+    DFXJSNApi::SourceMapSplitSourceMap("not valid json {{{");
+
+    // Unknown URL should return false after loading invalid data
+    std::string url = "any/path/file.ts";
+    int line = 1;
+    int column = 1;
+    std::string packageName;
+    EXPECT_FALSE(DFXJSNApi::SourceMapTranslateUrlPosition(url, line, column, packageName));
+
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+}
+
+/**
+ * @tc.name: SourceMapTranslateUrlPosition_NotFound_001
+ * @tc.desc: Test DFXJSNApi::SourceMapTranslateUrlPosition returns false for unknown URL
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateUrlPosition_NotFound_001)
+{
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+
+    std::string url = "nonexistent/path/unknown.ts";
+    int line = 1;
+    int column = 1;
+    std::string packageName;
+    bool result = DFXJSNApi::SourceMapTranslateUrlPosition(url, line, column, packageName);
+    EXPECT_FALSE(result);
+
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+}
+
+/**
+ * @tc.name: SourceMapTranslateUrlPosition_AfterSplit_001
+ * @tc.desc: Test DFXJSNApi::SourceMapTranslateUrlPosition finds URL after SplitSourceMap eager path
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateUrlPosition_AfterSplit_001)
+{
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::IN_EXECUTED);
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+
+    // Load eager data (same format as sourceMapTest.h sourceMapData)
+    std::string eagerData =
+        "{\n"
+        "  \"entry/src/main/ets/pages/Index.ts\": {\n"
+        "    \"version\": 3,\n"
+        "    \"file\": \"Index.ets\",\n"
+        "    \"sources\": [\n"
+        "      \"entry/src/main/ets/pages/Index.ets\"\n"
+        "    ],\n"
+        "    \"names\": [],\n"
+        "    \"mappings\": \"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\"\n"
+        "    \"entry-package-info\": \"entry|1.0.0\"\n"
+        "  }\n"
+        "}";
+    DFXJSNApi::SourceMapSplitSourceMap(eagerData);
+
+    // Now translate should find the URL via eager path
+    std::string url = "entry/src/main/ets/pages/Index.ts";
+    int line = 10;
+    int column = 5;
+    std::string packageName;
+    bool result = DFXJSNApi::SourceMapTranslateUrlPosition(url, line, column, packageName);
+    EXPECT_TRUE(result);
+
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+}
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_NoSourceMap_001
+ * @tc.desc: Test DFXJSNApi::SourceMapTranslateBySourceMap
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_NoSourceMap_001)
+{
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NO_SOURCEMAP);
+
+    std::string stackStr = "at func (entry/src/main/ets/pages/Index.ts:10:5)";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr);
+    // After unification, NO_SOURCEMAP returns prefix + raw stack instead of attempting translation
+    std::string expected = "Cannot get SourceMap info, dump raw stack:\n" + stackStr;
+    EXPECT_EQ(result, expected);
+
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+}
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_ExecutedSuccessfully_001
+ * @tc.desc: Test DFXJSNApi::SourceMapTranslateBySourceMap with InitStatus=EXECUTED_SUCCESSFULLY preserves stack lines
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_ExecutedSuccessfully_001)
+{
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+
+    // Line without parentheses is preserved as-is
+    std::string stackStr = "TypeError: Cannot read property";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr);
+    EXPECT_NE(result.find("TypeError: Cannot read property"), std::string::npos);
+
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+}
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_UnknownUrl_001
+ * @tc.desc: Test DFXJSNApi::SourceMapTranslateBySourceMap with unknown URL falls back to raw stack
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_UnknownUrl_001)
+{
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+
+    // Unknown URL, not in eagerSourceMaps_, falls back to raw stack
+    std::string stackStr = "at func (unknown/file.js:10:5)";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr);
+    // Should contain the original file reference
+    EXPECT_NE(result.find("unknown/file.js"), std::string::npos);
+
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+}
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_AfterSplit_001
+ * @tc.desc: Test DFXJSNApi::SourceMapTranslateBySourceMap resolves after SplitSourceMap eager path
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_AfterSplit_001)
+{
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::IN_EXECUTED);
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+
+    // Load eager data (same format as sourceMapTest.h sourceMapData)
+    std::string eagerData =
+        "{\n"
+        "  \"entry/src/main/ets/pages/Index.ts\": {\n"
+        "    \"version\": 3,\n"
+        "    \"file\": \"Index.ets\",\n"
+        "    \"sources\": [\n"
+        "      \"entry/src/main/ets/pages/Index.ets\"\n"
+        "    ],\n"
+        "    \"names\": [],\n"
+        "    \"mappings\": \"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\"\n"
+        "    \"entry-package-info\": \"entry|1.0.0\"\n"
+        "  }\n"
+        "}";
+    DFXJSNApi::SourceMapSplitSourceMap(eagerData);
+
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+
+    // TranslateBySourceMap should resolve using eager data
+    std::string stackStr = "at func (entry/src/main/ets/pages/Index.ts:10:5)";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr);
+    // With eager data loaded and InitStatus=EXECUTED_SUCCESSFULLY, should NOT have NOT_FOUNDMAP prefix
+    EXPECT_EQ(result.find("Cannot get SourceMap info"), std::string::npos);
+    // Should contain the resolved source path from eagerSourceMaps_
+    EXPECT_NE(result.find("entry/src/main/ets/pages/Index.ets"), std::string::npos);
+
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+}
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_MixedLines_001
+ * @tc.desc: Test DFXJSNApi::SourceMapTranslateBySourceMap with mixed stack lines (error msg + stack frame)
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_MixedLines_001)
+{
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+
+    // First line without parens (error message), second line with unknown URL
+    std::string stackStr = "TypeError: Cannot read property\nat func (unknown.js:10:5)";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr);
+    // Both lines should appear in output
+    EXPECT_NE(result.find("TypeError: Cannot read property"), std::string::npos);
+    EXPECT_NE(result.find("unknown.js"), std::string::npos);
+
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+}
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_InExecuted_001
+ * @tc.desc: Test SourceMapTranslateBySourceMap returns "not initialized" prefix + raw stack when InitStatus=IN_EXECUTED
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_InExecuted_001)
+{
+    // InitStatus=IN_EXECUTED, expect "SourceMap is not initialized yet \n" + stackStr
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::IN_EXECUTED);
+    std::string stackStr = "at foo (bar.js:1:1)";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr);
+    std::string expected = "SourceMap is not initialized yet \n" + stackStr;
+    EXPECT_EQ(result, expected);
+
+    // State isolation: restore to NOT_EXECUTED
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+}
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_NotExecuted_001
+ * @tc.desc: Test SourceMapTranslateBySourceMap returns raw stack when InitStatus=NOT_EXECUTED
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_NotExecuted_001)
+{
+    // InitStatus=NOT_EXECUTED, expect raw stack preserved
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+    std::string stackStr = "at foo (bar.js:1:1)";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr);
+    EXPECT_EQ(result, stackStr);
+
+    // State isolation: NOT_EXECUTED is the default state, no extra restore needed
+}
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_ExecutedSuccessfully_002
+ * @tc.desc: Test SourceMapTranslateBySourceMap delegates to TranslateBySourceMap when InitStatus=EXECUTED_SUCCESSFULLY
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_ExecutedSuccessfully_002)
+{
+    // InitStatus=EXECUTED_SUCCESSFULLY, delegates to TranslateBySourceMap, expect raw stack preserved
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::EXECUTED_SUCCESSFULLY);
+    std::string stackStr = "at foo (unknown.js:1:1)";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr);
+    // TranslateBySourceMap falls back to raw stack for unknown URL, verify stack content passthrough
+    EXPECT_NE(result.find("unknown.js"), std::string::npos);
+
+    // State isolation: restore to NOT_EXECUTED
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+}
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_EmptyStack_001
+ * @tc.desc: Test SourceMapTranslateBySourceMap with empty stack string boundary case
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_EmptyStack_001)
+{
+    // Empty stackStr with IN_EXECUTED returns only the prefix (boundary condition)
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::IN_EXECUTED);
+    std::string stackStr = "";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr);
+    std::string expected = "SourceMap is not initialized yet \n";
+    EXPECT_EQ(result, expected);
+
+    // State isolation: restore to NOT_EXECUTED
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+}
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_UseStatus_001
+ * @tc.desc: Test SourceMapTranslateBySourceMap with useInitStatus=true parses by InitStatus (branch: true)
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_UseStatus_001)
+{
+    // Branch useInitStatus=true: delegates to TranslateStackTraceWithStatus, so the
+    // IN_EXECUTED status must be honored (prefix + raw stack)
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::IN_EXECUTED);
+    std::string stackStr = "at foo (unknown.js:1:1)";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr, true);
+    std::string expected = "SourceMap is not initialized yet \n" + stackStr;
+    EXPECT_EQ(result, expected);
+
+    // State isolation: restore to NOT_EXECUTED
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+}
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_NoStatus_001
+ * @tc.desc: Test SourceMapTranslateBySourceMap with useInitStatus=false bypasses InitStatus and translates directly
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_NoStatus_001)
+{
+    // Branch useInitStatus=false: even when InitStatus=IN_EXECUTED, status parsing is skipped
+    // and TranslateBySourceMap is called directly (no "not initialized" prefix)
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::IN_EXECUTED);
+    std::string stackStr = "at foo (unknown.js:1:1)";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr, false);
+    EXPECT_EQ(result.find("SourceMap is not initialized yet"), std::string::npos);
+    EXPECT_NE(result.find("unknown.js"), std::string::npos);
+
+    // State isolation: restore to NOT_EXECUTED
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+}
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_NoStatus_NoSourceMap_001
+ * @tc.desc: Test SourceMapTranslateBySourceMap with useInitStatus=false bypasses NO_SOURCEMAP prefix too
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_NoStatus_NoSourceMap_001)
+{
+    // Branch useInitStatus=false with InitStatus=NO_SOURCEMAP: the status prefix
+    // "Cannot get SourceMap info" must NOT be prepended; direct translation keeps raw content
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NO_SOURCEMAP);
+    std::string stackStr = "at foo (unknown.js:1:1)";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr, false);
+    EXPECT_EQ(result.find("Cannot get SourceMap info"), std::string::npos);
+    EXPECT_NE(result.find("unknown.js"), std::string::npos);
+
+    // State isolation: restore to NOT_EXECUTED
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
+}
+
+/**
+ * @tc.name: SourceMapTranslateBySourceMap_NoStatus_AfterSplit_001
+ * @tc.desc: Test SourceMapTranslateBySourceMap with useInitStatus=false still performs real mapping with eager data
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(DFXJSNApiTests, SourceMapTranslateBySourceMap_NoStatus_AfterSplit_001)
+{
+    // Branch useInitStatus=false: even when InitStatus=IN_EXECUTED, status parsing is skipped AND
+    // TranslateBySourceMap actually resolves frames using loaded eager source map data
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::IN_EXECUTED);
+
+    // Load eager data (same format as sourceMapTest.h sourceMapData)
+    std::string eagerData =
+        "{\n"
+        "  \"entry/src/main/ets/pages/Index.ts\": {\n"
+        "    \"version\": 3,\n"
+        "    \"file\": \"Index.ets\",\n"
+        "    \"sources\": [\n"
+        "      \"entry/src/main/ets/pages/Index.ets\"\n"
+        "    ],\n"
+        "    \"names\": [],\n"
+        "    \"mappings\": \"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\"\n"
+        "    \"entry-package-info\": \"entry|1.0.0\"\n"
+        "  }\n"
+        "}";
+    DFXJSNApi::SourceMapSplitSourceMap(eagerData);
+
+    // TranslateBySourceMap should resolve using eager data despite IN_EXECUTED status
+    std::string stackStr = "at func (entry/src/main/ets/pages/Index.ts:10:5)";
+    std::string result = DFXJSNApi::SourceMapTranslateBySourceMap(stackStr, false);
+    // No status prefix, but real mapping happens
+    EXPECT_EQ(result.find("SourceMap is not initialized yet"), std::string::npos);
+    EXPECT_NE(result.find("entry/src/main/ets/pages/Index.ets"), std::string::npos);
+
+    // State isolation: restore to NOT_EXECUTED
+    DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus::NOT_EXECUTED);
 }
 } // namespace panda::test

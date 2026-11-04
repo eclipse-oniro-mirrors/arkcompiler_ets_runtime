@@ -140,6 +140,12 @@ public:
                     if (IsStateSplit(gate)) {
                         endStateList_.emplace_back(gate);
                     }
+#ifdef CONTROLFLOW_OPTIMIZATION
+                    else if (linearizer_->addBytecode_) {
+                        linearizer_->GetGateInfo(gate).region = currentRegion_;
+                        linearizer_->BindGate(gate, currentRegion_);
+                    }
+#endif
                     break;
                 default: {
                     if (linearizer_->onlyBB_) {
@@ -175,6 +181,13 @@ public:
         return stateOut > 1; // 1: depend out
     }
 
+#ifdef CONTROLFLOW_OPTIMIZATION
+    ChunkVector<GateRef> &GetEndStateList()
+    {
+        return endStateList_;
+    }
+#endif
+
 private:
     GraphLinearizer* linearizer_;
     ChunkDeque<GateRef> pendingList_;
@@ -183,6 +196,48 @@ private:
     GateRegion* currentRegion_ {nullptr};
     bool scheduleLIR_;
 };
+
+#ifdef CONTROLFLOW_OPTIMIZATION
+class DominanceFrontiersGenerator {
+public:
+    explicit DominanceFrontiersGenerator(GraphLinearizer *linearizer)
+        :linearizer_(linearizer), acc_(linearizer->circuit_) {}
+
+    void Run()
+    {
+        for (auto region: linearizer_->regionList_) {
+            if (region->succs_.size() <= 1) {
+                continue;
+            }
+            for (auto succ: region->succs_) {
+                while (succ != region->GetPostDominator()) {
+                    succ->dominanceFrontiers_.push_back(region);
+                    succ = succ->GetPostDominator();
+                }
+            }
+        }
+    }
+
+    void PrintDominanceFrontiers()
+    {
+        auto size = linearizer_->regionList_.size();
+        LOG_COMPILER(INFO) << "--------------------------------- DFInfo Start ---------------------------------";
+        for (size_t i = 0; i < size; ++ i) {
+            auto region = linearizer_->regionList_[i];
+            LOG_COMPILER(INFO) << "region " << region->id_ << " has dominance frontiers: [";
+            for (auto df: region->GetDominanceFrontiers()) {
+                LOG_COMPILER(INFO) <<  df->id_ << ", ";
+            }
+            LOG_COMPILER(INFO) << "]";
+        }
+        LOG_COMPILER(INFO) << "--------------------------------- DFInfo End ---------------------------------";
+    }
+
+private:
+    GraphLinearizer *linearizer_;
+    GateAccessor acc_;
+};
+#endif
 
 class ImmediateDominatorsGenerator {
 public:
@@ -204,6 +259,11 @@ public:
     {
         size_t timestamp = 0;
         auto entry = linearizer_->regionList_.front();
+#ifdef CONTROLFLOW_OPTIMIZATION
+        if (enablePostDominator_) {
+            entry = linearizer_->regionList_.back();
+        }
+#endif
         linearizer_->circuit_->AdvanceTime();
         entry->SetVisited(linearizer_->acc_);
         ASSERT(pendingList_.empty());
@@ -213,7 +273,12 @@ public:
             pendingList_.pop_back();
             dfsList_.emplace_back(curRegion->id_);
             dfsTimestamp_[curRegion->id_] = timestamp++;
-            for (auto succ : curRegion->succs_) {
+#ifdef CONTROLFLOW_OPTIMIZATION
+            auto &succRegions = enablePostDominator_ ? curRegion->preds_ : curRegion->succs_;
+#else
+            auto &succRegions = curRegion->succs_;
+#endif
+            for (auto succ : succRegions) {
                 if (!succ->IsVisited(linearizer_->acc_)) {
                     succ->SetVisited(linearizer_->acc_);
                     pendingList_.emplace_back(succ);
@@ -268,7 +333,13 @@ public:
 
         ASSERT(dfsList_.size() > 0);
         for (size_t idx = dfsList_.size() - 1; idx >= 1; idx--) {
-            for (const auto &preRegion : regionList[dfsList_[idx]]->preds_) {
+            auto region = regionList[dfsList_[idx]];
+#ifdef CONTROLFLOW_OPTIMIZATION
+            auto &predRegions = enablePostDominator_ ? region->succs_ : region->preds_;
+#else
+            auto &predRegions = region->preds_;
+#endif
+            for (const auto &preRegion : predRegions) {
                 size_t preRegionIdx = bbDfsTimestampToIdx_[preRegion->id_];
                 if (bbDfsTimestampToIdx_[preRegion->id_] < idx) {
                     semiDom_[idx] = std::min(semiDom_[idx], preRegionIdx);
@@ -298,8 +369,19 @@ public:
                 immDom_[idx] = immDom_[immDom_[idx]];
             }
         }
+#ifdef CONTROLFLOW_OPTIMIZATION
+        GateRegion *entry = nullptr;
+        if (enablePostDominator_) {
+            entry = linearizer_->regionList_.back();
+            entry->postIDominator_ = entry;
+        } else {
+            entry = linearizer_->regionList_.front();
+            entry->iDominator_ = entry;
+        }
+#else
         auto entry = linearizer_->regionList_.front();
         entry->iDominator_ = entry;
+#endif
         entry->depth_ = 0;
         auto &regionList = linearizer_->regionList_;
         for (size_t i = 1; i < immDom_.size(); i++) {
@@ -308,14 +390,29 @@ public:
             auto domIndex = dfsList_[immDom_[i]];
             auto immDomRegion = regionList[domIndex];
             immDomRegion->depth_ = static_cast<int32_t>(immDom_[i]);
+#ifdef CONTROLFLOW_OPTIMIZATION
+            if (enablePostDominator_) {
+                dominatedRegion->postIDominator_ = immDomRegion;
+                immDomRegion->postDominatedRegions_.emplace_back(dominatedRegion);
+            } else {
+                dominatedRegion->iDominator_ = immDomRegion;
+                immDomRegion->dominatedRegions_.emplace_back(dominatedRegion);
+            }
+#else
             dominatedRegion->iDominator_ = immDomRegion;
             immDomRegion->dominatedRegions_.emplace_back(dominatedRegion);
+#endif
         }
     }
 
     void BuildImmediateDominatorDepth()
     {
         auto entry = linearizer_->regionList_.front();
+#ifdef CONTROLFLOW_OPTIMIZATION
+        if (enablePostDominator_) {
+            entry = linearizer_->regionList_.back();
+        }
+#endif
         entry->depth_ = 0;
 
         ASSERT(pendingList_.empty());
@@ -324,13 +421,25 @@ public:
             auto curRegion = pendingList_.back();
             pendingList_.pop_back();
 
+#ifdef CONTROLFLOW_OPTIMIZATION
+            auto &dRegions = enablePostDominator_ ? curRegion->postDominatedRegions_ : curRegion->dominatedRegions_;
+            for (auto succ : dRegions) {
+#else
             for (auto succ : curRegion->dominatedRegions_) {
+#endif
                 ASSERT(succ->iDominator_->depth_ != GateRegion::INVALID_DEPTH);
                 succ->depth_ = succ->iDominator_->depth_ + 1;
                 pendingList_.emplace_back(succ);
             }
         }
     }
+
+#ifdef CONTROLFLOW_OPTIMIZATION
+    void EnablePostDominator()
+    {
+        enablePostDominator_ = true;
+    }
+#endif
 
 private:
     GraphLinearizer* linearizer_;
@@ -344,6 +453,9 @@ private:
     ChunkVector<size_t> minIdx_;
     ChunkVector<size_t> parentIdx_;
     ChunkVector<ChunkDeque<size_t>> semiDomTree_;
+#ifdef CONTROLFLOW_OPTIMIZATION
+    bool enablePostDominator_ {false};
+#endif
 };
 
 class LoopInfoBuilder {
@@ -854,8 +966,68 @@ private:
     bool scheduleUpperBound_{false};
 };
 
+#ifdef CONTROLFLOW_OPTIMIZATION
+void GraphLinearizer::Schedule()
+{
+    if (!onlyBB_) {
+        GateScheduler scheduler(this);
+        scheduler.Prepare();
+        scheduler.ScheduleUpperBound();
+        scheduler.ScheduleFloatingGate();
+        scheduler.ScheduleFixedGate();
+    }
+}
+
+void GraphLinearizer::BuildControlflowInfo()
+{
+    gateIdToGateInfo_.resize(circuit_->GetMaxGateId() + 1, GateInfo{nullptr}); // 1: max + 1 = size
+    CFGBuilder builder(this);
+    builder.Run();
+    ImmediateDominatorsGenerator imm(this, chunk_, regionList_.size());
+    imm.Run();
+    if (IsEnableLoopInvariantCodeMotion() && loopNumber_ > 0) {
+        scheduleUpperBound_ = true;
+        LoopInfoBuilder loopInfoBuilder(this, chunk_);
+        loopInfoBuilder.Run();
+    }
+}
+
+void GraphLinearizer::BuildDominanceFrontier()
+{
+    auto unionExit = new (chunk_) GateRegion(chunk_);
+    unionExit->id_ = regionList_.size();
+    regionList_.emplace_back(unionExit);
+    unionExit->gateList_.push_back(circuit_->DeadGate());
+    unionExit->state_ = circuit_->DeadGate();
+    for (auto fixedGate: regionRootList_) {
+        auto opcode = acc_.GetOpCode(fixedGate);
+        if (opcode == OpCode::RETURN || opcode == OpCode::RETURN_VOID) {
+            auto region = GateToRegion(fixedGate);
+            region->AddSucc(unionExit);
+        }
+    }
+    // connect infinite loop to union exit
+    for (auto &loopInfo: loops_) {
+        if (loopInfo.loopExits != nullptr) {
+            continue;
+        }
+        loopInfo.loopHead->AddSucc(unionExit);
+    }
+    ImmediateDominatorsGenerator postImm(this, chunk_, regionList_.size());
+    postImm.EnablePostDominator();
+    postImm.Run();
+    DominanceFrontiersGenerator df(this);
+    df.Run();
+    df.PrintDominanceFrontiers();
+}
+#endif
+
 void GraphLinearizer::LinearizeGraph()
 {
+#ifdef CONTROLFLOW_OPTIMIZATION
+    BuildControlflowInfo();
+    Schedule();
+#else
     gateIdToGateInfo_.resize(circuit_->GetMaxGateId() + 1, GateInfo{nullptr}); // 1: max + 1 = size
     CFGBuilder builder(this);
     builder.Run();
@@ -873,6 +1045,7 @@ void GraphLinearizer::LinearizeGraph()
         scheduler.ScheduleFloatingGate();
         scheduler.ScheduleFixedGate();
     }
+#endif
 }
 
 void GraphLinearizer::CreateGateRegion(GateRef gate)
@@ -1016,7 +1189,11 @@ void GraphLinearizer::PrintGraph(const char* title)
     int bbIdx = 0;
     for (size_t i = 0; i < regionList_.size(); i++) {
         auto bb = regionList_[i];
+#ifdef CONTROLFLOW_OPTIMIZATION
+        if (bb->IsDead() || acc_.IsNop(bb->GetState())) {
+#else
         if (bb->IsDead()) {
+#endif
             continue;
         }
         auto front = bb->gateList_.front();

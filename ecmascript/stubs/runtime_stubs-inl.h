@@ -17,12 +17,13 @@
 #define ECMASCRIPT_STUBS_RUNTIME_STUBS_INL_H
 
 #include "ecmascript/ecma_macros.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/stubs/runtime_stubs.h"
 
 #include "ecmascript/base/array_helper.h"
 #include "ecmascript/builtins/builtins_regexp.h"
 #include "ecmascript/compiler/aot_file/aot_file_manager.h"
+#include "ecmascript/containers/containers_errors.h"
 #include "ecmascript/debugger/js_debugger_manager.h"
 #include "ecmascript/ecma_string_table.h"
 #include "ecmascript/global_dictionary-inl.h"
@@ -44,6 +45,7 @@
 #include "ecmascript/jspandafile/program_object.h"
 #include "ecmascript/jspandafile/scope_info_extractor.h"
 #include "ecmascript/message_string.h"
+#include "ecmascript/compiler/ecma_opcode_des.h"
 #include "ecmascript/module/js_module_manager.h"
 #include "ecmascript/module/js_module_source_text.h"
 #include "ecmascript/module/module_value_accessor.h"
@@ -1062,12 +1064,12 @@ void RuntimeStubs::SetProfileTypeInfoCellToFunction(JSThread *thread, const JSHa
     ASSERT(!profileTypeInfo.IsUndefined());
 
     JSHandle<ProfileTypeInfo> profileTypeArray(thread, profileTypeInfo);
-    JSTaggedValue slotValue = profileTypeArray->Get(thread, slotId);
+    JSTaggedValue slotValue = profileTypeArray->GetICSlot(thread, slotId);
     if (slotValue.IsUndefined()) {
         JSHandle<JSTaggedValue> handleUndefined(thread, JSTaggedValue::Undefined());
         JSHandle<ProfileTypeInfoCell> newProfileTypeInfoCell =
             thread->GetEcmaVM()->GetFactory()->NewProfileTypeInfoCell(handleUndefined);
-        profileTypeArray->Set(thread, slotId, newProfileTypeInfoCell);
+        profileTypeArray->SetICSlot(thread, slotId, newProfileTypeInfoCell);
         definedFunc->SetRawProfileTypeInfo(thread, newProfileTypeInfoCell);
     } else {
         auto cellPtr = ProfileTypeInfoCell::Cast(slotValue.GetTaggedObject());
@@ -1186,16 +1188,18 @@ JSTaggedValue RuntimeStubs::RuntimeSetClassInheritanceRelationship(JSThread *thr
         }
     }
 
-    ctor->GetTaggedObject()->GetClass()->SetPrototype(thread, parent); // __proto__
+    JSHandle<JSHClass> ctorHClass(thread, ctor->GetTaggedObject()->GetClass());
+    JSHClass::SetPrototype(thread, ctorHClass, parent); // __proto__
 
     JSHandle<JSObject> clsPrototype(thread, JSHandle<JSFunction>(ctor)->GetFunctionPrototype(thread));
-    clsPrototype->GetClass()->SetPrototype(thread, parentPrototype);
+    JSHandle<JSHClass> clsPrototypeHClass(thread, clsPrototype->GetClass());
+    JSHClass::SetPrototype(thread, clsPrototypeHClass, parentPrototype);
 
     ObjectOperator::UpdateDetectorOnSetPrototype(thread, clsPrototype.GetTaggedValue(),
                                                  parentPrototype.GetTaggedValue());
 
     // ctor -> hclass -> EnableProtoChangeMarker
-    auto constructor = JSFunction::Cast(ctor.GetTaggedValue().GetTaggedObject());
+    JSHandle<JSFunction> constructor(ctor);
     if (constructor->GetClass()->IsAOT()) {
         JSHClass::EnableProtoChangeMarker(thread, JSHandle<JSHClass>(thread, constructor->GetClass()));
         // prototype -> hclass -> EnableProtoChangeMarker
@@ -1249,15 +1253,18 @@ JSTaggedValue RuntimeStubs::RuntimeNotifyInlineCache(JSThread *thread, const JSH
     if (function->IsSharedFunction()) {
         return JSTaggedValue::Undefined();
     } else {
-        profileTypeInfo = factory->NewProfileTypeInfo(icSlotSize);
+        JSHandle<Method> method(thread, function->GetMethod(thread));
+        profileTypeInfo = factory->NewProfileTypeInfo(icSlotSize, method);
     }
     Method *method = Method::Cast(function->GetMethod(thread));
     auto codeSize = method->GetCodeSize(thread);
+#ifndef EXCLUDE_PGO
     if (pgo::PGOProfilerManager::GetInstance()->IsBigMethod(codeSize)) {
         LOG_ECMA(DEBUG) << "method size is too large, skip pgo. code size: " << codeSize
                         << ", max code size: " << pgo::PGOProfilerManager::GetInstance()->GetMaxAotMethodSize();
         profileTypeInfo->SetBigMethodPeriodIndex();
     }
+#endif
     JSFunction::SetProfileTypeInfo(thread, function, JSHandle<JSTaggedValue>::Cast(profileTypeInfo));
     return profileTypeInfo.GetTaggedValue();
 }
@@ -2386,7 +2393,7 @@ void RuntimeStubs::DumpInfoForLdObjByValue(JSThread *thread, JSHandle<JSTaggedVa
     } else {
         auto prof = JSHandle<ProfileTypeInfo>::Cast(profile);
         auto slot = slotId.GetInt();
-        auto first = prof->GetIcSlot(thread, slot);
+        auto first = prof->GetICSlot(thread, slot);
         if (first.IsHole()) {
             msg += "state: mega";
         } else if (first.IsUndefined()) {
@@ -2394,7 +2401,7 @@ void RuntimeStubs::DumpInfoForLdObjByValue(JSThread *thread, JSHandle<JSTaggedVa
         } else if (first.IsWeak()) {
             msg += "state: mono";
         } else {
-            auto second = prof->GetIcSlot(thread, slot + 1);
+            auto second = prof->GetICSlot(thread, slot + 1);
             if (second.IsTaggedArray()) {
                 TaggedArray *elements = TaggedArray::Cast(second.GetTaggedObject());
                 if (elements->GetLength() == MONO_NUM) {
@@ -2436,7 +2443,8 @@ void RuntimeStubs::DefineFuncTryUseAOTHClass(JSThread* thread,
         // build inheritance
         JSHandle<JSTaggedValue> parentPrototype = env->GetObjectFunctionPrototype();
         JSHandle<JSObject> clsPrototype(thread, func->GetFunctionPrototype(thread));
-        clsPrototype->GetClass()->SetPrototype(thread, parentPrototype);
+        JSHandle<JSHClass> clsPrototypeHClass(thread, clsPrototype->GetClass());
+        JSHClass::SetPrototype(thread, clsPrototypeHClass, parentPrototype);
 
         // set "constructor" in prototype
         JSHandle<JSTaggedValue> constructorKey = globalConst->GetHandledConstructorString();
@@ -2465,7 +2473,7 @@ JSTaggedValue RuntimeStubs::RuntimeDefinefunc(JSThread *thread, const JSHandle<J
     JSMutableHandle<JSTaggedValue> ihc(thread, JSTaggedValue::Undefined());
     JSMutableHandle<AOTLiteralInfo> aotLiteralInfo(thread, JSTaggedValue::Hole());
     //AOT ihc infos always in unshareConstpool
-    //If is runing on AOT,unshareConstpool is definitely not a hole
+    //If is running on AOT,unshareConstpool is definitely not a hole
     //So wo can skip if unshareConstpool is hole
     JSTaggedValue unsharedCp = thread->GetEcmaVM()->FindUnsharedConstpool(constpoolHandle.GetTaggedValue());
     if (!unsharedCp.IsHole()) {
@@ -2696,7 +2704,7 @@ JSTaggedValue RuntimeStubs::RuntimeDefineGetterSetterByValue(JSThread *thread, c
             "In a class, computed property names for static getter that are named 'prototype' throw a TypeError");
     }
 
-    auto receiverHClass = obj->GetJSHClass();
+    JSHandle<JSHClass> receiverHClass(thread, obj->GetJSHClass());
 
     if (flag) {
         if (!getter->IsUndefined()) {
@@ -2734,17 +2742,18 @@ JSTaggedValue RuntimeStubs::RuntimeDefineGetterSetterByValue(JSThread *thread, c
     }
 
     JSObject::DefineOwnProperty(thread, obj, propKey, desc);
-    auto holderTraHClass = obj->GetJSHClass();
-    if (receiverHClass != holderTraHClass) {
+    JSHandle<JSHClass> holderTraHClass(thread, obj->GetJSHClass());
+    if (*receiverHClass != *holderTraHClass) {
         if (holderTraHClass->IsAOT()) {
-            JSHandle<JSHClass> phcHandle(thread, holderTraHClass);
-            JSHClass::EnablePHCProtoChangeMarker(thread, phcHandle);
+            JSHClass::EnablePHCProtoChangeMarker(thread, holderTraHClass);
         }
         if (thread->GetEcmaVM()->IsEnablePGOProfiler()) {
+#ifndef EXCLUDE_PGO
             if (!func->IsUndefined()) {
                 thread->GetEcmaVM()->GetPGOProfiler()->ProfileDefineGetterSetter(
-                    receiverHClass, holderTraHClass, func, pcOffset);
+                    *receiverHClass, *holderTraHClass, func, pcOffset);
             }
+#endif
         }
     }
     return obj.GetTaggedValue();
@@ -2790,10 +2799,42 @@ JSTaggedValue RuntimeStubs::RuntimeOptSuperCall(JSThread *thread, const JSHandle
     return result;
 }
 
+JSTaggedValue RuntimeStubs::RuntimeCallRange(JSThread *thread, const JSHandle<JSTaggedValue> &func,
+                                             const JSHandle<TaggedArray> &argv, uint16_t length)
+{
+    JSHandle<JSTaggedValue> undefined = thread->GlobalConstants()->GetHandledUndefined();
+    EcmaRuntimeCallInfo *info = EcmaInterpreter::NewRuntimeCallInfo(thread, func, undefined, undefined, length);
+    RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread);
+    info->SetCallArg(length, argv);
+    JSTaggedValue result = JSFunction::Call(info);
+    RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread);
+    return result;
+}
+
+JSTaggedValue RuntimeStubs::RuntimeCallThisRange(JSThread *thread, const JSHandle<JSTaggedValue> &func,
+                                                 const JSHandle<JSTaggedValue> &thisObj,
+                                                 const JSHandle<TaggedArray> &argv, uint16_t length)
+{
+    EcmaRuntimeCallInfo *info = EcmaInterpreter::NewRuntimeCallInfo(thread, func, thisObj, thisObj, length);
+    RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread);
+    info->SetCallArg(length, argv);
+    JSTaggedValue result = JSFunction::Call(info);
+    RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread);
+    return result;
+}
+
 JSTaggedValue RuntimeStubs::RuntimeThrowTypeError(JSThread *thread, const char *message)
 {
     ASSERT_NO_ABRUPT_COMPLETION(thread);
     THROW_TYPE_ERROR_AND_RETURN(thread, message, JSTaggedValue::Exception());
+}
+
+JSTaggedValue RuntimeStubs::RuntimeThrowContainerBusinessError(JSThread *thread,
+    int32_t errorCode, const char *message)
+{
+    // no ASSERT_NO_ABRUPT_COMPLETION since concurrentScope would throw error both in construction and destruction.
+    JSTaggedValue error = containers::ContainerError::BusinessError(thread, errorCode, message);
+    THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, JSTaggedValue::Exception());
 }
 
 JSTaggedValue RuntimeStubs::RuntimeGetCallSpreadArgs(JSThread *thread, const JSHandle<JSTaggedValue> &jsArray)
@@ -3138,14 +3179,19 @@ JSTaggedValue RuntimeStubs::RuntimeOptConstructBoundFunction(JSThread *thread, J
     return RuntimeOptConstruct(thread, target, newTargetMutable, newPreArgs, args);
 }
 
-JSTaggedValue RuntimeStubs::GetResultValue(JSThread *thread, bool isAotMethod, JSHandle<JSFunction> ctor,
+JSTaggedValue RuntimeStubs::GetResultValue(JSThread *thread, bool isCompiledCode, JSHandle<JSFunction> ctor,
     CVector<JSTaggedType> &values, JSHandle<JSTaggedValue> newTgt, uint32_t &size, JSHandle<JSTaggedValue> obj)
 {
     JSTaggedValue resultValue;
-    if (isAotMethod && thread->HasSwitchedToStwStub()) {
+    if (isCompiledCode && thread->HasSwitchedToStwStub()) {
         uint32_t numArgs = ctor->GetCallTarget(thread)->GetNumArgsWithCallField();
         bool needPushArgv = numArgs != size;
         const JSTaggedType *prevFp = thread->GetLastLeaveFrame();
+#if ECMASCRIPT_ENABLE_ARK_STEED
+        if (ctor->HasArkSteedEntry()) {
+            resultValue = thread->GetEcmaVM()->ExecuteArkSteed(size, values.data(), prevFp);
+        } else
+#endif
         if (ctor->IsCompiledFastCall()) {
             if (needPushArgv) {
                 values.reserve(numArgs + NUM_MANDATORY_JSFUNC_ARGS - 1);
@@ -3189,7 +3235,7 @@ JSTaggedValue RuntimeStubs::RuntimeOptConstructGeneric(JSThread *thread, JSHandl
     CVector<JSTaggedType> values;
     bool isCompiledCode = ctor->IsCompiledCode();
     if (isCompiledCode) {
-        if (ctor->IsCompiledFastCall()) {
+        if (!ctor->HasArkSteedEntry() && ctor->IsCompiledFastCall()) {
             values.reserve(size + NUM_MANDATORY_JSFUNC_ARGS - 1);
             values.emplace_back(ctor.GetTaggedValue().GetRawData());
             values.emplace_back(obj.GetTaggedValue().GetRawData());
@@ -3299,6 +3345,9 @@ JSTaggedType *RuntimeStubs::GetActualArgv(JSThread *thread)
     if (it.IsFastJitFunctionFrame()) {
         auto optimizedJSJITFunctionFrame = it.GetFrame<FASTJITFunctionFrame>();
         return optimizedJSJITFunctionFrame->GetArgv(it);
+    } else if (it.IsSteedFunctionFrame()) {
+        auto steedFunctionFrame = it.GetFrame<SteedFunctionFrame>();
+        return steedFunctionFrame->GetArgv(it);
     } else {
         auto optimizedJSFunctionFrame = it.GetFrame<OptimizedJSFunctionFrame>();
         return optimizedJSFunctionFrame->GetArgv(it);
@@ -3317,9 +3366,13 @@ JSTaggedType *RuntimeStubs::GetActualArgvFromStub(JSThread *thread)
     if (it.IsFastJitFunctionFrame()) {
         auto optimizedJSJITFunctionFrame = it.GetFrame<FASTJITFunctionFrame>();
         return optimizedJSJITFunctionFrame->GetArgv(it);
+    } else if (it.IsSteedFunctionFrame()) {
+        auto steedFunctionFrame = it.GetFrame<SteedFunctionFrame>();
+        return steedFunctionFrame->GetArgv(it);
+    } else {
+        auto optimizedJSFunctionFrame = it.GetFrame<OptimizedJSFunctionFrame>();
+        return optimizedJSFunctionFrame->GetArgv(it);
     }
-    auto optimizedJSFunctionFrame = it.GetFrame<OptimizedJSFunctionFrame>();
-    return optimizedJSFunctionFrame->GetArgv(it);
 }
 
 OptimizedJSFunctionFrame *RuntimeStubs::GetOptimizedJSFunctionFrame(JSThread *thread)

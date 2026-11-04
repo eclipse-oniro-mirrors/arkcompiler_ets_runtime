@@ -51,8 +51,14 @@ size_t SlotFreeList::Discard()
     {
         SlotFreeSegment *unused = SlotFreeSegment::Cast(nextTop_);
         while (unused != nullptr) {
+            // Free segments stay poisoned under ARK_ASAN_ON; unpoison the
+            // header for this walk, then restore (same convention as
+            // FetchAndUpdateSegment).
+            unused->AsanUnPoisonFreeSegment();
             allocatedSize -= unused->GetSize();
-            unused = unused->GetNextFreeSegment();
+            SlotFreeSegment *next = unused->GetNextFreeSegment();
+            unused->AsanPoisonFreeSegment();
+            unused = next;
         }
     }
     top_ = 0;
@@ -60,6 +66,14 @@ size_t SlotFreeList::Discard()
     nextTop_ = 0;
     totalUsableSize_ = 0;
     return allocatedSize;
+}
+
+void SlotFreeList::FillInFlightSegment()
+{
+    if (top_ < end_) {
+        SlotFreeSegment::FillFreeSegment(top_, end_ - top_);
+    }
+    // top_/end_/nextTop_/totalUsableSize_ intentionally left unchanged.
 }
 
 uintptr_t SlotFreeList::TryAllocate()

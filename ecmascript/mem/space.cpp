@@ -17,9 +17,11 @@
 
 #include "common_components/heap/heap.h"
 #include "heap/heap_allocator.h"
-#include "ecmascript/js_tagged_value-inl.h"
+#include "ecmascript/js_tagged_value_wrapper-inl.h"
+#include "ecmascript/mem/heap.h"
 #include "ecmascript/mem/mem_controller.h"
 #include "ecmascript/mem/region-inl.h"
+#include "ecmascript/platform/map.h"
 #include "ecmascript/platform/os.h"
 
 namespace panda::ecmascript {
@@ -63,6 +65,7 @@ void Space::Destroy()
 void Space::ClearAndFreeRegion(Region *region, size_t cachedSize)
 {
     ASSERT(region != nullptr);
+    JIT_WRITE_SCOPE(jitWriteScope, region->InMachineCodeSpace() || region->InHugeMachineCodeSpace());
     LOG_ECMA_MEM(DEBUG) << "Clear region from:" << region << " to " << ToSpaceTypeName(spaceType_)
                         << ", region begin: " << reinterpret_cast<void *>(region->GetBegin());
     region->DeleteCrossRegionRSet();
@@ -285,6 +288,16 @@ uintptr_t HugeObjectSpace::Allocate(size_t objectSize, JSThread *thread, Allocat
 void HugeMachineCodeSpace::Sweep()
 {
     ASSERT(!g_isEnableCMCGC);
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    EnumerateRegions([this](Region *region) {
+        bool isMarked = false;
+        region->IterateAllMarkedBits([&isMarked]([[maybe_unused]] void *mem) { isMarked = true; });
+        if (!isMarked) {
+            localHeap_->GetEmbeddedCodeRefSet()->RemoveOwner(
+                MachineCode::Cast(reinterpret_cast<TaggedObject *>(region->GetBegin())));
+        }
+    });
+#endif
     HugeObjectSpace::Sweep();
     if (jitFort_) {
         jitFort_->Sweep(true);

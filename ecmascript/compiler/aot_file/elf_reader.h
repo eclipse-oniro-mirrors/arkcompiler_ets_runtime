@@ -55,6 +55,7 @@ public:
         const uintptr_t &secAddr, llvm::ELF::Elf64_Off &secOffset, const llvm::ELF::Elf64_Off &curShOffset);
     void SeparateSymtabSections(BinaryBufferParser &parser, std::vector<ModuleSectionDes> &des,
         const uintptr_t &secAddr, llvm::ELF::Elf64_Off &secOffset, const llvm::ELF::Elf64_Off &curShOffset);
+    uint64_t RuntimeOffsetToFileOffset(uint64_t runtimeOffset);
 
 private:
     static uint32_t GetModuleNum(size_t moduleInfoSize)
@@ -63,7 +64,11 @@ private:
         return moduleInfoSize / sizeof(ModuleSectionDes::ModuleRegionInfo);
     }
 
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
     static constexpr uint32_t ASMSTUB_MODULE_NUM = 6;
+#else
+    static constexpr uint32_t ASMSTUB_MODULE_NUM = 5;
+#endif
     ExecutedMemoryAllocator::ExeMem stubsMem_ {};
     MemMap fileMapMem_ {};
     std::vector<ModuleSectionDes::ModuleRegionInfo> moduleInfo_;

@@ -20,15 +20,17 @@
 #include <sstream>
 #include <string>
 #include <cstdint>
+#include <unordered_map>
 
 #include "ecmascript/platform/ffrt.h"
 #include "ecmascript/base/aligned_struct.h"
+#include "ecmascript/base/config.h"
 #include "ecmascript/builtin_entries.h"
 #include "ecmascript/daemon/daemon_task.h"
 #include "ecmascript/global_index.h"
 #include "ecmascript/js_handle.h"
 #include "ecmascript/js_object_resizing_strategy.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/js_thread_hclass_entries.h"
 #include "ecmascript/js_thread_stub_entries.h"
 #include "ecmascript/js_thread_elements_hclass_entries.h"
@@ -58,6 +60,7 @@ class EcmaVM;
 class GlobalIndex;
 class HeapRegionAllocator;
 class JSThread;
+class JitThread;
 class PropertiesCache;
 class MegaICCache;
 class ModuleLogger;
@@ -71,6 +74,7 @@ class GlobalEnvConstants;
 enum class ElementsKind : uint8_t;
 enum class NodeKind : uint8_t;
 class CCEvacuator;
+class SharedCCEvacuator;
 
 class MachineCode;
 class DependentInfos;
@@ -91,6 +95,19 @@ enum class CCStatus : uint8_t {
     COPY_FINISHED,
 };
 
+enum class SharedCCStatus : uint8_t {
+    IDLE,
+    PENDING,
+    READY,
+    SUSPENDED,
+};
+
+enum class ReadBarrierOwner : uint8_t {
+    LOCAL_CC = 1U,
+    SHARED_PARTIAL_GC = 1U << 1U,
+    SHARED_CC = 1U << 2U,
+};
+
 enum class GCKind : uint8_t {
     LOCAL_GC,
     SHARED_GC
@@ -104,7 +121,9 @@ enum class PGOProfilerStatus : uint8_t {
 enum class BCStubStatus: uint8_t {
     NORMAL_BC_STUB,
     PROFILE_BC_STUB,
+#if ECMASCRIPT_ENABLE_INTERPRETER_JIT_STUBS
     JIT_PROFILE_BC_STUB,
+#endif
     STW_COPY_BC_STUB,
 };
 
@@ -379,6 +398,7 @@ public:
 
     void SetIsStartHeapSampling(bool isStart)
     {
+        std::atomic_thread_fence(std::memory_order_release);
         glueData_.isStartHeapSampling_ = isStart ? JSTaggedValue::True() : JSTaggedValue::False();
     }
 
@@ -403,9 +423,17 @@ public:
 
     void PUBLIC_API SetException(JSTaggedValue exception);
 
+    size_t GetGlobalHandleCount();
+
     JSTaggedValue GetException() const
     {
         return glueData_.exception_;
+    }
+
+    // last exception will not clear when clear exception
+    JSTaggedValue GetLastException() const
+    {
+        return glueData_.lastException_;
     }
 
     bool HasPendingException() const
@@ -417,7 +445,7 @@ public:
     {
         glueData_.exception_ = JSTaggedValue::Hole();
     }
-    
+
     void ClearExceptionAndExtraErrorMessage()
     {
         glueData_.extraErrorMessage_ = JSTaggedValue::Hole();
@@ -471,8 +499,8 @@ public:
     JSHClass *GetBuiltinExtraHClass(BuiltinTypeId type) const;
 
     JSHClass *GetArrayInstanceHClass(ElementsKind kind, bool isPrototype) const;
-    JSHClass *GetArrayInstanceHClass(JSHandle<GlobalEnv> env, ElementsKind kind,
-                                     bool isPrototype, ThreadKind threadKind) const;
+    PUBLIC_API JSHClass *GetArrayInstanceHClass(JSHandle<GlobalEnv> env, ElementsKind kind,
+                                              bool isPrototype, ThreadKind threadKind) const;
 
     GlobalEnvField GetArrayInstanceHClassIndex(ElementsKind kind, bool isPrototype) const
     {
@@ -563,7 +591,10 @@ public:
 
     void PUBLIC_API CheckSwitchDebuggerBCStub();
     void CheckOrSwitchPGOStubs();
+    void CheckSwitchRBStub();
+#if ECMASCRIPT_ENABLE_INTERPRETER_JIT_STUBS
     void SwitchJitProfileStubs(bool isEnablePgo);
+#endif
     void SwitchStwCopyBCStubs(bool isStwCopy);
     void SwitchStwCopyCommonStubs(bool isStwCopy);
     void SwitchStwCopyBuiltinsStubs(bool isStwCopy);
@@ -587,6 +618,12 @@ public:
     void IterateWeakEcmaGlobalStorage(WeakVisitor &visitor);
 
     void IterateWeakEcmaGlobalStorage(const WeakRootVisitor &visitor, GCKind gcKind = GCKind::LOCAL_GC);
+
+    void IterateWeakRoots(const WeakRootVisitor &visitor);
+
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+    void IterateGlobal(RootVisitor &visitor);
+#endif
 
     void UpdateJitCodeMapReference(const WeakRootVisitor &visitor);
 
@@ -646,6 +683,103 @@ public:
         return status == CCStatus::COPY_FINISHED;
     }
 
+    SharedCCStatus GetSharedCCStatus() const
+    {
+        LockHolder lock(ccStatusMutex_);
+        return ccStatus_;
+    }
+
+    void SetSharedCCStatus(SharedCCStatus status)
+    {
+        LockHolder lock(ccStatusMutex_);
+        ccStatus_ = status;
+    }
+
+    template<typename Callback>
+    void WithCCStatusLock(Callback &&cb)
+    {
+        LockHolder lock(ccStatusMutex_);
+        cb(ccStatus_);
+    }
+
+    // Atomically set PENDING and try to mark task-pending under ccStatusMutex_.
+    // Returns true if a new task should be posted (first time), false if already pending.
+    bool TryMarkCCTaskPending()
+    {
+        LockHolder lock(ccStatusMutex_);
+        if (ccStatus_ == SharedCCStatus::READY || ccStatus_ == SharedCCStatus::SUSPENDED) {
+            return false;
+        }
+        ccStatus_ = SharedCCStatus::PENDING;
+        if (ccTaskPending_) {
+            return false;
+        }
+        ccTaskPending_ = true;
+        return true;
+    }
+
+    // Publish READY only after switching stubs.
+    bool TrySwitchSharedCCStub()
+    {
+        LockHolder lock(ccStatusMutex_);
+        if (ccStatus_ == SharedCCStatus::SUSPENDED) {
+            return true;
+        }
+        if (GetLastLeaveFrame() != nullptr) {
+            return ccStatus_ == SharedCCStatus::READY;
+        }
+        HoldReadBarrier(ReadBarrierOwner::SHARED_CC);
+        ccStatus_ = SharedCCStatus::READY;
+        return true;
+    }
+
+    // CC_SUSPEND: block thread from transitioning to RUNNING during SharedCC copy phase
+    void SetCCSuspend()
+    {
+        SetFlag(ThreadFlag::CC_SUSPEND);
+    }
+
+    bool HasCCSuspend() const
+    {
+        return ReadFlag(ThreadFlag::CC_SUSPEND);
+    }
+
+    void WaitCCSuspend();
+    void ClearCCSuspend();
+
+    // Marker: thread is blocked inside WaitGCFinished waiting for shared GC
+    bool IsWaitingSharedGCFinished() const
+    {
+        return waitingSharedGCFinished_;
+    }
+
+    void SetWaitingSharedGCFinished(bool v)
+    {
+        waitingSharedGCFinished_ = v;
+    }
+
+    // Called on target thread (via PostTaskToThread callback) to complete stub switch
+    void ExecuteSharedCCStubSwitch();
+
+    using PostTaskToThreadCallback = std::function<void(std::function<void()> task)>;
+
+    void SetPostTaskToThreadCallback(PostTaskToThreadCallback cb)
+    {
+        postTaskToThreadCallback_ = std::move(cb);
+    }
+
+    bool HasPostTaskToThreadCallback() const
+    {
+        return postTaskToThreadCallback_ != nullptr;
+    }
+
+    void PostTaskToThread(std::function<void()> task)
+    {
+        if (postTaskToThreadCallback_ != nullptr) {
+            postTaskToThreadCallback_(std::move(task));
+        }
+    }
+
     SharedMarkStatus GetSharedMarkStatus() const
     {
         return SharedMarkStatusBits::Decode(glueData_.sharedGCStateBitField_);
@@ -684,6 +818,44 @@ public:
 #else
         ReadBarrierStateBit::Set(flag, &glueData_.sharedGCStateBitField_);
 #endif
+    }
+
+    // Serialized by owner-thread, STW, or GC phase protocols.
+    // Hold CC stubs without enabling the barrier.
+    void HoldReadBarrier(ReadBarrierOwner owner)
+    {
+        readBarrierOwnerMask_ |= static_cast<uint8_t>(owner);
+        SwitchAllStub(false);
+    }
+
+    void AcquireReadBarrier(ReadBarrierOwner owner)
+    {
+        uint8_t ownerMask = static_cast<uint8_t>(owner);
+        readBarrierOwnerMask_ |= ownerMask;
+        activeReadBarrierOwnerMask_ |= ownerMask;
+        SetReadBarrierState(true);
+        SwitchAllStub(false);
+    }
+
+    void ReleaseReadBarrier(ReadBarrierOwner owner)
+    {
+        uint8_t ownerMask = static_cast<uint8_t>(owner);
+        if ((readBarrierOwnerMask_ & ownerMask) == 0) {
+            return;
+        }
+        readBarrierOwnerMask_ &= static_cast<uint8_t>(~ownerMask);
+        activeReadBarrierOwnerMask_ &= static_cast<uint8_t>(~ownerMask);
+        SetReadBarrierState(activeReadBarrierOwnerMask_ != 0);
+    }
+
+    bool TryRestoreNormalStubs()
+    {
+        if (readBarrierOwnerMask_ != 0) {
+            return false;
+        }
+        SetReadBarrierState(false);
+        SwitchAllStub(true);
+        return true;
     }
 
     common::GCPhase GetCMCGCPhase() const
@@ -852,6 +1024,23 @@ public:
         return enableLazyBuiltins_;
     }
 
+#if ENABLE_V70_OPTIMIZATION
+    void SetElementsDeletionCounter(uint32_t count)
+    {
+        elementsDeletionCounter_ = count;
+    }
+
+    uint32_t GetElementsDeletionCounter() const
+    {
+        return elementsDeletionCounter_;
+    }
+
+    void ResetElementsDeletionCounter()
+    {
+        elementsDeletionCounter_ = 0;
+    }
+#endif
+
     void SetInGlobalEnvInitialize(bool value)
     {
         inGlobalEnvInitialize_ = value;
@@ -862,10 +1051,7 @@ public:
         return inGlobalEnvInitialize_;
     }
 
-    void SetReadyForGCIterating(bool flag)
-    {
-        readyForGCIterating_ = flag;
-    }
+    void SetReadyForGCIterating(bool flag);
 
     bool ReadyForGCIterating() const
     {
@@ -1009,6 +1195,18 @@ public:
 
     JSHandle<GlobalEnv> PUBLIC_API GetGlobalEnv() const;
 
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+    GlobalEnv *GetGlobalEnvRaw() const
+    {
+        return reinterpret_cast<GlobalEnv *>(GetGlueGlobalEnv().GetTaggedObject());
+    }
+
+    uintptr_t GetFrameBase() const
+    {
+        return reinterpret_cast<uintptr_t>(glueData_.frameBase_);
+    }
+#endif
+
     JSTaggedValue PUBLIC_API GetCurrentGlobalEnv(JSTaggedValue currentEnv);
 
     JSTaggedValue GetGlueGlobalEnv() const
@@ -1047,6 +1245,32 @@ public:
     inline bool IsWeak(uintptr_t addr) const
     {
         return isWeak_(addr);
+    }
+
+    // Global ref mapping (thread-level storage, switch is process-level on Runtime)
+    void StoreGlobalRefMapping(uintptr_t slotAddr, void *ref);
+
+    void EraseGlobalRefMapping(uintptr_t slotAddr)
+    {
+        globalRefMap_.erase(slotAddr);
+    }
+
+    void *FindGlobalRefMapping(uintptr_t slotAddr) const
+    {
+        auto it = globalRefMap_.find(slotAddr);
+        return it != globalRefMap_.end() ? it->second : nullptr;
+    }
+
+    void IterateGlobalRefMappings(const std::function<void(uintptr_t slotAddr, void *ref)> &visitor) const
+    {
+        for (const auto &[slot, ref] : globalRefMap_) {
+            visitor(slot, ref);
+        }
+    }
+
+    void ClearGlobalRefMap()
+    {
+        globalRefMap_.clear();
     }
 
     void SetCrossThreadExecution(bool enable)
@@ -1225,6 +1449,16 @@ public:
         localEvacuator_ = evacuator;
     }
 
+    SharedCCEvacuator *GetSharedCCEvacuator() const
+    {
+        return sharedCCEvacuator_;
+    }
+
+    void InstallSharedCCEvacuator(SharedCCEvacuator *evacuator)
+    {
+        sharedCCEvacuator_ = evacuator;
+    }
+
     struct GlueData : public base::AlignedStruct<JSTaggedValue::TaggedTypeSize(),
                                                  BCStubEntries,
                                                  base::AlignedBool,
@@ -1233,6 +1467,7 @@ public:
                                                  base::AlignedPointer,
                                                  base::AlignedPointer,
                                                  base::AlignedPointer,
+                                                 JSTaggedValue,
                                                  JSTaggedValue,
                                                  JSTaggedValue,
                                                  base::AlignedUint32,
@@ -1295,6 +1530,7 @@ public:
             HeapCurrentEndIndex,
             AllocBufferIndex,
             StateAndFlagsIndex,
+            LastExceptionIndex,
             ExceptionIndex,
             ExtraErrorMessageIndex,
             JsonErrorPositionIndex,
@@ -1376,6 +1612,11 @@ public:
         static size_t GetStateAndFlagsOffset(bool isArch32)
         {
             return GetOffset<static_cast<size_t>(Index::StateAndFlagsIndex)>(isArch32);
+        }
+
+        static size_t GetLastExceptionOffset(bool isArch32)
+        {
+            return GetOffset<static_cast<size_t>(Index::LastExceptionIndex)>(isArch32);
         }
 
         static size_t GetExceptionOffset(bool isArch32)
@@ -1663,13 +1904,13 @@ public:
             return GetOffset<static_cast<size_t>(Index::isMultiContextTriggeredIndex)>(
                 isArch32);
         }
-        
+
         static size_t GetExtraErrorMessageOffset(bool isArch32)
         {
             return GetOffset<static_cast<size_t>(Index::ExtraErrorMessageIndex)>(
                 isArch32);
         }
-        
+
         static size_t GetJsonErrorPositionOffset(bool isArch32)
         {
             return GetOffset<static_cast<size_t>(Index::JsonErrorPositionIndex)>(
@@ -1683,6 +1924,8 @@ public:
         alignas(EAS) uintptr_t heapCurrentEnd_ {0};
         alignas(EAS) uintptr_t allocBuffer_ {0};
         alignas(EAS) ThreadStateAndFlags stateAndFlags_ {};
+        // cache of last exception, will not clear when clear exception
+        alignas(EAS) JSTaggedValue lastException_ {JSTaggedValue::Hole()};
         alignas(EAS) JSTaggedValue exception_ {JSTaggedValue::Hole()};
         alignas(EAS) JSTaggedValue extraErrorMessage_ {JSTaggedValue::Hole()};
         alignas(EAS) uint32_t jsonErrorPosition_ {0};
@@ -1842,6 +2085,21 @@ public:
     void ResetFullMarkRequest()
     {
         fullMarkRequest_ = false;
+    }
+
+    bool SuspendByConcurrentTask() const
+    {
+        return suspendByConcurrentTask_;
+    }
+
+    void SetSuspendByConcurrentTask(bool flag)
+    {
+        suspendByConcurrentTask_ = flag;
+    }
+
+    void SetSwitchRBStubRequest(bool request)
+    {
+        switchRBStubRequest_ = request;
     }
 
     Closure *GetFlipFunction() const
@@ -2019,7 +2277,7 @@ public:
         }
     }
 
-    void SuspendThread(bool internalSuspend, SuspendBarrier* barrier = nullptr);
+    void SuspendThread(bool internalSuspend, SuspendBarrier *barrier = nullptr, bool jitLocalGC = false);
     void ResumeThread(bool internalSuspend);
     void WaitSuspension();
     static bool IsMainThread();
@@ -2091,6 +2349,16 @@ public:
     {
         return &jitMutex_;
     }
+
+    // Registration is per compilation task, while the compiler is native.
+    // jitMutex_ stabilizes this list for a local safepoint; ordinary heap reads
+    // use only the compiler's existing thread state, not this mutex.
+    PUBLIC_API void RegisterJitThread(JitThread *compiler);
+    PUBLIC_API void UnregisterJitThread(JitThread *compiler);
+    PUBLIC_API void LockJitMutex(JSThread *current);
+    // Called under jitMutex_. Local and shared GC request the SAME thread state.
+    PUBLIC_API void SuspendJitThreads();
+    PUBLIC_API void ResumeJitThreads();
 
     RecursiveMutex &GetIcAccessorLock()
     {
@@ -2236,6 +2504,10 @@ private:
         glueData_.globalConst_ = globalConst;
     }
 
+    void IterateBuiltinHClassEntries(const WeakRootVisitor &visitor);
+
+    void IterateCtorHClassEntries(const WeakRootVisitor &visitor);
+
     void PUBLIC_API TransferFromRunningToSuspended(ThreadState newState);
 
     void PUBLIC_API TransferToRunning();
@@ -2283,6 +2555,7 @@ private:
     void *env_ {nullptr};
     Area *regExpCacheArea_ {nullptr};
     CCEvacuator *localEvacuator_ {nullptr};
+    SharedCCEvacuator *sharedCCEvacuator_ {nullptr};
     static thread_local ThreadId currentThreadId_;
     // MM: handles, global-handles, and aot-stubs.
     int nestedLevel_ = 0;
@@ -2294,6 +2567,8 @@ private:
 
     EcmaGlobalStorage<Node> *globalStorage_ {nullptr};
     EcmaGlobalStorage<DebugNode> *globalDebugStorage_ {nullptr};
+    // Global ref mapping: slotAddr → ref
+    std::unordered_map<uintptr_t, void*> globalRefMap_;
     int32_t stackTraceFd_ {-1};
     std::function<uintptr_t(JSTaggedType value)> newGlobalHandle_;
     std::function<void(uintptr_t nodeAddr)> disposeGlobalHandle_;
@@ -2313,6 +2588,9 @@ private:
     VmThreadControl *vmThreadControl_ {nullptr};
     bool enableStackSourceFile_ {true};
     bool enableLazyBuiltins_ {false};
+#if ENABLE_V70_OPTIMIZATION
+    uint32_t elementsDeletionCounter_ {0};
+#endif
     bool inGlobalEnvInitialize_ {false};
     bool readyForGCIterating_ {false};
     bool isUncaughtExceptionRegistered_ {false};
@@ -2333,8 +2611,17 @@ private:
     // Shared heap
     bool isMainThread_ {false};
     bool fullMarkRequest_ {false};
+    bool suspendByConcurrentTask_ {false};
+    bool switchRBStubRequest_ {false};
     // Shared heap collect local heap Rset
     bool processingLocalToSharedRset_ {false};
+    bool waitingSharedGCFinished_ {false};
+    uint8_t readBarrierOwnerMask_ {0};
+    uint8_t activeReadBarrierOwnerMask_ {0};
+    SharedCCStatus ccStatus_ {SharedCCStatus::IDLE};
+    bool ccTaskPending_ {false};
+    mutable Mutex ccStatusMutex_;
+    PostTaskToThreadCallback postTaskToThreadCallback_ {nullptr};
 
     CMap<JSHClass *, GlobalIndex> ctorHclassEntries_;
 
@@ -2345,6 +2632,9 @@ private:
     int32_t suspendCount_ {0};
     ConditionVariable suspendCondVar_;
     SuspendBarrier *suspendBarrier_ {nullptr};
+    // Local and shared GC may await the same compiler concurrently. Both
+    // acknowledgements share SUSPEND_REQUEST/ACTIVE_BARRIER and suspendCount_.
+    SuspendBarrier *jitSuspendBarrier_{nullptr};
 
     Closure *flipFunction_ {nullptr};
     Mutex flipMutex_ {};
@@ -2354,6 +2644,8 @@ private:
 
     ThreadType threadType_ {ThreadType::JS_THREAD};
     RecursiveMutex jitMutex_;
+    JitThread *jitThreads_{nullptr};
+    uint32_t jitSuspendDepth_{0}; // Nested exclusive scopes, NOT active heap readers.
     bool machineCodeLowMemory_ {false};
     RecursiveMutex icAccessorLockMutex_;
     DateUtils *dateUtils_ {nullptr};

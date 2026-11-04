@@ -24,7 +24,10 @@
 #include "ecmascript/serializer/serialize_data.h"
 #include "ecmascript/snapshot/mem/encode_bit.h"
 #include "ecmascript/jspandafile/method_literal.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
+#if USE_CMS_GC
+#include "ecmascript/mem/cms_mem/slot_space_config.h"
+#endif
 #include "ecmascript/mem/object_xray.h"
 
 #include "libpandabase/macros.h"
@@ -43,14 +46,15 @@ enum class SnapshotType {
 struct SnapshotRegionHeadInfo {
     size_t regionIndex_ {0};
     size_t aliveObjectSize_ {0};
+#if USE_CMS_GC
+    size_t slotSize_ {0};
+#endif
 
     static constexpr size_t RegionHeadInfoSize()
     {
         return sizeof(SnapshotRegionHeadInfo);
     }
 };
-
-using ObjectEncode = std::pair<uint64_t, ecmascript::EncodeBit>;
 
 class SnapshotProcessor final {
 public:
@@ -68,30 +72,31 @@ public:
     void StopAllocate();
     void WriteObjectToFile(std::fstream &write);
     std::vector<size_t> StatisticsObjectSize();
-    void ProcessObjectQueue(CQueue<TaggedObject *> *queue, std::unordered_map<uint64_t, ObjectEncode> *data);
-    void SerializeObject(TaggedObject *objectHeader, CQueue<TaggedObject *> *queue,
-                         std::unordered_map<uint64_t, ObjectEncode> *data);
+    void ProcessObjectQueue(CQueue<TaggedObject *> *queue);
+    void SerializeObject(TaggedObject *objectHeader, CQueue<TaggedObject *> *queue);
     void Relocate(SnapshotType type, const JSPandaFile *jsPandaFile,
                   uint64_t rootObjSize);
     void RelocateSpaceObject(std::vector<std::pair<uintptr_t, size_t>> &regions, SnapshotType type,
         MethodLiteral* methods, size_t methodNums, size_t rootObjSize);
-    void RelocateSpaceObject(MonoSpace* space, SnapshotType type, MethodLiteral* methods,
+    void RelocateSpaceObject(MonoSpace* space, MemSpaceType spaceType, SnapshotType type, MethodLiteral* methods,
                              size_t methodNums, size_t rootObjSize);
     void SerializePandaFileMethod();
     AllocResult GetNewObj(size_t objectSize, TaggedObject *objectHeader);
     uintptr_t GetNewObjAddress(size_t objectSize, TaggedObject *objectHeader);
-    EncodeBit EncodeTaggedObject(TaggedObject *objectHeader, CQueue<TaggedObject *> *queue,
-                                 std::unordered_map<uint64_t, ObjectEncode> *data);
-    EncodeBit GetObjectEncode(JSTaggedValue object, CQueue<TaggedObject *> *queue,
-                              std::unordered_map<uint64_t, ObjectEncode> *data);
-    void EncodeTaggedObjectRange(ObjectSlot start, ObjectSlot end, CQueue<TaggedObject *> *queue,
-                                 std::unordered_map<uint64_t, ObjectEncode> *data);
+    template <ReferenceType refType>
+    EncodeBitType<refType> EncodeTaggedObject(TaggedObject *objectHeader, CQueue<TaggedObject *> *queue);
+    template <ReferenceType refType>
+    EncodeBitType<refType> GetObjectEncode(JSTaggedValue object, CQueue<TaggedObject *> *queue);
+    void EncodeTaggedObjectRange(ObjectSlot start, ObjectSlot end, CQueue<TaggedObject *> *queue);
     void DeserializeObjectExcludeString(uintptr_t regularObjBegin, size_t regularObjSize, size_t pinnedObjSize,
                                         size_t largeObjSize);
     void DeserializeObjectExcludeString(uintptr_t oldSpaceBegin, size_t oldSpaceObjSize, size_t nonMovableObjSize,
                                         size_t machineCodeObjSize, size_t snapshotObjSize, size_t hugeSpaceObjSize);
     void DeserializeString(uintptr_t stringBegin, uintptr_t stringEnd);
-
+#if USE_CMS_GC
+    void RelocateSlotSpaceObject(SnapshotType type, size_t rootObjSize);
+    void DeserializeSlotSpaceObject(uintptr_t beginAddr, size_t spaceObjSize);
+#endif
     // ONLY used in UT to get the deserialize value result
     JSTaggedValue GetDeserializeResultForUT() const
     {
@@ -123,19 +128,40 @@ public:
     size_t GetNativeTableSize() const;
 
 private:
+    // Canonical source-address -> snapshot allocation entry. A single ordinary object may be
+    // referenced through both a normal-width field and a compressed-width field (for example a
+    // ConstantPool cache slot written via SetObjectToCache() and its AOT array info slot written
+    // via SetAotArrayInfo()). Exactly one snapshot allocation is made per source object; both
+    // encode-bit widths are derived from this canonical entry so object identity survives the
+    // serialize/deserialize round trip instead of producing two divergent copies.
+    struct CanonicalObjectEncode {
+        enum class Kind : uint8_t {
+            ALLOCATED,  // ordinary object copied into snapshot space
+            STRING,     // deduplicated string index (no snapshot allocation)
+            BUILTINS,   // reused builtins/global-constant index (no snapshot allocation)
+        };
+        Kind kind {Kind::ALLOCATED};
+        uintptr_t snapshotAddr {0};  // snapshot-space copy; 0 for STRING/BUILTINS
+        size_t regionIndex {0};      // ALLOCATED only
+        size_t objectOffset {0};     // ALLOCATED only
+        size_t nativeIndex {0};      // STRING/BUILTINS index
+    };
+
     class SerializeObjectVisitor final : public BaseObjectVisitor<SerializeObjectVisitor> {
     public:
         explicit SerializeObjectVisitor(SnapshotProcessor *processor, uintptr_t snapshotObj,
-            CQueue<TaggedObject *> *queue, std::unordered_map<uint64_t, ObjectEncode> *data);
+            CQueue<TaggedObject *> *queue);
         ~SerializeObjectVisitor() override = default;
 
-        void VisitObjectRangeImpl(BaseObject *rootObject, uintptr_t startAddr,
-                                  uintptr_t endAddr, VisitObjectArea area) override;
+        void VisitObjectRangeImpl(BaseObject *rootObject, ObjectSlot start,
+                                  ObjectSlot end, VisitObjectArea area) override;
+
+        void VisitCompressedObjectRangeImpl(BaseObject *rootObject, CompressedObjectSlot start,
+                                            CompressedObjectSlot end) override;
     private:
         SnapshotProcessor *processor_ {nullptr};
         uintptr_t snapshotObj_ {-1};
         CQueue<TaggedObject *> *queue_ {nullptr};
-        std::unordered_map<uint64_t, ObjectEncode> *data_{nullptr};
     };
 
     class DeserializeFieldVisitor final : public BaseObjectVisitor<DeserializeFieldVisitor> {
@@ -143,23 +169,27 @@ private:
         explicit DeserializeFieldVisitor(SnapshotProcessor *processor);
         ~DeserializeFieldVisitor() override = default;
 
-        void VisitObjectRangeImpl(BaseObject *rootObject, uintptr_t startAddr, uintptr_t endAddr,
+        void VisitObjectRangeImpl(BaseObject *rootObject, ObjectSlot start, ObjectSlot end,
                                   VisitObjectArea area) override;
+
+        void VisitCompressedObjectRangeImpl(BaseObject *rootObject, CompressedObjectSlot start,
+                                            CompressedObjectSlot end) override;
     private:
         SnapshotProcessor *processor_ {nullptr};
     };
 
     bool VisitObjectBodyWithRep(TaggedObject *root, ObjectSlot slot, uintptr_t obj, int index, VisitObjectArea area);
     void SetObjectEncodeField(uintptr_t obj, size_t offset, uint64_t value);
+    void SetCompressedObjectEncodeField(uintptr_t obj, size_t offset, CompressedEncodeBit encodeBit);
 
-    EncodeBit SerializeObjectHeader(TaggedObject *objectHeader, size_t objectType, CQueue<TaggedObject *> *queue,
-                                    std::unordered_map<uint64_t, ObjectEncode> *data);
-    uint64_t SerializeTaggedField(JSTaggedType *tagged, CQueue<TaggedObject *> *queue,
-                                  std::unordered_map<uint64_t, ObjectEncode> *data);
+    EncodeBit SerializeObjectHeader(TaggedObject *objectHeader, size_t objectType, CQueue<TaggedObject *> *queue);
+    uint64_t SerializeTaggedField(JSTaggedType *tagged, CQueue<TaggedObject *> *queue);
+    CompressedEncodeBit SerializeCompressedTaggedField(CompressedJSTaggedType *tagged, CQueue<TaggedObject *> *queue);
     void DeserializeField(TaggedObject *objectHeader);
     void DeserializeTaggedField(uint64_t *value, TaggedObject *root);
+    void DeserializeCompressedTaggedField(CompressedJSTaggedType *value, TaggedObject *root);
     void DeserializeNativePointer(uint64_t *value);
-    void DeserializeClassWord(TaggedObject *object);
+    void DeserializeClassWord(TaggedObject *object, MemSpaceType spaceType = MemSpaceType::SPACE_TYPE_LAST);
     void DeserializePandaMethod(uintptr_t begin, uintptr_t end, MethodLiteral *methods,
                                 size_t &methodNums, size_t &others);
     void DeserializeSpaceObject(uintptr_t beginAddr, size_t objSize, SerializedObjectSpace spaceType);
@@ -169,7 +199,10 @@ private:
 
     EncodeBit NativePointerToEncodeBit(void *nativePointer);
     size_t SearchNativeMethodIndex(void *nativePointer);
-    uintptr_t TaggedObjectEncodeBitToAddr(EncodeBit taggedBit);
+    template <ReferenceType refType>
+    uintptr_t TaggedObjectEncodeBitToAddr(EncodeBitType<refType> taggedBit);
+    template <ReferenceType refType>
+    EncodeBitType<refType> DeriveEncodeBit(const CanonicalObjectEncode &entry);
     void WriteSpaceObjectToFile(MonoSpace* space, std::fstream &write);
     void WriteHugeObjectToFile(HugeObjectSpace* space, std::fstream &writer);
     size_t StatisticsSpaceObjectSize(MonoSpace* space);
@@ -183,7 +216,7 @@ private:
     class RegionProxy {
     public:
         RegionProxy() = default;
-        ~RegionProxy() = default;
+        virtual ~RegionProxy() = default;
 
         bool IsEmpty() const
         {
@@ -227,7 +260,7 @@ private:
         {
             return regionIndex_;
         }
-    private:
+    protected:
         uintptr_t begin_ {0};
         uintptr_t top_ {0};
         uintptr_t end_ {0};
@@ -266,6 +299,97 @@ private:
         size_t allocatedSize_ {0};
         size_t commonRegionSize_ {0};
     };
+
+#if USE_CMS_GC
+    class SlotRegionProxy : public RegionProxy {
+    public:
+        static constexpr size_t REGION_BEGIN_OFFSET = DEFAULT_REGION_SIZE - CMSRegion::GetRegionAvailableSize();
+
+        virtual ~SlotRegionProxy() = default;
+        AllocResult Allocate()
+        {
+            if (top_ + slotSize_ <= end_) {
+                uintptr_t addr = top_;
+                top_ += slotSize_;
+                return {addr, addr - begin_ + REGION_BEGIN_OFFSET, regionIndex_};
+            }
+            return {0, 0, -1};
+        }
+
+        void Setup(size_t slotSize)
+        {
+            slotSize_ = slotSize;
+        }
+
+        size_t GetSlotSize() const
+        {
+            return slotSize_;
+        }
+
+        void SetRootRegion()
+        {
+            isRootRegion_ = true;
+        }
+
+        bool IsRootRegion() const
+        {
+            return isRootRegion_;
+        }
+    private:
+        size_t slotSize_ {0};
+        bool isRootRegion_ {false};
+    };
+
+    class SlotRegionAllocateProxy {
+    public:
+        SlotRegionAllocateProxy()
+        {
+            for (size_t i = 0; i < SlotSpaceConfig::NUM_SLOTS; ++i) {
+                size_t slotSize = SlotSpace::GetSlotSizeByIdx(i);
+                tlabAllocators_[i].Setup(slotSize);
+            }
+        }
+
+        ~SlotRegionAllocateProxy()
+        {
+            for (SlotRegionProxy &info : regions_) {
+                if (!info.IsEmpty()) {
+                    void *ptr = reinterpret_cast<void*>(info.GetBegin());
+                    free(ptr);
+                }
+            }
+        }
+
+        AllocResult Allocate(size_t size, uintptr_t &regionIndex);
+
+        void StopAllocate();
+
+        void Initialize();
+
+        size_t GetAllocatedSize() const
+        {
+            return allocatedSize_;
+        }
+
+        void WriteToFile(std::fstream &writer);
+    private:
+        size_t GetRegionSize()
+        {
+            ASSERT(regionSize_ != 0);
+            return regionSize_;
+        }
+
+        void Expand(SlotRegionProxy &tlab, uintptr_t &regionIndex);
+
+        std::vector<SlotRegionProxy> regions_ {};
+        std::array<SlotRegionProxy, SlotSpaceConfig::NUM_SLOTS> tlabAllocators_ {};
+        size_t allocatedSize_ {0};
+        size_t regionSize_ {0};
+    };
+
+    SlotRegionAllocateProxy slotRegionAllocator_ ;
+    std::map<size_t, std::pair<Region*, size_t>> slotRegions_ {};
+#endif
     AllocateProxy regularObjAllocator_ {SerializedObjectSpace::REGULAR_SPACE};
     AllocateProxy pinnedObjAllocator_ {SerializedObjectSpace::PIN_SPACE};
     AllocateProxy largeObjAllocator_ {SerializedObjectSpace::LARGE_SPACE};
@@ -286,6 +410,8 @@ private:
     */
     CVector<JSHandle<EcmaString>> deserializeStringVector_;
     std::unordered_map<size_t, uintptr_t> regionIndexMap_;
+    // Canonical source-address -> snapshot allocation entry, shared across both encode-bit widths.
+    std::unordered_map<uint64_t, CanonicalObjectEncode> objectEncodeMap_ {};
     size_t regionIndex_ {0};
     bool isRootObjRelocate_ {false};
     JSTaggedValue root_ {JSTaggedValue::Hole()};

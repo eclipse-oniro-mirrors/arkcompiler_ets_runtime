@@ -14,6 +14,7 @@
  */
 #include <sys/wait.h>
 #include <sys/prctl.h>
+#include <unistd.h>
 #include "profiler/heap_profiler_listener.h"
 #include "ecmascript/dfx/hprof/heap_profiler.h"
 
@@ -28,6 +29,7 @@
 #include "ecmascript/platform/backtrace.h"
 #include "ecmascript/platform/process.h"
 #include "ecmascript/platform/file.h"
+#include "ecmascript/runtime.h"
 #include "ecmascript/runtime_lock.h"
 
 #if defined(ENABLE_DUMP_IN_FAULTLOG)
@@ -41,8 +43,6 @@
 #endif
 
 namespace panda::ecmascript {
-
-bool HeapProfiler::oomDumpActive_ = false;
 
 std::pair<bool, NodeId> EntryIdMap::FindId(JSTaggedType addr)
 {
@@ -170,62 +170,68 @@ void HeapProfiler::MoveEvent(uintptr_t address, TaggedObject *forwardAddress, si
 void HeapProfiler::UpdateHeapObjects(HeapSnapshot *snapshot)
 {
     SharedHeap::GetInstance()->GetSweeper()->WaitAllTaskFinished();
-    vm_->GetHeap()->WaitAndHandleCCFinished();
+    const_cast<Heap*>(vm_->GetHeap())->WaitAndHandleCCFinished();
     snapshot->UpdateNodes();
+}
+
+static void ReportOOMDumpStatus(const DumpSnapShotOption &dumpOption, int32_t status,
+                                const char *message)
+{
+    if (!dumpOption.isDumpOOM) {
+        return;
+    }
+    SEND_HISYSEVENT(ARKTS_RUNTIME, ARK_STATS_OOM, STATISTIC, "STATUS", status,
+                    "MESSAGE", message,
+                    "OOM_TYPE", dumpOption.isForSharedOOM ? "SHARED_OOM" : "LOCAL_OOM",
+                    "APP_RUNNING_UNIQUE_ID", &DFX_GetAppRunningUniqueId == nullptr ? "" : DFX_GetAppRunningUniqueId(),
+                    "EVENT_VERSION", "1.0.0");
 }
 
 void HeapProfiler::DumpHeapSnapshotForOOM([[maybe_unused]] const DumpSnapShotOption &dumpOption,
                                           [[maybe_unused]] bool fromSharedGC)
 {
 #if defined(ENABLE_DUMP_IN_FAULTLOG)
-    // Write in faultlog for heap leak.
-    int32_t fd;
+    DumpSnapShotOption doDumpOption = dumpOption;
 #if defined(PANDA_TARGET_ARM32)
-    DumpSnapShotOption doDumpOption;
     doDumpOption.dumpFormat = DumpFormat::JSON;
-    doDumpOption.isFullGC = dumpOption.isFullGC;
     doDumpOption.isSimplify = true;
     doDumpOption.isBeforeFill = false;
-    fd = RequestFileDescriptor(static_cast<int32_t>(FaultLoggerType::JS_HEAP_SNAPSHOT));
-    if (fd < 0) {
-        LOG_ECMA(ERROR) << "OOM Dump Write FD failed, fd" << fd;
-        SEND_HISYSEVENT(ARKTS_RUNTIME, ARK_STATS_OOM, STATISTIC, "STATUS", 1,
-                        "MESSAGE", "request fd from dfx failed.",
-                        "OOM_TYPE", dumpOption.isForSharedOOM ? "SHARED_OOM" : "LOCAL_OOM");
-        return;
-    }
-#else
-    if (dumpOption.isDumpOOM && dumpOption.dumpFormat == DumpFormat::BINARY) {
+#endif
+    int32_t fd;
+    if (doDumpOption.dumpFormat == DumpFormat::BINARY) {
         fd = RequestFileDescriptor(static_cast<int32_t>(FaultLoggerType::JS_RAW_SNAPSHOT));
     } else {
         fd = RequestFileDescriptor(static_cast<int32_t>(FaultLoggerType::JS_HEAP_SNAPSHOT));
     }
     if (fd < 0) {
         LOG_ECMA(ERROR) << "OOM Dump Write FD failed, fd" << fd;
-        SEND_HISYSEVENT(ARKTS_RUNTIME, ARK_STATS_OOM, STATISTIC, "STATUS", 1,
-                        "MESSAGE", "request fd from dfx failed.",
-                        "OOM_TYPE", dumpOption.isForSharedOOM ? "SHARED_OOM" : "LOCAL_OOM");
+        ReportOOMDumpStatus(dumpOption, DUMP_STATUS_FAILED, "request fd from dfx failed.");
         return;
     }
-#endif
+
     FileDescriptorStream stream(fd);
     if (fromSharedGC) {
-        DumpHeapSnapshotFromSharedGCForOOM(&stream, dumpOption);
+        DumpHeapSnapshotFromSharedGCForOOM(&stream, doDumpOption);
     } else {
-        DumpHeapSnapshot(&stream, dumpOption);
+        DumpHeapSnapshot(&stream, doDumpOption);
     }
 #else
     LOG_ECMA(ERROR) << "oom dump not supported.";
 #endif
 }
 
+static void ChildHandler(void)
+{
+    Runtime::SetFork(true);
+}
+
+static void InitFork()
+{
+    pthread_atfork(nullptr, nullptr, ChildHandler);
+}
+
 void HeapProfiler::DumpHeapSnapshotFromSharedGCForOOM(Stream *stream, const DumpSnapShotOption &dumpOption)
 {
-    if (!TryStartOOMDump()) {
-        LOG_ECMA(WARN) << "OOM dump already in progress, skip dump";
-        return;
-    }
-
     SharedHeap::GetInstance()->PrepareByJSThread(vm_->GetAssociatedJSThread(), true);
     if (dumpOption.isProcDump) {
         Runtime::GetInstance()->GCIterateThreadList([&](JSThread *thread) {
@@ -235,20 +241,30 @@ void HeapProfiler::DumpHeapSnapshotFromSharedGCForOOM(Stream *stream, const Dump
         const_cast<Heap*>(vm_->GetHeap())->Prepare();
     }
 
+    appPid_ = getpid();
+    appTid_ = syscall(SYS_gettid);
     pid_t pid = -1;
+    static std::once_flag flag;
+    std::call_once(flag, InitFork);
     // fork for oom
     if ((pid = fork()) < 0) {
         LOG_ECMA(ERROR) << "DumpHeapSnapshotFromSharedGCForOOM fork failed: " << strerror(errno);
+        ReportOOMDumpStatus(dumpOption, DUMP_STATUS_FAILED, "fork_failed");
         return;
     }
     if (pid == 0) {
         prctl(PR_SET_NAME, reinterpret_cast<unsigned long>("dump_process"), 0, 0, 0);
-        DumpHeapSnapshotFromSharedGC(stream, dumpOption);
+        {
+            DumpAbortSignalScope dumpAbortScope(dumpOption.isDumpOOM, dumpOption.isForSharedOOM);
+            SetDumpStatus(DUMP_STATUS_DUMP_INIT);
+            DumpHeapSnapshotFromSharedGC(stream, dumpOption);
+        }
         _exit(0);
     }
     if (pid != 0) {
         if (!Process::IsolateSubProcess(vm_->GetBundleName().c_str(), getpid(), pid)) {
             LOG_ECMA(ERROR) << "OOM Fork dump snapshot failed!";
+            ReportOOMDumpStatus(dumpOption, DUMP_STATUS_FAILED, "isolate_subprocess_failed");
         }
     }
 }
@@ -256,11 +272,17 @@ void HeapProfiler::DumpHeapSnapshotFromSharedGCForOOM(Stream *stream, const Dump
 bool HeapProfiler::DumpHeapSnapshotFromSharedGC(Stream *stream, const DumpSnapShotOption &dumpOption)
 {
     base::BlockHookScope blockScope;
+    SetDumpStatus(DUMP_STATUS_FILL_BUMP_POINTER);
     Runtime::GetInstance()->GCIterateThreadList([&](JSThread *thread) {
         ASSERT(thread->IsSuspended() || thread->HasLaunchedSuspendAll());
         const_cast<Heap*>(thread->GetEcmaVM()->GetHeap())->FillBumpPointerForTlab();
     });
-    BinaryDump(stream, dumpOption);
+    if (dumpOption.dumpFormat == DumpFormat::BINARY) {
+        BinaryDump(stream, dumpOption);
+    } else {
+        DoDump(stream, nullptr, dumpOption);
+    }
+    SetDumpStatus(DUMP_STATUS_END_OF_STREAM);
     stream->EndOfStream();
     return true;
 }
@@ -398,10 +420,15 @@ void HeapProfiler::UpdateNodeAddressIdMap()
 
 bool HeapProfiler::BinaryDump(Stream *stream, const DumpSnapShotOption &dumpOption)
 {
+#if defined(PANDA_TARGET_ARM32)
+    LOG_ECMA(ERROR) << "binary dump is not supported in ARM32.";
+    return false;
+#endif
     [[maybe_unused]] EcmaHandleScope ecmaHandleScope(vm_->GetAssociatedJSThread());
     DumpSnapShotOption option;
     std::vector<std::string> filePaths;
     std::vector<uint64_t> fileSizes;
+    std::string filePath;
     auto stringTable = chunk_.New<StringHashMap>(vm_);
     auto snapshot = chunk_.New<HeapSnapshot>(vm_, stringTable, option, false, entryIdMap_);
 
@@ -425,7 +452,8 @@ bool HeapProfiler::BinaryDump(Stream *stream, const DumpSnapShotOption &dumpOpti
     }
 
     rawHeapDump->BinaryDump();
-    filePaths.emplace_back(RAWHEAP_FILE_NAME);
+    filePath = RAWHEAP_FILE_NAME + "-" + std::to_string(appPid_) + "-" + std::to_string(appTid_) + ".rawheap";
+    filePaths.emplace_back(filePath);
     fileSizes.emplace_back(rawHeapDump->GetRawHeapFileOffset());
     delete rawHeapDump;
 
@@ -470,6 +498,24 @@ void HeapProfiler::FillIdMap()
     entryIdMap_->RemoveUnmarkedObjects(marker);
 }
 
+std::unordered_map<uintptr_t, uint64_t> HeapProfiler::GetHandleNodeIdMap()
+{
+    nodeAddressIdMap_.clear();
+    UpdateNodeAddressIdMap();
+    LOG_ECMA(DEBUG) << "HeapProfiler::GetHandleNodeIdMap: built, nodeAddrMap="
+                    << nodeAddressIdMap_.size()
+                    << " entryIdMap=" << entryIdMap_->GetIdCount();
+
+    auto handleNodeIdMap = GetNodeAddressIdMap();
+    std::unordered_map<uintptr_t, uint64_t> result;
+    result.reserve(handleNodeIdMap.size());
+    for (const auto& [handleAddr, nodeId] : handleNodeIdMap) {
+        result.emplace(handleAddr, nodeId);
+    }
+    nodeAddressIdMap_.clear();
+    return result;
+}
+
 bool HeapProfiler::DumpHeapSnapshot(Stream *stream, const DumpSnapShotOption &dumpOption, Progress *progress,
                                     std::function<void(uint8_t)> callback)
 {
@@ -512,25 +558,27 @@ bool HeapProfiler::DumpHeapSnapshot(Stream *stream, const DumpSnapShotOption &du
         std::string unused;
         if (appfreezeCallback != nullptr && !appfreezeCallback(getpid(), false, unused)) {
             LOG_ECMA(ERROR) << "failed to set appfreeze filter";
+            ReportOOMDumpStatus(dumpOption, DUMP_STATUS_FAILED, "appfreeze_filter_failed");
             return false;
         }
         // hidumper do fork and fillmap.
         if (dumpOption.isBeforeFill) {
             FillIdMap();
         }
-        if (dumpOption.isDumpOOM) {
-            if (!TryStartOOMDump()) {
-                LOG_ECMA(WARN) << "OOM dump already in progress, skip dump";
-                return false;
-            }
-        }
         // fork for hidumper or oom
         pid = ForkAndPerformDump(stream, dumpOption, progress);
         if (pid < 0) {
+            ReportOOMDumpStatus(dumpOption, DUMP_STATUS_FAILED, "fork_failed");
             if (callback) {
                 callback(static_cast<uint8_t>(DumpHeapSnapshotStatus::FORK_FAILED));
             }
             return false;
+        }
+        if (pid > 0) {
+#if defined(ENABLE_HITRACE_LOCAL_HANDLE_DETECT) && defined(ENABLE_BACKTRACE_LOCAL)
+            const_cast<EcmaVM *>(vm_)->ClearHandleLeakRecords();
+            CloseLeakStackTraceFd();
+#endif
         }
     }
     if (pid != 0) {
@@ -538,6 +586,7 @@ bool HeapProfiler::DumpHeapSnapshot(Stream *stream, const DumpSnapShotOption &du
         if (dumpOption.isDumpOOM) {
             if (!Process::IsolateSubProcess(vm_->GetBundleName().c_str(), getpid(), pid)) {
                 LOG_ECMA(ERROR) << "OOM Fork dump snapshot failed!";
+                ReportOOMDumpStatus(dumpOption, DUMP_STATUS_FAILED, "isolate_subprocess_failed");
                 return false;
             }
             return true;
@@ -553,6 +602,10 @@ pid_t HeapProfiler::ForkAndPerformDump(Stream *stream,
                                        const DumpSnapShotOption &dumpOption,
                                        Progress *progress)
 {
+    static std::once_flag flag;
+    std::call_once(flag, InitFork);
+    appPid_ = getpid();
+    appTid_ = syscall(SYS_gettid);
     pid_t pid = fork();
     if (pid < 0) {
         LOG_ECMA(ERROR) << "DumpHeapSnapshot fork failed: " << strerror(errno);
@@ -561,11 +614,19 @@ pid_t HeapProfiler::ForkAndPerformDump(Stream *stream,
     if (pid == 0) {
         vm_->GetAssociatedJSThread()->SetCrossThreadExecution(true);
         prctl(PR_SET_NAME, reinterpret_cast<unsigned long>("dump_process"), 0, 0, 0);
-        if (dumpOption.dumpFormat == DumpFormat::BINARY) {
-            BinaryDump(stream, dumpOption);
-            stream->EndOfStream();
-        } else {
-            DoDump(stream, progress, dumpOption);
+        {
+            DumpAbortSignalScope dumpAbortScope(dumpOption.isDumpOOM, dumpOption.isForSharedOOM);
+            SetDumpStatus(DUMP_STATUS_DUMP_INIT);
+            if (dumpOption.dumpFormat == DumpFormat::BINARY) {
+                BinaryDump(stream, dumpOption);
+                SetDumpStatus(DUMP_STATUS_END_OF_STREAM);
+                stream->EndOfStream();
+            } else {
+                DoDump(stream, progress, dumpOption);
+#if defined(ENABLE_HITRACE_LOCAL_HANDLE_DETECT) && defined(ENABLE_BACKTRACE_LOCAL)
+                DumpHandleLeakRecords();
+#endif // ENABLE_HITRACE_LOCAL_HANDLE_DETECT && ENABLE_BACKTRACE_LOCAL
+            }
         }
         vm_->GetAssociatedJSThread()->SetCrossThreadExecution(false);
         _exit(0);
@@ -922,15 +983,28 @@ void HeapProfiler::StorePotentiallyLeakHandles(const uintptr_t handle)
     }
 }
 
-bool HeapProfiler::TryStartOOMDump()
+#if defined(ENABLE_HITRACE_LOCAL_HANDLE_DETECT) && defined(ENABLE_BACKTRACE_LOCAL)
+void HeapProfiler::DumpHandleLeakRecords()
 {
-    bool result = oomDumpActive_;
-    oomDumpActive_ = true;
-    return !result;
-}
+    auto handleLeakRecords = vm_->GetHandleLeakRecords();
+    std::ostringstream buffer;
 
-void HeapProfiler::ResetOOMDump()
-{
-    oomDumpActive_ = false;
+    for (const auto &record : handleLeakRecords) {
+        uintptr_t handle = record.handleAddr;
+        if (handle == 0) {
+            continue;
+        }
+        int count = record.leakCount;
+        const std::string &backtrace = record.backtrace;
+
+        auto [found, nodeId] = entryIdMap_->FindId(*(reinterpret_cast<JSTaggedType *>(handle)));
+        if (found) {
+            buffer << "LOCAL_HANDLE_LEAK NodeId:" << nodeId << " Count:" << count << " backtrace:" << backtrace;
+            WriteToLeakStackTraceFd(buffer);
+        }
+    }
+
+    CloseLeakStackTraceFd();
 }
+#endif // ENABLE_HITRACE_LOCAL_HANDLE_DETECT && ENABLE_BACKTRACE_LOCAL
 }  // namespace panda::ecmascript

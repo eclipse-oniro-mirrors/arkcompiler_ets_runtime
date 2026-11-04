@@ -17,7 +17,7 @@
 #define ECMASCRIPT_INTERPRETER_FRAME_HANDLER_H
 
 #include "ecmascript/frames.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/js_thread.h"
 #include "ecmascript/mem/heap.h"
 #include "ecmascript/mem/visitor.h"
@@ -104,7 +104,8 @@ public:
 
     bool IsJSFrame(FrameType type) const
     {
-        return IsInterpretedFrame(type) || IsOptimizedJSFunctionFrame(type) || IsFastJitFunctionFrame(type);
+        return IsInterpretedFrame(type) || IsOptimizedJSFunctionFrame(type) || IsFastJitFunctionFrame(type) ||
+               IsSteedFunctionFrame(type);
     }
 
     bool IsOptimizedJSFunctionFrame(FrameType type) const
@@ -117,6 +118,11 @@ public:
     {
         return type == FrameType::FASTJIT_FUNCTION_FRAME ||
             type == FrameType::FASTJIT_FAST_CALL_FUNCTION_FRAME;
+    }
+
+    bool IsSteedFunctionFrame(FrameType type) const
+    {
+        return type == FrameType::STEED_FUNCTION_FRAME;
     }
 
     bool IsAsmInterpretedFrame() const

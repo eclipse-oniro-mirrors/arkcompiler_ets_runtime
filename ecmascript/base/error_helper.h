@@ -39,7 +39,8 @@ public:
 
     static JSTaggedValue ErrorCommonConstructor(EcmaRuntimeCallInfo *argv, const ErrorType &errorType);
 
-    static void PrintJSErrorInfo(JSThread *thread, const JSHandle<JSTaggedValue> exceptionInfo);
+    static void PrintJSErrorInfo(JSThread *thread, const JSHandle<JSTaggedValue> exceptionInfo,
+                                 bool enableRateLimit = false);
 
     static CString GetJSErrorInfo(JSThread *thread, const JSHandle<JSTaggedValue> exceptionInfo, JSErrorProps key);
 
@@ -47,6 +48,8 @@ private:
     static JSHandle<JSTaggedValue> GetErrorJSFunction(JSThread *thread);
 
     static std::string BuildStackTraceWithLimit(JSThread *thread, const JSHandle<JSObject> &jsErrorObj);
+
+    static void AddNativeModuleLoadFailureInfo(JSThread *thread, const JSHandle<JSObject> &nativeInstanceObj);
 
     static JSHandle<JSTaggedValue> GetErrorName(JSThread *thread, const JSHandle<JSTaggedValue> &name,
                                                 const ErrorType &errorType);

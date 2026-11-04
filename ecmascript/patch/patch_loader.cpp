@@ -349,7 +349,7 @@ void PatchLoader::FindAndReplaceSameMethod(JSThread *thread, const JSPandaFile *
 
         ConstantPool *baseConstpool = ConstantPool::Cast(item.second.GetTaggedObject());
         uint32_t constpoolNum = item.first;
-        uint32_t baseConstpoolSize = baseConstpool->GetCacheLength();
+        uint32_t baseConstpoolSize = baseConstpool->GetNumOfCacheElement();
         for (uint32_t constpoolIndex = 0; constpoolIndex < baseConstpoolSize; constpoolIndex++) {
             JSTaggedValue constpoolValue = baseConstpool->GetObjectFromCache(thread, constpoolIndex);
             if (!constpoolValue.IsMethod() && !constpoolValue.IsClassLiteral()) {
@@ -389,7 +389,7 @@ void PatchLoader::FindAndReplaceSameMethod(JSThread *thread, const JSPandaFile *
 
         JSTaggedValue unsharedConstpool = vm->FindOrCreateUnsharedConstpool(item.second);
         ConstantPool *baseUnsharedConstpool = ConstantPool::Cast(unsharedConstpool.GetTaggedObject());
-        const uint32_t len = baseUnsharedConstpool->GetCacheLength();
+        const uint32_t len = baseUnsharedConstpool->GetNumOfCacheElement();
         for (uint32_t constpoolIndex = 0; constpoolIndex < len; constpoolIndex++) {
             JSTaggedValue constpoolValue = baseUnsharedConstpool->GetObjectFromCache(thread, constpoolIndex);
             if (!constpoolValue.IsMethod() && !constpoolValue.IsClassLiteral()) {
@@ -533,12 +533,7 @@ CMap<uint32_t, CString> PatchLoader::CollectClassInfo(const JSPandaFile *jsPanda
         panda_file::ClassDataAccessor cda(pandaFile, classId);
         cda.EnumerateMethods([&pandaFile, &map, &classInfo, jsPandaFile](panda_file::MethodDataAccessor &mda) {
             EntityId methodId = mda.GetMethodId();
-#if ENABLE_LATEST_OPTIMIZATION
             MethodLiteral *methodLiteral = map.Find(methodId.GetOffset());
-#else
-            auto iter = map.find(methodId.GetOffset());
-            MethodLiteral *methodLiteral = (iter == map.end()) ? nullptr : iter->second;
-#endif
             auto codeId = mda.GetCodeId();
             ASSERT(codeId.has_value());
             panda_file::CodeDataAccessor codeDataAccessor(pandaFile, codeId.value());

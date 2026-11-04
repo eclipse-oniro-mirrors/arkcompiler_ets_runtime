@@ -1,0 +1,83 @@
+/*
+ * Copyright (c) 2026 Huawei Device Co., Ltd.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#ifndef ECMASCRIPT_ARKSTEED_PGO_CONTEXT_H
+#define ECMASCRIPT_ARKSTEED_PGO_CONTEXT_H
+
+#include "ecmascript/arksteed/arksteed_access_info_factory.h"
+#include "ecmascript/arksteed/arksteed_feedback_reader.h"
+
+namespace panda::ecmascript::arksteed {
+
+class ArkSteedPGOContext {
+public:
+    ArkSteedPGOContext(JSThread *compilerThread, JitCompilationEnv *env)
+        : compilerThread_(compilerThread), env_(env), broker_(compilerThread, env)
+    {}
+
+    ArkSteedAccessInfoFactory CreateAccessInfoFactory(const kungfu::BytecodeInfo *bytecodeInfo) const
+    {
+        return ArkSteedAccessInfoFactory(compilerThread_, bytecodeInfo, env_,
+                                         const_cast<ArkSteedHeapBroker *>(&broker_));
+    }
+
+    ArkSteedHeapBroker *GetBroker()
+    {
+        return &broker_;
+    }
+
+    const ArkSteedHeapBroker *GetBroker() const
+    {
+        return &broker_;
+    }
+
+    OperationFeedback ReadOperationFeedback(const kungfu::BytecodeInfo *bytecodeInfo)
+    {
+        OperationFeedback feedback;
+        ArkSteedFeedbackReader reader(compilerThread_, bytecodeInfo, &broker_);
+        broker_.GetFeedbackForOperation(reader, &feedback);
+        return feedback;
+    }
+
+    CallFeedback ReadCallFeedback(const kungfu::BytecodeInfo *bytecodeInfo)
+    {
+        CallFeedback feedback;
+        ArkSteedFeedbackReader reader(compilerThread_, bytecodeInfo, &broker_);
+        broker_.GetFeedbackForCall(reader, &feedback);
+        return feedback;
+    }
+
+    ConstructorFeedback ReadConstructorFeedback(const kungfu::BytecodeInfo *bytecodeInfo)
+    {
+        ConstructorFeedback feedback;
+        ArkSteedFeedbackReader reader(compilerThread_, bytecodeInfo, &broker_);
+        broker_.GetFeedbackForConstructor(reader, &feedback);
+        return feedback;
+    }
+
+    bool TargetsCurrentFunction(const CallFeedback &feedback) const
+    {
+        return feedback.IsMonomorphicJSFunction() && broker_.IsSameFunction(feedback.target);
+    }
+
+private:
+    JSThread *compilerThread_ {nullptr};
+    JitCompilationEnv *env_ {nullptr};
+    mutable ArkSteedHeapBroker broker_;
+};
+
+}  // namespace panda::ecmascript::arksteed
+
+#endif  // ECMASCRIPT_ARKSTEED_PGO_CONTEXT_H

@@ -22,6 +22,11 @@
 #include "ecmascript/compiler/builtins/builtins_number_stub_builder.h"
 #include "ecmascript/compiler/builtins/builtins_proxy_stub_builder.h"
 #include "ecmascript/compiler/builtins/builtins_reflect_stub_builder.h"
+#include "ecmascript/compiler/builtins/builtins_shared_array_stub_builder.h"
+#include "ecmascript/compiler/builtins/builtins_shared_function_stub_builder.h"
+#include "ecmascript/compiler/builtins/builtins_shared_map_stub_builder.h"
+#include "ecmascript/compiler/builtins/builtins_shared_set_stub_builder.h"
+#include "ecmascript/compiler/builtins/builtins_shared_typedarray_stub_builder.h"
 #include "ecmascript/compiler/builtins/builtins_typedarray_stub_builder.h"
 #include "ecmascript/compiler/builtins/containers_arraylist_stub_builder.h"
 #include "ecmascript/compiler/builtins/containers_deque_stub_builder.h"
@@ -448,15 +453,15 @@ DECLARE_BUILTINS(BooleanConstructor)
     Bind(&newTargetIsJSFunction);
     {
         Label intialHClassIsHClass(env);
-        GateRef intialHClass = Load(VariableType::JS_ANY(), glue, newTarget,
-                                    IntPtr(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
-        BRANCH(IsJSHClass(glue, intialHClass), &intialHClassIsHClass, &slowPath1);
+        GateRef initialHClass = Load(VariableType::JS_ANY(), glue, newTarget,
+                                     IntPtr(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
+        BRANCH(IsJSHClass(glue, initialHClass), &intialHClassIsHClass, &slowPath1);
         Bind(&intialHClassIsHClass);
         {
             NewObjectStubBuilder newBuilder(this);
             newBuilder.SetParameters(glue, 0);
             Label afterNew(env);
-            newBuilder.NewJSObject(&res, &afterNew, intialHClass);
+            newBuilder.NewJSObject(&res, &afterNew, initialHClass);
             Bind(&afterNew);
             {
                 GateRef valueOffset = IntPtr(JSPrimitiveRef::VALUE_OFFSET);
@@ -500,9 +505,9 @@ DECLARE_BUILTINS(DateConstructor)
     Bind(&newTargetIsJSFunction);
     {
         Label intialHClassIsHClass(env);
-        GateRef intialHClass = Load(VariableType::JS_ANY(), glue, newTarget,
-                                    IntPtr(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
-        BRANCH(IsJSHClass(glue, intialHClass), &intialHClassIsHClass, &slowPath);
+        GateRef initialHClass = Load(VariableType::JS_ANY(), glue, newTarget,
+                                     IntPtr(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
+        BRANCH(IsJSHClass(glue, initialHClass), &intialHClassIsHClass, &slowPath);
         Bind(&intialHClassIsHClass);
         {
             Label oneArg(env);
@@ -547,7 +552,7 @@ DECLARE_BUILTINS(DateConstructor)
                 NewObjectStubBuilder newBuilder(this);
                 newBuilder.SetParameters(glue, 0);
                 Label afterNew(env);
-                newBuilder.NewJSObject(&res, &afterNew, intialHClass);
+                newBuilder.NewJSObject(&res, &afterNew, initialHClass);
                 Bind(&afterNew);
                 {
                     GateRef timeValueOffset = IntPtr(JSDate::TIME_VALUE_OFFSET);
@@ -592,6 +597,13 @@ DECLARE_BUILTINS(ArrayConstructor)
     builder.GenArrayConstructor(glue, nativeCode, func, newTarget, thisValue, numArgs);
 }
 
+DECLARE_BUILTINS(SharedArrayConstructor)
+{
+    GateRef globalEnv = GetGlobalEnvFromFunction(glue, func);
+    BuiltinsSharedArrayStubBuilder builder(this, globalEnv);
+    builder.GenSharedArrayConstructor(glue, nativeCode, func, newTarget, thisValue, numArgs);
+}
+
 DECLARE_BUILTINS(MapConstructor)
 {
     GateRef globalEnv = GetGlobalEnvFromFunction(glue, func);
@@ -608,16 +620,46 @@ DECLARE_BUILTINS(SetConstructor)
     hashTableBuilder.GenMapSetConstructor(nativeCode, func, newTarget, thisValue, numArgs, arg0, GetArgv());
 }
 
+DECLARE_BUILTINS(SharedMapConstructor)
+{
+    GateRef globalEnv = GetGlobalEnvFromFunction(glue, func);
+    bool isShared = true;
+    LinkedHashTableStubBuilder<LinkedHashMap, LinkedHashMapObject> hashTableBuilder(this, glue, globalEnv, isShared);
+    GateRef arg0 = GetArgFromArgv(glue, IntPtr(0), numArgs, true);
+    hashTableBuilder.GenSharedMapSetConstructor(nativeCode, func, newTarget, thisValue, numArgs, arg0, GetArgv());
+}
+
+DECLARE_BUILTINS(SharedSetConstructor)
+{
+    GateRef globalEnv = GetGlobalEnvFromFunction(glue, func);
+    bool isShared = true;
+    LinkedHashTableStubBuilder<LinkedHashSet, LinkedHashSetObject> hashTableBuilder(this, glue, globalEnv, isShared);
+    GateRef arg0 = GetArgFromArgv(glue, IntPtr(0), numArgs, true);
+    hashTableBuilder.GenSharedMapSetConstructor(nativeCode, func, newTarget, thisValue, numArgs, arg0, GetArgv());
+}
+
 #define DECLARE_BUILTINS_TYPED_ARRAY_STUB_BUILDER(TYPE, type, index)                                \
 DECLARE_BUILTINS(type##ArrayConstructor)                                                            \
 {                                                                                                   \
-    GateRef ctorName = GetGlobalConstantValue(VariableType::JS_POINTER(), glue,                     \
-                                              ConstantIndex::TYPE##_ARRAY_STRING_INDEX);            \
     GateRef globalEnv = GetGlobalEnvFromFunction(glue, func);                                       \
     BuiltinsTypedArrayStubBuilder builtinsTypedArrayStubBuilder(this, globalEnv);                   \
     builtinsTypedArrayStubBuilder.GenTypedArrayConstructor(glue, nativeCode, func, newTarget,       \
-        thisValue, numArgs, ctorName, DataViewType::TYPE);                                          \
+        thisValue, numArgs, DataViewType::TYPE);                                                    \
 }
 BUILTIN_COMPILER_TYPED_ARRAY_TYPES(DECLARE_BUILTINS_TYPED_ARRAY_STUB_BUILDER)
 #undef DECLARE_BUILTINS_TYPED_ARRAY_STUB_BUILDER
+
+#define DECLARE_BUILTINS_SHARED_TYPED_ARRAY_STUB_BUILDER(Type, ctorName, TYPE, ...)                  \
+DECLARE_BUILTINS(ctorName##Constructor)                                                             \
+{                                                                                                   \
+    GateRef globalEnv = GetGlobalEnvFromFunction(glue, func);                                       \
+    BuiltinsSharedTypedArrayStubBuilder builder(this, globalEnv);                                   \
+    builder.GenSharedTypedArrayConstructor(glue, nativeCode, func, newTarget, thisValue, numArgs,    \
+        GlobalEnv::SHARED_##TYPE##_ARRAY_FUNCTION_INDEX,                                            \
+        GlobalEnv::SHARED_##TYPE##_ARRAY_ROOT_HCLASS_INDEX,                                         \
+        GlobalEnv::SHARED_##TYPE##_ARRAY_ROOT_HCLASS_ON_HEAP_INDEX,                                 \
+        DataViewType::TYPE);                                                                       \
+}
+BUILTIN_SHARED_TYPED_ARRAY_TYPES(DECLARE_BUILTINS_SHARED_TYPED_ARRAY_STUB_BUILDER)
+#undef DECLARE_BUILTINS_SHARED_TYPED_ARRAY_STUB_BUILDER
 }  // namespace panda::ecmascript::kungfu

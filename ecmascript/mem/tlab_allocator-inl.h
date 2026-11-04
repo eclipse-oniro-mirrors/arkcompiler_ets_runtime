@@ -19,19 +19,72 @@
 #include "ecmascript/mem/tlab_allocator.h"
 
 #include "ecmascript/free_object.h"
+#include "ecmascript/mem/cms_mem/slot_free_segment-inl.h"
 #include "ecmascript/mem/full_gc.h"
 #include "ecmascript/mem/heap-inl.h"
+#include "ecmascript/mem/specialized_slot_space.h"
 
 namespace panda::ecmascript {
 static constexpr size_t MIN_BUFFER_SIZE = 31_KB;
 static constexpr size_t SMALL_OBJECT_SIZE = 8_KB;
 
+SpecializedSlotTlabAllocator::SpecializedSlotTlabAllocator(SpecializedSlotSpace *space) : space_(space)
+{
+    ASSERT(space_ != nullptr);
+    slotSize_ = space_->GetSlotSize();
+}
+
+uintptr_t SpecializedSlotTlabAllocator::Allocate()
+{
+    ASSERT(space_ != nullptr);
+    if (LIKELY(top_ < end_)) {
+        uintptr_t result = top_;
+        top_ += slotSize_;
+        return result;
+    }
+    return Refill();
+}
+
+void SpecializedSlotTlabAllocator::Reset(SpecializedSlotSpace *space)
+{
+    ASSERT(space != nullptr);
+    Discard();
+    space_ = space;
+    slotSize_ = space->GetSlotSize();
+}
+
+void SpecializedSlotTlabAllocator::Finalize()
+{
+    Discard();
+    space_ = nullptr;
+    slotSize_ = 0;
+}
+
+void SpecializedSlotTlabAllocator::Discard()
+{
+    if (top_ < end_) {
+        SlotFreeSegment::FillFreeSegment(top_, end_ - top_);
+    }
+    top_ = 0;
+    end_ = 0;
+}
+
+uintptr_t SpecializedSlotTlabAllocator::Refill()
+{
+    auto [bufferBegin, bufferSize] = space_->AllocateBufferSync();
+    ASSERT(bufferBegin != 0 && bufferSize >= slotSize_);
+    top_ = bufferBegin;
+    end_ = bufferBegin + bufferSize;
+    return Allocate();
+}
+
 TlabAllocator::TlabAllocator(Heap *heap)
-    : heap_(heap), enableExpandYoung_(true), enableStealOldRegion_(true)
+    : heap_(heap), enableExpandYoung_(true), enableStealOldRegion_(true), nonMovableSpace_(heap_->GetNonMovableSpace())
 {
     size_t maxOldSpaceCapacity = heap->GetOldSpace()->GetMaximumCapacity();
     localSpace_ = new LocalSpace(heap, maxOldSpaceCapacity, maxOldSpaceCapacity);
     youngAllocator_.Reset();
+    nonMovableAllocator_.Reset();
 }
 
 inline void TlabAllocator::Finalize()
@@ -39,6 +92,10 @@ inline void TlabAllocator::Finalize()
     if (youngAllocator_.Available() != 0) {
         FreeObject::FillFreeObject(heap_, youngAllocator_.GetTop(), youngAllocator_.Available());
         youngAllocator_.Reset();
+    }
+    if (nonMovableAllocator_.Available() != 0) {
+        FreeObject::FillFreeObject(heap_, nonMovableAllocator_.GetTop(), nonMovableAllocator_.Available());
+        nonMovableAllocator_.Reset();
     }
 
     heap_->MergeToOldSpaceSync(localSpace_);
@@ -56,6 +113,9 @@ uintptr_t TlabAllocator::Allocate(size_t size, MemSpaceType space)
             break;
         case COMPRESS_SPACE:
             result = AllocateInCompressSpace(size);
+            break;
+        case NON_MOVABLE:
+            result = AllocateInNonMovableSpace(size);
             break;
         default:
             LOG_ECMA(FATAL) << "this branch is unreachable";
@@ -87,6 +147,24 @@ uintptr_t TlabAllocator::AllocateInCompressSpace(size_t size)
     ASSERT(AlignUp(size, static_cast<size_t>(MemAlignment::MEM_ALIGN_OBJECT)) == size);
     size = AlignUp(size, static_cast<size_t>(MemAlignment::MEM_ALIGN_OBJECT));
     uintptr_t result = localSpace_->Allocate(size, true);
+    ASSERT(result != 0);
+    return result;
+}
+
+uintptr_t TlabAllocator::AllocateInNonMovableSpace(size_t size)
+{
+    ASSERT(AlignUp(size, static_cast<size_t>(MemAlignment::MEM_ALIGN_OBJECT)) == size);
+    uintptr_t result = nonMovableAllocator_.Allocate(size);
+    if (LIKELY(result != 0)) {
+        return result;
+    }
+    if (UNLIKELY(size > SMALL_OBJECT_SIZE)) {
+        result = nonMovableSpace_->AllocateSyncInGC(size);
+        ASSERT(result != 0);
+        return result;
+    }
+    ExpandNonMovable();
+    result = nonMovableAllocator_.Allocate(size);
     ASSERT(result != 0);
     return result;
 }
@@ -138,6 +216,22 @@ bool TlabAllocator::ExpandCompressFromOld(size_t size)
         return true;
     }
     return false;
+}
+
+void TlabAllocator::ExpandNonMovable()
+{
+    uintptr_t buffer = nonMovableSpace_->AllocateSyncInGC(MIN_BUFFER_SIZE);
+    ASSERT(buffer != 0);
+    uintptr_t end = buffer + MIN_BUFFER_SIZE;
+
+    if (buffer == nonMovableAllocator_.GetEnd()) {
+        buffer = nonMovableAllocator_.GetTop();
+    } else {
+        if (nonMovableAllocator_.Available() != 0) {
+            FreeObject::FillFreeObject(heap_, nonMovableAllocator_.GetTop(), nonMovableAllocator_.Available());
+        }
+    }
+    nonMovableAllocator_.Reset(buffer, end);
 }
 
 void CCTlabAllocator::Setup(Heap *heap)

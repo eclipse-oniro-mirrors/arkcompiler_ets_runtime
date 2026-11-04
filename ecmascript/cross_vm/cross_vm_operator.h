@@ -1,5 +1,5 @@
-/*
- * Copyright (c) 2024-2025 Huawei Device Co., Ltd.
+/**
+ * Copyright (c) 2024-2026 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -21,9 +21,14 @@
 #include "libpandabase/macros.h"
 
 #include "hybrid/ecma_vm_interface.h"
+#include "hybrid/hybrid_frame_info.h"
 #include "hybrid/sts_vm_interface.h"
+#include "profiler/heap_dump.h"
 
 namespace panda::ecmascript {
+
+using common::dump::AbstractDumper;
+using common::dump::DumpRequest;
 
 using JSTaggedType = uint64_t;
 class EcmaVM;
@@ -49,6 +54,10 @@ public:
         return ecmaVMInterface_.get();
     }
 
+    bool UnionStackIsEmpty(bool *isEmpty) const;
+    bool ForEachFrameInUnionStack(const std::function<void(const void *frame, bool isStaticFrame)> &callback) const;
+    bool GetStaticFrameInfo(const void *frame, arkplatform::HybridFrameInfo &frameInfo) const;
+
     void MarkFromObject(JSTaggedType value, std::function<void(uintptr_t)> &visitor);
     void MarkFromObject(JSTaggedType value);
     bool IsObjectAlive(JSTaggedType value);
@@ -64,9 +73,12 @@ private:
 
         bool StartXRefMarking() override;
         void NotifyXGCInterruption() override;
+        bool GetDynamicFrameInfo(const void *dynamicFramePtr, arkplatform::HybridFrameInfo &frameInfo) override;
         JSTaggedType *GetTopFrameSPFromDynamic() const override;
         bool ForEachDynamicFrame(void *currFrameSP, void *toFrameSP,
                                  const std::function<void(const void *)> &cb) const override;
+        const void *GetEcmaVM() const override;
+        std::unique_ptr<AbstractDumper> CreateHeapDumper(const DumpRequest &request) override;
 
     private:
         [[maybe_unused]] EcmaVM *vm_ {nullptr};

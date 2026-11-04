@@ -74,15 +74,15 @@ void HeapSnapshotJSONSerializer::SerializeSnapshotHeader(HeapSnapshot *snapshot,
     // NOLINTNEXTLINE(modernize-raw-string-literal)
     writer->WriteString("\"number\",\"native\",\"synthetic\",\"concatenated string\",\"slicedstring\",\"symbol\",");
     // NOLINTNEXTLINE(modernize-raw-string-literal)
-    writer->WriteString("\"bigint\",\"framework\",\"handle\"],\"string\",\"number\",\"number\",\"number\",\"number\",");
+    writer->WriteString("\"bigint\",\"class\",\"framework\",\"handle\"],\"string\",\"number\",\"number\",");
     // NOLINTNEXTLINE(modernize-raw-string-literal)
-    writer->WriteString("\"number\"],\n");  // 4.
+    writer->WriteString("\"number\",\"number\",\"number\"],\n");  // 4.
     // NOLINTNEXTLINE(modernize-raw-string-literal)
     writer->WriteString("\"edge_fields\":[\"type\",\"name_or_index\",\"to_node\"],\n");  // 5.
     // NOLINTNEXTLINE(modernize-raw-string-literal)
     writer->WriteString("\"edge_types\":[[\"context\",\"element\",\"property\",\"internal\",\"hidden\",\"shortcut\",");
     // NOLINTNEXTLINE(modernize-raw-string-literal)
-    writer->WriteString("\"weak\"],\"string_or_number\",\"node\"],\n");  // 6.
+    writer->WriteString("\"weak\",\"native\",\"native_string\",\"xref\"],\"string_or_number\",\"node\"],\n");  // 6.
     // NOLINTNEXTLINE(modernize-raw-string-literal)
     writer->WriteString("\"trace_function_info_fields\":[\"function_id\",\"name\",\"script_name\",\"script_id\",");
     // NOLINTNEXTLINE(modernize-raw-string-literal)
@@ -106,7 +106,7 @@ void HeapSnapshotJSONSerializer::SerializeNodes(HeapSnapshot *snapshot, StreamWr
 {
     LOG_ECMA(INFO) << "HeapSnapshotJSONSerializer::SerializeNodes";
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "HeapSnapshotJSONSerializer::SerializeNodes", "");
-    const CVector<Node *> *nodes = snapshot->GetNodes();
+    const CVector<HprofNode *> *nodes = snapshot->GetNodes();
     const StringHashMap *stringTable = snapshot->GetEcmaStringTable();
     ASSERT(nodes != nullptr);
     writer->WriteString("\"nodes\":[");  // Section Header
@@ -160,10 +160,10 @@ void HeapSnapshotJSONSerializer::SerializeEdges(HeapSnapshot *snapshot, StreamWr
         writer->WriteChar(',');
 
         if (i == edges->size() - 1) {  // add comma at last the line
-            writer->WriteNumber(edge->GetTo()->GetIndex() * Node::NODE_FIELD_COUNT);  // 3.
+            writer->WriteNumber(edge->GetTo()->GetIndex() * HprofNode::NODE_FIELD_COUNT);  // 3.
             writer->WriteString("],\n");
         } else {
-            writer->WriteNumber(edge->GetTo()->GetIndex() * Node::NODE_FIELD_COUNT);    // 3.
+            writer->WriteNumber(edge->GetTo()->GetIndex() * HprofNode::NODE_FIELD_COUNT);    // 3.
             writer->WriteChar('\n');
         }
         i++;

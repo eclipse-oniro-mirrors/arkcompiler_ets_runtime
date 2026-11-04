@@ -20,6 +20,10 @@ void WaiterList::AddNode(WaiterListNode *node)
 {
     ASSERT(node->prev_ == nullptr);
     ASSERT(node->next_ == nullptr);
+    if (node->arrayHandle_ != 0) {
+        sharedWaiters_.push_back(node);
+        return;
+    }
     auto iter = locationListMap_.find(node->waitPointer_);
     if (iter != locationListMap_.end()) {
         iter->second.pTail->next_ = node;
@@ -32,6 +36,11 @@ void WaiterList::AddNode(WaiterListNode *node)
 
 void WaiterList::DeleteNode(WaiterListNode *node)
 {
+    if (node->arrayHandle_ != 0) {
+        sharedWaiters_.remove(node);
+        node->arrayHandle_ = 0;
+        return;
+    }
     auto iter = locationListMap_.find(node->waitPointer_);
     ASSERT(iter != locationListMap_.end());
     WaiterListNode *temp = iter->second.pHead;

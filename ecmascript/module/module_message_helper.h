@@ -16,18 +16,33 @@
 #ifndef ECMASCRIPT_MODULE_MESSAGE_HELPER_H
 #define ECMASCRIPT_MODULE_MESSAGE_HELPER_H
 
+#include <optional>
+
 #include "ecmascript/base/string_helper.h"
 
 namespace panda::ecmascript {
 
 class ModuleMessageHelper {
 public:
+    static constexpr std::string_view FILEDIR = "/data/storage/el2/base/files/";
+    static constexpr std::string_view CIRCULAR_IMPORT_FILE = "_circularImport.txt";
+    static bool GetOrCreateWritableFile(const EcmaVM *vm, const uint32_t tid,
+                               const std::string_view fileSuffix, std::string &path);
+    static void PrintCircularImportModuleStack(const JSThread *thread, const CString &moduleName,
+                                                std::string_view stack);
     static inline CString VmModuleInfoMessage(JSThread *thread)
     {
         EcmaVM *vm = thread->GetEcmaVM();
         return "bundleName:" + vm->GetBundleName() +
                ", moduleName:" + vm->GetModuleName() +
                ", assetPath:" + vm->GetAssetPath();
+    }
+
+    static inline void PrintNativeModuleLoadFailure(JSThread *thread, const CString &moduleName)
+    {
+        std::optional<CString> reason = thread->GetEcmaVM()->GetSoLoadFailureByModuleName(moduleName);
+        LOG_ECMA(DEBUG) << "Load native module failed, ModuleName: " << moduleName
+            << (reason.has_value() ? ", Reason: " + *reason : "");
     }
 
     static void PrintAndThrowError(JSThread *thread, JSHandle<SourceTextModule> module)

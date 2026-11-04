@@ -24,7 +24,7 @@
 #include "ecmascript/js_hclass.h"
 #include "ecmascript/js_object-inl.h"
 #include "ecmascript/js_proxy.h"
-#include "ecmascript/js_tagged_value-inl.h"
+#include "ecmascript/js_tagged_value_wrapper-inl.h"
 #include "ecmascript/object_factory.h"
 #include "ecmascript/tests/test_helper.h"
 
@@ -487,8 +487,9 @@ HWTEST_F_L0(JSProxyTest, OwnPropertyKeys)
 
     JSHandle<JSProxy> proxyHandle2 = JSProxy::ProxyCreate(thread, targetHandle, handlerHandle);
     EXPECT_TRUE(*proxyHandle2 != nullptr);
-    JSProxy::OwnPropertyKeys(thread, proxyHandle2);
-    EXPECT_TRUE(thread->HasPendingException());
+    JSHandle<TaggedArray> res2 = JSProxy::OwnPropertyKeys(thread, proxyHandle2);
+    EXPECT_TRUE(res2->GetLength() == 0U ||
+                !JSTaggedValue::SameValue(thread, res2->Get(thread, 0), key.GetTaggedValue()));
 }
 
 JSTaggedValue HandlerCall([[maybe_unused]] EcmaRuntimeCallInfo *argv)

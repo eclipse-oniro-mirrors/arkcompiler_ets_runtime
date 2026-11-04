@@ -184,6 +184,8 @@ public:
     static JSTaggedValue AssignTaggedValue(JSThread *thread, const JSHandle<JSTaggedValue> &source,
                                            const JSHandle<JSObject> &toAssign);
 
+    static JSTaggedValue ToStringWithTag(JSThread *thread, const JSHandle<JSTaggedValue> &tag);
+
     static Span<const std::pair<std::string_view, bool>> GetFunctionPrototypeProperties()
     {
         return Span<const std::pair<std::string_view, bool>>(OBJECT_PROTOTYPE_PROPERTIES);

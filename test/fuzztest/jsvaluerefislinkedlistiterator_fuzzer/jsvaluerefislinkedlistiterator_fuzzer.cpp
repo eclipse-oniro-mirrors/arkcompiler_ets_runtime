@@ -21,7 +21,7 @@
 #include "ecmascript/ecma_vm.h"
 #include "ecmascript/global_env.h"
 #include "ecmascript/js_handle.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/napi/include/jsnapi.h"
 #include "ecmascript/js_thread.h"
 #include "ecmascript/js_global_object.h"
@@ -143,9 +143,9 @@ void JSValueRefIsLinkedListIteratorFuzzTest(const uint8_t *data, size_t size)
         objCallInfo->SetThis(tagvalue.GetTaggedValue());
         objCallInfo->SetCallArg(0, JSTaggedValue(static_cast<int>(containers::ContainerTag::LinkedList)));
         [[maybe_unused]] auto prev = SetupFrame(thread, objCallInfo);
-        JSHandle<JSTaggedValue> contianer =
+        JSHandle<JSTaggedValue> container =
             JSHandle<JSTaggedValue>(thread, containers::ContainersPrivate::Load(objCallInfo));
-        auto obj = factory->NewJSObjectByConstructor(JSHandle<JSFunction>(contianer), contianer);
+        auto obj = factory->NewJSObjectByConstructor(JSHandle<JSFunction>(container), container);
         JSHandle<JSAPILinkedList> linkedList = JSHandle<JSAPILinkedList>::Cast(obj);
         JSTaggedValue doubleList = TaggedDoubleList::Create(thread);
         linkedList->SetDoubleList(thread, doubleList);

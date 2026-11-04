@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2024 Huawei Device Co., Ltd.
+ * Copyright (c) 2021-2026 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -287,5 +287,55 @@ HWTEST_F_L0(MicroJobQueueTest, ExecutePendingJob_002)
     JSHandle<JSPromise> rejectPromise(thread, capbility2->GetPromise(thread));
     EXPECT_EQ(rejectPromise->GetPromiseState(), PromiseState::REJECTED);
     EXPECT_EQ(JSTaggedValue::SameValue(thread, rejectPromise->GetPromiseResult(thread), JSTaggedValue(32)), true);
+}
+
+/**
+ * @tc.name: ExecutePendingJob_003
+ * @tc.desc: Enqueue a promise reaction job and open the microtask scope on the vm. While the scope is open,
+ *           calling "ExecutePendingJob" is skipped by the queue gate and the promise stays pending. After the
+ *           scope is closed, the same call drains the still-queued job and fulfills the promise.
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(MicroJobQueueTest, ExecutePendingJob_003)
+{
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    auto env = thread->GetEcmaVM()->GetGlobalEnv();
+    JSHandle<JSFunction> promiseReactionsJob(env->GetPromiseReactionJob());
+    JSHandle<MicroJobQueue> handleMicrojob = thread->GetEcmaVM()->GetMicroJobQueue();
+
+    JSHandle<JSTaggedValue> promiseFunc = env->GetPromiseFunction();
+    JSHandle<PromiseCapability> capability = JSPromise::NewPromiseCapability(thread, promiseFunc);
+    JSHandle<JSTaggedValue> resolve(thread, capability->GetResolve(thread));
+
+    JSHandle<PromiseReaction> fulfillReaction = factory->NewPromiseReaction();
+#if ENABLE_LATEST_OPTIMIZATION
+    fulfillReaction->SetPromiseOrCapability(thread, capability.GetTaggedValue());
+#else // ENABLE_LATEST_OPTIMIZATION
+    fulfillReaction->SetPromiseCapability(thread, capability.GetTaggedValue());
+#endif // ENABLE_LATEST_OPTIMIZATION
+    fulfillReaction->SetHandler(thread, resolve.GetTaggedValue());
+
+    JSHandle<TaggedArray> arguments = factory->NewTaggedArray(2);
+    arguments->Set(thread, 0, fulfillReaction.GetTaggedValue());
+    arguments->Set(thread, 1, JSTaggedValue::Undefined());
+    MicroJobQueue::EnqueueJob(thread, handleMicrojob, QueueType::QUEUE_PROMISE, promiseReactionsJob, arguments);
+
+    JSHandle<JSPromise> jsPromise(thread, capability->GetPromise(thread));
+
+    // the queue gate skips draining while the microtask scope is open
+    ASSERT_TRUE(instance->OpenMicrotaskScope());
+    if (!thread->HasPendingException()) {
+        MicroJobQueue::ExecutePendingJob(thread, handleMicrojob);
+    }
+    EXPECT_EQ(jsPromise->GetPromiseState(), PromiseState::PENDING);
+
+    // once the scope is closed, the queued job is drained and the promise is fulfilled
+    ASSERT_TRUE(instance->CloseMicrotaskScope());
+    if (!thread->HasPendingException()) {
+        MicroJobQueue::ExecutePendingJob(thread, handleMicrojob);
+    }
+    EXPECT_EQ(jsPromise->GetPromiseState(), PromiseState::FULFILLED);
+    EXPECT_EQ(JSTaggedValue::SameValue(thread, jsPromise->GetPromiseResult(thread), JSTaggedValue::Undefined()), true);
 }
 } // namespace panda::test

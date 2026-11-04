@@ -39,7 +39,7 @@ void JSFunction::InitializeJSFunctionCommon(JSThread *thread, const JSHandle<JSF
             accessor = globalConst->GetHandledFunctionLengthAccessor();
             func->SetPropertyInlinedProps(thread, LENGTH_INLINE_PROPERTY_INDEX, accessor.GetTaggedValue());
             if (kind == FunctionKind::ASYNC_GENERATOR_FUNCTION) {
-                // Not duplicate codes, it will slow the performace if combining and put outside!
+                // Not duplicate codes, it will slow the performance if combining and put outside!
                 JSHandle<GlobalEnv> env = thread->GetEcmaVM()->GetGlobalEnv();
                 ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
                 JSHandle<JSFunction> objFun(env->GetObjectFunction());
@@ -48,7 +48,7 @@ void JSFunction::InitializeJSFunctionCommon(JSThread *thread, const JSHandle<JSF
                 func->SetProtoOrHClass(thread, initialGeneratorFuncPrototype);
             }
             if (kind == FunctionKind::GENERATOR_FUNCTION) {
-                // Not duplicate codes, it will slow the performace if combining and put outside!
+                // Not duplicate codes, it will slow the performance if combining and put outside!
                 JSHandle<GlobalEnv> env = thread->GetEcmaVM()->GetGlobalEnv();
                 ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
                 JSHandle<JSFunction> objFun(env->GetObjectFunction());
@@ -203,8 +203,10 @@ JSHClass *JSFunction::GetOrCreateInitialJSHClass(JSThread *thread, const JSHandl
     if (!fun->HasFunctionPrototype(thread)) {
         proto = JSHandle<JSTaggedValue>::Cast(NewJSFunctionPrototype(thread, fun));
         if (thread->GetEcmaVM()->IsEnablePGOProfiler()) {
+#ifndef EXCLUDE_PGO
             thread->GetEcmaVM()->GetPGOProfiler()->ProfileClassRootHClass(fun.GetTaggedType(),
                 JSTaggedType(proto->GetTaggedObject()->GetClass()), pgo::ProfileType::Kind::PrototypeId);
+#endif
         }
     } else {
         proto = JSHandle<JSTaggedValue>(thread, fun->GetProtoOrHClass(thread));
@@ -216,6 +218,8 @@ JSHClass *JSFunction::GetOrCreateInitialJSHClass(JSThread *thread, const JSHandl
     if (thread->GetEcmaVM()->GetJSOptions().IsEnableInlinePropertyOptimization()) {
         bool isStartObjSizeTracking = true;
         uint32_t expectedOfProperties = JSFunction::CalcuExpotedOfProperties(thread, fun, &isStartObjSizeTracking);
+        // The OffsetBits of IC limits the total bytes occupied by inlined properties and the object itself to the
+        // representable range of 10 bits.
         uint32_t maxInlinedProperties = static_cast<uint32_t>(PropertyAttributes::MAX_FAST_PROPS_CAPACITY -
             JSObject::SIZE / JSTaggedValue::TaggedTypeSize());
         expectedOfProperties = std::min(expectedOfProperties, maxInlinedProperties);
@@ -229,9 +233,15 @@ JSHClass *JSFunction::GetOrCreateInitialJSHClass(JSThread *thread, const JSHandl
     fun->SetProtoOrHClass(thread, hclass);
     if (thread->GetEcmaVM()->IsEnablePGOProfiler()) {
         if (!needProfileTransition) {
+#ifndef EXCLUDE_PGO
             thread->GetEcmaVM()->GetPGOProfiler()->ProfileClassRootHClass(fun.GetTaggedType(), hclass.GetTaggedType());
+#else
+            (void)hclass;
+#endif
         } else {
+#ifndef EXCLUDE_PGO
             thread->GetEcmaVM()->GetPGOProfiler()->ProfileProtoTransitionClass(fun, hclass, proto);
+#endif
         }
     }
     return *hclass;
@@ -270,8 +280,10 @@ JSTaggedValue JSFunction::PrototypeGetter(JSThread *thread, const JSHandle<JSObj
     if (!func->HasFunctionPrototype(thread)) {
         JSHandle<JSTaggedValue> proto = JSHandle<JSTaggedValue>::Cast(NewJSFunctionPrototype(thread, func));
         if (thread->GetEcmaVM()->IsEnablePGOProfiler()) {
+#ifndef EXCLUDE_PGO
             thread->GetEcmaVM()->GetPGOProfiler()->ProfileClassRootHClass(func.GetTaggedType(),
                 JSTaggedType(proto->GetTaggedObject()->GetClass()), pgo::ProfileType::Kind::PrototypeId);
+#endif
         }
     }
     return JSFunction::Cast(*self)->GetFunctionPrototype(thread);
@@ -290,8 +302,10 @@ bool JSFunction::PrototypeSetter(JSThread *thread, const JSHandle<JSObject> &sel
         func->SetProtoOrHClass(thread, newClass);
         // Forbide to profile for changing the function prototype after an instance of the function has been created
         if (!hclass->IsAOT() && thread->GetEcmaVM()->IsEnablePGOProfiler()) {
+#ifndef EXCLUDE_PGO
             EntityId ctorMethodId = Method::Cast(func->GetMethod(thread).GetTaggedObject())->GetMethodId();
             thread->GetEcmaVM()->GetPGOProfiler()->InsertSkipCtorMethodIdSafe(ctorMethodId);
+#endif
         }
     } else {
         if (!value->IsECMAObject()) {
@@ -309,7 +323,9 @@ bool JSFunction::PrototypeSetter(JSThread *thread, const JSHandle<JSObject> &sel
         func->SetProtoOrHClass(thread, value.GetTaggedValue());
         JSHClass::OptimizePrototypeForIC(thread, thread->GetGlobalEnv(), value, true);
         if (thread->GetEcmaVM()->IsEnablePGOProfiler()) {
+#ifndef EXCLUDE_PGO
             thread->GetEcmaVM()->GetPGOProfiler()->ProfileProtoTransitionPrototype(func, value, oldPrototype, baseIhc);
+#endif
         }
     }
     return true;
@@ -557,6 +573,13 @@ JSTaggedValue JSFunction::Call(EcmaRuntimeCallInfo *info)
     // 3. If IsCallable(F) is false, throw a TypeError exception.
     if (!func->IsCallable()) {
         RETURN_STACK_BEFORE_THROW_IF_ASM(thread);
+        LOG_ECMA(INFO) << "JSFunction::Call: Callable is false, func raw data: " << std::dec
+                       << func->GetRawData() << ", func is heap object: " << func->IsHeapObject()
+                       << ", pending exception: " << thread->HasPendingException();
+        if (func->IsHeapObject()) {
+            LOG_ECMA(INFO) << "JSFunction::Call: func js type: " << std::dec
+                           << static_cast<uint32_t>(func->GetTaggedObject()->GetClass()->GetObjectType());
+        }
         THROW_TYPE_ERROR_AND_RETURN(thread, "Callable is false", JSTaggedValue::Exception());
     }
 
@@ -632,6 +655,18 @@ JSTaggedValue JSFunction::InvokeOptimizedEntrypoint(JSThread *thread, JSHandle<J
 #if ECMASCRIPT_ENABLE_FUNCTION_CALL_TIMER
     RuntimeStubs::StartCallTimer(thread->GetGlueAddr(), mainFunc.GetTaggedType(), true);
 #endif
+
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    if (mainFunc->HasArkSteedEntry()) {
+        args = {mainFunc.GetTaggedType(), JSTaggedValue::Undefined().GetRawData(), thisArg.GetTaggedType()};
+        if (cjsInfo != nullptr) {
+            args.insert(args.end(), {cjsInfo->exportsHdl.GetTaggedType(), cjsInfo->requireHdl.GetTaggedType(),
+                                     cjsInfo->moduleHdl.GetTaggedType(), cjsInfo->filenameHdl.GetTaggedType(),
+                                     cjsInfo->dirnameHdl.GetTaggedType()});
+        }
+        res = thread->GetEcmaVM()->ExecuteArkSteed(args.size() - NUM_MANDATORY_JSFUNC_ARGS, args.data(), prevFp);
+    } else
+#endif
     if (mainFunc->IsCompiledFastCall()) {
         // entry of aot
         args = JSFunction::GetArgsData(thread, true, thisArg, mainFunc, cjsInfo);
@@ -641,6 +676,7 @@ JSTaggedValue JSFunction::InvokeOptimizedEntrypoint(JSThread *thread, JSHandle<J
         // entry of aot
         res = thread->GetEcmaVM()->ExecuteAot(actualNumArgs, args.data(), prevFp, false);
     }
+
 #if ECMASCRIPT_ENABLE_FUNCTION_CALL_TIMER
     RuntimeStubs::EndCallTimer(thread->GetGlueAddr(), mainFunc.GetTaggedType());
 #endif
@@ -693,6 +729,11 @@ JSTaggedValue JSFunction::InvokeOptimizedEntrypoint(JSThread *thread, JSHandle<J
 #if ECMASCRIPT_ENABLE_FUNCTION_CALL_TIMER
     RuntimeStubs::StartCallTimer(thread->GetGlueAddr(), func.GetTaggedType(), true);
 #endif
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    if (func->HasArkSteedEntry()) {
+        resultValue = thread->GetEcmaVM()->ExecuteArkSteed(info->GetArgsNumber(), info->GetArgs(), prevFp);
+    } else
+#endif
     if (func->IsCompiledFastCall()) {
         if (needPushArgv) {
             info = EcmaInterpreter::ReBuildRuntimeCallInfo(thread, info, numArgs);
@@ -705,6 +746,7 @@ JSTaggedValue JSFunction::InvokeOptimizedEntrypoint(JSThread *thread, JSHandle<J
         resultValue = thread->GetEcmaVM()->ExecuteAot(info->GetArgsNumber(),
             info->GetArgs(), prevFp, needPushArgv);
     }
+
 #if ECMASCRIPT_ENABLE_FUNCTION_CALL_TIMER
     RuntimeStubs::EndCallTimer(thread->GetGlueAddr(), func.GetTaggedType());
 #endif
@@ -1011,7 +1053,7 @@ JSHandle<JSHClass> JSFunction::GetInstanceJSHClass(JSThread *thread, JSHandle<JS
 
     JSHandle<JSHClass> newJSHClass = JSHClass::Clone(thread, ctorInitialJSHClass);
     newJSHClass->SetElementsKind(ElementsKind::GENERIC);
-    newJSHClass->SetPrototype(thread, prototype);
+    JSHClass::SetPrototype(thread, newJSHClass, prototype);
 
     return newJSHClass;
 }
@@ -1041,12 +1083,14 @@ JSHandle<JSHClass> JSFunction::GetOrCreateDerivedJSHClass(JSThread *thread, JSHa
     // guarante derived has function prototype
     JSHandle<JSTaggedValue> prototype(thread, derived->GetProtoOrHClass(thread));
     ASSERT(!prototype->IsHole());
-    newJSHClass->SetPrototype(thread, prototype);
+    JSHClass::SetPrototype(thread, newJSHClass, prototype);
     derived->SetProtoOrHClass(thread, newJSHClass);
 
     if (thread->GetEcmaVM()->IsEnablePGOProfiler()) {
+#ifndef EXCLUDE_PGO
         thread->GetEcmaVM()->GetPGOProfiler()->ProfileClassRootHClass(derived.GetTaggedType(),
             newJSHClass.GetTaggedType());
+#endif
     }
 
     return newJSHClass;
@@ -1317,12 +1361,13 @@ bool JSFunction::IsSharedFunction() const
     return false;
 }
 
-void JSFunctionBase::SetCompiledFuncEntry(uintptr_t codeEntry, bool isFastCall)
+void JSFunctionBase::SetCompiledFuncEntry(uintptr_t codeEntry, bool isFastCall, bool isArkSteed)
 {
     ASSERT(codeEntry != 0);
     SetCodeEntry(codeEntry);
-    SetIsCompiledFastCall(isFastCall);
-    SetCompiledCodeBit(true);
+    uint32_t bitField = IsCompiledCodeBit::Update(GetBitField(), true);
+    bitField = IsFastCallBit::Update(bitField, isFastCall);
+    SetBitField(IsArkSteedEntryBit::Update(bitField, isArkSteed));
 }
 
 void JSFunction::SetJitCompiledFuncEntry(JSThread *thread, JSHandle<MachineCode> &machineCode, bool isFastCall)
@@ -1331,32 +1376,12 @@ void JSFunction::SetJitCompiledFuncEntry(JSThread *thread, JSHandle<MachineCode>
     ASSERT(codeEntry != 0);
 
     SetMachineCode(thread, machineCode);
-    SetCompiledFuncEntry(codeEntry, isFastCall);
-}
-
-void JSFunction::SetJitHotnessCnt(const JSThread *thread, uint16_t cnt)
-{
-    JSTaggedValue profileTypeInfoVal = GetProfileTypeInfo(thread);
-    if (!profileTypeInfoVal.IsUndefined()) {
-        ProfileTypeInfo *profileTypeInfo = ProfileTypeInfo::Cast(profileTypeInfoVal.GetTaggedObject());
-        profileTypeInfo->SetJitHotnessCnt(cnt);
-    }
-}
-
-uint16_t JSFunction::GetJitHotnessCnt(const JSThread *thread) const
-{
-    JSTaggedValue profileTypeInfoVal = GetProfileTypeInfo(thread);
-    if (!profileTypeInfoVal.IsUndefined()) {
-        ProfileTypeInfo *profileTypeInfo = ProfileTypeInfo::Cast(profileTypeInfoVal.GetTaggedObject());
-        return profileTypeInfo->GetJitHotnessCnt();
-    }
-    return 0;
+    SetCompiledFuncEntry(codeEntry, isFastCall, machineCode->GetIsArkSteedCode());
 }
 
 void JSFunctionBase::ClearCompiledCodeFlags()
 {
-    SetCompiledCodeBit(false);
-    SetIsCompiledFastCall(false);
+    SetBitField(GetBitField() & ~COMPILED_CODE_FLAGS_MASK);
 }
 
 void JSFunction::ClearMachineCode(const JSThread *thread)

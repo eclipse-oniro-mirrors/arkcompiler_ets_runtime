@@ -49,9 +49,9 @@ public:
 
     void Run([[maybe_unused]] JSThread *thread) override
     {
-        ThreadPriorityScope scope;
         ASSERT(thread->IsDaemonThread());
         SharedHeap *sHeap = SharedHeap::GetInstance();
+        sHeap->SetGCThreadQosPriority(common::PriorityMode::STW);
         TRACE_GC(GCStats::Scope::ScopeId::ConcurrentMark, sHeap->GetEcmaGCStats());
         LOG_GC(DEBUG) << "SharedConcurrentMarker: Concurrent Marking Begin";
         ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, ("SharedConcurrentMarker::Mark;MarkReason"
@@ -67,11 +67,19 @@ public:
             + ";NativeLimitGC" + std::to_string(sHeap->GetNativeSizeTriggerSharedGC())
             + ";NativeLimitCM" + std::to_string(sHeap->GetNativeSizeTriggerSharedCM())).c_str(), "");
         CHECK_DAEMON_THREAD();
-        Runtime::GetInstance()->GCIterateThreadList([](JSThread *thread) {
+        JSThread *mainThread = Runtime::GetInstance()->GetMainThread();
+        Runtime::GetInstance()->GCIterateThreadList([&](JSThread *thread) {
             thread->GetEcmaVM()->GetHeap()->WaitAndHandleCCFinished();
+            if (thread == mainThread && sHeap->GetConcurrentMarker()->IsSharedPartialGCMode()) {
+                thread->SetSwitchRBStubRequest(true);
+            }
         });
+        if (sHeap->GetConcurrentMarker()->IsCCMode()) {
+            sHeap->SetGCType(TriggerGCType::SHARED_CC);
+        }
         // fixme: support shared runtime state
         if (UNLIKELY(sHeap->ShouldVerifyHeap())) {
+            sHeap->GetSharedGCMarker()->MergeBackAndResetRSetWorkListHandler();
             SharedHeapVerification(sHeap, VerifyKind::VERIFY_PRE_SHARED_GC).VerifyAll();
         }
         sHeap->GetConcurrentMarker()->InitializeMarking();
@@ -79,38 +87,15 @@ public:
         SharedGCMarker *marker = sHeap->GetSharedGCMarker();
         SharedGCMarkRootVisitor rootVisitor(sHeap->GetWorkManager()->GetSharedGCWorkNodeHolder(DAEMON_THREAD_INDEX));
         marker->MarkGlobalRoots(rootVisitor);
-
         marker->PrepareCollectLocalVMRSet();
+        sHeap->SetGCThreadQosPriority(common::PriorityMode::FOREGROUND);
     }
-
-private:
-    class ThreadPriorityScope {
-    public:
-        explicit ThreadPriorityScope()
-        {
-            common::Taskpool::GetCurrentTaskpool()->SetThreadPriority(common::PriorityMode::STW);
-        }
-        ~ThreadPriorityScope()
-        {
-            common::Taskpool::GetCurrentTaskpool()->SetThreadPriority(common::PriorityMode::FOREGROUND);
-        }
-
-        NO_COPY_SEMANTIC(ThreadPriorityScope);
-        NO_MOVE_SEMANTIC(ThreadPriorityScope);
-    };
 };
 
-class InitialMarkFlipFunction : public Closure {
-public:
-    InitialMarkFlipFunction() = default;
-    ~InitialMarkFlipFunction() override = default;
-
-    NO_COPY_SEMANTIC(InitialMarkFlipFunction);
-    NO_MOVE_SEMANTIC(InitialMarkFlipFunction);
-
-    void Run(JSThread *thread) override
+class SharedMarkFlipFunctionBase : public Closure {
+protected:
+    void MarkRoots(JSThread *thread)
     {
-        ASSERT(!thread->IsConcurrentCopying());
         SharedHeap *sHeap = SharedHeap::GetInstance();
         SharedGCMarker *marker = sHeap->GetSharedGCMarker();
         SharedGCWorkNodeHolder *temporaryHolder = sHeap->GetWorkManager()->GetTemporaryWorkNodeHolder();
@@ -122,16 +107,61 @@ public:
     }
 };
 
+class InitialMarkFlipFunction : public SharedMarkFlipFunctionBase {
+public:
+    InitialMarkFlipFunction() = default;
+    ~InitialMarkFlipFunction() override = default;
+
+    NO_COPY_SEMANTIC(InitialMarkFlipFunction);
+    NO_MOVE_SEMANTIC(InitialMarkFlipFunction);
+
+    void Run(JSThread *thread) override
+    {
+        ASSERT(!thread->IsConcurrentCopying());
+        MarkRoots(thread);
+    }
+};
+
+class CCMarkFlipFunction : public SharedMarkFlipFunctionBase {
+public:
+    CCMarkFlipFunction() = default;
+    ~CCMarkFlipFunction() override = default;
+
+    NO_COPY_SEMANTIC(CCMarkFlipFunction);
+    NO_MOVE_SEMANTIC(CCMarkFlipFunction);
+
+    void Run(JSThread *thread) override
+    {
+        ASSERT(!thread->IsConcurrentCopying());
+        if (!thread->TrySwitchSharedCCStub() && thread->HasPostTaskToThreadCallback() &&
+            thread->TryMarkCCTaskPending()) {
+            thread->PostTaskToThread([thread]() {
+                thread->ExecuteSharedCCStubSwitch();
+            });
+        }
+        MarkRoots(thread);
+    }
+};
+
 void SharedConcurrentMarker::Mark(TriggerGCType gcType)
 {
     RecursionScope recurScope(this);
     gcType_ = gcType;
-    sHeap_->WaitSensitiveStatusFinished();
+    // SharedCC already waited before thread preparation.
+    if (!IsCCMode()) {
+        sHeap_->WaitSensitiveStatusFinished();
+    }
     {
+        SharedHeap::LocalCCDrainScope localCCDrainScope(dThread_);
         ThreadManagedScope runningScope(dThread_);
         InitialMarkSuspendCallback suspendCallback;
-        InitialMarkFlipFunction flipFunction;
-        Runtime::GetInstance()->FlipAllThreads(dThread_, &suspendCallback, &flipFunction);
+        if (IsCCMode()) {
+            CCMarkFlipFunction flipFunction;
+            Runtime::GetInstance()->FlipAllThreads(dThread_, &suspendCallback, &flipFunction);
+        } else {
+            InitialMarkFlipFunction flipFunction;
+            Runtime::GetInstance()->FlipAllThreads(dThread_, &suspendCallback, &flipFunction);
+        }
     }
     // Daemon thread do not need to post task to GC_Thread
     ASSERT(!dThread_->IsInRunningState());
@@ -152,6 +182,7 @@ void SharedConcurrentMarker::ReMark()
 #endif
     TRACE_GC(GCStats::Scope::ScopeId::ReMark, sHeap_->GetEcmaGCStats());
     LOG_GC(DEBUG) << "SharedConcurrentMarker: Remarking Begin";
+
     // TODO: support shared runtime state
     SharedGCMarker *sharedGCMarker = sHeap_->GetSharedGCMarker();
     // If enable shared concurrent mark, the recorded weak reference slots from local to share may be changed
@@ -169,14 +200,15 @@ void SharedConcurrentMarker::Reset(bool clearGCBits)
     dThread_->SetSharedMarkStatus(SharedMarkStatus::READY_TO_CONCURRENT_MARK);
     isConcurrentMarking_ = false;
     if (clearGCBits) {
-        sHeap_->GetOldSpace()->RevertCSets();
         // Shared gc clear GC bits in ReclaimRegions after GC
         auto callback = [](Region *region) {
             region->ClearMarkGCBitset();
             region->ResetAliveObject();
             region->ClearCrossRegionRSet();
+            region->ClearGCFlag(RegionGCFlags::IN_SHARED_COLLECT_SET);
         };
         sHeap_->EnumerateOldSpaceRegions(callback);
+        sWorkManager_->FinishBase();
     }
 }
 
@@ -190,9 +222,6 @@ void SharedConcurrentMarker::InitializeMarking()
     CHECK_DAEMON_THREAD();
     // TODO: support shared runtime state
     sHeap_->Prepare(true);
-    if (gcType_ == TriggerGCType::SHARED_PARTIAL_GC) {
-        sHeap_->GetOldSpace()->SelectCSets();
-    }
     isConcurrentMarking_ = true;
     dThread_->SetSharedMarkStatus(SharedMarkStatus::CONCURRENT_MARKING_OR_FINISHED);
 
@@ -201,9 +230,14 @@ void SharedConcurrentMarker::InitializeMarking()
         current->ClearMarkGCBitset();
         current->ClearCrossRegionRSet();
     });
-    sHeap_->EnumerateOldSpaceRegions([](Region *current) {
+    bool needCSet = IsSharedPartialGCMode();
+    sHeap_->EnumerateOldSpaceRegions([needCSet](Region *current) {
         ASSERT(current->InSharedSweepableSpace());
+        ASSERT(!current->InSCollectSet());
         current->ResetAliveObject();
+        if (needCSet && current->InSharedOldSpace()) {
+            current->SetGCFlag(RegionGCFlags::IN_SHARED_COLLECT_SET);
+        }
     });
     // this should not less than the actual num of JSThread
     size_t numTotalThreads = Runtime::GetInstance()->GetThreadListSize();
@@ -230,6 +264,13 @@ void SharedConcurrentMarker::FinishMarking(float spendTime)
 void SharedConcurrentMarker::HandleMarkingFinished()
 {
     sHeap_->WaitSensitiveStatusFinished();
-    sHeap_->DaemonCollectGarbage(gcType_, GCReason::HANDLE_MARKING_FINISHED);
+    if (IsCCMode()) {
+        return;
+    }
+    if (IsSharedPartialGCMode()) {
+        sHeap_->DaemonCollectGarbageWithFlip(gcType_, GCReason::HANDLE_MARKING_FINISHED);
+    } else {
+        sHeap_->DaemonCollectGarbage(gcType_, GCReason::HANDLE_MARKING_FINISHED);
+    }
 }
 }  // namespace panda::ecmascript

@@ -49,16 +49,24 @@ JSHandle<JSTaggedValue> BaseSnapshotInfo::TryGetIHClass(ProfileType rootType, Pr
 
 JSHandle<JSTaggedValue> BaseSnapshotInfo::TryGetHClass(ProfileType rootType, ProfileType childType) const
 {
+#ifndef EXCLUDE_PGO
     PGOTypeManager* ptManager = thread_->GetEcmaVM()->GetPTManager();
     JSTaggedValue hclass = ptManager->QueryHClass(rootType, childType);
     return JSHandle<JSTaggedValue>(thread_, hclass);
+#else
+    return JSHandle<JSTaggedValue>(thread_, JSTaggedValue::Undefined());
+#endif
 }
 
 JSHandle<JSTaggedValue> BaseSnapshotInfo::TryGetHClassByPGOTypeLocation(PGOTypeLocation loc) const
 {
+#ifndef EXCLUDE_PGO
     PGOTypeManager* ptManager = thread_->GetEcmaVM()->GetPTManager();
     ProfileType  pt = ptManager->GetRootIdByLocation(loc);
     return TryGetHClass(pt, pt);
+#else
+    return JSHandle<JSTaggedValue>(thread_, JSTaggedValue::Undefined());
+#endif
 }
 
 JSHandle<JSTaggedValue> BaseSnapshotInfo::TryGetHClassFromCached(const JSHandle<TaggedArray> &properties,
@@ -266,11 +274,17 @@ void MethodSnapshotInfo::StoreDataToGlobalData(SnapshotGlobalData &globalData,
             }
             snapshotCp->SetObjectToCache(thread_, data.constantPoolIdx_, aotLiteralInfo.GetTaggedValue());
         } else if (skippedMethods.find(methodOffset) == skippedMethods.end()) {
-            // For MethodSnaphotInfo which does not have ihc info, we insert JSTaggedValue(methodOffset) as revervation.
-            // For the purpose of reducing ai size.
             globalData.RecordReviseData(
                 ReviseData::ItemData {globalData.GetCurDataIdx(), snapshotCpArrIdx, data.constantPoolIdx_});
+#ifdef USE_COMPRESSED_POINTER
+            // fixme: compressed pointer : support int for aot
+            aotLiteralInfo->SetObjectToCache(thread_, 0, JSTaggedValue(methodOffset));
+            snapshotCp->SetObjectToCache(thread_, data.constantPoolIdx_, aotLiteralInfo.GetTaggedValue());
+#else
+            // For MethodSnaphotInfo which does not have ihc info, we insert JSTaggedValue(methodOffset) as revervation.
+            // For the purpose of reducing ai size.
             snapshotCp->SetObjectToCache(thread_, data.constantPoolIdx_, JSTaggedValue(methodOffset));
+#endif
         } else {
             snapshotCp->SetObjectToCache(thread_, data.constantPoolIdx_, JSTaggedValue::Hole());
         }

@@ -16,6 +16,7 @@
 #ifndef ECMASCRIPT_DFX_HPROF_RAWHEAP_DUMP_H
 #define ECMASCRIPT_DFX_HPROF_RAWHEAP_DUMP_H
 
+#include <csignal>
 #include <functional>
 
 #include "ecmascript/dfx/hprof/file_stream.h"
@@ -26,6 +27,61 @@
 
 
 namespace panda::ecmascript {
+struct GlobalRefMappingEntry {
+    uintptr_t refAddr {0};
+    JSTaggedType heapObjAddr {0};
+};
+
+// RAII guard: registers crash signal handlers for OOM dump, restores on scope exit.
+// Ensures the handler does not affect normal exit (_exit) after dump completes.
+class DumpAbortSignalScope {
+public:
+    explicit DumpAbortSignalScope(bool enable, bool isForSharedOOM = false);
+    ~DumpAbortSignalScope();
+    NO_COPY_SEMANTIC(DumpAbortSignalScope);
+    NO_MOVE_SEMANTIC(DumpAbortSignalScope);
+
+private:
+    static constexpr int SIGNALS_TO_CATCH[] = {
+        SIGABRT,  // abort()
+        SIGSEGV,  // segmentation fault (null pointer, memory violation)
+        SIGFPE,   // floating point exception (divide by zero)
+        SIGILL,   // illegal instruction
+        SIGBUS,   // bus error
+        SIGALRM,  // timeout (alarm)
+        SIGPIPE,  // write to closed pipe
+        SIGXFSZ,  // file size limit exceeded
+        SIGTERM   // termination
+    };
+    static constexpr int SIGNAL_COUNT = sizeof(SIGNALS_TO_CATCH) / sizeof(SIGNALS_TO_CATCH[0]);
+    static constexpr int DUMP_TIMEOUT_WARNING_SECONDS = 20;
+
+    struct sigaction oldActions_[SIGNAL_COUNT] {};
+    bool active_ {false};
+};
+
+// Dump status codes: 0=success, 1=failed, 2-11=phase in progress
+static constexpr int32_t DUMP_STATUS_SUCCESS = 0;
+static constexpr int32_t DUMP_STATUS_FAILED = 1;
+static constexpr int32_t DUMP_STATUS_DUMP_INIT = 2;
+static constexpr int32_t DUMP_STATUS_FILL_BUMP_POINTER = 3;
+static constexpr int32_t DUMP_STATUS_MARK_ROOT_OBJECTS = 4;
+static constexpr int32_t DUMP_STATUS_ROOT_TABLE = 5;
+static constexpr int32_t DUMP_STATUS_MARK_PROCESS_OBJECTS = 6;
+static constexpr int32_t DUMP_STATUS_UPDATE_STRING_TABLE = 7;
+static constexpr int32_t DUMP_STATUS_DUMP_STRING_TABLE = 8;
+static constexpr int32_t DUMP_STATUS_DUMP_OBJECT_TABLE = 9;
+static constexpr int32_t DUMP_STATUS_DUMP_OBJECT_MEMORY = 10;
+static constexpr int32_t DUMP_STATUS_END_OF_STREAM = 11;
+
+void SetDumpStatus(int32_t status);
+
+#ifdef OHOS_UNIT_TEST
+// Test helpers for coverage testing
+const char* GetSignalNameForTest(int sig);
+double GetDumpCostForTest();
+#endif
+
 class ObjectMarker : public HeapMarker, public RootVisitor, public BaseObjectVisitor<ObjectMarker> {
 public:
     ObjectMarker(const EcmaVM *vm, const DumpSnapShotOption *option) : vm_(vm), option_(option) {}
@@ -34,7 +90,9 @@ public:
     void VisitRoot(Root type, ObjectSlot slot) override;
     void VisitRangeRoot(Root type, ObjectSlot start, ObjectSlot end) override;
     void VisitBaseAndDerivedRoot(Root type, ObjectSlot base, ObjectSlot derived, uintptr_t baseOldObject) override;
-    void VisitObjectRangeImpl(BaseObject *root, uintptr_t start, uintptr_t endAddr, VisitObjectArea area) override;
+    void VisitObjectRangeImpl(BaseObject *root, ObjectSlot start, ObjectSlot end, VisitObjectArea area) override;
+    void VisitCompressedObjectRangeImpl(BaseObject *root,
+                                        CompressedObjectSlot start, CompressedObjectSlot end) override;
 
     void ProcessMarkObjectsFromRoot();
     void IterateMarkedObjects(const std::function<void(JSTaggedType)> &visitor);
@@ -61,6 +119,21 @@ public:
         return globalHandleRoots_;
     }
 
+    const CSet<JSTaggedType>& GetVmRoots() const
+    {
+        return vmRoots_;
+    }
+
+    const CSet<JSTaggedType>& GetFrameRoots() const
+    {
+        return frameRoots_;
+    }
+
+    const CUnorderedSet<JSTaggedType>& GetNativePointerAddrs() const
+    {
+        return nativePointerAddrs_;
+    }
+
 private:
 
     const EcmaVM *vm_ {nullptr};
@@ -68,7 +141,10 @@ private:
     CQueue<JSTaggedType> bfsQueue_ {};
     CSet<JSTaggedType> localHandleRoots_ {};
     CSet<JSTaggedType> globalHandleRoots_ {};
+    CSet<JSTaggedType> vmRoots_ {};
+    CSet<JSTaggedType> frameRoots_ {};
     CVector<JSTaggedType> markedObjects_ {};
+    CUnorderedSet<JSTaggedType> nativePointerAddrs_ {};
     uint32_t heapSize_ {0};
 };
 
@@ -80,10 +156,31 @@ public:
 
     void BinaryDump();
 
+    /**
+     * @brief Flush the binary writer buffer and emit the success log / OOM
+     * HiSysEvent. Called at a defined point (end of BinaryDump) rather than
+     * from the destructor.
+     *
+     * In the hybrid fork model the parent process never calls BinaryDump but
+     * still destroys the RawHeapDump instance; performing the flush / event
+     * emission in the destructor would flush the parent's stale buffer into
+     * the child's output file and double-report the OOM event. The destructor
+     * therefore only clears in-memory state, and all side effects live here.
+     */
+    void Finalize();
+
     uint32_t GetRawHeapFileOffset()
     {
         return static_cast<uint32_t>(writer_.GetCurrentFileSize());
     }
+
+    /**
+     * @brief Read-only nodeId lookup for a heap address (no insertion, no
+     * counter advance). Used by DynamicDump::GetNodeId so XRef records carry
+     * the dynamic nodeId instead of the raw address.
+     * @return nodeId assigned to addr (low 32 bits), or 0 if addr was not dumped.
+     */
+    uint32_t FindNodeId(uint64_t addr) const;
 
     uint32_t GetObjectCount()
     {
@@ -105,6 +202,21 @@ public:
         return marker_.GetGlobalHandleRoots();
     }
 
+    const CSet<JSTaggedType>& GetVmRoots() const
+    {
+        return marker_.GetVmRoots();
+    }
+
+    const CSet<JSTaggedType>& GetFrameRoots() const
+    {
+        return marker_.GetFrameRoots();
+    }
+
+    const CUnorderedSet<JSTaggedType>& GetNativePointerAddrs() const
+    {
+        return marker_.GetNativePointerAddrs();
+    }
+
 protected:
     virtual void DumpRootTable() = 0;
     virtual void DumpStringTable() = 0;
@@ -117,6 +229,8 @@ protected:
     void IterateMarkedObjects(const std::function<void(JSTaggedType)> &visitor);
     void DumpVersion(const std::string &version);
     void DumpSectionIndex();
+    void DumpMetadataFields();
+    void DumpStringField(const std::string &value, size_t bufSize, const char *fieldName);
     NodeId GenerateNodeId(JSTaggedType addr);
     void WriteChunk(char *data, size_t size);
     void WriteU64(uint64_t value);
@@ -138,14 +252,20 @@ protected:
         version_ = version;
     }
 
+    void WriteGlobalRefGroup();
+    virtual void WriteGlobalRefHeapObjAddr(JSTaggedType addr) = 0;
+
+    const EcmaVM *vm_ {nullptr};
+
 private:
     StringId GenerateStringIdForJSObject(TaggedObject *object, JSThread *thread);
     StringId GenerateStringIdForJSFunction(TaggedObject *object, JSThread *thread);
     StringId GenerateStringIdForJSProxy(TaggedObject *object);
     StringId GenerateStringIdForString(TaggedObject *object, JSThread *thread);
+    // Update string table for SourceTextModule's EcmaModuleRecordName and EcmaModuleFilename
+    void UpdateSourceTextModuleStringTable(JSTaggedType addr, int &strCnt);
 
-    const EcmaVM *vm_ {nullptr};
-    const DumpSnapShotOption *dumpOption_ {};
+    DumpSnapShotOption dumpOption_ {};
     HeapSnapshot *snapshot_ {nullptr};
     EntryIdMap *entryIdMap_ {nullptr};
     BinaryWriter writer_;
@@ -180,6 +300,8 @@ private:
     void UpdateStringTable(JSTaggedType addr, StringId strId) override;
 
     void CollectRootAddrByType(const CSet<JSTaggedType>& rootSet) override;
+    void DumpNonCMGCObject(JSTaggedType addr, size_t size, const CUnorderedSet<JSTaggedType> &nativePointerAddrs);
+    void WriteGlobalRefHeapObjAddr(JSTaggedType addr) override;
 
     constexpr static const char *const RAWHEAP_VERSION = "1.0.0";
 
@@ -208,6 +330,7 @@ private:
     void UpdateStringTable(JSTaggedType addr, StringId strId) override;
 
     void CollectRootAddrByType(const CSet<JSTaggedType>& rootSet) override;
+    void WriteGlobalRefHeapObjAddr(JSTaggedType addr) override;
 
     uint32_t GenerateRegionId(JSTaggedType addr);
     uint32_t GenerateSyntheticAddr(JSTaggedType addr);

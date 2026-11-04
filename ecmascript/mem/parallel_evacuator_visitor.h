@@ -25,14 +25,18 @@ public:
     explicit SlotUpdateRangeVisitor(ParallelEvacuator *evacuator);
     ~SlotUpdateRangeVisitor() override = default;
 
-    void VisitObjectRangeImpl(BaseObject *root, uintptr_t start, uintptr_t end, VisitObjectArea area) override;
+    void VisitObjectRangeImpl(BaseObject *root, ObjectSlot start, ObjectSlot end, VisitObjectArea area) override;
+
+    void VisitCompressedObjectRangeImpl(BaseObject *root, CompressedObjectSlot start,
+                                        CompressedObjectSlot end) override;
 private:
-    void UpdateSlot(ObjectSlot slot, Region *rootRegion);
+    template <ReferenceType refType>
+    void UpdateSlot(ObjectSlotBase<refType> slot, Region *rootRegion);
 
     ParallelEvacuator *evacuator_ {nullptr};
 };
 
-template<TriggerGCType gcType>
+template<TriggerGCType gcType, bool updateHClass>
 class NewToOldEvacuationVisitor {
 public:
     explicit NewToOldEvacuationVisitor(Heap *heap, std::unordered_set<JSTaggedType> *set,
@@ -52,6 +56,7 @@ private:
     JSThread *thread_ {nullptr};
     std::shared_ptr<PGOProfiler> pgoProfiler_;
     std::unordered_set<JSTaggedType> *trackSet_ {nullptr};
+    ParallelEvacuator *evacuator_ {nullptr};
     SlotUpdateRangeVisitor<gcType> slotUpdateRangeVisitor_;
 };
 }  // namespace panda::ecmascript

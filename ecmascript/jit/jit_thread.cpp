@@ -25,9 +25,42 @@ JSThread *JitThread::GetHostThread() const
     return hostThread_;
 }
 
+void JitThread::EnterHeapAccess()
+{
+    ASSERT(!g_isEnableCMCGC && hostThread_ != nullptr);
+    ASSERT(!IsInRunningState());
+    CHECK_NO_GC;
+    // The existing state CAS admits this thread only when neither local nor
+    // shared GC has requested suspension. There is no second admission state.
+    ManagedCodeBegin();
+    hostThread_->GetEcmaVM()->GetHeap()->WaitCCFinished();
+}
+
+void JitThread::LeaveHeapAccess()
+{
+    ASSERT(IsInRunningState());
+    CHECK_NO_GC;
+    ManagedCodeEnd();
+}
+
+void JitThread::HeapSafepointSlowPath()
+{
+    WaitSuspension();
+    // Non-CMC local concurrent copy may outlive its initial stop-the-world
+    // phase. As on initial entry, finish it before reading raw heap addresses.
+    hostThread_->GetEcmaVM()->GetHeap()->WaitCCFinished();
+}
+
 void JitThread::SetHostThread(JSThread *thread)
 {
+    ASSERT(g_isEnableCMCGC || !IsInRunningState());
+    if (!g_isEnableCMCGC && hostThread_ != nullptr) {
+        hostThread_->UnregisterJitThread(this);
+    }
     hostThread_ = thread;
+    if (!g_isEnableCMCGC && hostThread_ != nullptr) {
+        hostThread_->RegisterJitThread(this);
+    }
 }
 
 JitVM *JitThread::GetJitVM() const

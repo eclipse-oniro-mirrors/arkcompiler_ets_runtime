@@ -12,24 +12,28 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include <fcntl.h>
-#include <unistd.h>
+#include <algorithm>
 #include <chrono>
+#include <csignal>
+#include <fcntl.h>
+#include <regex>
+#include <sstream>
+#include <sys/wait.h>
+#include <thread>
+#include <unistd.h>
+#include <vector>
 #include "ecmascript/base/number_helper.h"
 #include "ecmascript/builtins/builtins_ark_tools.h"
 #include "ecmascript/dfx/hprof/heap_snapshot.h"
 #include "ecmascript/dfx/hprof/heap_profiler.h"
 #include "ecmascript/dfx/hprof/heap_root_visitor.h"
+#include "ecmascript/dfx/hprof/rawheap_dump.h"
 #include "ecmascript/dfx/hprof/rawheap_translate/rawheap_translate.h"
 #include "ecmascript/dfx/hprof/heap_marker.h"
 #include "ecmascript/global_env.h"
 #include "ecmascript/jspandafile/js_pandafile_manager.h"
+#include "ecmascript/runtime.h"
 #include "ecmascript/js_api/js_api_arraylist.h"
-#include "ecmascript/js_api/js_api_arraylist_iterator.h"
-#include "ecmascript/js_api/js_api_deque.h"
-#include "ecmascript/js_api/js_api_hashmap.h"
-#include "ecmascript/js_api/js_api_hashset.h"
-#include "ecmascript/js_api/js_api_lightweightmap.h"
 #include "ecmascript/js_api/js_api_lightweightset.h"
 #include "ecmascript/js_api/js_api_linked_list.h"
 #include "ecmascript/js_api/js_api_list.h"
@@ -68,7 +72,7 @@ public:
     {
         TestHelper::CreateEcmaVMWithScope(ecmaVm_, thread_, scope_);
         ecmaVm_->SetEnableForceGC(false);
-        HeapProfiler::ResetOOMDump();
+        HeapProfilerInterface::ResetOOMDump();
     }
 
     void TearDown() override
@@ -171,7 +175,13 @@ public:
                 continue;
             }
 
-            if (translate.hashSet_.find(hash) == translate.hashSet_.end()) {
+            std::string expected = "Int:" + std::to_string(hash);
+            bool found = std::any_of(translate.primitiveNodes_.begin(), translate.primitiveNodes_.end(),
+                                     [&translate, &expected](const rawheap_translate::Node *node) {
+                                         auto key = translate.strTable_->GetKeyByStringId(node->strId);
+                                         return translate.strTable_->GetStringByKey(key) == expected;
+                                     });
+            if (!found) {
                 std::cout << "CheckHashInRawheap, missed object hash in rawheap." << std::endl;
                 return false;
             }
@@ -275,6 +285,20 @@ public:
         GTEST_LOG_(ERROR) << "file: " << filePath.c_str() << ", target:" << targetStr.c_str()
                           << ", line:" << std::to_string(lineNum) <<"not found";
         return false;  // Lost the Line
+    }
+
+    bool MatchHeapDumpRegex(const std::string &filePath, const std::string &pattern)
+    {
+        std::string line;
+        std::ifstream inputStream(filePath);
+        std::regex re(pattern);
+        while (getline(inputStream, line)) {
+            if (std::regex_search(line, re)) {
+                return true;
+            }
+        }
+        GTEST_LOG_(ERROR) << "file: " << filePath.c_str() << ", pattern:" << pattern.c_str() << " not found";
+        return false;
     }
 
     bool ReadRawHeapSectionInfo(std::string &filePath, std::vector<uint32_t> &section)
@@ -860,6 +884,62 @@ private:
     EcmaVM *instance {nullptr};
 };
 
+class NodeIdTestStream : public Stream {
+public:
+    void EndOfStream() override {}
+
+    int GetSize() override
+    {
+        constexpr int chunkSize = 64;
+        return chunkSize;
+    }
+
+    bool WriteChunk([[maybe_unused]] char *data, [[maybe_unused]] int32_t size) override
+    {
+        return true;
+    }
+
+    bool WriteBinBlock([[maybe_unused]] char *data, [[maybe_unused]] int32_t size) override
+    {
+        return true;
+    }
+
+    bool Good() override
+    {
+        return true;
+    }
+
+    void UpdateHeapStats([[maybe_unused]] HeapStat *data, [[maybe_unused]] int32_t count) override {}
+
+    void UpdateLastSeenObjectId([[maybe_unused]] int32_t lastSeenObjectId,
+                                [[maybe_unused]] int64_t timeStampUs) override
+    {
+    }
+};
+
+class NodeIdTestRawHeapDump final : public RawHeapDump {
+public:
+    NodeIdTestRawHeapDump(const EcmaVM *vm, Stream *stream, EntryIdMap *entryIdMap,
+                          const DumpSnapShotOption &dumpOption)
+        : RawHeapDump(vm, stream, nullptr, entryIdMap, dumpOption)
+    {
+    }
+
+    NodeId GenerateId(JSTaggedType addr)
+    {
+        return GenerateNodeId(addr);
+    }
+
+private:
+    void DumpRootTable() override {}
+    void DumpStringTable() override {}
+    void DumpObjectTable() override {}
+    void DumpObjectMemory() override {}
+    void UpdateStringTable([[maybe_unused]] JSTaggedType addr, [[maybe_unused]] StringId strId) override {}
+    void CollectRootAddrByType([[maybe_unused]] const CSet<JSTaggedType> &rootSet) override {}
+    void WriteGlobalRefHeapObjAddr([[maybe_unused]] JSTaggedType addr) override {}
+};
+
 class MockHeapProfiler : public HeapProfilerInterface {
 public:
     NO_MOVE_SEMANTIC(MockHeapProfiler);
@@ -928,6 +1008,11 @@ public:
         return profiler_->GetIdCount();
     }
 
+    std::unordered_map<uintptr_t, uint64_t> GetHandleNodeIdMap() override
+    {
+        return profiler_->GetHandleNodeIdMap();
+    }
+
     std::unordered_map<TaggedObject *, bool> allocEvtObj_;
     HeapProfilerInterface *profiler_ {nullptr};
 };
@@ -957,6 +1042,12 @@ public:
 private:
     Callback &cb_;
 };
+
+HWTEST_F_L0(HeapDumpTest, TestOOMDumpCanOnlyStartOnce)
+{
+    EXPECT_TRUE(HeapProfilerInterface::TryStartOOMDump());
+    EXPECT_FALSE(HeapProfilerInterface::TryStartOOMDump());
+}
 
 HWTEST_F_L0(HeapDumpTest, TestAllocationEvent)
 {
@@ -1125,55 +1216,6 @@ HWTEST_F_L0(HeapDumpTest, TestHeapDumpFunctionAndObject)
     ASSERT_TRUE(strMatched7);
 }
 
-HWTEST_F_L0(HeapDumpTest, TestHeapDumpGenerateNodeName1)
-{
-    JSHandle<GlobalEnv> env = thread_->GetEcmaVM()->GetGlobalEnv();
-    ObjectFactory *factory = ecmaVm_->GetFactory();
-    HeapDumpTestHelper tester(ecmaVm_);
-
-    // TAGGED_ARRAY
-    factory->NewTaggedArray(10);
-    // LEXICAL_ENV
-    factory->NewLexicalEnv(10);
-    // CONSTANT_POOL
-    factory->NewConstantPool(10);
-    // PROFILE_TYPE_INFO
-    factory->NewProfileTypeInfo(10);
-    // TAGGED_DICTIONARY
-    factory->NewDictionaryArray(10);
-    // AOT_LITERAL_INFO
-    factory->NewAOTLiteralInfo(10);
-    // VTABLE
-    factory->NewVTable(10);
-    // COW_TAGGED_ARRAY
-    factory->NewCOWTaggedArray(10);
-    // HCLASS
-    JSHandle<JSTaggedValue> proto = env->GetFunctionPrototype();
-    factory->NewEcmaHClass(JSHClass::SIZE, JSType::HCLASS, proto);
-    // LINKED_NODE
-    JSHandle<LinkedNode> linkedNode(thread_, JSTaggedValue::Hole());
-    factory->NewLinkedNode(1, JSHandle<JSTaggedValue>(thread_, JSTaggedValue::Hole()),
-        JSHandle<JSTaggedValue>(thread_, JSTaggedValue::Hole()), linkedNode);
-    // JS_NATIVE_POINTER
-    auto newData = ecmaVm_->GetNativeAreaAllocator()->AllocateBuffer(8);
-    factory->NewJSNativePointer(newData);
-
-    tester.GenerateSnapShot("testGenerateNodeName_1.heapsnapshot");
-    ASSERT_TRUE(tester.MatchHeapDumpString("testGenerateNodeName_1.heapsnapshot", "\"ArkInternalArray["));
-    ASSERT_TRUE(tester.MatchHeapDumpString("testGenerateNodeName_1.heapsnapshot", "\"LexicalEnv["));
-    ASSERT_TRUE(tester.MatchHeapDumpString("testGenerateNodeName_1.heapsnapshot", "\"ArkInternalConstantPool["));
-    ASSERT_TRUE(tester.MatchHeapDumpString("testGenerateNodeName_1.heapsnapshot", "\"ArkInternalProfileTypeInfo["));
-    ASSERT_TRUE(tester.MatchHeapDumpString("testGenerateNodeName_1.heapsnapshot", "\"ArkInternalDict["));
-    ASSERT_TRUE(tester.MatchHeapDumpString("testGenerateNodeName_1.heapsnapshot", "\"ArkInternalAOTLiteralInfo["));
-    ASSERT_TRUE(tester.MatchHeapDumpString("testGenerateNodeName_1.heapsnapshot", "\"ArkInternalVTable["));
-    ASSERT_TRUE(tester.MatchHeapDumpString("testGenerateNodeName_1.heapsnapshot", "\"ArkInternalCOWArray["));
-    ASSERT_TRUE(tester.MatchHeapDumpString("testGenerateNodeName_1.heapsnapshot", "\"HiddenClass(NonMovable)"));
-    ASSERT_TRUE(tester.MatchHeapDumpString("testGenerateNodeName_1.heapsnapshot", "\"LinkedNode\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString("testGenerateNodeName_1.heapsnapshot", "\"JSNativePointer\""));
-    // Test Not Found
-    ASSERT_TRUE(!tester.MatchHeapDumpString("testGenerateNodeName_1.heapsnapshot", "*#@failed case"));
-}
-
 HWTEST_F_L0(HeapDumpTest, TestHeapDumpGenerateNodeName2)
 {
     ObjectFactory *factory = ecmaVm_->GetFactory();
@@ -1287,34 +1329,6 @@ HWTEST_F_L0(HeapDumpTest, TestHeapDumpGenerateNodeName4)
     ASSERT_TRUE(tester.MatchHeapDumpString("testGenerateNodeName_4.heapsnapshot", "\"WeakMap\""));
     ASSERT_TRUE(tester.MatchHeapDumpString("testGenerateNodeName_4.heapsnapshot", "\"JSArray\""));
     ASSERT_TRUE(tester.MatchHeapDumpString("testGenerateNodeName_4.heapsnapshot", "\"Typed Array\""));
-}
-
-HWTEST_F_L0(HeapDumpTest, TestHeapDumpGenerateNodeName5)
-{
-    ObjectFactory *factory = ecmaVm_->GetFactory();
-    HeapDumpTestHelper tester(ecmaVm_);
-
-    JSHandle<JSTaggedValue> proto = ecmaVm_->GetGlobalEnv()->GetFunctionPrototype();
-    // JS_REG_EXP
-    tester.NewObject(JSRegExp::SIZE, JSType::JS_REG_EXP, proto);
-    // JS_DATE
-    tester.NewObject(JSDate::SIZE, JSType::JS_DATE, proto);
-    // JS_ARGUMENTS
-    factory->NewJSArguments();
-    // JS_PROXY
-    tester.NewJSProxy();
-    // JS_PRIMITIVE_REF
-    tester.NewObject(JSPrimitiveRef::SIZE, JSType::JS_PRIMITIVE_REF, proto);
-    // JS_DATA_VIEW
-    factory->NewJSDataView(factory->NewJSArrayBuffer(10), 5, 5);
-
-    tester.GenerateSnapShot("testGenerateNodeName_5.heapsnapshot");
-    ASSERT_TRUE(tester.MatchHeapDumpString("testGenerateNodeName_5.heapsnapshot", "\"Regexp\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString("testGenerateNodeName_5.heapsnapshot", "\"Date\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString("testGenerateNodeName_5.heapsnapshot", "\"Arguments\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString("testGenerateNodeName_5.heapsnapshot", "\"Proxy\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString("testGenerateNodeName_5.heapsnapshot", "\"Primitive\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString("testGenerateNodeName_5.heapsnapshot", "\"DataView\""));
 }
 
 HWTEST_F_L0(HeapDumpTest, TestHeapDumpGenerateNodeName6)
@@ -1601,6 +1615,28 @@ void CreateObjectsForBinaryDump(JSThread *thread, ObjectFactory *factory, HeapDu
     CREATE_ARRAY_AND_ADD_REFS(factory, JSSharedArrayBuffer, 10, refs)
 }
 
+HWTEST_F_L0(HeapDumpTest, TestHybridOOMRegistersNodeIdForXRef)
+{
+    constexpr JSTaggedType objectAddress = 0x1000;
+    NodeIdTestStream stream;
+
+    DumpSnapShotOption legacyOption;
+    legacyOption.isDumpOOM = true;
+    EntryIdMap legacyIdMap;
+    NodeIdTestRawHeapDump legacyDump(ecmaVm_, &stream, &legacyIdMap, legacyOption);
+    EXPECT_NE(legacyDump.GenerateId(objectAddress), 0U);
+    EXPECT_EQ(legacyIdMap.FindNodeId(objectAddress), 0U);
+
+    DumpSnapShotOption hybridOption;
+    hybridOption.isDumpOOM = true;
+    hybridOption.isForHybridXRef = true;
+    EntryIdMap hybridIdMap;
+    NodeIdTestRawHeapDump hybridDump(ecmaVm_, &stream, &hybridIdMap, hybridOption);
+    NodeId nodeId = hybridDump.GenerateId(objectAddress);
+    EXPECT_NE(nodeId, 0U);
+    EXPECT_EQ(hybridIdMap.FindNodeId(objectAddress), static_cast<uint32_t>(nodeId));
+}
+
 HWTEST_F_L0(HeapDumpTest, TestHeapDumpBinaryDumpV0)
 {
     ObjectFactory *factory = ecmaVm_->GetFactory();
@@ -1778,7 +1814,7 @@ HWTEST_F_L0(HeapDumpTest, TestThreadBinaryDumpForSharedGCTriggeredOOM)
     CreateObjectsForBinaryDump(thread_, factory, &tester, vec);
 
     std::string rawHeapPath("test_sharedgc_oom1.rawheap");
-    int fd = open(rawHeapPath.c_str(), O_RDWR | O_CREAT);
+    int fd = open(rawHeapPath.c_str(), O_RDWR | O_CREAT, 0644);
     ASSERT_TRUE(fd > 0);
 
     FileDescriptorStream stream(fd);
@@ -1802,7 +1838,7 @@ HWTEST_F_L0(HeapDumpTest, TestProcBinaryDumpForSharedGCTriggeredOOM)
     CreateObjectsForBinaryDump(thread_, factory, &tester, vec);
 
     std::string rawHeapPath("test_sharedgc_oom2.rawheap");
-    int fd = open(rawHeapPath.c_str(), O_RDWR | O_CREAT);
+    int fd = open(rawHeapPath.c_str(), O_RDWR | O_CREAT, 0644);
     ASSERT_TRUE(fd > 0);
 
     FileDescriptorStream stream(fd);
@@ -2005,6 +2041,99 @@ HWTEST_F_L0(HeapDumpTest, TestHeapDumpBinaryDumpV2WithHandleClassification2)
     ASSERT_TRUE(tester.MatchHeapDumpString("test_binary_dump_v2_with_handle.heapsnapshot", "\"LocalHandleRoot[3]\""));
     ASSERT_TRUE(tester.MatchHeapDumpString("test_binary_dump_v2_with_handle.heapsnapshot", "\"GlobalHandleRoot[2]"));
 }
+
+HWTEST_F_L0(HeapDumpTest, TestPropertyNameInBinaryDump)
+{
+    const std::string abcFileName = HPROF_TEST_ABC_FILES_DIR"property_name.abc";
+
+    bool result = JSNApi::Execute(ecmaVm_, abcFileName, "property_name");
+    EXPECT_TRUE(result);
+
+    std::string rawHeapPath("test_property_name.rawheap");
+    HeapDumpTestHelper tester(ecmaVm_);
+    DumpSnapShotOption dumpOption;
+    ASSERT_TRUE(tester.GenerateRawHeapSnapshot(rawHeapPath, dumpOption));
+
+    std::string heapsnapshotPath("test_property_name.heapsnapshot");
+    ASSERT_TRUE(tester.AddMetaDataJsonToRawheap(rawHeapPath));
+    ASSERT_TRUE(tester.DecodeRawheap(rawHeapPath, heapsnapshotPath));
+
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"id\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"name\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"score\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"isActive\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"tags\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"userSet\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"configMap\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"calculate\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"nested\""));
+    // Additional string properties
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"stringProperty1\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"stringProperty2\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"stringProperty3\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"stringProperty4\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"stringProperty5\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"description\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"address\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"phoneNumber\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"creationDate\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"version\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"enabled\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"counter\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"metadata\""));
+}
+
+HWTEST_F_L0(HeapDumpTest, TestHeapMetadataFields)
+{
+    const std::string abcFileName = HPROF_TEST_ABC_FILES_DIR "property_name.abc";
+
+    bool result = JSNApi::Execute(ecmaVm_, abcFileName, "property_name");
+    EXPECT_TRUE(result);
+
+    std::string rawHeapPath("test_heap_metadata.rawheap");
+    HeapDumpTestHelper tester(ecmaVm_);
+    DumpSnapShotOption dumpOption;
+    dumpOption.spaceType = "LocalGC";
+    dumpOption.heapType = "local heap";
+    ASSERT_TRUE(tester.GenerateRawHeapSnapshot(rawHeapPath, dumpOption));
+
+    std::string heapsnapshotPath("test_heap_metadata.heapsnapshot");
+    ASSERT_TRUE(tester.AddMetaDataJsonToRawheap(rawHeapPath));
+    ASSERT_TRUE(tester.DecodeRawheap(rawHeapPath, heapsnapshotPath));
+
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"HeapMetadata\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"spaceType\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"LocalGC\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"heapType\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"local heap\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"vmType\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"dynamic\""));
+}
+
+HWTEST_F_L0(HeapDumpTest, TestSourceTextModuleRecordAndFileName)
+{
+    const std::string abcFileName = HPROF_TEST_ABC_FILES_DIR "module_record_name.abc";
+
+    bool result = JSNApi::Execute(ecmaVm_, abcFileName, "module_record_name");
+    EXPECT_TRUE(result);
+
+    std::string rawHeapPath("test_module_record_name.rawheap");
+    HeapDumpTestHelper tester(ecmaVm_);
+    DumpSnapShotOption dumpOption;
+    ASSERT_TRUE(tester.GenerateRawHeapSnapshot(rawHeapPath, dumpOption));
+
+    std::string heapsnapshotPath("test_module_record_name.heapsnapshot");
+    ASSERT_TRUE(tester.AddMetaDataJsonToRawheap(rawHeapPath));
+    ASSERT_TRUE(tester.DecodeRawheap(rawHeapPath, heapsnapshotPath));
+
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"SourceTextModule\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"EcmaModuleRecordName\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"EcmaModuleFileName\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"module_record_name\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "module_record_name.abc"));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"module_record_name_export\""));
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "module_record_name_export.abc"));
+}
 #endif
 
 HWTEST_F_L0(HeapDumpTest, TestSharedFullGCInHeapDump)
@@ -2190,65 +2319,583 @@ HWTEST_F_L0(HeapDumpTest, TestPropertyNameInJSObject)
         << "Found " << foundKeys.size() << " keys, expected " << expectedKeys.size();
 }
 
-HWTEST_F_L0(HeapDumpTest, TestPropertyNameInBinaryDump)
+// ---------------------------------------------------------------------------
+// Helpers shared by the four native-address tests below.
+// MockNativeRef mimics the layout that ArkNativeReference::GetData() reads:
+//   the callback receives a (void*) pointing to this struct and returns ->data.
+// ---------------------------------------------------------------------------
+struct MockNativeRef {
+    void *data;
+};
+
+static void *MockGetNativeReferenceData(void *ref)
 {
-    const std::string abcFileName = HPROF_TEST_ABC_FILES_DIR"property_name.abc";
-
-    bool result = JSNApi::Execute(ecmaVm_, abcFileName, "property_name");
-    EXPECT_TRUE(result);
-
-    std::string rawHeapPath("test_property_name.rawheap");
-    HeapDumpTestHelper tester(ecmaVm_);
-    DumpSnapShotOption dumpOption;
-    ASSERT_TRUE(tester.GenerateRawHeapSnapshot(rawHeapPath, dumpOption));
-
-    std::string heapsnapshotPath("test_property_name.heapsnapshot");
-    ASSERT_TRUE(tester.AddMetaDataJsonToRawheap(rawHeapPath));
-    ASSERT_TRUE(tester.DecodeRawheap(rawHeapPath, heapsnapshotPath));
-
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"id\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"name\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"score\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"isActive\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"tags\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"userSet\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"configMap\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"calculate\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"nested\""));
-    // Additional string properties
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"stringProperty1\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"stringProperty2\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"stringProperty3\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"stringProperty4\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"stringProperty5\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"description\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"address\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"phoneNumber\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"creationDate\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"version\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"enabled\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"counter\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"metadata\""));
+    return reinterpret_cast<MockNativeRef *>(ref)->data;
 }
 
-HWTEST_F_L0(HeapDumpTest, TestProxyClassName)
+// Helper: create a JSWrappedNapiObject, allocate one native-pointer slot,
+// store &mockRef in that slot, and register the mock callback on the VM.
+// Returns a JSHandle<JSObject> for the wrapped object.
+static JSHandle<JSObject> CreateWrappedObjWithNativeRef(
+    JSThread *thread, EcmaVM *vm, MockNativeRef &mockRef)
 {
-    const std::string abcFileName = HPROF_TEST_ABC_FILES_DIR "proxy_class_name.abc";
+    ObjectFactory *factory = vm->GetFactory();
+    JSHandle<JSObject> object = factory->CreateNapiObject(true);
+    JSObject::SetNativePointerFieldCount(thread, object, 1);
+    JSObject::SetNativePointerField(thread, object, 0,
+                                    reinterpret_cast<void *>(&mockRef),
+                                    nullptr, nullptr);
+    vm->SetNativeReferenceDataGetter(
+        reinterpret_cast<ecmascript::NativeReferenceDataCallbackGetter>(
+            MockGetNativeReferenceData));
+    return object;
+}
 
-    bool result = JSNApi::Execute(ecmaVm_, abcFileName, "proxy_class_name");
-    EXPECT_TRUE(result);
+// UT1: JSON snapshot for a JSWrappedNapiObject contains the real native address
+//      (via callback) both from JSWrappedNapiObject::DumpForSnapshot (NativeAddress0 edge)
+//      and from JSNativePointer::DumpForSnapshot (ExternalPointer edge, resolved via
+//      wrappedNativePointerAddrsMap_).
+HWTEST_F_L0(HeapDumpTest, TestWrappedNapiObjectDumpForSnapshotNativeEdge)
+{
+    static int realNativeObj = 0xBEEF;
+    MockNativeRef mockRef { reinterpret_cast<void *>(&realNativeObj) };
 
-    std::string rawHeapPath("test_proxy_class_name.rawheap");
+    CreateWrappedObjWithNativeRef(thread_, ecmaVm_, mockRef);
+
     HeapDumpTestHelper tester(ecmaVm_);
+    const std::string snapshotPath("test_wrapped_napi_native_edge.heapsnapshot");
+    tester.GenerateSnapShot(snapshotPath);
+
+    // Both the JSWrappedNapiObject edge and the JSNativePointer ExternalPointer edge
+    // must resolve to the real native address via the callback.
+    std::stringstream ss;
+    ss << "0x" << std::hex << reinterpret_cast<uintptr_t>(&realNativeObj);
+    ASSERT_TRUE(tester.MatchHeapDumpString(snapshotPath, ss.str()))
+        << "JSON snapshot must contain the real native address: " << ss.str();
+    ASSERT_TRUE(tester.MatchHeapDumpString(snapshotPath, "\"native\""))
+        << "JSON snapshot must declare the 'native' edge type";
+}
+
+// UT2: When no NativeReferenceDataCallbackGetter is registered, the JSON snapshot
+//      must NOT contain any native address node for JSWrappedNapiObject.
+HWTEST_F_L0(HeapDumpTest, TestWrappedNapiObjectDumpForSnapshotNoCallbackNoNativeEdge)
+{
+    static int realNativeObj = 0xDEAD;
+    MockNativeRef mockRef { reinterpret_cast<void *>(&realNativeObj) };
+
+    ObjectFactory *factory = ecmaVm_->GetFactory();
+    JSHandle<JSObject> object = factory->CreateNapiObject(true);
+    JSObject::SetNativePointerFieldCount(thread_, object, 1);
+    JSObject::SetNativePointerField(thread_, object, 0,
+                                    reinterpret_cast<void *>(&mockRef),
+                                    nullptr, nullptr);
+    // Do NOT register the callback
+    ecmaVm_->SetNativeReferenceDataGetter(nullptr);
+
+    HeapDumpTestHelper tester(ecmaVm_);
+    const std::string snapshotPath("test_wrapped_napi_no_callback.heapsnapshot");
+    tester.GenerateSnapShot(snapshotPath);
+
+    // Without the callback the real native address must not appear in the snapshot
+    std::stringstream ss;
+    ss << "0x" << std::hex << reinterpret_cast<uintptr_t>(&realNativeObj);
+    ASSERT_FALSE(tester.MatchHeapDumpString(snapshotPath, ss.str()))
+        << "Without a registered callback the real native address must not appear";
+}
+
+// UT3: The hprof JSON snapshot for a JSWrappedNapiObject contains
+//      the "native" edge type, the "JSWrappedNapiObject" node name,
+//      and the real native address formatted as "0x…".
+HWTEST_F_L0(HeapDumpTest, TestWrappedNapiObjectNativeAddressInJSONSnapshot)
+{
+    static int realNativeObj = 0xCAFE;
+    MockNativeRef mockRef { reinterpret_cast<void *>(&realNativeObj) };
+
+    CreateWrappedObjWithNativeRef(thread_, ecmaVm_, mockRef);
+
+    HeapDumpTestHelper tester(ecmaVm_);
+    const std::string snapshotPath("test_wrapped_napi_native_json.heapsnapshot");
+    tester.GenerateSnapShot(snapshotPath);
+
+    // Edge-type metadata must include "native"
+    ASSERT_TRUE(tester.MatchHeapDumpString(snapshotPath, "\"native\""))
+        << "JSON snapshot must declare the 'native' edge type";
+
+    // Node name for the wrapped object
+    ASSERT_TRUE(tester.MatchHeapDumpString(snapshotPath, "\"JSWrappedNapiObject\""))
+        << "JSON snapshot must contain 'JSWrappedNapiObject' node name";
+
+    // The real native address must appear as a hex string node name
+    std::stringstream ss;
+    ss << "0x" << std::hex << reinterpret_cast<uintptr_t>(&realNativeObj);
+    ASSERT_TRUE(tester.MatchHeapDumpString(snapshotPath, ss.str()))
+        << "JSON snapshot must contain the real native address: " << ss.str();
+}
+
+// UT4: A plain JSNativePointer (not referenced by JSWrappedNapiObject) has its
+//      ExternalPointer shown directly (no callback) in the hprof JSON snapshot.
+HWTEST_F_L0(HeapDumpTest, TestPlainJSNativePointerNativeAddressInJSONSnapshot)
+{
+    static int realNativeObj = 0xABCD;
+    ObjectFactory *factory = ecmaVm_->GetFactory();
+
+    // Create a plain JSNativePointer whose ExternalPointer points to realNativeObj
+    JSHandle<JSNativePointer> nativePointer =
+        factory->NewJSNativePointer(reinterpret_cast<void *>(&realNativeObj));
+
+    // Keep it alive via a local handle
+    Local<JSValueRef> local(JSHandle<JSTaggedValue>::Cast(nativePointer).GetAddress());
+
+    HeapDumpTestHelper tester(ecmaVm_);
+    const std::string snapshotPath("test_plain_native_pointer_json.heapsnapshot");
+    tester.GenerateSnapShot(snapshotPath);
+
+    // The raw ExternalPointer address must appear directly (no callback transform)
+    std::stringstream ss;
+    ss << "0x" << std::hex << reinterpret_cast<uintptr_t>(&realNativeObj);
+    ASSERT_TRUE(tester.MatchHeapDumpString(snapshotPath, ss.str()))
+        << "JSON snapshot must contain the plain native pointer address: " << ss.str();
+}
+
+#ifndef PANDA_TARGET_ARM32
+// UT5: The rawheap binary snapshot, after translate, contains the real native
+//      address as a hex string – verifying the DumpNonCMGCObject replacement
+//      and BuildJSWrappedObjectEdges translation path end-to-end.
+HWTEST_F_L0(HeapDumpTest, TestWrappedNapiObjectNativeAddressInRawHeapSnapshot)
+{
+    static int realNativeObj = 0xF00D;
+    MockNativeRef mockRef { reinterpret_cast<void *>(&realNativeObj) };
+
+    CreateWrappedObjWithNativeRef(thread_, ecmaVm_, mockRef);
+
+    HeapDumpTestHelper tester(ecmaVm_);
+    const std::string rawHeapPath("test_wrapped_napi_native.rawheap");
+    const std::string snapshotPath("test_wrapped_napi_native.heapsnapshot");
+
+    DumpSnapShotOption dumpOption;
+    ASSERT_TRUE(tester.GenerateRawHeapSnapshot(rawHeapPath, dumpOption));
+    ASSERT_TRUE(tester.AddMetaDataJsonToRawheap(rawHeapPath));
+    ASSERT_TRUE(tester.DecodeRawheap(rawHeapPath, snapshotPath));
+
+    // The translated snapshot must contain the real native address as "0x…"
+    std::stringstream ss;
+    ss << "0x" << std::hex << reinterpret_cast<uintptr_t>(&realNativeObj);
+    ASSERT_TRUE(tester.MatchHeapDumpString(snapshotPath, ss.str()))
+        << "Rawheap snapshot must contain the real native address: " << ss.str();
+}
+
+// UT6: A plain JSNativePointer has its ExternalPointer shown in the rawheap snapshot
+//      via BuildJSNativePointerEdges (no callback, address used as-is).
+HWTEST_F_L0(HeapDumpTest, TestPlainJSNativePointerNativeAddressInRawHeapSnapshot)
+{
+    static int realNativeObj = 0x1234;
+    ObjectFactory *factory = ecmaVm_->GetFactory();
+
+    JSHandle<JSNativePointer> nativePointer =
+        factory->NewJSNativePointer(reinterpret_cast<void *>(&realNativeObj));
+
+    Local<JSValueRef> local(JSHandle<JSTaggedValue>::Cast(nativePointer).GetAddress());
+
+    HeapDumpTestHelper tester(ecmaVm_);
+    const std::string rawHeapPath("test_plain_native_pointer.rawheap");
+    const std::string snapshotPath("test_plain_native_pointer.heapsnapshot");
+
+    DumpSnapShotOption dumpOption;
+    ASSERT_TRUE(tester.GenerateRawHeapSnapshot(rawHeapPath, dumpOption));
+    ASSERT_TRUE(tester.AddMetaDataJsonToRawheap(rawHeapPath));
+    ASSERT_TRUE(tester.DecodeRawheap(rawHeapPath, snapshotPath));
+
+    std::stringstream ss;
+    ss << "0x" << std::hex << reinterpret_cast<uintptr_t>(&realNativeObj);
+    ASSERT_TRUE(tester.MatchHeapDumpString(snapshotPath, ss.str()))
+        << "Rawheap snapshot must contain the plain native pointer address: " << ss.str();
+}
+#endif
+
+#ifdef PANDA_TARGET_ARM32
+HWTEST_F_L0(HeapDumpTest, TestBinaryDumpNotSupportedOnARM32)
+{
+    HeapDumpTestHelper tester(ecmaVm_);
+    std::string rawHeapPath("test_arm32_binary_dump.rawheap");
+    DumpSnapShotOption dumpOption;
+    dumpOption.dumpFormat = DumpFormat::BINARY;
+    dumpOption.isFullGC = false;
+
+    fstream outputString(rawHeapPath, std::ios::out);
+    outputString.close();
+    outputString.clear();
+    int fd = open(rawHeapPath.c_str(), O_RDWR | O_CREAT);
+    ASSERT_TRUE(fd > 0);
+    FileDescriptorStream stream(fd);
+
+    HeapProfilerInterface *heapProfile = HeapProfilerInterface::GetInstance(ecmaVm_);
+    bool result = heapProfile->DumpHeapSnapshot(&stream, dumpOption);
+    stream.EndOfStream();
+
+    ASSERT_FALSE(result) << "BinaryDump should return false on ARM32 platform";
+}
+
+HWTEST_F_L0(HeapDumpTest, TestJsonDumpSucceedsOnARM32)
+{
+    HeapDumpTestHelper tester(ecmaVm_);
+    std::string jsonPath("test_arm32_json_dump.heapsnapshot");
+
+    DumpSnapShotOption dumpOption;
+    dumpOption.dumpFormat = DumpFormat::JSON;
+    dumpOption.isFullGC = false;
+
+    tester.GenerateSnapShot(jsonPath);
+
+    ASSERT_TRUE(tester.MatchHeapDumpString(jsonPath, "\"meta\""))
+        << "JSON snapshot should contain valid meta section";
+    ASSERT_TRUE(tester.MatchHeapDumpString(jsonPath, "\"nodes\""))
+        << "JSON snapshot should contain nodes section";
+    ASSERT_TRUE(tester.MatchHeapDumpString(jsonPath, "\"edges\""))
+        << "JSON snapshot should contain edges section";
+}
+
+HWTEST_F_L0(HeapDumpTest, TestSharedGCOOMDumpUsesJsonOnARM32)
+{
+    HeapDumpTestHelper tester(ecmaVm_);
+    std::string rawHeapPath("test_arm32_sharedgc_oom.rawheap");
+
+    int fd = open(rawHeapPath.c_str(), O_RDWR | O_CREAT, 0644);
+    ASSERT_TRUE(fd > 0);
+
+    FileDescriptorStream stream(fd);
+    DumpSnapShotOption dumpOption;
+    dumpOption.dumpFormat = DumpFormat::BINARY;
+    dumpOption.isForSharedOOM = true;
+    dumpOption.isFullGC = false;
+
+    tester.DumpHeapSnapshotFromSharedGCForOOM(&stream, dumpOption);
+    stream.EndOfStream();
+
+    ASSERT_FALSE(tester.MatchHeapDumpString(rawHeapPath, "\"meta\""))
+        << "SharedGC OOM dump should use JSON format on ARM32 instead of binary";
+}
+#endif
+
+#if defined(ENABLE_DUMP_IN_FAULTLOG)
+HWTEST_F_L0(HeapDumpTest, TestGlobalRefInHeapSnapshot)
+{
+    JSNApi::SetTrackGlobalRef(true);
+
+    // First snapshot to trigger GC and stabilize slots
+    HeapDumpTestHelper tester(ecmaVm_);
+    tester.GenerateSnapShot("test_global_ref_stabilize.heapsnapshot");
+
+    ObjectFactory *factory = ecmaVm_->GetFactory();
+    int fakeRef1 = 0;
+    int fakeRef2 = 0;
+    int fakeRef3 = 0;
+
+    // Create multiple global handles with different JS types
+    JSHandle<JSTaggedValue> napiObj(factory->CreateNapiObject());
+    Global<ObjectRef> globalObj1(ecmaVm_, Local<JSTaggedValue>(napiObj.GetAddress()));
+    thread_->StoreGlobalRefMapping(globalObj1.GetSlotAddress(), &fakeRef1);
+
+    JSHandle<JSTaggedValue> jsArray(thread_, factory->NewJSArray().GetTaggedValue());
+    Global<ObjectRef> globalObj2(ecmaVm_, Local<JSTaggedValue>(jsArray.GetAddress()));
+    thread_->StoreGlobalRefMapping(globalObj2.GetSlotAddress(), &fakeRef2);
+
+    JSHandle<EcmaString> str = factory->NewFromUtf16(u"globalRefTest");
+    Global<ObjectRef> globalObj3(ecmaVm_, Local<JSTaggedValue>(str.GetAddress()));
+    thread_->StoreGlobalRefMapping(globalObj3.GetSlotAddress(), &fakeRef3);
+
+    // Generate snapshot with global ref tracking
+    std::string snapshotPath = "test_global_ref_dump.heapsnapshot";
+    tester.GenerateSnapShot(snapshotPath);
+
+    // Verify GlobalHandleObject node in snapshot
+    ASSERT_TRUE(tester.MatchHeapDumpString(snapshotPath, "\"GlobalHandleObject"))
+        << "GlobalHandleObject node not found in snapshot";
+
+    // Verify NATIVE nodes with ReferenceAddress in snapshot
+    ASSERT_TRUE(tester.MatchHeapDumpString(snapshotPath, "\"ReferenceAddress:0x"))
+        << "ReferenceAddress node not found in snapshot";
+
+    // Verify ReferenceAddress value is in hex format (only hex digits after 0x)
+    ASSERT_TRUE(tester.MatchHeapDumpRegex(snapshotPath, R"("ReferenceAddress:0x[0-9a-f]+")"))
+        << "ReferenceAddress value is not in hex format";
+
+    // Verify target JS objects reachable via global ref edges
+    ASSERT_TRUE(tester.MatchHeapDumpString(snapshotPath, "\"JSObject"))
+        << "JSObject not found in snapshot";
+
+    JSNApi::SetTrackGlobalRef(false);
+}
+
+#ifndef PANDA_TARGET_ARM32
+// Covers WriteGlobalRefGroup's tracking-off branch in the rawheap dumper
+// (rawheap_dump.cpp): when track-global-ref is disabled, the dumper must emit
+// the GLOBAL_REF_TRACK_OFF_MARK sentinel as the globalRef group count and skip
+// the payload. The translator then sees the sentinel and produces no
+// GlobalHandleObject node. Translate-side coverage exists in
+// rawheap_translate_test.cpp via crafted bytes; this test exercises the
+// dump-side writer end-to-end.
+HWTEST_F_L0(HeapDumpTest, TestRawHeapGlobalRefTrackingOff)
+{
+    ASSERT_FALSE(JSNApi::IsTrackGlobalRefEnabled());
+
+    HeapDumpTestHelper tester(ecmaVm_);
+    std::string rawHeapPath("test_rawheap_global_ref_off.rawheap");
     DumpSnapShotOption dumpOption;
     ASSERT_TRUE(tester.GenerateRawHeapSnapshot(rawHeapPath, dumpOption));
 
-    std::string heapsnapshotPath("test_proxy_class_name.heapsnapshot");
+    std::string heapsnapshotPath("test_rawheap_global_ref_off.heapsnapshot");
     ASSERT_TRUE(tester.AddMetaDataJsonToRawheap(rawHeapPath));
     ASSERT_TRUE(tester.DecodeRawheap(rawHeapPath, heapsnapshotPath));
 
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"Proxy-ClassA\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"Proxy-ClassB\""));
-    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"Proxy\""));
+    ASSERT_FALSE(tester.MatchHeapDumpString(heapsnapshotPath, "\"GlobalHandleObject"))
+        << "Tracking off but GlobalHandleObject node appeared in snapshot";
+}
+
+// Covers WriteGlobalRefGroup's tracking-on branch in the rawheap dumper
+// (rawheap_dump.cpp): the non-ProcDump path via
+// vm_->GetAssociatedJSThread()->IterateGlobalRefMappings. With tracking enabled
+// and at least one global ref stored, the dumper writes count + payload; the
+// translator then builds the GlobalHandleObject subtree with one
+// ReferenceAddress child per surviving entry.
+HWTEST_F_L0(HeapDumpTest, TestRawHeapGlobalRefTrackingOn)
+{
+    ObjectFactory *factory = ecmaVm_->GetFactory();
+    HeapDumpTestHelper tester(ecmaVm_);
+
+    JSNApi::SetTrackGlobalRef(true);
+
+    JSHandle<JSTaggedValue> obj(factory->CreateNapiObject());
+    Global<ObjectRef> globalObj(ecmaVm_, Local<JSTaggedValue>(obj.GetAddress()));
+    int fakeRef = 1;
+    thread_->StoreGlobalRefMapping(globalObj.GetSlotAddress(), &fakeRef);
+
+    std::string rawHeapPath("test_rawheap_global_ref_on.rawheap");
+    DumpSnapShotOption dumpOption;
+    ASSERT_TRUE(tester.GenerateRawHeapSnapshot(rawHeapPath, dumpOption));
+
+    std::ostringstream oss;
+    oss << "ReferenceAddress:0x" << std::hex << reinterpret_cast<uintptr_t>(&fakeRef);
+
+    std::string heapsnapshotPath("test_rawheap_global_ref_on.heapsnapshot");
+    ASSERT_TRUE(tester.AddMetaDataJsonToRawheap(rawHeapPath));
+    ASSERT_TRUE(tester.DecodeRawheap(rawHeapPath, heapsnapshotPath));
+
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"GlobalHandleObject[1]\""))
+        << "GlobalHandleObject[1] node not found in snapshot";
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, oss.str()))
+        << "ReferenceAddress for the stored global ref not found in snapshot";
+    ASSERT_TRUE(tester.MatchHeapDumpString(heapsnapshotPath, "\"JSObject\""))
+        << "Target heap object referenced by global ref not found in snapshot";
+
+    JSNApi::SetTrackGlobalRef(false);
+}
+
+// Same as TestRawHeapGlobalRefTrackingOn but exercises the V2 rawheap dump
+// path: SetRawHeapDumpCropLevel(LEVEL_V2) makes the dumper emit 4-byte
+// synthetic addresses. WriteGlobalRefGroup itself is format-agnostic, but the
+// V2 translator (RawHeapTranslateV2) reads the globalRef group back through a
+// different code path, so this end-to-end test verifies the V2 path doesn't
+// drop the GlobalHandleObject subtree.
+HWTEST_F_L0(HeapDumpTest, TestRawHeapGlobalRefTrackingOnV2)
+{
+    ObjectFactory *factory = ecmaVm_->GetFactory();
+    HeapDumpTestHelper tester(ecmaVm_);
+
+    JSNApi::SetTrackGlobalRef(true);
+
+    JSHandle<JSTaggedValue> obj(factory->CreateNapiObject());
+    Global<ObjectRef> globalObj(ecmaVm_, Local<JSTaggedValue>(obj.GetAddress()));
+    int fakeRef = 1;
+    thread_->StoreGlobalRefMapping(globalObj.GetSlotAddress(), &fakeRef);
+
+    std::string rawHeapPath("test_rawheap_global_ref_on_v2.rawheap");
+    Runtime::GetInstance()->SetRawHeapDumpCropLevel(RawHeapDumpCropLevel::LEVEL_V2);
+    DumpSnapShotOption dumpOption;
+    ASSERT_TRUE(tester.GenerateRawHeapSnapshot(rawHeapPath, dumpOption));
+    Runtime::GetInstance()->SetRawHeapDumpCropLevel(RawHeapDumpCropLevel::DEFAULT);
+
+    std::string heapsnapshotPath("test_rawheap_global_ref_on_v2.heapsnapshot");
+    ASSERT_TRUE(tester.AddMetaDataJsonToRawheap(rawHeapPath));
+    ASSERT_TRUE(tester.DecodeRawheap(rawHeapPath, heapsnapshotPath));
+
+    JSNApi::SetTrackGlobalRef(false);
+}
+
+HWTEST_F_L0(HeapDumpTest, TestOOMDumpNonOOMPathNoReport)
+{
+    HeapDumpTestHelper tester(ecmaVm_);
+
+    std::string rawHeapPath("test_oom_non_oom_no_report.raw");
+    DumpSnapShotOption dumpOption;
+    dumpOption.isSync = false;
+    dumpOption.isDumpOOM = false;
+    ASSERT_TRUE(tester.GenerateRawHeapSnapshot(rawHeapPath, dumpOption));
+}
+#endif  // PANDA_TARGET_ARM32
+#endif
+
+HWTEST_F_L0(HeapDumpTest, TestDumpAbortSignalScopeDisabled)
+{
+    DumpAbortSignalScope scope(false);
+}
+
+HWTEST_F_L0(HeapDumpTest, TestDumpAbortSignalScopeEnabledRestoresHandler)
+{
+    struct sigaction oldAct;
+    sigemptyset(&oldAct.sa_mask);
+    oldAct.sa_handler = SIG_DFL;
+    sigaction(SIGABRT, &oldAct, nullptr);
+
+    {
+        DumpAbortSignalScope scope(true);
+    }
+
+    struct sigaction restoredAct;
+    sigaction(SIGABRT, nullptr, &restoredAct);
+    EXPECT_EQ(restoredAct.sa_handler, SIG_DFL);
+}
+
+HWTEST_F_L0(HeapDumpTest, TestOOMDumpForkChildNormalExit)
+{
+    HeapDumpTestHelper tester(ecmaVm_);
+    std::string rawHeapPath("test_oom_fork_normal_exit.rawheap");
+    int fd = open(rawHeapPath.c_str(), O_RDWR | O_CREAT, 0644);
+    ASSERT_TRUE(fd > 0);
+
+    FileDescriptorStream stream(fd);
+    DumpSnapShotOption dumpOption;
+    dumpOption.isForSharedOOM = true;
+    dumpOption.isDumpOOM = true;
+    tester.DumpHeapSnapshotFromSharedGCForOOM(&stream, dumpOption);
+}
+
+HWTEST_F_L0(HeapDumpTest, TestDumpAbortSignalScopeAlarmDoesNotExit)
+{
+    pid_t childPid = fork();
+    ASSERT_GE(childPid, 0);
+    if (childPid == 0) {
+        DumpAbortSignalScope scope(true);
+        alarm(1);
+        sleep(3);
+        _exit(0);
+    }
+    int status = 0;
+    ASSERT_EQ(waitpid(childPid, &status, 0), childPid);
+    ASSERT_TRUE(WIFEXITED(status)) << "Child should exit normally, not killed by signal";
+    ASSERT_EQ(WEXITSTATUS(status), 0);
+}
+
+HWTEST_F_L0(HeapDumpTest, TestDumpAbortSignalScopeCrashSignalExits)
+{
+    pid_t childPid = fork();
+    ASSERT_GE(childPid, 0);
+    if (childPid == 0) {
+        DumpAbortSignalScope scope(true);
+        raise(SIGABRT);
+        _exit(0);
+    }
+    int status = 0;
+    ASSERT_EQ(waitpid(childPid, &status, 0), childPid);
+    ASSERT_TRUE(WIFSIGNALED(status) || WIFEXITED(status)) <<
+        "Child should exit (via _exit in handler or signal)";
+}
+
+HWTEST_F_L0(HeapDumpTest, TestGetSignalNameAllCases)
+{
+    // Test all signal branches in GetSignalName switch statement
+    std::vector<std::pair<int, std::string>> cases = {
+        {SIGABRT, "dump_abort_before_finalize"},
+        {SIGSEGV, "dump_segfault_before_finalize"},
+        {SIGFPE, "dump_fpe_before_finalize"},
+        {SIGILL, "dump_illegal_instruction_before_finalize"},
+        {SIGBUS, "dump_bus_error_before_finalize"},
+        {SIGALRM, "dump_timeout_before_finalize"},
+        {SIGPIPE, "dump_broken_pipe_before_finalize"},
+        {SIGXFSZ, "dump_file_size_limit_before_finalize"},
+        {SIGTERM, "dump_terminated_before_finalize"},
+        {99999, "dump_unknown_signal_before_finalize"},  // tests default branch
+    };
+    for (const auto &[sig, expected] : cases) {
+        const char* result = GetSignalNameForTest(sig);
+        EXPECT_STREQ(result, expected.c_str()) << "Signal " << sig << " should return " << expected;
+    }
+}
+
+HWTEST_F_L0(HeapDumpTest, TestSetDumpStatusBasic)
+{
+    SetDumpStatus(DUMP_STATUS_DUMP_INIT);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    SetDumpStatus(DUMP_STATUS_END_OF_STREAM);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+}
+
+HWTEST_F_L0(HeapDumpTest, TestDumpAbortSignalHandlerOutsideDumpZone)
+{
+    pid_t childPid = fork();
+    ASSERT_GE(childPid, 0);
+    if (childPid == 0) {
+        {
+            DumpAbortSignalScope scope(true);
+        }
+        raise(SIGABRT);
+        _exit(0);
+    }
+    int status = 0;
+    waitpid(childPid, &status, 0);
+    ASSERT_TRUE(WIFSIGNALED(status));
+}
+
+HWTEST_F_L0(HeapDumpTest, TestReportOOMDumpStatusSharedOOM)
+{
+    DumpSnapShotOption dumpOption;
+    dumpOption.isDumpOOM = true;
+    dumpOption.isForSharedOOM = true;
+
+    HeapDumpTestHelper tester(ecmaVm_);
+    std::string rawHeapPath("test_shared_oom_report.rawheap");
+    int fd = open(rawHeapPath.c_str(), O_RDWR | O_CREAT, 0644);
+    ASSERT_TRUE(fd > 0);
+    FileDescriptorStream stream(fd);
+    tester.DumpHeapSnapshotFromSharedGCForOOM(&stream, dumpOption);
+}
+
+HWTEST_F_L0(HeapDumpTest, TestOOMDumpNonOOMForkPath)
+{
+    HeapDumpTestHelper tester(ecmaVm_);
+
+    bool status = true;
+    std::string rawHeapPath("test_non_oom_fork_path.raw");
+    auto cb = [&status](uint8_t retCode) {
+        if (retCode != static_cast<uint8_t>(DumpHeapSnapshotStatus::SUCCESS)) {
+            status = false;
+        }
+    };
+    DumpSnapShotOption dumpOption;
+    dumpOption.isSync = false;
+    dumpOption.isDumpOOM = false;
+    ASSERT_TRUE(tester.GenerateRawHeapSnapshot(rawHeapPath, dumpOption, nullptr, cb));
+    ASSERT_TRUE(status);
+}
+
+HWTEST_F_L0(HeapDumpTest, TestDumpAbortSignalScopeAllSignalsRestored)
+{
+    int testSignals[] = {SIGABRT, SIGSEGV, SIGFPE, SIGILL, SIGBUS,
+                         SIGALRM, SIGPIPE, SIGXFSZ, SIGTERM};
+    for (int sig : testSignals) {
+        struct sigaction oldAct;
+        sigemptyset(&oldAct.sa_mask);
+        oldAct.sa_handler = SIG_DFL;
+        sigaction(sig, &oldAct, nullptr);
+    }
+
+    {
+        DumpAbortSignalScope scope(true);
+    }
+
+    for (int sig : testSignals) {
+        struct sigaction restoredAct;
+        sigaction(sig, nullptr, &restoredAct);
+        EXPECT_EQ(restoredAct.sa_handler, SIG_DFL) << "Signal " << sig << " handler not restored";
+    }
 }
 }

@@ -1,0 +1,1 @@
+nested-compiled-catch: outer-inline:true true

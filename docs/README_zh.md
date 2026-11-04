@@ -62,7 +62,10 @@
    ./build.sh --product-name rk3568 --build-target ets_frontend_build
    ```
 
-   更多编译命令请参考 [编译命令](https://gitee.com/openharmony/docs/blob/master/zh-cn/device-dev/subsystems/subsys-arkcompiler-guide.md)
+    更多编译命令请参考 [编译命令](https://gitee.com/openharmony/docs/blob/master/zh-cn/device-dev/subsystems/subsys-arkcompiler-guide.md)
+
+    dfx 版运行时（libark_jsruntime_dfx.so）的裁剪说明与单独验证方法，请参考
+    [dfx 运行时裁剪与验证指南](dfx-so-trim-guide_zh.md)。
 
 **说明**：上述编译命令为release版本，编译debug版本需增加编译选项：--gn-args is_debug=true。
 
@@ -629,6 +632,11 @@ ark_disasm [选项] 输入文件 输出文件
 <tr id="row194197407327"><td class="cellrowborder" valign="top" width="50%" headers="mcps1.1.3.1.1 "><p id="p154205401325"><a name="p154205401325"></a><a name="p154205401325"></a>--verbose</p>
 </td>
 <td class="cellrowborder" valign="top" width="50%" headers="mcps1.1.3.1.2 "><p id="p369871173312"><a name="p369871173312"></a><a name="p369871173312"></a>输出更多关于类和方法在文件中的信息。默认值是false</p>
+</td>
+</tr>
+<tr id="row194197407327"><td class="cellrowborder" valign="top" width="50%" headers="mcps1.1.3.1.1 "><p id="p154205401326"><a name="p154205401326"></a><a name="p154205401326"></a>--version</p>
+</td>
+<td class="cellrowborder" valign="top" width="50%" headers="mcps1.1.3.1.2 "><p id="p369871173313"><a name="p369871173313"></a><a name="p369871173313"></a>打印版本信息，包括当前和所支持的最低的文件格式版本</p>
 </td>
 </tr>
 </tbody>

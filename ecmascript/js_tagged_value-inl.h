@@ -13,8 +13,8 @@
  * limitations under the License.
  */
 
-#ifndef ECMASCRIPT_TAGGED_VALUE_INL_H
-#define ECMASCRIPT_TAGGED_VALUE_INL_H
+#ifndef ECMASCRIPT_JS_TAGGED_VALUE_INL_H
+#define ECMASCRIPT_JS_TAGGED_VALUE_INL_H
 
 #include "ecmascript/js_tagged_value.h"
 
@@ -320,6 +320,11 @@ inline bool JSTaggedValue::IsAOTLiteralInfo() const
 inline bool JSTaggedValue::IsExtraProfileTypeInfo() const
 {
     return IsHeapObject() && GetTaggedObject()->GetClass()->IsExtraProfileTypeInfo();
+}
+
+inline bool JSTaggedValue::IsProfileTypeInfo() const
+{
+    return IsHeapObject() && GetTaggedObject()->GetClass()->IsProfileTypeInfo();
 }
 
 inline bool JSTaggedValue::IsProfileTypeInfoCell() const
@@ -1497,4 +1502,4 @@ inline bool JSTaggedValue::IsSendable() const
          IsUndefined() || IsNull() || IsBigInt();
 }
 }  // namespace panda::ecmascript
-#endif  // ECMASCRIPT_TAGGED_VALUE_INL_H
+#endif  // ECMASCRIPT_JS_TAGGED_VALUE_INL_H

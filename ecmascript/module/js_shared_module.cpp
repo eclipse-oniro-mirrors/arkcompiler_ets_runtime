@@ -12,8 +12,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include "ecmascript/debugger/js_debugger_manager.h"
 #include "ecmascript/global_env.h"
+#include "ecmascript/mem/heap.h"
+#include "ecmascript/module/js_module_manager.h"
 #include "ecmascript/module/js_shared_module.h"
 #include "ecmascript/module/module_data_extractor.h"
 #include "ecmascript/shared_objects/js_shared_array.h"
@@ -32,6 +33,13 @@ JSHandle<JSTaggedValue> SendableClassModule::GenerateSendableFuncModule(JSThread
     if (SourceTextModule::IsModuleInSharedHeap(currentModule)) {
         return module;
     }
+    CString recordName = currentModule->GetEcmaModuleRecordNameString();
+    ModuleManager *moduleManager = thread->GetModuleManager();
+    // try find cache in sendableModule
+    JSHandle<JSTaggedValue> cachedSendableModule = moduleManager->TryGetSendableModule(recordName);
+    if (cachedSendableModule->IsSourceTextModule()) {
+        return cachedSendableModule;
+    }
     ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
     JSHandle<SourceTextModule> sModule = factory->NewSSourceTextModule();
     JSHandle<JSTaggedValue> currentEnvironment(thread, currentModule->GetEnvironment(thread));
@@ -39,14 +47,12 @@ JSHandle<JSTaggedValue> SendableClassModule::GenerateSendableFuncModule(JSThread
                                                                                             currentEnvironment);
     sModule->SetSharedType(SharedTypes::SENDABLE_FUNCTION_MODULE);
     sModule->SetEnvironment(thread, sendableEnvironment);
-    sModule->SetEcmaModuleFilenameString(currentModule->GetEcmaModuleFilenameString());
-    sModule->SetEcmaModuleRecordNameString(currentModule->GetEcmaModuleRecordNameString());
+    sModule->SetEcmaSharedModuleFilenameString(currentModule->GetEcmaModuleFilenameString());
+    sModule->SetEcmaModuleRecordNameString(recordName);
     sModule->SetSendableEnv(thread, JSTaggedValue::Undefined());
-    if (thread->GetEcmaVM()->GetJsDebuggerManager()->IsDebugApp()) {
-        sModule->SetImportEntries(thread, currentModule->GetImportEntries(thread));
-        sModule->SetLocalExportEntries(thread, currentModule->GetLocalExportEntries(thread));
-        sModule->SetIndirectExportEntries(thread, currentModule->GetIndirectExportEntries(thread));
-    }
+    moduleManager->AddSendableModuleToCache(recordName, sModule.GetTaggedValue());
+    // Weak registration for post-GC native field release.
+    SharedHeap::GetInstance()->PushToSendableModuleList(sModule.GetTaggedValue());
     return JSHandle<JSTaggedValue>(sModule);
 }
 
@@ -61,10 +67,9 @@ JSHandle<JSTaggedValue> SendableClassModule::CloneRecordIndexBinding(JSThread *t
     }
 
     CString moduleName = SourceTextModule::GetModuleName(resolvedModule.GetTaggedValue());
-    JSHandle<EcmaString> record = thread->GetEcmaVM()->GetFactory()->NewFromUtf8(moduleName);
-    JSHandle<EcmaString> fileName = factory->NewFromUtf8(resolvedModule->GetEcmaModuleFilenameString());
     int32_t index = binding->GetIndex();
-    return JSHandle<JSTaggedValue>::Cast(factory->NewSResolvedRecordIndexBindingRecord(record, fileName, index));
+    return JSHandle<JSTaggedValue>::Cast(factory->NewSResolvedRecordIndexBindingRecord(moduleName,
+        resolvedModule->GetEcmaModuleFilenameString(), index));
 }
 
 JSHandle<JSTaggedValue> SendableClassModule::CloneRecordNameBinding(JSThread *thread, JSTaggedValue binding)
@@ -79,9 +84,8 @@ JSHandle<JSTaggedValue> SendableClassModule::CloneRecordNameBinding(JSThread *th
     }
 
     CString moduleName = SourceTextModule::GetModuleName(resolvedModule.GetTaggedValue());
-    JSHandle<EcmaString> record = thread->GetEcmaVM()->GetFactory()->NewFromUtf8(moduleName);
     JSHandle<JSTaggedValue> bindingName(thread, resolvedBinding->GetBindingName(thread));
-    return JSHandle<JSTaggedValue>::Cast(factory->NewSResolvedRecordBindingRecord(record, bindingName));
+    return JSHandle<JSTaggedValue>::Cast(factory->NewSResolvedRecordBindingRecord(moduleName, bindingName));
 }
 
 JSHandle<TaggedArray> SendableClassModule::CloneModuleEnvironment(JSThread *thread,
@@ -146,7 +150,7 @@ JSHandle<JSTaggedValue> SharedModuleHelper::ParseSharedModule(JSThread *thread, 
 
     bool hasTLA = jsPandaFile->GetHasTopLevelAwait(descriptor);
     moduleRecord->SetHasTLA(hasTLA);
-    moduleRecord->SetEcmaModuleFilenameString(moduleFilename);
+    moduleRecord->SetEcmaSharedModuleFilenameString(moduleFilename);
     moduleRecord->SetStatus(ModuleStatus::UNINSTANTIATED);
     moduleRecord->SetTypes(ModuleTypes::ECMA_MODULE);
     moduleRecord->SetIsNewBcVersion(true);

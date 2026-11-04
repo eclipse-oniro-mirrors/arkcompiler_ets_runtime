@@ -1412,8 +1412,8 @@ void BytecodeCircuitBuilder::PrintBytecodeInfo(BytecodeRegion& bb)
         if (bytecodeInfo.AccOut()) {
             log += "acc,";
         }
-        for (const auto &out: bytecodeInfo.vregOut) {
-            log += std::to_string(out) + ",";
+        if (bytecodeInfo.vregOut != BytecodeInfo::NO_VREG) {
+            log += std::to_string(bytecodeInfo.vregOut) + ",";
         }
         log += "] >";
         LOG_COMPILER(INFO) << log;

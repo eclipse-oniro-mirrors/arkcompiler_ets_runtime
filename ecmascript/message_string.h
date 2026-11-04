@@ -19,7 +19,11 @@
 #include <string>
 #include "common_components/base/c_string.h"
 #include "ecmascript/compiler/common_stub_csigns.h"
-#include "ecmascript/compiler/interpreter_stub.h"
+#include "ecmascript/compiler/bc_call_signature.h"
+#include "ecmascript/compiler/builtins/builtins_call_signature.h"
+#include "ecmascript/compiler/builtins/builtins_call_signature_list.h"
+#include "ecmascript/compiler/baseline/baseline_stub_csigns.h"
+#include "ecmascript/compiler/rt_call_signature.h"
 
 namespace panda::ecmascript {
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
@@ -43,6 +47,10 @@ namespace panda::ecmascript {
     V(INT32_VALUE, "value: %ld")                                                                               \
     V(TargetTypeNotObject, "Type of target is not Object")                                                     \
     V(TargetTypeNotTypedArray, "The O is not a TypedArray.")                                                   \
+    V(ConcurrentApiScopeError, "Concurrent modification exception")                                            \
+    V(OnlyAcceptSendableValue1, "Parameter error.Only accept sendable value.")                                 \
+    V(OnlyAcceptSendableValue2, "Parameter error. Only accept sendable value.")                                \
+    V(PredicateNotCallable, "the predicate is not callable.")                                                  \
     V(CanNotGetNotEcmaObject, "Can not get Prototype on non ECMA Object")                                      \
     V(SendableArrayForJson, "Array not supported for SENDABLE_JSON")                                           \
     V(InstanceOfErrorTargetNotCallable, "InstanceOf error when target is not Callable")                        \
@@ -61,6 +69,8 @@ namespace panda::ecmascript {
     V(InvalidStringLength, "Invalid string length")                                                            \
     V(InvalidNewTarget, "new.target is not an object")                                                         \
     V(ObjIsNotCallable, "obj is not Callable")                                                                 \
+    V(CallbackfunNotCallable, "the callbackfun is not callable.")                                               \
+    V(CallbackNotCallable, "callback is not callable")                                                         \
     V(SharedObjectRefersLocalObject, "shared object refers a local object")                                    \
     V(InvalidRadixLength, "radix must be 2 to 36")                                                             \
     V(SetPrototypeOfFailed, "SetPrototypeOf: prototype set failed")                                            \
@@ -96,7 +106,14 @@ namespace panda::ecmascript {
     V(LexicalEnvIsInvalid, "LexicalEnv of native JSFunction is invalid, it should be GlobalEnv or Undefined")  \
     V(CurrentEnvIsInvalid, "CurrentEnv is invalid, it should be GlobalEnv, LexicalEnv or SFunctionEnv")        \
     V(AccessCompositeClassField, "this field of CompositeClass is unavailable")                                \
-    V(HClassAddressIsInvalid, "HClass address is invalid")
+    V(HClassAddressIsInvalid, "HClass address is invalid")                                                     \
+    V(ArrayCopyConstantPool, "constant pool do not support array copy, line:%d")                               \
+    V(UseConstPoolInTaggedArrayGet, "const pool do not use tagged array get, line:%d")                         \
+    V(StoreValueToConstPool, "const pool do not support store value in asm, line:%d")                          \
+    V(GetObjectFromConstPoolCacheOutOfBounds, "index of cache element in const pool out of bounds, line:%d")   \
+    V(ConvertNonTemporaryHeapObjectAsHeapObject, "convert a non object temporay tagged as object, line:%d")    \
+    V(ThisBranchOnlySupportInCompressedPointer, "ThisBranchOnlySupportInCompressedPointer")                    \
+    V(OutOfRange, "out of range.")
 
 #define DEBUG_CHECK_MESSAGE_STRING_LIST(V)                                                   \
     V(IsCallable)                                                                            \
@@ -123,13 +140,17 @@ public:
         COMMON_MESSAGE_STRING_LIST(DEF_MESSAGE_ID)
 #undef DEF_MESSAGE_ID
 #define DEF_MESSAGE_ID(name) Message_##name,
-        ASM_INTERPRETER_BC_STUB_LIST(DEF_MESSAGE_ID, DEF_MESSAGE_ID, DEF_MESSAGE_ID)
+        ASM_INTERPRETER_BC_STUB_LIST(DEF_MESSAGE_ID, DEF_MESSAGE_ID)
         ASM_INTERPRETER_SECOND_BC_STUB_ID_LIST(DEF_MESSAGE_ID)
         ASM_INTERPRETER_BC_HELPER_STUB_LIST(DEF_MESSAGE_ID)
+#if ECMASCRIPT_ENABLE_INTERPRETER_PGO_STUBS
 #define DEF_MESSAGE_ID_DYN(name, ...) DEF_MESSAGE_ID(name)
         ASM_INTERPRETER_BC_PROFILER_STUB_LIST(DEF_MESSAGE_ID_DYN)
+    #if ECMASCRIPT_ENABLE_INTERPRETER_JIT_STUBS
         ASM_INTERPRETER_BC_JIT_PROFILER_STUB_LIST(DEF_MESSAGE_ID_DYN)
+    #endif
 #undef DEF_MESSAGE_ID_DYN
+#endif
 #define DEF_STW_COPY_MESSAGE_ID(name) Message_##name##StwCopy,
         ASM_INTERPRETER_BC_STW_COPY_STUB_LIST(DEF_STW_COPY_MESSAGE_ID)
         COMMON_STUB_LIST(DEF_MESSAGE_ID)

@@ -315,6 +315,8 @@ namespace panda::ecmascript {
     V(SharedArray, Unshift)                   \
     V(SharedArray, Values)                    \
     V(SharedArray, Includes)                  \
+    V(SharedArray, ContainsAll)               \
+    V(SharedArray, RetainAll)                 \
     V(SharedArray, Flat)                      \
     V(SharedArray, FlatMap)                   \
     V(SharedArray, At)                        \
@@ -536,11 +538,15 @@ namespace panda::ecmascript {
     V(SharedMap, Constructor)               \
     V(SharedMap, Species)                   \
     V(SharedMap, Clear)                     \
+    V(SharedMap, ContainsValue)             \
     V(SharedMap, Delete)                    \
     V(SharedMap, Entries)                   \
     V(SharedMap, Get)                       \
     V(SharedMap, Has)                       \
     V(SharedMap, Keys)                      \
+    V(SharedMap, Put)                       \
+    V(SharedMap, PutAll)                    \
+    V(SharedMap, Remove)                    \
     V(SharedMap, Set)                       \
     V(SharedMap, GetSize)                   \
     V(SharedMap, Values)                    \
@@ -1381,7 +1387,6 @@ enum EcmaRuntimeCallerId {
 
 #if ECMASCRIPT_ENABLE_ALLOCATE_AND_GC_RUNTIME_STAT
 #define MEM_ALLOCATE_AND_GC_TRACE(vm, name)                                                     \
-    CHECK_JS_THREAD(vm);                                                                        \
     EcmaRuntimeStat *_run_stat_ = vm->GetRuntimeStat();                                         \
     RuntimeTimerScope mem_##name##_scope_(MEM_ALLOCATE_AND_GC_ID(name) _run_stat_)
 #else

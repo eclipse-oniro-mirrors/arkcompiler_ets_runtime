@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Huawei Device Co., Ltd.
+ * Copyright (c) 2024-2026 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -21,6 +21,7 @@ let arr = ["a",2,3,4];
 //aot: [trace] aot call builtin: Array.prototype.push, caller function name:func_main_0@builtinArrayPush
 print(arr.push()) //: 4
 
+//aot: [trace] aot inline function name: #*#testArrayPushagrs1@builtinArrayPush caller function name: func_main_0@builtinArrayPush
 function testArrayPushagrs1() {
     print("testArrayPushagrs1") //: testArrayPushagrs1
     //aot: [trace] aot inline builtin: Array.prototype.push, caller function name:#*#testArrayPushagrs1@builtinArrayPush
@@ -103,7 +104,7 @@ function testArrayPushException(){
       arr.push(1);
     } catch (e) {
       error = e;
-      print("exception happend") //: exception happend
+      print("exception happened") //: exception happened
     }
   }
 testArrayPushException()
@@ -118,7 +119,7 @@ function testArrayPushMaxLength(){
       //aot: [trace] Check Type: NotStableArray2
       arr.push(1);
     } catch (e) {
-      print("exception happend") //: exception happend
+      print("exception happened") //: exception happened
     }
   }
  testArrayPushMaxLength()

@@ -96,6 +96,7 @@ void ConcurrentMarker::Mark()
         ("ConcurrentMarker::Mark" + std::to_string(heap_->IsFullMarkRequested())
         + ";MarkReason" + std::to_string(static_cast<int>(gcStats->GetMarkReason()))
         + ";Sensitive" + std::to_string(static_cast<int>(heap_->GetSensitiveStatus()))
+        + ";Cms" + std::to_string(static_cast<int>(heap_->GetCmsGC()))
         + ";IsInBackground" + std::to_string(Runtime::GetInstance()->IsInBackground())
         + ";Startup" + std::to_string(static_cast<int>(heap_->GetStartupStatus()))
         + ";ConMark" + std::to_string(static_cast<int>(heap_->GetJSThread()->GetMarkStatus()))
@@ -120,6 +121,9 @@ void ConcurrentMarker::Mark()
 void ConcurrentMarker::Finish()
 {
     workManager_->Finish();
+    heap_->SetCmsGC(false);
+    heap_->SetDisableCmsGC(false);
+    heap_->SetEvacuateNonMovableSpace(false);
 }
 
 void ConcurrentMarker::ReMark()
@@ -133,6 +137,13 @@ void ConcurrentMarker::ReMark()
     heap_->WaitRunningMarkTaskFinished();
     // MarkJitCodeMap must be call after other mark work finish to make sure which jserror object js alive.
     marker->MarkJitCodeMap(MAIN_THREAD_INDEX);
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    if (!heap_->GetEmbeddedCodeRefSet()->IsEmpty()) {
+        marker->MarkEmbeddedCodeRefs(MAIN_THREAD_INDEX);
+        marker->ProcessMarkStack(MAIN_THREAD_INDEX);
+        heap_->WaitRunningMarkTaskFinished();
+    }
+#endif
 }
 
 void ConcurrentMarker::HandleMarkingFinished(GCReason gcReason)  // js-thread wait for sweep
@@ -156,6 +167,7 @@ void ConcurrentMarker::WaitMarkingFinished()  // call in EcmaVm thread, wait for
 void ConcurrentMarker::Reset(bool revertCSet)
 {
     ASSERT(runningTaskCount_ == 0);
+    const bool discardCCMark = revertCSet && heap_->IsCCMark();
     Finish();
     thread_->SetMarkStatus(MarkStatus::READY_TO_MARK);
     isConcurrentMarking_ = false;
@@ -166,6 +178,7 @@ void ConcurrentMarker::Reset(bool revertCSet)
         // fixme: refactor?
         if constexpr (!G_USE_CMS_GC) {
             heap_->GetOldSpace()->RevertCSet();
+            heap_->GetNonMovableSpace()->RevertCSet();
         }
         auto callback = [](Region *region) {
             region->ResetRegionTypeFlag();
@@ -184,12 +197,29 @@ void ConcurrentMarker::Reset(bool revertCSet)
             }
         }
     }
+    if (discardCCMark) {
+        thread_->ReleaseReadBarrier(ReadBarrierOwner::LOCAL_CC);
+        thread_->TryRestoreNormalStubs();
+        heap_->SetMarkType(MarkType::MARK_YOUNG);
+    }
 }
 
 void ConcurrentMarker::InitializeMarking()
 {
     MEM_ALLOCATE_AND_GC_TRACE(vm_, ConcurrentMarkingInitialize);
     heap_->Prepare();
+#if ENABLE_MEMORY_OPTIMIZATION
+    if (!heap_->IsCCMark()) {
+        bool useCms = heap_->GetEcmaParamConfiguration().GetMaxHeapSize() >= DEFAULT_HEAP_SIZE
+            && heap_->InSensitiveStatus()
+            && !heap_->GetDisableCmsGC();
+        heap_->SetCmsGC(useCms);
+        if (heap_->IsFullMark()) {
+            bool evacuateNonMovableSpace = !useCms && Runtime::GetInstance()->IsEnableEvacuateNonMovableSpace();
+            heap_->SetEvacuateNonMovableSpace(evacuateNonMovableSpace);
+        }
+    }
+#endif
     ASSERT(VerifyAllRegionsNonFresh());
     // fixme: refactor?
     if constexpr (!G_USE_CMS_GC) {
@@ -201,6 +231,14 @@ void ConcurrentMarker::InitializeMarking()
     if (heap_->IsYoungMark()) {
         if constexpr (G_USE_CMS_GC) {
             heapObjectSize_ = heap_->GetHeapObjectSize();
+            if constexpr (G_USE_STICKY_CMS_GC) {
+                NonMovableMarker *marker = static_cast<NonMovableMarker*>(heap_->GetNonMovableMarker());
+                {
+                    ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "GC::MarkOldToNew", "");
+                    marker->ProcessOldToNewNoMarkStackForSticky(MAIN_THREAD_INDEX);
+                }
+                marker->ProcessSnapshotRSetNoMarkStackForSticky(MAIN_THREAD_INDEX);
+            }
         } else {
             heapObjectSize_ = heap_->GetNewSpace()->GetHeapObjectSize();
             NonMovableMarker *marker = static_cast<NonMovableMarker*>(heap_->GetNonMovableMarker());
@@ -219,6 +257,11 @@ void ConcurrentMarker::InitializeMarking()
         });
         if (heap_->IsConcurrentFullMark() && !G_USE_CMS_GC) {
             heap_->GetOldSpace()->SelectCSet();
+            if (heap_->GetEvacuateNonMovableSpace()) {
+                heap_->GetNonMovableSpace()->SelectCSet();
+            }
+        } else if constexpr (G_USE_STICKY_CMS_GC) {
+            heap_->ClearGCBitSetForCMS();
         }
         heap_->EnumerateNonNewSpaceRegions([](Region *current) {
             // fixme: refactor?

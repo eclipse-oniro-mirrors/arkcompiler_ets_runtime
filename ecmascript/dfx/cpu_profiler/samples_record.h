@@ -1,5 +1,5 @@
-/*
- * Copyright (c) 2021-2023 Huawei Device Co., Ltd.
+/**
+ * Copyright (c) 2021-2026 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -27,6 +27,7 @@
 #include "ecmascript/jspandafile/method_literal.h"
 #include "ecmascript/mem/c_containers.h"
 #include "ecmascript/platform/mutex.h"
+#include "arkplatform/hybrid/hybrid_frame_info.h"
 
 namespace panda::ecmascript {
 const int MAX_STACK_SIZE = 128; // 128:the maximum size of the js stack
@@ -98,7 +99,7 @@ public:
                    int frameInfoTempsLength, int frameStackLength);
     void PostNapiFrame(CVector<FrameInfoTemp> &napiFrameInfoTemps,
                        CVector<MethodKey> &napiFrameStack);
-    FrameStackAndInfo *PopFrame();
+    bool PopFrame(FrameStackAndInfo &out);
     bool IsEmpty();
     bool IsFull();
     int GetSize();
@@ -119,13 +120,13 @@ public:
     virtual ~SamplesRecord();
 
     void NodeInit();
-    void AddSample(FrameStackAndInfo *frame);
+    void AddSample(const FrameStackAndInfo &frame);
     void AddEmptyStackSample(uint64_t sampleTimeStamp);
     void StringifySampleData();
     int GetMethodNodeCount() const;
     int GetframeStackLength() const;
     std::string GetSampleData() const;
-    std::string GetModuleName(char *recordName);
+    std::string GetModuleName(const char *recordName);
     void SetThreadStartTime(uint64_t threadStartTime);
     uint64_t GetThreadStartTime();
     void SetThreadStopTime();
@@ -138,10 +139,17 @@ public:
     void SetGcState(bool gcState);
     bool GetRuntimeState() const;
     void SetRuntimeState(bool runtimeState);
+    // Indexed form: sem_[0] is the legacy per-sample ACK, sem_[1] the
+    // processor-exit handshake shared by both sampling modes, sem_[2] reserved.
     int SemInit(int index, int pshared, int value);
     int SemPost(int index);
     int SemWait(int index);
     int SemDestroy(int index);
+    // Index-free form used by the lock-free mode; the handshake is sem_[1].
+    int SemInit(int pshared, int value);
+    int SemPost();
+    int SemWait();
+    int SemDestroy();
     const CMap<struct MethodKey, struct FrameInfo> &GetStackInfo() const;
     void InsertStackInfo(struct MethodKey &methodKey, struct FrameInfo &codeEntry);
     bool PushFrameStack(struct MethodKey &methodKey);
@@ -154,6 +162,7 @@ public:
     void ClearNapiStack();
     void PostFrame();
     void PostNapiFrame();
+    void PostHybridStackFrame(const arkplatform::HybridFrameInfo &frameInfo);
     void ResetFrameLength();
     uint64_t GetCallTimeStamp();
     void SetCallTimeStamp(uint64_t timeStamp);
@@ -163,11 +172,6 @@ public:
     void SetEnableVMTag(bool flag)
     {
         enableVMTag_ = flag;
-    }
-
-    void SetSourceMapTranslateCallback(SourceMapTranslateCallback cb)
-    {
-        sourceMapTranslateCallback_ = cb;
     }
 
     void SetTimeDeltaThreshold(uint32_t timeDeltaThreshold)
@@ -183,8 +187,12 @@ private:
     void StringifyNodes();
     void StringifySamples();
     struct FrameInfo GetMethodInfo(struct MethodKey &methodKey);
-    std::string AddRunningState(char *functionName, RunningState state, kungfu::DeoptType type);
-    void FrameInfoTempToMap(FrameInfoTemp *frameInfoTemps, int frameInfoTempLength);
+    std::string AddRunningState(const char *functionName, RunningState state, kungfu::DeoptType type);
+    // Sentinel returned when the profile tree hit MAX_NODE_COUNT; the caller
+    // aborts the sample being folded in.
+    static constexpr int NODE_ID_OVERFLOW = -1;
+    int ResolveProfileNodeId(struct NodeKey &nodeKey);
+    void FrameInfoTempToMap(const FrameInfoTemp *frameInfoTemps, int frameInfoTempLength);
     void NapiFrameInfoTempToMap();
     void StatisticStateTime(int timeDelta, RunningState state);
     void TranslateUrlPositionBySourceMap(struct FrameInfo &codeEntry);
@@ -200,7 +208,7 @@ private:
     CMap<struct NodeKey, int> nodeMap_;
     std::string sampleData_ = "";
     std::string fileName_ = "";
-    sem_t sem_[3]; // 3 : sem_ size is three.
+    sem_t sem_[3]; // 3: [0] legacy per-sample ACK, [1] processor-exit handshake, [2] reserved
     CMap<struct MethodKey, struct FrameInfo> stackInfoMap_;
     struct MethodKey frameStack_[MAX_STACK_SIZE] = {};
     int frameStackLength_ = 0;
@@ -213,7 +221,6 @@ private:
     bool enableVMTag_ {false};
     uint64_t callTimeStamp_ = 0;
     uint32_t timeDeltaThreshold_ = 0;
-    SourceMapTranslateCallback sourceMapTranslateCallback_ {nullptr};
     int traceEventNodePos_ = 0;
     uint32_t traceEventSamplePos_ = 0;
 

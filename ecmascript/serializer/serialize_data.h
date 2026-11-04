@@ -20,7 +20,7 @@
 
 #include "common_components/heap/heap.h"
 #include "common_components/serialize/serialize_utils.h"
-#include "ecmascript/js_tagged_value-inl.h"
+#include "ecmascript/js_tagged_value_wrapper-inl.h"
 #include "ecmascript/mem/dyn_chunk.h"
 #include "ecmascript/runtime.h"
 #include "ecmascript/shared_mm/shared_mm.h"
@@ -60,6 +60,7 @@ enum class EncodeFlag : uint8_t {
     NEW_OBJECT = 0x00,
     REFERENCE = 0x10,
     WEAK,
+    COMPRESSED_POINTER,
     PRIMITIVE,
     MULTI_RAW_DATA,
     ROOT_OBJECT,
@@ -77,6 +78,7 @@ enum class EncodeFlag : uint8_t {
     MODULE_FILE_NAME,
     MODULE_RECORD_NAME,
     MODULE_LAZY_ARRAY,
+    SEQUENCE_COMPRESSED_HOLE,
     LAST
 };
 
@@ -97,11 +99,6 @@ enum class SerializedObjectSpace : uint8_t {
     SHARED_HUGE_SPACE,
 };
 using common::SerializedBaseObjectSpace;
-
-enum class SerializeType : uint8_t {
-    VALUE_SERIALIZE,
-    PGO_SERIALIZE
-};
 
 enum class SerializeErrorInfo : uint8_t {
     ONLY_MSG = 1,
@@ -519,7 +516,26 @@ public:
         buffer_ = buffer;
     }
 
+    // Flat buffer pack/unpack: self-contained uint8_t* buffer for cross-process
+    // deep-copy scenarios (e.g. persist to disk and deserialize in another process).
+    // Pack serializes all SerializeData fields needed for deserialization into a
+    // contiguous buffer (caller owns and must free the returned pointer).
+    // Unpack reconstructs a fresh SerializeData from such a flat buffer.
+    static uint8_t* Pack(std::unique_ptr<SerializeData> &data, size_t &outSize);
+    static std::unique_ptr<SerializeData> Unpack(JSThread *thread, const uint8_t *buffer);
+
 private:
+    static size_t CalculateFlatBufferSize(const SerializeData *data);
+    static bool WriteFlatHeader(uint8_t *&ptr, uint8_t *buffer, size_t totalSize, const SerializeData *data);
+    static bool WriteFlatSizeGroup(uint8_t *&ptr, uint8_t *buffer, size_t totalSize, const SerializeData *data);
+    static bool WriteFlatRegionSizes(uint8_t *&ptr, uint8_t *buffer, size_t totalSize, const SerializeData *data);
+    static bool WriteFlatBufferData(uint8_t *&ptr, uint8_t *buffer, size_t totalSize, const SerializeData *data);
+
+    bool ReadFlatHeader(const uint8_t *&ptr, const uint8_t *base);
+    bool ReadFlatSizeGroup(const uint8_t *&ptr);
+    bool ReadFlatRegionSizes(const uint8_t *&ptr);
+    bool ReadFlatBufferData(const uint8_t *&ptr);
+
     static constexpr size_t U8_SIZE = 1;
     static constexpr size_t U16_SIZE = 2;
     static constexpr size_t U32_SIZE = 4;
@@ -545,7 +561,7 @@ private:
     std::array<std::vector<size_t>, SERIALIZE_SPACE_NUM> regionRemainSizeVectors_ {};
     std::set<uintptr_t> sharedArrayBufferSet_ {};
     std::set<NativeBindingDetachInfo *> nativeBindingDetachInfos_ {};
-    friend class ModuleSnapshot;
+    friend class ModulesSnapshotHelper;
 };
 }
 

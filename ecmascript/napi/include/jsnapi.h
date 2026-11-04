@@ -83,8 +83,6 @@ using EcmaVM = ecmascript::EcmaVM;
 using JSThread = ecmascript::JSThread;
 using JSTaggedType = uint64_t;
 using ConcurrentCallback = void (*)(Local<JSValueRef> result, bool success, void *taskInfo, void *data);
-using SourceMapTranslateCallback = std::function<bool(std::string& url, int& line, int& column,
-    std::string &packageName)>;
 using DeviceDisconnectCallback = std::function<bool()>;
 
 static constexpr size_t DEFAULT_GC_THREAD_NUM = 7;
@@ -222,9 +220,10 @@ public:
         enableBuiltinsLazy_ = value;
     }
 
+    // Kept for source compatibility. Opcode-range disabling is no longer supported.
     void SetAsmOpcodeDisableRange(const std::string &value)
     {
-        asmOpcodeDisableRange_ = value;
+        (void)value;
     }
 
     void SetIsWorker()
@@ -245,6 +244,16 @@ public:
     bool GetIsRestrictedWorker() const
     {
         return isRestrictedWorker_;
+    }
+
+    void SetIsFormThread(bool isFormThread)
+    {
+        isFormThread_ = isFormThread;
+    }
+
+    bool GetIsFormThread() const
+    {
+        return isFormThread_;
     }
 
     void SetBundleName(const std::string &value)
@@ -318,6 +327,15 @@ public:
         return enableWarmStartupSmartGC_;
     }
 
+    void SetStubFile(const std::string &stubFile)
+    {
+        stubFile_ = stubFile;
+    }
+
+    std::string GetStubFile() const
+    {
+        return stubFile_;
+    }
 private:
     std::string GetGcType() const
     {
@@ -403,11 +421,6 @@ private:
         return enableBuiltinsLazy_;
     }
 
-    std::string GetAsmOpcodeDisableRange() const
-    {
-        return asmOpcodeDisableRange_;
-    }
-
     std::string GetBundleName() const
     {
         return bundleName_;
@@ -469,7 +482,8 @@ private:
     bool enableBuiltinsLazy_ {true};
     bool isWorker_ {false};
     bool isRestrictedWorker_ {false};
-    std::string asmOpcodeDisableRange_ {""};
+    bool isFormThread_ {false};
+
     std::string bundleName_ {};
     bool enableAOT_ {false};
     std::string anDir_ {};
@@ -483,6 +497,7 @@ private:
     bool enableWarmStartupSmartGC_ {false};
     std::string arkTSMode_ {""};
     friend JSNApi;
+    std::string stubFile_ {""};
 };
 }  // namespace panda
 

@@ -164,6 +164,7 @@ std::string FrameHandler::GetFileName() const
 
 uint32_t FrameHandler::GetAbcId() const
 {
+#ifndef EXCLUDE_PGO
     std::string abcName = GetFileName();
     pgo::PGOProfilerManager* pm = pgo::PGOProfilerManager::GetInstance();
     uint32_t abcId;
@@ -171,6 +172,9 @@ uint32_t FrameHandler::GetAbcId() const
         LOG_ECMA(ERROR) << "Get method abc id failed. abcName: " << abcName;
     }
     return abcId;
+#else
+    return 0;
+#endif
 }
 
 uint32_t FrameHandler::GetMethodId() const
@@ -229,6 +233,10 @@ JSTaggedValue FrameHandler::GetFunction() const
             case FrameType::FASTJIT_FUNCTION_FRAME:
             case FrameType::FASTJIT_FAST_CALL_FUNCTION_FRAME: {
                 auto *frame = FASTJITFunctionFrame::GetFrameFromSp(sp_);
+                return frame->GetFunction();
+            }
+            case FrameType::STEED_FUNCTION_FRAME: {
+                auto *frame = SteedFunctionFrame::GetFrameFromSp(sp_);
                 return frame->GetFunction();
             }
             case FrameType::BUILTIN_FRAME_WITH_ARGV_STACK_OVER_FLOW_FRAME :
@@ -375,7 +383,7 @@ void FrameHandler::IterateAssembleStack(RootVisitor &visitor)
     }
 }
 
-// We seperate InterpretedEntryFrame from assemble stack when asm interpreter is enable.
+// We separate InterpretedEntryFrame from assemble stack when asm interpreter is enable.
 // To protect EcmaRuntimeCallInfo on InterpretedEntryFrame, we iterate InterpretedEntryFrame on thread sp individually.
 // And only InterpretedEntryFrame is on thread sp when asm interpreter is enable.
 void FrameHandler::IterateEcmaRuntimeCallInfo(RootVisitor &visitor)
@@ -441,6 +449,11 @@ void FrameHandler::IterateFrameChain(JSTaggedType *start, RootVisitor &visitor) 
             case FrameType::FASTJIT_FUNCTION_FRAME:
             case FrameType::FASTJIT_FAST_CALL_FUNCTION_FRAME: {
                 auto frame = it.GetFrame<FASTJITFunctionFrame>();
+                frame->GCIterate(it, visitor, type);
+                break;
+            }
+            case FrameType::STEED_FUNCTION_FRAME: {
+                auto frame = it.GetFrame<SteedFunctionFrame>();
                 frame->GCIterate(it, visitor, type);
                 break;
             }

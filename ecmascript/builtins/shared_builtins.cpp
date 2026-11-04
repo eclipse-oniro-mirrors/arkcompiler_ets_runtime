@@ -27,6 +27,7 @@
 #include "ecmascript/builtins/builtins_shared_typedarray.h"
 #include "ecmascript/containers/containers_bitvector.h"
 #include "ecmascript/js_api/js_api_bitvector.h"
+#include "ecmascript/js_api/js_api_bitvector_iterator.h"
 #include "ecmascript/shared_objects/js_shared_array.h"
 #include "ecmascript/shared_objects/js_sendable_arraybuffer.h"
 #include "ecmascript/shared_objects/js_shared_map.h"
@@ -78,6 +79,7 @@ void Builtins::InitializeSObjectAndSFunction(const JSHandle<GlobalEnv> &env) con
     InitializeSharedArray(env, sObjPrototype, sFuncPrototype);
     InitializeSTypedArray(env, sObjPrototype, sFuncPrototype);
     InitializeSArrayBuffer(env, sObjPrototype, sFuncPrototype);
+    InitializeSharedBitVector(env, sObjPrototype, sFuncPrototype);
     InitializeSModuleNamespace(env, sObjIHClass);
     env->SetSObjectFunctionPrototype(thread_, sObjPrototype);
 }
@@ -210,7 +212,8 @@ void Builtins::InitializeSSet(const JSHandle<GlobalEnv> &env, const JSHandle<JSO
     // SharedSet() = new Function()
     JSHandle<JSFunction> setFunction =
         factory_->NewSFunctionByHClass(reinterpret_cast<void *>(BuiltinsSharedSet::Constructor),
-                                       setFuncHClass, FunctionKind::BUILTIN_CONSTRUCTOR);
+                                       setFuncHClass, FunctionKind::BUILTIN_CONSTRUCTOR,
+                                       BUILTINS_STUB_ID(SharedSetConstructor));
 
     InitializeSCtor(setIHClass, setFunction, "SendableSet", FunctionLength::ZERO);
     JSHandle<JSObject> globalObject(thread_, env->GetGlobalObject());
@@ -242,7 +245,7 @@ void Builtins::InitializeSSet(const JSHandle<GlobalEnv> &env, const JSHandle<JSO
 
     // 23.1.3.10get SharedSet.prototype.size
     JSHandle<JSTaggedValue> sizeGetter = CreateSGetterSetter(env, BuiltinsSharedSet::GetSize, "size",
-        FunctionLength::ZERO);
+        FunctionLength::ZERO, BUILTINS_STUB_ID(SharedSetGetSize));
     SetSAccessor(setPrototype, fieldIndex++, sizeGetter, globalConst->GetHandledUndefined());
 
     // %SetPrototype% [ @@iterator ]
@@ -277,7 +280,8 @@ void Builtins::InitializeSMap(const JSHandle<GlobalEnv> &env, const JSHandle<JSO
     // SharedMap() = new Function()
     JSHandle<JSFunction> mapFunction =
         factory_->NewSFunctionByHClass(reinterpret_cast<void *>(BuiltinsSharedMap::Constructor),
-                                       mapFuncHClass, FunctionKind::BUILTIN_CONSTRUCTOR);
+                                       mapFuncHClass, FunctionKind::BUILTIN_CONSTRUCTOR,
+                                       BUILTINS_STUB_ID(SharedMapConstructor));
     InitializeSCtor(mapIHClass, mapFunction, "SendableMap", FunctionLength::ZERO);
     JSHandle<JSObject> globalObject(thread_, env->GetGlobalObject());
     JSHandle<JSTaggedValue> nameString(factory_->NewFromUtf8ReadOnly("SendableMap"));
@@ -299,7 +303,7 @@ void Builtins::InitializeSMap(const JSHandle<GlobalEnv> &env, const JSHandle<JSO
 
     // 23.1.3.10get SharedMap.prototype.size
     JSHandle<JSTaggedValue> sizeGetter = CreateSGetterSetter(env, BuiltinsSharedMap::GetSize, "size",
-        FunctionLength::ZERO);
+        FunctionLength::ZERO, BUILTINS_STUB_ID(SharedMapGetSize));
     SetSAccessor(mapPrototype, fieldIndex++, sizeGetter, globalConst->GetHandledUndefined());
 
     // %MapPrototype% [ @@iterator ]
@@ -331,7 +335,7 @@ void Builtins::InitializeSModuleNamespace(const JSHandle<GlobalEnv> &env, const 
 
     JSHandle<JSHClass> moduleNamespaceHClass = factory_->NewSEcmaHClass(ModuleNamespace::SIZE, 0,
         JSType::JS_MODULE_NAMESPACE, moduleNamespacePrototypeValue, emptySLayout);
-    moduleNamespaceHClass->SetPrototype(thread_, JSTaggedValue::Null());
+    JSHClass::SetPrototype(thread_, moduleNamespaceHClass, JSTaggedValue::Null());
     env->SetSharedModuleNamespaceClass(thread_, moduleNamespaceHClass.GetTaggedValue());
 
     // SharedmoduleNamespace.prototype [ @@toStringTag ]
@@ -407,9 +411,11 @@ void Builtins::InitializeSFunction(const JSHandle<GlobalEnv> &env,
     SetSFunction(env, sFuncPrototypeObj, "apply", Function::FunctionPrototypeApply, fieldIndex++, FunctionLength::TWO,
         BUILTINS_STUB_ID(FunctionPrototypeApply));
     // 19.2.3.2 Function.prototype.bind ( thisArg , ...args)
-    SetSFunction(env, sFuncPrototypeObj, "bind", Function::FunctionPrototypeBind, fieldIndex++, FunctionLength::ONE);
+    SetSFunction(env, sFuncPrototypeObj, "bind", Function::FunctionPrototypeBind, fieldIndex++, FunctionLength::ONE,
+        BUILTINS_STUB_ID(FunctionPrototypeBind));
     // 19.2.3.3 Function.prototype.call (thisArg , ...args)
-    SetSFunction(env, sFuncPrototypeObj, "call", Function::FunctionPrototypeCall, fieldIndex++, FunctionLength::ONE);
+    SetSFunction(env, sFuncPrototypeObj, "call", Function::FunctionPrototypeCall, fieldIndex++, FunctionLength::ONE,
+        BUILTINS_STUB_ID(SharedFunctionPrototypeCall));
     // 19.2.3.5 Function.prototype.toString ( )
     SetSFunction(env, sFuncPrototypeObj, thread_->GlobalConstants()->GetHandledToStringString(),
         Function::FunctionPrototypeToString, fieldIndex++, FunctionLength::ZERO);
@@ -888,10 +894,11 @@ void Builtins::SetSAccessor(const JSHandle<JSObject> &obj, uint32_t index,
 }
 
 JSHandle<JSTaggedValue> Builtins::CreateSGetterSetter(const JSHandle<GlobalEnv> &env, EcmaEntrypoint func,
-                                                      std::string_view name, int length) const
+                                                      std::string_view name, int length,
+                                                      kungfu::BuiltinsStubCSigns::ID builtinId) const
 {
     JSHandle<JSTaggedValue> funcName(factory_->NewFromUtf8ReadOnly(name));
-    JSHandle<JSFunction> function = NewSFunction(env, funcName, func, length);
+    JSHandle<JSFunction> function = NewSFunction(env, funcName, func, length, builtinId);
     return JSHandle<JSTaggedValue>(function);
 }
 
@@ -954,7 +961,8 @@ void Builtins::InitializeSharedArray(const JSHandle<GlobalEnv> &env, const JSHan
     // SharedArray() = new Function()
     JSHandle<JSFunction> arrayFunction =
         factory_->NewSFunctionByHClass(reinterpret_cast<void *>(BuiltinsSharedArray::ArrayConstructor), arrayFuncHClass,
-                                       FunctionKind::BUILTIN_CONSTRUCTOR);
+                                       FunctionKind::BUILTIN_CONSTRUCTOR,
+                                       BUILTINS_STUB_ID(SharedArrayConstructor));
 
     InitializeSCtor(arrFuncInstanceHClass, arrayFunction, "SendableArray", FunctionLength::ZERO);
 
@@ -1048,6 +1056,18 @@ void Builtins::InitializeSharedBitVector(const JSHandle<GlobalEnv> &env, const J
     env->SetBitVectorFunction(thread_, bitVectorFunction);
 }
 
+void Builtins::InitializeSBitVectorIterator(const JSHandle<GlobalEnv> &env,
+                                            const JSHandle<JSHClass> &iteratorFuncClass) const
+{
+    [[maybe_unused]] EcmaHandleScope scope(thread_);
+    // BitVectorIterator.prototype
+    JSHandle<JSObject> bitVectorIteratorPrototype(factory_->NewJSObjectWithInit(iteratorFuncClass));
+    // Iterator.prototype.next()
+    SetFunction(env, bitVectorIteratorPrototype, "next", JSAPIBitVectorIterator::Next, FunctionLength::ONE);
+    SetStringTagSymbol(env, bitVectorIteratorPrototype, "BitVector Iterator");
+    env->SetBitVectorIteratorPrototype(thread_, bitVectorIteratorPrototype);
+}
+
 
 // todo: remove sendableName when refactor
 #define BUILTIN_SHARED_TYPED_ARRAY_DEFINE_INITIALIZE(Type, ctorName, TYPE, bytesPerElement, sendableName)       \
@@ -1061,9 +1081,9 @@ void Builtins::InitializeS##Type(const JSHandle<GlobalEnv> &env, const JSHandle<
     JSHandle<JSTaggedValue> arrFuncPrototypeValue(arrFuncPrototype);                                            \
     /* %SharedTypedArray%.prototype_or_hclass */                                                                \
     JSHandle<JSHClass> arrFuncInstanceHClass = factory_->NewSEcmaHClass(                                        \
-        JSSharedTypedArray::SIZE, 0, JSType::JS_SHARED_##TYPE, arrFuncPrototypeValue, emptySLayout);            \
+        JSSharedTypedArray::SIZE, 0, JSType::JS_SHARED_##TYPE##_ARRAY, arrFuncPrototypeValue, emptySLayout);    \
     JSHandle<JSHClass> arrFuncInstanceHClassOnHeap = factory_->NewSEcmaHClass(                                  \
-        JSSharedTypedArray::SIZE, 0, JSType::JS_SHARED_##TYPE, arrFuncPrototypeValue, emptySLayout);            \
+        JSSharedTypedArray::SIZE, 0, JSType::JS_SHARED_##TYPE##_ARRAY, arrFuncPrototypeValue, emptySLayout);    \
     arrFuncInstanceHClassOnHeap->SetIsOnHeap(true);                                                             \
     arrFuncInstanceHClass->SetHasConstructor(false);                                                            \
     /* %SharedTypedArray% = new Function() */                                                                   \
@@ -1071,7 +1091,8 @@ void Builtins::InitializeS##Type(const JSHandle<GlobalEnv> &env, const JSHandle<
         env->GetSharedSpecificTypedArrayFunctionClass());                                                       \
     JSHandle<JSFunction> arrayFunction = factory_->NewSFunctionByHClass(                                        \
         reinterpret_cast<void *>(BuiltinsSharedTypedArray::Type##Constructor), specificTypedArrayFuncClass,     \
-        FunctionKind::BUILTIN_CONSTRUCTOR);                                                                     \
+        FunctionKind::BUILTIN_CONSTRUCTOR,                                                                     \
+        BUILTINS_STUB_ID(ctorName##Constructor));                                                              \
     InitializeSCtor(arrFuncInstanceHClass, arrayFunction, #sendableName, FunctionLength::THREE);                \
     JSHandle<JSObject> globalObject(thread_, env->GetGlobalObject());                                           \
     JSHandle<JSTaggedValue> nameString(factory_->NewFromUtf8ReadOnly(#sendableName));                           \

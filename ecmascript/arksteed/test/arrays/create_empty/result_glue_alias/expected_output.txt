@@ -1,0 +1,4 @@
+interpreted:true
+compiled:true
+compiled-instances:true
+survivor:true

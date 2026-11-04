@@ -1,0 +1,12 @@
+singleThrow_stack:70
+singleThrow: PASS
+multiLayer_stack:innerThrow:76|middleCall:80|outerCall:84|func_main_0:149
+innerThrow: PASS
+middleCall: PASS
+outerCall: PASS
+tryCatchThrow_line:92
+multiThrow(neg)_stack:104
+multiThrow_neg: PASS
+multiThrow(zero)_stack:107
+multiThrow_zero: PASS
+Total:6 Pass:6 Fail:0

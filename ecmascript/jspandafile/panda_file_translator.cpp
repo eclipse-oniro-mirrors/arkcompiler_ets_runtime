@@ -21,6 +21,9 @@
 
 namespace panda::ecmascript {
 using EcmaOpcode = kungfu::EcmaOpcode;
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+using FullJSRecordInfo = JSPandaFile::FullJSRecordInfo;
+#endif
 
 template<class T, class... Args>
 static T *InitializeMemory(T *mem, Args... args)
@@ -137,10 +140,10 @@ void PandaFileTranslator::TranslateClass(const JSThread *thread, JSPandaFile *js
 }
 
 JSHandle<Program> PandaFileTranslator::GenerateProgram(EcmaVM *vm, const JSPandaFile *jsPandaFile,
-                                                       std::string_view entryPoint)
+                                                       const CString &entryPoint)
 {
     bool isNewVersion = jsPandaFile->IsNewVersion();
-    uint32_t mainMethodIndex = jsPandaFile->GetMainMethodIndex(entryPoint.data(), isNewVersion);
+    uint32_t mainMethodIndex = jsPandaFile->GetMainMethodIndex(entryPoint, isNewVersion);
     JSHandle<ConstantPool> sconstpool;
     if (isNewVersion) {
         sconstpool = vm->FindOrCreateConstPool(jsPandaFile, EntityId(mainMethodIndex));
@@ -161,7 +164,7 @@ JSHandle<Program> PandaFileTranslator::GenerateProgram(EcmaVM *vm, const JSPanda
         }
 
         if (!jsPandaFile->IsBundlePack()) {
-            ParseFuncAndLiteralConstPool(vm, jsPandaFile, entryPoint.data(), sconstpool, unsharedConstpool);
+            ParseFuncAndLiteralConstPool(vm, jsPandaFile, entryPoint, sconstpool, unsharedConstpool);
         }
     }
 
@@ -183,7 +186,7 @@ JSHandle<Program> PandaFileTranslator::GenerateProgramInternal(EcmaVM *vm,
         program->SetMainFunction(thread, JSTaggedValue::Undefined());
     } else {
         JSHandle<GlobalEnv> env = vm->GetGlobalEnv();
-        JSHandle<Method> method = factory->NewSMethod(mainMethodLiteral);
+        JSHandle<Method> method = factory->NewSMethod(mainMethodLiteral, SHARED_OLD_SPACE, jsPandaFile);
         JSTaggedValue patchVal = QuickFixHelper::CreateMainFuncWithPatch(vm, mainMethodLiteral, jsPandaFile);
         if (!patchVal.IsHole()) {
             method = JSHandle<Method>(thread, patchVal);
@@ -265,7 +268,7 @@ std::pair<JSHandle<ConstantPool>, JSHandle<ConstantPool>> PandaFileTranslator::P
                                 "ParseConstPool:methodLiteral is nullptr, offset: " + std::to_string(it.first));
             methodLiteral->SetFunctionKind(JSPandaFile::GetFunctionKind(type));
 
-            JSHandle<Method> method = factory->NewSMethod(methodLiteral);
+            JSHandle<Method> method = factory->NewSMethod(methodLiteral, SHARED_OLD_SPACE, jsPandaFile);
             constpool->SetObjectToCache(thread, value.GetConstpoolIndex(), method.GetTaggedValue());
             method->SetConstantPool(thread, sconstpool.GetTaggedValue());
         }
@@ -278,7 +281,15 @@ void PandaFileTranslator::ParseFuncAndLiteralConstPool(EcmaVM *vm, const JSPanda
                                                        JSHandle<ConstantPool> sconstpool,
                                                        JSHandle<ConstantPool> constpool)
 {
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+    auto &rawRecordInfo = const_cast<JSPandaFile *>(jsPandaFile)->FindRecordInfo(entryPoint);
+    if (!rawRecordInfo.IsFull()) {
+        LOG_ECMA(FATAL) << "invalid JSRecordInfo object, full object required";
+    }
+    auto &recordInfo = static_cast<FullJSRecordInfo&>(rawRecordInfo);
+#else
     auto &recordInfo = const_cast<JSPandaFile *>(jsPandaFile)->FindRecordInfo(entryPoint);
+#endif
     JSThread *thread = vm->GetJSThread();
     ASSERT(!thread->HasPendingException());
     if (recordInfo.IsParsedConstpoolOfCurrentVM(vm)) {
@@ -336,7 +347,7 @@ void PandaFileTranslator::ParseFuncAndLiteralConstPool(EcmaVM *vm, const JSPanda
                                                 + std::to_string(it.first));
             methodLiteral->SetFunctionKind(JSPandaFile::GetFunctionKind(type));
 
-            JSHandle<Method> method = factory->NewSMethod(methodLiteral);
+            JSHandle<Method> method = factory->NewSMethod(methodLiteral, SHARED_OLD_SPACE, jsPandaFile);
             constpool->SetObjectToCache(thread, value.GetConstpoolIndex(), method.GetTaggedValue());
             method->SetConstantPool(thread, sconstpool.GetTaggedValue());
         }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024 Huawei Device Co., Ltd.
+ * Copyright (c) 2023-2026 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -40,7 +40,7 @@
 #include "ecmascript/js_runtime_options.h"
 #include "ecmascript/js_set.h"
 #include "ecmascript/js_set_iterator.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/js_typed_array.h"
 #include "ecmascript/js_thread.h"
 #include "ecmascript/js_weak_container.h"
@@ -906,23 +906,6 @@ HWTEST_F_L0(JSNApiTests, JSNApi_SetMockModuleList)
 }
 
 /**
- * @tc.number: ffi_interface_api_092
- * @tc.name: SetSourceMapTranslateCallback
- * @tc.desc: Whether the source mapping translation callback function used to verify the settings.
- * was successfully set
- * @tc.type: FUNC
- * @tc.require:  parameter
- */
-HWTEST_F_L0(JSNApiTests, JSNAPI_SetSourceMapTranslateCallback)
-{
-    LocalScope scope(vm_);
-    SourceMapTranslateCallback tag { nullptr };
-    JSNApi::SetSourceMapTranslateCallback(vm_, tag);
-    SourceMapTranslateCallback cur = vm_->GetSourceMapTranslateCallback();
-    ASSERT_EQ(nullptr, cur);
-}
-
-/**
  * @tc.number: ffi_interface_api_093
  * @tc.name: ExecutePendingJob
  * @tc.desc: Used to verify whether the pending task has been successfully executed.
@@ -1175,7 +1158,7 @@ HWTEST_F_L0(JSNApiTests, JSValueRef_IsModuleNamespaceObject)
     SourceTextModule::AddLocalExportEntry(thread_, module, localExportEntry2, 1, 2);
     JSHandle<TaggedArray> localExportEntries(thread_, module->GetLocalExportEntries(thread_));
     CString baseFileName = "a.abc";
-    module->SetEcmaModuleFilenameString(baseFileName);
+    module->SetEcmaModuleFilenameString(thread_, baseFileName);
     ModuleManager *moduleManager = thread_->GetModuleManager();
     moduleManager->AddResolveImportedModule(baseFileName, module.GetTaggedValue());
     JSHandle<ModuleNamespace> np =
@@ -1743,25 +1726,6 @@ HWTEST_F_L0(JSNApiTests, JSNApiInitForConcurrentFunction)
 }
 
 /**
- * @tc.number: ffi_interface_api_131
- * @tc.name: GetStackBeforeCallNapiSuccess
- * @tc.desc: Used to verify whether the function of setting the map container module was successful.
- * @tc.type: FUNC
- * @tc.require:  parameter
- */
-HWTEST_F_L0(JSNApiTests, GetStackBeforeCallNapiSuccess)
-{
-    LocalScope scope(vm_);
-    SourceMapCallback callback { nullptr };
-    JSNApi::SetSourceMapCallback(vm_, callback);
-    vm_->GetJSThread()->SetIsProfiling(false);
-    bool getStackBeforeCallNapiSuccess = false;
-    JSNApi::GetStackBeforeCallNapiSuccess(vm_, getStackBeforeCallNapiSuccess);
-    JSNApi::GetStackAfterCallNapi(vm_);
-    EXPECT_FALSE(getStackBeforeCallNapiSuccess);
-}
-
-/**
  * @tc.number: ffi_interface_api_132
  * @tc.name: NewConcurrentWithName
  * @tc.desc: Check if the function created through the NewConcurrentWithName returns the same value to native callee
@@ -2177,5 +2141,311 @@ HWTEST_F_L0(JSNApiTests, NativePointerRefNewWrapperDataFlagCheck)
 
     void* externalPtr = JSHandle<JSNativePointer>(nativePointerHandle)->GetExternalPointer();
     EXPECT_EQ(externalPtr, &TEST_NUM);
+}
+
+/**
+ * @tc.number: ffi_interface_api_159
+ * @tc.name: NewConcurrentClassFunctionWithNameCase2_PropTagsIndexBugFix
+ * @tc.desc: Test that when nonStaticPropCount is large (close to MAX_FAST_PROPS_CAPACITY),
+ *           the propTags array index is correctly handled. This tests the fix for the bug where
+ *           propTags[curNonStaticPropIdx] was used instead of propTags[i], causing incorrect
+ *           property values due to out-of-bounds access when propertyCount approaches MAX_FAST_PROPS_CAPACITY.
+ *           propertyCount = MAX_FAST_PROPS_CAPACITY + 1 = 1024 is used to truly trigger the bug.
+ * @tc.type: FUNC
+ * @tc.require: parameter
+ */
+HWTEST_F_L0(JSNApiTests, NewConcurrentClassFunctionWithNameCase2_PropTagsIndexBugFix)
+{
+    LocalScope scope(vm_);
+    JSHandle<GlobalEnv> env = thread_->GetGlobalEnv();
+    Local<JSValueRef> context = JSNApiHelper::ToLocal<JSValueRef>(JSHandle<JSTaggedValue>(env));
+    std::string name = "MyClassFunctionWithManyProps";
+
+    // Use PROPERTY_COUNT_CASE2 = MAX_FAST_PROPS_CAPACITY + 1 to truly trigger the bug
+    // Old code: propTags[curNonStaticPropIdx] would overflow when curNonStaticPropIdx >= MAX_FAST_PROPS_CAPACITY
+    const size_t propertyCount = PROPERTY_COUNT_CASE2;  // MAX_FAST_PROPS_CAPACITY + 1 = 1024
+    const size_t staticPropCount = 5;
+
+    Local<panda::JSValueRef> keys[PROPERTY_COUNT_CASE2];
+    PropertyAttribute attrs[PROPERTY_COUNT_CASE2];
+
+    // Initialize keys and attrs with unique values
+    for (size_t i = 0; i < propertyCount; ++i) {
+        std::string keyName = "key" + std::to_string(i);
+        keys[i] = StringRef::NewFromUtf8(vm_, keyName.c_str());
+        Local<JSValueRef> curValue =
+            JSNApiHelper::ToLocal<JSValueRef>(JSHandle<JSTaggedValue>(thread_, JSTaggedValue(static_cast<int32_t>(i))));
+        attrs[i].SetValue(curValue);
+        attrs[i].SetConfigurable(true);
+        attrs[i].SetWritable(true);
+    }
+
+    // Create class with MAX_FAST_PROPS_CAPACITY + 1 properties
+    Local<FunctionRef> cls = FunctionRef::NewConcurrentClassFunctionWithName(
+        vm_, context, InternalFunctionCallback, nullptr, name.c_str(), nullptr, true, propertyCount,
+        staticPropCount, keys, attrs);
+
+    JSHandle<JSTaggedValue> obj = JSNApiHelper::ToJSHandle(Local<JSValueRef>(cls));
+    JSHandle<JSFunction> clsFunc(obj);
+    JSThread *thread = vm_->GetJSThread();
+
+    // Verify static property values
+    for (size_t i = 0; i < staticPropCount; ++i) {
+        auto realProp = JSObject::GetProperty(thread_, obj, JSNApiHelper::ToJSHandle(keys[i])).GetValue();
+        uint32_t realVal = JSTaggedValue::ToUint32(thread_, realProp);
+        ASSERT_EQ(realVal, i) << "Static property key[" << i << "] has incorrect value";
+    }
+
+    // Verify non-static property values on prototype
+    // Properties are added in reverse order (last nonStaticProp first)
+    // We verify only the first few properties to ensure the fix works correctly
+    JSHandle<JSTaggedValue> clsProtoVal(thread_, clsFunc->GetProtoOrHClass(thread));
+    constexpr size_t verifyCount = 20;  // Verify first 20 non-static properties
+    for (size_t i = 0; i < verifyCount; ++i) {
+        size_t trueIdx = propertyCount - 1 - i;  // Reverse order
+        auto realProp = JSObject::GetProperty(thread_, clsProtoVal, JSNApiHelper::ToJSHandle(keys[trueIdx])).GetValue();
+        uint32_t realVal = JSTaggedValue::ToUint32(thread_, realProp);
+        ASSERT_EQ(realVal, static_cast<uint32_t>(trueIdx))
+            << "Non-static property key[" << trueIdx << "] has incorrect value, expected " << trueIdx << " but got "
+            << realVal;
+    }
+}
+
+/**
+ * @tc.number: ffi_interface_api_160
+ * @tc.name: NewConcurrentClassFunctionWithNameCase3_InlinePropLimit
+ * @tc.desc: Test that the inline property count is correctly limited by maxInlPropCountForClassFunc.
+ *           This verifies the fix for limiting inlNonStaticPropCount using maxInlPropCountForClassFunc
+ *           instead of MAX_FAST_PROPS_CAPACITY, to prevent IC offset overflow.
+ *           The limit is MAX_FAST_PROPS_CAPACITY - JSFunction::SIZE/TaggedTypeSize - DEFAULT_CAPACITY_OF_IN_OBJECTS.
+ *           propertyCount = MAX_FAST_PROPS_CAPACITY + 1 = 1024 is used to truly test the limit.
+ * @tc.type: FUNC
+ * @tc.require: parameter
+ */
+HWTEST_F_L0(JSNApiTests, NewConcurrentClassFunctionWithNameCase3_InlinePropLimit)
+{
+    LocalScope scope(vm_);
+    JSHandle<GlobalEnv> env = thread_->GetGlobalEnv();
+    Local<JSValueRef> context = JSNApiHelper::ToLocal<JSValueRef>(JSHandle<JSTaggedValue>(env));
+    std::string name = "MyClassFunctionInlineLimitTest";
+
+    // Use PROPERTY_COUNT_CASE2 = MAX_FAST_PROPS_CAPACITY + 1 to truly test the limit
+    const size_t propertyCount = PROPERTY_COUNT_CASE2;  // MAX_FAST_PROPS_CAPACITY + 1 = 1024
+    const size_t staticPropCount = 5;
+
+    Local<panda::JSValueRef> keys[PROPERTY_COUNT_CASE2];
+    PropertyAttribute attrs[PROPERTY_COUNT_CASE2];
+
+    // Initialize keys and attrs with unique values
+    for (size_t i = 0; i < propertyCount; ++i) {
+        std::string keyName = "key" + std::to_string(i);
+        keys[i] = StringRef::NewFromUtf8(vm_, keyName.c_str());
+        Local<JSValueRef> curValue =
+            JSNApiHelper::ToLocal<JSValueRef>(JSHandle<JSTaggedValue>(thread_, JSTaggedValue(static_cast<int32_t>(i))));
+        attrs[i].SetValue(curValue);
+        attrs[i].SetConfigurable(true);
+        attrs[i].SetWritable(true);
+    }
+
+    // Create class with MAX_FAST_PROPS_CAPACITY + 1 properties
+    Local<FunctionRef> cls = FunctionRef::NewConcurrentClassFunctionWithName(
+        vm_, context, InternalFunctionCallback, nullptr, name.c_str(), nullptr, true, propertyCount,
+        staticPropCount, keys, attrs);
+
+    JSHandle<JSTaggedValue> obj = JSNApiHelper::ToJSHandle(Local<JSValueRef>(cls));
+    JSHandle<JSFunction> clsFunc(obj);
+    JSThread *thread = vm_->GetJSThread();
+
+    // Verify static property values on class function
+    for (size_t i = 0; i < staticPropCount; ++i) {
+        auto realProp = JSObject::GetProperty(thread_, obj, JSNApiHelper::ToJSHandle(keys[i])).GetValue();
+        uint32_t realVal = JSTaggedValue::ToUint32(thread_, realProp);
+        ASSERT_EQ(realVal, i) << "Static property key[" << i << "] has incorrect value";
+    }
+
+    // Verify non-static property values exist on prototype
+    // We verify only the first few properties to ensure the fix works correctly
+    JSHandle<JSTaggedValue> clsProtoVal(thread_, clsFunc->GetProtoOrHClass(thread));
+    constexpr size_t verifyCount = 20;  // Verify first 20 non-static properties
+    for (size_t i = 0; i < verifyCount; ++i) {
+        size_t trueIdx = propertyCount - 1 - i;
+        auto realProp = JSObject::GetProperty(thread_, clsProtoVal, JSNApiHelper::ToJSHandle(keys[trueIdx])).GetValue();
+        uint32_t realVal = JSTaggedValue::ToUint32(thread_, realProp);
+        ASSERT_EQ(realVal, static_cast<uint32_t>(trueIdx))
+            << "Non-static property key[" << trueIdx << "] has incorrect value, expected " << trueIdx << " but got "
+            << realVal;
+    }
+}
+
+class MicrotaskScopeModuleTest : public testing::Test {
+public:
+    static void SetUpTestCase()
+    {
+        GTEST_LOG_(INFO) << "SetUpTestCase";
+    }
+
+    static void TearDownTestCase()
+    {
+        GTEST_LOG_(INFO) << "TearDownCase";
+    }
+
+    void SetUp() override
+    {
+        TestHelper::CreateEcmaVMWithScope(instance, thread, scope);
+    }
+
+    void TearDown() override
+    {
+        TestHelper::DestroyEcmaVMWithScope(instance, scope);
+    }
+
+protected:
+    EcmaVM *instance {nullptr};
+    ecmascript::EcmaHandleScope *scope {nullptr};
+    JSThread *thread {nullptr};
+
+    static bool IsMicrotaskDone(const EcmaVM *vm)
+    {
+        Local<ObjectRef> globalObject = JSNApi::GetGlobalObject(vm);
+        Local<JSValueRef> done = globalObject->Get(vm, StringRef::NewFromUtf8(vm, "microtaskDone"));
+        return done->IsTrue();
+    }
+
+    static bool ExecuteMicrotaskScopeMain(const EcmaVM *vm)
+    {
+        std::string baseFileName = ABC_PATH "microtask_scope_main.abc";
+        return JSNApi::Execute(vm, baseFileName, "microtask_scope_main");
+    }
+};
+
+/**
+ * @tc.number: microtask_scope_api_001
+ * @tc.name: MicrotaskScopeIsOpened
+ * @tc.desc: IsOpened reflects the scope state of the vm: false on a fresh vm, true while a scope is
+ *           alive, false after it is destroyed, and the state is reusable across sequential scopes
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(MicrotaskScopeModuleTest, MicrotaskScopeIsOpened)
+{
+    ecmascript::ThreadNativeScope nativeScope(thread);
+
+    // no scope is open on a fresh vm
+    ASSERT_FALSE(JsiMicrotaskScope::IsOpened(instance));
+    {
+        JsiMicrotaskScope firstScope(instance);
+        ASSERT_TRUE(JsiMicrotaskScope::IsOpened(instance));
+    }
+    ASSERT_FALSE(JsiMicrotaskScope::IsOpened(instance));
+    {
+        JsiMicrotaskScope secondScope(instance);
+        ASSERT_TRUE(JsiMicrotaskScope::IsOpened(instance));
+    }
+    ASSERT_FALSE(JsiMicrotaskScope::IsOpened(instance));
+}
+
+/**
+ * @tc.number: microtask_scope_api_002
+ * @tc.name: MicrotaskScopeSuppressModuleMicrotask
+ * @tc.desc: While a scope is open, the microtask drain at the end of module evaluation is suppressed;
+ *           when the scope is destroyed, the still-queued microtask is drained once and runs
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(MicrotaskScopeModuleTest, MicrotaskScopeSuppressModuleMicrotask)
+{
+    ecmascript::ThreadNativeScope nativeScope(thread);
+    JSNApi::EnableUserUncaughtErrorHandler(instance);
+
+    {
+        JsiMicrotaskScope scopeGuard(instance);
+
+        // each test gets a fresh VM, so the module with the static import is not yet loaded;
+        // the drains at the end of module evaluation are suppressed by the queue gate
+        ASSERT_TRUE(ExecuteMicrotaskScopeMain(instance));
+        ASSERT_FALSE(IsMicrotaskDone(instance));
+    }
+
+    // the scope was closed and the pending microtask queue was drained once
+    ASSERT_TRUE(IsMicrotaskDone(instance));
+}
+
+/**
+ * @tc.number: microtask_scope_api_003
+ * @tc.name: MicrotaskScopeNestedOpenIsNoOp
+ * @tc.desc: Creating a scope while an outer one is open is rejected by the vm; the nested scope stays
+ *           passive (its destructor is a no-op), the outer scope keeps suppressing, and the queue is
+ *           drained exactly once when the outermost scope is destroyed
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(MicrotaskScopeModuleTest, MicrotaskScopeNestedOpenIsNoOp)
+{
+    ecmascript::ThreadNativeScope nativeScope(thread);
+    JSNApi::EnableUserUncaughtErrorHandler(instance);
+
+    {
+        JsiMicrotaskScope outerScope(instance);
+        ASSERT_TRUE(JsiMicrotaskScope::IsOpened(instance));
+        {
+            // the nested open is rejected (the "nested open is not allowed" ERROR log is expected);
+            // the inner scope stays passive and never owns the gate
+            JsiMicrotaskScope innerScope(instance);
+            ASSERT_TRUE(JsiMicrotaskScope::IsOpened(instance));
+        }
+
+        // the inner scope's destructor was a no-op: the gate is still held by the outer scope
+        ASSERT_TRUE(JsiMicrotaskScope::IsOpened(instance));
+
+        // suppression is still in effect under the outer scope
+        ASSERT_TRUE(ExecuteMicrotaskScopeMain(instance));
+        ASSERT_FALSE(IsMicrotaskDone(instance));
+    }
+    ASSERT_FALSE(JsiMicrotaskScope::IsOpened(instance));
+
+    // the queue is drained exactly once, when the outermost scope is destroyed
+    ASSERT_TRUE(IsMicrotaskDone(instance));
+}
+
+/**
+ * @tc.number: microtask_scope_api_004
+ * @tc.name: MicrotaskScopeModuleMicrotaskBaseline
+ * @tc.desc: Without a scope, the microtask enqueued during module evaluation is drained when the
+ *           module evaluation finishes
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(MicrotaskScopeModuleTest, MicrotaskScopeModuleMicrotaskBaseline)
+{
+    ecmascript::ThreadNativeScope nativeScope(thread);
+    JSNApi::EnableUserUncaughtErrorHandler(instance);
+
+    ASSERT_TRUE(ExecuteMicrotaskScopeMain(instance));
+
+    // without a scope the reaction is drained when the module evaluation finishes
+    ASSERT_TRUE(IsMicrotaskDone(instance));
+}
+
+/**
+ * @tc.number: microtask_scope_api_005
+ * @tc.name: MicrotaskScopeCloseWithoutOpenIsRejected
+ * @tc.desc: Closing the microtask scope without a matching open is rejected by the vm and leaves the
+ *           state unchanged; the vm stays usable, a subsequent open and close still succeed
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(MicrotaskScopeModuleTest, MicrotaskScopeCloseWithoutOpenIsRejected)
+{
+    ecmascript::ThreadNativeScope nativeScope(thread);
+
+    // the unmatched close is rejected (the "without matching open" ERROR log is expected)
+    // and leaves the scope closed
+    ASSERT_FALSE(instance->CloseMicrotaskScope());
+    ASSERT_FALSE(JsiMicrotaskScope::IsOpened(instance));
+
+    // the rejected close does not corrupt the state: open and close still succeed
+    ASSERT_TRUE(instance->OpenMicrotaskScope());
+    ASSERT_TRUE(instance->CloseMicrotaskScope());
+    ASSERT_FALSE(JsiMicrotaskScope::IsOpened(instance));
 }
 } // namespace panda::test

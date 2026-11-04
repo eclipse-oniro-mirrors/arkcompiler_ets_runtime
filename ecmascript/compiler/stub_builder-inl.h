@@ -24,6 +24,7 @@
 #include "ecmascript/compiler/assembler_module.h"
 #include "ecmascript/compiler/bc_call_signature.h"
 #include "ecmascript/compiler/baseline/baseline_call_signature.h"
+#include "ecmascript/containers/containers_errors.h"
 #include "ecmascript/enum_cache.h"
 #include "ecmascript/global_dictionary.h"
 #include "ecmascript/global_env.h"
@@ -38,14 +39,16 @@
 #include "ecmascript/js_for_in_iterator.h"
 #include "ecmascript/js_generator_object.h"
 #include "ecmascript/js_object.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/jspandafile/program_object.h"
 #include "ecmascript/layout_info.h"
 #include "ecmascript/message_string.h"
+#include "ecmascript/compiler/circuit_builder-inl.h"
 #include "ecmascript/mem/slots.h"
 #include "ecmascript/mem/visitor.h"
 #include "ecmascript/ic/properties_cache.h"
 #include "ecmascript/property_attributes.h"
+#include "ecmascript/shared_objects/js_sendable_arraybuffer.h"
 
 namespace panda::ecmascript::kungfu {
 using JSFunction = panda::ecmascript::JSFunction;
@@ -222,21 +225,33 @@ inline GateRef StubBuilder::Alloca(int size)
 
 inline GateRef StubBuilder::Return(GateRef value)
 {
-    auto control = env_->GetCurrentLabel()->GetControl();
-    auto depend = env_->GetCurrentLabel()->GetDepend();
-    return env_->GetBuilder()->Return(control, depend, value);
+    auto currentLabel = env_->GetCurrentLabel();
+    auto control = currentLabel->GetControl();
+    auto depend = currentLabel->GetDepend();
+    auto ret = env_->GetBuilder()->Return(control, depend, value);
+    env_->SetCurrentLabel(nullptr);
+    return ret;
 }
 
 inline GateRef StubBuilder::Return()
 {
-    auto control = env_->GetCurrentLabel()->GetControl();
-    auto depend = env_->GetCurrentLabel()->GetDepend();
-    return env_->GetBuilder()->ReturnVoid(control, depend);
+    auto currentLabel = env_->GetCurrentLabel();
+    auto control = currentLabel->GetControl();
+    auto depend = currentLabel->GetDepend();
+    auto ret = env_->GetBuilder()->ReturnVoid(control, depend);
+    env_->SetCurrentLabel(nullptr);
+    return ret;
 }
 
 inline void StubBuilder::Bind(Label *label)
 {
     env_->GetBuilder()->Bind(label);
+}
+
+inline void StubBuilder::Bind(LabelImpl *label)
+{
+    label->Bind();
+    env_->SetCurrentLabel(label);
 }
 
 inline GateRef StubBuilder::CallRuntime(GateRef glue, int index, const std::vector<GateRef>& args)
@@ -400,22 +415,7 @@ void StubBuilder::SaveJumpSizeIfNeeded(GateRef glue, GateRef jumpSize)
 
 void StubBuilder::SetHotnessCounter(GateRef glue, GateRef method, GateRef value)
 {
-    auto env = GetEnvironment();
-    GateRef newValue = env->GetBuilder()->TruncInt64ToInt16(value);
-    Store(VariableType::INT16(), glue, method, IntPtr(Method::LITERAL_INFO_OFFSET), newValue);
-}
-
-void StubBuilder::SaveHotnessCounterIfNeeded(GateRef glue, GateRef sp, GateRef hotnessCounter, JSCallMode mode)
-{
-    if ((env_->IsAsmInterp() || env_->IsBaselineBuiltin())
-         && kungfu::AssemblerModule::IsJumpToCallCommonEntry(mode)) {
-        ASSERT(hotnessCounter != Circuit::NullGate());
-        GateRef frame = PtrSub(sp, IntPtr(AsmInterpretedFrame::GetSize(env_->IsArch32Bit())));
-        GateRef function = LoadPrimitive(VariableType::JS_POINTER(), frame,
-            IntPtr(AsmInterpretedFrame::GetFunctionOffset(env_->IsArch32Bit())));
-        GateRef method = Load(VariableType::JS_ANY(), glue, function, IntPtr(JSFunctionBase::METHOD_OFFSET));
-        SetHotnessCounter(glue, method, hotnessCounter);
-    }
+    Store(VariableType::INT32(), glue, method, IntPtr(Method::HOTNESS_COUNTER_OFFSET), value);
 }
 
 // memory
@@ -429,6 +429,13 @@ inline GateRef StubBuilder::Load(VariableType type, GateRef glue, GateRef base, 
         return env_->GetBuilder()->Load(type, glue, base, offset);
     }
     return LoadPrimitive(type, base, offset);
+}
+
+inline GateRef StubBuilder::LoadFromCompressedTaggedValue(VariableType type, GateRef glue, GateRef base,
+                                                          GateRef offset)
+{
+    ASSERT(type == VariableType::JS_ANY());
+    return env_->GetBuilder()->LoadFromCompressedTaggedValue(type, glue, base, offset);
 }
 
 inline GateRef StubBuilder::LoadZeroOffset(VariableType type, GateRef glue, GateRef base,
@@ -760,6 +767,29 @@ inline GateRef StubBuilder::TaggedIsSharedObj(GateRef glue, GateRef obj)
     return env_->GetBuilder()->TaggedIsSharedObj(glue, obj);
 }
 
+inline GateRef StubBuilder::TaggedIsSharedType(GateRef glue, GateRef value)
+{
+    // Check if value is a shared type (Number, Boolean, Undefined, Null, or JSShared object)
+    // IsSharedType = IsNumber() || IsBoolean() || IsUndefined() || IsNull() || IsJSShared()
+    Label entry(env_);
+    env_->SubCfgEntry(&entry);
+
+    DEFVARIABLE(result, VariableType::BOOL(), False());
+
+    GateRef isSharedType = LogicOrBuilder(env_)
+        .Or(TaggedIsNumber(value))
+        .Or(TaggedIsBoolean(value))
+        .Or(TaggedIsUndefinedOrNull(value))
+        .Or(TaggedIsSharedObj(glue, value))
+        .Done();
+    IR_IF (isSharedType) {
+        result = True();
+    }
+    auto ret = *result;
+    env_->SubCfgExit();
+    return ret;
+}
+
 inline GateRef StubBuilder::TaggedIsStringOrSymbol(GateRef glue, GateRef obj)
 {
     return env_->GetBuilder()->TaggedIsStringOrSymbol(glue, obj);
@@ -893,6 +923,21 @@ inline GateRef StubBuilder::TaggedIsJSArray(GateRef glue, GateRef x)
     return env_->GetBuilder()->TaggedIsJSArray(glue, x);
 }
 
+inline GateRef StubBuilder::TaggedIsJSSharedArray(GateRef glue, GateRef x)
+{
+    return env_->GetBuilder()->TaggedIsJSSharedArray(glue, x);
+}
+
+inline GateRef StubBuilder::TaggedIsJSSharedMap(GateRef glue, GateRef x)
+{
+    return env_->GetBuilder()->TaggedIsJSSharedMap(glue, x);
+}
+
+inline GateRef StubBuilder::TaggedIsJSSharedSet(GateRef glue, GateRef x)
+{
+    return env_->GetBuilder()->TaggedIsJSSharedSet(glue, x);
+}
+
 inline GateRef StubBuilder::IsTaggedArray(GateRef glue, GateRef x)
 {
     return env_->GetBuilder()->IsTaggedArray(glue, x);
@@ -982,7 +1027,6 @@ inline GateRef StubBuilder::DoubleTrunc(GateRef x)
     env_->SubCfgEntry(&entry);
 
     DEFVARIABLE(result, VariableType::FLOAT64(), x);
-    Label exit(env_);
 
     constexpr int64_t DOUBLE_FRACTION_BITS = 52;
     constexpr int64_t DOUBLE_EXP_MASK = 0x7ff;
@@ -991,31 +1035,18 @@ inline GateRef StubBuilder::DoubleTrunc(GateRef x)
     GateRef exp = Int64Sub(Int64And(Int64LSR(bits, Int64(DOUBLE_FRACTION_BITS)), Int64(DOUBLE_EXP_MASK)),
                            Int64(DOUBLE_EXP_OFFSET));
 
-    Label trunc(env_);
-    BRANCH(Int64GreaterThanOrEqual(exp, Int64(DOUBLE_FRACTION_BITS)), &exit, &trunc);
-    Bind(&trunc);
-    {
-        Label zero(env_);
-        Label nonZero(env_);
-        BRANCH(Int64LessThan(exp, Int64(0)), &zero, &nonZero);
-        Bind(&zero);
-        {
+    IR_IF (Int64LessThan(exp, Int64(DOUBLE_FRACTION_BITS))) {
+        IR_IF (Int64LessThan(exp, Int64(0))) {
             constexpr int64_t DOUBLE_SIGN_SHIFT = 63;
             constexpr int64_t mask = static_cast<int64_t>(1) << DOUBLE_SIGN_SHIFT;
             result = CastInt64ToFloat64(Int64And(bits, Int64(mask)));
-            Jump(&exit);
-        }
-        Bind(&nonZero);
-        {
+        } IR_ELSE {
             constexpr int64_t DOUBLE_NON_FRACTION_BITS = 12;
             constexpr int64_t NEG_ONE = -1;
             GateRef mask = Int64LSR(Int64(NEG_ONE), Int64Add(exp, Int64(DOUBLE_NON_FRACTION_BITS)));
             result = CastInt64ToFloat64(Int64And(bits, Int64Not(mask)));
-            Jump(&exit);
         }
     }
-
-    Bind(&exit);
     auto ret = *result;
     env_->SubCfgExit();
     return ret;
@@ -1451,9 +1482,10 @@ inline GateRef StubBuilder::LoadHclassImpl(GateRef glue, GateRef object, int lin
     return res;
 }
 
-inline void StubBuilder::StoreHClass(GateRef glue, GateRef object, GateRef hClass, MemoryAttribute mAttr)
+inline void StubBuilder::StoreHClass(GateRef glue, GateRef object, GateRef hClass,
+                                     RegionSpaceFlag spaceType, MemoryAttribute mAttr)
 {
-    return env_->GetBuilder()->StoreHClass(glue, object, hClass, mAttr);
+    return env_->GetBuilder()->StoreHClass(glue, object, hClass, spaceType, mAttr);
 }
 
 inline void StubBuilder::TransitionHClass(GateRef glue, GateRef object, GateRef hClass, MemoryAttribute mAttr)
@@ -1461,9 +1493,9 @@ inline void StubBuilder::TransitionHClass(GateRef glue, GateRef object, GateRef 
     return env_->GetBuilder()->TransitionHClass(glue, object, hClass, mAttr);
 }
 
-inline void StubBuilder::StoreBuiltinHClass(GateRef glue, GateRef object, GateRef hClass)
+inline void StubBuilder::StoreBuiltinHClass(GateRef glue, GateRef object, GateRef hClass, RegionSpaceFlag spaceType)
 {
-    return env_->GetBuilder()->StoreHClass(glue, object, hClass, MemoryAttribute::NoBarrier());
+    return env_->GetBuilder()->StoreHClass(glue, object, hClass, spaceType, MemoryAttribute::NoBarrier());
 }
 
 inline void StubBuilder::StorePrototype(GateRef glue, GateRef hclass, GateRef prototype)
@@ -2536,7 +2568,6 @@ inline void StubBuilder::SetPropertyInlinedProps(GateRef glue, GateRef obj, Gate
 
     // NOTE: need to translate MarkingBarrier
     Store(type, glue, obj, ZExtInt32ToPtr(propOffset), value, mAttr);
-    EXITENTRY();
 }
 
 inline GateRef StubBuilder::GetPropertyInlinedProps(GateRef glue, GateRef obj, GateRef hClass,
@@ -2605,6 +2636,15 @@ inline GateRef StubBuilder::IsAOTHClass(GateRef hClass)
     return Int32NotEqual(Int32And(Int32LSR(bitfield,
         Int32(JSHClass::IsAOTBit::START_BIT)),
         Int32((1LU << JSHClass::IsAOTBit::SIZE) - 1)),
+        Int32(0));
+}
+
+inline GateRef StubBuilder::IsSharedHClass(GateRef hClass)
+{
+    GateRef bitfield = LoadPrimitive(VariableType::INT32(), hClass, IntPtr(JSHClass::BIT_FIELD_OFFSET));
+    return Int32NotEqual(Int32And(Int32LSR(bitfield,
+        Int32(JSHClass::IsJSSharedBit::START_BIT)),
+        Int32((1LU << JSHClass::IsJSSharedBit::SIZE) - 1)),
         Int32(0));
 }
 
@@ -2688,6 +2728,8 @@ inline void StubBuilder::SetValueToTaggedArray(VariableType valType, GateRef glu
                                                GateRef index, GateRef val, MemoryAttribute mAttr)
 {
     // NOTE: need to translate MarkingBarrier
+    ASM_ASSERT_WITH_GLUE(GET_MESSAGE_STRING_ID(StoreValueToConstPool),
+                         BoolNot(env_->GetBuilder()->IsConstantPool(glue, array)), glue);
     GateRef offset = PtrMul(ZExtInt32ToPtr(index), IntPtr(JSTaggedValue::TaggedTypeSize()));
     GateRef dataOffset = PtrAdd(offset, IntPtr(TaggedArray::DATA_OFFSET));
     Store(valType, glue, array, dataOffset, val, mAttr);
@@ -2695,9 +2737,31 @@ inline void StubBuilder::SetValueToTaggedArray(VariableType valType, GateRef glu
 
 inline GateRef StubBuilder::GetValueFromTaggedArray(GateRef glue, GateRef array, GateRef index)
 {
+    ASM_ASSERT_WITH_GLUE(GET_MESSAGE_STRING_ID(UseConstPoolInTaggedArrayGet),
+                         BoolNot(env_->GetBuilder()->IsConstantPool(glue, array)), glue);
     GateRef offset = PtrMul(ZExtInt32ToPtr(index), IntPtr(JSTaggedValue::TaggedTypeSize()));
     GateRef dataOffset = PtrAdd(offset, IntPtr(TaggedArray::DATA_OFFSET));
     return Load(VariableType::JS_ANY(), glue, array, dataOffset);
+}
+
+inline GateRef StubBuilder::GetICLength(GateRef profileTypeInfo)
+{
+    return LoadPrimitive(VariableType::INT32(), profileTypeInfo, IntPtr(ProfileTypeInfo::LENGTH_OFFSET));
+}
+
+inline GateRef StubBuilder::GetICSlot(GateRef glue, GateRef profileTypeInfo, GateRef index)
+{
+    GateRef offset = PtrMul(ZExtInt32ToPtr(index), IntPtr(JSTaggedValue::TaggedTypeSize()));
+    GateRef dataOffset = PtrAdd(offset, IntPtr(ProfileTypeInfo::SIZE));
+    return Load(VariableType::JS_ANY(), glue, profileTypeInfo, dataOffset);
+}
+
+inline void StubBuilder::SetICSlot(VariableType valType, GateRef glue, GateRef profileTypeInfo,
+                                   GateRef index, GateRef val, MemoryAttribute mAttr)
+{
+    GateRef offset = PtrMul(ZExtInt32ToPtr(index), IntPtr(JSTaggedValue::TaggedTypeSize()));
+    GateRef dataOffset = PtrAdd(offset, IntPtr(ProfileTypeInfo::SIZE));
+    Store(valType, glue, profileTypeInfo, dataOffset, val, mAttr);
 }
 
 inline GateRef StubBuilder::GetDataPtrInTaggedArray(GateRef array)
@@ -2714,9 +2778,7 @@ inline GateRef StubBuilder::GetDataPtrInTaggedArray(GateRef array, GateRef index
 
 inline GateRef StubBuilder::GetUnsharedConstpoolIndex(GateRef glue, GateRef constpool)
 {
-    GateRef constPoolSize = GetLengthOfTaggedArray(constpool);
-    GateRef unshareIdx = Int32Sub(constPoolSize, Int32(ConstantPool::UNSHARED_CONSTPOOL_INDEX));
-    return GetValueFromTaggedArray(glue, constpool, unshareIdx);
+    return env_->GetBuilder()->GetUnsharedConstpoolIndex(glue, constpool);
 }
 
 inline GateRef StubBuilder::GetUnsharedConstpoolFromGlue(GateRef glue, GateRef constpool)
@@ -2731,8 +2793,10 @@ inline GateRef StubBuilder::GetUnsharedConstpool(GateRef glue, GateRef arrayAddr
     return LoadZeroOffset(VariableType::JS_ANY(), glue, dataOffset);
 }
 
-inline GateRef StubBuilder::GetValueFromMutantTaggedArray(GateRef elements, GateRef index)
+inline GateRef StubBuilder::GetValueFromMutantTaggedArray(GateRef glue, GateRef elements, GateRef index)
 {
+    ASM_ASSERT_WITH_GLUE(GET_MESSAGE_STRING_ID(UseConstPoolInTaggedArrayGet),
+                         BoolNot(env_->GetBuilder()->IsConstantPool(glue, elements)), glue);
     GateRef offset = PtrMul(ZExtInt32ToPtr(index), IntPtr(sizeof(int64_t)));
     GateRef dataOffset = PtrAdd(offset, IntPtr(TaggedArray::DATA_OFFSET));
     return LoadPrimitive(VariableType::INT64(), elements, dataOffset);
@@ -2840,7 +2904,7 @@ inline GateRef StubBuilder::IsSharedArray(GateRef jsType)
     return Int32Equal(jsType, Int32(static_cast<int32_t>(JSType::JS_SHARED_ARRAY)));
 }
 
-inline GateRef StubBuilder::IsFastTypeArray(GateRef jsType)
+inline GateRef StubBuilder::IsFastTypedArray(GateRef jsType)
 {
     return BitAnd(
         Int32GreaterThan(jsType, Int32(static_cast<int32_t>(JSType::JS_TYPED_ARRAY_FIRST))),
@@ -3141,11 +3205,6 @@ inline GateRef StubBuilder::TruncInt32ToInt1(GateRef x)
     return env_->GetBuilder()->TruncInt32ToInt1(x);
 }
 
-inline GateRef StubBuilder::GetObjectFromConstPool(GateRef glue, GateRef constpool, GateRef index)
-{
-    return GetValueFromTaggedArray(glue, constpool, index);
-}
-
 inline GateRef StubBuilder::GetGlobalConstantAddr(GateRef index)
 {
     return Int64Mul(Int64(sizeof(JSTaggedValue)), index);
@@ -3328,6 +3387,26 @@ inline GateRef StubBuilder::InYoungGeneration(GateRef region)
     return RegionInSpace(region, RegionSpaceFlag::IN_YOUNG_SPACE);
 }
 
+inline GateRef StubBuilder::InYoungGenerationForCMSObj(GateRef object, GateRef region)
+{
+    // In CMS GC use objstate from obj to identity a young obj
+    GateRef hclass = LoadPrimitive(VariableType::INT64(), object, IntPtr(TaggedObject::HCLASS_OFFSET));
+    GateRef objStateInt64 = Int64And(hclass, Int64(~TaggedObject::GC_STATE_MASK));
+    GateRef inYoungState = Int64Equal(objStateInt64, Int64(TaggedStateWord::YOUNG_STATE));
+    GateRef regionInLocal = BoolNot(InSharedHeap(region));
+    return BitAnd(inYoungState, regionInLocal);
+}
+
+inline GateRef StubBuilder::InOldGenerationForCMSObj(GateRef object, GateRef region)
+{
+    // In CMS GC use objstate from obj to identity an old obj
+    GateRef hclass = LoadPrimitive(VariableType::INT64(), object, IntPtr(TaggedObject::HCLASS_OFFSET));
+    GateRef objStateInt64 = Int64And(hclass, Int64(~TaggedObject::GC_STATE_MASK));
+    GateRef inOldState = Int64Equal(objStateInt64, Int64(TaggedStateWord::OLD_STATE));
+    GateRef regionInLocal = BoolNot(InSharedHeap(region));
+    return BitAnd(inOldState, regionInLocal);
+}
+
 inline GateRef StubBuilder::InFromSpace(GateRef region)
 {
     auto offset = Region::PackedData::GetTypeFlagOffset(env_->Is32Bit());
@@ -3506,13 +3585,6 @@ inline GateRef StubBuilder::GetProtoOrHClass(GateRef glue, GateRef function)
     return Load(VariableType::JS_ANY(), glue, function, offset);
 }
 
-inline void StubBuilder::SetTypedArrayName(GateRef glue, GateRef typedArray, GateRef name,
-                                           MemoryAttribute mAttr)
-{
-    GateRef offset = IntPtr(JSTypedArray::TYPED_ARRAY_NAME_OFFSET);
-    Store(VariableType::JS_ANY(), glue, typedArray, offset, name, mAttr);
-}
-
 inline void StubBuilder::SetContentType(GateRef glue, GateRef typedArray, GateRef type)
 {
     GateRef offset = IntPtr(JSTypedArray::CONTENT_TYPE_OFFSET);
@@ -3674,17 +3746,20 @@ inline void StubBuilder::SetCompiledCodeFlagToFunction(GateRef glue, GateRef fun
     GateRef bitFieldOffset = IntPtr(JSFunctionBase::BIT_FIELD_OFFSET);
     GateRef oldVal = LoadPrimitive(VariableType::INT32(), function, bitFieldOffset);
 
-    GateRef mask = Int32(JSFunctionBase::COMPILED_CODE_FASTCALL_BITS << JSFunctionBase::IsCompiledCodeBit::START_BIT);
+    GateRef mask = Int32(JSFunctionBase::COMPILED_CODE_FLAGS_MASK);
     GateRef newVal = Int32Or(Int32And(oldVal, Int32Not(mask)), value);
     Store(VariableType::INT32(), glue, function, bitFieldOffset, newVal, MemoryAttribute::NoBarrier());
 }
 
-inline void StubBuilder::SetCompiledFuncEntry(GateRef glue, GateRef jsFunc, GateRef codeEntry, GateRef isFastCall)
+inline void StubBuilder::SetCompiledFuncEntry(GateRef glue, GateRef jsFunc, GateRef codeEntry, GateRef isFastCall,
+                                              GateRef isArkSteed)
 {
     SetCodeEntryToFunctionFromFuncEntry(glue, jsFunc, codeEntry);
     GateRef compiledCodeFastCallBits = Int32Add(Int32(1),
                                                 Int32LSL(isFastCall, Int32(JSFunctionBase::IsFastCallBit::START_BIT)));
-    SetCompiledCodeFlagToFunction(glue, jsFunc, compiledCodeFastCallBits);
+    GateRef compiledCodeFlags = Int32Or(compiledCodeFastCallBits,
+        Int32LSL(isArkSteed, Int32(JSFunctionBase::IsArkSteedEntryBit::START_BIT)));
+    SetCompiledCodeFlagToFunction(glue, jsFunc, compiledCodeFlags);
 }
 
 inline GateRef StubBuilder::GetIsFastCall(GateRef machineCode)
@@ -3692,6 +3767,12 @@ inline GateRef StubBuilder::GetIsFastCall(GateRef machineCode)
     GateRef bitfield = LoadPrimitive(VariableType::INT32(), machineCode, IntPtr(MachineCode::BIT_FIELD_OFFSET));
     return Int32And(Int32LSR(bitfield, Int32(MachineCode::IsFastCallBits::START_BIT)),
                     Int32((1LU << MachineCode::IsFastCallBits::SIZE) - 1));
+}
+
+inline GateRef StubBuilder::GetIsArkSteedCode(GateRef machineCode)
+{
+    GateRef bitfield = LoadPrimitive(VariableType::INT32(), machineCode, IntPtr(MachineCode::BIT_FIELD_OFFSET));
+    return Int32And(Int32LSR(bitfield, Int32(MachineCode::IsArkSteedCodeBits::START_BIT)), Int32(1));
 }
 
 inline void StubBuilder::SetTaskConcurrentFuncFlagToFunction(GateRef glue, GateRef function, GateRef value)
@@ -3931,6 +4012,11 @@ inline GateRef StubBuilder::IsNativeMethod(GateRef method)
 inline GateRef StubBuilder::JudgeAotAndFastCall(GateRef jsFunc, CircuitBuilder::JudgeMethodType type)
 {
     return env_->GetBuilder()->JudgeAotAndFastCall(jsFunc, type);
+}
+
+inline GateRef StubBuilder::HasArkSteedEntry(GateRef jsFunc)
+{
+    return env_->GetBuilder()->HasArkSteedEntry(jsFunc);
 }
 
 inline GateRef StubBuilder::GetExpectedNumOfArgs(GateRef method)
@@ -4190,7 +4276,7 @@ inline GateRef StubBuilder::LoadPfHeaderFromConstPool(GateRef glue, GateRef jsFu
     GateRef constPool = Load(VariableType::JS_ANY(), glue, method, IntPtr(Method::CONSTANT_POOL_OFFSET));
     auto length = GetLengthOfTaggedArray(constPool);
     auto index = Int32Sub(length, Int32(ConstantPool::JS_PANDA_FILE_INDEX));
-    auto jsPandaFile = GetValueFromTaggedArray(glue, constPool, index);
+    auto jsPandaFile = env_->GetBuilder()->GetExtendElementFromConstPool(glue, constPool, index);
     auto jsPfAddr = ChangeInt64ToIntPtr(ChangeTaggedPointerToInt64(jsPandaFile));
     auto pfAddr = LoadPrimitive(VariableType::NATIVE_POINTER(), jsPfAddr, Int32(JSPandaFile::PF_OFFSET));
     auto pfHeader = LoadPrimitive(VariableType::NATIVE_POINTER(), pfAddr, Int32(0));
@@ -4203,7 +4289,7 @@ inline GateRef StubBuilder::LoadHCIndexInfosFromConstPool(GateRef glue, GateRef 
     GateRef constPool = Load(VariableType::JS_ANY(), glue, method, IntPtr(Method::CONSTANT_POOL_OFFSET));
     auto length = GetLengthOfTaggedArray(constPool);
     auto index = Int32Sub(length, Int32(ConstantPool::CONSTANT_INDEX_INFO_INDEX));
-    return GetValueFromTaggedArray(glue, constPool, index);
+    return env_->GetBuilder()->GetExtendElementFromConstPool(glue, constPool, index);
 }
 
 inline GateRef StubBuilder::LoadHCIndexFromConstPool(
@@ -4321,6 +4407,12 @@ inline GateRef StubBuilder::GetArrayBufferData(GateRef glue, GateRef buffer)
 inline GateRef StubBuilder::GetArrayBufferByteLength(GateRef buffer)
 {
     GateRef offset = IntPtr(JSArrayBuffer::BYTE_LENGTH_OFFSET);
+    return LoadPrimitive(VariableType::INT32(), buffer, offset);
+}
+
+inline GateRef StubBuilder::GetSendableArrayBufferByteLength(GateRef buffer)
+{
+    GateRef offset = IntPtr(JSSendableArrayBuffer::BYTE_LENGTH_OFFSET);
     return LoadPrimitive(VariableType::INT32(), buffer, offset);
 }
 
@@ -4576,12 +4668,6 @@ inline GateRef StubBuilder::GetIdxOfResolvedRecordIndexBinding(GateRef resolvedB
     return LoadPrimitive(VariableType::INT32(), resolvedBinding, indexOffset);
 }
 
-inline GateRef StubBuilder::GetModuleRecord(GateRef glue, GateRef resolvedBinding)
-{
-    GateRef moduleRecordIdxOffset = IntPtr(ResolvedRecordIndexBinding::MODULE_RECORD_INDEX_OFFSET);
-    return Load(VariableType::JS_ANY(), glue, resolvedBinding, moduleRecordIdxOffset);
-}
-
 inline GateRef StubBuilder::GetBindingName(GateRef glue, GateRef resolvedBinding)
 {
     GateRef bindingNameOffset = IntPtr(ResolvedRecordBinding::BINDING_NAME_OFFSET);
@@ -4725,5 +4811,179 @@ inline GateRef StubBuilder::GetStringWrapperToPrimitiveDetector(GateRef env)
 {
     return env_->GetBuilder()->GetStringWrapperToPrimitiveDetector(env);
 }
+
+// ConcurrentApiScope implementation
+inline GateRef StubBuilder::AtomicCmpXchgI32(GateRef obj, GateRef offset, GateRef expected, GateRef desired)
+{
+    GateRef address = PtrAdd(obj, offset);
+    return env_->GetBuilder()->AtomicCmpXchg(VariableType::INT32(), address, expected, desired);
+}
+
+inline GateRef StubBuilder::AtomicLoadAcquireI32(GateRef base, GateRef offset)
+{
+    GateRef address = PtrAdd(base, offset);
+    return env_->GetBuilder()->AtomicLoadAcquire(VariableType::INT32(), address);
+}
+
+// Reference: ConcurrentApiScope::CanRead()
+// scopeEntered: initialized to False(), set to True() when CAS succeeds
+template<typename Container>
+inline void StubBuilder::ConcurrentApiScopeCanRead(GateRef glue, GateRef sharedObj,
+    Variable &expectModRecord, Variable &desiredModRecord, Variable &scopeEntered, Label *exit)
+{
+    auto env = GetEnvironment();
+    Label loopHead(env);
+    Label loopEnd(env);
+    Label tryCAS(env);
+    Label casSuccess(env);
+    Label throwError(env);
+    static constexpr uint32_t WRITE_MOD_MASK = 1 << 31;
+
+    Jump(&loopHead);
+    LoopBegin(&loopHead);
+    {
+        expectModRecord = AtomicLoadAcquireI32(sharedObj, Int32(Container::MOD_RECORD_OFFSET));
+        GateRef hasWriter = Int32And(*expectModRecord, Int32(WRITE_MOD_MASK));
+        BRANCH(Int32Equal(hasWriter, Int32(0)), &tryCAS, &throwError);
+    }
+    Bind(&tryCAS);
+    {
+        desiredModRecord = Int32Add(*expectModRecord, Int32(1));
+        GateRef oldValue = AtomicCmpXchgI32(sharedObj, Int32(Container::MOD_RECORD_OFFSET),
+            *expectModRecord, *desiredModRecord);
+        BRANCH(Int32Equal(oldValue, *expectModRecord), &casSuccess, &loopEnd);
+    }
+    Bind(&casSuccess);
+    {
+        scopeEntered = True();
+        Jump(exit);
+    }
+    Bind(&loopEnd);
+    {
+        LoopEnd(&loopHead);
+    }
+    Bind(&throwError);
+    {
+        int errorCode = containers::ErrorFlag::CONCURRENT_MODIFICATION_ERROR;
+        int errorMsg = GET_MESSAGE_STRING_ID(ConcurrentApiScopeError);
+        ThrowContainerBusinessError(glue, errorCode, errorMsg);
+        Jump(exit);
+    }
+}
+
+// Reference: ConcurrentApiScope::ReadDone()
+// scopeEntered logic: check scopeEntered variable, only execute ReadDone if scopeEntered == true
+template<typename Container>
+inline void StubBuilder::ConcurrentApiScopeReadDone(GateRef glue, GateRef sharedObj,
+    Variable &expectModRecord, Variable &desiredModRecord, Variable &scopeEntered, Label *exit)
+{
+    auto env = GetEnvironment();
+    Label doReadDone(env);
+    Label loopHead(env);
+    Label loopEnd(env);
+    Label updateDesired(env);
+    Label checkState(env);
+    Label throwError(env);
+    static constexpr uint32_t WRITE_MOD_MASK = 1 << 31;
+
+    // Check scopeEntered first - if CanRead failed, skip ReadDone
+    BRANCH(*scopeEntered, &doReadDone, exit);
+    Bind(&doReadDone);
+    {
+        GateRef temp = *expectModRecord;
+        expectModRecord = *desiredModRecord;
+        desiredModRecord = temp;
+
+        Jump(&loopHead);
+        LoopBegin(&loopHead);
+        {
+            GateRef oldValue = AtomicCmpXchgI32(sharedObj, Int32(Container::MOD_RECORD_OFFSET),
+                *expectModRecord, *desiredModRecord);
+            BRANCH(Int32Equal(oldValue, *expectModRecord), exit, &checkState);
+        }
+        Bind(&checkState);
+        {
+            expectModRecord = AtomicLoadAcquireI32(sharedObj, Int32(Container::MOD_RECORD_OFFSET));
+            GateRef hasWriter = Int32NotEqual(Int32And(*expectModRecord, Int32(WRITE_MOD_MASK)), Int32(0));
+            GateRef isZero = Int32Equal(*expectModRecord, Int32(0));
+            BRANCH(BitOr(hasWriter, isZero), &throwError, &updateDesired);
+        }
+        Bind(&updateDesired);
+        {
+            desiredModRecord = Int32Sub(*expectModRecord, Int32(1));
+            Jump(&loopEnd);
+        }
+        Bind(&loopEnd);
+        {
+            LoopEnd(&loopHead);
+        }
+        Bind(&throwError);
+        {
+            int errorCode = containers::ErrorFlag::CONCURRENT_MODIFICATION_ERROR;
+            int errorMsg = GET_MESSAGE_STRING_ID(ConcurrentApiScopeError);
+            ThrowContainerBusinessError(glue, errorCode, errorMsg);
+            Jump(exit);
+        }
+    }
+}
+
+// Reference: ConcurrentApiScope::CanWrite()
+// scopeEntered: initialized to False(), set to True() when CAS succeeds
+template<typename Container>
+inline void StubBuilder::ConcurrentApiScopeCanWrite(GateRef glue, GateRef sharedObj,
+    Variable &scopeEntered, Label *exit)
+{
+    auto env = GetEnvironment();
+    Label success(env);
+    Label throwError(env);
+    static constexpr uint32_t WRITE_MOD_MASK = 1 << 31;
+
+    constexpr uint32_t expectedModRecord = 0;
+    constexpr uint32_t desiredModRecord = WRITE_MOD_MASK;
+    GateRef oldValue = AtomicCmpXchgI32(sharedObj, Int32(Container::MOD_RECORD_OFFSET),
+        Int32(expectedModRecord), Int32(desiredModRecord));
+    BRANCH(Int32Equal(oldValue, Int32(expectedModRecord)), &success, &throwError);
+    Bind(&success);
+    {
+        scopeEntered = True();
+        Jump(exit);
+    }
+    Bind(&throwError);
+    {
+        int errorCode = containers::ErrorFlag::CONCURRENT_MODIFICATION_ERROR;
+        int errorMsg = GET_MESSAGE_STRING_ID(ConcurrentApiScopeError);
+        ThrowContainerBusinessError(glue, errorCode, errorMsg);
+        Jump(exit);
+    }
+}
+
+// Reference: ConcurrentApiScope::WriteDone()
+// scopeEntered logic: check scopeEntered variable, only execute WriteDone if scopeEntered == true
+template<typename Container>
+inline void StubBuilder::ConcurrentApiScopeWriteDone(GateRef glue, GateRef sharedObj,
+    Variable &scopeEntered, Label *exit)
+{
+    auto env = GetEnvironment();
+    Label doWriteDone(env);
+    Label throwError(env);
+    static constexpr uint32_t WRITE_MOD_MASK = 1 << 31;
+
+    // Check scopeEntered first - if CanWrite failed, skip WriteDone
+    BRANCH(*scopeEntered, &doWriteDone, exit);
+    Bind(&doWriteDone);
+    {
+        GateRef oldValue = AtomicCmpXchgI32(sharedObj, Int32(Container::MOD_RECORD_OFFSET),
+            Int32(WRITE_MOD_MASK), Int32(0));
+        BRANCH(Int32Equal(oldValue, Int32(WRITE_MOD_MASK)), exit, &throwError);
+    }
+    Bind(&throwError);
+    {
+        int errorCode = containers::ErrorFlag::CONCURRENT_MODIFICATION_ERROR;
+        int errorMsg = GET_MESSAGE_STRING_ID(ConcurrentApiScopeError);
+        ThrowContainerBusinessError(glue, errorCode, errorMsg);
+        Jump(exit);
+    }
+}
+
 } //  namespace panda::ecmascript::kungfu
 #endif // ECMASCRIPT_COMPILER_STUB_INL_H

@@ -15,12 +15,59 @@
 
 #include "ecmascript/mem/barriers_get-inl.h"
 #include "ecmascript/mem/local_cmc/cc_evacuator-inl.h"
+#include "ecmascript/mem/shared_heap/shared_cc_evacuator.h"
 #include "ecmascript/mem/work_manager-inl.h"
 #include "common_components/heap/allocator/region_desc.h"
 #include "common_components/mutator/mutator.h"
 #include "ecmascript/runtime.h"
 
 namespace panda::ecmascript {
+namespace {
+JSTaggedType ForwardGCRootValue(const JSThread *thread, JSTaggedType rawValue)
+{
+    JSTaggedValue value(rawValue);
+    if (!value.IsHeapObject()) {
+        return rawValue;
+    }
+
+    TaggedObject *object = value.GetHeapObject();
+    Region *objectRegion = Region::ObjectAddressToRange(object);
+    if (objectRegion->InSharedHeap() || !objectRegion->IsFromRegion()) {
+        return rawValue;
+    }
+
+    MarkWord markWord(object, RELAXED_LOAD);
+    TaggedObject *toObject = nullptr;
+    if (markWord.IsForwardingAddress()) {
+        toObject = markWord.ToForwardingAddress();
+    } else {
+        toObject = thread->GetLocalCCEvacuator()->Copy(object, markWord);
+    }
+
+    JSTaggedValue forwarded(toObject);
+    return forwarded.GetRawData();
+}
+}  // namespace
+
+JSTaggedType Barriers::ReadBarrierForGCRoot(const JSThread *thread, uintptr_t slotAddress)
+{
+    ASSERT(thread != nullptr && thread->NeedReadBarrier());
+    auto field = reinterpret_cast<volatile std::atomic<JSTaggedType> *>(slotAddress);
+    JSTaggedType current = field->load(std::memory_order_relaxed);
+    JSTaggedType forwarded = ForwardGCRootValue(thread, current);
+    if (forwarded != current) {
+        field->store(forwarded, std::memory_order_relaxed);
+    }
+    return forwarded;
+}
+
+JSTaggedType Barriers::NormalizeGCRoot(const JSThread *thread, JSTaggedType value)
+{
+    ASSERT(thread != nullptr && thread->NeedReadBarrier());
+    return ForwardGCRootValue(thread, value);
+}
+
+template <ReferenceType refType>
 void Barriers::Update(const JSThread *thread, uintptr_t slotAddr, Region *objectRegion, TaggedObject *value,
                       Region *valueRegion, WriteBarrierType writeType)
 {
@@ -29,27 +76,36 @@ void Barriers::Update(const JSThread *thread, uintptr_t slotAddr, Region *object
         return;
     }
     auto heap = thread->GetEcmaVM()->GetHeap();
+    TaggedObject *heapValue = JSTaggedValue(value).GetHeapObject();
     if (heap->IsConcurrentFullMark()) {
         if (valueRegion->InCollectSet() && !objectRegion->InYoungSpaceOrCSet()) {
-            objectRegion->AtomicInsertCrossRegionRSet(slotAddr);
+            objectRegion->AtomicInsertCrossRegionRSet<refType>(slotAddr);
         }
     } else if (heap->IsYoungMark()) {
+#if USE_STICKY_CMS_GC
+        if (heapValue->IsInOld()) {
+            return;
+        }
+#else
         if (!valueRegion->InYoungSpace()) {
             return;
         }
+#endif
     }
 
     // Weak ref record and concurrent mark record maybe conflict.
     // This conflict is solved by keeping alive weak reference. A small amount of floating garbage may be added.
-    TaggedObject *heapValue = JSTaggedValue(value).GetHeapObject();
     if (valueRegion->IsFreshRegion()) {
-        valueRegion->NonAtomicMark(heapValue);
+        if (valueRegion->NonAtomicMark(heapValue)) {
+            valueRegion->IncreaseAliveObject(heapValue->GetSize());
+        }
     } else if (writeType == WriteBarrierType::NORMAL && valueRegion->AtomicMark(heapValue)) {
         std::atomic_thread_fence(std::memory_order_seq_cst);
         heap->GetWorkManager()->GetWorkNodeHolder(MAIN_THREAD_INDEX)->Push(heapValue);
     }
 }
 
+template <ReferenceType refType>
 void Barriers::UpdateShared(const JSThread *thread, uintptr_t slotAddr, Region *objectRegion, TaggedObject *value,
                             Region *valueRegion)
 {
@@ -57,8 +113,8 @@ void Barriers::UpdateShared(const JSThread *thread, uintptr_t slotAddr, Region *
 
     ASSERT(DaemonThread::GetInstance()->IsConcurrentMarkingOrFinished());
     ASSERT(valueRegion->InSharedSweepableSpace());
-    if (valueRegion->InSCollectSet() && objectRegion->InSharedHeap()) {
-        objectRegion->AtomicInsertCrossRegionRSet(slotAddr);
+    if (valueRegion->InSCollectSet() && objectRegion->InSharedHeap() && (valueRegion != objectRegion)) {
+        objectRegion->AtomicInsertCrossRegionRSet<refType>(slotAddr);
     }
     // Weak ref record and concurrent mark record maybe conflict.
     // This conflict is solved by keeping alive weak reference. A small amount of floating garbage may be added.
@@ -70,6 +126,18 @@ void Barriers::UpdateShared(const JSThread *thread, uintptr_t slotAddr, Region *
         SharedHeap::GetInstance()->GetWorkManager()->PushToLocalMarkingBuffer(localBuffer, heapValue);
     }
 }
+
+// explicit Instantiation to avoid compile optimization
+template PUBLIC_API void Barriers::Update<ReferenceType::NORMAL>(const JSThread *, uintptr_t, Region *,
+    TaggedObject *, Region *, WriteBarrierType);
+template PUBLIC_API void Barriers::UpdateShared<ReferenceType::NORMAL>(const JSThread *, uintptr_t, Region *,
+    TaggedObject *, Region *);
+#ifdef USE_COMPRESSED_POINTER
+template PUBLIC_API void Barriers::Update<ReferenceType::COMPRESSED>(const JSThread *, uintptr_t, Region *,
+    TaggedObject *, Region *, WriteBarrierType);
+template PUBLIC_API void Barriers::UpdateShared<ReferenceType::COMPRESSED>(const JSThread *, uintptr_t, Region *,
+    TaggedObject *, Region *);
+#endif
 
 template <Region::RegionSpaceKind kind>
 ARK_NOINLINE bool BatchBitSet([[maybe_unused]] const JSThread* thread, Region* objectRegion, JSTaggedValue* dst,
@@ -100,10 +168,17 @@ ARK_NOINLINE bool BatchBitSet([[maybe_unused]] const JSThread* thread, Region* o
             continue;
         }
         if constexpr (kind == Region::InGeneralOld) {
+#if USE_STICKY_CMS_GC
+            if (!valueRegion->InSharedHeap() && taggedValue.GetTaggedObject()->IsInYoung()) {
+                updater.UpdateOldToNew();
+                continue;
+            }
+#else
             if (valueRegion->InYoungSpace()) {
                 updater.UpdateOldToNew();
                 continue;
             }
+#endif
         }
     }
     return allValueNotHeap;
@@ -218,7 +293,7 @@ void Barriers::CMCArrayCopyReadBarrierForward(const JSThread *thread, JSTaggedVa
                                               size_t count)
 {
     for (size_t i = 0; i < count; i++) {
-        JSTaggedType valueToRef = Barriers::GetTaggedValue(thread, src, i * sizeof(JSTaggedType));
+        JSTaggedType valueToRef = Barriers::GetTaggedValue(thread, ToUintPtr(src) + i * sizeof(JSTaggedType));
         Barriers::SetObject<false>(thread, dst, i * sizeof(JSTaggedType), valueToRef);
     }
 }
@@ -227,54 +302,150 @@ void Barriers::CMCArrayCopyReadBarrierBackward(const JSThread *thread, JSTaggedV
                                                size_t count)
 {
     for (size_t i = count; i > 0; i--) {
-        JSTaggedType valueToRef = Barriers::GetTaggedValue(thread, src, (i - 1) * sizeof(JSTaggedType));
+        JSTaggedType valueToRef = Barriers::GetTaggedValue(thread, ToUintPtr(src) + (i - 1) * sizeof(JSTaggedType));
         Barriers::SetObject<false>(thread, dst, (i - 1) * sizeof(JSTaggedType), valueToRef);
     }
 }
 
+void Barriers::CheckObjectForCMS(const JSThread *thread, void *obj, size_t offset, JSTaggedValue value,
+                                 bool writeBarrierCheck)
+{
+    Region *objectRegion = Region::ObjectAddressToRange(static_cast<TaggedObject *>(obj));
+    if (!objectRegion->InSharedHeap() && static_cast<TaggedObject *>(obj)->IsInvalid()) {
+        LOG_ECMA(FATAL) << "obj state is invalid";
+    }
+    if (thread->IsReadyToConcurrentMark() && objectRegion->InSlotSpace() &&
+        static_cast<TaggedObject *>(obj)->IsInOld() && !objectRegion->Test(obj)) {
+        LOG_ECMA(FATAL) << "obj is old but not marked";
+    }
+    if (value.IsHeapObject()) {
+        TaggedObject *heapValue = value.GetHeapObject();
+        Region *valueRegion = Region::ObjectAddressToRange(heapValue);
+        if (!valueRegion->InSharedHeap() && heapValue->IsInvalid()) {
+            LOG_ECMA(FATAL) << "value state is invalid";
+        }
+        if (thread->IsReadyToConcurrentMark()) {
+            if (valueRegion->InSlotSpace() && heapValue->IsInOld() && !valueRegion->Test(heapValue)) {
+                LOG_ECMA(FATAL) << "value is old but not marked";
+            }
+            if (!writeBarrierCheck && valueRegion->InSlotSpace() && static_cast<TaggedObject *>(obj)->IsInOld() &&
+                heapValue->IsInYoung() &&
+                !objectRegion->TestOldToNew<ReferenceType::NORMAL>(reinterpret_cast<uintptr_t>(obj) + offset)) {
+                LOG_ECMA(FATAL) << "old to new reference not marked in RSet";
+            }
+        }
+    }
+}
+
+void Barriers::CheckValueForCMS(const JSThread *thread, JSTaggedValue value)
+{
+    if (value.IsHeapObject()) {
+        TaggedObject *heapValue = value.GetHeapObject();
+        Region *valueRegion = Region::ObjectAddressToRange(heapValue);
+        if (!valueRegion->InSharedHeap() && heapValue->IsInvalid()) {
+            LOG_ECMA(FATAL) << "value state is invalid";
+        }
+        if (thread->IsReadyToConcurrentMark()) {
+            if (valueRegion->InSlotSpace() && heapValue->IsInOld() && !valueRegion->Test(heapValue)) {
+                LOG_ECMA(FATAL) << "value is old but not marked";
+            }
+        }
+    }
+}
+
 #ifndef USE_CMC_GC
-JSTaggedType ReadBarrierImpl(const JSThread *thread, uintptr_t slotAddress)
+JSTaggedType ReadBarrierImpl(const JSThread *thread, uintptr_t slotAddress, JSTaggedValue value)
 {
     ASSERT(!thread->IsJitThread());
     ASSERT(thread->NeedReadBarrier());
     ObjectSlot slot(slotAddress);
-    JSTaggedValue value = slot.GetTaggedValue();
     auto object = value.GetHeapObject();
     if (UNLIKELY(object == nullptr)) {
         return slot.GetTaggedType();
     }
     Region *objectRegion = Region::ObjectAddressToRange(object);
-    if (objectRegion->InSharedHeap()) {
-        return slot.GetTaggedType();
-    }
     if (objectRegion->IsFromRegion()) {
         MarkWord markWord(object, RELAXED_LOAD);
         TaggedObject *toObject = nullptr;
         if (markWord.IsForwardingAddress()) {
             toObject = markWord.ToForwardingAddress();
         } else {
-            toObject = thread->GetLocalCCEvacuator()->Copy(object, markWord);
+            bool inShared = objectRegion->InSharedHeap();
+            if (inShared) {
+                toObject = thread->GetSharedCCEvacuator()->Copy(object, markWord);
+            } else {
+                toObject = thread->GetLocalCCEvacuator()->Copy(object, markWord);
+            }
         }
+        TaggedObject *rawObject = value.GetRawHeapObject();
         if (value.IsWeak()) {
-            slot.UpdateWeak(ToUintPtr(toObject));
+            slot.CASUpdateWeak(rawObject, toObject);
         } else {
-            slot.Update(toObject);
+            slot.CASUpdate(rawObject, toObject);
         }
         return slot.GetTaggedType();
     }
     return slot.GetTaggedType();
 }
 
-JSTaggedType ReadBarrierForStringTableSlotImpl(JSTaggedType value)
+TemporaryJSTaggedValue ReadBarrierForCompressedImpl(const JSThread *thread, uintptr_t slotAddress,
+    TemporaryJSTaggedValue temporaryValue)
+{
+    ASSERT(!thread->IsJitThread());
+    ASSERT(thread->NeedReadBarrier());
+    CompressedObjectSlot slot(slotAddress);
+    TaggedObject *object = temporaryValue.GetHeapObject();
+    if (UNLIKELY(object == nullptr)) {
+        return slot.GetTaggedValue();
+    }
+    Region *objectRegion = Region::ObjectAddressToRange(object);
+    if (objectRegion->IsFromRegion()) {
+        MarkWord markWord(object, RELAXED_LOAD);
+        TaggedObject *toObject = nullptr;
+        if (markWord.IsForwardingAddress()) {
+            toObject = markWord.ToForwardingAddress();
+        } else {
+            bool inShared = objectRegion->InSharedHeap();
+            if (inShared) {
+                toObject = thread->GetSharedCCEvacuator()->Copy(object, markWord);
+            } else {
+                toObject = thread->GetLocalCCEvacuator()->Copy(object, markWord);
+            }
+        }
+        ASSERT(!temporaryValue.IsWeakForHeapObject());
+        slot.CASUpdate(temporaryValue.GetRawHeapObject(), toObject);
+        return slot.GetTaggedValue();
+    }
+    return slot.GetTaggedValue();
+}
+
+JSTaggedType ReadBarrierForStringTableSlotImpl(JSTaggedType value, const JSThread *thread)
 {
     if (value == reinterpret_cast<JSTaggedType>(nullptr)) {
         return reinterpret_cast<JSTaggedType>(nullptr);
     }
     Region *objectRegion = Region::ObjectAddressToRange(value);
-    if (!objectRegion->InSharedSweepableSpace()) {
+    if (!objectRegion->InSharedSweepableSpace() || objectRegion->IsToRegion()) {
         return value;
     }
+    if (objectRegion->IsFromRegion()) {
+        MarkWord markWord(reinterpret_cast<TaggedObject *>(value), RELAXED_LOAD);
+        if (markWord.IsForwardingAddress()) {
+            return reinterpret_cast<JSTaggedType>(markWord.ToForwardingAddress());
+        }
+        if (objectRegion->Test(value)) {
+            TaggedObject *toObject = thread->GetSharedCCEvacuator()->Copy(
+                reinterpret_cast<TaggedObject *>(value), markWord);
+            return reinterpret_cast<JSTaggedType>(toObject);
+        }
+        return reinterpret_cast<JSTaggedType>(nullptr);
+    }
     if (objectRegion->Test(value)) {
+        if (objectRegion->InSCollectSet()) {
+            MarkWord markWord(reinterpret_cast<TaggedObject *>(value), RELAXED_LOAD);
+            ASSERT(markWord.IsForwardingAddress());
+            return reinterpret_cast<JSTaggedType>(markWord.ToForwardingAddress());
+        }
         return value;
     }
     return reinterpret_cast<JSTaggedType>(nullptr);

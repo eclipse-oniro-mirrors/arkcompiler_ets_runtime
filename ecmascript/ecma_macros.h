@@ -69,6 +69,7 @@
 #endif
 
 #ifdef ENABLE_HISYSEVENT
+#ifndef EXCLUDE_PGO
     #define SEND_HISYSEVENT(domain, eventName, eventType, ...)                                          \
         {                                                                                               \
             int32_t ret = HiSysEventWrite(OHOS::HiviewDFX::HiSysEvent::Domain::domain, #eventName,      \
@@ -79,6 +80,17 @@
                                 << ", eventName = " << #eventName << ", ret = " << ret;                 \
             }                                                                                           \
         }
+#else
+    #define SEND_HISYSEVENT(domain, eventName, eventType, ...)                                          \
+        {                                                                                               \
+            int32_t ret = HiSysEventWrite(OHOS::HiviewDFX::HiSysEvent::Domain::domain, #eventName,      \
+                OHOS::HiviewDFX::HiSysEvent::EventType::eventType, ##__VA_ARGS__);                      \
+            if (ret != 0) {                                                                             \
+                LOG_ECMA(ERROR) << "Send hiSysEvent failed, domain = " << #domain                       \
+                                << ", eventName = " << #eventName << ", ret = " << ret;                 \
+            }                                                                                           \
+        }
+#endif
 #else
     #define SEND_HISYSEVENT(domain, eventName, eventType, keyValues...)
 #endif
@@ -743,6 +755,15 @@
     void VisitRangeSlot(BaseObjectVisitor<DerivedVisitor> &visitor)                                       \
     {                                                                                                     \
         ArrayBodyIterator<visitType, (BEGIN_OFFSET)>::IterateBody(this, visitor, (REF_LENGTH), (LENGTH)); \
+    }
+
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define DECL_VISIT_CONST_POOL(BEGIN_OFFSET, COMPRESSED_REF_LENGTH, REF_LENGTH, LENGTH)                    \
+    template <VisitType visitType, class DerivedVisitor>                                                  \
+    void VisitRangeSlot(BaseObjectVisitor<DerivedVisitor> &visitor)                                       \
+    {                                                                                                     \
+        ArrayBodyIterator<visitType, (BEGIN_OFFSET)>::IterateBodyWithCompressedPart(                      \
+            this, visitor, (COMPRESSED_REF_LENGTH), (REF_LENGTH), (LENGTH));                              \
     }
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)

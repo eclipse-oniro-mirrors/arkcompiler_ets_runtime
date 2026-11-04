@@ -24,13 +24,13 @@
 #include "ecmascript/ic/ic_runtime.h"
 #include "ecmascript/interpreter/fast_runtime_stub-inl.h"
 #include "ecmascript/ic/proto_change_details.h"
-#include "ecmascript/js_tagged_value-inl.h"
+#include "ecmascript/js_tagged_value_wrapper-inl.h"
 #include "ecmascript/js_array.h"
 #include "ecmascript/js_hclass-inl.h"
 #include "ecmascript/js_function.h"
 #include "ecmascript/js_proxy.h"
 #include "ecmascript/js_handle.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/object_factory-inl.h"
 #include "ecmascript/runtime_call_id.h"
 #include "ecmascript/js_primitive_ref.h"
@@ -41,7 +41,7 @@ JSTaggedValue ICRuntimeStub::LoadGlobalICByName(JSThread *thread, ProfileTypeInf
                                                 bool tryLoad)
 {
     INTERPRETER_TRACE(thread, LoadGlobalICByName);
-    JSTaggedValue handler = profileTypeInfo->Get(thread, slotId);
+    JSTaggedValue handler = profileTypeInfo->GetICSlot(thread, slotId);
     if (handler.IsHeapObject()) {
         auto result = LoadGlobal(thread, handler);
         if (!result.IsHole()) {
@@ -57,7 +57,7 @@ JSTaggedValue ICRuntimeStub::StoreGlobalICByName(JSThread *thread, ProfileTypeIn
                                                  JSTaggedValue value, uint32_t slotId, bool tryStore)
 {
     INTERPRETER_TRACE(thread, StoreGlobalICByName);
-    JSTaggedValue handler = profileTypeInfo->Get(thread, slotId);
+    JSTaggedValue handler = profileTypeInfo->GetICSlot(thread, slotId);
     if (handler.IsHeapObject()) {
         auto result = StoreGlobal(thread, value, handler);
         if (!result.IsHole()) {
@@ -74,7 +74,12 @@ JSTaggedValue ICRuntimeStub::CheckPolyHClass(const JSThread *thread, JSTaggedVal
         ASSERT(cachedValue.IsTaggedArray());
         TaggedArray *array = TaggedArray::Cast(cachedValue.GetTaggedObject());
         uint32_t length = array->GetLength();
+#if ENABLE_V70_OPTIMIZATION
+        ASSERT(length >= 2); // 2 means one ic, two slot, at least one ic exist
+        for (int i = length - 2; i >= 0; i -= 2) {  // 2 means one ic, two slot
+#else
         for (uint32_t i = 0; i < length; i += 2) {  // 2 means one ic, two slot
+#endif
             auto result = array->Get(thread, i);
             if (!result.IsUndefined() && result.GetWeakReferent() == hclass) {
                 return array->Get(thread, i + 1);
@@ -348,11 +353,11 @@ void ICRuntimeStub::StoreWithTransition(JSThread *thread, JSObject *receiver, JS
     }
     JSHandle<JSObject> objHandle(thread, receiver);
     ElementsKind oldKind = receiver->GetJSHClass()->GetElementsKind();
-    JSHClass::RestoreElementsKindToGeneric(newHClass);
+    JSHClass::RestoreElementsKindToGeneric(*newHClassHandle);
 #if ECMASCRIPT_ENABLE_IC
     JSHClass::NotifyHclassChanged(thread, oldHClassHandle, newHClassHandle);
 #endif
-    objHandle->SynchronizedTransitionClass(thread, newHClass);
+    objHandle->SynchronizedTransitionClass(thread, *newHClassHandle);
     JSObject::TryMigrateToGenericKindForJSObject(thread, objHandle, oldKind);
 
     ASSERT(HandlerBase::IsField(handlerInfo));
@@ -635,7 +640,7 @@ JSTaggedValue ICRuntimeStub::StoreElement(JSThread *thread, JSObject *receiver, 
         } else if (HandlerBase::IsJSArray(handlerInfo)) {
             JSTaggedValue receiveValue = receiverHandle.GetTaggedValue();
             if (receiveValue.IsJSCOWArray(thread)) {
-                // Copy on write array.
+                // The feedback bit guides ArkSteed codegen; IC hits always copy COW elements.
                 JSArray::CheckAndCopyArray(thread, JSHandle<JSArray>::Cast(receiverHandle));
             }
             JSArray *arr = JSArray::Cast(*receiverHandle);

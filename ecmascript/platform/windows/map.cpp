@@ -36,7 +36,8 @@
 namespace panda::ecmascript {
 static constexpr int INSUFFICIENT_CONTINUOUS_MEM = 1455;
 
-MemMap PageMap(size_t size, int prot, size_t alignment, void *addr, [[maybe_unused]] int flags)
+MemMap PageMap(size_t size, int prot, size_t alignment, void *addr, [[maybe_unused]] int flags,
+               [[maybe_unused]] bool jitfort)
 {
     ASSERT(size == AlignUp(size, PageSize()));
     ASSERT(alignment == AlignUp(alignment, PageSize()));
@@ -57,22 +58,12 @@ MemMap PageMap(size_t size, int prot, size_t alignment, void *addr, [[maybe_unus
     return MemMap(result, result, size);
 }
 
-void PageUnmap(MemMap it)
+void PageUnmap(MemMap it, [[maybe_unused]] bool jitfort)
 {
     if (!VirtualFree(it.GetOriginAddr(), 0, MEM_RELEASE)) {
         int errCode = GetLastError();
         LOG_ECMA(ERROR) << "PageUnmap failed, error code is " << errCode;
     }
-}
-
-MemMap JitFortPageMap(size_t size, int prot, size_t alignment, void *addr, [[maybe_unused]] int flags)
-{
-    return PageMap(size, prot, alignment, addr, flags);
-}
-
-void JitFortPageUnmap(MemMap it)
-{
-    PageUnmap(it);
 }
 
 MemMap MachineCodePageMap(size_t size, int prot, size_t alignment)
@@ -85,7 +76,7 @@ MemMap MachineCodePageMap(size_t size, int prot, size_t alignment)
 void MachineCodePageUnmap(MemMap it)
 {
     PageClearTag(it.GetMem(), it.GetSize());
-    if (!PageProtect(it.GetMem(), it.GetSize(), PAGE_PROT_NONE)) {
+    if (PageProtect(it.GetMem(), it.GetSize(), PAGE_PROT_NONE) != 0) {
         return;
     }
     PageUnmap(it);
@@ -93,6 +84,33 @@ void MachineCodePageUnmap(MemMap it)
 
 void PageRelease([[maybe_unused]] void *mem, [[maybe_unused]] size_t size)
 {
+}
+
+// No memfd on Windows; callers fall back to filling the memory themselves.
+bool CreateFillTemplate([[maybe_unused]] size_t size, [[maybe_unused]] uint64_t fillWord,
+                        [[maybe_unused]] size_t wordSize)
+{
+    return false;
+}
+
+void DestroyFillTemplates()
+{
+}
+
+bool IsFillTemplateReady([[maybe_unused]] size_t wordSize)
+{
+    return false;
+}
+
+bool MapFillTemplate([[maybe_unused]] void *addr, [[maybe_unused]] size_t size,
+                     [[maybe_unused]] size_t wordSize)
+{
+    return false;
+}
+
+bool UnmapFillTemplate([[maybe_unused]] void *addr, [[maybe_unused]] size_t size)
+{
+    return false;
 }
 
 void PagePreRead([[maybe_unused]] void *mem, [[maybe_unused]] size_t size)
@@ -108,16 +126,16 @@ void PageClearTag([[maybe_unused]] void *mem, [[maybe_unused]] size_t size)
 {
 }
 
-bool PageProtect(void *mem, size_t size, int prot)
+int PageProtect(void *mem, size_t size, int prot)
 {
     [[maybe_unused]] DWORD oldProtect;
     if (!VirtualProtect(mem, size, prot, &oldProtect)) {
         int errCode = GetLastError();
         LOG_ECMA(ERROR) << "PageProtect mem = " << mem << ", size = " << size <<
             ", change to " << prot << " failed, error code is " << errCode;
-        return false;
+        return errCode;
     }
-    return true;
+    return 0;
 }
 
 size_t PageSize()

@@ -20,14 +20,14 @@
 #include "ecmascript/builtins/builtins_arraybuffer.h"
 #include "ecmascript/builtins/builtins_async_from_sync_iterator.h"
 #include "ecmascript/builtins/builtins_async_function.h"
-#include "ecmascript/builtins/builtins_async_iterator.h"
 #include "ecmascript/builtins/builtins_async_generator.h"
+#include "ecmascript/builtins/builtins_async_iterator.h"
 #include "ecmascript/builtins/builtins_atomics.h"
 #include "ecmascript/builtins/builtins_bigint.h"
 #include "ecmascript/builtins/builtins_boolean.h"
+#include "ecmascript/builtins/builtins_cjs_exports.h"
 #include "ecmascript/builtins/builtins_cjs_module.h"
 #include "ecmascript/builtins/builtins_cjs_require.h"
-#include "ecmascript/builtins/builtins_cjs_exports.h"
 #include "ecmascript/builtins/builtins_dataview.h"
 #include "ecmascript/builtins/builtins_date.h"
 #include "ecmascript/builtins/builtins_errors.h"
@@ -49,8 +49,8 @@
 #include "ecmascript/builtins/builtins_reflect.h"
 #include "ecmascript/builtins/builtins_regexp.h"
 #include "ecmascript/builtins/builtins_set.h"
-#include "ecmascript/builtins/builtins_sharedarraybuffer.h"
 #include "ecmascript/builtins/builtins_shared_typedarray.h"
+#include "ecmascript/builtins/builtins_sharedarraybuffer.h"
 #include "ecmascript/builtins/builtins_string_iterator.h"
 #include "ecmascript/builtins/builtins_symbol.h"
 #include "ecmascript/builtins/builtins_typedarray.h"
@@ -58,15 +58,15 @@
 #include "ecmascript/builtins/builtins_weak_ref.h"
 #include "ecmascript/builtins/builtins_weak_set.h"
 #include "ecmascript/containers/containers_private.h"
-#include "ecmascript/containers/containers_treeset.h"
 #include "ecmascript/dfx/native_module_failure_info.h"
 #include "ecmascript/global_env.h"
-#include "ecmascript/js_arraybuffer.h"
 #include "ecmascript/js_array_iterator.h"
+#include "ecmascript/js_arraybuffer.h"
+#include "ecmascript/js_async_from_sync_iterator.h"
 #include "ecmascript/js_async_function.h"
 #include "ecmascript/js_async_generator_object.h"
-#include "ecmascript/js_for_in_iterator.h"
 #include "ecmascript/js_finalization_registry.h"
+#include "ecmascript/js_for_in_iterator.h"
 #include "ecmascript/js_map.h"
 #include "ecmascript/js_map_iterator.h"
 #include "ecmascript/js_primitive_ref.h"
@@ -74,15 +74,15 @@
 #include "ecmascript/js_set.h"
 #include "ecmascript/js_set_iterator.h"
 #include "ecmascript/js_string_iterator.h"
-#include "ecmascript/js_async_from_sync_iterator.h"
 #include "ecmascript/js_weak_container.h"
 #include "ecmascript/js_weak_ref.h"
+#include "ecmascript/marker_cell.h"
 #include "ecmascript/require/js_cjs_module_cache.h"
 #include "ecmascript/require/js_cjs_require.h"
 #include "ecmascript/shared_objects/js_shared_array_iterator.h"
 #include "ecmascript/shared_objects/js_shared_map_iterator.h"
 #include "ecmascript/shared_objects/js_shared_set_iterator.h"
-#include "ecmascript/marker_cell.h"
+#include "ecmascript/utils/collections_atomics.h"
 #ifdef ARK_SUPPORT_INTL
 #include "ecmascript/builtins/builtins_collator.h"
 #include "ecmascript/builtins/builtins_date_time_format.h"
@@ -93,19 +93,17 @@
 #include "ecmascript/builtins/builtins_number_format.h"
 #include "ecmascript/builtins/builtins_plural_rules.h"
 #include "ecmascript/builtins/builtins_relative_time_format.h"
+#include "ecmascript/builtins/builtins_segment_iterator.h"
 #include "ecmascript/builtins/builtins_segmenter.h"
 #include "ecmascript/builtins/builtins_segments.h"
-#include "ecmascript/builtins/builtins_segment_iterator.h"
-#include "ecmascript/js_api/js_api_tree_set_iterator.h"
-#include "ecmascript/js_api/js_api_tree_set.h"
 #include "ecmascript/js_collator.h"
 #include "ecmascript/js_date_time_format.h"
 #include "ecmascript/js_displaynames.h"
 #include "ecmascript/js_list_format.h"
 #include "ecmascript/js_number_format.h"
 #include "ecmascript/js_plural_rules.h"
-#include "ecmascript/js_segments.h"
 #include "ecmascript/js_segment_iterator.h"
+#include "ecmascript/js_segments.h"
 #endif
 
 
@@ -211,7 +209,7 @@ void Builtins::Initialize(const JSHandle<GlobalEnv> &env, JSThread *thread, bool
     // GLobalObject.prototype_or_hclass
     JSHandle<JSHClass> globalObjFuncClass =
         factory_->NewEcmaHClass(JSObject::SIZE, JSType::JS_GLOBAL_OBJECT, 0);
-    globalObjFuncClass->SetPrototype(thread_, objFuncPrototypeVal.GetTaggedValue());
+    JSHClass::SetPrototype(thread_, globalObjFuncClass, objFuncPrototypeVal.GetTaggedValue());
     globalObjFuncClass->SetIsDictionaryMode(true);
 
     // PrimitiveRef.prototype_or_hclass
@@ -267,11 +265,21 @@ void Builtins::Initialize(const JSHandle<GlobalEnv> &env, JSThread *thread, bool
     thread_->SetInitialBuiltinHClass(
         BuiltinTypeId::OBJECT, objectFunction->GetJSHClass(), *objFuncClass, objFuncPrototype->GetJSHClass());
 
+#if ENABLE_MEMORY_OPTIMIZATION
+    JSHandle<JSHClass> functionClass = factory_->CreateFunctionClass(FunctionKind::BASE_CONSTRUCTOR, JSFunction::SIZE,
+        JSType::JS_FUNCTION, env->GetFunctionPrototype(), JSHClass::OPTIMIZED_FUNCTION_CAPACITY_OF_IN_OBJECTS);
+#else // !ENABLE_MEMORY_OPTIMIZATION
     JSHandle<JSHClass> functionClass = factory_->CreateFunctionClass(FunctionKind::BASE_CONSTRUCTOR, JSFunction::SIZE,
                                                                      JSType::JS_FUNCTION, env->GetFunctionPrototype());
+#endif // ENABLE_MEMORY_OPTIMIZATION
     env->SetFunctionClassWithProto(thread_, functionClass);
+#if ENABLE_MEMORY_OPTIMIZATION
+    functionClass = factory_->CreateFunctionClass(FunctionKind::NORMAL_FUNCTION, JSFunction::SIZE, JSType::JS_FUNCTION,
+        env->GetFunctionPrototype(), JSHClass::OPTIMIZED_FUNCTION_CAPACITY_OF_IN_OBJECTS);
+#else // !ENABLE_MEMORY_OPTIMIZATION
     functionClass = factory_->CreateFunctionClass(FunctionKind::NORMAL_FUNCTION, JSFunction::SIZE, JSType::JS_FUNCTION,
                                                   env->GetFunctionPrototype());
+#endif // ENABLE_MEMORY_OPTIMIZATION
     env->SetFunctionClassWithoutProto(thread_, functionClass);
     functionClass = factory_->CreateFunctionClass(FunctionKind::CLASS_CONSTRUCTOR, JSFunction::SIZE,
                                                   JSType::JS_FUNCTION, env->GetFunctionPrototype());
@@ -347,7 +355,7 @@ void Builtins::Initialize(const JSHandle<GlobalEnv> &env, JSThread *thread, bool
     InitializeAsyncGeneratorFunction(env, objFuncClass);
     InitializePromise(env, objFuncClass);
     InitializePromiseJob(env);
-    InitializeTreeSet(env);
+    ContainersPrivate::InitializeContainer(env);
     thread->CheckSafepointIfSuspended();
 #ifdef ARK_SUPPORT_INTL
     InitializeIntl(env, objFuncPrototypeVal);
@@ -360,7 +368,8 @@ void Builtins::Initialize(const JSHandle<GlobalEnv> &env, JSThread *thread, bool
         LazyInitializePluralRules(env);
         LazyInitializeDisplayNames(env);
         LazyInitializeListFormat(env);
-        LazyInitializeSegments(env);
+        // this function only initialize Segments in globalEnv
+        InitializeSegments(env);
         LazyInitializeSegmenter(env);
     } else {
         InitializeLocale(env);
@@ -725,8 +734,13 @@ void Builtins::InitializeFunction(const JSHandle<GlobalEnv> &env, JSHandle<JSTag
     env->SetFunctionFunction(thread_, funcFunc);
     env->SetFunctionPrototype(thread_, funcFuncPrototype);
 
+#if ENABLE_MEMORY_OPTIMIZATION
+    JSHandle<JSHClass> normalFuncClass = factory_->NewEcmaHClass(JSFunction::SIZE,
+        JSHClass::OPTIMIZED_FUNCTION_CAPACITY_OF_IN_OBJECTS, JSType::JS_FUNCTION, env->GetFunctionPrototype());
+#else // !ENABLE_MEMORY_OPTIMIZATION
     JSHandle<JSHClass> normalFuncClass =
         factory_->NewEcmaHClass(JSFunction::SIZE, JSType::JS_FUNCTION, env->GetFunctionPrototype());
+#endif // ENABLE_MEMORY_OPTIMIZATION
     env->SetNormalFunctionClass(thread_, normalFuncClass);
 
     JSHandle<JSHClass> normalApiFuncClass =
@@ -1702,6 +1716,22 @@ void Builtins::InitializeAtomics(const JSHandle<GlobalEnv> &env,
     // @@ToStringTag
     SetStringTagSymbol(env, atomicsObject, "Atomics");
     env->SetAtomicsFunction(thread_, atomicsObject);
+    InitializeSendableAtomics(env);
+}
+
+void Builtins::InitializeSendableAtomics(const JSHandle<GlobalEnv> &env) const
+{
+    [[maybe_unused]] EcmaHandleScope scope(thread_);
+    JSHandle<JSObject> globalObject(thread_, env->GetGlobalObject());
+    JSHandle<JSObject> atomics = factory_->NewEmptyJSObject(env);
+    for (const base::BuiltinFunctionEntry &entry : collections::CollectionsAtomics::GetAtomicsFunctions()) {
+        SetFunction(env, atomics, entry.GetName(), entry.GetEntrypoint(),
+            entry.GetLength(), entry.GetBuiltinStubId());
+    }
+    SetStringTagSymbol(env, atomics, "SendableAtomics");
+    JSHandle<JSTaggedValue> atomicsName(factory_->NewFromUtf8ReadOnly("SendableAtomics"));
+    PropertyDescriptor atomicsDesc(thread_, JSHandle<JSTaggedValue>::Cast(atomics), true, false, true);
+    JSObject::DefineOwnProperty(thread_, globalObject, atomicsName, atomicsDesc);
 }
 
 void Builtins::InitializeWeakRef(const JSHandle<GlobalEnv> &env, const JSHandle<JSHClass> &objFuncClass) const
@@ -1829,6 +1859,7 @@ void Builtins::InitializeJson(const JSHandle<GlobalEnv> &env, const JSHandle<JST
     SetFunction(env, jsonObject, "stringify", Json::Stringify, FunctionLength::THREE, BUILTINS_STUB_ID(JsonStringify));
     SetFunction(env, jsonObject, "stringifySendable", SendableJson::Stringify, FunctionLength::THREE);
     SetFunction(env, jsonObject, "stringifyBigInt", BigIntJson::Stringify, FunctionLength::THREE);
+    SetFrozenFunction(env, jsonObject, "parseSendableV2", SendableJson::ParseSendable, FunctionLength::THREE);
 
     PropertyDescriptor jsonDesc(thread_, JSHandle<JSTaggedValue>::Cast(jsonObject), true, false, true);
     JSHandle<JSTaggedValue> jsonString(factory_->NewFromASCIIReadOnly("JSON"));
@@ -1980,6 +2011,7 @@ void Builtins::InitializeIterator(const JSHandle<GlobalEnv> &env, const JSHandle
     InitializeForinIterator(env, iteratorFuncClass);
     InitializeSetIterator(env, iteratorFuncClass);
     InitializeSSetIterator(env, iteratorFuncClass);
+    InitializeSBitVectorIterator(env, iteratorFuncClass);
     InitializeMapIterator(env, iteratorFuncClass);
     InitializeSMapIterator(env, iteratorFuncClass);
     InitializeArrayIterator(env, iteratorFuncClass, iteratorPrototypeHClass);
@@ -2036,7 +2068,7 @@ void Builtins::InitializeSetIterator(const JSHandle<GlobalEnv> &env,
     JSHandle<JSTaggedValue> protoValue = env->GetSetIteratorPrototype();
     const GlobalEnvConstants *globalConst = thread_->GlobalConstants();
     JSHandle<JSHClass> hclassHandle(globalConst->GetHandledJSSetIteratorClass());
-    hclassHandle->SetPrototype(thread_, protoValue);
+    JSHClass::SetPrototype(thread_, hclassHandle, protoValue);
     hclassHandle->SetExtensible(true);
 }
 
@@ -2051,7 +2083,7 @@ void Builtins::InitializeSSetIterator(const JSHandle<GlobalEnv> &env, const JSHa
     JSHandle<JSTaggedValue> protoValue = env->GetSharedSetIteratorPrototype();
     const GlobalEnvConstants *globalConst = thread_->GlobalConstants();
     JSHandle<JSHClass> hclassHandle(globalConst->GetHandledJSSharedSetIteratorClass());
-    hclassHandle->SetPrototype(thread_, protoValue);
+    JSHClass::SetPrototype(thread_, hclassHandle, protoValue);
     hclassHandle->SetExtensible(true);
 }
 
@@ -2068,7 +2100,7 @@ void Builtins::InitializeMapIterator(const JSHandle<GlobalEnv> &env,
     JSHandle<JSTaggedValue> protoValue = env->GetMapIteratorPrototype();
     const GlobalEnvConstants *globalConst = thread_->GlobalConstants();
     JSHandle<JSHClass> hclassHandle(globalConst->GetHandledJSMapIteratorClass());
-    hclassHandle->SetPrototype(thread_, protoValue);
+    JSHClass::SetPrototype(thread_, hclassHandle, protoValue);
     hclassHandle->SetExtensible(true);
 }
 
@@ -2084,7 +2116,7 @@ void Builtins::InitializeSMapIterator(const JSHandle<GlobalEnv> &env,
     JSHandle<JSTaggedValue> protoValue = env->GetSharedMapIteratorPrototype();
     const GlobalEnvConstants *globalConst = thread_->GlobalConstants();
     JSHandle<JSHClass> hclassHandle(globalConst->GetHandledJSSharedMapIteratorClass());
-    hclassHandle->SetPrototype(thread_, protoValue);
+    JSHClass::SetPrototype(thread_, hclassHandle, protoValue);
     hclassHandle->SetExtensible(true);
 }
 
@@ -2100,7 +2132,7 @@ void Builtins::InitializeArrayIterator(const JSHandle<GlobalEnv> &env,
     // Iterator.prototype.next()
     SetFunction(env, arrayIteratorPrototype, "next", JSArrayIterator::Next, FunctionLength::ZERO,
                 BUILTINS_STUB_ID(ArrayIteratorProtoNext));
-    arrayIteratorInstanceHClass->SetPrototype(thread_, arrayIteratorPrototypeValue);
+    JSHClass::SetPrototype(thread_, arrayIteratorInstanceHClass, arrayIteratorPrototypeValue);
     SetStringTagSymbol(env, arrayIteratorPrototype, "Array Iterator");
     thread_->SetInitialBuiltinHClass(BuiltinTypeId::ARRAY_ITERATOR, nullptr,
         *arrayIteratorInstanceHClass, arrayIteratorPrototype->GetJSHClass(), *iteratorPrototypeClass);
@@ -3902,68 +3934,6 @@ JSHandle<JSObject> Builtins::InitializeArkPrivate(const JSHandle<GlobalEnv> &env
     return arkPrivate;
 }
 
-JSHandle<JSTaggedValue> Builtins::InitializeTreeSet(const JSHandle<GlobalEnv> &env)
-{
-    const GlobalEnvConstants *globalConst = thread_->GlobalConstants();
-    // TreeSet.prototype
-    JSHandle<JSObject> setFuncPrototype = factory_->NewEmptyJSObject(env);
-    JSHandle<JSTaggedValue> setFuncPrototypeValue(setFuncPrototype);
-    // TreeSet.prototype_or_hclass
-    JSHandle<JSHClass> setInstanceClass =
-        factory_->NewEcmaHClass(JSAPITreeSet::SIZE, JSType::JS_API_TREE_SET, setFuncPrototypeValue);
-    // TreeSet() = new Function()
-    JSHandle<JSTaggedValue> setFunction(ContainersPrivate::NewTreeSetConstructor(env,
-        thread_, setFuncPrototype, containers::ContainersTreeSet::TreeSetConstructor,
-        "TreeSet", containers::FuncLength::ZERO));
-    JSFunction::SetFunctionPrototypeOrInstanceHClass(thread_,
-        JSHandle<JSFunction>::Cast(setFunction), setInstanceClass.GetTaggedValue());
-
-    // "constructor" property on the prototype
-    JSHandle<JSTaggedValue> constructorKey = globalConst->GetHandledConstructorString();
-    JSObject::SetProperty(thread_, JSHandle<JSTaggedValue>(setFuncPrototype), constructorKey, setFunction);
-    RETURN_HANDLE_IF_ABRUPT_COMPLETION(JSTaggedValue, thread_);
-
-    // TreeSet.prototype methods (excluding constructor and '@@' internal properties)
-    for (const base::BuiltinFunctionEntry &entry: containers::ContainersTreeSet::GetTreeSetPrototypeFunctions()) {
-        SetFrozenFunction(env, setFuncPrototype, entry.GetName().data(), entry.GetEntrypoint(),
-                          entry.GetLength());
-    }
-
-    // @@ToStringTag
-    SetStringTagSymbol(env, setFuncPrototype, "TreeSet");
-    // %TreeSetPrototype% [ @@iterator ]
-    JSHandle<JSTaggedValue> iteratorSymbol = globalConst->GetHandledIteratorSymbol();
-    JSHandle<JSTaggedValue> values = globalConst->GetHandledValuesString();
-    JSHandle<JSTaggedValue> valuesFunc =
-        JSObject::GetMethod(thread_, JSHandle<JSTaggedValue>::Cast(setFuncPrototype), values);
-    RETURN_HANDLE_IF_ABRUPT_COMPLETION(JSTaggedValue, thread_);
-    PropertyDescriptor descriptor(thread_, valuesFunc, false, false, false);
-    JSObject::DefineOwnProperty(thread_, setFuncPrototype, iteratorSymbol, descriptor);
-    // length
-    JSHandle<JSTaggedValue> lengthGetter =
-        CreateGetter(env, containers::ContainersTreeSet::GetLength, "length", containers::FuncLength::ZERO);
-    JSHandle<JSTaggedValue> lengthKey(thread_, globalConst->GetLengthString());
-    SetGetter(setFuncPrototype, lengthKey, lengthGetter);
-
-    ContainersPrivate::InitializeTreeSetIterator(env, thread_);
-
-    JSHandle<JSTaggedValue> undefinedHandle = globalConst->GetHandledUndefined();
-    // 2. Let obj be OrdinaryObjectCreate(%Object.prototype%).
-    JSHandle<JSHClass> klass = JSHandle<JSHClass>::Cast(env->GetIteratorResultClass());
-    JSHandle<JSObject> undefinedIteratorResult = factory_->NewJSObject(klass);
-
-    // 3. Perform ! CreateDataPropertyOrThrow(obj, "value", value).
-    // 4. Perform ! CreateDataPropertyOrThrow(obj, "done", done).
-    undefinedIteratorResult->SetPropertyInlinedPropsWithSize<JSIterator::SIZE, JSIterator::VALUE_INLINE_PROPERTY_INDEX>(
-        thread_, undefinedHandle.GetTaggedValue());
-    undefinedIteratorResult->SetPropertyInlinedPropsWithSize<JSIterator::SIZE, JSIterator::DONE_INLINE_PROPERTY_INDEX>(
-        thread_, JSTaggedValue(true));
-
-    env->SetUndefinedIteratorResult(thread_, undefinedIteratorResult);
-
-    env->SetTreeSetConstructor(thread_, setFunction);
-    return setFunction;
-}
 
 void Builtins::InitializeModuleNamespace(const JSHandle<GlobalEnv> &env,
                                          const JSHandle<JSHClass> &objFuncClass) const
@@ -3976,7 +3946,7 @@ void Builtins::InitializeModuleNamespace(const JSHandle<GlobalEnv> &env,
     //  ModuleNamespace.prototype_or_hclass
     JSHandle<JSHClass> moduleNamespaceHClass =
         factory_->NewEcmaHClass(ModuleNamespace::SIZE, JSType::JS_MODULE_NAMESPACE, moduleNamespacePrototypeValue);
-    moduleNamespaceHClass->SetPrototype(thread_, JSTaggedValue::Null());
+    JSHClass::SetPrototype(thread_, moduleNamespaceHClass, JSTaggedValue::Null());
     env->SetModuleNamespaceClass(thread_, moduleNamespaceHClass.GetTaggedValue());
 
     // moduleNamespace.prototype [ @@toStringTag ]
@@ -3995,7 +3965,7 @@ void Builtins::InitializeNativeModuleFailureInfo(const JSHandle<GlobalEnv> &env,
     JSHandle<JSHClass> nativeModuleFailureInfoHClass =
         factory_->NewEcmaHClass(NativeModuleFailureInfo::SIZE, JSType::NATIVE_MODULE_FAILURE_INFO,
             nativeModuleFailureInfoPrototypeValue);
-    nativeModuleFailureInfoHClass->SetPrototype(thread_, JSTaggedValue::Null());
+    JSHClass::SetPrototype(thread_, nativeModuleFailureInfoHClass, JSTaggedValue::Null());
     env->SetNativeModuleFailureInfoClass(thread_, nativeModuleFailureInfoHClass.GetTaggedValue());
 }
 
@@ -4038,7 +4008,7 @@ void Builtins::InitializeCjsModule(const JSHandle<GlobalEnv> &env) const
     JSHandle<JSTaggedValue> loaded(factory_->NewEmptyJSObject(env));
     JSHandle<JSTaggedValue> children(factory_->NewEmptyJSObject(env));
     JSHandle<JSTaggedValue> cache = JSHandle<JSTaggedValue>::Cast(CjsModuleCache::Create(thread_,
-        CjsModuleCache::DEAULT_DICTIONART_CAPACITY));
+        CjsModuleCache::DEFAULT_DICTIONARY_CAPACITY));
 
     // CjsModule.prototype members
     SetNonConstantObject(cjsModulePrototype, "id", id);

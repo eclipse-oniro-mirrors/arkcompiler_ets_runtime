@@ -22,8 +22,8 @@ namespace panda::ecmascript::kungfu {
 template<typename LinkedHashTableType, typename LinkedHashTableObject>
 class LinkedHashTableStubBuilder : public StubBuilder {
 public:
-    explicit LinkedHashTableStubBuilder(StubBuilder *parent, GateRef glue, GateRef globalEnv)
-        : StubBuilder(parent, globalEnv), glue_(glue) {}
+    explicit LinkedHashTableStubBuilder(StubBuilder *parent, GateRef glue, GateRef globalEnv, bool isShared = false)
+        : StubBuilder(parent, globalEnv), glue_(glue), isShared_(isShared) {}
     ~LinkedHashTableStubBuilder() override = default;
     NO_MOVE_SEMANTIC(LinkedHashTableStubBuilder);
     NO_COPY_SEMANTIC(LinkedHashTableStubBuilder);
@@ -32,6 +32,11 @@ public:
     GateRef Create(GateRef numberOfElements);
     GateRef Clear(GateRef linkedTable);
     GateRef ForEach(GateRef thisValue, GateRef linkedTable, GateRef callbackFnHandle, GateRef thisArg);
+    // Only for SendableMap / SendableSet. Differs from the legacy ForEach:
+    // 1. Return value: reads the result Variable before SubCfgExit, so the callback's
+    //    call result is actually returned on the exception path.
+    // 2. No next-table chase: under the caller's read scope, GetNextTable is always Hole.
+    GateRef SendableForEach(GateRef thisValue, GateRef linkedTable, GateRef callbackFnHandle, GateRef thisArg);
     GateRef Insert(GateRef linkedTable, GateRef key, GateRef value);
     GateRef Delete(GateRef linkedTable, GateRef key);
     GateRef Has(GateRef linkedTable, GateRef key);
@@ -39,6 +44,8 @@ public:
 
     void GenMapSetConstructor(GateRef nativeCode, GateRef func, GateRef newTarget, GateRef thisValue, GateRef numArgs,
         GateRef arg0, GateRef argv);
+    void GenSharedMapSetConstructor(GateRef nativeCode, GateRef func, GateRef newTarget,
+        GateRef thisValue, GateRef numArgs, GateRef arg0, GateRef argv);
 
     GateRef GetLinked(GateRef jsThis);
 
@@ -212,6 +219,9 @@ private:
     GateRef GetLinkedOffset();
 
     GateRef glue_;
+
+    // isShared_ for SharedMap and SharedSet
+    bool isShared_ = false;
 };
 }  // namespace panda::ecmascript::kungfu
 #endif  // ECMASCRIPT_COMPILER_BUILTINS_LINKED_HASHTABLE_STUB_BUILDER_H

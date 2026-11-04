@@ -267,7 +267,7 @@ bool ElfReader::ParseELFSegment()
         ASSERT(phdr[i].p_offset % PageSize() == 0);
         if ((phdr[i].p_flags & llvm::ELF::PF_X) != 0) {
             ASSERT(reinterpret_cast<uintptr_t>(virtualAddr) % PageSize() == 0);
-            if (!PageProtect(virtualAddr, phdr[i].p_memsz, PAGE_PROT_EXEC_READ)) {
+            if (PageProtect(virtualAddr, phdr[i].p_memsz, PAGE_PROT_EXEC_READ) != 0) {
                 return false;
             }
         }
@@ -361,7 +361,11 @@ void ElfReader::SeparateTextSections(BinaryBufferParser &parser,
             secOffset = AlignUp(secOffset, AOTFileInfo::TEXT_SEC_ALIGN);
         }
         uint32_t textSize = moduleInfo.textSize;
-        parser.ParseBuffer(reinterpret_cast<void *>(secAddr + secOffset), textSize, curShOffset + secOffset);
+        // Empty stub slots are part of the fixed module layout. Do not remove this guard:
+        // BinaryBufferParser intentionally rejects zero-length copies.
+        if (textSize != 0) {
+            parser.ParseBuffer(reinterpret_cast<void *>(secAddr + secOffset), textSize, curShOffset + secOffset);
+        }
         des[i].SetSecAddrAndSize(ElfSecName::TEXT, secAddr + secOffset, textSize);
         secOffset += textSize;
         if (rodataSizeAfterText != 0) {
@@ -382,7 +386,9 @@ void ElfReader::SeparateArkStackMapSections(BinaryBufferParser &parser,
     for (size_t i = 0; i < des.size(); ++i) {
         auto moduleInfo = moduleInfo_[i];
         uint32_t stackMapSize = moduleInfo.stackMapSize;
-        parser.ParseBuffer(reinterpret_cast<void *>(secAddr + secOffset), stackMapSize, curShOffset + secOffset);
+        if (stackMapSize != 0) {
+            parser.ParseBuffer(reinterpret_cast<void *>(secAddr + secOffset), stackMapSize, curShOffset + secOffset);
+        }
         des[i].SetArkStackMapPtr(reinterpret_cast<uint8_t *>(secAddr + secOffset));
         des[i].SetArkStackMapSize(stackMapSize);
         uint32_t index = moduleInfo.startIndex;
@@ -402,7 +408,9 @@ void ElfReader::SeparateStrtabSections(BinaryBufferParser &parser,
     for (size_t i = 0; i < des.size(); ++i) {
         auto moduleInfo = moduleInfo_[i];
         uint32_t strtabSize = moduleInfo.strtabSize;
-        parser.ParseBuffer(reinterpret_cast<void *>(secAddr + secOffset), strtabSize, curShOffset + secOffset);
+        if (strtabSize != 0) {
+            parser.ParseBuffer(reinterpret_cast<void *>(secAddr + secOffset), strtabSize, curShOffset + secOffset);
+        }
         des[i].SetSecAddrAndSize(ElfSecName::STRTAB, secAddr + secOffset, strtabSize);
         secOffset += strtabSize;
     }
@@ -417,9 +425,39 @@ void ElfReader::SeparateSymtabSections(BinaryBufferParser &parser,
     for (size_t i = 0; i < des.size(); ++i) {
         auto moduleInfo = moduleInfo_[i];
         uint32_t symtabSize = moduleInfo.symtabSize;
-        parser.ParseBuffer(reinterpret_cast<void *>(secAddr + secOffset), symtabSize, curShOffset + secOffset);
+        if (symtabSize != 0) {
+            parser.ParseBuffer(reinterpret_cast<void *>(secAddr + secOffset), symtabSize, curShOffset + secOffset);
+        }
         des[i].SetSecAddrAndSize(ElfSecName::SYMTAB, secAddr + secOffset, symtabSize);
         secOffset += symtabSize;
     }
+}
+
+uint64_t ElfReader::RuntimeOffsetToFileOffset(uint64_t runtimeOffset)
+{
+    if (fileMapMem_.GetOriginAddr() == nullptr) {
+        return 0;
+    }
+    char *addr = reinterpret_cast<char *>(fileMapMem_.GetOriginAddr());
+    llvm::ELF::Elf64_Ehdr *ehdr = reinterpret_cast<llvm::ELF::Elf64_Ehdr *>(fileMapMem_.GetOriginAddr());
+    llvm::ELF::Elf64_Phdr *phdr = reinterpret_cast<llvm::ELF::Elf64_Phdr *>(addr + ehdr->e_phoff);
+
+    for (int i = 0; i < ehdr->e_phnum; ++i) {
+        if (phdr[i].p_type != llvm::ELF::PT_LOAD) {
+            continue;
+        }
+        if (!phdr[i].p_filesz) {
+            continue;
+        }
+
+        uint64_t segStart = phdr[i].p_vaddr;
+        uint64_t segEnd = phdr[i].p_vaddr + phdr[i].p_filesz;
+
+        if (runtimeOffset >= segStart && runtimeOffset < segEnd) {
+            return static_cast<uint64_t>(phdr[i].p_offset + (runtimeOffset - segStart));
+        }
+    }
+
+    return 0;
 }
 }  // namespace panda::ecmascript

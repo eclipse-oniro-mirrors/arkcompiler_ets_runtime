@@ -25,9 +25,9 @@
 #define BUILTIN_SHARED_ARRAY_FUNCTIONS(V)                      \
     /* SharedArray.from ( items [ , mapfn [ , thisArg ] ] ) */ \
     V("from", From, 1, INVALID)                                \
-    V("create", Create, 2, INVALID)                            \
+    V("create", Create, 2, SharedArrayCreate)                  \
     /* SendableArray.isArray ( arg ) */                        \
-    V("isArray", IsArray, 1, INVALID)                          \
+    V("isArray", IsArray, 1, SharedArrayIsArray)               \
     V("of", Of, 1, INVALID)                                    \
     // fixme(hzzhouzebin) Support later.
     // /* SharedArray.of ( ...items ) */                          \
@@ -46,29 +46,33 @@
     /* SharedArray.prototype.fill ( value [ , start [ , end ] ] ) */             \
     V("fill", Fill, 1, INVALID)                                                  \
     /* SharedArray.prototype.filter ( callbackfn [ , thisArg ] ) */              \
-    V("filter", Filter, 1, INVALID)                                              \
+    V("filter", Filter, 1, SharedArrayFilter)                                    \
     /* SharedArray.prototype.find ( predicate [ , thisArg ] ) */                 \
-    V("find", Find, 1, INVALID)                                                  \
+    V("find", Find, 1, SharedArrayFind)                                          \
     /* SharedArray.prototype.findIndex ( predicate [ , thisArg ] ) */            \
     V("findIndex", FindIndex, 1, INVALID)                                        \
     /* SharedArray.prototype.forEach ( callbackfn [ , thisArg ] ) */             \
-    V("forEach", ForEach, 1, INVALID)                                            \
+    V("forEach", ForEach, 1, SharedArrayForEach)                                 \
     /* SharedArray.prototype.includes ( searchElement [ , fromIndex ] ) */       \
     V("includes", Includes, 1, INVALID)                                          \
+    /* SharedArray.prototype.containsAll ( elements ) */                         \
+    V("containsAll", ContainsAll, 1, INVALID)                                    \
+    /* SharedArray.prototype.retainAll ( elements | predicate ) */               \
+    V("retainAll", RetainAll, 1, INVALID)                                        \
     /* SharedArray.prototype.indexOf ( searchElement [ , fromIndex ] ) */        \
-    V("indexOf", IndexOf, 1, INVALID)                                            \
+    V("indexOf", IndexOf, 1, SharedArrayIndexOf)                                 \
     /* SharedArray.prototype.join ( separator ) */                               \
     V("join", Join, 1, INVALID)                                                  \
     /* SharedArray.prototype.keys ( ) */                                         \
     V("keys", Keys, 0, INVALID)                                                  \
     /* SharedArray.prototype.map ( callbackfn [ , thisArg ] ) */                 \
-    V("map", Map, 1, INVALID)                                                    \
+    V("map", Map, 1, SharedArrayMap)                                             \
     /* SharedArray.prototype.pop ( ) */                                          \
-    V("pop", Pop, 0, INVALID)                                                    \
+    V("pop", Pop, 0, SharedArrayPop)                                             \
     /* SharedArray.prototype.push ( ...items ) */                                \
-    V("push", Push, 1, INVALID)                                                  \
+    V("push", Push, 1, SharedArrayPush)                                          \
     /* SharedArray.prototype.reduce ( callbackfn [ , initialValue ] ) */         \
-    V("reduce", Reduce, 1, INVALID)                                              \
+    V("reduce", Reduce, 1, SharedArrayReduce)                                    \
     /* SharedArray.prototype.shift ( ) */                                        \
     V("shift", Shift, 0, INVALID)                                                \
     /* SharedArray.prototype.slice ( start, end ) */                             \
@@ -92,7 +96,7 @@
     /* SharedArray.prototype.some ( callbackfn [ , thisArg ] ) */                \
     V("some", Some, 1, INVALID)                                                  \
     /* SendableArray.prototype.lastIndexOf ( searchElement [ , fromIndex ] ) */  \
-    V("lastIndexOf", LastIndexOf, 1, INVALID)                                    \
+    V("lastIndexOf", LastIndexOf, 1, SharedArrayLastIndexOf)                     \
 	/* SharedArray.prototype.copyWithin ( target, start [ , end ] ) */           \
     V("copyWithin", CopyWithin, 2, INVALID)                                      \
 	/* SharedArray.prototype.reduceRight ( callbackfn [ , initialValue ] ) */    \
@@ -147,6 +151,8 @@ public:
     static JSTaggedValue Values(EcmaRuntimeCallInfo *argv);
     static JSTaggedValue Unscopables(EcmaRuntimeCallInfo *argv);
     static JSTaggedValue Includes(EcmaRuntimeCallInfo *argv);
+    static JSTaggedValue ContainsAll(EcmaRuntimeCallInfo *argv);
+    static JSTaggedValue RetainAll(EcmaRuntimeCallInfo *argv);
     static JSTaggedValue At(EcmaRuntimeCallInfo *argv);
     static JSTaggedValue ShrinkTo(EcmaRuntimeCallInfo *argv);
     static JSTaggedValue ExtendTo(EcmaRuntimeCallInfo *argv);
@@ -254,6 +260,22 @@ private:
                                                       const JSHandle<JSTaggedValue> &thisHandle, int64_t len);
     static JSTaggedValue ReduceRightInternalHandle(EcmaRuntimeCallInfo *argv, JSThread *thread,
             const JSHandle<JSTaggedValue> &thisHandle, JSHandle<JSObject>& thisObjHandle, uint32_t argc, int64_t len);
+
+    template<bool targetElementsIsSharedArray = true>
+    static JSTaggedValue ContainsAllElements(JSThread *thread,
+                                             JSHandle<JSTaggedValue> &receiverHandle,
+                                             JSHandle<JSTaggedValue> &targetElements);
+    static JSTaggedValue FinishRetain(JSThread *thread,
+                                      JSHandle<JSObject> &thisObjHandle,
+                                      int64_t retainedLen,
+                                      int64_t thisLen);
+    static JSTaggedValue RetainByPredicate(JSThread *thread,
+                                           JSHandle<JSTaggedValue> &thisHandle,
+                                           JSHandle<JSTaggedValue> &predicate);
+    template<bool elementsIsSharedArray = true>
+    static JSTaggedValue RetainElements(JSThread *thread,
+                                        JSHandle<JSTaggedValue> &thisHandle,
+                                        JSHandle<JSTaggedValue> &elements);
 
 #define ARRAY_PROPERTIES_PAIR(name, func, length, id) \
     std::pair<std::string_view, bool>(name, false),

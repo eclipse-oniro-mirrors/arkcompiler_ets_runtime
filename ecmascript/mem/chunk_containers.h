@@ -44,7 +44,7 @@ public:
     }
     ~ChunkVector() = default;
     NO_COPY_SEMANTIC(ChunkVector);
-    NO_MOVE_SEMANTIC(ChunkVector);
+    DEFAULT_MOVE_SEMANTIC(ChunkVector);
 };
 
 template<typename T>
@@ -103,7 +103,21 @@ public:
     }
     ~ChunkUnorderedMap() = default;
     NO_COPY_SEMANTIC(ChunkUnorderedMap);
-    NO_MOVE_SEMANTIC(ChunkUnorderedMap);
+    DEFAULT_MOVE_SEMANTIC(ChunkUnorderedMap);
+};
+
+template<typename K, typename Hash = std::hash<K>, typename KeyEqual = std::equal_to<K>>
+class PUBLIC_API ChunkUnorderedSet : public std::unordered_set<K, Hash, KeyEqual, ChunkAllocator<K>> {
+public:
+    // NOLINTNEXTLINE(readability-magic-numbers)
+    explicit ChunkUnorderedSet(Chunk *chunk, size_t bucket_count = 100)
+        : std::unordered_set<K, Hash, KeyEqual, ChunkAllocator<K>>(
+              bucket_count, Hash(), KeyEqual(), ChunkAllocator<K>(chunk))
+    {
+    }
+    ~ChunkUnorderedSet() = default;
+    NO_COPY_SEMANTIC(ChunkUnorderedSet);
+    DEFAULT_MOVE_SEMANTIC(ChunkUnorderedSet);
 };
 
 template<typename K, typename V, typename Compare = std::less<K>>
@@ -117,7 +131,7 @@ public:
     }
     ~ChunkMultimap() = default;
     NO_COPY_SEMANTIC(ChunkMultimap);
-    NO_MOVE_SEMANTIC(ChunkMultimap);
+    DEFAULT_MOVE_SEMANTIC(ChunkMultimap);
 };
 }  // namespace panda::ecmascript
 

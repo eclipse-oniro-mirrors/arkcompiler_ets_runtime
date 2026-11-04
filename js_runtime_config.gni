@@ -35,8 +35,18 @@ declare_args() {
   # Enable pgo for building.
   ets_runtime_feature_enable_codemerge = false
 
+  # Enable back annotation for building
+  ets_runtime_feature_enable_back_annotation = false
+
   # Enable cache miss-based instruction prefetch.
   ets_runtime_feature_enable_inst_prefetch = false
+
+  # Enable reordering of stub functions.
+  ets_runtime_feature_enable_stub_function_reordering = true
+
+  # Request Baseline JIT and its handlers on supported architectures (not ARM32).
+  # This only makes Baseline available; runtime options still control activation.
+  ets_runtime_feature_enable_baseline_stub = false
 
   # Set pgo profdata path.
   ets_runtime_feature_pgo_path = ""
@@ -47,6 +57,30 @@ declare_args() {
   # Control whether to compile libark_jsruntime_dfx.so, only enabled for phone and PC
   ets_runtime_feature_enable_dfx = false
 
+  # If true, host tests build/link against the dfx-trimmed runtime
+  # (applies dfx_trim_exclude_sources + EXCLUDE_JIT/EXCLUDE_PGO).
+  ets_runtime_test_enable_dfx = false
+
+  # Control whether libark_jsruntime links runtime_core:arkbacktrace in supported
+  # product closures.
+  ets_runtime_feature_enable_static_backtrace = true
+
+  # Enable ark_steed (ArkSteed JIT compiler)
+  ets_runtime_enable_ark_steed =
+      true && !is_arkui_x &&
+      (current_cpu == "amd64" || current_cpu == "x64" || current_cpu == "x86_64" || current_cpu == "arm64")
+
+  # Compile the translation units that carry the ArkSteed JIT compiler with
+  # clang coverage instrumentation (`--coverage`) and link the coverage runtime
+  # into the targets that consume them. Disabled by default, so a normal build
+  # compiles and links exactly as before; this is the measurement build used by
+  # the numeric C++ coverage of the ArkSteed JIT compiler
+  # (`ecmascript/arksteed/test/coverage/`, ISSUE-0059 and ISSUE-0011). It is a
+  # separate argument because `enable_coverage` below is a plain variable that
+  # several build files assign unconditionally and never declare through
+  # `declare_args()`, so `--gn-args=enable_coverage=true` has no effect and no
+  # coverage flag reaches the ArkSteed sources.
+  arksteed_coverage = false
 
   # Defaults for fort
   ets_runtime_support_jit_code_sign = false
@@ -55,9 +89,9 @@ declare_args() {
 
   enable_litecg_emit = true
 
-  is_qemu_runtime = false
-
-  disable_hilog = false
+  # Only use LiteCG as the AOT/JIT codegen backend on device.
+  # When true, libark_llvmcodegen.so is not built or packaged into ROM.
+  ets_runtime_disable_llvm_backend = true
 
   TARGET = "x86_64"
   HOST_ARCH = 64
@@ -66,27 +100,53 @@ declare_args() {
     timeout = 2400
   }
 
-  # Turn off next optimization features if set to false
-  enable_next_optimization = true
+  # Turn off optimization features if set to false
   # For v61
   enable_latest_optimization = true
   # For v70
   enable_v70_optimization = true
+
+  # Enable redundant calculation elimination and controlflow optimization
+  enable_controlflow_optimization = false
 
   # If true app_aot_jit_enable_list will be placed in /etc/ark
   # Default false.
   ets_runtime_feature_enable_list = false
   enable_gc_dfx_options = false
 
+  enable_branch_elimination = false
+  enable_branch_profile = false
+
   # NOTE(ipetrov): Need to enable for mac previewer
   ark_js_hybrid = !ark_standalone_build && !is_mac
 
   ets_runtime_enable_cmc_gc = false
 
+  # Compile the legacy CPU profiler sampling scheme (in-handler symbolization,
+  # NOT async-signal-safe, issue #13618) behind ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY.
+  # Off by default: the lock-free two-phase scheme is the only compiled scheme.
+  ets_runtime_cpuprofiler_legacy = false
+
   enable_handle_leak_detect = false
 
   enable_cms_gc = false
+
+  enable_sticky_cms_gc = false
+
+  ets_runtime_enable_compressed_pointer = false
+
+  # Control whether to include the C interpreter in arm64 builds.
+  enable_c_interpreter = false
+  enable_c_interpreter_arm64 = false
 }
+
+enable_c_interpreter_arm64 = enable_c_interpreter && (current_cpu == "arm64")
+
+# ARM32 must never enable Baseline, even when explicitly requested. Do not remove
+# the target_cpu check: the x64/ARM64 host generator must also trim ARM32 products.
+# Check current_cpu as well to exclude ARM32 secondary toolchains in 64-bit builds.
+compile_baseline_stub = ets_runtime_feature_enable_baseline_stub &&
+                        target_cpu != "arm" && current_cpu != "arm"
 
 if (defined(enable_cmc_gc)) {
   ets_runtime_enable_cmc_gc = enable_cmc_gc
@@ -98,16 +158,26 @@ if (target_cpu == "arm64") {
 MAPLEALL_ROOT = "//arkcompiler/ets_runtime/ecmascript/compiler/codegen/maple"
 MAPLEALL_THIRD_PARTY_ROOT = "//third_party"
 LLVM_LIB_ROOT = "//arkcompiler/ets_runtime/ecmascript/compiler/codegen/llvm/lib"
+ARK_STEED_ROOT = "//arkcompiler/ets_runtime/ecmascript/arksteed"
 
 if (!ark_standalone_build) {
   build_root = "//build"
   ark_third_party_root = "//third_party"
   import("$build_root/config/components/toolchain/build_type.gni")
   import("$build_root/ohos.gni")
+  import("//build/config/components/runtime_core/hilog_config.gni")
 } else {
   ark_third_party_root = "//build/third_party_gn"
   import("$build_root/ark.gni")
   import("$build_root/config/build_type.gni")
+
+  # is_qemu_runtime/disable_hilog are declared by hilog_config.gni in the OH
+  # build; declare them for the standalone build so args.gn overrides are
+  # consumed and the enable_* flags below stay referenceable.
+  declare_args() {
+    is_qemu_runtime = false
+    disable_hilog = false
+  }
 }
 if (!defined(build_variant)) {
   build_variant = "root"
@@ -159,34 +229,37 @@ sdk_libc_secshared_config =
     "$ark_third_party_root/bounds_checking_function:libsec_public_config"
 
 # ohos device, windows previewer, mac previewer
-enable_hilog =
-    !ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) &&
-    (is_ohos || is_mingw || is_mac) && !is_qemu_runtime && !disable_hilog
-enable_hisysevent =
-    !ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) && is_ohos &&
+if (!ark_standalone_build) {
+  enable_hilog = enable_hilog_broad
+} else {
+  # Standalone build: hilog is never enabled (!ark_standalone_build gates it off).
+  enable_hilog = false
+}
+# Common derived condition: dfx/observability features on the ohos standard system.
+not_arkui_x = !(defined(is_arkui_x) && is_arkui_x)
+enable_ohos_dfx_common =
+    !ark_standalone_build && not_arkui_x && is_ohos &&
     is_standard_system && !is_qemu_runtime
-enable_dump_in_faultlog =
-    !ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) && is_ohos &&
-    is_standard_system && !is_qemu_runtime
-enable_bytrace =
-    !ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) && is_ohos &&
-    is_standard_system && !is_qemu_runtime
-enable_hitrace =
-    !ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) && is_ohos &&
-    is_standard_system && !is_qemu_runtime
-enable_unwinder =
-    !ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) && is_ohos &&
-    is_standard_system && !is_qemu_runtime
-enable_backtrace_local =
-    !ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) && is_ohos &&
-    is_standard_system && !is_qemu_runtime && (current_cpu == "arm64")
-enable_async_stack =
-    !ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) && is_ohos &&
-    is_standard_system && !is_qemu_runtime && (current_cpu == "arm64")
-enable_static_backtrace =
-    !ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) && is_ohos &&
-    is_standard_system && !is_qemu_runtime && (current_cpu == "arm64")
 
+enable_hisysevent = enable_ohos_dfx_common
+enable_dump_in_faultlog = enable_ohos_dfx_common
+enable_bytrace = enable_ohos_dfx_common
+enable_hitrace = enable_ohos_dfx_common
+enable_unwinder = enable_ohos_dfx_common
+enable_backtrace_local = enable_ohos_dfx_common && (current_cpu == "arm64")
+enable_async_stack = enable_ohos_dfx_common && (current_cpu == "arm64")
+enable_static_backtrace = ets_runtime_feature_enable_static_backtrace &&
+                          enable_ohos_dfx_common && (current_cpu == "arm64")
+enable_handle_node_id_map_proto = enable_dump_in_faultlog
+if (defined(global_parts_info) &&
+    !defined(global_parts_info.thirdparty_protobuf)) {
+  enable_handle_node_id_map_proto = false
+}
+# NOTE: ecma_stackinfo uses !build_ohos_sdk instead of !is_qemu_runtime, so it
+# must NOT be folded into enable_ohos_dfx_common.
+enable_ecma_stackinfo =
+    !ark_standalone_build && not_arkui_x && is_ohos &&
+    is_standard_system && !build_ohos_sdk
 
 hiviewdfx_deps = []
 hiviewdfx_ext_deps = []
@@ -246,21 +319,42 @@ if (!ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) && is_ohos &&
 }
 ets_runtime_output_path = "ets_runtime/ets_runtime"
 
+# Source files excluded from the dfx runtime build to trim AOT/JIT/PGO code
+# and reduce ROM size. These files are still compiled into libark_jsruntime.so.
+dfx_trim_exclude_sources = [
+  "ecmascript/compiler/pgo_bc_info.cpp",
+  "ecmascript/compiler/pgo_type/pgo_hclass_generator.cpp",
+  "ecmascript/compiler/pgo_type/pgo_type_manager.cpp",
+  "ecmascript/compiler/pgo_type/pgo_type_parser.cpp",
+  "ecmascript/compiler/pgo_type/pgo_type_recorder.cpp",
+  "ecmascript/dfx/dump_code/jit_dump_elf.cpp",
+  "ecmascript/jit/compile_decision.cpp",
+  "ecmascript/jit/jit.cpp",
+  "ecmascript/jit/jit_dfx.cpp",
+  "ecmascript/jit/jit_profiler.cpp",
+  "ecmascript/jit/jit_resources.cpp",
+  "ecmascript/jit/jit_task.cpp",
+  "ecmascript/jit/jit_thread.cpp",
+  "ecmascript/pgo_profiler/ap_file/pgo_file_info.cpp",
+  "ecmascript/pgo_profiler/ap_file/pgo_method_type_set.cpp",
+  "ecmascript/pgo_profiler/pgo_info.cpp",
+  "ecmascript/pgo_profiler/pgo_profiler.cpp",
+  "ecmascript/pgo_profiler/pgo_profiler_decoder.cpp",
+  "ecmascript/pgo_profiler/pgo_profiler_encoder.cpp",
+  "ecmascript/pgo_profiler/pgo_profiler_info.cpp",
+  "ecmascript/pgo_profiler/pgo_profiler_layout.cpp",
+  "ecmascript/pgo_profiler/pgo_profiler_manager.cpp",
+  "ecmascript/pgo_profiler/pgo_state.cpp",
+  "ecmascript/pgo_profiler/pgo_utils.cpp",
+  "ecmascript/pgo_profiler/types/pgo_profile_type.cpp",
+]
+
 template("libark_jsruntime_common_set") {
   forward_variables_from(invoker, "*")
 
   _is_dfx = defined(is_dfx) && is_dfx
 
   ohos_source_set(target_name) {
-    if ((target_name == "libark_jsruntime_arm_set" ||
-        target_name == "libark_jsruntime_dfx_arm_set") && is_ohos &&
-        is_standard_system && !is_arkui_x && target_cpu == "arm64") {
-      include_dirs = [
-        "$js_root",
-        "$js_root/ecmascript/napi/include",
-      ]
-    }
-
     stack_protector_ret = false
 
     if (is_ohos && is_standard_system) {
@@ -282,9 +376,16 @@ template("libark_jsruntime_common_set") {
     sources += invoker.ecma_debugger_source
     sources += invoker.hitrace_scope_source
     sources += invoker.ecma_platform_source
+    if (is_arkui_x && ark_compile_mode == "release") {
+      sources -= invoker.ecma_debugger_source
+    }
 
-    if (is_ohos) {
+    if (enable_ecma_stackinfo) {
       sources += invoker.ecma_stackinfo_source
+    }
+
+    if (_is_dfx) {
+      sources -= dfx_trim_exclude_sources
     }
 
     public_configs = [ "$js_root:ark_jsruntime_public_config" ]
@@ -300,13 +401,25 @@ template("libark_jsruntime_common_set") {
       configs += [ "$js_root:dfx_extra_config" ]
     }
 
+    if (arksteed_coverage) {
+      # Coverage measurement build (off by default). The ArkSteed runtime
+      # sources (arksteed_deopt_helper.cpp, arksteed_safepoint_table.cpp,
+      # arksteed_task.cpp) are compiled into this source set, so the compile
+      # config instruments every translation unit of the set and the published
+      # link config passes the coverage runtime to the targets that link those
+      # objects (`libark_jsruntime`) and flushes the profile on exit.
+      configs += [ "$js_root/ecmascript/compiler:arksteed_coverage_compile" ]
+      public_configs +=
+          [ "$js_root/ecmascript/compiler:arksteed_coverage_link" ]
+    }
+
     cflags_cc = []
     if (is_standard_system || target_os == "android" || target_os == "ios") {
       cflags_cc += [ "-fvisibility=hidden" ]
     }
 
     external_deps = [ "libuv:uv" ]
-    
+
     if (enable_static_backtrace) {
       external_deps += [ "runtime_core:arkbacktrace" ]
     }
@@ -321,6 +434,10 @@ template("libark_jsruntime_common_set") {
       ]
     }
     deps = []
+    if (enable_handle_node_id_map_proto) {
+      deps += [ "$js_root:handle_node_id_map_proto" ]
+      external_deps += [ "protobuf:protobuf_lite" ]
+    }
     if (!is_arkui_x) {
       external_deps += [ "runtime_core:arkfile_header_deps" ]
     } else {
@@ -333,11 +450,23 @@ template("libark_jsruntime_common_set") {
       defines += [ "ENABLE_OHOS_PARAMETER" ]
     }
 
+    if (is_ohos && current_cpu == "arm64") {
+      defines += [ "ENABLE_LINXKIT" ]
+    }
+
     if (ark_standalone_build) {
       defines += [ "STANDALONE_MODE" ]
     }
 
     include_dirs = []
+    if ((target_name == "libark_jsruntime_arm_set" ||
+        target_name == "libark_jsruntime_dfx_arm_set") && is_ohos &&
+        is_standard_system && !is_arkui_x && target_cpu == "arm64") {
+      include_dirs += [
+        "$js_root",
+        "$js_root/ecmascript/napi/include",
+      ]
+    }
     if (enable_jit_code_sign) {
       defines += [ "JIT_ENABLE_CODE_SIGN" ]
       external_deps += [ "code_signature:libjit_code_sign" ]
@@ -365,7 +494,7 @@ template("libark_jsruntime_common_set") {
         "json:nlohmann_json_static"
       ]
     }
-  
+
     if (enable_backtrace_local) {
       external_deps += [ "faultloggerd:libbacktrace_local" ]
     }
@@ -383,6 +512,10 @@ template("libark_jsruntime_common_set") {
         "icu:shared_icuuc",
         sdk_libc_secshared_dep,
       ]
+    }
+    if (enable_ecma_stackinfo) {
+      external_deps += [ "ability_base:extractortool" ]
+      defines += [ "ENABLE_ABILITY_EXTRACTOR" ]
     }
     part_name = "ets_runtime"
     subsystem_name = "arkcompiler"
@@ -459,7 +592,7 @@ template("libark_jsruntime_static_template") {
     if (!is_ohos) {
       if ((current_cpu == "amd64" || current_cpu == "x64" ||
            current_cpu == "x86_64" || current_cpu == "arm64") && !is_mingw &&
-          !is_mac && target_os != "ios") {
+          !is_mac && target_os != "ios" && target_os != "android") {
         deps += [ "ecmascript/compiler:libark_stub_set" ]
       } else {
         deps += [ "$js_root/ecmascript/compiler:libark_mock_stub_set" ]
@@ -580,6 +713,15 @@ template("libark_jsruntime_shared_library_template") {
       ":ark_jsruntime_common_config",
       ":arkjs_runtime_lto_link_config",
     ]
+    if (arksteed_coverage) {
+      # Link the coverage runtime into the shared library that links the
+      # instrumented `libark_jsruntime_set` objects, so the profile is flushed
+      # on exit. The source set publishes this config to its direct dependents;
+      # this entry covers `libark_jsruntime` / `libark_jsruntime_dfx`, which
+      # depend on the static source set instead of on the set directly.
+      configs +=
+          [ "$js_root/ecmascript/compiler:arksteed_coverage_link" ]
+    }
     if (defined(ohos_indep_compiler_enable) && ohos_indep_compiler_enable) {
       external_deps += [
         "runtime_core:libarkbase_static",

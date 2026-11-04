@@ -63,6 +63,23 @@ public:
     }
 };
 
+class TestableGCStats : public GCStats {
+public:
+    explicit TestableGCStats(const Heap *heap) : GCStats(heap) {}
+
+    using GCStats::GetGCStatistic;
+    using GCStats::GetGCStatisticType;
+    using GCStats::MergeGCStatistic;
+    using GCStats::RecordGCStatisticEnd;
+    using GCStats::RecordGCStatisticStart;
+    using GCStats::SetRecordDuration;
+
+    void SetGCTypeForTest(GCType type)
+    {
+        gcType_ = type;
+    }
+};
+
 HWTEST_F_L0(GCTest, NativeGCTestConcurrentMarkDisabled)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
@@ -97,6 +114,9 @@ HWTEST_F_L0(GCTest, CSetTest)
     instance->CollectGarbage(TriggerGCType::OLD_GC, GCReason::ALLOCATION_FAILED);
     instance->CollectGarbage(TriggerGCType::OLD_GC);
     Region *region = Region::ObjectAddressToRange(*array);
+    // The sensitive status set above gates the requested full mark; reset it so the
+    // requested-mark path below is exercised.
+    heap->SetSensitiveStatus(AppSensitiveStatus::NORMAL_SCENE);
     heap->SetFullMarkRequestedState(true);
     heap->TryTriggerConcurrentMarking(MarkReason::OTHER);
     EXPECT_TRUE(!region->InCollectSet());
@@ -174,6 +194,61 @@ HWTEST_F_L0(GCTest, HighSensitiveForceExpand)
 HWTEST_F_L0(GCTest, HighSensitiveExceedMaxHeapSize)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    heap->NotifyHighSensitive(true);
+    // First allocate about 250M TaggedArray, not reach max heap size
+    {
+        [[maybe_unused]] ecmascript::EcmaHandleScope baseScope(thread);
+        for (int i = 0; i < 16 * 1000; i++) {
+            [[maybe_unused]] JSHandle<TaggedArray> array = thread->GetEcmaVM()->GetFactory()->NewTaggedArray(
+                1024, JSTaggedValue::Hole(), MemSpaceType::SEMI_SPACE);
+        }
+    }
+    // Continue allocate about 250M TaggedArray, now reach max heap size, must trigger gc to avoid OOM
+    {
+        [[maybe_unused]] ecmascript::EcmaHandleScope baseScope(thread);
+        for (int i = 0; i < 10 * 1000; i++) {
+            [[maybe_unused]] JSHandle<TaggedArray> array = thread->GetEcmaVM()->GetFactory()->NewTaggedArray(
+                1024, JSTaggedValue::Hole(), MemSpaceType::SEMI_SPACE);
+        }
+    }
+    size_t commitSize = thread->GetEcmaVM()->GetHeap()->GetCommittedSize();
+    const_cast<Heap *>(thread->GetEcmaVM()->GetHeap())->NotifyHighSensitive(false);
+    EXPECT_TRUE(commitSize < thread->GetEcmaVM()->GetEcmaParamConfiguration().GetMaxHeapSize());
+}
+
+HWTEST_F_L0(GCTest, HighSensitiveExceedMaxHeapSizeVerify)
+{
+    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    heap->Prepare();
+    heap->EnableHeapVerication(true);
+    heap->NotifyHighSensitive(true);
+    // First allocate about 250M TaggedArray, not reach max heap size
+    {
+        [[maybe_unused]] ecmascript::EcmaHandleScope baseScope(thread);
+        for (int i = 0; i < 16 * 1000; i++) {
+            [[maybe_unused]] JSHandle<TaggedArray> array = thread->GetEcmaVM()->GetFactory()->NewTaggedArray(
+                1024, JSTaggedValue::Hole(), MemSpaceType::SEMI_SPACE);
+        }
+    }
+    // Continue allocate about 250M TaggedArray, now reach max heap size, must trigger gc to avoid OOM
+    {
+        [[maybe_unused]] ecmascript::EcmaHandleScope baseScope(thread);
+        for (int i = 0; i < 10 * 1000; i++) {
+            [[maybe_unused]] JSHandle<TaggedArray> array = thread->GetEcmaVM()->GetFactory()->NewTaggedArray(
+                1024, JSTaggedValue::Hole(), MemSpaceType::SEMI_SPACE);
+        }
+    }
+    size_t commitSize = thread->GetEcmaVM()->GetHeap()->GetCommittedSize();
+    const_cast<Heap *>(thread->GetEcmaVM()->GetHeap())->NotifyHighSensitive(false);
+    EXPECT_TRUE(commitSize < thread->GetEcmaVM()->GetEcmaParamConfiguration().GetMaxHeapSize());
+}
+
+HWTEST_F_L0(GCTest, HighSensitiveExceedMaxHeapSizeSyncSweepVerify)
+{
+    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    heap->Prepare();
+    heap->GetSweeper()->EnableConcurrentSweep(EnableConcurrentSweepType::DISABLE);
+    heap->EnableHeapVerication(true);
     heap->NotifyHighSensitive(true);
     // First allocate about 250M TaggedArray, not reach max heap size
     {
@@ -363,26 +438,22 @@ HWTEST_F_L0(GCTest, AdjustCapacity)
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
     SemiSpace * space = heap->GetNewSpace();
 
-    EXPECT_EQ(space->GetSurvivalObjectSize(), 0);
-    {
-        [[maybe_unused]] ecmascript::EcmaHandleScope baseScope(thread);
-        for (int i = 0; i < 300; i++) {
-            [[maybe_unused]] JSHandle<TaggedArray> array = thread->GetEcmaVM()->GetFactory()->NewTaggedArray(
-                10 * 1024, JSTaggedValue::Hole(), MemSpaceType::SEMI_SPACE);
-        }
-    }
-    EXPECT_GT(space->GetSurvivalObjectSize(), 0);
+    // The active semi-space always has at least one committed region: Initialize() commits a
+    // DEFAULT_REGION_SIZE region on heap init and after every SwapNewSpace->Restart, so
+    // committedSize > 0 holds without any prior allocation. Assert on it because the
+    // committed-driven AdjustCapacity calls below rely on it (not on survivalObjectSize_).
+    EXPECT_GT(space->GetCommittedSize(), 0);
 
-    EXPECT_FALSE(space->AdjustCapacity(0, thread));
+    // Pin the capacity at half the committed size so the small-flow calls below
+    // deterministically take the committed-driven coverage recovery.
+    space->SetInitialCapacity(space->GetCommittedSize() / 2);
+    // A small flow carries no survival signal: NaN votes for neither grow nor shrink.
+    space->AdjustCapacity(0, thread);
+    space->SetInitialCapacity(space->GetCommittedSize() / 2);
+    // The flow gate is removed: a small flow no longer gates the adjustment.
+    EXPECT_TRUE(space->AdjustCapacity(1, thread));
+    space->SetInitialCapacity(space->GetCommittedSize() / 2);
     size_t size = space->GetInitialCapacity() * GROW_OBJECT_SURVIVAL_RATE / 2;
-    EXPECT_FALSE(space->AdjustCapacity(size, thread));
-
-    space->SetInitialCapacity(space->GetSurvivalObjectSize() / GROW_OBJECT_SURVIVAL_RATE - 1);
-    size = space->GetSurvivalObjectSize() / GROW_OBJECT_SURVIVAL_RATE - 1;
-    size_t oldMaxCapacity = space->GetMaximumCapacity();
-    space->SetMaximumCapacity(space->GetInitialCapacity());
-    EXPECT_TRUE(space->AdjustCapacity(size, thread));
-    space->SetMaximumCapacity(oldMaxCapacity);
     EXPECT_TRUE(space->AdjustCapacity(size, thread));
 #endif
 }
@@ -392,9 +463,14 @@ HWTEST_F_L0(GCTest, NativeMemAllocInSensitive)
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
     ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
     heap->NotifyHighSensitive(true);
+    // 20 x 64MB = 1.25GB: exceeds nativeSizeTriggerGCThreshold_ (768MB) to trigger the
+    // sensitive NATIVE_LIMIT OLD_GC reclamation, and total > 1GB keeps the < 1GB assertion
+    // meaningful. A single 300MB guest mmap crashes qemu user-mode (signal 44 / SIGSEGV;
+    // ceiling ~256MB on qemu 6.2.0), so cap each ArrayBuffer at 64MB -- works on host,
+    // real arm64, and qemu.
     for (size_t i = 0; i < 20; i++) {
         [[maybe_unused]] ecmascript::EcmaHandleScope baseScope(thread);
-        factory->NewJSArrayBuffer(300 * 1024 * 1024); // 300MB
+        factory->NewJSArrayBuffer(64 * 1024 * 1024); // 64MB
     }
     EXPECT_TRUE(heap->GetGlobalNativeSize() < 1 * 1024 * 1024* 1024); // 1GB
 }
@@ -576,5 +652,632 @@ HWTEST_F_L0(GCTest, NotifyWarmStartFalse002)
     EXPECT_TRUE(heap->AllowWarmStartGcRestrain());
     heap->NotifyPostFork();
     EXPECT_FALSE(heap->AllowWarmStartGcRestrain());
+}
+
+HWTEST_F_L0(GCTest, GetGCStatisticTypeTest001)
+{
+    EXPECT_STREQ(TestableGCStats::GetGCStatisticType(GCType::SHARED_GC), "Shared GC");
+    EXPECT_STREQ(TestableGCStats::GetGCStatisticType(GCType::SHARED_PARTIAL_GC), "Shared GC");
+    EXPECT_STREQ(TestableGCStats::GetGCStatisticType(GCType::SHARED_FULL_GC), "Shared GC");
+    EXPECT_STREQ(TestableGCStats::GetGCStatisticType(GCType::PARTIAL_YOUNG_GC), "Local GC");
+    EXPECT_STREQ(TestableGCStats::GetGCStatisticType(GCType::PARTIAL_OLD_GC), "Local GC");
+    EXPECT_STREQ(TestableGCStats::GetGCStatisticType(GCType::LOCAL_CC), "Local GC");
+    EXPECT_STREQ(TestableGCStats::GetGCStatisticType(GCType::COMPRESS_GC), "Local GC");
+    EXPECT_STREQ(TestableGCStats::GetGCStatisticType(GCType::CMS_GC), "Local GC");
+    EXPECT_STREQ(TestableGCStats::GetGCStatisticType(GCType::OTHER), "UnknownType");
+}
+
+HWTEST_F_L0(GCTest, GetGCStatisticDataTest001)
+{
+    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    TestableGCStats stats(heap);
+    stats.SetRecordData(RecordData::YOUNG_COUNT, 2);
+    stats.SetRecordDuration(RecordDuration::YOUNG_MIN_PAUSE, 3.5f);
+    stats.SetRecordDuration(RecordDuration::YOUNG_MAX_PAUSE, 8.5f);
+    stats.SetRecordDuration(RecordDuration::YOUNG_TOTAL_PAUSE, 12.0f);
+    stats.SetRecordData(RecordData::OLD_COUNT, 1);
+    stats.SetRecordDuration(RecordDuration::OLD_MIN_PAUSE, 5.0f);
+    stats.SetRecordDuration(RecordDuration::OLD_MAX_PAUSE, 9.0f);
+    stats.SetRecordDuration(RecordDuration::OLD_TOTAL_PAUSE, 5.0f);
+    stats.SetRecordData(RecordData::LOCAL_CC_COUNT, 1);
+    stats.SetRecordDuration(RecordDuration::LOCAL_CC_MIN_PAUSE, 2.0f);
+    stats.SetRecordDuration(RecordDuration::LOCAL_CC_MAX_PAUSE, 4.0f);
+    stats.SetRecordDuration(RecordDuration::LOCAL_CC_TOTAL_PAUSE, 2.0f);
+    stats.SetGCTypeForTest(GCType::PARTIAL_YOUNG_GC);
+    stats.RecordGCStatisticStart();
+    stats.RecordGCStatisticEnd();
+
+    GCStatisticData gcStatistic = stats.GetGCStatistic();
+    EXPECT_EQ(gcStatistic.count, 4U);
+    EXPECT_FLOAT_EQ(gcStatistic.maxPause, 9.0f);
+    EXPECT_FLOAT_EQ(gcStatistic.minPause, 2.0f);
+    EXPECT_FLOAT_EQ(gcStatistic.totalPause, 19.0f);
+    EXPECT_NE(gcStatistic.lastStartTime, 0U);
+    EXPECT_NE(gcStatistic.lastEndTime, 0U);
+    EXPECT_STREQ(gcStatistic.lastType, "Local GC");
+}
+
+HWTEST_F_L0(GCTest, GetGCStatisticTypeTest002)
+{
+    EXPECT_STREQ(TestableGCStats::GetGCStatisticType(GCType::SHARED_GC), "Shared GC");
+    EXPECT_STREQ(TestableGCStats::GetGCStatisticType(GCType::SHARED_PARTIAL_GC), "Shared GC");
+    EXPECT_STREQ(TestableGCStats::GetGCStatisticType(GCType::SHARED_FULL_GC), "Shared GC");
+    EXPECT_STREQ(TestableGCStats::GetGCStatisticType(GCType::PARTIAL_YOUNG_GC), "Local GC");
+    EXPECT_STREQ(TestableGCStats::GetGCStatisticType(GCType::PARTIAL_OLD_GC), "Local GC");
+    EXPECT_STREQ(TestableGCStats::GetGCStatisticType(GCType::LOCAL_CC), "Local GC");
+    EXPECT_STREQ(TestableGCStats::GetGCStatisticType(GCType::COMPRESS_GC), "Local GC");
+    EXPECT_STREQ(TestableGCStats::GetGCStatisticType(GCType::CMS_GC), "Local GC");
+    EXPECT_STREQ(TestableGCStats::GetGCStatisticType(GCType::GLOBAL_GC), "Shared GC");
+    EXPECT_STREQ(TestableGCStats::GetGCStatisticType(GCType::OTHER), "UnknownType");
+}
+
+HWTEST_F_L0(GCTest, GetGCStatisticDataTest002)
+{
+    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    TestableGCStats stats(heap);
+    stats.SetGCTypeForTest(GCType::OTHER);
+    stats.RecordGCStatisticStart();
+    stats.RecordGCStatisticEnd();
+
+    GCStatisticData gcStatistic = stats.GetGCStatistic();
+    EXPECT_EQ(gcStatistic.count, 0U);
+    EXPECT_FLOAT_EQ(gcStatistic.maxPause, 0.0f);
+    EXPECT_FLOAT_EQ(gcStatistic.minPause, 0.0f);
+    EXPECT_FLOAT_EQ(gcStatistic.totalPause, 0.0f);
+    EXPECT_NE(gcStatistic.lastStartTime, 0U);
+    EXPECT_NE(gcStatistic.lastEndTime, 0U);
+    EXPECT_STREQ(gcStatistic.lastType, "UnknownType");
+}
+
+HWTEST_F_L0(GCTest, GetGCStatisticDataTest003)
+{
+    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    TestableGCStats stats(heap);
+    stats.SetRecordData(RecordData::YOUNG_COUNT, 5);
+    stats.SetRecordDuration(RecordDuration::YOUNG_MIN_PAUSE, 1.5f);
+    stats.SetRecordDuration(RecordDuration::YOUNG_MAX_PAUSE, 9.5f);
+    stats.SetRecordDuration(RecordDuration::YOUNG_TOTAL_PAUSE, 20.0f);
+    stats.SetGCTypeForTest(GCType::PARTIAL_YOUNG_GC);
+    stats.RecordGCStatisticStart();
+    stats.RecordGCStatisticEnd();
+
+    GCStatisticData gcStatistic = stats.GetGCStatistic();
+    EXPECT_EQ(gcStatistic.count, 5U);
+    EXPECT_FLOAT_EQ(gcStatistic.maxPause, 9.5f);
+    EXPECT_FLOAT_EQ(gcStatistic.minPause, 1.5f);
+    EXPECT_FLOAT_EQ(gcStatistic.totalPause, 20.0f);
+    EXPECT_STREQ(gcStatistic.lastType, "Local GC");
+}
+
+HWTEST_F_L0(GCTest, GetGCStatisticDataTest004)
+{
+    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    TestableGCStats stats(heap);
+    stats.SetRecordData(RecordData::OLD_COUNT, 3);
+    stats.SetRecordDuration(RecordDuration::OLD_MIN_PAUSE, 4.0f);
+    stats.SetRecordDuration(RecordDuration::OLD_MAX_PAUSE, 12.0f);
+    stats.SetRecordDuration(RecordDuration::OLD_TOTAL_PAUSE, 18.5f);
+    stats.SetGCTypeForTest(GCType::PARTIAL_OLD_GC);
+    stats.RecordGCStatisticStart();
+    stats.RecordGCStatisticEnd();
+
+    GCStatisticData gcStatistic = stats.GetGCStatistic();
+    EXPECT_EQ(gcStatistic.count, 3U);
+    EXPECT_FLOAT_EQ(gcStatistic.maxPause, 12.0f);
+    EXPECT_FLOAT_EQ(gcStatistic.minPause, 4.0f);
+    EXPECT_FLOAT_EQ(gcStatistic.totalPause, 18.5f);
+    EXPECT_STREQ(gcStatistic.lastType, "Local GC");
+}
+
+HWTEST_F_L0(GCTest, GetGCStatisticDataTest005)
+{
+    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    TestableGCStats stats(heap);
+    stats.SetRecordData(RecordData::COMPRESS_COUNT, 2);
+    stats.SetRecordDuration(RecordDuration::COMPRESS_MIN_PAUSE, 6.0f);
+    stats.SetRecordDuration(RecordDuration::COMPRESS_MAX_PAUSE, 14.0f);
+    stats.SetRecordDuration(RecordDuration::COMPRESS_TOTAL_PAUSE, 21.0f);
+    stats.SetGCTypeForTest(GCType::COMPRESS_GC);
+    stats.RecordGCStatisticStart();
+    stats.RecordGCStatisticEnd();
+
+    GCStatisticData gcStatistic = stats.GetGCStatistic();
+    EXPECT_EQ(gcStatistic.count, 2U);
+    EXPECT_FLOAT_EQ(gcStatistic.maxPause, 14.0f);
+    EXPECT_FLOAT_EQ(gcStatistic.minPause, 6.0f);
+    EXPECT_FLOAT_EQ(gcStatistic.totalPause, 21.0f);
+    EXPECT_STREQ(gcStatistic.lastType, "Local GC");
+}
+
+HWTEST_F_L0(GCTest, GetGCStatisticDataTest006)
+{
+    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    TestableGCStats stats(heap);
+    stats.SetRecordData(RecordData::LOCAL_CC_COUNT, 4);
+    stats.SetRecordDuration(RecordDuration::LOCAL_CC_MIN_PAUSE, 2.5f);
+    stats.SetRecordDuration(RecordDuration::LOCAL_CC_MAX_PAUSE, 6.5f);
+    stats.SetRecordDuration(RecordDuration::LOCAL_CC_TOTAL_PAUSE, 16.0f);
+    stats.SetGCTypeForTest(GCType::LOCAL_CC);
+    stats.RecordGCStatisticStart();
+    stats.RecordGCStatisticEnd();
+
+    GCStatisticData gcStatistic = stats.GetGCStatistic();
+    EXPECT_EQ(gcStatistic.count, 4U);
+    EXPECT_FLOAT_EQ(gcStatistic.maxPause, 6.5f);
+    EXPECT_FLOAT_EQ(gcStatistic.minPause, 2.5f);
+    EXPECT_FLOAT_EQ(gcStatistic.totalPause, 16.0f);
+    EXPECT_STREQ(gcStatistic.lastType, "Local GC");
+}
+
+HWTEST_F_L0(GCTest, GetGCStatisticDataTest007)
+{
+    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    TestableGCStats stats(heap);
+    stats.SetRecordData(RecordData::SHARED_COUNT, 7);
+    stats.SetRecordDuration(RecordDuration::SHARED_MIN_PAUSE, 3.0f);
+    stats.SetRecordDuration(RecordDuration::SHARED_MAX_PAUSE, 10.0f);
+    stats.SetRecordDuration(RecordDuration::SHARED_TOTAL_PAUSE, 35.0f);
+    stats.SetGCTypeForTest(GCType::SHARED_GC);
+    stats.RecordGCStatisticStart();
+    stats.RecordGCStatisticEnd();
+
+    GCStatisticData gcStatistic = stats.GetGCStatistic();
+    EXPECT_EQ(gcStatistic.count, 7U);
+    EXPECT_FLOAT_EQ(gcStatistic.maxPause, 10.0f);
+    EXPECT_FLOAT_EQ(gcStatistic.minPause, 3.0f);
+    EXPECT_FLOAT_EQ(gcStatistic.totalPause, 35.0f);
+    EXPECT_STREQ(gcStatistic.lastType, "Shared GC");
+}
+
+HWTEST_F_L0(GCTest, GetGCStatisticDataTest008)
+{
+    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    TestableGCStats stats(heap);
+    stats.SetRecordData(RecordData::SWEEP_COUNT, 8);
+    stats.SetRecordDuration(RecordDuration::SWEEP_MIN_PAUSE, 4.5f);
+    stats.SetRecordDuration(RecordDuration::SWEEP_MAX_PAUSE, 11.5f);
+    stats.SetRecordDuration(RecordDuration::SWEEP_TOTAL_PAUSE, 40.0f);
+    stats.SetGCTypeForTest(GCType::CMS_GC);
+    stats.RecordGCStatisticStart();
+    stats.RecordGCStatisticEnd();
+
+    GCStatisticData gcStatistic = stats.GetGCStatistic();
+    EXPECT_EQ(gcStatistic.count, 8U);
+    EXPECT_FLOAT_EQ(gcStatistic.maxPause, 11.5f);
+    EXPECT_FLOAT_EQ(gcStatistic.minPause, 4.5f);
+    EXPECT_FLOAT_EQ(gcStatistic.totalPause, 40.0f);
+    EXPECT_STREQ(gcStatistic.lastType, "Local GC");
+}
+
+HWTEST_F_L0(GCTest, GetGCStatisticDataTest009)
+{
+    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    TestableGCStats stats(heap);
+    stats.SetRecordData(RecordData::YOUNG_COUNT, 1);
+    stats.SetRecordDuration(RecordDuration::YOUNG_MIN_PAUSE, 8.0f);
+    stats.SetRecordDuration(RecordDuration::YOUNG_MAX_PAUSE, 11.0f);
+    stats.SetRecordDuration(RecordDuration::YOUNG_TOTAL_PAUSE, 11.0f);
+    stats.SetRecordData(RecordData::OLD_COUNT, 2);
+    stats.SetRecordDuration(RecordDuration::OLD_MIN_PAUSE, 7.0f);
+    stats.SetRecordDuration(RecordDuration::OLD_MAX_PAUSE, 12.0f);
+    stats.SetRecordDuration(RecordDuration::OLD_TOTAL_PAUSE, 19.0f);
+    stats.SetRecordData(RecordData::COMPRESS_COUNT, 3);
+    stats.SetRecordDuration(RecordDuration::COMPRESS_MIN_PAUSE, 6.0f);
+    stats.SetRecordDuration(RecordDuration::COMPRESS_MAX_PAUSE, 13.0f);
+    stats.SetRecordDuration(RecordDuration::COMPRESS_TOTAL_PAUSE, 24.0f);
+    stats.SetRecordData(RecordData::LOCAL_CC_COUNT, 4);
+    stats.SetRecordDuration(RecordDuration::LOCAL_CC_MIN_PAUSE, 5.0f);
+    stats.SetRecordDuration(RecordDuration::LOCAL_CC_MAX_PAUSE, 14.0f);
+    stats.SetRecordDuration(RecordDuration::LOCAL_CC_TOTAL_PAUSE, 28.0f);
+    stats.SetRecordData(RecordData::SHARED_COUNT, 5);
+    stats.SetRecordDuration(RecordDuration::SHARED_MIN_PAUSE, 4.0f);
+    stats.SetRecordDuration(RecordDuration::SHARED_MAX_PAUSE, 15.0f);
+    stats.SetRecordDuration(RecordDuration::SHARED_TOTAL_PAUSE, 33.0f);
+    stats.SetRecordData(RecordData::SWEEP_COUNT, 6);
+    stats.SetRecordDuration(RecordDuration::SWEEP_MIN_PAUSE, 3.0f);
+    stats.SetRecordDuration(RecordDuration::SWEEP_MAX_PAUSE, 16.0f);
+    stats.SetRecordDuration(RecordDuration::SWEEP_TOTAL_PAUSE, 39.0f);
+    stats.SetGCTypeForTest(GCType::SHARED_FULL_GC);
+    stats.RecordGCStatisticStart();
+    stats.RecordGCStatisticEnd();
+
+    GCStatisticData gcStatistic = stats.GetGCStatistic();
+    EXPECT_EQ(gcStatistic.count, 21U);
+    EXPECT_FLOAT_EQ(gcStatistic.maxPause, 16.0f);
+    EXPECT_FLOAT_EQ(gcStatistic.minPause, 3.0f);
+    EXPECT_FLOAT_EQ(gcStatistic.totalPause, 154.0f);
+    EXPECT_STREQ(gcStatistic.lastType, "Shared GC");
+}
+
+HWTEST_F_L0(GCTest, GetGCStatisticDataTest010)
+{
+    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    TestableGCStats stats(heap);
+    stats.SetRecordData(RecordData::YOUNG_COUNT, 0);
+    stats.SetRecordDuration(RecordDuration::YOUNG_MIN_PAUSE, 1.0f);
+    stats.SetRecordDuration(RecordDuration::YOUNG_MAX_PAUSE, 99.0f);
+    stats.SetRecordDuration(RecordDuration::YOUNG_TOTAL_PAUSE, 100.0f);
+    stats.SetRecordData(RecordData::OLD_COUNT, 2);
+    stats.SetRecordDuration(RecordDuration::OLD_MIN_PAUSE, 4.0f);
+    stats.SetRecordDuration(RecordDuration::OLD_MAX_PAUSE, 7.0f);
+    stats.SetRecordDuration(RecordDuration::OLD_TOTAL_PAUSE, 10.0f);
+    stats.SetGCTypeForTest(GCType::PARTIAL_OLD_GC);
+    stats.RecordGCStatisticStart();
+    stats.RecordGCStatisticEnd();
+
+    GCStatisticData gcStatistic = stats.GetGCStatistic();
+    EXPECT_EQ(gcStatistic.count, 2U);
+    EXPECT_FLOAT_EQ(gcStatistic.maxPause, 7.0f);
+    EXPECT_FLOAT_EQ(gcStatistic.minPause, 4.0f);
+    EXPECT_FLOAT_EQ(gcStatistic.totalPause, 10.0f);
+    EXPECT_STREQ(gcStatistic.lastType, "Local GC");
+}
+
+HWTEST_F_L0(GCTest, GetGCStatisticDataTest011)
+{
+    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    TestableGCStats stats(heap);
+    stats.SetGCTypeForTest(GCType::PARTIAL_YOUNG_GC);
+    stats.RecordGCStatisticStart();
+    stats.RecordGCStatisticEnd();
+
+    GCStatisticData gcStatistic = stats.GetGCStatistic();
+    EXPECT_EQ(gcStatistic.count, 0U);
+    EXPECT_NE(gcStatistic.lastStartTime, 0U);
+    EXPECT_NE(gcStatistic.lastEndTime, 0U);
+    EXPECT_LE(gcStatistic.lastStartTime, gcStatistic.lastEndTime);
+    EXPECT_STREQ(gcStatistic.lastType, "Local GC");
+}
+
+HWTEST_F_L0(GCTest, GetGCStatisticDataTest012)
+{
+    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    TestableGCStats stats(heap);
+    stats.SetGCTypeForTest(GCType::SHARED_PARTIAL_GC);
+    stats.RecordGCStatisticStart();
+    stats.RecordGCStatisticEnd();
+
+    GCStatisticData gcStatistic = stats.GetGCStatistic();
+    EXPECT_EQ(gcStatistic.count, 0U);
+    EXPECT_NE(gcStatistic.lastStartTime, 0U);
+    EXPECT_NE(gcStatistic.lastEndTime, 0U);
+    EXPECT_LE(gcStatistic.lastStartTime, gcStatistic.lastEndTime);
+    EXPECT_STREQ(gcStatistic.lastType, "Shared GC");
+}
+
+HWTEST_F_L0(GCTest, GetGCStatisticDataTest013)
+{
+    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    TestableGCStats stats(heap);
+    stats.SetGCTypeForTest(GCType::GLOBAL_GC);
+    stats.RecordGCStatisticStart();
+    stats.RecordGCStatisticEnd();
+
+    GCStatisticData gcStatistic = stats.GetGCStatistic();
+    EXPECT_EQ(gcStatistic.count, 0U);
+    EXPECT_NE(gcStatistic.lastStartTime, 0U);
+    EXPECT_NE(gcStatistic.lastEndTime, 0U);
+    EXPECT_LE(gcStatistic.lastStartTime, gcStatistic.lastEndTime);
+    EXPECT_STREQ(gcStatistic.lastType, "Shared GC");
+}
+
+HWTEST_F_L0(GCTest, MergeGCStatisticTest001)
+{
+    GCStatisticData localStats;
+    localStats.count = 0;
+    localStats.maxPause = 1.0f;
+    localStats.minPause = 0.0f;
+    localStats.totalPause = 1.0f;
+    localStats.lastStartTime = 10;
+    localStats.lastEndTime = 20;
+    localStats.lastType = "Local GC";
+
+    GCStatisticData sharedStats;
+    sharedStats.count = 2;
+    sharedStats.maxPause = 5.0f;
+    sharedStats.minPause = 2.0f;
+    sharedStats.totalPause = 7.0f;
+    sharedStats.lastStartTime = 30;
+    sharedStats.lastEndTime = 40;
+    sharedStats.lastType = "Shared GC";
+
+    GCStatisticData merged = TestableGCStats::MergeGCStatistic(localStats, sharedStats);
+    EXPECT_EQ(merged.count, 2U);
+    EXPECT_FLOAT_EQ(merged.maxPause, 5.0f);
+    EXPECT_FLOAT_EQ(merged.minPause, 2.0f);
+    EXPECT_FLOAT_EQ(merged.totalPause, 8.0f);
+    EXPECT_EQ(merged.lastStartTime, 30U);
+    EXPECT_EQ(merged.lastEndTime, 40U);
+    EXPECT_STREQ(merged.lastType, "Shared GC");
+}
+
+HWTEST_F_L0(GCTest, MergeGCStatisticTest002)
+{
+    GCStatisticData localStats;
+    localStats.count = 3;
+    localStats.maxPause = 6.0f;
+    localStats.minPause = 1.5f;
+    localStats.totalPause = 9.0f;
+    localStats.lastStartTime = 50;
+    localStats.lastEndTime = 80;
+    localStats.lastType = "Local GC";
+
+    GCStatisticData sharedStats;
+    sharedStats.count = 0;
+    sharedStats.maxPause = 4.0f;
+    sharedStats.minPause = 0.0f;
+    sharedStats.totalPause = 2.0f;
+    sharedStats.lastStartTime = 40;
+    sharedStats.lastEndTime = 70;
+    sharedStats.lastType = "Shared GC";
+
+    GCStatisticData merged = TestableGCStats::MergeGCStatistic(localStats, sharedStats);
+    EXPECT_EQ(merged.count, 3U);
+    EXPECT_FLOAT_EQ(merged.maxPause, 6.0f);
+    EXPECT_FLOAT_EQ(merged.minPause, 1.5f);
+    EXPECT_FLOAT_EQ(merged.totalPause, 11.0f);
+    EXPECT_EQ(merged.lastStartTime, 50U);
+    EXPECT_EQ(merged.lastEndTime, 80U);
+    EXPECT_STREQ(merged.lastType, "Local GC");
+}
+
+HWTEST_F_L0(GCTest, MergeGCStatisticTest003)
+{
+    GCStatisticData localStats;
+    localStats.count = 2;
+    localStats.maxPause = 3.0f;
+    localStats.minPause = 2.5f;
+    localStats.totalPause = 5.0f;
+    localStats.lastStartTime = 100;
+    localStats.lastEndTime = 120;
+    localStats.lastType = "Local GC";
+
+    GCStatisticData sharedStats;
+    sharedStats.count = 4;
+    sharedStats.maxPause = 7.0f;
+    sharedStats.minPause = 1.0f;
+    sharedStats.totalPause = 8.0f;
+    sharedStats.lastStartTime = 90;
+    sharedStats.lastEndTime = 110;
+    sharedStats.lastType = "Shared GC";
+
+    GCStatisticData merged = TestableGCStats::MergeGCStatistic(localStats, sharedStats);
+    EXPECT_EQ(merged.count, 6U);
+    EXPECT_FLOAT_EQ(merged.maxPause, 7.0f);
+    EXPECT_FLOAT_EQ(merged.minPause, 1.0f);
+    EXPECT_FLOAT_EQ(merged.totalPause, 13.0f);
+    EXPECT_EQ(merged.lastStartTime, 100U);
+    EXPECT_EQ(merged.lastEndTime, 120U);
+    EXPECT_STREQ(merged.lastType, "Local GC");
+
+    sharedStats.lastStartTime = 130;
+    sharedStats.lastEndTime = 140;
+    merged = TestableGCStats::MergeGCStatistic(localStats, sharedStats);
+    EXPECT_EQ(merged.lastStartTime, 130U);
+    EXPECT_EQ(merged.lastEndTime, 140U);
+    EXPECT_STREQ(merged.lastType, "Shared GC");
+}
+
+HWTEST_F_L0(GCTest, MergeGCStatisticTest004)
+{
+    GCStatisticData localStats;
+    localStats.count = 0;
+    localStats.maxPause = 2.0f;
+    localStats.minPause = 0.0f;
+    localStats.totalPause = 1.0f;
+    localStats.lastStartTime = 100;
+    localStats.lastEndTime = 120;
+    localStats.lastType = "Local GC";
+
+    GCStatisticData sharedStats;
+    sharedStats.count = 0;
+    sharedStats.maxPause = 5.0f;
+    sharedStats.minPause = 0.0f;
+    sharedStats.totalPause = 3.0f;
+    sharedStats.lastStartTime = 50;
+    sharedStats.lastEndTime = 150;
+    sharedStats.lastType = "Shared GC";
+
+    GCStatisticData merged = TestableGCStats::MergeGCStatistic(localStats, sharedStats);
+    EXPECT_EQ(merged.count, 0U);
+    EXPECT_FLOAT_EQ(merged.maxPause, 5.0f);
+    EXPECT_FLOAT_EQ(merged.minPause, 0.0f);
+    EXPECT_FLOAT_EQ(merged.totalPause, 4.0f);
+    EXPECT_EQ(merged.lastStartTime, 100U);
+    EXPECT_EQ(merged.lastEndTime, 150U);
+    EXPECT_STREQ(merged.lastType, "Local GC");
+}
+
+HWTEST_F_L0(GCTest, MergeGCStatisticTest005)
+{
+    GCStatisticData localStats;
+    localStats.count = 0;
+    localStats.maxPause = 1.0f;
+    localStats.minPause = 0.0f;
+    localStats.totalPause = 2.0f;
+    localStats.lastStartTime = 10;
+    localStats.lastEndTime = 80;
+    localStats.lastType = "Local GC";
+
+    GCStatisticData sharedStats;
+    sharedStats.count = 0;
+    sharedStats.maxPause = 2.0f;
+    sharedStats.minPause = 0.0f;
+    sharedStats.totalPause = 5.0f;
+    sharedStats.lastStartTime = 90;
+    sharedStats.lastEndTime = 70;
+    sharedStats.lastType = "Shared GC";
+
+    GCStatisticData merged = TestableGCStats::MergeGCStatistic(localStats, sharedStats);
+    EXPECT_EQ(merged.count, 0U);
+    EXPECT_FLOAT_EQ(merged.maxPause, 2.0f);
+    EXPECT_FLOAT_EQ(merged.minPause, 0.0f);
+    EXPECT_FLOAT_EQ(merged.totalPause, 7.0f);
+    EXPECT_EQ(merged.lastStartTime, 90U);
+    EXPECT_EQ(merged.lastEndTime, 80U);
+    EXPECT_STREQ(merged.lastType, "Shared GC");
+}
+
+HWTEST_F_L0(GCTest, MergeGCStatisticTest006)
+{
+    GCStatisticData localStats;
+    localStats.count = 4;
+    localStats.maxPause = 6.0f;
+    localStats.minPause = 1.0f;
+    localStats.totalPause = 11.0f;
+    localStats.lastStartTime = 200;
+    localStats.lastEndTime = 210;
+    localStats.lastType = "Local GC";
+
+    GCStatisticData sharedStats;
+    sharedStats.count = 5;
+    sharedStats.maxPause = 9.0f;
+    sharedStats.minPause = 0.5f;
+    sharedStats.totalPause = 15.0f;
+    sharedStats.lastStartTime = 200;
+    sharedStats.lastEndTime = 260;
+    sharedStats.lastType = "Shared GC";
+
+    GCStatisticData merged = TestableGCStats::MergeGCStatistic(localStats, sharedStats);
+    EXPECT_EQ(merged.count, 9U);
+    EXPECT_FLOAT_EQ(merged.maxPause, 9.0f);
+    EXPECT_FLOAT_EQ(merged.minPause, 0.5f);
+    EXPECT_FLOAT_EQ(merged.totalPause, 26.0f);
+    EXPECT_EQ(merged.lastStartTime, 200U);
+    EXPECT_EQ(merged.lastEndTime, 260U);
+    EXPECT_STREQ(merged.lastType, "Local GC");
+}
+
+HWTEST_F_L0(GCTest, MergeGCStatisticTest007)
+{
+    GCStatisticData localStats;
+    localStats.count = 2;
+    localStats.maxPause = 10.0f;
+    localStats.minPause = 3.0f;
+    localStats.totalPause = 14.0f;
+    localStats.lastStartTime = 400;
+    localStats.lastEndTime = 405;
+    localStats.lastType = "Local GC";
+
+    GCStatisticData sharedStats;
+    sharedStats.count = 6;
+    sharedStats.maxPause = 12.0f;
+    sharedStats.minPause = 2.0f;
+    sharedStats.totalPause = 28.0f;
+    sharedStats.lastStartTime = 401;
+    sharedStats.lastEndTime = 403;
+    sharedStats.lastType = "Shared GC";
+
+    GCStatisticData merged = TestableGCStats::MergeGCStatistic(localStats, sharedStats);
+    EXPECT_EQ(merged.count, 8U);
+    EXPECT_FLOAT_EQ(merged.maxPause, 12.0f);
+    EXPECT_FLOAT_EQ(merged.minPause, 2.0f);
+    EXPECT_FLOAT_EQ(merged.totalPause, 42.0f);
+    EXPECT_EQ(merged.lastStartTime, 401U);
+    EXPECT_EQ(merged.lastEndTime, 405U);
+    EXPECT_STREQ(merged.lastType, "Shared GC");
+}
+
+HWTEST_F_L0(GCTest, MergeGCStatisticTest008)
+{
+    GCStatisticData localStats;
+    localStats.count = 1;
+    localStats.maxPause = 0.0f;
+    localStats.minPause = 0.0f;
+    localStats.totalPause = 0.0f;
+    localStats.lastStartTime = 1;
+    localStats.lastEndTime = 2;
+    localStats.lastType = "Local GC";
+
+    GCStatisticData sharedStats;
+    sharedStats.count = 3;
+    sharedStats.maxPause = 4.5f;
+    sharedStats.minPause = 1.5f;
+    sharedStats.totalPause = 6.0f;
+    sharedStats.lastStartTime = 3;
+    sharedStats.lastEndTime = 4;
+    sharedStats.lastType = "Shared GC";
+
+    GCStatisticData merged = TestableGCStats::MergeGCStatistic(localStats, sharedStats);
+    EXPECT_EQ(merged.count, 4U);
+    EXPECT_FLOAT_EQ(merged.maxPause, 4.5f);
+    EXPECT_FLOAT_EQ(merged.minPause, 0.0f);
+    EXPECT_FLOAT_EQ(merged.totalPause, 6.0f);
+    EXPECT_EQ(merged.lastStartTime, 3U);
+    EXPECT_EQ(merged.lastEndTime, 4U);
+    EXPECT_STREQ(merged.lastType, "Shared GC");
+}
+
+HWTEST_F_L0(GCTest, IsLongGCTest001)
+{
+    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    TestableGCStats stats(heap);
+
+    EXPECT_FALSE(stats.IsLongGC(GCReason::IDLE, false, true,
+        static_cast<float>(GCKeyStats::GC_BACKGROUD_IDLE_LONG_TIME)));
+    EXPECT_TRUE(stats.IsLongGC(GCReason::IDLE, false, true,
+        static_cast<float>(GCKeyStats::GC_BACKGROUD_IDLE_LONG_TIME) + 0.1f));
+
+    EXPECT_FALSE(stats.IsLongGC(GCReason::IDLE, false, false, static_cast<float>(GCKeyStats::GC_IDLE_LONG_TIME)));
+    EXPECT_TRUE(stats.IsLongGC(GCReason::IDLE, false, false,
+        static_cast<float>(GCKeyStats::GC_IDLE_LONG_TIME) + 0.1f));
+
+    EXPECT_FALSE(stats.IsLongGC(GCReason::OTHER, false, false,
+        static_cast<float>(GCKeyStats::GC_NOT_SENSITIVE_LONG_TIME)));
+    EXPECT_TRUE(stats.IsLongGC(GCReason::OTHER, false, false,
+        static_cast<float>(GCKeyStats::GC_NOT_SENSITIVE_LONG_TIME) + 0.1f));
+
+    EXPECT_FALSE(stats.IsLongGC(GCReason::OTHER, true, false,
+        static_cast<float>(GCKeyStats::GC_SENSITIVE_LONG_TIME)));
+    EXPECT_TRUE(stats.IsLongGC(GCReason::OTHER, true, false,
+        static_cast<float>(GCKeyStats::GC_SENSITIVE_LONG_TIME) + 0.1f));
+}
+
+HWTEST_F_L0(GCTest, IsLongGCTest002)
+{
+    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    TestableGCStats stats(heap);
+
+    EXPECT_FALSE(stats.IsLongGC(GCReason::OTHER, false, true,
+        static_cast<float>(GCKeyStats::GC_BACKGROUD_LONG_TIME)));
+    EXPECT_TRUE(stats.IsLongGC(GCReason::OTHER, false, true,
+        static_cast<float>(GCKeyStats::GC_BACKGROUD_LONG_TIME) + 0.1f));
+
+    EXPECT_FALSE(stats.IsLongGC(GCReason::TRIGGER_BY_JS, false, true,
+        static_cast<float>(GCKeyStats::GC_BACKGROUD_LONG_TIME)));
+    EXPECT_TRUE(stats.IsLongGC(GCReason::TRIGGER_BY_JS, false, true,
+        static_cast<float>(GCKeyStats::GC_BACKGROUD_LONG_TIME) + 0.1f));
+}
+
+HWTEST_F_L0(GCTest, IsLongGCTest003)
+{
+    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    TestableGCStats stats(heap);
+
+    EXPECT_FALSE(stats.IsLongGC(GCReason::IDLE, true, false,
+        static_cast<float>(GCKeyStats::GC_SENSITIVE_LONG_TIME)));
+    EXPECT_TRUE(stats.IsLongGC(GCReason::IDLE, true, false,
+        static_cast<float>(GCKeyStats::GC_SENSITIVE_LONG_TIME) + 0.1f));
+
+    EXPECT_FALSE(stats.IsLongGC(GCReason::IDLE, true, true,
+        static_cast<float>(GCKeyStats::GC_SENSITIVE_LONG_TIME)));
+    EXPECT_TRUE(stats.IsLongGC(GCReason::IDLE, true, true,
+        static_cast<float>(GCKeyStats::GC_SENSITIVE_LONG_TIME) + 0.1f));
+}
+
+HWTEST_F_L0(GCTest, IsLongGCTest004)
+{
+    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    TestableGCStats stats(heap);
+
+    EXPECT_FALSE(stats.IsLongGC(GCReason::IDLE_NATIVE, false, false,
+        static_cast<float>(GCKeyStats::GC_IDLE_LONG_TIME)));
+    EXPECT_TRUE(stats.IsLongGC(GCReason::IDLE_NATIVE, false, false,
+        static_cast<float>(GCKeyStats::GC_IDLE_LONG_TIME) + 0.1f));
+
+    EXPECT_FALSE(stats.IsLongGC(GCReason::IDLE_NATIVE, false, true,
+        static_cast<float>(GCKeyStats::GC_BACKGROUD_IDLE_LONG_TIME)));
+    EXPECT_TRUE(stats.IsLongGC(GCReason::IDLE_NATIVE, false, true,
+        static_cast<float>(GCKeyStats::GC_BACKGROUD_IDLE_LONG_TIME) + 0.1f));
 }
 } // namespace panda::test

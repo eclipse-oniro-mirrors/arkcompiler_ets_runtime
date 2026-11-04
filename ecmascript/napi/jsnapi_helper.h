@@ -18,8 +18,9 @@
 
 #include "ecmascript/ecma_runtime_call_info.h"
 #include "ecmascript/js_handle.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/napi/include/jsnapi.h"
+#include "ecmascript/napi/jsnapi_handle_scope_check.h"
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define RETURN_VALUE_IF_ABRUPT(thread, value)                 \
@@ -137,6 +138,7 @@
     V(TerminationError, TERMINATION_ERROR)
 
 namespace panda {
+extern uintptr_t ecmascript::g_guardAddress;
 using NativeFinalize = void (*)(EcmaVM *);
 class JSNApiHelper {
 public:
@@ -146,28 +148,117 @@ public:
         return Local<T>(from.GetAddress());
     }
 
-    static inline ecmascript::JSTaggedValue ToJSTaggedValue(JSValueRef *from)
+    static inline ecmascript::JSTaggedValue ToJSTaggedValueNoCheck(JSValueRef *from)
     {
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+        auto ret = ecmascript::JSHandle<ecmascript::JSTaggedValue>(reinterpret_cast<uintptr_t>(from));
+        CheckHandleValid(ret.GetAddress());
+        return **ret;
+#else
         ASSERT(from != nullptr);
         return *reinterpret_cast<ecmascript::JSTaggedValue *>(from);
+#endif
+    }
+
+    static inline ecmascript::JSHandle<ecmascript::JSTaggedValue> ToJSHandleNoCheck(JSValueRef *from)
+    {
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+        auto ret = ecmascript::JSHandle<ecmascript::JSTaggedValue>(reinterpret_cast<uintptr_t>(from));
+        CheckHandleValid(ret.GetAddress());
+        return ret;
+#else
+        ASSERT(from != nullptr);
+        return ecmascript::JSHandle<ecmascript::JSTaggedValue>(reinterpret_cast<uintptr_t>(from));
+#endif
+    }
+
+    static inline ecmascript::JSTaggedValue ToJSTaggedValue(JSValueRef *from)
+    {
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+        auto ret = ecmascript::JSHandle<ecmascript::JSTaggedValue>(reinterpret_cast<uintptr_t>(from));
+        CheckHandleValid(ret.GetAddress());
+        return **ret;
+#else
+
+        ASSERT(from != nullptr);
+#if !defined(PANDA_TARGET_WINDOWS)
+        ecmascript::JSTaggedValue value = *reinterpret_cast<ecmascript::JSTaggedValue *>(from);
+        if (value.GetRawData() == static_cast<ecmascript::JSTaggedType>(ecmascript::g_guardAddress)) {
+            LOG_FULL(FATAL) << "invalid handle checked";
+        }
+#endif
+        return *reinterpret_cast<ecmascript::JSTaggedValue *>(from);
+#endif
     }
 
     static inline ecmascript::JSMutableHandle<ecmascript::JSTaggedValue> ToJSMutableHandle(Local<JSValueRef> from)
     {
-        ASSERT(!from.IsEmpty());
-        return ecmascript::JSMutableHandle<ecmascript::JSTaggedValue>(reinterpret_cast<uintptr_t>(*from));
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+        auto ret = ecmascript::JSMutableHandle<ecmascript::JSTaggedValue>(reinterpret_cast<uintptr_t>(*from));
+        CheckHandleValid(ret.GetAddress());
+        return ret;
+#else
+        uintptr_t address = reinterpret_cast<uintptr_t>(*from);
+#if !defined(PANDA_TARGET_WINDOWS)
+        if (address != 0 && *reinterpret_cast<ecmascript::JSTaggedType *>(address) ==
+                            static_cast<ecmascript::JSTaggedType>(ecmascript::g_guardAddress)) {
+            LOG_FULL(FATAL) << "invalid handle checked";
+        }
+#endif
+        return ecmascript::JSMutableHandle<ecmascript::JSTaggedValue>(address);
+#endif
+    }
+
+    static inline ecmascript::JSMutableHandle<ecmascript::JSTaggedValue> ToJSMutableHandle(JSValueRef *from)
+    {
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+        auto ret = ecmascript::JSMutableHandle<ecmascript::JSTaggedValue>(reinterpret_cast<uintptr_t>(*from));
+        CheckHandleValid(ret.GetAddress());
+        return ret;
+#else
+#if !defined(PANDA_TARGET_WINDOWS)
+        if (from != nullptr && *reinterpret_cast<ecmascript::JSTaggedType *>(from) ==
+                               static_cast<ecmascript::JSTaggedType>(ecmascript::g_guardAddress)) {
+            LOG_FULL(FATAL) << "invalid handle checked";
+        }
+#endif
+        return ecmascript::JSMutableHandle<ecmascript::JSTaggedValue>(reinterpret_cast<uintptr_t>(from));
+#endif
     }
 
     static inline ecmascript::JSHandle<ecmascript::JSTaggedValue> ToJSHandle(Local<JSValueRef> from)
     {
-        ASSERT(!from.IsEmpty());
-        return ecmascript::JSHandle<ecmascript::JSTaggedValue>(reinterpret_cast<uintptr_t>(*from));
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+        auto ret = ecmascript::JSHandle<ecmascript::JSTaggedValue>(reinterpret_cast<uintptr_t>(*from));
+        CheckHandleValid(ret.GetAddress());
+        return ret;
+#else
+        uintptr_t address = reinterpret_cast<uintptr_t>(*from);
+#if !defined(PANDA_TARGET_WINDOWS)
+        if (address != 0 && *reinterpret_cast<ecmascript::JSTaggedType *>(address) ==
+                            static_cast<ecmascript::JSTaggedType>(ecmascript::g_guardAddress)) {
+            LOG_FULL(FATAL) << "invalid handle checked";
+        }
+#endif
+        return ecmascript::JSHandle<ecmascript::JSTaggedValue>(address);
+#endif
     }
 
     static inline ecmascript::JSHandle<ecmascript::JSTaggedValue> ToJSHandle(JSValueRef *from)
     {
-        ASSERT(from != nullptr);
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+        auto ret = ecmascript::JSHandle<ecmascript::JSTaggedValue>(reinterpret_cast<uintptr_t>(from));
+        CheckHandleValid(ret.GetAddress());
+        return ret;
+#else
+#if !defined(PANDA_TARGET_WINDOWS)
+        if (from != nullptr && *reinterpret_cast<ecmascript::JSTaggedType *>(from) ==
+                               static_cast<ecmascript::JSTaggedType>(ecmascript::g_guardAddress)) {
+            LOG_FULL(FATAL) << "invalid handle checked";
+        }
+#endif
         return ecmascript::JSHandle<ecmascript::JSTaggedValue>(reinterpret_cast<uintptr_t>(from));
+#endif
     }
 };
 

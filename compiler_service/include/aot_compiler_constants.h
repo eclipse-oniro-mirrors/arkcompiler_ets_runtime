@@ -28,16 +28,14 @@ const std::string BUNDLE_UID = "BundleUid";
 const std::string BUNDLE_GID = "BundleGid";
 const std::string BUNDLE_TYPE = "bundleType";
 const std::string TRIGGER_TYPE = "triggerType";
-const std::string STATIC_HYBRID_MODULE_CNT = "staticAndHybridModuleCnt";
 const std::string AN_FILE_NAME = "anFileName";
 const std::string APP_SIGNATURE = "appIdentifier";
 const std::string BUNDLE_NAME = "bundleName";
+const std::string HOST_BUNDLE_NAME = "hostBundleName";
 const std::string PKG_PATH = "pkgPath";
 const std::string ABC_NAME = "abcName";
 const std::string MODULE_NAME = "moduleName";
 const std::string PGO_DIR = "pgoDir";
-const std::string ABC_OFFSET = "abcOffset";
-const std::string ABC_SIZE = "abcSize";
 const std::string ARKTS_DYNAMIC = "dynamic";
 const std::string ARKTS_STATIC = "static";
 const std::string ARKTS_HYBRID = "hybrid";
@@ -54,10 +52,50 @@ const std::string IS_SYSTEM_COMPONENT = "isSysComp";
 
 const std::string APP_ARK_CACHE_PREFIX = "/data/app/el1/public/aot_compiler/ark_cache/";
 const std::string FRAMEWORK_ARK_CACHE_PREFIX = "/data/service/el1/public/for-all-app/framework_ark_cache/";
-const std::string SHARED_BUNDLES_ARK_CACHE_PREFIX = "/data/service/el1/public/for-all-app/shared_bundles_ark_cache/";
 
 const std::string ARKTS_MODE = "moduleArkTSMode";
 const std::string PARTIAL = "partial";
+const std::string FULL = "full";
+
+// Compiler argument names (dynamic AOT)
+const std::string COMPILER_OPT_BC_RANGE = "compiler-opt-bc-range";
+const std::string COMPILER_DEVICE_STATE = "compiler-device-state";
+const std::string COMPILER_BASELINE_PGO = "compiler-baseline-pgo";
+const std::string COMPILER_EXTERNAL_PKG_INFO = "compiler-external-pkg-info";
+
+// Compiler argument names (static AOT)
+const std::string BOOT_PANDA_FILES = "boot-panda-files";
+const std::string PAOC_PANDA_FILES = "paoc-panda-files";
+const std::string PAOC_LOCATION = "paoc-location";
+const std::string PAOC_OUTPUT = "paoc-output";
+const std::string PAOC_USE_PROFILE = "paoc-use-profile";
+const std::string COMPILER_REGEX = "compiler-regex";
+
+// FD argument names
+const std::string AN_FD = "an-fd";
+const std::string PAOC_AN_FD = "paoc-an-fd";
+const std::string HAP_FD = "hap-fd";
+const std::string PAOC_HAP_FD = "paoc-hap-fd";
+
+// File suffixes
+const std::string AN_SUFFIX = ".an";
+const std::string AP_SUFFIX = ".ap";
+const std::string HSP_SUFFIX = ".hsp";
+
+// Static AOT paths
+const std::string STATIC_BOOT_PATH = "/system/framework/bootpath.json";
+const std::string STATIC_PAOC_BLACK_LIST_PATH = "/etc/ark/static_aot_methods_black_list.json";
+
+// Path prefixes
+const std::string APP_SANDBOX_PATH_PREFIX = "/data/storage/el1/bundle/";
+const std::string SYS_OUTER_HSP_PATH_PREFIX = "/system/app/";
+const std::string APP_ABC_PHYS_PATH_PREFIX = "/data/app/el1/bundle/public/";
+const std::string ETS_PATH = "/ets";
+
+// Tags and misc
+const std::string EMPTY_JSON_ARRAY = "[]";
+const std::string BUNDLE_PATH_SEGMENT = "bundle";
+const std::string LOG_OPT_ALLASM = "allasm";
 } // namespace ArgsIdx
 
 // UID and GID of system users
@@ -70,7 +108,7 @@ enum class AotTriggerType {
     INSTALL = 1,
 };
 
-constexpr const char* BOOLEAN_FALSE = "0";
+constexpr const char* BOOLEAN_TRUE = "1";
 
 namespace Symbols {
 constexpr const char* PREFIX = "--";
@@ -122,7 +160,7 @@ const std::unordered_map<int, InfoOfCompiler> RetInfoOfCompiler {
     {static_cast<int>(RetStatusOfCompiler::ERR_CHECK_VERSION),
         {ERR_OK_NO_AOT_FILE, "AOT compiler not run: check version"}},
     {static_cast<int>(RetStatusOfCompiler::ERR_MERGE_AP),
-        {ERR_AOT_COMPILER_CALL_FAILED, "AOT compiler fail: merge ap error"}},
+        {ERR_OK_NO_AOT_FILE, "AOT compiler not run: merge ap error"}},
     {static_cast<int>(RetStatusOfCompiler::ERR_AN_EMPTY),
         {ERR_AOT_COMPILER_CALL_FAILED, "AOT compiler fail: empty an file"}},
     {static_cast<int>(RetStatusOfCompiler::ERR_AN_FAIL),

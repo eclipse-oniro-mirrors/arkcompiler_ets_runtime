@@ -16,9 +16,12 @@
 #ifndef ECMASCRIPT_COMPILER_STUB_BUILDER_H
 #define ECMASCRIPT_COMPILER_STUB_BUILDER_H
 
+#include <string>
+
 #include "ecmascript/base/config.h"
 #include "ecmascript/compiler/call_signature.h"
 #include "ecmascript/compiler/circuit_builder.h"
+#include "ecmascript/compiler/circuit_builder_helper.h"
 #include "ecmascript/compiler/lcr_gate_meta_data.h"
 #include "ecmascript/compiler/profiler_operation.h"
 #include "ecmascript/compiler/share_gate_meta_data.h"
@@ -71,7 +74,10 @@ using namespace panda::ecmascript;
         EXITENTRY();                                                                                         \
     }
 #define ASM_ASSERT_WITH_GLUE(messageId, condition, glue)                            \
-    SUBENTRY_WITH_GLUE(messageId, condition, glue)
+    {                                                                               \
+        SUBENTRY_WITH_GLUE(messageId, condition, glue);                             \
+        EXITENTRY();                                                                \
+    }
 #elif defined(ENABLE_ASM_ASSERT)
 #define ASM_ASSERT(messageId, condition)                                            \
     if (!GetEnvironment()->GetCircuit()->IsOptimizedOrFastJit() &&                  \
@@ -79,8 +85,16 @@ using namespace panda::ecmascript;
         SUBENTRY(messageId, condition);                                             \
         EXITENTRY();                                                                \
     }
+#define ASM_ASSERT_WITH_LINE(messageId, condition, line)                                                     \
+    if (!GetEnvironment()->GetCircuit()->IsOptimizedOrFastJit() && !GetEnvironment()->IsBaselineBuiltin()) { \
+        SUBENTRY_WITH_LINE(messageId, condition, line);                                                      \
+        EXITENTRY();                                                                                         \
+    }
 #define ASM_ASSERT_WITH_GLUE(messageId, condition, glue)                            \
-    SUBENTRY_WITH_GLUE(messageId, condition, glue)
+    {                                                                               \
+        SUBENTRY_WITH_GLUE(messageId, condition, glue);                             \
+        EXITENTRY();                                                                \
+    }
 #else
 #define ASM_ASSERT(messageId, ...) ((void)0)
 #define ASM_ASSERT_WITH_GLUE(messageId, ...) ((void)0)
@@ -134,6 +148,10 @@ public:
     {
         return callSignature_;
     }
+    inline GateRef HasGlobalEnv() const
+    {
+        return globalEnv_ != Gate::InvalidGateRef;
+    }
     inline GateRef GetCurrentGlobalEnv()
     {
         if (globalEnv_ == Gate::InvalidGateRef) {
@@ -184,7 +202,12 @@ public:
     GateRef Return(GateRef value);
     GateRef Return();
     void Bind(Label *label);
+    void Bind(LabelImpl *label);
     void Jump(Label *label);
+    void Jump(LabelImpl *label);
+    void Branch(GateRef condition, LabelImpl *trueLabel, LabelImpl *falseLabel,
+                uint32_t trueWeight = BranchWeight::ONE_WEIGHT, uint32_t falseWeight = BranchWeight::ONE_WEIGHT,
+                const char *comment = nullptr);
     void Branch(GateRef condition, Label *trueLabel, Label *falseLabel,
                        uint32_t trueWeight = BranchWeight::ONE_WEIGHT, uint32_t falseWeight = BranchWeight::ONE_WEIGHT,
                        const char *comment = nullptr);
@@ -194,9 +217,13 @@ public:
     void Switch(GateRef index, Label *defaultLabel,
                 const int64_t *keysValue, Label * const *keysLabel, int numberOfKeys);
     void LoopBegin(Label *loopHead);
+    void LoopBegin(LabelImpl *loopHead);
     void LoopEnd(Label *loopHead);
+    void LoopEnd(LabelImpl *loopHead);
     GateRef GetReservedRegister();
     void LoopEndWithCheckSafePoint(Label *loopHead, Environment *env, GateRef glue);
+    void LoopEndWithCheckSafePoint(LabelImpl *loopHead, Environment *env, GateRef glue);
+    void CheckSafePointAtLoopEnd(Environment *env, GateRef glue);
     GateRef CheckSuspend(GateRef glue);
     GateRef CheckSuspendForCMCGC(GateRef glue);
     // call operation
@@ -223,6 +250,7 @@ public:
     // memory
     GateRef Load(VariableType type, GateRef glue, GateRef base, GateRef offset,
                  MemoryAttribute mAttr = MemoryAttribute::Default());
+    GateRef LoadFromCompressedTaggedValue(VariableType type, GateRef glue, GateRef base, GateRef offset);
     GateRef LoadZeroOffset(VariableType type, GateRef glue, GateRef base,
                  MemoryAttribute mAttr = MemoryAttribute::Default());
     GateRef LoadPrimitive(VariableType type, GateRef base, GateRef offset);
@@ -310,11 +338,16 @@ public:
     GateRef RegionInSpace(GateRef region, RegionSpaceFlag spaceBegin, RegionSpaceFlag spaceEnd);
     GateRef InFromSpace(GateRef region);
     GateRef InYoungGeneration(GateRef region);
+    GateRef InYoungGenerationForCMSObj(GateRef object, GateRef region);
     GateRef InGeneralOldGeneration(GateRef region);
+    GateRef InOldGenerationForCMSObj(GateRef object, GateRef region);
     GateRef InSharedHeap(GateRef region);
     GateRef InSharedSweepableSpace(GateRef region);
     GateRef TaggedIsGeneratorObject(GateRef glue, GateRef x);
     GateRef TaggedIsJSArray(GateRef glue, GateRef x);
+    GateRef TaggedIsJSSharedArray(GateRef glue, GateRef x);
+    GateRef TaggedIsJSSharedMap(GateRef glue, GateRef x);
+    GateRef TaggedIsJSSharedSet(GateRef glue, GateRef x);
     GateRef TaggedIsJSProxy(GateRef glue, GateRef x);
     GateRef IsTaggedArray(GateRef glue, GateRef x);
     GateRef TaggedIsAsyncGeneratorObject(GateRef glue, GateRef x);
@@ -327,6 +360,7 @@ public:
     GateRef TaggedIsString(GateRef glue, GateRef obj);
     GateRef TaggedIsStringIterator(GateRef glue, GateRef obj);
     GateRef TaggedIsSharedObj(GateRef glue, GateRef obj);
+    GateRef TaggedIsSharedType(GateRef glue, GateRef value);
     GateRef BothAreString(GateRef glue, GateRef x, GateRef y);
     GateRef TaggedIsStringOrSymbol(GateRef glue, GateRef obj);
     GateRef TaggedIsSymbol(GateRef glue, GateRef obj);
@@ -440,11 +474,11 @@ public:
     GateRef CreateDataProperty(GateRef glue, GateRef obj, GateRef proKey, GateRef value);
     GateRef CreateDataPropertyOrThrow(GateRef glue, GateRef onj, GateRef proKey, GateRef value);
     GateRef DefineField(GateRef glue, GateRef obj, GateRef proKey, GateRef value);
-    void StoreHClass(GateRef glue, GateRef object, GateRef hClass,
+    void StoreHClass(GateRef glue, GateRef object, GateRef hClass, RegionSpaceFlag spaceType,
                      MemoryAttribute mAttr = MemoryAttribute::NeedBarrier());
     void TransitionHClass(GateRef glue, GateRef object, GateRef hClass,
                           MemoryAttribute mAttr = MemoryAttribute::NeedBarrier());
-    void StoreBuiltinHClass(GateRef glue, GateRef object, GateRef hClass);
+    void StoreBuiltinHClass(GateRef glue, GateRef object, GateRef hClass, RegionSpaceFlag spaceType);
     void StorePrototype(GateRef glue, GateRef hclass, GateRef prototype);
     void CopyAllHClass(GateRef glue, GateRef dstHClass, GateRef scrHClass);
     void FuncOrHClassCompare(GateRef glue, GateRef funcOrHClass,
@@ -609,8 +643,7 @@ public:
     void SetArrayElementsGuardians(GateRef glue, GateRef env, GateRef value);
     GateRef GetLengthFromString(GateRef value);
     GateRef CalcHashcodeForInt(GateRef value);
-    void CalcHashcodeForDouble(GateRef value, Variable *res, Label *exit);
-    void CalcHashcodeForObject(GateRef glue, GateRef value, Variable *res, Label *exit);
+    GateRef CanDoubleRepresentInt(GateRef exp, GateRef expBits, GateRef fractionBits);
     GateRef GetHashcodeFromString(GateRef glue, GateRef value, GateRef hir = Circuit::NullGate());
     inline void SetMixHashcode(GateRef glue, GateRef str, GateRef mixHashcode);
     GateRef TryGetHashcodeFromString(GateRef string);
@@ -649,6 +682,7 @@ public:
     GateRef GetNumberOfPropsFromHClass(GateRef hClass);
     GateRef HasDeleteProperty(GateRef hClass);
     GateRef IsAOTHClass(GateRef hClass);
+    GateRef IsSharedHClass(GateRef hClass);
     void SetNumberOfPropsToHClass(GateRef glue, GateRef hClass, GateRef value);
     void SetElementsKindToTrackInfo(GateRef glue, GateRef trackInfo, GateRef elementsKind);
     void SetSpaceFlagToTrackInfo(GateRef glue, GateRef trackInfo, GateRef spaceFlag);
@@ -657,13 +691,18 @@ public:
     GateRef GetInlinedPropsStartFromHClass(GateRef hClass);
     GateRef GetInlinedPropertiesFromHClass(GateRef hClass);
     void ThrowTypeAndReturn(GateRef glue, int messageId, GateRef val);
+    void ThrowContainerBusinessError(GateRef glue, int errorCode, int message);
     GateRef GetValueFromTaggedArray(GateRef glue, GateRef elements, GateRef index);
     GateRef GetDataPtrInTaggedArray(GateRef array);
     GateRef GetDataPtrInTaggedArray(GateRef array, GateRef index);
+    GateRef GetICLength(GateRef profileTypeInfo);
+    GateRef GetICSlot(GateRef glue, GateRef profileTypeInfo, GateRef index);
+    void SetICSlot(VariableType valType, GateRef glue, GateRef profileTypeInfo, GateRef index, GateRef val,
+                   MemoryAttribute mAttr = MemoryAttribute::Default());
     GateRef GetUnsharedConstpoolIndex(GateRef glue, GateRef constpool);
     GateRef GetUnsharedConstpoolFromGlue(GateRef glue, GateRef constpool);
     GateRef GetUnsharedConstpool(GateRef glue, GateRef array, GateRef index);
-    GateRef GetValueFromMutantTaggedArray(GateRef elements, GateRef index);
+    GateRef GetValueFromMutantTaggedArray(GateRef glue, GateRef elements, GateRef index);
     void SharedObjectStoreBarrierWithTypeCheck(bool isDicMode, Variable *result, GateRef glue, GateRef attr,
         GateRef value, Variable *newValue, Label *executeSharedSetProp, Label *exit);
     void SharedObjectStoreBarrierWithTypeCheck(bool isDicMode, Variable *result, GateRef glue, GateRef attr,
@@ -730,6 +769,8 @@ public:
     GateRef IsInternalString(GateRef string);
     GateRef IsDigit(GateRef ch);
     GateRef ComputeElementCapacity(GateRef oldLength);
+    GateRef ComputeElementCapacityWithHint(GateRef oldCapacity, GateRef hint);
+    GateRef ComputeElementCapacityHighGrowth(GateRef oldCapacity);
     GateRef ComputeNonInlinedFastPropsCapacity(GateRef glue, GateRef oldLength,
                                                GateRef maxNonInlinedFastPropsCapacity);
     GateRef FindTransitions(GateRef glue, GateRef hClass, GateRef key, GateRef attr, GateRef value);
@@ -848,6 +889,7 @@ public:
     void SetValueWithAttr(GateRef glue, GateRef obj, GateRef offset, GateRef key, GateRef value, GateRef attr);
     void SetValueWithRep(GateRef glue, GateRef obj, GateRef offset, GateRef value, GateRef rep, Label *repChange);
     void VerifyBarrier(GateRef glue, GateRef obj, GateRef offset, GateRef value);
+    void VerifyStoreJSValueForCompressedPointer(GateRef glue, GateRef obj, GateRef offset);
     GateRef GetCMCRegionRSet(GateRef obj);
     GateRef GetCMCRegionType(GateRef obj);
     GateRef GetGCPhase(GateRef glue);
@@ -866,7 +908,9 @@ public:
     void SetValueWithBarrier(GateRef glue, GateRef obj, GateRef offset, GateRef value,
                              MemoryAttribute::ShareFlag share = MemoryAttribute::UNKNOWN);
     GateRef GetValueWithBarrier(GateRef glue, GateRef addr);
+    GateRef GetValueFromCompressedWithBarrier(GateRef glue, GateRef addr);
     GateRef FastReadBarrier(GateRef glue, GateRef addr, GateRef value);
+    GateRef FastReadBarrierForCompressed(GateRef glue, GateRef addr, GateRef temporaryValue);
     GateRef IsHeapAddress(GateRef glue, GateRef value);
     GateRef GetPropertyByIndex(GateRef glue, GateRef receiver, GateRef index,
                                ProfileOperation callback, GateRef hir = Circuit::NullGate());
@@ -966,7 +1010,7 @@ public:
                                 MemoryAttribute mAttr = MemoryAttribute::Default());
     void SetCompiledCodeFlagToFunction(GateRef glue, GateRef function, GateRef value);
     void SetCompiledFastCallFlagToFunction(GateRef glue, GateRef function, GateRef value);
-    void SetCompiledFuncEntry(GateRef glue, GateRef jsFunc, GateRef codeEntry, GateRef isFastCall);
+    void SetCompiledFuncEntry(GateRef glue, GateRef jsFunc, GateRef codeEntry, GateRef isFastCall, GateRef isArkSteed);
     GateRef GetFuncEntryDes(GateRef glue, GateRef machineCode, GateRef codeAddr);
     GateRef GetFuncEntryDesAddress(GateRef machineCode);
     GateRef IsAlign(GateRef address, GateRef alignByte);
@@ -975,8 +1019,6 @@ public:
                                MemoryAttribute mAttr = MemoryAttribute::Default());
     void SetMachineCodeToFunction(GateRef glue, GateRef function, GateRef value,
                                   MemoryAttribute mAttr = MemoryAttribute::Default());
-    void SetTypedArrayName(GateRef glue, GateRef typedArray, GateRef name,
-                           MemoryAttribute mAttr = MemoryAttribute::Default());
     void SetContentType(GateRef glue, GateRef typedArray, GateRef type);
     void SetViewedArrayBufferOrByteArray(GateRef glue, GateRef typedArray, GateRef data,
                                          MemoryAttribute mAttr = MemoryAttribute::Default());
@@ -1006,7 +1048,6 @@ public:
     void NotifyArrayPrototypeChangedGuardians(GateRef glue, GateRef receiver);
     GateRef GrowElementsCapacity(GateRef glue, GateRef receiver, GateRef capacity);
 
-    inline GateRef GetObjectFromConstPool(GateRef glue, GateRef constpool, GateRef index);
     GateRef GetConstPoolFromFunction(GateRef glue, GateRef jsFunc);
     GateRef GetSharedConstpoolFromMethod(GateRef glue, GateRef method);
     GateRef GetStringFromConstPool(GateRef glue, GateRef constpool, GateRef index);
@@ -1032,6 +1073,8 @@ public:
     GateRef FastToBoolean(GateRef glue, GateRef value, bool flag = true);
     GateRef FastToBooleanWithProfile(GateRef glue, GateRef value, ProfileOperation callback, bool flag = true);
     GateRef FastToBooleanWithProfileBaseline(GateRef glue, GateRef value, ProfileOperation callback, bool flag = true);
+    void ProfileNonNumberOpType(GateRef glue, GateRef value, ProfileOperation callback);
+    void ProfileNonNumericOpType(GateRef glue, GateRef value, ProfileOperation callback);
 
     // Add SpecialContainer
     GateRef JSAPIContainerGet(GateRef glue, GateRef receiver, GateRef index);
@@ -1128,6 +1171,7 @@ public:
     GateRef IsAotWithCallField(GateRef method);
     GateRef IsFastCall(GateRef method);
     GateRef JudgeAotAndFastCall(GateRef jsFunc, CircuitBuilder::JudgeMethodType type);
+    GateRef HasArkSteedEntry(GateRef jsFunc);
     GateRef GetInternalString(GateRef glue, GateRef key);
     GateRef GetExpectedNumOfArgs(GateRef method);
     GateRef GetMethod(GateRef glue, GateRef obj, GateRef key, GateRef profileTypeInfo, GateRef slotId);
@@ -1136,7 +1180,6 @@ public:
     GateRef GetHandlerFromJSProxy(GateRef glue, GateRef proxy);
     GateRef GetTargetFromJSProxy(GateRef glue, GateRef proxy);
     inline void SetHotnessCounter(GateRef glue, GateRef method, GateRef value);
-    inline void SaveHotnessCounterIfNeeded(GateRef glue, GateRef sp, GateRef hotnessCounter, JSCallMode mode);
     inline void SavePcIfNeeded(GateRef glue);
     inline void SaveJumpSizeIfNeeded(GateRef glue, GateRef jumpSize);
     inline GateRef ComputeTaggedArraySize(GateRef length);
@@ -1156,11 +1199,11 @@ public:
     GateRef FastToBooleanBaseline(GateRef glue, GateRef value, bool flag = true);
     GateRef GetBaselineCodeAddr(GateRef baselineCode);
 
-    GateRef IsFastTypeArray(GateRef jsType);
+    GateRef IsFastTypedArray(GateRef jsType);
     GateRef IsJSProxy(GateRef jsType);
-    GateRef GetTypeArrayPropertyByName(GateRef glue, GateRef receiver, GateRef holder, GateRef key, GateRef jsType);
-    GateRef SetTypeArrayPropertyByName(GateRef glue, GateRef receiver, GateRef holder, GateRef key, GateRef value,
-                                       GateRef jsType);
+    GateRef GetTypedArrayPropertyByName(GateRef glue, GateRef receiver, GateRef holder, GateRef key, GateRef jsType);
+    GateRef SetTypedArrayPropertyByName(GateRef glue, GateRef receiver, GateRef holder, GateRef key, GateRef value,
+                                        GateRef jsType);
     GateRef TryStringOrSymbolToElementIndex(GateRef glue, GateRef key);
     inline GateRef DispatchBuiltins(GateRef glue, GateRef builtinsId, const std::vector<GateRef>& args,
                                     GateRef hir = Circuit::NullGate());
@@ -1198,8 +1241,10 @@ public:
     inline GateRef GetByteLength(GateRef dataView);
     inline GateRef GetArrayBufferData(GateRef glue, GateRef buffer);
     inline GateRef GetArrayBufferByteLength(GateRef buffer);
+    inline GateRef GetSendableArrayBufferByteLength(GateRef buffer);
     inline void SetArrayBufferByteLength(GateRef glue, GateRef buffer, GateRef length);
     GateRef IsDetachedBuffer(GateRef glue, GateRef buffer);
+    GateRef IsSendableArrayBufferDetached(GateRef glue, GateRef buffer);
     inline GateRef IsMarkerCellValid(GateRef cell);
     inline GateRef GetAccessorHasChanged(GateRef obj);
     inline GateRef ComputeTaggedTypedArraySize(GateRef elementSize, GateRef length);
@@ -1250,7 +1295,6 @@ public:
     inline void SetIsUpdatedFromResolvedBindingOfResolvedIndexBinding(GateRef glue, GateRef resolvedBinding,
                                                                       GateRef value);
     inline GateRef GetIdxOfResolvedRecordIndexBinding(GateRef resolvedBinding);
-    inline GateRef GetModuleRecord(GateRef glue, GateRef resolvedBinding);
     inline GateRef GetBindingName(GateRef glue, GateRef resolvedBinding);
     inline GateRef IsResolvedIndexBinding(GateRef glue, GateRef resolvedBinding);
     inline GateRef IsResolvedBinding(GateRef glue, GateRef resolvedBinding);
@@ -1304,6 +1348,7 @@ public:
     void EndTraceDefineFunc(GateRef glue);
     void UpdateProfileTypeInfoAsMega(GateRef glue, GateRef profileTypeInfo, GateRef slotId);
     GateRef GetIsFastCall(GateRef machineCode);
+    GateRef GetIsArkSteedCode(GateRef machineCode);
     // compute new elementKind from sub elements
     GateRef ComputeTaggedArrayElementKind(GateRef glue, GateRef array, GateRef offset, GateRef end);
     GateRef GetElementsKindHClass(GateRef glue, GateRef elementKind);
@@ -1317,6 +1362,23 @@ public:
                                 PreferredPrimitiveType type, GateRef hir = Circuit::NullGate());
     GateRef CallFunction(GateRef glue, GateRef func);
 
+    GateRef AtomicCmpXchgI32(GateRef obj, GateRef offset, GateRef expected, GateRef desired);
+    GateRef AtomicLoadAcquireI32(GateRef base, GateRef offset);
+    template<typename Container>
+    void ConcurrentApiScopeCanRead(GateRef glue, GateRef sharedObj,
+        Variable &expectModRecord, Variable &desiredModRecord, Variable &scopeEntered, Label *exit);
+    template<typename Container>
+    void ConcurrentApiScopeReadDone(GateRef glue, GateRef sharedObj,
+        Variable &expectModRecord, Variable &desiredModRecord, Variable &scopeEntered, Label *exit);
+    template<typename Container>
+    void ConcurrentApiScopeCanWrite(GateRef glue, GateRef sharedObj, Variable &scopeEntered, Label *exit);
+    template<typename Container>
+    void ConcurrentApiScopeWriteDone(GateRef glue, GateRef sharedObj, Variable &scopeEntered, Label *exit);
+
+    GateRef GetSharedArrayLength(GateRef object);
+    void SetSharedArrayLength(GateRef glue, GateRef object, GateRef len);
+    GateRef GetSharedArrayHintLength(GateRef glue, GateRef object);
+
     enum CopyKind {
         SameArray,
         DifferentArray,
@@ -1327,16 +1389,75 @@ public:
     void ArrayCopy(GateRef glue, GateRef srcObj, GateRef srcAddr, GateRef dstObj, GateRef dstAddr,
                    GateRef taggedValueCount, GateRef needBarrier, CopyKind copyKind);
 
-    void SetCallBackForLazySetGlobalEnv(std::function<void()> func)
+    void SetCallBackForLazyGetGlobalEnv(std::function<GateRef()> func)
     {
-        lazySetGlobalEnvCallBack_ = func;
+        lazyGetGlobalEnvCallBack_ = func;
     }
 
-    void LazySetGlobalEnv()
+    std::function<GateRef()> GetCallBackForLazyGetGlobalEnv()
     {
-        ASSERT(lazySetGlobalEnvCallBack_ != nullptr);
-        lazySetGlobalEnvCallBack_();
+        return lazyGetGlobalEnvCallBack_;
     }
+
+    void PropagateGlobalEnvTo(StubBuilder *builder)
+    {
+#if ENABLE_V70_OPTIMIZATION
+        if (HasGlobalEnv()) {
+            builder->SetCurrentGlobalEnv(GetCurrentGlobalEnv());
+        } else {
+            builder->SetCallBackForLazyGetGlobalEnv(GetCallBackForLazyGetGlobalEnv());
+        }
+#else
+        builder->SetCurrentGlobalEnv(GetCurrentGlobalEnv());
+#endif
+    }
+
+    GateRef LazyGetGlobalEnv()
+    {
+        ASSERT(lazyGetGlobalEnvCallBack_ != nullptr);
+        return lazyGetGlobalEnvCallBack_();
+    }
+
+    GateRef FastLoadSendableModuleVar(GateRef glue, GateRef index, GateRef curModule,
+                                      GateRef currentFunc, bool isLazy);
+    GateRef FastLoadSendableLocalModuleVar(GateRef glue, GateRef index, GateRef curModule,
+                                           GateRef currentFunc);
+
+#if ENABLE_V70_OPTIMIZATION
+    // RAII helper class for automatic GlobalEnv management
+    class GlobalEnvScope {
+    public:
+        explicit GlobalEnvScope(StubBuilder* builder)
+            : builder_(builder)
+        {
+            // Save and restore the previous GlobalEnv to prevent a lazy gate created in one branch
+            // from leaking into sibling blocks:
+            //   Bind(&pathA) { GlobalEnvScope scope(this); Use(GetCurrentGlobalEnv()); }
+            //   Bind(&pathB) { GlobalEnvScope scope(this); Use(GetCurrentGlobalEnv()); }
+            // Without restoration, pathB may reuse the GateRef created only in pathA.
+            prevGlobalEnv_ = builder_->globalEnv_;
+            if (!builder_->HasGlobalEnv()) {
+                builder_->SetCurrentGlobalEnv(builder_->LazyGetGlobalEnv());
+            }
+        }
+
+        ~GlobalEnvScope()
+        {
+            // Restore previous globalEnv state
+            builder_->globalEnv_ = prevGlobalEnv_;
+        }
+
+        // Delete copy and move operations
+        GlobalEnvScope(const GlobalEnvScope&) = delete;
+        GlobalEnvScope& operator=(const GlobalEnvScope&) = delete;
+        GlobalEnvScope(GlobalEnvScope&&) = delete;
+        GlobalEnvScope& operator=(GlobalEnvScope&&) = delete;
+
+    private:
+        StubBuilder* builder_;
+        GateRef prevGlobalEnv_;
+    };
+#endif
 
 protected:
     static constexpr int LOOP_UNROLL_FACTOR = 2;
@@ -1347,6 +1468,7 @@ protected:
 
 private:
     using BinaryOperation = std::function<GateRef(Environment*, GateRef, GateRef)>;
+    void ProfileNonNumberOpTypeImpl(GateRef glue, GateRef value, ProfileOperation callback, bool includeBigInt);
     template<OpCode Op>
     GateRef FastAddSubAndMul(GateRef glue, GateRef left, GateRef right, ProfileOperation callback);
     GateRef FastIntDiv(GateRef left, GateRef right, Label *bailout, ProfileOperation callback);
@@ -1366,7 +1488,6 @@ private:
                                      GateRef valueRegion);
     void InitializeArguments();
     void CheckDetectorName(GateRef glue, GateRef key, Label *fallthrough, Label *slow);
-    GateRef CanDoubleRepresentInt(GateRef exp, GateRef expBits, GateRef fractionBits);
     GateRef CalIteratorKey(GateRef glue);
 
     template <class LabelPtrGetter>
@@ -1377,7 +1498,181 @@ private:
     CallSignature *callSignature_ {nullptr};
     Environment *env_;
     GateRef globalEnv_ {Gate::InvalidGateRef};
-    std::function<void()> lazySetGlobalEnvCallBack_ = nullptr;
+    std::function<GateRef()> lazyGetGlobalEnvCallBack_ {nullptr};
 };
+
+struct BranchOptions {
+    static BranchOptions From()
+    {
+        return {};
+    }
+
+    static BranchOptions From(BranchOptions options)
+    {
+        return options;
+    }
+
+    static BranchOptions Likely()
+    {
+        return {BranchWeight::DEOPT_WEIGHT, BranchWeight::ONE_WEIGHT};
+    }
+
+    static BranchOptions Unlikely()
+    {
+        return {BranchWeight::ONE_WEIGHT, BranchWeight::DEOPT_WEIGHT};
+    }
+
+    static BranchOptions NoWeight()
+    {
+        return {BranchWeight::ZERO_WEIGHT, BranchWeight::ZERO_WEIGHT};
+    }
+
+    uint32_t trueWeight {BranchWeight::ONE_WEIGHT};
+    uint32_t falseWeight {BranchWeight::ONE_WEIGHT};
+};
+
+class IfElseHelper {
+public:
+    IfElseHelper(StubBuilder *builder, Environment *env, GateRef condition,
+                 BranchOptions options = {}, const char *comment = nullptr);
+    void Advance();
+    bool IsTrueBranch() const;
+    bool IsFalseBranch() const;
+    bool IsDone() const;
+private:
+    enum class State { TRUE_BRANCH, FALSE_BRANCH, DONE };
+    LabelImpl *EnsureMergeLabel();
+
+    StubBuilder *builder_;
+    Environment *env_;
+    LabelImpl *trueLabel_;
+    LabelImpl *falseLabel_;
+    LabelImpl *mergeLabel_;
+    State state_;
+};
+
+// Structured IR branch. IR_IF without IR_ELSE merges the false path with the code
+// following the macro. Nested branches are supported; write else-if as
+// IR_ELSE { IR_IF (...) { ... } }. BranchOptions controls the branch weights.
+//
+// IR_IF and IR_ELSE build IR control flow rather than C++ control flow. Jump,
+// Branch, Return, and Dispatch terminate the current IR path by clearing the
+// current label. If both branches terminate, no internal merge is bound.
+#define IR_CONTROL_FLOW_COMMENT(kind, condition)                                        \
+    (std::string(__func__) + ": " kind "(" #condition ")").c_str()
+
+#define IR_IF_IMPL(condition, options, kind)                                            \
+    for (IfElseHelper _ife(this, GetEnvironment(), condition, options,                  \
+            IR_CONTROL_FLOW_COMMENT(kind, condition));                                  \
+         !_ife.IsDone(); _ife.Advance())                                                \
+        if (_ife.IsTrueBranch())
+
+#define IR_IF(condition, ...)                                                           \
+    IR_IF_IMPL(condition, BranchOptions::From(__VA_ARGS__), "IR_IF")
+
+#define IR_IF_LIKELY(condition)                                                         \
+    IR_IF_IMPL(condition, BranchOptions::Likely(), "IR_IF_LIKELY")
+
+#define IR_IF_UNLIKELY(condition)                                                       \
+    IR_IF_IMPL(condition, BranchOptions::Unlikely(), "IR_IF_UNLIKELY")
+
+#define IR_IF_NO_WEIGHT(condition)                                                      \
+    IR_IF_IMPL(condition, BranchOptions::NoWeight(), "IR_IF_NO_WEIGHT")
+
+#define IR_ELSE                                                                         \
+        else if (_ife.IsFalseBranch())
+
+struct LoopSafepoint {
+    explicit LoopSafepoint(GateRef value) : glue(value) {}
+
+    GateRef glue;
+};
+
+class LoopOptions {
+public:
+    template<class... Options>
+    static LoopOptions From(Options... options)
+    {
+        LoopOptions result;
+        (result.Apply(options), ...);
+        return result;
+    }
+
+    const BranchOptions &GetBranchOptions() const
+    {
+        return branchOptions_;
+    }
+
+    bool NeedCheckSafePoint() const
+    {
+        return needCheckSafePoint_;
+    }
+
+    GateRef GetGlue() const
+    {
+        return glue_;
+    }
+
+private:
+    void Apply(BranchOptions options)
+    {
+        branchOptions_ = options;
+    }
+
+    void Apply(LoopSafepoint option)
+    {
+        needCheckSafePoint_ = true;
+        glue_ = option.glue;
+    }
+
+    BranchOptions branchOptions_ {};
+    GateRef glue_ {Circuit::NullGate()};
+    bool needCheckSafePoint_ {false};
+};
+
+class WhileHelper {
+public:
+    using ConditionBuilder = std::function<GateRef()>;
+
+    WhileHelper(StubBuilder *builder, Environment *env, ConditionBuilder condition,
+                LoopOptions options = {}, const char *comment = nullptr);
+    void Finish();
+    void Break();
+    void Continue();
+    bool IsActive() const;
+
+private:
+    bool IsReachable() const;
+    LabelImpl *EnsureBackEdge();
+    void EmitLoopEnd();
+
+    StubBuilder *builder_;
+    Environment *env_;
+    LabelImpl *header_;
+    LabelImpl *body_;
+    LabelImpl *exit_;
+    LabelImpl *backEdge_;
+    LoopOptions options_;
+    bool active_;
+};
+
+// Structured IR while loop. The condition is built at the loop header so reads
+// of loop-carried Variables create the correct pending Phi nodes. BranchOptions
+// controls the condition branch weights; LoopSafepoint adds a safepoint check
+// before the backedge.
+//
+// IR_BREAK() and IR_CONTINUE() target the innermost IR_WHILE through C++ lexical
+// scoping. They emit IR jumps and do not alter C++ control flow, so subsequent IR
+// construction must be placed in IR_ELSE or start from another bound label.
+// Every IR_WHILE must have a natural fallthrough or an IR_CONTINUE() backedge;
+// a loop whose body always breaks, returns, or throws should be written as IR_IF.
+#define IR_WHILE(condition, ...)                                                        \
+    for (WhileHelper _loop(this, GetEnvironment(),                                      \
+            [&]() -> GateRef { return (condition); }, LoopOptions::From(__VA_ARGS__),   \
+            IR_CONTROL_FLOW_COMMENT("IR_WHILE", condition));                            \
+         _loop.IsActive(); _loop.Finish())
+
+#define IR_BREAK() _loop.Break()
+#define IR_CONTINUE() _loop.Continue()
 }  // namespace panda::ecmascript::kungfu
 #endif  // ECMASCRIPT_COMPILER_STUB_BUILDER_H

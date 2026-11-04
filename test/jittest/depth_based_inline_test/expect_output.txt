@@ -160,9 +160,18 @@ Extended Phase 2: Medium depth function tests
 === Medium Depth Function Tests ===
 MediumDepth1(5): NaN
 Extended Phase 3: Variable size depth tests
+[trace] aot inline function name: #*#TestVariableSizeDepth@depth_based_inline_test caller function name: #*#ExecuteExtendedDepthTests@depth_based_inline_test
 === Variable Size Depth Tests ===
+[trace] aot inline function name: #*#VariableSizeDepthSmall2@depth_based_inline_test caller function name: #*#TestVariableSizeDepth@depth_based_inline_test
+[trace] aot inline function name: #*#VariableSizeDepthSmall1@depth_based_inline_test caller function name: #*#VariableSizeDepthSmall2@depth_based_inline_test
 VariableSizeDepthSmall2(5): 13
+[trace] aot inline function name: #*#VariableSizeDepthMedium2@depth_based_inline_test caller function name: #*#TestVariableSizeDepth@depth_based_inline_test
+[trace] aot inline function name: #*#VariableSizeDepthMedium1@depth_based_inline_test caller function name: #*#VariableSizeDepthMedium2@depth_based_inline_test
+[trace] aot inline function name: #*#VariableSizeDepthSmall2@depth_based_inline_test caller function name: #*#VariableSizeDepthMedium2@depth_based_inline_test
 VariableSizeDepthMedium2(5): 118
+[trace] aot inline function name: #*#VariableSizeDepthLarge2@depth_based_inline_test caller function name: #*#TestVariableSizeDepth@depth_based_inline_test
+[trace] aot inline function name: #*#VariableSizeDepthLarge1@depth_based_inline_test caller function name: #*#VariableSizeDepthLarge2@depth_based_inline_test
+[trace] aot inline function name: #*#VariableSizeDepthMedium2@depth_based_inline_test caller function name: #*#VariableSizeDepthLarge2@depth_based_inline_test
 VariableSizeDepthLarge2(5): 21893
 Extended Phase 4: Complex branch depth tests
 [trace] aot inline function name: #*#TestComplexBranchDepth@depth_based_inline_test caller function name: #*#ExecuteExtendedDepthTests@depth_based_inline_test
@@ -184,10 +193,7 @@ Extended Phase 6: Array depth chain tests
 [trace] aot inline function name: #*#ArrayDepth2@depth_based_inline_test caller function name: #*#ArrayDepth1@depth_based_inline_test
 ArrayDepth1([1, 2, 3, 4, 5]): 60
 Extended Phase 7: String depth chain tests
-[trace] aot inline function name: #*#TestStringDepthChains@depth_based_inline_test caller function name: #*#ExecuteExtendedDepthTests@depth_based_inline_test
 === String Depth Chain Tests ===
-[trace] aot inline function name: #*#StringDepth1@depth_based_inline_test caller function name: #*#TestStringDepthChains@depth_based_inline_test
-[trace] aot inline function name: #*#StringDepth2@depth_based_inline_test caller function name: #*#StringDepth1@depth_based_inline_test
 StringDepth1("hello"): 5
 Extended Phase 8: Mixed type depth chain tests
 === Mixed Type Depth Chain Tests ===

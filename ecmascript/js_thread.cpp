@@ -20,15 +20,17 @@
 #include "ecmascript/platform/os.h"
 #include "ecmascript/base/json_stringifier.h"
 #include "ecmascript/mem/local_cmc/cc_evacuator-inl.h"
+#include "ecmascript/mem/shared_heap/shared_cc_evacuator-inl.h"
 #include "ecmascript/mem/local_cmc/concurrent_copy_gc.h"
 #include "ecmascript/mem/tagged_state_word.h"
 #include "ecmascript/runtime.h"
+#include "ecmascript/stubs/runtime_stubs.h"
 #include "ecmascript/debugger/js_debugger_manager.h"
 #include "ecmascript/dependent_infos.h"
 #include "ecmascript/ic/mega_ic_cache.h"
 #include "ecmascript/js_date.h"
 #include "ecmascript/js_object-inl.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/module/module_logger.h"
 #include "ecmascript/module/js_module_manager.h"
 #include "ecmascript/runtime_call_id.h"
@@ -50,11 +52,18 @@
 #include "ecmascript/ic/properties_cache.h"
 #include "ecmascript/interpreter/interpreter.h"
 #include "ecmascript/mem/concurrent_marker.h"
+#include "ecmascript/mem/shared_heap/shared_cc.h"
 #include "ecmascript/platform/file.h"
 #include "ecmascript/jit/jit.h"
-#include "thread/thread_holder_manager.h"
+#include "common_interfaces/thread/thread_holder_manager.h"
 #include "ecmascript/checkpoint/thread_state_transition.h"
 #include "ecmascript/platform/asm_stack.h"
+#include "ecmascript/base/config.h"
+
+#undef ENABLE_LINXKIT
+#ifdef ENABLE_LINXKIT
+#include "ecmascript/platform/arm64/linxkit_atomic.h"
+#endif
 
 namespace panda::ecmascript {
 uintptr_t TaggedStateWord::BASE_ADDRESS = 0;
@@ -266,6 +275,7 @@ JSThread::~JSThread()
         vm_->GetChunk()->Delete(globalDebugStorage_);
         globalDebugStorage_ = nullptr;
     }
+    globalRefMap_.clear();
 
     ClearMegaIC();
 
@@ -300,6 +310,7 @@ JSThread::~JSThread()
         delete localEvacuator_;
         localEvacuator_ = nullptr;
     }
+    sharedCCEvacuator_ = nullptr;
     if (glueData_.moduleLogger_ != nullptr) {
         delete glueData_.moduleLogger_;
         glueData_.moduleLogger_ = nullptr;
@@ -308,6 +319,11 @@ JSThread::~JSThread()
         delete glueData_.globalConst_;
         glueData_.globalConst_ = nullptr;
     }
+}
+
+void JSThread::StoreGlobalRefMapping(uintptr_t slotAddr, void *ref)
+{
+    globalRefMap_[slotAddr] = ref;
 }
 
 ThreadId JSThread::GetCurrentThreadId()
@@ -320,7 +336,13 @@ ThreadId JSThread::GetCurrentThreadId()
 
 void JSThread::SetException(JSTaggedValue exception)
 {
+    glueData_.lastException_ = exception;
     glueData_.exception_ = exception;
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    if (vm_->GetJSOptions().IsEnableJitLazyDeopt()) {
+        PrepareForExceptionLazyDeopt(GetGlueAddr());
+    }
+#endif
 #if defined(ENABLE_EXCEPTION_BACKTRACE)
     if (vm_->GetJSOptions().EnableExceptionBacktrace()) {
         LOG_ECMA(INFO) << "SetException:" << exception.GetRawData();
@@ -351,7 +373,7 @@ void JSThread::HandleUncaughtException(JSTaggedValue exception)
     // if caught exceptionHandle type is JSError
     ClearException();
     if (exceptionHandle->IsJSError()) {
-        base::ErrorHelper::PrintJSErrorInfo(this, exceptionHandle);
+        base::ErrorHelper::PrintJSErrorInfo(this, exceptionHandle, !vm_->GetJSThread()->IsMainThread());
         return;
     }
     JSHandle<EcmaString> result = JSTaggedValue::ToString(this, exceptionHandle);
@@ -528,8 +550,59 @@ void JSThread::ClearMegaIC()
     }
 }
 
+size_t JSThread::GetGlobalHandleCount()
+{
+    size_t count = 0;
+    if (!vm_->GetJSOptions().EnableGlobalLeakCheck()) {
+        globalStorage_->IterateUsageGlobal([&count](Node *node) {
+            count++;
+        });
+    } else {
+        globalDebugStorage_->IterateUsageGlobal([&count](DebugNode *node) {
+            count++;
+        });
+    }
+    return count;
+}
+
+void JSThread::IterateBuiltinHClassEntries(const WeakRootVisitor &visitor)
+{
+    auto visit = [&visitor] (JSHClass *&cls) {
+        if (cls == nullptr) {
+            return;
+        }
+        TaggedObject *obj = cls;
+        TaggedObject *fwd = visitor(obj);
+        cls = reinterpret_cast<JSHClass *>(fwd);
+    };
+    for (size_t i = 0; i < BuiltinHClassEntries::N_ENTRIES; ++i) {
+        auto &entry = glueData_.builtinHClassEntries_.entries[i];
+        visit(entry.builtinHClass);
+        visit(entry.instanceHClass);
+        visit(entry.prototypeHClass);
+        visit(entry.prototypeOfPrototypeHClass);
+        visit(entry.extraHClass);
+    }
+}
+
+void JSThread::IterateCtorHClassEntries(const WeakRootVisitor &visitor)
+{
+    CMap<JSHClass *, GlobalIndex> ctorHclassEntries;
+    for (auto it : ctorHclassEntries_) {
+        TaggedObject *obj = it.first;
+        TaggedObject *fwd = visitor(obj);
+        if (fwd != nullptr) {
+            ctorHclassEntries.emplace(JSHClass::Cast(fwd), it.second);
+        }
+    }
+    std::swap(ctorHclassEntries_, ctorHclassEntries);
+}
+
 void JSThread::Iterate(RootVisitor &visitor, GlobalVisitType visitType)
 {
+    if (!glueData_.lastException_.IsHole()) {
+        visitor.VisitRoot(Root::ROOT_VM, ObjectSlot(ToUintPtr(&glueData_.lastException_)));
+    }
     if (!glueData_.exception_.IsHole()) {
         visitor.VisitRoot(Root::ROOT_VM, ObjectSlot(ToUintPtr(&glueData_.exception_)));
     }
@@ -556,9 +629,13 @@ void JSThread::Iterate(RootVisitor &visitor, GlobalVisitType visitType)
         size_t globalCount = 0;
         auto callback = [&visitor, &globalCount](Node *node) {
             JSTaggedValue value(node->GetObject());
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+            visitor.VisitRoot(Root::ROOT_GLOBAL_HANDLE, ecmascript::ObjectSlot(node->GetObjectAddress()));
+#else
             if (value.IsHeapObject()) {
                 visitor.VisitRoot(Root::ROOT_GLOBAL_HANDLE, ecmascript::ObjectSlot(node->GetObjectAddress()));
             }
+#endif
             globalCount++;
         };
         if (visitType == GlobalVisitType::YOUNG_GLOBAL_VISIT) {
@@ -736,6 +813,31 @@ void JSThread::IterateWeakEcmaGlobalStorage(const WeakRootVisitor &visitor, GCKi
     }
 }
 
+void JSThread::IterateWeakRoots(const WeakRootVisitor &visitor)
+{
+    IterateBuiltinHClassEntries(visitor);
+    IterateCtorHClassEntries(visitor);
+}
+
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+void JSThread::IterateGlobal(RootVisitor &visitor)
+{
+    auto callBackWeak = [&visitor](WeakNode *node) {
+        visitor.VisitRoot(ecmascript::Root::ROOT_GLOBAL_HANDLE, ecmascript::ObjectSlot(node->GetObjectAddress()));
+    };
+    auto callBack = [&visitor](Node *node) {
+        visitor.VisitRoot(ecmascript::Root::ROOT_GLOBAL_HANDLE, ecmascript::ObjectSlot(node->GetObjectAddress()));
+    };
+    if (!vm_->GetJSOptions().EnableGlobalLeakCheck()) {
+        globalStorage_->IterateWeakUsageGlobal(callBackWeak);
+        globalStorage_->IterateUsageGlobal(callBack);
+    } else {
+        globalDebugStorage_->IterateWeakUsageGlobal(callBackWeak);
+        globalDebugStorage_->IterateUsageGlobal(callBack);
+    }
+}
+#endif
+
 void JSThread::UpdateJitCodeMapReference(const WeakRootVisitor &visitor)
 {
     auto it = jitCodeMaps_.begin();
@@ -750,6 +852,19 @@ void JSThread::UpdateJitCodeMapReference(const WeakRootVisitor &visitor)
             it = jitCodeMaps_.erase(it);
         } else {
             ++it;
+        }
+    }
+}
+
+void JSThread::SetReadyForGCIterating(bool flag)
+{
+    readyForGCIterating_ = flag;
+    if (readyForGCIterating_ && SharedHeap::GetInstance()->NeedSwitchRBStub()) {
+        SharedCC *cc = SharedHeap::GetInstance()->GetSharedCC();
+        if (cc != nullptr && cc->IsRunning()) {
+            cc->PrepareNewThread(this);
+        } else {
+            AcquireReadBarrier(ReadBarrierOwner::SHARED_PARTIAL_GC);
         }
     }
 }
@@ -890,7 +1005,9 @@ void JSThread::CheckOrSwitchPGOStubs()
         curAddress = GetBCStubEntry(BytecodeStubCSigns::ID_##fromName);                                     \
         SetBCStubEntry(BytecodeStubCSigns::ID_##fromName, GetBCStubEntry(BytecodeStubCSigns::ID_##toName)); \
         SetBCStubEntry(BytecodeStubCSigns::ID_##toName, curAddress);
+#if ECMASCRIPT_ENABLE_INTERPRETER_PGO_STUBS
         ASM_INTERPRETER_BC_PROFILER_STUB_LIST(SWITCH_PGO_STUB_ENTRY)
+#endif
 #undef SWITCH_PGO_STUB_ENTRY
     }
     if (isSwitchToNormal && !g_isEnableCMCGC) {
@@ -898,6 +1015,15 @@ void JSThread::CheckOrSwitchPGOStubs()
     }
 }
 
+void JSThread::CheckSwitchRBStub()
+{
+    if (switchRBStubRequest_ && GetLastLeaveFrame() == nullptr) {
+        HoldReadBarrier(ReadBarrierOwner::SHARED_PARTIAL_GC);
+        switchRBStubRequest_ = false;
+    }
+}
+
+#if ECMASCRIPT_ENABLE_INTERPRETER_JIT_STUBS
 void JSThread::SwitchJitProfileStubs(bool isEnablePgo)
 {
     if (isEnablePgo) {
@@ -921,10 +1047,13 @@ void JSThread::SwitchJitProfileStubs(bool isEnablePgo)
         curAddress = GetBCStubEntry(BytecodeStubCSigns::ID_##fromName);                                     \
         SetBCStubEntry(BytecodeStubCSigns::ID_##fromName, GetBCStubEntry(BytecodeStubCSigns::ID_##toName)); \
         SetBCStubEntry(BytecodeStubCSigns::ID_##toName, curAddress);
+#if ECMASCRIPT_ENABLE_INTERPRETER_PGO_STUBS
         ASM_INTERPRETER_BC_JIT_PROFILER_STUB_LIST(SWITCH_PGO_STUB_ENTRY)
+#endif
 #undef SWITCH_PGO_STUB_ENTRY
     }
 }
+#endif
 
 void JSThread::SwitchStwCopyBCStubs(bool isStwCopy)
 {
@@ -1033,6 +1162,45 @@ void JSThread::SwitchAllStub(bool isStwCopy)
     glueData_.switchToStwStub_ = isStwCopy;
 }
 
+void JSThread::ExecuteSharedCCStubSwitch()
+{
+    {
+        LockHolder lock(ccStatusMutex_);
+        ccTaskPending_ = false;
+        if (ccStatus_ == SharedCCStatus::IDLE || ccStatus_ == SharedCCStatus::SUSPENDED) {
+            return;
+        }
+        if (GetLastLeaveFrame() == nullptr) {
+            HoldReadBarrier(ReadBarrierOwner::SHARED_CC);
+            ccStatus_ = SharedCCStatus::READY;
+        } else {
+            LOG_ECMA(FATAL) << "SharedCC: ExecuteSharedCCStubSwitch called with"
+                               " non-empty stack (LastLeaveFrame != nullptr)";
+            UNREACHABLE();
+        }
+    }
+    SharedHeap::GetInstance()->GetSharedCC()->NotifyMainThreadReady();
+}
+
+void JSThread::WaitCCSuspend()
+{
+    constexpr int TIMEOUT = 100;
+    LockHolder lock(suspendLock_);
+    while (HasCCSuspend()) {
+        suspendCondVar_.TimedWait(&suspendLock_, TIMEOUT);
+    }
+}
+
+void JSThread::ClearCCSuspend()
+{
+    LockHolder lock(suspendLock_);
+    if (!HasCCSuspend()) {
+        return;
+    }
+    ClearFlag(ThreadFlag::CC_SUSPEND);
+    suspendCondVar_.SignalAll();
+}
+
 void JSThread::TerminateExecution()
 {
     // set the TERMINATE_ERROR to exception
@@ -1056,13 +1224,21 @@ bool JSThread::PassSuspendBarrier()
 {
     // Use suspendLock_ to avoid data-race between suspend-all-thread and suspended-threads.
     LockHolder lock(suspendLock_);
+    bool passed = false;
     if (suspendBarrier_ != nullptr) {
         suspendBarrier_->PassStrongly();
         suspendBarrier_ = nullptr;
-        ClearFlag(ThreadFlag::ACTIVE_BARRIER);
-        return true;
+        passed = true;
     }
-    return false;
+    if (jitSuspendBarrier_ != nullptr) {
+        jitSuspendBarrier_->PassStrongly();
+        jitSuspendBarrier_ = nullptr;
+        passed = true;
+    }
+    if (passed) {
+        ClearFlag(ThreadFlag::ACTIVE_BARRIER);
+    }
+    return passed;
 }
 
 bool JSThread::ShouldHandleMarkOrCopyFinishedInSafepoint()
@@ -1070,8 +1246,9 @@ bool JSThread::ShouldHandleMarkOrCopyFinishedInSafepoint()
     auto heap = const_cast<Heap *>(vm_->GetHeap());
     bool isMarkOrCopyFinished = IsCopyFinished() ||
         (IsMarkFinished() && heap->GetConcurrentMarker()->IsTriggeredConcurrentMark());
-    return isMarkOrCopyFinished && !heap->GetOnSerializeEvent() &&
-        !heap->InSensitiveStatus() && !heap->CheckIfNeedStopCollectionByStartup();
+    return isMarkOrCopyFinished && !heap->GetOnSerializeEvent()
+        && (!heap->InSensitiveStatus() || heap->GetCmsGC() || heap->IsNearGCInSensitive())
+        && !heap->CheckIfNeedStopCollectionByStartup();
 }
 
 bool JSThread::CheckSafepoint()
@@ -1087,6 +1264,7 @@ bool JSThread::CheckSafepoint()
         SetTerminationRequest(false);
     }
 
+    ASSERT(!HasCCSuspend());
     if UNLIKELY(HasSuspendRequest()) {
         WaitSuspension();
     }
@@ -1096,8 +1274,10 @@ bool JSThread::CheckSafepoint()
         vmThreadControl_->SuspendVM();
     }
     if (HasInstallMachineCode()) {
+#ifndef EXCLUDE_JIT
         Jit::JitGCLockHolder lock(this);
         vm_->GetJit()->InstallTasks(this);
+#endif
         SetInstallMachineCode(false);
     }
 
@@ -1335,7 +1515,7 @@ ThreadState JSThread::UpdateState(ThreadState newState)
     return oldState;
 }
 
-void JSThread::SuspendThread(bool internalSuspend, SuspendBarrier* barrier)
+void JSThread::SuspendThread(bool internalSuspend, SuspendBarrier *barrier, bool jitLocalGC)
 {
     ASSERT(!g_isEnableCMCGC);
     LockHolder lock(suspendLock_);
@@ -1350,8 +1530,10 @@ void JSThread::SuspendThread(bool internalSuspend, SuspendBarrier* barrier)
     }
 
     if (barrier != nullptr) {
-        ASSERT(suspendBarrier_ == nullptr);
-        suspendBarrier_ = barrier;
+        ASSERT(!jitLocalGC || IsJitThread());
+        auto *&slot = jitLocalGC ? jitSuspendBarrier_ : suspendBarrier_;
+        ASSERT(slot == nullptr);
+        slot = barrier;
         SetFlag(ThreadFlag::ACTIVE_BARRIER);
         SetCheckSafePointStatus();
     }
@@ -1376,6 +1558,9 @@ void JSThread::ResumeThread(bool internalSuspend)
 
 void JSThread::WaitSuspension()
 {
+    if (!g_isEnableCMCGC && IsJitThread()) {
+        CHECK_NO_GC;
+    }
     if (UNLIKELY(g_isEnableCMCGC)) {
         GetThreadHolder()->WaitSuspension();
     } else {
@@ -1404,6 +1589,72 @@ void JSThread::ManagedCodeBegin()
     }
 }
 
+void JSThread::RegisterJitThread(JitThread *compiler)
+{
+    ASSERT(!compiler->IsInRunningState());
+    LockHolder lock(jitMutex_);
+    ASSERT(compiler->nextHostJitThread_ == nullptr);
+    compiler->nextHostJitThread_ = jitThreads_;
+    jitThreads_ = compiler;
+}
+
+void JSThread::UnregisterJitThread(JitThread *compiler)
+{
+    ASSERT(!compiler->IsInRunningState());
+    LockHolder lock(jitMutex_);
+    auto **entry = &jitThreads_;
+    while (*entry != nullptr && *entry != compiler) {
+        entry = &(*entry)->nextHostJitThread_;
+    }
+    ASSERT(*entry == compiler);
+    *entry = compiler->nextHostJitThread_;
+    compiler->nextHostJitThread_ = nullptr;
+}
+
+void JSThread::LockJitMutex(JSThread *current)
+{
+    if (jitMutex_.TryLock()) {
+        return;
+    }
+    // Like V8's ParkedMutexGuard: a blocked mutex waiter must not hold up GC.
+    CHECK_NO_GC;
+    ThreadNativeScope parked(current);
+    jitMutex_.Lock();
+}
+
+void JSThread::SuspendJitThreads()
+{
+    if (g_isEnableCMCGC || jitSuspendDepth_++ != 0) {
+        return;
+    }
+    int32_t count = 0;
+    for (auto *compiler = jitThreads_; compiler != nullptr; compiler = compiler->nextHostJitThread_) {
+        ++count;
+    }
+    // A one-shot GC acknowledgement barrier, not a heap-access counter.
+    SuspendBarrier barrier(count);
+    for (auto *compiler = jitThreads_; compiler != nullptr; compiler = compiler->nextHostJitThread_) {
+        compiler->SuspendThread(true, &barrier, true);
+        if (compiler->IsSuspended()) {
+            compiler->PassSuspendBarrier();
+        }
+    }
+    barrier.Wait();
+}
+
+void JSThread::ResumeJitThreads()
+{
+    if (g_isEnableCMCGC) {
+        return;
+    }
+    ASSERT(jitSuspendDepth_ != 0);
+    if (--jitSuspendDepth_ == 0) {
+        for (auto *compiler = jitThreads_; compiler != nullptr; compiler = compiler->nextHostJitThread_) {
+            compiler->ResumeThread(true);
+        }
+    }
+}
+
 void JSThread::ManagedCodeEnd()
 {
     ASSERT(IsInManagedState());
@@ -1418,6 +1669,9 @@ void JSThread::TransferFromRunningToSuspended(ThreadState newState)
 {
     ASSERT(!g_isEnableCMCGC);
     ASSERT(currentThread == this);
+    if (IsJitThread()) {
+        CHECK_NO_GC;
+    }
     StoreSuspendedState(newState);
     CheckAndPassActiveBarrier();
 }
@@ -1468,6 +1722,9 @@ void JSThread::TransferToRunning()
     ASSERT(!g_isEnableCMCGC);
     ASSERT(!IsDaemonThread());
     ASSERT(currentThread == this);
+    if (IsJitThread()) {
+            CHECK_NO_GC;
+    }
     StoreRunningState(ThreadState::RUNNING);
     // Invoke free weak global callback when thread switch to running
     if (!weakNodeFreeGlobalCallbacks_.empty()) {
@@ -1490,6 +1747,7 @@ void JSThread::StoreState(ThreadState newState)
 {
     ASSERT(!g_isEnableCMCGC);
     while (true) {
+#ifndef ENABLE_LINXKIT
         ThreadStateAndFlags oldStateAndFlags;
         oldStateAndFlags.asNonvolatileInt = glueData_.stateAndFlags_.asInt;
 
@@ -1500,6 +1758,12 @@ void JSThread::StoreState(ThreadState newState)
         bool done = glueData_.stateAndFlags_.asAtomicInt.compare_exchange_weak(oldStateAndFlags.asNonvolatileInt,
                                                                                newStateAndFlags.asNonvolatileInt,
                                                                                std::memory_order_release);
+#else
+        // atomic update 16bit
+        bool done = LinxkitAtomicUpdateHalfword(
+            reinterpret_cast<uint16_t*>(&glueData_.stateAndFlags_.asNonvolatileStruct.state),
+            static_cast<uint16_t>(newState));
+#endif
         if (LIKELY(done)) {
             break;
         }
@@ -1508,23 +1772,30 @@ void JSThread::StoreState(ThreadState newState)
 
 void JSThread::StoreRunningState([[maybe_unused]] ThreadState newState)
 {
-    ASSERT(!g_isEnableCMCGC);
-    ASSERT(newState == ThreadState::RUNNING);
+    ASSERT(!g_isEnableCMCGC && newState == ThreadState::RUNNING);
     while (true) {
         ThreadStateAndFlags oldStateAndFlags;
         oldStateAndFlags.asNonvolatileInt = glueData_.stateAndFlags_.asInt;
         ASSERT(oldStateAndFlags.asNonvolatileStruct.state != ThreadState::RUNNING);
 
         if (LIKELY(oldStateAndFlags.asNonvolatileStruct.flags == ThreadFlag::NO_FLAGS)) {
+#ifndef ENABLE_LINXKIT
             ThreadStateAndFlags newStateAndFlags;
             newStateAndFlags.asNonvolatileStruct.flags = oldStateAndFlags.asNonvolatileStruct.flags;
             newStateAndFlags.asNonvolatileStruct.state = newState;
 
-            if (glueData_.stateAndFlags_.asAtomicInt.compare_exchange_weak(oldStateAndFlags.asNonvolatileInt,
-                                                                           newStateAndFlags.asNonvolatileInt,
-                                                                           std::memory_order_release)) {
+            if (glueData_.stateAndFlags_.asAtomicInt.compare_exchange_weak(
+                oldStateAndFlags.asNonvolatileInt, newStateAndFlags.asNonvolatileInt, std::memory_order_acq_rel)) {
                 break;
             }
+#else
+            // atomic read val compare to old val, if same, update high 16bit and return true else return false
+            bool success = LinxkitAtomicCmpUpdateState(
+                reinterpret_cast<uint32_t*>(&glueData_.stateAndFlags_.asNonvolatileInt),
+                static_cast<uint32_t>(oldStateAndFlags.asNonvolatileInt),
+                static_cast<uint16_t>(newState));
+            if (success) { break; }
+#endif
         } else if ((oldStateAndFlags.asNonvolatileStruct.flags & ThreadFlag::ACTIVE_BARRIER) != 0) {
             PassSuspendBarrier();
         } else if ((oldStateAndFlags.asNonvolatileStruct.flags & ThreadFlag::SUSPEND_REQUEST) != 0) {
@@ -1539,6 +1810,8 @@ void JSThread::StoreRunningState([[maybe_unused]] ThreadState newState)
             TryRunFlipFunction();
         } else if ((oldStateAndFlags.asNonvolatileStruct.flags & ThreadFlag::RUNNING_FLIP_FUNCTION) != 0) {
             WaitFlipFunctionFinished();
+        } else if ((oldStateAndFlags.asNonvolatileStruct.flags & ThreadFlag::CC_SUSPEND) != 0) {
+            WaitCCSuspend();
         } else if ((oldStateAndFlags.asNonvolatileStruct.flags & ThreadFlag::PENDING_SHARED_HEAP_OOM) != 0) {
             ThreadStateAndFlags newStateAndFlags;
             newStateAndFlags.asNonvolatileStruct.flags = oldStateAndFlags.asNonvolatileStruct.flags;
@@ -1698,8 +1971,14 @@ JSHClass *JSThread::GetArrayInstanceHClass(JSHandle<GlobalEnv> env, ElementsKind
 
 ModuleManager *JSThread::GetModuleManager() const
 {
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+    GlobalEnv *globalEnv = GetGlobalEnvRaw();
+    JSTaggedValue val = globalEnv->GetTaggedModuleManagerNativePointer();
+    JSNativePointer *nativePointer = reinterpret_cast<JSNativePointer *>(val.GetTaggedObject());
+#else
     JSHandle<GlobalEnv> globalEnv = GetGlobalEnv();
     JSHandle<JSNativePointer> nativePointer(globalEnv->GetModuleManagerNativePointer());
+#endif
     ModuleManager *moduleManager = reinterpret_cast<ModuleManager *>(nativePointer->GetExternalPointer());
     return moduleManager;
 }

@@ -1,0 +1,430 @@
+/*
+ * Copyright (c) 2026 Huawei Device Co., Ltd.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#ifndef ECMASCRIPT_ARKSTEED_ARKSTEED_REGALLOC_PROCESSORS_H
+#define ECMASCRIPT_ARKSTEED_ARKSTEED_REGALLOC_PROCESSORS_H
+
+#include "ecmascript/arksteed/arksteed_graph_processor.h"
+#include "ecmascript/arksteed/arksteed_opcode.h"
+#include "ecmascript/arksteed/arksteed_regalloc.h"
+#include "ecmascript/arksteed/arksteed_regalloc_vertex_info.h"
+#include "ecmascript/arksteed/arksteed_vertex.h"
+
+#include <type_traits>
+
+namespace panda::ecmascript::arksteed {
+
+// =============================================================================
+// VertexInfoAllocateProcessor
+// Allocates RegallocValueVertexInfo for each vertex in the graph
+// This must run before any other register allocation processors
+// =============================================================================
+
+class VertexInfoAllocateProcessor {
+public:
+    void PreProcessGraph(Graph *graph)
+    {
+        chunk_ = graph->GetChunk();
+    }
+
+    void PreProcessBlock(BB *block) {}
+    void PostProcessBlock(BB *block) {}
+    void PostProcessGraph(Graph *graph) {}
+    void PostPhiProcessing() {}
+
+    void ProcessVertex(ValueVertex *vertex, const ArkSteedState &state)
+    {
+        vertex->SetRegallocInfo(
+            chunk_->New<RegallocValueVertexInfo>(chunk_, vertex->GetInputCount(), vertex->GetMachineRepresentation()));
+    }
+
+    void ProcessVertex(Vertex *vertex, const ArkSteedState &state)
+    {
+        vertex->SetRegallocInfo(chunk_->New<RegallocVertexInfo>(chunk_, vertex->GetInputCount()));
+    }
+
+private:
+    Chunk *chunk_ = nullptr;
+};
+
+template <typename T>
+void EnsureDeoptLocationsForVertex(T *vertex)
+{
+    if constexpr (std::is_base_of_v<LazyDeoptimizableMixin, T>) {
+        auto *deopt = static_cast<LazyDeoptimizableMixin *>(vertex);
+        if (!deopt->HasLazyDeoptFrameState()) {
+            return;
+        }
+        for (uint32_t index = 0; index < deopt->GetDeoptFrameValueCount(); ++index) {
+            InputLocation *location = deopt->GetDeoptSourceLocation(index);
+            if (location->GetOperand().IsInvalid()) {
+                location->GetOperand() = UnallocatedState(NO_VREG);
+            }
+        }
+    }
+}
+
+// =============================================================================
+// ValueLocationConstraintProcessor
+// Calls SetValueLocationConstraints() on each vertex to define
+// input/output location requirements for register allocation
+// =============================================================================
+
+class ValueLocationConstraintProcessor {
+public:
+    void PreProcessGraph(Graph *graph) {}
+    void PreProcessBlock(BB *block) {}
+    void PostProcessBlock(BB *block) {}
+    void PostProcessGraph(Graph *graph) {}
+    void PostPhiProcessing() {}
+
+#define DEF_PROCESS_VERTEX(NAME)                                         \
+    void ProcessVertex(NAME##Vertex *vertex, const ArkSteedState &state) \
+    {                                                                    \
+        EnsureDeoptLocationsForVertex(vertex);                           \
+        vertex->SetValueLocationConstraints();                           \
+        return;                                                          \
+    }
+    ALL_VERTEX_LIST(DEF_PROCESS_VERTEX)
+#undef DEF_PROCESS_VERTEX
+};
+
+// =============================================================================
+// MaxCallDepthProcessor
+// Computes the maximum number of stack arguments passed to calls
+// =============================================================================
+
+class MaxCallDepthProcessor {
+public:
+    void PreProcessGraph(Graph *graph) {}
+    void PreProcessBlock(BB *block) {}
+    void PostProcessBlock(BB *block) {}
+    void PostProcessGraph(Graph *graph)
+    {
+        graph->SetMaxCallStackArgs(maxCallStackArgs_);
+    }
+    void PostPhiProcessing() {}
+
+    template <typename T>
+    void ProcessVertex(T *vertex, const ArkSteedState &state)
+    {
+        constexpr bool isCall = IsCall(T::PROPERTIES);
+        constexpr bool isDeferredCall = IsDeferredCall(T::PROPERTIES);
+        if constexpr (isCall || isDeferredCall) {
+            uint32_t vertexStackArgs = vertex->GetInputCount();
+            if constexpr (isDeferredCall) {
+                // Pessimistically assume that we'll push all registers in deferred calls.
+                vertexStackArgs += ALLOCATABLE_GENERAL_REGISTER_COUNT + ALLOCATABLE_DOUBLE_REGISTER_COUNT;
+            }
+            maxCallStackArgs_ = std::max<uint32_t>(maxCallStackArgs_, vertexStackArgs);
+        }
+    }
+
+private:
+    int maxCallStackArgs_ {0};
+    static constexpr int ALLOCATABLE_GENERAL_REGISTER_COUNT =
+        32;                                                       // 32: number of allocatable general-purpose registers
+    static constexpr int ALLOCATABLE_DOUBLE_REGISTER_COUNT = 32;  // 32: number of allocatable double (FP) registers
+};
+
+// =============================================================================
+// LivenessProcessor
+// Tracks live ranges and next-use information for register allocation
+// Handles loop-external vertex lifetime extension
+//
+// ArkSteed uses Edge Splitting optimization:
+// - For conditional branches (BranchIfTrue): target block cannot have Phi vertices, so no special handling is needed
+// - For unconditional jumps (Jump/JumpLoop): target block can have Phi vertices
+// =============================================================================
+
+class LivenessProcessor {
+public:
+    void PreProcessGraph(Graph *graph)
+    {
+        chunk_ = graph->GetChunk();
+    }
+
+    void PreProcessBlock(BB *block)
+    {
+        // Check if this block is a loop header
+        if (block->IsLoopHeader()) {
+            LoopUsedVertices loopVertex;
+            loopVertex.header = block;
+            loopUsedVertices_.push_back(loopVertex);
+        }
+    }
+
+    void PostProcessBlock(BB *block) {}
+
+    void PostProcessGraph(Graph *graph)
+    {
+        // Verify all loops have been processed
+        ASSERT(loopUsedVertices_.empty());
+    }
+
+    void PostPhiProcessing() {}
+
+    // Generic template for all vertex types
+    template <typename T>
+    void ProcessVertex(T *vertex, const ArkSteedState &state)
+    {
+        vertex->GetRegallocInfo()->SetId(nextVertexId_++);
+        LoopUsedVertices *loopUsedVertices = GetCurrentLoopUsedVertices();
+        if (loopUsedVertices != nullptr && vertex->IsCall()) {
+            if (loopUsedVertices->firstCall == INVALID_VERTEX_ID) {
+                loopUsedVertices->firstCall = vertex->GetId();
+            }
+            loopUsedVertices->lastCall = vertex->GetId();
+        }
+        MarkInputUses(vertex, state);
+    }
+
+private:
+    struct LoopVertexUse {
+        VertexId firstRegisterUse = INVALID_VERTEX_ID;
+        VertexId lastRegisterUse = INVALID_VERTEX_ID;
+    };
+
+    struct LoopUsedVertices {
+        // ValueVertex* from outside the loop.
+        std::map<ValueVertex *, LoopVertexUse> usedVertices;
+        VertexId firstCall = INVALID_VERTEX_ID;
+        VertexId lastCall = INVALID_VERTEX_ID;
+        BB *header = nullptr;
+    };
+
+    LoopUsedVertices *GetCurrentLoopUsedVertices()
+    {
+        if (loopUsedVertices_.empty()) {
+            return nullptr;
+        }
+        return &loopUsedVertices_.back();
+    }
+
+    template <typename T>
+    void MarkDirectInputUses(T *vertex, const ArkSteedState &state)
+    {
+        LoopUsedVertices *loopUsedVertices = GetCurrentLoopUsedVertices();
+        vertex->ForAllInputsInRegallocAssignmentOrder([&](const Input &input) {
+            MarkUse(input.vertex()->Cast<ValueVertex>(), vertex->GetId(), input.GetLocation(), loopUsedVertices);
+        });
+    }
+
+    template <typename T>
+    void MarkLazyDeoptInputUses(T *vertex, const ArkSteedState &state)
+    {
+        if (!vertex->HasLazyDeoptFrameState()) {
+            return;
+        }
+        uint32_t vertexID = vertex->GetId();
+        LoopUsedVertices *loopUsedVertices = GetCurrentLoopUsedVertices();
+        for (uint32_t index = 0, valueCount = vertex->GetDeoptFrameValueCount(); index < valueCount; ++index) {
+            ValueVertex *value = vertex->GetDeoptFrameValue(index);
+            InputLocation *location = vertex->GetDeoptSourceLocation(index);
+            MarkUse(value, vertexID, location, loopUsedVertices);
+        }
+    }
+
+    template <typename T>
+    void MarkCatchPhiInputUses(T *vertex, const ArkSteedState &state)
+    {
+        BB *catchBlock = CatchBlockOf(vertex);
+        if (catchBlock == nullptr || !catchBlock->HasPhi()) {
+            return;
+        }
+        uint32_t use = vertex->GetId();
+        uint32_t predId = CatchPredecessorIndexOf(vertex);
+        int predIdx = static_cast<int>(predId);
+        LoopUsedVertices *loopUsedVertices = GetCurrentLoopUsedVertices();
+
+        for (PhiVertex *phi : catchBlock->GetPhis()) {
+            ValueVertex *input = phi->GetInput(predIdx);
+            InputLocation *location = phi->GetInputLocation(predIdx);
+            MarkUse(input, use, location, loopUsedVertices);
+        }
+    }
+
+    template <typename T>
+    void MarkEagerDeoptUses(T *vertex)
+    {
+        if constexpr (std::is_base_of_v<EagerDeoptimizableMixin, T>) {
+            LoopUsedVertices *loopUsedVertices = GetCurrentLoopUsedVertices();
+            for (uint32_t index = 0; index < vertex->GetDeoptFrameValueCount(); ++index) {
+                MarkUse(vertex->GetDeoptFrameValue(index), vertex->GetId(), vertex->GetDeoptSourceLocation(index),
+                        loopUsedVertices);
+            }
+        }
+    }
+
+public:
+    template <typename T>
+    void MarkInputUses(T *vertex, const ArkSteedState &state)
+    {
+        MarkDirectInputUses(vertex, state);
+        MarkEagerDeoptUses(vertex);
+        if constexpr (std::is_base_of_v<LazyDeoptimizableMixin, T>) {
+            MarkLazyDeoptInputUses(vertex, state);
+        }
+        if constexpr (std::is_base_of_v<ThrowableMixin, T>) {
+            MarkCatchPhiInputUses(vertex, state);
+        }
+    }
+
+    // Specialization for PhiVertex - skip here, will be handled by control vertices
+    void MarkInputUses(PhiVertex *vertex, const ArkSteedState &state) {}
+
+    // Specialization for JumpVertex - handle phi inputs for target block
+    void MarkInputUses(JumpVertex *vertex, const ArkSteedState &state)
+    {
+        BB *target = vertex->Target();
+        uint32_t use = vertex->GetId();
+        int predecessorIdx = state.GetBlock()->GetPredecessorId();
+        LoopUsedVertices *loopUsedVertices = GetCurrentLoopUsedVertices();
+
+        if (!target->HasPhi()) {
+            return;
+        }
+
+        const auto &phis = target->GetPhis();
+        for (PhiVertex *phi : phis) {
+            ValueVertex *input = phi->GetPredecessor(predecessorIdx);
+            InputLocation *location = phi->GetInputLocation(predecessorIdx);
+            MarkUse(input, use, location, loopUsedVertices);
+        }
+    }
+
+    // Specialization for JumpLoopVertex - handle phi inputs for loop header block and propagate loop-external vertices
+    void MarkInputUses(JumpLoopVertex *vertex, const ArkSteedState &state)
+    {
+        BB *target = vertex->Target();
+        uint32_t use = vertex->GetId();
+        uint32_t predecessorIdx = state.GetBlock()->GetPredecessorId();
+
+        ASSERT(!loopUsedVertices_.empty());
+        LoopUsedVertices loopUsedVertices = std::move(loopUsedVertices_.back());
+        loopUsedVertices_.pop_back();
+        ASSERT(loopUsedVertices.header == target);
+
+        LoopUsedVertices *outerLoopUsedVertices = GetCurrentLoopUsedVertices();
+
+        // Handle phi inputs from loop header
+        if (target->HasPhi()) {
+            const auto &phis = target->GetPhis();
+            for (PhiVertex *phi : phis) {
+                ValueVertex *input = phi->GetPredecessor(predecessorIdx);
+                InputLocation *location = phi->GetInputLocation(predecessorIdx);
+                MarkUse(input, use, location, outerLoopUsedVertices);
+            }
+        }
+
+        // Propagate loop-external vertices to outer loop if exists
+        // This extends their lifetime across the loop back edge
+        if (!loopUsedVertices.usedVertices.empty()) {
+            BB::RegallocLoopInfo &loopInfo = loopUsedVertices.header->GetOrCreateRegallocLoopInfo(chunk_);
+            for (auto &[usedVertex, useInfo] : loopUsedVertices.usedVertices) {
+                if (ShouldReloadAtLoopHeader(useInfo, loopUsedVertices)) {
+                    loopInfo.reloadHints.push_back(usedVertex);
+                }
+                if (ShouldSpillAtLoopHeader(useInfo, loopUsedVertices)) {
+                    loopInfo.spillHints.push_back(usedVertex);
+                }
+            }
+
+            JumpLoopVertex::UsedVerticesType usedVertexInputs(chunk_);
+            usedVertexInputs.reserve(loopUsedVertices.usedVertices.size());
+            for (auto &entry : loopUsedVertices.usedVertices) {
+                ValueVertex *usedVertex = entry.first;
+                usedVertexInputs.emplace_back(usedVertex, InputLocation());
+                MarkUse(usedVertex, use, &usedVertexInputs.back().second, outerLoopUsedVertices);
+            }
+            vertex->SetUsedVertices(std::move(usedVertexInputs));
+        }
+    }
+
+    static bool IsRegisterUse(const InputLocation *input)
+    {
+        const InstructionOperand &operand = input->GetOperand();
+        if (!operand.IsUnallocated()) {
+            return false;
+        }
+
+        const UnallocatedState unallocated = UnallocatedState::Cast(operand);
+        if (unallocated.GetBasicPolicy() != UnallocatedState::BasicPolicy::EXTENDED_POLICY) {
+            return false;
+        }
+
+        switch (unallocated.GetExtendedPolicy()) {
+            case UnallocatedState::ExtendedPolicy::MUST_HAVE_REGISTER:
+            case UnallocatedState::ExtendedPolicy::FIXED_REGISTER:
+            case UnallocatedState::ExtendedPolicy::FIXED_FP_REGISTER:
+                return true;
+            case UnallocatedState::ExtendedPolicy::NONE:
+            case UnallocatedState::ExtendedPolicy::MUST_HAVE_SLOT:
+            case UnallocatedState::ExtendedPolicy::REGISTER_OR_SLOT:
+            case UnallocatedState::ExtendedPolicy::REGISTER_OR_SLOT_OR_CONSTANT:
+            case UnallocatedState::ExtendedPolicy::SAME_AS_INPUT:
+                return false;
+        }
+        UNREACHABLE();
+    }
+
+    static bool ShouldReloadAtLoopHeader(const LoopVertexUse &useInfo, const LoopUsedVertices &loopUsedVertices)
+    {
+        return useInfo.firstRegisterUse != INVALID_VERTEX_ID &&
+               (loopUsedVertices.firstCall == INVALID_VERTEX_ID ||
+                (useInfo.firstRegisterUse <= loopUsedVertices.firstCall &&
+                 useInfo.lastRegisterUse > loopUsedVertices.lastCall));
+    }
+
+    static bool ShouldSpillAtLoopHeader(const LoopVertexUse &useInfo, const LoopUsedVertices &loopUsedVertices)
+    {
+        return useInfo.firstRegisterUse == INVALID_VERTEX_ID ||
+               (loopUsedVertices.firstCall != INVALID_VERTEX_ID &&
+                useInfo.firstRegisterUse > loopUsedVertices.firstCall &&
+                useInfo.lastRegisterUse <= loopUsedVertices.lastCall);
+    }
+
+    void MarkUse(ValueVertex *vertex, uint32_t useId, InputLocation *input, LoopUsedVertices *loopUsedVertices)
+    {
+        ASSERT(vertex->GetRegallocInfo() != nullptr);
+
+        // record use
+        vertex->GetRegallocInfo()->RecordUse(useId, input);
+
+        // If we are in a loop, check if the incoming vertex is from outside the loop,
+        // and make sure to extend its lifetime to the loop end if yes.
+        if (loopUsedVertices != nullptr) {
+            if (vertex->GetId() < loopUsedVertices->header->GetFirstId()) {
+                LoopVertexUse initialUse {INVALID_VERTEX_ID, INVALID_VERTEX_ID};
+                auto result = loopUsedVertices->usedVertices.emplace(vertex, initialUse);
+                LoopVertexUse &useInfo = result.first->second;
+                if (IsRegisterUse(input)) {
+                    if (useInfo.firstRegisterUse == INVALID_VERTEX_ID) {
+                        useInfo.firstRegisterUse = useId;
+                    }
+                    useInfo.lastRegisterUse = useId;
+                }
+            }
+        }
+    }
+
+    std::vector<LoopUsedVertices> loopUsedVertices_;
+    Chunk *chunk_ = nullptr;
+    uint32_t nextVertexId_ {0};
+};
+
+}  // namespace panda::ecmascript::arksteed
+
+#endif  // ECMASCRIPT_ARKSTEED_ARKSTEED_REGALLOC_PROCESSORS_H

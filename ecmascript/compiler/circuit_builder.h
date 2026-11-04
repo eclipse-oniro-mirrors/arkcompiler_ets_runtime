@@ -28,19 +28,27 @@
 #include "ecmascript/compiler/share_gate_meta_data.h"
 #include "ecmascript/compiler/variable_type.h"
 #include "ecmascript/global_env_constants.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/jspandafile/constpool_value.h"
 
 namespace panda::ecmascript::kungfu {
 using namespace panda::ecmascript;
 #define DEFVALUE(varname, cirBuilder, type, val) \
         Variable varname(cirBuilder, type, cirBuilder->NextVariableId(), val)
+#ifndef NDEBUG
+#define ASSERT_ASM(messageId, condition, glue) Assert((messageId), __LINE__, (glue), (condition))
+#elif defined(ENABLE_ASM_ASSERT)
+#define ASSERT_ASM(messageId, condition, glue) Assert((messageId), __LINE__, (glue), (condition))
+#else
+#define ASSERT_ASM(messageId, ...) ((void)0)
+#endif
 
 class BuiltinsTypedArrayStubBuilder;
 class BuiltinsStringStubBuilder;
 class CompilationConfig;
 class Environment;
 class Label;
+class LabelImpl;
 class NTypeBytecodeLowering;
 class SlowPathLowering;
 class StubBuilder;
@@ -248,6 +256,7 @@ public:
     GateRef IsTaggedArray(GateRef glue, GateRef object);
     GateRef CheckJSType(GateRef glue, GateRef object, JSType jsType);
     GateRef IsMutantTaggedArray(GateRef objectType);
+    GateRef IsConstantPool(GateRef glue, GateRef object);
     GateRef SwitchCase(GateRef switchBranch, int64_t value);
     GateRef Int8(int8_t val);
     GateRef Int16(int16_t val);
@@ -261,6 +270,7 @@ public:
     GateRef Double(double value);
     GateRef UndefineConstant();
     GateRef HoleConstant();
+    GateRef TemporaryHoleConstant();        // for compressed pointer
     GateRef SpecialHoleConstant();
     GateRef NullPtrConstant();
     GateRef NullConstant();
@@ -324,6 +334,8 @@ public:
             BranchWeight::ZERO_WEIGHT, BranchWeight::ZERO_WEIGHT, os.str().c_str());     \
     }
 
+    void Assert(int messageId, int line, GateRef glue, GateRef condition);
+
     GateRef Branch(GateRef state, GateRef condition, uint32_t leftWeight = 1, uint32_t rightWeight = 1,
                    const char* comment = nullptr);  // 1: default branch weight
     GateRef SwitchBranch(GateRef state, GateRef index, int caseCounts);
@@ -332,6 +344,7 @@ public:
     inline GateRef False();
     inline GateRef Undefined();
     inline GateRef Hole();
+    inline GateRef TemporaryHole();     // for compressed pointer
 
     GateRef ElementsKindIsInt(GateRef kind);
     GateRef ElementsKindIsIntOrHoleInt(GateRef kind);
@@ -355,8 +368,22 @@ public:
     GateRef GetBaselineCodeAddr(GateRef baselineCode);
     GateRef GetObjectByIndexFromConstPool(GateRef glue, GateRef hirGate, GateRef frameState, GateRef index,
                                    ConstPoolType type);
+    GateRef GetLengthOfConstPoolCacheElement(GateRef constpool);
+    GateRef GetNumOfConstPoolCacheElement(GateRef constpool);
+    GateRef OffsetOfConstPoolValid(GateRef constpool, GateRef offset);
+    // may return a fake JSTaggedValue, which consists of the high bit of heap address and the
+    // low bit of `JSTaggedValue::Hole`. Thus `IsHeapObject()` and `IsHole()` will both return false,
+    // and need to do some conversion before use
+    GateRef GetFromCompressedTaggedValueFromConstPoolUnsafe(GateRef glue, GateRef constpool, GateRef index);
+    GateRef IndexOfConstPoolCacheElementValid(GateRef constpool, GateRef index);
+    // may return a fake JSTaggedValue, which consists of the high bit of heap address and the
+    // low bit of `JSTaggedValue::Hole`. Thus `IsHeapObject()` and `IsHole()` will both return false,
+    // and need to do some conversion before use
+    GateRef GetObjectFromConstPoolCacheUnsafe(GateRef glue, GateRef constpool, GateRef index);
     GateRef GetObjectFromConstPool(GateRef glue, GateRef hirGate, GateRef shardConstPool, GateRef unsharedConstPool,
                                    GateRef module, GateRef index, ConstPoolType type);
+    // only use to get extend element, do not use to get cache
+    GateRef GetExtendElementFromConstPool(GateRef glue, GateRef constpool, GateRef index);
     GateRef GetFunctionLexicalEnv(GateRef glue, GateRef function);
     GateRef GetGlobalEnv();
     GateRef GetGlobalEnvObj(GateRef env, size_t index);
@@ -425,7 +452,6 @@ public:
     GateRef IsUtf8String(GateRef string);
     GateRef IsUtf16String(GateRef string);
     GateRef IsInternString(GateRef string);
-    GateRef LoadObjectFromConstPool(GateRef glue, GateRef constPool, GateRef index);
     GateRef IsAccessorInternal(GateRef glue, GateRef accessor);
 
     // label related
@@ -450,7 +476,7 @@ public:
     void LoopBegin(Label *loopHead);
     void LoopEnd(Label *loopHead);
     void LoopExit(const std::vector<Variable*> &vars, size_t diff = 1);
-    inline Label *GetCurrentLabel() const;
+    inline LabelImpl *GetCurrentLabel() const;
     inline GateRef GetState() const;
     inline GateRef GetDepend() const;
     inline StateDepend GetStateDepend() const;
@@ -577,7 +603,7 @@ public:
     inline GateRef IsJsProxy(GateRef glue, GateRef obj);
     GateRef IsJSHClass(GateRef glue, GateRef obj);
     // It must sets zero for high 32 bits field when store hclass to object header.
-    inline void StoreHClass(GateRef glue, GateRef object, GateRef hClass,
+    inline void StoreHClass(GateRef glue, GateRef object, GateRef hClass, RegionSpaceFlag spaceType,
                             MemoryAttribute mAttr = MemoryAttribute::NeedBarrier());
     // It must keeps high 32 bits field when store hclass to object header.
     inline void TransitionHClass(GateRef glue, GateRef object, GateRef hClass,
@@ -749,7 +775,9 @@ public:
     inline GateRef PrimitiveToNumber(GateRef x, ParamType paramType);
     inline GateRef GetValueFromTaggedArray(GateRef glue, GateRef array, GateRef index);
     inline GateRef GetValueFromTaggedArray(GateRef glue, GateRef array, GateRef index, GateRef depend);
-    inline GateRef GetValueFromTaggedArray(VariableType valType, GateRef array, GateRef index);
+    inline GateRef GetValueFromTaggedArray(GateRef glue, VariableType valType, GateRef array, GateRef index);
+    inline GateRef GetICSlot(GateRef glue, GateRef profileTypeInfo, GateRef index);
+    void SetICSlot(VariableType valType, GateRef glue, GateRef profileTypeInfo, GateRef index, GateRef val);
     inline GateRef GetValueFromJSArrayWithElementsKind(VariableType type, GateRef array, GateRef index);
     inline GateRef GetArrayElementsGuardians(GateRef env);
     inline GateRef GetMapIteratorDetector(GateRef env);
@@ -763,7 +791,7 @@ public:
     GateRef LoadElement(GateRef receiver, GateRef index, OnHeapMode onHeap = OnHeapMode::NONE);
     GateRef LoadProperty(GateRef receiver, GateRef propertyLookupResult, bool isFunction);
     GateRef LoadArrayLength(GateRef gate, ElementsKind kind, ArrayMetaDataAccessor::Mode mode);
-    inline GateRef LoadFromTaggedArray(GateRef array, size_t index);
+    inline GateRef LoadFromTaggedArray(GateRef glue, GateRef array, size_t index);
     GateRef LoadStringLength(GateRef string);
     GateRef LoadMapSize(GateRef string);
     GateRef LoadConstOffset(VariableType type, GateRef receiver, size_t offset,
@@ -777,7 +805,7 @@ public:
                              MemoryAttribute mAttr = MemoryAttribute::Default());
     GateRef StoreHClassConstOffset(VariableType type, GateRef receiver, GateRef value, GateRef compValue,
                                    MemoryAttribute mAttr = MemoryAttribute::Default());
-    inline GateRef StoreToTaggedArray(GateRef array, size_t index, GateRef value);
+    inline GateRef StoreToTaggedArray(GateRef glue, GateRef array, size_t index, GateRef value);
     GateRef StringEqual(GateRef x, GateRef y);
     GateRef StringAdd(GateRef x, GateRef y, uint32_t stringStatus = 0);
     template<TypedStoreOp Op>
@@ -785,6 +813,7 @@ public:
     GateRef StoreMemory(MemoryType Op, VariableType type, GateRef receiver, GateRef index, GateRef value);
     GateRef StoreProperty(GateRef receiver, GateRef propertyLookupResult, GateRef value, uint32_t receiverHClassIndex);
     inline GateRef JudgeAotAndFastCall(GateRef jsFunc, JudgeMethodType type);
+    GateRef HasArkSteedEntry(GateRef jsFunc);
     GateRef ComputeTaggedArraySize(GateRef length);
     GateRef HeapAlloc(GateRef glue, GateRef size, GateType type, RegionSpaceFlag flag);
     GateRef TaggedIsHeapObjectOp(GateRef value);
@@ -811,6 +840,7 @@ public:
 
     // bit operation
     inline GateRef TaggedIsInt(GateRef x);
+    inline GateRef TemporaryTaggedIsInt(GateRef temporaryTagged);             // for compressed pointer
     inline GateRef TaggedIsDouble(GateRef x);
     inline GateRef TaggedIsObject(GateRef x);
     inline GateRef TaggedIsNumber(GateRef x);
@@ -818,10 +848,15 @@ public:
     inline GateRef TaggedIsNotHole(GateRef x);
     inline GateRef TaggedIsHole(GateRef x);
     inline GateRef TaggedIsNullPtr(GateRef x);
+    inline GateRef WipeHighBitOfTemporaryTagged(GateRef temporaryTagged);     // for compressed pointer
+    inline GateRef TemporaryTaggedIsNullPtr(GateRef temporaryTagged);         // for compressed pointer
     inline GateRef TaggedIsUndefined(GateRef x);
     inline GateRef TaggedIsException(GateRef x);
     inline GateRef TaggedIsSpecial(GateRef x);
     inline GateRef TaggedIsHeapObject(GateRef x);
+    inline GateRef TemporaryTaggedIsHeapObject(GateRef temporaryTagged);      // for compressed pointer
+    inline GateRef ConvertTemporaryTaggedObjectToTaggedValue(GateRef glue,
+                                                             GateRef temporaryTagged);    // for compressed pointer
     inline GateRef TaggedIsHeapObject(GateRef x, const CompilationEnv *compilationEnv);
     inline GateRef TaggedIsJSFunction(GateRef glue, GateRef x);
     inline GateRef TaggedIsArrayIterator(GateRef glue, GateRef obj);
@@ -829,6 +864,9 @@ public:
     inline GateRef TaggedIsJSGlobalObject(GateRef glue, GateRef x);
     inline GateRef TaggedIsGeneratorObject(GateRef glue, GateRef x);
     inline GateRef TaggedIsJSArray(GateRef glue, GateRef x);
+    inline GateRef TaggedIsJSSharedArray(GateRef glue, GateRef x);
+    inline GateRef TaggedIsJSSharedMap(GateRef glue, GateRef x);
+    inline GateRef TaggedIsJSSharedSet(GateRef glue, GateRef x);
     inline GateRef TaggedIsJSProxy(GateRef glue, GateRef x);
     inline GateRef TaggedIsPropertyBox(GateRef glue, GateRef x);
     inline GateRef TaggedIsWeak(GateRef x);
@@ -1001,6 +1039,7 @@ public:
         MemoryAttribute mAttr = MemoryAttribute::NeedBarrier());
     GateRef Load(VariableType type, GateRef glue, GateRef base, GateRef offset, GateRef depend,
         MemoryAttribute mAttr = MemoryAttribute::NeedBarrier());
+    GateRef LoadFromCompressedTaggedValue(VariableType type, GateRef glue, GateRef base, GateRef offset);
 
     // LoadWithoutBarrier
     GateRef LoadWithoutBarrier(VariableType type, GateRef base, GateRef offset,
@@ -1013,6 +1052,8 @@ public:
     void Store(VariableType type, GateRef glue, GateRef base, GateRef offset, GateRef value,
                MemoryAttribute mAttr = MemoryAttribute::Default());
     GateRef FetchOr(GateRef ptr, GateRef value, MemoryAttribute mAttr);
+    GateRef AtomicCmpXchg(VariableType type, GateRef address, GateRef expected, GateRef desired);
+    GateRef AtomicLoadAcquire(VariableType type, GateRef address);
     void StoreHClass(VariableType type, GateRef glue, GateRef base, GateRef offset, GateRef value, GateRef compValue,
                      MemoryAttribute mAttr = MemoryAttribute::Default());
     void StoreWithoutBarrier(VariableType type, GateRef addr, GateRef value,

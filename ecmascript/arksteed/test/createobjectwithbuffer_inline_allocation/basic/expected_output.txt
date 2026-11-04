@@ -1,0 +1,5 @@
+interpreted:true
+compiled:true
+values-and-identity:true
+external-properties-independent:true
+mutations-independent:true

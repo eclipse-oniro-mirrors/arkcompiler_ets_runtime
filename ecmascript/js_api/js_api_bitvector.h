@@ -17,7 +17,7 @@
 #define ECMASCRIPT_JS_API_JS_API_BITVECTOR_H
 
 #include "ecmascript/js_object.h"
-#include "ecmascript/js_tagged_value-inl.h"
+#include "ecmascript/js_tagged_value_wrapper-inl.h"
 
 namespace panda::ecmascript {
 class JSAPIBitVector : public JSObject {
@@ -73,6 +73,11 @@ public:
     inline uint32_t GetSize() const
     {
         return GetLength();
+    }
+
+    static constexpr uint32_t ComputeBitSetCount(uint32_t length)
+    {
+        return length == 0 ? 0 : (length - 1) / BIT_SET_LENGTH + 1;
     }
 
     static constexpr size_t NATIVE_POINTER_OFFSET = JSObject::SIZE;

@@ -33,7 +33,9 @@
 #include "ecmascript/jspandafile/method_literal.h"
 #include "llvm-c/DebugInfo.h"
 #include "llvm-c/Core.h"
-
+#if defined(STUB_FUNCTION_REORDERING)
+#include "ecmascript/compiler/aot_file/stub_file_info.h"
+#endif
 namespace panda::ecmascript::kungfu {
 class BasicBlock;
 class DebugInfo;
@@ -111,7 +113,12 @@ public:
     void SetUpForBytecodeStwCopyHandlerStubs();
     void SetUpForBuiltinsStubs();
     void SetUpForBuiltinsStwCopyStubs();
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
     void SetUpForBaselineStubs();
+#endif
+#if defined(STUB_FUNCTION_REORDERING)
+    void SetUpForMergedStubs(const std::string &stubOrder, StubFileInfo *stubInfo);
+#endif
 
     LLVMValueRef AddFunc(const panda::ecmascript::MethodLiteral *methodLiteral, const JSPandaFile *jsPandaFile);
     LLVMModuleRef GetModule() const

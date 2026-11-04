@@ -538,4 +538,48 @@ HWTEST_F_L0(AOTFileTest, getHeapNotNullTest)
     JSNApi::DestroyJSVM(vm);
 }
 
+HWTEST_F_L0(AOTFileTest, safeTryInsideStubOrAotTest)
+{
+    // This test covers the signal-handler-safe range query of AnFileDataManager
+    // and its AOTFileManager wrapper:
+    // 1. A pc inside a loaded .an text section is reported as inside AOT.
+    // 2. A random unmapped pc is reported as outside.
+    std::string testFile = "file_size_test.abc";
+    SetEnvrionmentForTest(testFile);
+    GetApFileInTest(testApPath_, testRecordName_, testAbcPath_);
+    GetAnFileInTest(testApPath_, testAotPath_, testAbcPath_);
+    ASSERT_TRUE(Exists(testAnPath_));
+
+    JSRuntimeOptions runtimeOptions;
+    runtimeOptions.SetEntryPoint(testRecordName_);
+    EcmaVM *vm = JSNApi::CreateEcmaVM(runtimeOptions);
+    ASSERT_TRUE(vm != nullptr);
+    std::string moduleName = "file_size_test";
+    std::string anFileName = "file_size_test.an";
+    ecmascript::AnFileDataManager::GetInstance()->SetDir(testDir_);
+    ecmascript::AnFileDataManager::GetInstance()->SetEnable(true);
+    vm->SetModuleName(moduleName.c_str());
+    JSNApi::LoadAotFile(vm, moduleName);
+    uint32_t anIndex = ecmascript::AnFileDataManager::GetInstance()->SafeGetFileInfoIndex(anFileName);
+    ASSERT_EQ(anIndex, 0U);
+    std::shared_ptr<AnFileInfo> info = ecmascript::AnFileDataManager::GetInstance()->SafeGetAnFileInfo(anIndex);
+    ASSERT_TRUE(info != nullptr);
+
+    uintptr_t insidePc = 0;
+    for (const auto &des : info->GetCodeUnits()) {
+        uint64_t start = des.GetSecAddr(ElfSecName::TEXT);
+        uint32_t size = des.GetSecSize(ElfSecName::TEXT);
+        if (size > 0) {
+            insidePc = static_cast<uintptr_t>(start + size / 2); // 2: middle of the text section
+            break;
+        }
+    }
+    ASSERT_NE(insidePc, 0U);
+
+    EXPECT_TRUE(ecmascript::AnFileDataManager::GetInstance()->SafeTryInsideStubOrAOT(insidePc));
+    EXPECT_TRUE(AOTFileManager::TryInsideStubOrAot(insidePc));
+    EXPECT_FALSE(AOTFileManager::TryInsideStubOrAot(0x10)); // 0x10: unmapped low address
+    JSNApi::DestroyJSVM(vm);
+}
+
 }  // namespace panda::test

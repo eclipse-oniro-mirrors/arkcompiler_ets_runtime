@@ -17,13 +17,6 @@
 #define COMMON_COMPONENTS_BASE_CONFIG_H
 
 namespace common {
-    
-#if defined (NEXT_OPTIMIZATION_MACRO)
-#define ENABLE_NEXT_OPTIMIZATION 1
-#else
-#define ENABLE_NEXT_OPTIMIZATION 0
-#endif
-
 #if defined (LATEST_OPTIMIZATION_MACRO)
 #define ENABLE_LATEST_OPTIMIZATION 1    // Latest optimization used for 6.1 version
 #else
@@ -36,16 +29,13 @@ namespace common {
 #define ENABLE_V70_OPTIMIZATION 0
 #endif
 
-#if ENABLE_NEXT_OPTIMIZATION
-#define NEXT_OPTIMIZATION_BOOL true
-#else
-#define NEXT_OPTIMIZATION_BOOL false
-#endif
-
 #define ENABLE_MEMORY_OPTIMIZATION 1
+
+#define ENABLE_MODULE_MEMORY_OPTIMIZATION 1
 
 #define ECMASCRIPT_ENABLE_TRACE_STRING_TABLE 0
 
+#define ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION 1
 }  // namespace common
 
 #endif  // COMMON_COMPONENTS_BASE_CONFIG_H

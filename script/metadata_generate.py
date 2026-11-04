@@ -40,6 +40,11 @@ def parse_args():
                         type=str,
                         required=True,
                         help='version number')
+    parser.add_argument('--constpool-compressed-factor',
+                        type=int,
+                        default=1,
+                        help='scale factor of CONSTANT_POOL layout: 2 when '
+                             'ets_runtime_enable_compressed_pointer is on, else 1')
     args = parser.parse_args()
     return args
 
@@ -70,7 +75,17 @@ def _is_metadata_file(file_name):
     return file_name.endswith(".json") and file_name != "type_enums.json"
 
 
-def generate_metadata_json(enum_list, metadata_list, type_layout, file_path, version):
+def apply_compressed_factor(metadata_list, compressed_factor):
+    # Compressed pointers halve the tagged slot size (4B vs 8B), so the
+    # CONSTANT_POOL layout must be scaled by this factor when
+    # ets_runtime_enable_compressed_pointer is enabled (2), otherwise 1.
+    for metadata in metadata_list:
+        if metadata.get("name") == "CONSTANT_POOL":
+            metadata["compressed_factor"] = compressed_factor
+
+
+def generate_metadata_json(enum_list, metadata_list, type_layout, file_path, version, compressed_factor):
+    apply_compressed_factor(metadata_list, compressed_factor)
     metadata_dict = {"type_enum": enum_list, "type_list": [], "type_layout": type_layout, "version": version}
     for metadata in metadata_list:
         metadata_dict["type_list"].append(metadata)
@@ -83,4 +98,5 @@ if __name__ == '__main__':
     arguments = parse_args()
     type_enum_list = parse_type_enums(arguments.enum)
     type_metadata_list, type_layout_list = parse_type_list(arguments.metadata)
-    generate_metadata_json(type_enum_list, type_metadata_list, type_layout_list, arguments.output, arguments.version)
+    generate_metadata_json(type_enum_list, type_metadata_list, type_layout_list, arguments.output,
+                           arguments.version, arguments.constpool_compressed_factor)

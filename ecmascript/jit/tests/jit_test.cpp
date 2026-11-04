@@ -20,6 +20,7 @@
 #include "ecmascript/jit/jit_task.h"
 
 using namespace panda::ecmascript;
+using namespace testing::ext;
 
 namespace panda::test {
 class JitTest : public testing::Test {
@@ -81,5 +82,31 @@ HWTEST_F_L0(JitTest, NewJitTask)
         jit_, emptyHandle, CompilerTier(CompilerTier::Tier::FAST), methodName, 0,
         JitCompileMode(JitCompileMode::Mode::SYNC));
     EXPECT_TRUE(jitTask->GetHostThread() == thread_);
+}
+/**
+ * @tc.name: SetEnableOrDisable_BaselineStubBuildGate
+ * @tc.desc: Build capability constrains Baseline requests without coupling the Fast JIT state.
+ * @tc.type: FUNC
+ * @tc.require: 20260803825096
+ */
+HWTEST_F(JitTest, SetEnableOrDisable_BaselineStubBuildGate, TestSize.Level1)
+{
+    ASSERT_NE(jit_, nullptr);
+    const auto &options = instance_->GetJSOptions();
+    for (bool fastRequested : {false, true}) {
+        for (bool baselineRequested : {false, true}) {
+            jit_->SetEnableOrDisable(options, fastRequested, baselineRequested);
+            EXPECT_EQ(jit_->IsEnableFastJit(), fastRequested);
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB)
+            EXPECT_EQ(jit_->IsEnableBaselineJit(), baselineRequested);
+#else
+            EXPECT_FALSE(jit_->IsEnableBaselineJit());
+#endif
+        }
+    }
+    // Restore the fixture's initial policy before its VM and task pool are destroyed.
+    jit_->SetEnableOrDisable(options, true, false);
+    EXPECT_TRUE(jit_->IsEnableFastJit());
+    EXPECT_FALSE(jit_->IsEnableBaselineJit());
 }
 }  // namespace panda::test

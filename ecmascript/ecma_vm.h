@@ -18,8 +18,14 @@
 
 #include "ecmascript/cross_vm/ecma_vm_hybrid.h"
 
+#include <algorithm>
 #include <atomic>
+#include <ctime>
+#include <deque>
+#include <functional>
+#include <list>
 #include <mutex>
+#include <unordered_map>
 
 #ifdef PANDA_JS_ETS_HYBRID_MODE
 #include "ecmascript/cross_vm/cross_vm_operator.h"
@@ -36,7 +42,10 @@
 #include "ecmascript/mem/gc_key_stats.h"
 #include "ecmascript/mem/gc_stats.h"
 #include "ecmascript/mem/heap_region_allocator.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/mem/local_cmc/local_cc_native_pointer_callback.h"
+#include "common_components/taskpool/task.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
+#include "ecmascript/module/module_manager_map.h"
 #include "ecmascript/napi/include/dfx_jsnapi.h"
 #include "ecmascript/patch/patch_loader.h"
 #include "ecmascript/stackmap/ark_stackmap.h"
@@ -53,6 +62,8 @@ class File;
 }  // namespace panda_file
 
 namespace ecmascript {
+class ConcurrentCopyGC;
+class CCEvacuator;
 class GlobalEnv;
 class ObjectFactory;
 class RegExpParserCache;
@@ -96,6 +107,7 @@ using PGOProfiler = pgo::PGOProfiler;
 #if !WIN_OR_MAC_OR_IOS_PLATFORM
 class HeapProfilerInterface;
 class HeapProfiler;
+class HybridHeapProfiler;
 #endif
 namespace job {
 class MicroJobQueue;
@@ -128,9 +140,6 @@ struct CJSInfo;
 enum class CompareStringsOption : uint8_t;
 
 using NativePtrGetter = void* (*)(void* info);
-using SourceMapCallback = std::function<std::string(const std::string& rawStack)>;
-using SourceMapTranslateCallback = std::function<bool(std::string& url, int& line, int& column,
-    std::string &packageName)>;
 using ResolveBufferCallback =
     std::function<bool(std::string dirPath, uint8_t **buff, size_t *buffSize, std::string &errorMsg)>;
 using TimerCallbackFunc = void (*)(void *data);
@@ -149,6 +158,10 @@ using HostPromiseRejectionTracker = void (*)(const EcmaVM* vm,
                                              PromiseRejectionEvent operation,
                                              void* data);
 using PromiseRejectCallback = void (*)(void* info);
+using ExtraJSCrashMessageCallback = std::function<std::string (const EcmaVM*)>;
+using NativeReferenceDataCallbackGetter = void* (*)(void* ref);
+template <typename Value>
+using ForEachCallback = std::function<void(int32_t index, Value value, size_t total)>;
 
 using namespace panda;
 
@@ -223,6 +236,12 @@ private:
     std::string defaultLocale_;
     std::optional<CompareStringsOption> defaultCompareStringsOption_ {std::nullopt};
     IcuFormatter icuObjCache_[static_cast<uint32_t>(IcuFormatterType::ICU_FORMATTER_TYPE_COUNT)];
+};
+
+enum class ModuleRequestsClearState : uint8_t {
+    UNINITIALIZED = 0,
+    CAN_CLEAR = 1,
+    CANNOT_CLEAR = 2,
 };
 
 class EcmaVM {
@@ -327,9 +346,24 @@ public:
         return thread_;
     }
 
+    const JSRuntimeOptions &GetJSOptions() const
+    {
+        return options_;
+    }
+
     JSRuntimeOptions &GetJSOptions()
     {
         return options_;
+    }
+
+    ModuleRequestsClearState GetModuleRequestsClearState()
+    {
+        return moduleRequestsClearState_;
+    }
+
+    void SetModuleRequestsClearState(ModuleRequestsClearState state)
+    {
+        moduleRequestsClearState_ = state;
     }
 
     const EcmaParamConfiguration &GetEcmaParamConfiguration() const
@@ -401,6 +435,29 @@ public:
         openHandleScopes_--;
     }
 
+#if defined(ENABLE_HITRACE_LOCAL_HANDLE_DETECT)
+    struct HandleLeakRecord {
+        uintptr_t handleAddr;
+        int leakCount;
+        std::string backtrace;
+    };
+    void HandleLeakDetect(uintptr_t handle);
+#if defined(ENABLE_BACKTRACE_LOCAL)
+    void ClearHandleLeakRecords();
+    const std::deque<HandleLeakRecord>& GetHandleLeakRecords() const;
+#endif // ENABLE_BACKTRACE_LOCAL
+#endif // ENABLE_HITRACE_LOCAL_HANDLE_DETECT
+
+    void SetHandleScopeCheckOptionForCurrentVM(bool flag)
+    {
+        handleScopeCheckEnabled_ = flag;
+    }
+
+    bool IsHandleScopeCheckEnabled() const
+    {
+        return options_.EnableHandleScopeCheck() || handleScopeCheckEnabled_;
+    }
+
     void PushToNativePointerList(JSNativePointer *pointer, Concurrent isConcurrent = Concurrent::NO);
     void RemoveFromNativePointerList(JSNativePointer *pointer);
     void PushToDeregisterModuleList(const CString &module);
@@ -447,6 +504,11 @@ public:
         return currentHandleStorageIndex_;
     }
 
+    size_t GetHandleStorageNodesSize() const
+    {
+        return handleStorageNodes_.size();
+    }
+
     JSTaggedType *GetPrimitiveScopeStorageNext() const
     {
         return primitiveScopeStorageNext_;
@@ -472,20 +534,47 @@ public:
         return currentPrimitiveStorageIndex_;
     }
 
+    size_t GetPrimitiveStorageNodesSize() const
+    {
+        return primitiveStorageNodes_.size();
+    }
+
     uintptr_t *ExpandHandleStorage();
     void ShrinkHandleStorage(int prevIndex);
     void DeleteHandleStorage();
+    void GuardHandleStorage(void *prevNext, int prevIndex);
+    bool IsValidOrCachedHandleAddress(uintptr_t handleAddress);
     uintptr_t *ExpandPrimitiveStorage();
     void ShrinkPrimitiveStorage(int prevIndex);
     void DeletePrimitiveStorage();
+    void GuardPrimitiveStorage(void *prevNext, int prevIndex);
+    // One-way enable of the proportional handle/primitive storage shrink.
+    void EnableHandleMemoryOptimization()
+    {
+        enableHandleMemoryOptimization_ = true;
+    }
+
+    bool IsHandleMemoryOptimizationEnabled() const
+    {
+        return enableHandleMemoryOptimization_;
+    }
 
     size_t IterateHandle(RootVisitor &visitor);
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+    size_t IteratePrimitive(RootVisitor &visitor);
+#endif
     // Visit all roots, including STW-only and concurrent roots
     void Iterate(RootVisitor &v);
     // STW roots are unsafe to visit duirng GC
     void IterateSTWRoots(RootVisitor &v);
     // Concurrent roots supports being visited while GC is ongoing
     void IterateConcurrentRoots(RootVisitor &v);
+    void BeginConcurrentRootScan();
+    uint32_t PrepareConcurrentRootScan(uint32_t maxTaskCount);
+    void ProcessConcurrentRootScan(uint32_t threadIndex, uint32_t taskCount,
+                                     const ModuleRootVisitor &visitor);
+    void ProcessConcurrentSendableRootScan(uint32_t threadIndex, const ModuleRootVisitor &visitor);
+    void FinishConcurrentRootScan();
     void IterateWeakGlobalEnvList(WeakVisitor &visitor);
     void IterateWeakGlobalEnvList(WeakRootVisitor &visitor);
     void IterateGlobalEnvField(RootVisitor &visitor);
@@ -517,7 +606,9 @@ public:
     }
     void ProcessNativeDelete(const WeakRootVisitor &visitor);
     void ProcessReferences(const WeakRootVisitor &visitor);
+    void ProcessReferencesForLocalCC(const WeakRootVisitor &visitor);
     void ProcessSnapShotEnv(const WeakRootVisitor& visitor);
+    void ProcessPendingRemovalLocalModules(const WeakRootVisitor &visitor);
     void IteratorSnapShotEnv(WeakVisitor& visitor);
 
     AsyncStackTrace *GetAsyncStackTrace() const
@@ -566,29 +657,19 @@ public:
         nativePtrGetter_ = cb;
     }
 
+    void SetNativeReferenceDataGetter(NativeReferenceDataCallbackGetter cb)
+    {
+        nativeReferenceDataGetter_ = cb;
+    }
+
+    NativeReferenceDataCallbackGetter GetNativeReferenceDataCallbackGetter() const
+    {
+        return nativeReferenceDataGetter_;
+    }
+
     NativePtrGetter GetNativePtrGetter() const
     {
         return nativePtrGetter_;
-    }
-
-    void SetSourceMapCallback(SourceMapCallback cb)
-    {
-        sourceMapCallback_ = cb;
-    }
-
-    SourceMapCallback GetSourceMapCallback() const
-    {
-        return sourceMapCallback_;
-    }
-
-    void SetSourceMapTranslateCallback(SourceMapTranslateCallback cb)
-    {
-        sourceMapTranslateCallback_ = cb;
-    }
-
-    SourceMapTranslateCallback GetSourceMapTranslateCallback() const
-    {
-        return sourceMapTranslateCallback_;
     }
 
     void SetResolveBufferCallback(ResolveBufferCallback cb)
@@ -701,6 +782,16 @@ public:
         return options_.IsRestrictedWorker();
     }
 
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+    // The form (card) thread keeps thread-local pkg-context copies; others share the Runtime store.
+    // Set once at thread creation via JSRuntimeOptions (same path as IsWorkerThread), so the
+    // demux in every pkg-context accessor is set before any access and never changes.
+    bool IsFormThread() const
+    {
+        return options_.IsFormThread();
+    }
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+
     bool IsBundlePack() const
     {
         return isBundlePack_;
@@ -711,6 +802,26 @@ public:
         isBundlePack_ = value;
     }
 
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+    // UnifiedOhmUrlPack means app compiles ohmurl using old format like "@bundle:",
+    // or new unified rules like "@normalize:"
+    // if pkgContextInfoList is empty, means use old ohmurl packing.
+    // Demux: form VM -> per-VM local store; non-form VM -> Runtime shared store.
+    bool IsNormalizedOhmUrlPack();
+
+    void SetPkgNameList(const CMap<CString, CString> &list);
+    void UpdatePkgNameList(const CMap<CString, CString> &list);
+    CMap<CString, CString> GetPkgNameList();
+    CString GetPkgName(const CString &moduleName);
+
+    void UpdatePkgContextInfoList(const CMap<CString, CMap<CString, CVector<std::pair<CString, CString>>>> &list);
+    CMap<CString, CMap<CString, CVector<std::pair<CString, CString>>>> GetPkgContextInfoList();
+    CString GetPkgNameWithAlias(const CString &alias);
+
+    void SetPkgAliasList(const CMap<CString, CString> &list);
+    void UpdatePkgAliasList(const CMap<CString, CString> &list);
+    CMap<CString, CString> GetPkgAliasList();
+#else
     // UnifiedOhmUrlPack means app compiles ohmurl using old format like "@bundle:",
     // or new unified rules like "@normalize:"
     // if pkgContextInfoList is empty, means use old ohmurl packing.
@@ -788,6 +899,7 @@ public:
         ReadLockHolder lock(pkgAliasListLock_);
         return pkgAliasList_;
     }
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
 
     void SetMockModuleList(const std::map<std::string, std::string> &list)
     {
@@ -822,6 +934,10 @@ public:
     HeapProfilerInterface *GetHeapProfile();
     void  SetHeapProfile(HeapProfilerInterface *heapProfile) { heapProfile_ = heapProfile; }
     HeapProfilerInterface *GetOrNewHeapProfile();
+#if defined(PANDA_JS_ETS_HYBRID_MODE)
+    void DeleteHybridHeapProfiler();
+    HybridHeapProfiler *GetOrNewHybridHeapProfiler();
+#endif // PANDA_JS_ETS_HYBRID_MODE
     void StartHeapTracking();
     void StopHeapTracking();
 #endif
@@ -869,11 +985,20 @@ public:
         return hmsModuleList_;
     }
 
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+    void SetpkgContextInfoList(const CMap<CString, CMap<CString, CVector<std::pair<CString, CString>>>> &list);
+#else
     void SetpkgContextInfoList(const CMap<CString, CMap<CString, CVector<CString>>> &list);
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
 
 #if ENABLE_LATEST_OPTIMIZATION
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+    void GetPkgContextInfoListElements(const CString &moduleName, const CString &packageName,
+                                       CVector<std::pair<CString, CString>> &resultList);
+#else
     void GetPkgContextInfoListElements(const CString &moduleName, const CString &packageName,
                                        CVector<CString> &resultList);
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
 #endif
 
     void SetOhExportsList(const CUnorderedMap<CString, CUnorderedMap<CString, CUnorderedSet<CString>>> &ohExportsMap);
@@ -881,11 +1006,15 @@ public:
         CUnorderedSet<CString>>> &ohExportsMap);
     bool CheckOhExportsWithOhmurl(const CString &moduleName, const CString &packageName, const CString &ohmurl);
 
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+    CUnorderedMap<CString, CUnorderedMap<CString, CUnorderedSet<CString>>> GetOhExportList();
+#else
     CUnorderedMap<CString, CUnorderedMap<CString, CUnorderedSet<CString>>> GetOhExportList()
     {
         ReadLockHolder lock(ohExportListLock_);
         return ohExportsList_;
     }
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
 #if defined(ECMASCRIPT_SUPPORT_CPUPROFILER)
     CpuProfiler *GetProfiler() const
     {
@@ -1026,6 +1155,11 @@ public:
         return concurrentNativeCallbacks_;
     }
 
+    std::vector<LocalCCNativePointerCallbackBucket> &GetLocalCCConcurrentNativePointerCallbacks()
+    {
+        return localCCConcurrentNativeCallbacks_;
+    }
+
     AsyncNativeCallbacksPack &GetAsyncNativePointerCallbacksPack()
     {
         return asyncNativeCallbacksPack_;
@@ -1061,9 +1195,57 @@ public:
         return checkCountApi_;
     }
 
+    static void SetDetectionConfig(const DFXJSNApi::MultithreadingDetectionOptions& config)
+    {
+        detectionConfig_.abort.store(config.abort.load());
+        constexpr int64_t MIN_CHECK_COUNT_NUM = 100;
+        if (config.frequency.load() < MIN_CHECK_COUNT_NUM) {
+            LOG_ECMA(ERROR) << "checkCountNum must be >= 100, but got " << config.frequency.load();
+        } else {
+            detectionConfig_.frequency.store(config.frequency.load());
+        }
+        constexpr int64_t MAX_CHECKINTERVAL = 1440;
+        if (config.interval.load() < 0 || config.interval.load() > MAX_CHECKINTERVAL) {
+            LOG_ECMA(ERROR) << "checkInterval must within [0, 1440] minutes, but got " << config.interval.load();
+        } else {
+            detectionConfig_.interval.store(config.interval.load());
+        }
+    }
+
+    PUBLIC_API static const DFXJSNApi::MultithreadingDetectionOptions &GetDetectionConfig()
+    {
+        return detectionConfig_;
+    }
+
     bool CheckCountNum() const
     {
-        return (count_++) % CHECKCOUNTNUM == 0;
+        if (count_ % detectionConfig_.frequency.load() == 0) {
+            count_ = 1;
+            return true;
+        } else {
+            count_++;
+        }
+        return false;
+    }
+
+    bool CheckTimeInterval() const
+    {
+        uint64_t currentTime = GetTimeStamp();
+        uint64_t lastTime = lastCheckTime_.load();
+        if (lastTime == 0) {
+            return true;
+        }
+        if (currentTime - lastTime >= detectionConfig_.interval.load() * SECOND_PER_MINUTE * MS_PER_SECOND) {
+            return true;
+        }
+        return false;
+    }
+
+    uint64_t GetTimeStamp() const
+    {
+        struct timespec ts{};
+        clock_gettime(CLOCK_REALTIME, &ts);
+        return ((uint64_t)ts.tv_sec * MS_PER_SECOND) + (((uint64_t)ts.tv_nsec) / NS_PER_SECOND);
     }
 
     static void SetErrorInfoEnhance(bool errorInfoEnhance)
@@ -1293,6 +1475,13 @@ public:
 
     bool ExecutePromisePendingJob();
 
+    bool OpenMicrotaskScope();
+    bool CloseMicrotaskScope();
+    bool IsMicrotaskScopeOpen() const
+    {
+        return microtaskScopeOpen_;
+    }
+
     void SetPromiseRejectCallback(PromiseRejectCallback cb)
     {
         promiseRejectCallback_ = cb;
@@ -1346,6 +1535,9 @@ public:
                                        int32_t index = 0);
     JSHandle<ConstantPool> PUBLIC_API FindOrCreateConstPool(const JSPandaFile *jsPandaFile,
                                                             panda_file::File::EntityId id);
+
+    void ForEachSharedConstpool(const JSPandaFile *jsPandaFile, const ForEachCallback<JSTaggedValue>& cb);
+
     void ClearCachedConstantPool()
     {
         cachedSharedConstpools_.clear();
@@ -1487,6 +1679,16 @@ public:
         globalEnvRecordList_.push_back(static_cast<JSTaggedType>(ToUintPtr(globalEnv)));
     }
 
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+    template <class Visitor>
+    void IterateGlobalEnv(Visitor &&visitor)
+    {
+        for (JSTaggedType type : globalEnvRecordList_) {
+            visitor(JSTaggedValue(type));
+        }
+    }
+#endif
+
     void AddHandleScopeDepth()
     {
         ++handleScopeDepth_;
@@ -1509,21 +1711,90 @@ public:
         return enableRuntimeAsyncStack_;
     }
 
+    void InsertWrappedNativePointerAddrsMap(const JSTaggedType addr, void* nativeAddress)
+    {
+        wrappedNativePointerAddrsMap_.emplace(addr, nativeAddress);
+    }
+
+    const CUnorderedMap<JSTaggedType, void*>& GetWrappedNativePointerAddrsMap() const
+    {
+        return wrappedNativePointerAddrsMap_;
+    }
+
+    void ClearWrappedNativePointerAddrsMap()
+    {
+        wrappedNativePointerAddrsMap_.clear();
+    }
+
+#ifdef ENABLE_BRANCH_PROFILE
+    void CountBranch()
+    {
+        branchCount_ ++;
+    }
+
+    size_t GetBranchCount() const
+    {
+        return branchCount_;
+    }
+#endif
+
     JSTaggedValue ExecuteAot(size_t actualNumArgs, JSTaggedType *args, const JSTaggedType *prevFp,
                              bool needPushArgv);
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    JSTaggedValue ExecuteArkSteed(size_t actualNumArgs, JSTaggedType *args, const JSTaggedType *prevFp);
+#endif
 
     static void ClearKeptObjects(JSThread *thread);
     static void AddToKeptObjects(JSThread *thread, JSHandle<JSTaggedValue> value);
     void AddModuleManager(ModuleManager *moduleManager);
-    int8_t GetDataViewType(JSTaggedType type) const
+
+    JSTaggedValue GetTypedArrayName(uint8_t type) const
     {
-        auto result = dataViewTypeTable_.find(type);
-        if (result == dataViewTypeTable_.end()) {
-            return -1;
-        }
-        return result->second;
+        ASSERT(type >= 0);
+        ASSERT(type < typedArrayNameTable_.size());
+        return typedArrayNameTable_[type];
     }
 
+    JSTaggedValue GetSharedTypedArrayName(uint8_t type) const
+    {
+        ASSERT(type >= 0);
+        ASSERT(type < sharedTypedArrayNameTable_.size());
+        return sharedTypedArrayNameTable_[type];
+    }
+
+    std::string GetExtraJSCrashMessage() const;
+    size_t RegisterExtraJSCrashMessageCallback(const std::string_view &name, ExtraJSCrashMessageCallback cb);
+    static void NotifyANR();
+    inline void InsertSoLoadFailure(const CString &moduleName, const CString &errorMessage)
+    {
+        if (GetSoLoadFailureByModuleName(moduleName).has_value()) {
+            return;
+        }
+        ++soLoadFailureNum_;
+        if (soLoadFailureList_.size() < SO_LOAD_FAILURE_CAPACITY) {
+            soLoadFailureList_.emplace_back(moduleName, errorMessage);
+        }
+    }
+
+    inline const CVector<std::pair<CString, CString>>& GetAllSoLoadFailures() const
+    {
+        return soLoadFailureList_;
+    }
+
+    inline size_t GetSoLoadFailureNum() const
+    {
+        return soLoadFailureNum_;
+    }
+
+    inline std::optional<CString> GetSoLoadFailureByModuleName(const CString &moduleName) const
+    {
+        for (const auto &failure : soLoadFailureList_) {
+            if (failure.first == moduleName) {
+                return failure.second;
+            }
+        }
+        return std::nullopt;
+    }
 #ifdef PANDA_JS_ETS_HYBRID_MODE
     ECMAVM_PUBLIC_HYBRID_MODE_EXTENSION()
 #endif  /* PANDA_JS_ETS_HYBRID_MODE */
@@ -1596,19 +1867,21 @@ private:
     JSTaggedValue InvokeEcmaAotEntrypoint(JSHandle<JSFunction> mainFunc, JSHandle<JSTaggedValue> &thisArg,
                                           const JSPandaFile *jsPandaFile, std::string_view entryPoint,
                                           CJSInfo *cjsInfo = nullptr);
-    Expected<JSTaggedValue, bool> InvokeEcmaEntrypoint(const JSPandaFile *jsPandaFile, std::string_view entryPoint,
+    Expected<JSTaggedValue, bool> InvokeEcmaEntrypoint(const JSPandaFile *jsPandaFile, const CString& entryPoint,
                                                        const ExecuteTypes &executeType = ExecuteTypes::STATIC);
     Expected<JSTaggedValue, bool> InvokeEcmaEntrypointForHotReload(
-        const JSPandaFile *jsPandaFile, std::string_view entryPoint, const ExecuteTypes &executeType);
+        const JSPandaFile *jsPandaFile, const CString& entryPoint, const ExecuteTypes &executeType);
     Expected<JSTaggedValue, bool> CommonInvokeEcmaEntrypoint(const JSPandaFile *jsPandaFile,
-        std::string_view entryPoint, JSHandle<JSFunction> &func, const ExecuteTypes &executeType);
+        const CString& entryPoint, JSHandle<JSFunction> &func, const ExecuteTypes &executeType);
 
-    void InitDataViewTypeTable(const GlobalEnvConstants *constant);
+    void InitTypedArrayNameTable(const GlobalEnvConstants *globalConst);
 
     NO_MOVE_SEMANTIC(EcmaVM);
     NO_COPY_SEMANTIC(EcmaVM);
 
     uint64_t openHandleScopes_ {0};
+
+    CUnorderedMap<JSTaggedType, void*> wrappedNativePointerAddrsMap_ {};
 
     // VM startup states.
     JSRuntimeOptions options_;
@@ -1621,10 +1894,16 @@ private:
     GCStats *gcStats_ {nullptr};
     GCKeyStats *gcKeyStats_ {nullptr};
     EcmaStringTable *stringTable_ {nullptr};
+    // Whether to enable multi-thread detection
     PUBLIC_API static std::atomic<bool> multiThreadCheck_;
+    // Whether to enable count-based multi-thread detection sampling
     PUBLIC_API static std::atomic<bool> checkCountApi_;
-    const static uint64_t CHECKCOUNTNUM = 100;
-    mutable std::atomic<uint64_t> count_{0};
+    // Configuration for multi-thread detection (abort/frequency/interval)
+    PUBLIC_API static DFXJSNApi::MultithreadingDetectionOptions detectionConfig_;
+    // Timestamp of the last multi-thread detection
+    PUBLIC_API static std::atomic<uint64_t> lastCheckTime_;
+    // Counter for count-based multi-thread detection sampling
+    PUBLIC_API static std::atomic<uint64_t> count_;
     static bool errorInfoEnhanced_;
 
     // for constpool.The shared constpool includes string, method, sendable classLiteral, etc.
@@ -1633,9 +1912,14 @@ private:
     JSTaggedValue* unsharedConstpools_ = nullptr;
     int32_t unsharedConstpoolsArrayLen_ = UNSHARED_CONSTANTPOOL_COUNT;
     static constexpr int32_t SHARED_CONSTPOOL_KEY_NOT_FOUND = INT32_MAX; // INT32_MAX :invalid value.
+    static constexpr uint64_t SECOND_PER_MINUTE = 60;
+    static constexpr uint64_t MS_PER_SECOND = 1000;
+    static constexpr uint64_t NS_PER_SECOND = 1000000;
 
     //apiVersion states
     uint32_t apiVersion_ = 8;
+
+    ModuleRequestsClearState moduleRequestsClearState_ {ModuleRequestsClearState::UNINITIALIZED};
 
     // VM memory management.
     std::unique_ptr<NativeAreaAllocator> nativeAreaAllocator_;
@@ -1645,6 +1929,7 @@ private:
     ObjectFactory *factory_ {nullptr};
 
     std::vector<NativePointerCallbackData> concurrentNativeCallbacks_ {};
+    std::vector<LocalCCNativePointerCallbackBucket> localCCConcurrentNativeCallbacks_ {};
     AsyncNativeCallbacksPack asyncNativeCallbacksPack_ {};
     // VM execution states.
     JSThread *thread_ {nullptr};
@@ -1664,12 +1949,18 @@ private:
 
     // For runtime async stack trace recording
     bool enableRuntimeAsyncStack_ = false;
+    // Proportional handle/primitive storage shrink, off by default.
+    bool enableHandleMemoryOptimization_ {false};
     AsyncStackTraceManager *asyncStackTraceManager_ {nullptr};
 
     // isBundle means app compile mode is JSBundle
     bool isBundlePack_ {true};
+
+    // local option for handle scope check
+    bool handleScopeCheckEnabled_ {false};
 #if !WIN_OR_MAC_OR_IOS_PLATFORM
     HeapProfilerInterface *heapProfile_ {nullptr};
+    HybridHeapProfiler *hybridHeapProfiler_ {nullptr};
 #endif
     CString assetPath_;
     CString bundleName_;
@@ -1678,7 +1969,11 @@ private:
     CMap<CString, CString> mockModuleList_;
     std::map<CString, HmsMap> hmsModuleList_;
     CMap<CString, CString> pkgNameList_;
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+    CMap<CString, CMap<CString, CVector<std::pair<CString, CString>>>> pkgContextInfoList_;
+#else
     CMap<CString, CMap<CString, CVector<CString>>> pkgContextInfoList_;
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
     CMap<CString, CString> pkgAliasList_;
     CUnorderedMap<CString, CUnorderedMap<CString, CUnorderedSet<CString>>> ohExportsList_;
     RWLock pkgContextInfoLock_;
@@ -1688,8 +1983,7 @@ private:
 
     CVector<StopPreLoadSoCallback> stopPreLoadCallbacks_;
     NativePtrGetter nativePtrGetter_ {nullptr};
-    SourceMapCallback sourceMapCallback_ {nullptr};
-    SourceMapTranslateCallback sourceMapTranslateCallback_ {nullptr};
+    NativeReferenceDataCallbackGetter nativeReferenceDataGetter_ {nullptr};
     void *loop_ {nullptr};
 
     // resolve path to get abc's buffer
@@ -1765,6 +2059,9 @@ private:
 
     // process StartRealTime
     int processStartRealtime_ = 0;
+#ifdef ENABLE_BRANCH_PROFILE
+    size_t branchCount_ = 0;
+#endif
 
     bool enableJitLogSkip_ = true;
 
@@ -1781,8 +2078,10 @@ private:
     JSTaggedValue registerSymbols_ {JSTaggedValue::Hole()};
     JSTaggedValue microJobQueue_ {JSTaggedValue::Hole()};
     std::atomic<bool> isProcessingPendingJob_{false};
+    bool microtaskScopeOpen_ {false};
 
-    std::unordered_map<JSTaggedType, int8_t> dataViewTypeTable_;
+    std::vector<JSTaggedValue> typedArrayNameTable_;
+    std::vector<JSTaggedValue> sharedTypedArrayNameTable_;
 #if ECMASCRIPT_ENABLE_SCOPE_LOCK_STAT
     // Stats for Thread-State-Transition and String-Table Locks
     bool isCollectingScopeLockStats_ = false;
@@ -1800,7 +2099,30 @@ private:
     // HandleScope
     static const uint32_t NODE_BLOCK_SIZE_LOG2 = 10;
     static const uint32_t NODE_BLOCK_SIZE = 1U << NODE_BLOCK_SIZE_LOG2;
+    using StorageNode = std::array<JSTaggedType, NODE_BLOCK_SIZE>;
+    static constexpr uint32_t SO_LOAD_FAILURE_CAPACITY = 20;
     static constexpr int32_t MIN_HANDLE_STORAGE_SIZE = 2;
+    // Retain SHRINK_HEADROOM_FACTOR * active usage nodes after a shrink.
+    static constexpr int32_t SHRINK_HEADROOM_FACTOR = 2;
+    // Only shrink when at least total / SHRINK_HYSTERESIS_DIVISOR nodes would be freed.
+    static constexpr int32_t SHRINK_HYSTERESIS_DIVISOR = 4;
+    // Never shrink for fewer than this many nodes to avoid trivial churn on small storages.
+    static constexpr int32_t SHRINK_MIN_FREE_NODES = 4;
+    // On the main thread, freeing more than this many nodes is offloaded to the taskpool.
+    static constexpr int32_t ASYNC_SHRINK_NODE_THRESHOLD = 1000;
+    void FreeStorageNodes(std::vector<StorageNode *> &nodes, int32_t toDelete);
+    // Detached storage nodes freed asynchronously by the taskpool (see FreeStorageNodes).
+    class FreeStorageNodesTask : public common::Task {
+    public:
+        explicit FreeStorageNodesTask(std::vector<StorageNode *> nodes)
+            : common::Task(common::GLOBAL_TASK_ID), nodes_(std::move(nodes)) {}
+        ~FreeStorageNodesTask() override = default;
+        bool Run(uint32_t threadIndex) override;
+        NO_COPY_SEMANTIC(FreeStorageNodesTask);
+        NO_MOVE_SEMANTIC(FreeStorageNodesTask);
+    private:
+        std::vector<StorageNode *> nodes_;
+    };
     JSTaggedType *handleScopeStorageNext_ {nullptr};
     JSTaggedType *handleScopeStorageEnd_ {nullptr};
     std::vector<std::array<JSTaggedType, NODE_BLOCK_SIZE> *> handleStorageNodes_ {};
@@ -1829,14 +2151,31 @@ private:
 
     // record globalEnv as weak reference
     std::vector<JSTaggedType> globalEnvRecordList_;
+    using ExtraJSCrashMessageCallbackTuple = std::pair<std::string, ExtraJSCrashMessageCallback>;
+    std::vector<ExtraJSCrashMessageCallbackTuple> extraJSCrashMessageCallbacks_{};
 
+    // record so load failure information. <soName, errorMessage>
+    CVector<std::pair<CString, CString>> soLoadFailureList_;
+    size_t soLoadFailureNum_ {0};
     // store multi-context module manager
     class ModuleManagers {
         Mutex CMCGCMutex_;
+        ConditionVariable concurrentRootScanCV_;
+        bool concurrentRootScanActive_ {false};
+        std::atomic<bool> concurrentRootScanCheckRequired_ {false};
         std::vector<ModuleManager *> moduleManagersVec_ {};
+
+        void WaitForConcurrentRootScanCheckRequired();
 
     public:
         void Iterate(RootVisitor &v);
+        void ProcessPendingRemovalLocalModules(const WeakRootVisitor &visitor);
+        void BeginConcurrentRootScan();
+        uint32_t PrepareConcurrentRootScan(uint32_t maxTaskCount);
+        void ProcessConcurrentRootScan(uint32_t threadIndex, uint32_t taskCount,
+                                         const ModuleRootVisitor &visitor);
+        void ProcessConcurrentSendableRootScan(uint32_t threadIndex, const ModuleRootVisitor &visitor);
+        void FinishConcurrentRootScan();
 
         template <typename T>
         void PushBack(T moduleManager);
@@ -1851,6 +2190,11 @@ private:
 #ifdef PANDA_JS_ETS_HYBRID_MODE
     ECMAVM_PRIVATE_HYBRID_EXTENSION();
 #endif /* PANDA_JS_ETS_HYBRID_MODE */
+
+#if defined(ENABLE_HITRACE_LOCAL_HANDLE_DETECT)
+    std::deque<HandleLeakRecord> handleLeakRecords_;
+    static constexpr size_t MAX_BACKTRACE_RECORDS = 500;
+#endif // ENABLE_HITRACE_LOCAL_HANDLE_DETECT
 };
 
 class HandleScopeDepthScope {

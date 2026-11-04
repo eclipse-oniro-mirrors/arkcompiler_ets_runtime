@@ -53,7 +53,7 @@ void ElfBuilder::AddShStrTabSection()
     }
 }
 
-uint32_t ElfBuilder::AddAsmStubStrTab(std::fstream &elfFile,
+uint32_t ElfBuilder::AddAsmStubStrTab(std::iostream &elfFile,
     const std::vector<std::pair<std::string, uint32_t>> &asmStubELFInfo)
 {
     uint32_t size = 1;
@@ -343,7 +343,7 @@ ElfSecName ElfBuilder::GetSegmentName(const ElfSecName &secName) const
     return segName;
 }
 
-void ElfBuilder::MergeTextSections(std::fstream &file,
+void ElfBuilder::MergeTextSections(std::iostream &file,
                                    std::vector<ModuleSectionDes::ModuleRegionInfo> &moduleInfo,
                                    llvm::ELF::Elf64_Off &curSecOffset)
 {
@@ -369,7 +369,9 @@ void ElfBuilder::MergeTextSections(std::fstream &file,
             file.seekp(curSecOffset);
         }
         stubTextOffset_.emplace_back(curSecOffset);
-        file.write(reinterpret_cast<char *>(curSecAddr), curSecSize);
+        if (curSecSize != 0) {
+            file.write(reinterpret_cast<char *>(curSecAddr), curSecSize);
+        }
         curInfo.textSize = curSecSize;
         curSecOffset += curSecSize;
         if (rodataSizeAfterText != 0) {
@@ -382,7 +384,7 @@ void ElfBuilder::MergeTextSections(std::fstream &file,
     }
 }
 
-void ElfBuilder::MergeStrtabSections(std::fstream &file,
+void ElfBuilder::MergeStrtabSections(std::iostream &file,
                                      std::vector<ModuleSectionDes::ModuleRegionInfo> &moduleInfo,
                                      llvm::ELF::Elf64_Off &curSecOffset)
 {
@@ -392,7 +394,9 @@ void ElfBuilder::MergeStrtabSections(std::fstream &file,
         uint32_t curSecSize = des.GetSecSize(ElfSecName::STRTAB);
         uint64_t curSecAddr = des.GetSecAddr(ElfSecName::STRTAB);
         curInfo.strtabSize = curSecSize;
-        file.write(reinterpret_cast<char *>(curSecAddr), curSecSize);
+        if (curSecSize != 0) {
+            file.write(reinterpret_cast<char *>(curSecAddr), curSecSize);
+        }
         curSecOffset += curSecSize;
         if (des.HasAsmStubStrTab()) {
             uint32_t asmStubStrTabSize = AddAsmStubStrTab(file, des.GetAsmStubELFInfo());
@@ -402,7 +406,7 @@ void ElfBuilder::MergeStrtabSections(std::fstream &file,
     }
 }
 
-void ElfBuilder::MergeSymtabSections(std::fstream &file,
+void ElfBuilder::MergeSymtabSections(std::iostream &file,
                                      std::vector<ModuleSectionDes::ModuleRegionInfo> &moduleInfo,
                                      llvm::ELF::Elf64_Off &curSecOffset,
                                      llvm::ELF::Elf64_Off &asmStubOffset)
@@ -416,7 +420,9 @@ void ElfBuilder::MergeSymtabSections(std::fstream &file,
         uint32_t curSecSize = des.GetSecSize(ElfSecName::SYMTAB);
         uint64_t curSecAddr = des.GetSecAddr(ElfSecName::SYMTAB);
         curInfo.symtabSize = curSecSize;
-        file.write(reinterpret_cast<char *>(curSecAddr), curSecSize);
+        if (curSecSize != 0) {
+            file.write(reinterpret_cast<char *>(curSecAddr), curSecSize);
+        }
         curSecOffset += curSecSize;
         strTabSize += des.GetSecSize(ElfSecName::STRTAB);
         if (des.HasAsmStubStrTab()) {
@@ -443,7 +449,7 @@ void ElfBuilder::MergeSymtabSections(std::fstream &file,
     }
 }
 
-void ElfBuilder::MergeArkStackMapSections(std::fstream &file,
+void ElfBuilder::MergeArkStackMapSections(std::iostream &file,
                                           std::vector<ModuleSectionDes::ModuleRegionInfo> &moduleInfo,
                                           llvm::ELF::Elf64_Off &curSecOffset)
 {
@@ -457,7 +463,9 @@ void ElfBuilder::MergeArkStackMapSections(std::fstream &file,
         curInfo.startIndex = index;
         curInfo.funcCount = cnt;
         curInfo.stackMapSize = curSecSize;
-        file.write(reinterpret_cast<char *>(curSecAddr), curSecSize);
+        if (curSecSize != 0) {
+            file.write(reinterpret_cast<char *>(curSecAddr), curSecSize);
+        }
         curSecOffset += curSecSize;
     }
 }
@@ -627,7 +635,7 @@ Key to Flags:
   C (compressed), x (unknown), o (OS specific), E (exclude),
   D (mbind), l (large), p (processor specific)
 */
-void ElfBuilder::PackELFSections(std::fstream &file)
+void ElfBuilder::PackELFSections(std::iostream &file)
 {
     uint32_t moduleNum = des_.size();
     const std::map<ElfSecName, std::pair<uint64_t, uint32_t>> &sections = GetFullSecInfo();
@@ -709,7 +717,9 @@ void ElfBuilder::PackELFSections(std::fstream &file)
             case ElfSecName::ARK_CHECKSUMINFO: {
                 uint32_t curSecSize = des_[FullSecIndex].GetSecSize(secName);
                 uint64_t curSecAddr = des_[FullSecIndex].GetSecAddr(secName);
-                file.write(reinterpret_cast<char *>(curSecAddr), curSecSize);
+                if (curSecSize != 0) {
+                    file.write(reinterpret_cast<char *>(curSecAddr), curSecSize);
+                }
                 curSecOffset += curSecSize;
                 curShdr.sh_size = curSecSize;
                 break;
@@ -735,7 +745,7 @@ void ElfBuilder::PackELFSections(std::fstream &file)
     file.seekp(secEnd);
 }
 
-void ElfBuilder::ResolveAArch64Relocate(std::fstream &elfFile, Span<llvm::ELF::Elf64_Rela> relas,
+void ElfBuilder::ResolveAArch64Relocate(std::iostream &elfFile, Span<llvm::ELF::Elf64_Rela> relas,
                                         Span<llvm::ELF::Elf64_Sym> syms, const uint32_t textOff)
 {
     using Elf64_Rela = llvm::ELF::Elf64_Rela;
@@ -778,7 +788,7 @@ void ElfBuilder::ResolveAArch64Relocate(std::fstream &elfFile, Span<llvm::ELF::E
     }
 }
 
-void ElfBuilder::ResolveAmd64Relocate(std::fstream &elfFile, Span<llvm::ELF::Elf64_Rela> relas,
+void ElfBuilder::ResolveAmd64Relocate(std::iostream &elfFile, Span<llvm::ELF::Elf64_Rela> relas,
                                       Span<llvm::ELF::Elf64_Sym> syms, const uint32_t textOff)
 {
     using Elf64_Rela = llvm::ELF::Elf64_Rela;
@@ -820,7 +830,7 @@ void ElfBuilder::ResolveAmd64Relocate(std::fstream &elfFile, Span<llvm::ELF::Elf
     }
 }
 
-void ElfBuilder::ResolveRelocate(std::fstream &elfFile)
+void ElfBuilder::ResolveRelocate(std::iostream &elfFile)
 {
     if (!enableOptDirectCall_) {
         return;
@@ -890,7 +900,7 @@ Program Headers:
    00     .text .ark_asmstub
    01     .shstrtab .ark_funcentry .ark_stackmaps .ark_moduleinfo
 */
-void ElfBuilder::PackELFSegment(std::fstream &file)
+void ElfBuilder::PackELFSegment(std::iostream &file)
 {
     llvm::ELF::Elf64_Off e_phoff = static_cast<uint64_t>(file.tellp());
     long phoff = (long)offsetof(struct llvm::ELF::Elf64_Ehdr, e_phoff);

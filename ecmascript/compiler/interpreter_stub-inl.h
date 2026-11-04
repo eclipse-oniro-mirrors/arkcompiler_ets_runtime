@@ -27,6 +27,16 @@
 #include "ecmascript/js_generator_object.h"
 
 namespace panda::ecmascript::kungfu {
+std::function<GateRef()> InterpreterStubBuilder::GlobalEnvGetter(GateRef glue, GateRef sp)
+{
+    return [this, glue, sp]() -> GateRef {
+        GateRef frame = PtrSub(sp, IntPtr(AsmInterpretedFrame::GetSize(GetEnvironment()->IsArch32Bit())));
+        GateRef currentEnv = LoadPrimitive(VariableType::JS_POINTER(), frame,
+            IntPtr(AsmInterpretedFrame::GetEnvOffset(GetEnvironment()->IsArch32Bit())));
+        return GetCurrentGlobalEnv(glue, currentEnv);
+    };
+}
+
 void InterpreterStubBuilder::SetVregValue(GateRef glue, GateRef sp, GateRef idx, GateRef val)
 {
     Store(VariableType::INT64(), glue, sp, PtrMul(IntPtr(sizeof(JSTaggedType)), idx), val);
@@ -528,34 +538,17 @@ GateRef InterpreterStubBuilder::GetStartIdxAndNumArgs(GateRef glue, GateRef sp, 
                                          Int64((1LLU << Method::NumArgsBits::SIZE) - 1)));
     GateRef fp = LoadPrimitive(VariableType::NATIVE_POINTER(), state,
         IntPtr(AsmInterpretedFrame::GetFpOffset(env->IsArch32Bit())));
-    Label actualEqualDeclared(env);
-    Label actualNotEqualDeclared(env);
-    BRANCH(Int32UnsignedGreaterThan(ChangeIntPtrToInt32(PtrSub(fp, sp)),
+    IR_IF (Int32UnsignedGreaterThan(ChangeIntPtrToInt32(PtrSub(fp, sp)),
                                     Int32Mul(Int32Add(Int32Add(numVregs, copyArgs), *numArgs),
-                                             Int32(sizeof(JSTaggedType)))),
-           &actualNotEqualDeclared, &actualEqualDeclared);
-    Bind(&actualNotEqualDeclared);
-    {
+                                             Int32(sizeof(JSTaggedType))))) {
         numArgs = GetInt32OfTInt(LoadPrimitive(VariableType::JS_ANY(), fp, IntPtr(-sizeof(JSTaggedType))));
-        Jump(&actualEqualDeclared);
     }
-    Bind(&actualEqualDeclared);
     GateRef startIdx = Int32Add(Int32Add(numVregs, copyArgs), restIdx);
-    Label numArgsGreater(env);
-    Label numArgsNotGreater(env);
-    Label exit(env);
-    BRANCH(Int32UnsignedGreaterThan(*numArgs, restIdx), &numArgsGreater, &numArgsNotGreater);
-    Bind(&numArgsGreater);
-    {
+    IR_IF (Int32UnsignedGreaterThan(*numArgs, restIdx)) {
         numArgs = Int32Sub(*numArgs, restIdx);
-        Jump(&exit);
-    }
-    Bind(&numArgsNotGreater);
-    {
+    } IR_ELSE {
         numArgs = Int32(0);
-        Jump(&exit);
     }
-    Bind(&exit);
     // 32: high 32 bits = startIdx, low 32 bits = numArgs
     GateRef ret = Int64Or(Int64LSL(ZExtInt32ToInt64(startIdx), Int64(32)), ZExtInt32ToInt64(*numArgs));
     env->SubCfgExit();
@@ -574,38 +567,23 @@ void InterpreterStubBuilder::UpdateProfileTypeInfoCellToFunction(GateRef glue, G
     Label subEntry(env);
     env->SubCfgEntry(&subEntry);
 
-    Label profileTypeInfoNotUndefined(env);
-    Label slotValueUpdate(env);
-    Label slotValueNotUndefined(env);
-    Label slotValueNotHole(env);
-    Label profileTypeInfoEnd(env);
     NewObjectStubBuilder newBuilder(this);
-    BRANCH(TaggedIsUndefined(profileTypeInfo), &profileTypeInfoEnd, &profileTypeInfoNotUndefined);
-    Bind(&profileTypeInfoNotUndefined);
-    {
-        GateRef slotValue = GetValueFromTaggedArray(glue, profileTypeInfo, slotId);
-        BRANCH_UNLIKELY(TaggedIsUndefined(slotValue), &slotValueUpdate, &slotValueNotUndefined);
-        Bind(&slotValueUpdate);
-        {
+    IR_IF (BoolNot(TaggedIsUndefined(profileTypeInfo))) {
+        GateRef slotValue = GetICSlot(glue, profileTypeInfo, slotId);
+        IR_IF_UNLIKELY (TaggedIsUndefined(slotValue)) {
             GateRef newProfileTypeInfoCell = newBuilder.NewProfileTypeInfoCell(glue, Undefined());
-            SetValueToTaggedArray(VariableType::JS_ANY(), glue, profileTypeInfo, slotId, newProfileTypeInfoCell,
-                                  MemoryAttribute::NeedNotShareBarrier());
+            SetICSlot(VariableType::JS_ANY(), glue, profileTypeInfo, slotId, newProfileTypeInfoCell,
+                      MemoryAttribute::NeedNotShareBarrier());
             SetRawProfileTypeInfoToFunction(glue, function, newProfileTypeInfoCell,
                                             MemoryAttribute::NeedNotShareBarrier());
-            Jump(&profileTypeInfoEnd);
+        } IR_ELSE {
+            IR_IF_LIKELY (BoolNot(TaggedIsHole(slotValue))) {
+                UpdateProfileTypeInfoCellType(glue, slotValue);
+                SetRawProfileTypeInfoToFunction(glue, function, slotValue, MemoryAttribute::NeedNotShareBarrier());
+                TryToJitReuseCompiledFunc(glue, function, slotValue);
+            }
         }
-        Bind(&slotValueNotUndefined);
-        BRANCH_UNLIKELY(TaggedIsHole(slotValue), &profileTypeInfoEnd, &slotValueNotHole);
-        Bind(&slotValueNotHole);
-        {
-            UpdateProfileTypeInfoCellType(glue, slotValue);
-            SetRawProfileTypeInfoToFunction(glue, function, slotValue, MemoryAttribute::NeedNotShareBarrier());
-            TryToJitReuseCompiledFunc(glue, function, slotValue);
-        }
-        Jump(&profileTypeInfoEnd);
     }
-    Bind(&profileTypeInfoEnd);
-
     env->SubCfgExit();
 }
 
@@ -680,111 +658,91 @@ void InterpreterStubBuilder::DispatchBase(GateRef target, GateRef glue, Args... 
 }
 
 void InterpreterStubBuilder::Dispatch(GateRef glue, GateRef sp, GateRef pc, GateRef constpool, GateRef profileTypeInfo,
-    GateRef acc, GateRef hotnessCounter, GateRef format)
+    GateRef acc, GateRef format)
 {
     GateRef newPc = PtrAdd(pc, format);
     GateRef opcode = LoadZeroOffsetPrimitive(VariableType::INT8(), newPc);
     GateRef target = PtrMul(ZExtInt32ToPtr(ZExtInt8ToInt32(opcode)), IntPtrSize());
-    DispatchBase(target, glue, sp, newPc, constpool, profileTypeInfo, acc, hotnessCounter);
+    DispatchBase(target, glue, sp, newPc, constpool, profileTypeInfo, acc);
     Return();
 }
 
 void InterpreterStubBuilder::DispatchLast(GateRef glue, GateRef sp, GateRef pc, GateRef constpool,
-    GateRef profileTypeInfo, GateRef acc, GateRef hotnessCounter)
+    GateRef profileTypeInfo, GateRef acc)
 {
     GateRef target = PtrMul(IntPtr(BytecodeStubCSigns::ID_ExceptionHandler), IntPtrSize());
-    DispatchBase(target, glue, sp, pc, constpool, profileTypeInfo, acc, hotnessCounter);
+    DispatchBase(target, glue, sp, pc, constpool, profileTypeInfo, acc);
     Return();
 }
 
 void InterpreterStubBuilder::DispatchDebugger(GateRef glue, GateRef sp, GateRef pc, GateRef constpool,
-    GateRef profileTypeInfo, GateRef acc, GateRef hotnessCounter)
+    GateRef profileTypeInfo, GateRef acc)
 {
     GateRef opcode = LoadZeroOffsetPrimitive(VariableType::INT8(), pc);
     GateRef target = PtrMul(ZExtInt32ToPtr(ZExtInt8ToInt32(opcode)), IntPtrSize());
-    auto args = { glue, sp, pc, constpool, profileTypeInfo, acc, hotnessCounter };
+    auto args = { glue, sp, pc, constpool, profileTypeInfo, acc };
     GetEnvironment()->GetBuilder()->CallBCDebugger(glue, target, args);
     Return();
 }
 
 void InterpreterStubBuilder::DispatchDebuggerLast(GateRef glue, GateRef sp, GateRef pc, GateRef constpool,
-    GateRef profileTypeInfo, GateRef acc, GateRef hotnessCounter)
+    GateRef profileTypeInfo, GateRef acc)
 {
     GateRef target = PtrMul(IntPtr(BytecodeStubCSigns::ID_ExceptionHandler), IntPtrSize());
-    auto args = { glue, sp, pc, constpool, profileTypeInfo, acc, hotnessCounter };
+    auto args = { glue, sp, pc, constpool, profileTypeInfo, acc };
     GetEnvironment()->GetBuilder()->CallBCDebugger(glue, target, args);
     Return();
 }
 
 GateRef InterpreterStubBuilder::GetHotnessCounterFromMethod(GateRef method)
 {
-    GateRef x = LoadPrimitive(VariableType::INT16(), method, IntPtr(Method::LITERAL_INFO_OFFSET));
-    return GetEnvironment()->GetBuilder()->SExtInt1ToInt32(x);
+    return LoadPrimitive(VariableType::INT32(), method, IntPtr(Method::HOTNESS_COUNTER_OFFSET));
 }
 
 void InterpreterStubBuilder::DispatchWithId(GateRef glue, GateRef sp, GateRef pc, GateRef constpool,
-    GateRef profileTypeInfo, GateRef acc,
-    GateRef hotnessCounter, GateRef index)
+    GateRef profileTypeInfo, GateRef acc, GateRef index)
 {
     GateRef target = PtrMul(index, IntPtrSize());
-    DispatchBase(target, glue, sp, pc, constpool, profileTypeInfo, acc, hotnessCounter);
+    DispatchBase(target, glue, sp, pc, constpool, profileTypeInfo, acc);
     Return();
 }
 
 #define DISPATCH_LAST(acc)                                                                  \
-    DispatchLast(glue, sp, pc, constpool, profileTypeInfo, acc, hotnessCounter)
+    DispatchLast(glue, sp, pc, constpool, profileTypeInfo, acc)
 #define DISPATCH(acc)                                                                       \
-    Dispatch(glue, sp, pc, constpool, profileTypeInfo, acc, hotnessCounter, offset)
+    Dispatch(glue, sp, pc, constpool, profileTypeInfo, acc, offset)
 void InterpreterStubBuilder::CheckException(GateRef glue, GateRef sp, GateRef pc, GateRef constpool,
-                                            GateRef profileTypeInfo, GateRef acc, GateRef hotnessCounter,
+                                            GateRef profileTypeInfo, GateRef acc,
                                             GateRef res, GateRef offset)
 {
     auto env = GetEnvironment();
-    Label isException(env);
-    Label notException(env);
-    BRANCH(TaggedIsException(res), &isException, &notException);
-    Bind(&isException);
-    {
+    IR_IF (TaggedIsException(res)) {
         DISPATCH_LAST(acc);
-    }
-    Bind(&notException);
-    {
+    } IR_ELSE {
         DISPATCH(acc);
     }
 }
 
 void InterpreterStubBuilder::CheckPendingException(GateRef glue, GateRef sp, GateRef pc, GateRef constpool,
-                                                   GateRef profileTypeInfo, GateRef acc, GateRef hotnessCounter,
+                                                   GateRef profileTypeInfo, GateRef acc,
                                                    GateRef res, GateRef offset)
 {
     auto env = GetEnvironment();
-    Label isException(env);
-    Label notException(env);
-    BRANCH(HasPendingException(glue), &isException, &notException);
-    Bind(&isException);
-    {
+    IR_IF (HasPendingException(glue)) {
         DISPATCH_LAST(acc);
-    }
-    Bind(&notException);
-    {
+    } IR_ELSE {
         DISPATCH(res);
     }
 }
 
 void InterpreterStubBuilder::CheckExceptionWithVar(GateRef glue, GateRef sp, GateRef pc, GateRef constpool,
-                                                   GateRef profileTypeInfo, GateRef acc, GateRef hotnessCounter,
+                                                   GateRef profileTypeInfo, GateRef acc,
                                                    GateRef res, GateRef offset)
 {
     auto env = GetEnvironment();
-    Label isException(env);
-    Label notException(env);
-    BRANCH(TaggedIsException(res), &isException, &notException);
-    Bind(&isException);
-    {
+    IR_IF (TaggedIsException(res)) {
         DISPATCH_LAST(acc);
-    }
-    Bind(&notException);
-    {
+    } IR_ELSE {
         DEFVARIABLE(varAcc, VariableType::JS_ANY(), acc);
         varAcc = res;
         DISPATCH(*varAcc);
@@ -792,21 +750,25 @@ void InterpreterStubBuilder::CheckExceptionWithVar(GateRef glue, GateRef sp, Gat
 }
 
 void InterpreterStubBuilder::CheckExceptionWithJump(GateRef glue, GateRef sp, GateRef pc, GateRef constpool,
-                                                    GateRef profileTypeInfo, GateRef acc, GateRef hotnessCounter,
+                                                    GateRef profileTypeInfo, GateRef acc,
                                                     GateRef res, Label *jump)
 {
     auto env = GetEnvironment();
-    Label isException(env);
-    Label notException(env);
-    BRANCH(TaggedIsException(res), &isException, &notException);
-    Bind(&isException);
-    {
+    IR_IF (TaggedIsException(res)) {
         DISPATCH_LAST(acc);
-    }
-    Bind(&notException);
-    {
+    } IR_ELSE {
         Jump(jump);
     }
+}
+
+GateRef InterpreterStubBuilder::ResolvePropKey(GateRef glue, GateRef prop, const StringIdInfo &info)
+{
+    if (!info.IsValid()) {
+        return prop;
+    }
+    InterpreterToolsStubBuilder builder(GetCallSignature(), GetEnvironment());
+    GateRef stringId = builder.GetStringId(info);
+    return GetStringFromConstPool(glue, info.GetConstantPool(), stringId);
 }
 
 GateRef InterpreterToolsStubBuilder::GetStringId(const StringIdInfo &info)

@@ -1,0 +1,81 @@
+/*
+ * Copyright (c) 2026 Huawei Device Co., Ltd.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#ifndef ECMASCRIPT_ARKSTEED_FEEDBACK_READER_H
+#define ECMASCRIPT_ARKSTEED_FEEDBACK_READER_H
+
+#include "ecmascript/arksteed/arksteed_heap_broker.h"
+#include "ecmascript/arksteed/arksteed_processed_feedback.h"
+#include "ecmascript/compiler/bytecodes.h"
+#include "ecmascript/js_thread.h"
+#include "ecmascript/tagged_array.h"
+
+namespace panda::ecmascript::arksteed {
+
+class ArkSteedFeedbackReader {
+public:
+    ArkSteedFeedbackReader(JSThread *compilerThread, const kungfu::BytecodeInfo *bytecodeInfo,
+                           ArkSteedHeapBroker *broker)
+        : compilerThread_(compilerThread), bytecodeInfo_(bytecodeInfo), broker_(broker)
+    {}
+
+    bool ReadNamedAccessFeedback(int slotIndex, NamedAccessFeedback *feedback) const;
+    bool ReadValueAccessFeedback(ValueAccessFeedback *feedback) const;
+    bool ReadElementAccessFeedback(int slotIndex, ElementAccessFeedback *feedback) const;
+    bool ReadGlobalAccessFeedback(GlobalAccessFeedback *feedback) const;
+    bool TryGetFeedbackSlotId(int index, bool allowImmediate, uint32_t *slotId) const; // input slot
+    bool TryGetFeedbackSlotId(uint32_t *slotId) const; // primary slot
+    bool ReadCallFeedback(CallFeedback *feedback) const;
+    bool ReadConstructorFeedback(ConstructorFeedback *feedback) const;
+    bool ReadOperationFeedback(OperationFeedback *feedback) const;
+
+private:
+    struct ICMonoSnapshot {
+        ArkSteedHClassRef expectedHClass;
+        JSTaggedValue handler;
+        uint32_t slotId {0};
+    };
+
+    struct ICCaseSnapshot {
+        ArkSteedHClassRef expectedHClass;
+        JSTaggedValue handler;
+    };
+
+    struct ICPolySnapshot {
+        TaggedArray *polyArray {nullptr};
+        uint32_t caseCount {0};
+        uint32_t slotId {0};
+    };
+
+    bool TryReadNamedAccessName(ArkSteedNameRef *name) const;
+    bool TryGetConstDataId(int index, uint16_t *constDataId) const;
+    NamedAccessCaseFeedback MakeNamedAccessCaseFeedback(ArkSteedHClassRef expectedHClass, JSTaggedValue handler) const;
+    ElementAccessCaseFeedback MakeElementAccessCaseFeedback(ArkSteedHClassRef expectedHClass,
+                                                            JSTaggedValue handler) const;
+    bool TryGetICMonoSnapshot(int slotIndex, ICMonoSnapshot *snapshot) const;
+    bool TryGetICPolySnapshot(int slotIndex, ICPolySnapshot *snapshot) const;
+    bool TryGetICPolyCase(const ICPolySnapshot &snapshot, uint32_t caseIndex, ICCaseSnapshot *icCase) const;
+
+    ArkSteedOperationHint MakeOperationHint(uint32_t rawBits) const;
+
+    JSThread *compilerThread_ {nullptr};
+    // Points to entries in the BytecodePreprocessor's bytecode table.
+    const kungfu::BytecodeInfo *bytecodeInfo_ {nullptr};
+    ArkSteedHeapBroker *broker_ {nullptr};
+};
+
+}  // namespace panda::ecmascript::arksteed
+
+#endif  // ECMASCRIPT_ARKSTEED_FEEDBACK_READER_H

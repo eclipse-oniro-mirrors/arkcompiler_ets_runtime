@@ -18,7 +18,7 @@
 #include "ecmascript/compiler/trampoline/aarch64/common_call.h"
 
 #include "ecmascript/deoptimizer/deoptimizer.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/message_string.h"
 
 namespace panda::ecmascript::aarch64 {
@@ -452,6 +452,42 @@ void OptimizedCall::JSCallInternal(ExtendedAssembler *assembler, Register jsfunc
     JSCallCheck(assembler, jsfunc, taggedValue, &nonCallable, &notJSFunction);
 
     Register method = x2;
+    __ Mov(x5, taggedValue); // reuse the class bit field loaded by JSCallCheck
+    __ Ldr(method, MemoryOperand(jsfunc, JSFunction::METHOD_OFFSET));
+    if (!isNew) {
+        Label noSubmit;
+        Register extraLiteralInfo = x6;
+        __ Ldr(extraLiteralInfo.W(), MemoryOperand(method, Method::EXTRA_LITERAL_INFO_OFFSET));
+        __ Lsr(extraLiteralInfo.W(), extraLiteralInfo.W(), Method::DeoptCountBits::START_BIT);
+        __ And(extraLiteralInfo.W(), extraLiteralInfo.W(),
+            LogicalImmediate::Create((1LU << Method::DeoptCountBits::SIZE) - 1, W_REG_SIZE));
+        __ Cmp(extraLiteralInfo.W(), Immediate(static_cast<int32_t>(TieringDecision::ARKSTEED_REQUESTED)));
+        __ B(Condition::NE, &noSubmit);
+        {
+            __ PushFpAndLr();
+            Register frameType = x6;
+            __ Mov(frameType, Immediate(static_cast<int64_t>(FrameType::OPTIMIZED_JS_FUNCTION_ARGS_CONFIG_FRAME)));
+            __ Stp(xzr, frameType, MemoryOperand(sp, -DOUBLE_SLOT_SIZE, AddrMode::PREINDEX));
+            __ Add(fp, sp, Immediate(DOUBLE_SLOT_SIZE));
+            __ Stp(xzr, glue, MemoryOperand(sp, -DOUBLE_SLOT_SIZE, AddrMode::PREINDEX));
+            // Keep the original tagged JS arguments gc-updated throughout submission.
+            __ Mov(x1, Immediate(RTSTUB_ID(SubmitJitTask)));
+            __ Ldr(x2, MemoryOperand(fp, DOUBLE_SLOT_SIZE)); // original argc
+            __ Add(x3, fp, Immediate(QUADRUPLE_SLOT_SIZE)); // skip saved fp, lr, argc and argv
+            __ CallAssemblerStub(RTSTUB_ID(CallRuntimeWithArgv), false);
+            __ Ldp(xzr, glue, MemoryOperand(sp, DOUBLE_SLOT_SIZE, AddrMode::POSTINDEX)); // restore glue
+            __ Add(sp, sp, Immediate(DOUBLE_SLOT_SIZE));
+            __ RestoreFpAndLr();
+            __ Ldr(jsfunc, MemoryOperand(sp, DOUBLE_SLOT_SIZE));
+            // Reload heap references and the class bit field after the runtime call.
+            __ Ldr(x5, MemoryOperand(jsfunc, JSFunction::HCLASS_OFFSET));
+            __ And(x5, x5, LogicalImmediate::Create(TaggedObject::GC_STATE_MASK, X_REG_SIZE));
+            __ Ldr(x5, MemoryOperand(x5, JSHClass::BIT_FIELD_OFFSET));
+            __ Ldr(method, MemoryOperand(jsfunc, JSFunction::METHOD_OFFSET));
+        }
+        __ Bind(&noSubmit);
+    }
+
     Register callField = x3;
     Register actualArgC = x4;
     Label callNativeMethod;
@@ -460,10 +496,6 @@ void OptimizedCall::JSCallInternal(ExtendedAssembler *assembler, Register jsfunc
     Label lCallNativeCpp;
     Label lNotClass;
 
-    __ Ldr(x5, MemoryOperand(jsfunc, JSFunction::HCLASS_OFFSET));
-    __ And(x5, x5, LogicalImmediate::Create(TaggedObject::GC_STATE_MASK, X_REG_SIZE));
-    __ Ldr(x5, MemoryOperand(x5, JSHClass::BIT_FIELD_OFFSET));
-    __ Ldr(method, MemoryOperand(jsfunc, JSFunction::METHOD_OFFSET));
     __ Ldr(actualArgC, MemoryOperand(sp, 0));
     __ Ldr(callField, MemoryOperand(method, Method::CALL_FIELD_OFFSET));
     __ Tbnz(callField, Method::IsNativeBit::START_BIT, &callNativeMethod);
@@ -985,6 +1017,20 @@ void OptimizedCall::JSBoundFunctionCallInternal(ExtendedAssembler *assembler, Re
     __ Tbz(compiledCodeFlag, JSFunctionBase::IsCompiledCodeBit::START_BIT, &slowCall);
     __ Bind(&aotCall);
     {
+#if ECMASCRIPT_ENABLE_ARK_STEED
+        Label notArkSteed;
+        __ Tbz(compiledCodeFlag, JSFunctionBase::IsArkSteedEntryBit::START_BIT, &notArkSteed);
+
+        __ Mov(x1, x19);
+        __ Sub(x1, x1, Immediate(NUM_MANDATORY_JSFUNC_ARGS));
+        __ Mov(x2, boundTarget);
+        __ Ldr(x3, MemoryOperand(fpReg, 3 * FRAME_SLOT_SIZE)); // 3: newTarget fp slot index
+        __ Ldr(x4, MemoryOperand(fpReg, 4 * FRAME_SLOT_SIZE)); // 4: this fp slot index
+        __ Add(x5, fpReg, Immediate(5 * FRAME_SLOT_SIZE)); // 5: argv fp slot index
+        __ CallAssemblerStub(RTSTUB_ID(SteedCallWithArgVAndPushArgv), false);
+        __ B(&popArgs);
+        __ Bind(&notArkSteed);
+#endif
         // output: glue:x0 argc:x1 calltarget:x2 argv:x3 this:x4 newtarget:x5
         __ Mov(x1, x19);
         __ Mov(x2, boundTarget);
@@ -1324,10 +1370,8 @@ void OptimizedCall::DeoptEnterAsmInterpOrBaseline(ExtendedAssembler *assembler)
     Register context = x2;
     Register opRegister = x9;
     Register outputCount = x10;
-    Register frameStateBase = x11;
     Register currentSlotRegister = x12;
     Register depth = x20;
-    Register tmpReg = x21;
     Register hasExceptionRegister = x25;
     Label loopBegin;
     Label stackOverflow;
@@ -1337,35 +1381,116 @@ void OptimizedCall::DeoptEnterAsmInterpOrBaseline(ExtendedAssembler *assembler)
     __ PushFpAndLr();
     __ Ldr(hasExceptionRegister, MemoryOperand(context, AsmStackContext::GetHasExceptionOffset(false)));
     __ Ldr(depth, MemoryOperand(context, AsmStackContext::GetInlineDepthOffset(false)));
+    __ Mov(x26, context); // context walks up per frame during linking; keep the base
     __ Add(context, context, Immediate(AsmStackContext::GetSize(false)));
     __ Mov(x23, Immediate(0));
     // update fp
     __ Mov(currentSlotRegister, sp);
     __ Bind(&loopBegin);
-    __ Ldr(outputCount, MemoryOperand(context, 0));
-    __ Add(frameStateBase, context, Immediate(FRAME_SLOT_SIZE));
-    __ Cmp(x23, Immediate(0));
-    __ B(Condition::EQ, &pushArgv);
-    __ Mov(tmpReg, currentSlotRegister);
-    __ Add(tmpReg, tmpReg, Immediate(AsmInterpretedFrame::GetSize(false)));
-    __ Add(x9, frameStateBase, Immediate(AsmInterpretedFrame::GetBaseOffset(false)));
-    __ Str(tmpReg, MemoryOperand(x9, InterpretedFrameBase::GetPrevOffset(false)));
-    __ Align16(currentSlotRegister);
+    {
+        // frameStateBase walks the deopt image (the C++-written source blocks) as the
+        // copy source of the linking loop; it — and the image — die when this scope closes.
+        Register frameStateBase = x11;
+        Register tmpReg = x21;
+        __ Ldr(outputCount, MemoryOperand(context, 0));
+        __ Add(frameStateBase, context, Immediate(FRAME_SLOT_SIZE));
+        __ Cmp(x23, Immediate(0));
+        __ B(Condition::EQ, &pushArgv);
+        __ Mov(tmpReg, currentSlotRegister);
+        __ Add(tmpReg, tmpReg, Immediate(AsmInterpretedFrame::GetSize(false)));
+        __ Add(x9, frameStateBase, Immediate(AsmInterpretedFrame::GetBaseOffset(false)));
+        __ Str(tmpReg, MemoryOperand(x9, InterpretedFrameBase::GetPrevOffset(false)));
+        __ Align16(currentSlotRegister);
 
-    __ Bind(&pushArgv);
-    __ Mov(tmpReg, outputCount);
-    __ Str(currentSlotRegister, MemoryOperand(frameStateBase, AsmInterpretedFrame::GetFpOffset(false)));
-    PushArgsWithArgv(assembler, glueRegister, outputCount, frameStateBase, opRegister,
-                     currentSlotRegister, nullptr, &stackOverflow);
-    __ Add(context, context, Immediate(FRAME_SLOT_SIZE)); // skip outputCount
-    __ Add(context, context, Operand(tmpReg, UXTW, FRAME_SLOT_SIZE_LOG2)); // skip args
-    __ Add(x23, x23, Immediate(1));
-    __ Cmp(depth, x23);
-    __ B(Condition::GE, &loopBegin);
+        __ Bind(&pushArgv);
+        __ Mov(tmpReg, outputCount);
+        __ Str(currentSlotRegister, MemoryOperand(frameStateBase, AsmInterpretedFrame::GetFpOffset(false)));
+        PushArgsWithArgv(assembler, glueRegister, outputCount, frameStateBase, opRegister,
+                         currentSlotRegister, nullptr, &stackOverflow);
+        __ Add(context, context, Immediate(FRAME_SLOT_SIZE)); // skip outputCount
+        __ Add(context, context, Operand(tmpReg, UXTW, FRAME_SLOT_SIZE_LOG2)); // skip args
+        __ Add(x23, x23, Immediate(1));
+        __ Cmp(depth, x23);
+        __ B(Condition::GE, &loopBegin);
+    }
+    // The linking loop has copied every image block (frame struct + vregs + args)
+    // into the linked frames below sp. From here on the image is DEAD: it sits
+    // above sp, off the frame chain, and is never visited or updated by the GC.
+    // Every value the continuation and the dispatch consume must come from the
+    // live frames (currentSlotRegister-relative) — an image read after the
+    // continuation's GC-capable stub call would be a moved-object hazard.
+    // frameStateBase is scoped to the loop above for exactly this reason. The
+    // stack context outlives the image only for the continuation payload: kind
+    // and bound-this are consumed before the stub call, the non-tagged resume
+    // pc after it.
+
+    // Lazy-deopt [[Construct]] result-check continuation: frames are linked now, so the
+    // shared common stubs may allocate and throw (the derived variant does). continuationKind_
+    // (NONE sentinel) is set by ProcessLazyDeopt for a CallBase/CallDerivedConstructor
+    // safepoint, whose raw acc is normalized here: the base variant selects the bound this
+    // for any non-object return, the derived variant throws for any non-object (the
+    // frontend guarantees a derived constructor never returns undefined across the call
+    // boundary, so only raw primitives reach its throw arm).
+    Label skipContinuation;
+    Label continuationThrew;
+    __ Ldr(opRegister, MemoryOperand(x26, AsmStackContext::GetContinuationKindOffset(false)));
+    __ Cmp(opRegister, Immediate(0));
+    __ B(Condition::EQ, &skipContinuation);
+    __ Cmp(hasExceptionRegister, Immediate(0));
+    __ B(Condition::NE, &skipContinuation);
+    {
+        Label derivedStub;
+        Label stubLoaded;
+        // root the GC walk and fp chain at the innermost reconstructed frame: the stub's
+        // runtime call re-roots below it and chains back through the saved fp
+        __ Add(x27, currentSlotRegister, Immediate(AsmInterpretedFrame::GetSize(false)));
+        __ Str(x27, MemoryOperand(glueRegister, JSThread::GlueData::GetLeaveFrameOffset(false)));
+        __ Mov(fp, x27);
+        // glue and the innermost frame base survive the call in callee-saved regs
+        __ Mov(x19, glueRegister);
+        __ Mov(x22, currentSlotRegister);
+        __ Ldr(x1, MemoryOperand(x22, AsmInterpretedFrame::GetAccOffset(false))); // raw acc
+        __ Ldr(x2, MemoryOperand(x26, AsmStackContext::GetBaseCtorThisOffset(false))); // bound this
+        Register baseAddress = x8;
+        Register stubId = x9;
+        Register codeAddress = x10;
+        __ Mov(baseAddress, Immediate(JSThread::GlueData::GetCOStubEntriesOffset(false)));
+        __ Cmp(opRegister, Immediate(static_cast<int64_t>(DeoptContinuationKind::BASE_CTOR)));
+        __ B(Condition::NE, &derivedStub);
+        __ Mov(stubId, Immediate(CommonStubCSigns::BaseConstructResultCheck));
+        __ B(&stubLoaded);
+        __ Bind(&derivedStub);
+        __ Mov(stubId, Immediate(CommonStubCSigns::DerivedConstructResultCheck));
+        __ Bind(&stubLoaded);
+        __ Add(codeAddress, x19, baseAddress);
+        __ Ldr(codeAddress, MemoryOperand(codeAddress, stubId, UXTW, FRAME_SLOT_SIZE_LOG2));
+        // unlike x64, the linking loop walks currentSlotRegister without moving sp, so the
+        // reconstructed frames live below sp: drop sp below them or the stub frame overwrites them
+        __ Mov(x24, sp);
+        __ Mov(x27, currentSlotRegister);
+        __ Align16(x27);
+        __ Mov(sp, x27);
+        __ Blr(codeAddress);
+        __ Mov(sp, x24);
+        __ Mov(currentSlotRegister, x22);
+        __ Mov(x27, x0); // normalized acc
+        __ Mov(x0, x19);
+        __ Cmp(x27, Immediate(JSTaggedValue::VALUE_EXCEPTION));
+        __ B(Condition::EQ, &continuationThrew);
+        // normalized acc / resume pc go to the linked innermost frame — the live,
+        // GC-maintained copy; the image is dead (see the comment above the continuation)
+        __ Str(x27, MemoryOperand(x22, AsmInterpretedFrame::GetAccOffset(false)));
+        __ Ldr(x9, MemoryOperand(x26, AsmStackContext::GetContinuationResumePcOffset(false)));
+        __ Str(x9, MemoryOperand(x22, AsmInterpretedFrame::GetPcOffset(false)));
+        __ B(&skipContinuation);
+        __ Bind(&continuationThrew);
+        __ Mov(hasExceptionRegister, Immediate(1));
+    }
+    __ Bind(&skipContinuation);
 
     Register callTargetRegister = __ CallDispatcherArgument(kungfu::CallDispatchInputs::CALL_TARGET);
     Register methodRegister = __ CallDispatcherArgument(kungfu::CallDispatchInputs::METHOD);
-    __ Ldr(callTargetRegister, MemoryOperand(frameStateBase, AsmInterpretedFrame::GetFunctionOffset(false)));
+    __ Ldr(callTargetRegister, MemoryOperand(currentSlotRegister, AsmInterpretedFrame::GetFunctionOffset(false)));
     // get baseline code
     __ Ldr(opRegister, MemoryOperand(callTargetRegister, JSFunction::BASELINECODE_OFFSET));
     Label baselineCodeUndefined;
@@ -1380,6 +1505,9 @@ void OptimizedCall::DeoptEnterAsmInterpOrBaseline(ExtendedAssembler *assembler)
         Register newSpRegister = x20;
         // get new sp
         __ Add(newSpRegister, currentSlotRegister, Immediate(AsmInterpretedFrame::GetSize(false)));
+        // get bytecode pc from the live frame before the sp alignment shifts currentSlotRegister
+        Register bytecodePc = opRegister;
+        __ Ldr(bytecodePc, MemoryOperand(currentSlotRegister, AsmInterpretedFrame::GetPcOffset(false)));
         __ Align16(currentSlotRegister);
         __ Mov(sp, currentSlotRegister);
 
@@ -1387,10 +1515,6 @@ void OptimizedCall::DeoptEnterAsmInterpOrBaseline(ExtendedAssembler *assembler)
         __ Stp(glueRegister, callTargetRegister, MemoryOperand(sp, -DOUBLE_SLOT_SIZE, AddrMode::PREINDEX));
         // callee save
         __ CalleeSave();
-
-        // get bytecode pc
-        Register bytecodePc = opRegister;
-        __ Ldr(bytecodePc, MemoryOperand(frameStateBase, AsmInterpretedFrame::GetPcOffset(false)));
         // get func
         Register func = x1;
         func = callTargetRegister;
@@ -1425,11 +1549,11 @@ void OptimizedCall::DeoptEnterAsmInterpOrBaseline(ExtendedAssembler *assembler)
 
     __ Bind(&baselineCodeUndefined);
     {
-        // X19, fp, x20, x21,      x22,     x23,  x24
-        // glue sp   pc  constpool  profile  acc   hotness
-        __ Ldr(callTargetRegister, MemoryOperand(frameStateBase, AsmInterpretedFrame::GetFunctionOffset(false)));
-        __ Ldr(x20, MemoryOperand(frameStateBase, AsmInterpretedFrame::GetPcOffset(false)));
-        __ Ldr(x23, MemoryOperand(frameStateBase, AsmInterpretedFrame::GetAccOffset(false)));
+        // X19, fp, x20, x21,      x22,     x23
+        // glue sp   pc  constpool  profile  acc
+        __ Ldr(callTargetRegister, MemoryOperand(currentSlotRegister, AsmInterpretedFrame::GetFunctionOffset(false)));
+        __ Ldr(x20, MemoryOperand(currentSlotRegister, AsmInterpretedFrame::GetPcOffset(false)));
+        __ Ldr(x23, MemoryOperand(currentSlotRegister, AsmInterpretedFrame::GetAccOffset(false)));
         __ Ldr(methodRegister, MemoryOperand(callTargetRegister, JSFunctionBase::METHOD_OFFSET));
 
         __ Add(opRegister, currentSlotRegister, Immediate(AsmInterpretedFrame::GetSize(false)));

@@ -1137,15 +1137,19 @@ JSTaggedValue JSStableArray::Filter(JSHandle<JSObject> newArrayHandle, JSHandle<
             info->SetCallArg(kValue.GetTaggedValue(), key.GetTaggedValue(), thisObjVal.GetTaggedValue());
             JSTaggedValue callResult = JSFunction::Call(info);
             RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread);
-            if (ElementAccessor::GetElementsLength(thread, thisObjHandle) < len) {
-                len = ElementAccessor::GetElementsLength(thread, thisObjHandle);
-            }
             bool boolResult = callResult.ToBoolean();
             if (boolResult) {
-                toIndexHandle.Update(JSTaggedValue(toIndex));
-                JSObject::CreateDataPropertyOrThrow(thread, newArrayHandle, toIndexHandle, kValue);
+                if (LIKELY(newArrayHandle->IsExtensible())) {
+                    JSArray::TryFastCreateDataProperty(thread, newArrayHandle, toIndex, kValue);
+                } else {
+                    toIndexHandle.Update(JSTaggedValue(toIndex));
+                    JSObject::CreateDataPropertyOrThrow(thread, newArrayHandle, toIndexHandle, kValue);
+                }
                 RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread);
                 toIndex++;
+            }
+            if (ElementAccessor::GetElementsLength(thread, thisObjHandle) < len) {
+                len = ElementAccessor::GetElementsLength(thread, thisObjHandle);
             }
         }
         k++;
@@ -1168,6 +1172,9 @@ JSTaggedValue JSStableArray::Map(JSHandle<JSObject> newArrayHandle, JSHandle<JSO
     JSMutableHandle<JSTaggedValue> mapResultHandle(thread, JSTaggedValue::Undefined());
     JSMutableHandle<JSTaggedValue> kValue(thread, JSTaggedValue::Undefined());
     const int32_t argsLength = 3; // 3: ?kValue, k, O?
+    if (ElementAccessor::GetElementsLength(thread, thisObjHandle) < len) {
+        len = ElementAccessor::GetElementsLength(thread, thisObjHandle);
+    }
     while (k < len) {
         // Elements of thisObjHandle may change.
         JSTaggedValue value = ElementAccessor::Get(thread, thisObjHandle, k);
@@ -1185,7 +1192,11 @@ JSTaggedValue JSStableArray::Map(JSHandle<JSObject> newArrayHandle, JSHandle<JSO
             JSTaggedValue mapResult = JSFunction::Call(info);
             RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread);
             mapResultHandle.Update(mapResult);
-            JSObject::CreateDataPropertyOrThrow(thread, newArrayHandle, k, mapResultHandle);
+            if (LIKELY(newArrayHandle->IsExtensible())) {
+                JSArray::TryFastCreateDataProperty(thread, newArrayHandle, k, mapResultHandle);
+            } else {
+                JSObject::CreateDataPropertyOrThrow(thread, newArrayHandle, k, mapResultHandle);
+            }
             RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread);
             if (ElementAccessor::GetElementsLength(thread, thisObjHandle) < len) {
                 len = ElementAccessor::GetElementsLength(thread, thisObjHandle);
@@ -1287,9 +1298,8 @@ JSTaggedValue JSStableArray::FastCopyFromArrayToTypedArray(JSThread *thread, JSH
                                      JSTaggedValue::Exception());
     }
     uint32_t targetByteIndex = static_cast<uint32_t>(targetOffset * targetElementSize + targetByteOffset);
-    ContentType contentType = targetArray->GetContentType();
     uint32_t elemLen = ElementAccessor::GetElementsLength(thread, obj);
-    if (contentType == ContentType::BigInt) {
+    if (UNLIKELY(targetArray->ContentTypeIsBigInt())) {
         JSMutableHandle<JSTaggedValue> kValue(thread, JSTaggedValue::Hole());
         JSMutableHandle<JSTaggedValue> elem(thread, JSTaggedValue::Hole());
         for (uint32_t i = 0; i < srcLength; i++) {
@@ -1360,11 +1370,10 @@ JSTaggedValue JSStableArray::CopyArrayToTypedArrayForCtor(JSThread *thread, JSHa
                                      JSTaggedValue::Exception());
     }
     uint32_t targetByteIndex = static_cast<uint32_t>(targetOffset * targetElementSize + targetByteOffset);
-    ContentType contentType = targetArray->GetContentType();
     ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
     JSHandle<TaggedArray> elements(thread, obj->GetElements(thread));
     uint32_t elemLen = elements->GetLength();
-    if (contentType == ContentType::BigInt) {
+    if (UNLIKELY(targetArray->ContentTypeIsBigInt())) {
         JSHandle<TaggedArray> copyElememts = factory->CopyArray(elements, elemLen, elemLen);
         JSMutableHandle<JSTaggedValue> kValue(thread, JSTaggedValue::Hole());
         JSMutableHandle<JSTaggedValue> elem(thread, JSTaggedValue::Hole());

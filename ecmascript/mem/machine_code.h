@@ -16,7 +16,7 @@
 #define ECMASCRIPT_MEM_MACHINE_CODE_H
 
 #include "ecmascript/ecma_macros.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/mem/barriers.h"
 #include "ecmascript/mem/mem.h"
 #include "ecmascript/mem/tagged_object.h"
@@ -25,6 +25,7 @@
 #include "ecmascript/method.h"
 #include "ecmascript/mem/jit_fort_memdesc.h"
 #include "ecmascript/deoptimizer/calleeReg.h"
+#include "ecmascript/compiler/aot_file/func_entry_des.h"
 
 #include "libpandabase/macros.h"
 
@@ -32,6 +33,7 @@ namespace panda::ecmascript {
 enum class MachineCodeType : uint8_t {
     BASELINE_CODE,
     FAST_JIT_CODE,
+    ARKSTEED_CODE,
 };
 
 struct MachineCodeDesc {
@@ -48,6 +50,12 @@ struct MachineCodeDesc {
     size_t stackMapOrOffsetTableSize {0};
     uintptr_t heapConstantTableAddr {0};
     size_t heapConstantTableSize {0};
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    uintptr_t arkSteedTranslationAddr {0};
+    size_t arkSteedTranslationSize {0};
+#endif
+    uintptr_t codeCommentsAddr { 0 };
+    size_t codeCommentsSize { 0 };
     MachineCodeType codeType {MachineCodeType::FAST_JIT_CODE};
 #ifdef JIT_ENABLE_CODE_SIGN
     uintptr_t codeSigner {0};
@@ -219,6 +227,9 @@ public:
     static constexpr size_t PAYLOAD_OFFSET = SIZE;
     static constexpr uint32_t DATA_ALIGN = 8;
     static constexpr uint32_t TEXT_ALIGN = 16;
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    static constexpr size_t ARKSTEED_TRANSLATION_INFO_SIZE = sizeof(uint32_t) * 2U;
+#endif
     static constexpr int32_t INVALID_OSR_OFFSET = -1;
     static constexpr uint32_t OSR_EXECUTE_CNT_OFFSET = OSRMASK_OFFSET + 2;
     static constexpr uint16_t OSR_DEOPT_FLAG = 0x80;
@@ -239,7 +250,9 @@ public:
 
     // define BitField
     static constexpr size_t IS_FAST_CALL_BITS = 1;
+    static constexpr size_t IS_ARK_STEED_BITS = 1;
     FIRST_BIT_FIELD(BitField, IsFastCall, bool, IS_FAST_CALL_BITS);
+    NEXT_BIT_FIELD(BitField, IsArkSteedCode, bool, IS_ARK_STEED_BITS, IsFastCall);
 
     DECL_DUMP()
 
@@ -251,6 +264,9 @@ public:
     uintptr_t GetText() const;
     uint8_t *GetStackMapOrOffsetTableAddress() const;
     uint8_t *GetHeapConstantTableAddress() const;
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    bool GetArkSteedTranslationData(const uint8_t **data, size_t *size) const;
+#endif
 
     size_t GetTextSize() const
     {
@@ -260,22 +276,23 @@ public:
     bool SetData(JSThread *thread, const MachineCodeDesc &desc, JSHandle<Method> &method, size_t dataSize);
     bool SetText(const MachineCodeDesc &desc);
     bool SetNonText(const MachineCodeDesc &desc, EntityId methodId);
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    bool SetArkSteedData(JSThread *thread, const MachineCodeDesc &desc,
+                         JSHandle<Method> &method, size_t dataSize);
+#endif
 
     template <VisitType visitType, class DerivedVisitor>
     void VisitRangeSlot(BaseObjectVisitor<DerivedVisitor> &visitor)
     {
         ASSERT(visitType == VisitType::ALL_VISIT || visitType == VisitType::OLD_GC_VISIT);
         if constexpr (visitType == VisitType::ALL_VISIT) {
-            visitor(this, ToUintPtr(this),
-                ToUintPtr(this) + GetMachineCodeObjectSize(), VisitObjectArea::RAW_DATA);
+            visitor(this, ObjectSlot(ToUintPtr(this)),
+                ObjectSlot(ToUintPtr(this) + GetMachineCodeObjectSize()), VisitObjectArea::RAW_DATA);
         }
         if constexpr (visitType == VisitType::OLD_GC_VISIT) {
             uintptr_t start = static_cast<uintptr_t>(GetHeapConstantTableAddr());
             uintptr_t end = static_cast<uintptr_t>(GetHeapConstantTableAddr()) + GetHeapConstantTableSize();
-            visitor(this,
-                    start,
-                    end,
-                    VisitObjectArea::NORMAL);
+            visitor(this, ObjectSlot(start), ObjectSlot(end), VisitObjectArea::NORMAL);
             this->ProcessMarkObject();
         }
     }
@@ -313,6 +330,9 @@ public:
     }
 private:
     bool SetBaselineCodeData(JSThread *thread, const MachineCodeDesc &desc, JSHandle<Method> &method, size_t dataSize);
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    bool SetArkSteedTranslationData(const MachineCodeDesc &desc);
+#endif
 };
 }  // namespace panda::ecmascript
 #endif  // ECMASCRIPT_MEM_MACHINE_CODE_H

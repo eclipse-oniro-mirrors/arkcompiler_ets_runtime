@@ -15,12 +15,42 @@
 
 #include "ecmascript/base/error_helper.h"
 #include "ecmascript/base/builtins_base.h"
+#include "ecmascript/base/log_manager.h"
 #include "ecmascript/dfx/stackinfo/js_stackinfo.h"
 #include "ecmascript/interpreter/frame_handler.h"
 #include "ecmascript/platform/log.h"
+#include "ecmascript/module/js_module_manager.h"
 #include "ecmascript/dfx/stackinfo/async_stack_trace.h"
+#include "ecmascript/extractortool/src/source_map.h"
 
 namespace panda::ecmascript::base {
+namespace {
+constexpr size_t KEY_MAX = 256;
+
+LogManager& GetLogManager()
+{
+    static LogManager instance;
+    return instance;
+}
+
+uint64_t ComputeRateLimitKey(const CString &name, const CString &msg)
+{
+    std::string keyStr;
+    keyStr.reserve(KEY_MAX);
+    keyStr.append(panda::ecmascript::previewerTag);
+    size_t remaining = keyStr.size() < KEY_MAX ? KEY_MAX - keyStr.size() : 0;
+    size_t nameLen = std::min(name.size(), remaining);
+    keyStr.append(name.c_str(), nameLen);
+    remaining = keyStr.size() < KEY_MAX ? KEY_MAX - keyStr.size() : 0;
+    size_t sepLen = std::min(static_cast<size_t>(2), remaining);
+    keyStr.append(": ", sepLen);
+    remaining = keyStr.size() < KEY_MAX ? KEY_MAX - keyStr.size() : 0;
+    size_t msgLen = std::min(msg.size(), remaining);
+    keyStr.append(msg.c_str(), msgLen);
+    return std::hash<std::string>{}(keyStr);
+}
+} // namespace
+
 JSTaggedValue ErrorHelper::ErrorCommonToString(EcmaRuntimeCallInfo *argv, const ErrorType &errorType)
 {
     ASSERT(argv);
@@ -191,12 +221,12 @@ JSTaggedValue ErrorHelper::ErrorCommonConstructor(EcmaRuntimeCallInfo *argv,
 
     std::string stackTrace = BuildStackTraceWithLimit(thread, nativeInstanceObj);
     JSHandle<EcmaString> stackTraceStr = factory->NewFromStdString(stackTrace);
-    JSHandle<EcmaString> cbStackTraceStr;
-    auto sourceMapcb = ecmaVm->GetSourceMapCallback();
-    if (sourceMapcb != nullptr && !stackTrace.empty()) {
-        cbStackTraceStr = factory->NewFromStdString(sourceMapcb(stackTrace.c_str()));
-    } else {
-        cbStackTraceStr = stackTraceStr;
+    JSHandle<EcmaString> cbStackTraceStr = stackTraceStr;
+    if (!stackTrace.empty()) {
+        std::string result = SourceMap::GetInstance().TranslateStackTraceWithStatus(stackTrace);
+        if (!result.empty()) {
+            cbStackTraceStr = factory->NewFromStdString(result);
+        }
     }
 
     PropertyDescriptor stackDesc(thread, JSHandle<JSTaggedValue>::Cast(cbStackTraceStr), true, false, true);
@@ -209,6 +239,23 @@ JSTaggedValue ErrorHelper::ErrorCommonConstructor(EcmaRuntimeCallInfo *argv,
     [[maybe_unused]] bool topStackstatus = JSObject::DefineOwnProperty(thread, nativeInstanceObj,
         globalConst->GetHandledTopStackString(), topStackDesc);
     ASSERT_PRINT(topStackstatus == true, "return result exception!");
+
+    // Add module stack trace
+    if (UNLIKELY(ecmaVm->GetJSOptions().EnableModuleImportStack())) {
+        std::string moduleStack = thread->GetModuleManager()
+            ->GetImportStackDataForJSCrash(64 * 1024); // 64 * 1024 = 64KB
+        if (!moduleStack.empty()) {
+            JSHandle<EcmaString> moduleStackStr = factory->NewFromStdString(moduleStack);
+            PropertyDescriptor moduleStackDesc(thread,
+                JSHandle<JSTaggedValue>::Cast(moduleStackStr), true, false, true);
+            [[maybe_unused]] bool moduleStackstatus = JSObject::DefineOwnProperty(thread, nativeInstanceObj,
+                globalConst->GetHandledModuleImportStackString(), moduleStackDesc);
+            ASSERT_PRINT(moduleStackstatus == true, "Failed to define module Import stack property on object!");
+        }
+    }
+
+    // Add native module load failure info
+    AddNativeModuleLoadFailureInfo(thread, nativeInstanceObj);
 
     // Add async stack trace
     if (UNLIKELY(ecmaVm->IsEnableRuntimeAsyncStack())) {
@@ -230,10 +277,19 @@ JSTaggedValue ErrorHelper::ErrorCommonConstructor(EcmaRuntimeCallInfo *argv,
 }
 
 // static
-void ErrorHelper::PrintJSErrorInfo(JSThread *thread, const JSHandle<JSTaggedValue> exceptionInfo)
+void ErrorHelper::PrintJSErrorInfo(JSThread *thread, const JSHandle<JSTaggedValue> exceptionInfo,
+                                   bool enableRateLimit)
 {
     CString nameBuffer = GetJSErrorInfo(thread, exceptionInfo, JSErrorProps::NAME);
     CString msgBuffer = GetJSErrorInfo(thread, exceptionInfo, JSErrorProps::MESSAGE);
+
+    if (enableRateLimit) {
+        uint64_t hashKey = ComputeRateLimitKey(nameBuffer, msgBuffer);
+        if (!GetLogManager().ShouldPrintByRateLimit(hashKey)) {
+            return;
+        }
+    }
+
     CString stackBuffer = GetJSErrorInfo(thread, exceptionInfo, JSErrorProps::STACK);
     LOG_NO_TAG(ERROR) << panda::ecmascript::previewerTag << nameBuffer << ": " << msgBuffer << "\n"
                       << (panda::ecmascript::previewerTag.empty()
@@ -302,6 +358,31 @@ JSHandle<JSTaggedValue> ErrorHelper::GetErrorJSFunction(JSThread *thread)
         }
     }
     return thread->GlobalConstants()->GetHandledUndefined();
+}
+
+void ErrorHelper::AddNativeModuleLoadFailureInfo(JSThread *thread,
+                                                 const JSHandle<JSObject> &nativeInstanceObj)
+{
+    EcmaVM *vm = thread->GetEcmaVM();
+    const CVector<std::pair<CString, CString>> &soLoadFailures = vm->GetAllSoLoadFailures();
+    if (soLoadFailures.empty()) {
+        return;
+    }
+    std::string soLoadFailureInfo;
+    base::AppendToBaseString(soLoadFailureInfo, "There are a total of ",
+        std::to_string(vm->GetSoLoadFailureNum()),
+        " SO loading failure messages, and ", std::to_string(soLoadFailures.size()),
+        " of them are displayed here.", "\n");
+    for (const auto &[moduleName, errorMessage] : soLoadFailures) {
+        base::AppendToBaseString(soLoadFailureInfo, "ModuleName:", moduleName.c_str(),
+            " Reason:", errorMessage.c_str(), "\n");
+    }
+    JSHandle<EcmaString> soLoadFailureStr = vm->GetFactory()->NewFromStdString(soLoadFailureInfo);
+    PropertyDescriptor soLoadFailureDesc(thread,
+        JSHandle<JSTaggedValue>::Cast(soLoadFailureStr), false, false, true);
+    [[maybe_unused]] bool soLoadFailureStatus = JSObject::DefineOwnProperty(thread, nativeInstanceObj,
+        thread->GlobalConstants()->GetHandledNativeModuleErrorInfoString(), soLoadFailureDesc);
+    ASSERT_PRINT(soLoadFailureStatus, "Failed to define so load failure info property on object!");
 }
 
 std::string ErrorHelper::BuildStackTraceWithLimit(JSThread *thread, const JSHandle<JSObject> &jsErrorObj)

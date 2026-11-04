@@ -18,8 +18,22 @@
 #include "ecmascript/base/config.h"
 #include "ecmascript/js_hclass-inl.h"
 #include "ecmascript/mem/heap-inl.h"
+#include "ecmascript/platform/map.h"
 
 namespace panda::ecmascript {
+
+void SparseSpace::PrepareForIterate() const
+{
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
+    allocator_->FillBumpPointer();
+}
+
+void SparseSpace::RebuildFreeList()
+{
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
+    allocator_->RebuildFreeList();
+}
+
 SparseSpace::SparseSpace(Heap *heap, MemSpaceType type, size_t initialCapacity, size_t maximumCapacity)
     : MonoSpace(heap, heap->GetHeapRegionAllocator(), type, initialCapacity, maximumCapacity),
       SweepableSpace(),
@@ -33,6 +47,7 @@ SparseSpace::SparseSpace(Heap *heap, MemSpaceType type, size_t initialCapacity, 
 
 void SparseSpace::Initialize()
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     JSThread *thread = localHeap_->GetJSThread();
     Region *region = heapRegionAllocator_->AllocateAlignedRegion(this, DEFAULT_REGION_SIZE, thread, localHeap_);
     AddRegion(region);
@@ -42,6 +57,7 @@ void SparseSpace::Initialize()
 
 void SparseSpace::Reset()
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     allocator_->RebuildFreeList();
     ReclaimRegions();
     liveObjectSize_ = 0;
@@ -49,11 +65,13 @@ void SparseSpace::Reset()
 
 void SparseSpace::ResetTopPointer(uintptr_t top)
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     allocator_->ResetTopPointer(top);
 }
 
 uintptr_t SparseSpace::Allocate(size_t size, bool allowGC)
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     ASSERT(spaceType_ != MemSpaceType::OLD_SPACE);
 #if ECMASCRIPT_ENABLE_THREAD_STATE_CHECK
     if (UNLIKELY(!localHeap_->GetJSThread()->IsInRunningStateOrProfiling())) { // LOCV_EXCL_BR_LINE
@@ -90,6 +108,7 @@ uintptr_t SparseSpace::Allocate(size_t size, bool allowGC)
 
 bool SparseSpace::Expand()
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     if (CommittedSizeExceed()) {
         LOG_ECMA_MEM(INFO) << "Expand::Committed size " << committedSize_ << " of Sparse Space is too big. ";
         return false;
@@ -103,6 +122,7 @@ bool SparseSpace::Expand()
 
 uintptr_t SparseSpace::AllocateAfterSweepingCompleted(size_t size)
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     ASSERT(sweepState_ == SweepState::SWEEPING);
     if (TryFillSweptRegion()) {
         auto object = allocator_->Allocate(size);
@@ -117,6 +137,7 @@ uintptr_t SparseSpace::AllocateAfterSweepingCompleted(size_t size)
 
 void SparseSpace::PrepareSweeping()
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     liveObjectSize_ = 0;
     ASSERT(GetSweepingRegionSafe() == nullptr);
     ASSERT(GetSweptRegionSafe() == nullptr);
@@ -142,6 +163,7 @@ void SparseSpace::PrepareSweeping()
 
 void SparseSpace::AsyncSweep(bool isMain, bool releaseMemory)
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     Region *current = GetSweepingRegionSafe();
     while (current != nullptr) {
         if (releaseMemory) {
@@ -162,6 +184,7 @@ void SparseSpace::AsyncSweep(bool isMain, bool releaseMemory)
 
 void SparseSpace::Sweep()
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     liveObjectSize_ = 0;
     allocator_->RebuildFreeList();
     EnumerateRegions([this](Region *current) {
@@ -176,6 +199,7 @@ void SparseSpace::Sweep()
 
 bool SparseSpace::TryFillSweptRegion()
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     if (sweptList_.empty()) {
         return false;
     }
@@ -191,6 +215,7 @@ bool SparseSpace::TryFillSweptRegion()
 
 bool SparseSpace::FinishFillSweptRegion()
 {
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     bool ret = TryFillSweptRegion();
     sweepState_ = SweepState::SWEPT;
     return ret;
@@ -301,9 +326,6 @@ void SparseSpace::IterateOverObjects(const std::function<void(TaggedObject *obje
 {
     allocator_->FillBumpPointer();
     EnumerateRegions([&](Region *region) {
-        if (region->InCollectSet()) {
-            return;
-        }
         uintptr_t curPtr = region->GetBegin();
         uintptr_t endPtr = region->GetEnd();
         while (curPtr < endPtr) {
@@ -324,20 +346,6 @@ void SparseSpace::IterateOverObjects(const std::function<void(TaggedObject *obje
             CHECK_OBJECT_SIZE(objSize);
         }
         CHECK_REGION_END(curPtr, endPtr);
-    });
-}
-
-void SparseSpace::IterateOldToNewOverObjects(
-    const std::function<void(TaggedObject *object, JSTaggedValue value)> &visitor) const
-{
-    auto cb = [visitor](void *mem) -> bool {
-        ObjectSlot slot(ToUintPtr(mem));
-        visitor(reinterpret_cast<TaggedObject *>(mem), JSTaggedValue(slot.GetTaggedType()));
-        return true;
-    };
-    EnumerateRegions([cb] (Region *region) {
-        region->IterateAllSweepingRSetBits(cb);
-        region->IterateAllOldToNewBits(cb);
     });
 }
 
@@ -531,6 +539,9 @@ void OldSpace::SelectCSet()
     if (localHeap_->InSensitiveStatus() && gcStats->GetGCReason() != GCReason::ALLOCATION_FAILED) {
         return;
     }
+    if (localHeap_->GetCmsGC()) {
+        return;
+    }
     CheckRegionSize();
     // 1、Select region which alive object larger than limit
     int64_t evacuateSizeLimit = 0;
@@ -636,12 +647,17 @@ void OldSpace::ReclaimCSet()
 
 bool OldSpace::SwapRegion(Region *region, SemiSpace *fromSpace)
 {
-    if (committedSize_ + region->GetCapacity() > maximumCapacity_) {
+    if (committedSize_ + region->GetCapacity() >= maximumCapacity_) {
         return false;
     }
     fromSpace->RemoveRegion(region);
     DefaultRegion::FromRegion(region)->InitializeFreeObjectSets();
     region->ResetRegionFlag(RegionSpaceFlag::IN_OLD_SPACE, RegionGCFlags::IN_NEW_TO_OLD_SET);
+    JSThread::ThreadId tid = 0;
+    if (localHeap_->EnablePageTagThreadId()) {
+        tid = localHeap_->GetJSThread()->GetThreadId();
+    }
+    PageTag(region, region->GetCapacity(), PageTagType::HEAP, region->GetSpaceTypeName(), tid);
 
     regionList_.AddNodeToFront(region);
     IncreaseCommitted(region->GetCapacity());
@@ -735,6 +751,11 @@ void LocalSpace::Stop()
     }
 }
 
+NonMovableSpace::NonMovableSpace(Heap *heap, size_t initialCapacity, size_t maximumCapacity)
+    : SparseSpace(heap, MemSpaceType::NON_MOVABLE, initialCapacity, maximumCapacity)
+{
+}
+
 uintptr_t NonMovableSpace::CheckAndAllocate(size_t size)
 {
     if (maximumCapacity_ == committedSize_ && GetHeapObjectSize() > MAX_NONMOVABLE_LIVE_OBJ_SIZE &&
@@ -744,9 +765,88 @@ uintptr_t NonMovableSpace::CheckAndAllocate(size_t size)
     return Allocate(size);
 }
 
-NonMovableSpace::NonMovableSpace(Heap *heap, size_t initialCapacity, size_t maximumCapacity)
-    : SparseSpace(heap, MemSpaceType::NON_MOVABLE, initialCapacity, maximumCapacity)
+bool NonMovableSpace::Expand()
 {
+    ASSERT(!localHeap_->InGC());
+    bool success = SparseSpace::Expand();
+    if (!success) {
+        return false;
+    }
+    if (localHeap_->GetEvacuateNonMovableSpace()) {
+        ASSERT(localHeap_->IsFullMark());
+        ASSERT(!localHeap_->GetJSThread()->IsReadyToConcurrentMark());
+        Region *region = GetCurrentRegion();
+        collectRegionSet_.emplace_back(region);
+        region->SetGCFlag(RegionGCFlags::IN_COLLECT_SET);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+    }
+    return true;
+}
+
+void NonMovableSpace::ForceExpandInGC()
+{
+    JSThread *thread = localHeap_->GetJSThread();
+    Region *region = heapRegionAllocator_->AllocateAlignedRegion(this, DEFAULT_REGION_SIZE, thread, localHeap_);
+    AddRegion(region);
+    allocator_->AddFree(region);
+}
+
+uintptr_t NonMovableSpace::AllocateSyncInGC(size_t size)
+{
+    LockHolder holder(gcAllocLock_);
+    uintptr_t object = allocator_->Allocate(size);
+    CHECK_OBJECT_AND_INC_OBJ_SIZE(size);
+
+    ForceExpandInGC();
+    object = allocator_->Allocate(size);
+    ASSERT(object != 0);
+    CHECK_OBJECT_AND_INC_OBJ_SIZE(size);
+
+    return 0;
+}
+
+void NonMovableSpace::SelectCSet()
+{
+    ASSERT(collectRegionSet_.empty());
+    EnumerateRegions([this](Region *region) {
+        collectRegionSet_.emplace_back(region);
+        region->SetGCFlag(RegionGCFlags::IN_COLLECT_SET);
+    });
+}
+
+void NonMovableSpace::RevertCSet()
+{
+    EnumerateCollectRegionSet([&](Region *region) {
+        region->ClearGCFlag(RegionGCFlags::IN_COLLECT_SET);
+    });
+    collectRegionSet_.clear();
+}
+
+void NonMovableSpace::ReclaimCSet()
+{
+    size_t cachedSize = localHeap_->GetRegionCachedSize();
+    EnumerateCollectRegionSet([this, cachedSize](Region *region) {
+        region->DeleteCrossRegionRSet();
+        region->DeleteOldToNewRSet();
+        region->DeleteLocalToShareRSet();
+        region->DeleteSweepingOldToNewRSet();
+        region->DeleteSweepingLocalToShareRSet();
+        DefaultRegion::FromRegion(region)->DestroyFreeObjectSets();
+        heapRegionAllocator_->FreeRegion(region, cachedSize);
+    });
+    collectRegionSet_.clear();
+}
+
+void NonMovableSpace::PrepareCompact()
+{
+    allocator_->RebuildFreeList();
+    EnumerateCollectRegionSet([this](Region *region) {
+        RemoveRegion(region);
+    });
+    ASSERT(regionList_.IsEmpty());
+    ASSERT(GetCommittedSize() == 0);
+    ASSERT(GetObjectSize() == 0);
+    liveObjectSize_ = 0;
 }
 
 AppSpawnSpace::AppSpawnSpace(Heap *heap, size_t initialCapacity)
@@ -803,9 +903,24 @@ MachineCodeSpace::MachineCodeSpace(Heap *heap, size_t initialCapacity, size_t ma
 void MachineCodeSpace::PrepareSweeping()
 {
     ASSERT(!g_isEnableCMCGC);
+    JIT_WRITE_SCOPE(jitWriteScope, true);
     // fill free obj before sparse space prepare sweeping rebuild freelist, as may fail set free obj
     // when iterate machine code space in GetMachineCodeObject
     allocator_->FillBumpPointer();
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    if (!localHeap_->GetEmbeddedCodeRefSet()->IsEmpty()) {
+        IterateOverObjects([this](TaggedObject *object) {
+            if (!JSTaggedValue(object).IsMachineCodeObject()) {
+                return;
+            }
+            Region *region = Region::ObjectAddressToRange(object);
+            ASSERT(!region->IsFreshRegion());
+            if (!region->Test(object)) {
+                localHeap_->GetEmbeddedCodeRefSet()->RemoveOwner(MachineCode::Cast(object));
+            }
+        });
+    }
+#endif
     SparseSpace::PrepareSweeping();
     if (jitFort_) {
         jitFort_->PrepareSweeping();
@@ -860,6 +975,7 @@ uintptr_t MachineCodeSpace::Allocate(size_t size, bool allowGC)
 uintptr_t MachineCodeSpace::Allocate(size_t size, MachineCodeDesc *desc, bool allowGC)
 {
     ASSERT(!g_isEnableCMCGC);
+    JIT_WRITE_SCOPE(jitWriteScope, true);
 #if ECMASCRIPT_ENABLE_THREAD_STATE_CHECK
     if (UNLIKELY(!localHeap_->GetJSThread()->IsInRunningStateOrProfiling())) { // LOCV_EXCL_BR_LINE
         LOG_ECMA(FATAL) << "Allocate must be in jsthread running state";
@@ -928,6 +1044,7 @@ uintptr_t MachineCodeSpace::GetMachineCodeObject(uintptr_t pc)
     }
     uintptr_t machineCode = 0;
     LockHolder holder(asyncSweepMutex_);
+    JIT_WRITE_SCOPE(jitWriteScope, true);
     allocator_->FillBumpPointer();
 
     EnumerateRegions([&](Region *region) {

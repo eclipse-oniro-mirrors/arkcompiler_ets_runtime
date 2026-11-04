@@ -16,9 +16,11 @@
 #ifndef RAWHEAP_TRANSLATE_H
 #define RAWHEAP_TRANSLATE_H
 
-#include "ecmascript/dfx/hprof/rawheap_translate/common.h"
-#include "ecmascript/dfx/hprof/rawheap_translate/metadata_parse.h"
-#include "ecmascript/dfx/hprof/rawheap_translate/string_hashmap.h"
+#include <chrono>
+
+#include "common.h"
+#include "metadata_parse.h"
+#include "string_hashmap.h"
 
 namespace panda::test {
 class HeapDumpTestHelper;
@@ -27,6 +29,22 @@ class RawHeapTranslateV2TestHelper;
 };
 
 namespace rawheap_translate {
+class SnapshotMerger;
+class StaticRawheapTranslate;
+
+// Heap objects are 8-byte aligned; sizes must stay aligned after dividing the
+// expanded (non-compressed pointer) CONSTANT_POOL size by the compressed factor.
+static constexpr uint32_t MEM_ALIGN_OBJECT = 8U;
+// Rounds x up to the next multiple of alignment (a power of two). Mirrors
+// AlignUp in ecmascript/mem/mem.h; kept local because the translator is built
+// standalone, without the runtime's mem.h.
+template<typename T>
+constexpr T AlignUp(T x, T alignment)
+{
+    // alignment must be a power of two.
+    return (x + alignment - 1) & ~(alignment - 1);
+}
+
 class RawHeap {
 public:
     RawHeap() : strTable_(new StringHashMap())
@@ -40,9 +58,27 @@ public:
     virtual bool Translate() = 0;
 
     static bool TranslateRawheap(const std::string &inputPath, const std::string &outputPath);
+
+    /**
+     * @brief Translate a dynamic (V1/V2 rawheap) file plus a static binary
+     * snapshot file into one combined .heapsnapshot.
+     *
+     * The dynamic file is parsed+translated by the existing V1/V2 toolchain;
+     * the static file is parsed by StaticRawheapTranslate; the two graphs are
+     * merged by SnapshotMerger (string pools deduplicated by content, object
+     * addresses live in disjoint virtual-machine spaces, XRef edges spliced
+     * across virtual-machine boundaries).
+     */
+    static bool TranslateRawheap(
+        const std::string &dynamicPath,
+        const std::string &staticPath,
+        const std::string &outputPath);
     static bool ParseMetaData(FileReader &file, MetaParser *parser);
     static RawHeap *ParseRawheap(const Version &version, MetaParser *metaParser);
     static std::string ReadVersion(FileReader &file);
+
+    /** Read-only probe: true for a static/hybrid V3 rawheap. */
+    static bool IsStaticSnapshotFormat(FileReader &file);
 
     std::vector<Node *>* GetNodes();
     std::vector<Edge *>* GetEdges();
@@ -51,16 +87,62 @@ public:
     StringHashMap* GetStringTable();
     std::string GetVersion();
 
-protected:
+    // Graph-construction primitives. Declared public so that the merger and
+    // tests can build/extend a graph without subclassing; the V1/V2 parsers
+    // and the static parser also use them internally.
     Node *CreateNode();
-    void InsertEdge(Node *toNode, uint32_t indexOrStrId, EdgeType type);
     StringId InsertAndGetStringId(const std::string &str);
+
+    std::string spaceType_;
+    std::string heapType_;
+    std::string vmType_;
+
+protected:
+    Node *CreateNodeAt(size_t pos);
+    void InsertEdge(Node *toNode, uint32_t indexOrStrId, EdgeType type);
+    // Variant that records the source node on the edge (edge->from). Used by
+    // the static parser so SortEdgesByFrom can group edges by source node.
+    void InsertEdge(Node *fromNode, Node *toNode, uint32_t indexOrStrId, EdgeType type);
+    // Sort edges_ by source node index (edge->from->index), stable. Required by
+    // the .heapsnapshot grouping contract (node i owns the next edgeCount[i]
+    // edges). Edges with from==nullptr sort first. Call after BuildGraph.
+    void SortEdgesByFrom();
     void SetVersion(const std::string &version);
     void CreateHashEdge(Node *node);
     void AddPrimitiveNodes();
-    void CreateHandleRootNode(Node *handleRoot, const std::string &name, size_t count);
+    // Post-translate fixup: restore CONSTANT_POOL sizes from the expanded
+    // (non-compressed pointer) form recorded in rawheap files. The base
+    // implementation is a no-op; V1/V2 translators override it. The halved
+    // restore is approximate (a constant 40 bytes below the true footprint
+    // per pool); see the V1/V2 implementations for the arithmetic.
+    virtual void RecomputeNodeSize() {}
+    void CreateRootNode(Node *root, const std::string &name, size_t count);
+    bool ReadHeapMetaData(FileReader &file, uint32_t section);
+    void CreateMetadataNode(Node *metadataNode);
+    void AddMetadataPropertyNode(Node *metadataNode, const std::string &value, const std::string &propertyName);
+
+    void DoAddGlobalHandleObjectNodes(const std::unordered_map<uint64_t, uint64_t> &globalRefEntries);
 
     static bool ReadSectionInfo(FileReader &file, uint32_t offset, std::vector<uint32_t> &section);
+    // Two-file (hybrid) helpers: split out of TranslateRawheap(dynamic, static, out)
+    // so each step stays small. ParseDynamicRawheap returns an owning pointer
+    // (caller deletes); ParseStaticSnapshot fills the provided parser. Both log
+    // the failure reason and return nullptr/false on error.
+    static RawHeap *ParseDynamicRawheap(const std::string &dynamicPath);
+    static bool ParseStaticSnapshot(const std::string &staticPath, StaticRawheapTranslate &staticParser);
+
+    // Single-file helpers: split out of TranslateRawheap(input, out) so each
+    // format path stays small. Both consume the already-opened `file` (its
+    // cursor is left at 0 after the IsStaticSnapshotFormat probe) and measure
+    // duration from `start`, which the caller captures before opening the file.
+    static bool TranslateStaticSnapshot(FileReader &file, const std::string &inputPath,
+                                        const std::string &outputPath,
+                                        std::chrono::steady_clock::time_point start);
+    static bool TranslateDynamicRawheap(FileReader &file, const std::string &inputPath,
+                                        const std::string &outputPath,
+                                        std::chrono::steady_clock::time_point start);
+
+    std::unordered_map<StringId, uint64_t> refAddrStrIdMap_ {};  // strId -> refAddr (virtual nodes)
 
 private:
     StringHashMap *strTable_ {nullptr};
@@ -70,11 +152,8 @@ private:
     std::string version_;
     uint32_t nodeIndex_ {0};
 
-#ifdef OHOS_UNIT_TEST
-    std::unordered_set<uint32_t> hashSet_ {};
-#endif
-
     friend class panda::test::HeapDumpTestHelper;
+    friend class SnapshotMerger;
 };
 
 class RawHeapTranslateV1 : public RawHeap {
@@ -84,6 +163,7 @@ public:
 
     bool Parse(FileReader &file, uint32_t rawheapFileSize) override;
     bool Translate() override;
+    void RecomputeNodeSize() override;
 
 private:
     struct AddrTableItem {
@@ -99,25 +179,35 @@ private:
     bool ParseStringTable(FileReader &file);
     bool ReadLocalHandleRoots(FileReader &file);
     bool ReadGlobalHandleRoots(FileReader &file);
+    bool ReadVmRoots(FileReader &file);
+    bool ReadFrameRoots(FileReader &file);
     void AddSyntheticRootNode(std::vector<uint64_t> &roots);
     void SetNodeStringId(const std::vector<uint64_t> &objects, StringId strId);
     Node* FindOrCreateNode(uint64_t addr);
     Node* FindNode(uint64_t addr);
     void AddHandleRootEdges(const std::vector<uint64_t> &handleRoots);
 
-    void FillNodes(Node *node, JSType type);
-    void BuildEdges(Node *node, JSType type);
-    void BuildGlobalEnvEdges(Node *node, JSType type);
-    void BuildArrayEdges(Node *node, JSType type);
-    void BuildFieldEdges(Node *node, JSType type);
-    void BuildJSObjectEdges(Node *node, JSType type);
-    void BuildDictionaryEdges(Node *node, JSType type, bool usePropertyBox);
+    void FillNodes();
+    void BuildEdges(Node *node);
+    void BuildGlobalEnvEdges(Node *node);
+    void BuildArrayEdges(Node *node);
+    void BuildArrayFieldEdges(Node *node, const ArrayLayout &layout);
+    void BuildArrayElementEdges(Node *node, const ArrayLayout &layout);
+    void BuildFieldEdges(Node *node);
+    void BuildJSObjectEdges(Node *node);
+    void BuildDictionaryModeEdges(Node *node, Node *properties);
+    void BuildNonDictionaryModeEdges(Node *node, Node *properties);
+    void BuildJSNativePointerEdges(Node *node);
+    void BuildJSWrappedObjectEdges(Node *node);
+    void BuildNativePointerEdges(Node *node, Node *array, uint32_t dataOffset,
+                                  uint32_t externalPtrOffset, uint32_t length);
     void CreateEdge(Node *node, uint64_t addr, uint32_t nameOrIndex, EdgeType type);
     Node* CreatePrimitiveNode(uint64_t addr);
-    void CreateHClassEdge(Node *node, Node *hclass);
-    EdgeType GenerateEdgeTypeAndRemoveWeak(Node *node, JSType type, uint64_t &addr);
+    void CreateHClassEdge(Node *node);
+    EdgeType GenerateEdgeTypeAndRemoveWeak(Node *node, uint64_t &addr);
 
     static bool IsHeapObject(uint64_t addr);
+    static bool IsHole(uint64_t addr);
     static bool IsWeak(uint64_t addr);
     static void RemoveWeak(uint64_t &addr);
     static constexpr uint64_t TAG_WEAK = 0x01ULL;      // Weak reference tag bit
@@ -141,12 +231,22 @@ private:
 
     static constexpr uint64_t DOUBLE_ENCODE_OFFSET = 1ULL << 48; // Offset for double encoding
 
+    static constexpr uint64_t GLOBAL_HANDLE_OBJECT_OFFSET = 6; // V2 Global Handle Object offset
+    bool ReadGlobalRefEntries(FileReader &file);
+    void AddGlobalHandleObjectNodes();
+    bool BuildGlobalRefEdge(Node *node, StringId objectStrId);
+
     MetaParser *metaParser_ {nullptr};
     std::vector<char *> mem_ {};
     std::vector<uint32_t> sections_ {};
     std::unordered_map<uint64_t, Node *> nodesMap_ {};
     std::vector<uint64_t> localHandleRoots_;
     std::vector<uint64_t> globalHandleRoots_;
+    std::vector<uint64_t> vmRoots_;
+    std::vector<uint64_t> frameRoots_;
+    std::unordered_map<uint64_t, uint64_t> globalRefEntries_;  // refAddr -> heapObjAddr
+    bool globalRefTrackingEnabled_ {false};
+    Node *globalHandleObject_ {nullptr};
     friend class panda::test::HeapDumpTestHelper;
     friend class panda::test::RawHeapTranslateV1TestHelper;
 };
@@ -158,8 +258,16 @@ public:
 
     bool Parse(FileReader &file, uint32_t rawheapFileSize) override;
     bool Translate() override;
+    void RecomputeNodeSize() override;
 
 private:
+    struct IndexedReference {
+        size_t index;
+        Node *node;
+    };
+
+    using IndexedReferences = std::vector<IndexedReference>;
+
     struct AddrTableItemV2 {
         uint32_t syntheticAddr;
         uint32_t size;
@@ -174,13 +282,23 @@ private:
     bool ParseStringTable(FileReader &file);
     bool ReadLocalHandleRoots(FileReader &file);
     bool ReadGlobalHandleRoots(FileReader &file);
+    bool ReadVmRoots(FileReader &file);
+    bool ReadFrameRoots(FileReader &file);
     void AddSyntheticRootNode(std::vector<uint32_t> &roots);
     Node* FindNode(uint32_t addr);
     void AddHandleRootEdges(const std::vector<uint32_t> &handleRoots);
+    bool ReadGlobalRefEntries(FileReader &file);
+    void AddGlobalHandleObjectNodes();
+    bool BuildGlobalRefEdge(Node *node, StringId objectStrId);
 
     void FillNodes();
     void BuildEdges(Node *node);
     void BuildArrayEdges(Node *node);
+    IndexedReferences ReadArrayReferences(Node *node);
+    void BuildLegacyArrayEdges(Node *node, const IndexedReferences &refs);
+    void BuildArrayFieldEdges(Node *node, const ArrayLayout &layout, const IndexedReferences &refs);
+    void BuildArrayElementEdges(Node *node, const ArrayLayout &layout, const IndexedReferences &refs);
+    static Node *FindReferenceAt(const IndexedReferences &refs, size_t index);
     void BuildFieldEdges(Node *node, std::vector<Node *> &refs);
     void BuildJSObjectEdges(Node *node, std::vector<Node *> &refs, uint32_t endOffset);
     void CreateEdge(Node *node, Node *to, uint32_t nameOrIndex, EdgeType type);
@@ -196,9 +314,18 @@ private:
     Node *syntheticRoot_ {nullptr};
     Node *localHandleRoot_ {nullptr};
     Node *globalHandleRoot_ {nullptr};
+    Node *vmRoot_ {nullptr};
+    Node *frameRoot_ {nullptr};
+    Node *metadataNode_ {nullptr};
+    Node *globalHandleObject_ {nullptr};
 
     std::vector<uint32_t> localHandleRoots_;
     std::vector<uint32_t> globalHandleRoots_;
+    std::vector<uint32_t> vmRoots_;
+    std::vector<uint32_t> frameRoots_;
+    std::unordered_map<uint64_t, uint64_t> globalRefEntries_;  // refAddr -> heapObjAddr
+    bool globalRefTrackingEnabled_ {false};
+    static constexpr uint64_t GLOBAL_HANDLE_OBJECT_OFFSET = 6; // V2 Global Handle Object offset
     friend class panda::test::HeapDumpTestHelper;
     friend class panda::test::RawHeapTranslateV2TestHelper;
 };

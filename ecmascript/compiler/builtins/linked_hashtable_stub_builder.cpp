@@ -18,9 +18,11 @@
 #include "ecmascript/compiler/call_stub_builder.h"
 #include "ecmascript/compiler/hash_stub_builder.h"
 #include "ecmascript/compiler/new_object_stub_builder.h"
-#include "ecmascript/linked_hash_table.h"
 #include "ecmascript/js_set.h"
 #include "ecmascript/js_map.h"
+#include "ecmascript/linked_hash_table.h"
+#include "ecmascript/shared_objects/js_shared_set.h"
+#include "ecmascript/shared_objects/js_shared_map.h"
 
 namespace panda::ecmascript::kungfu {
 template <typename LinkedHashTableType, typename LinkedHashTableObject>
@@ -353,7 +355,12 @@ GateRef LinkedHashTableStubBuilder<LinkedHashTableType, LinkedHashTableObject>::
     // new LinkedHashTable
     GateRef length = CalNewTaggedArrayLength(numberOfElements);
     NewObjectStubBuilder newBuilder(this);
-    GateRef array = newBuilder.NewTaggedArray(glue_, length);
+    GateRef array;
+    if (!isShared_) {
+        array = newBuilder.NewTaggedArray(glue_, length);
+    } else {
+        array = newBuilder.NewSTaggedArray(glue_, length);
+    }
 
     Label noException(env);
     BRANCH(TaggedIsException(array), &exit, &noException);
@@ -379,7 +386,6 @@ GateRef LinkedHashTableStubBuilder<LinkedHashTableType, LinkedHashTableObject>::
     Label entry(env);
     env->SubCfgEntry(&entry);
     Label exit(env);
-    Label setLinked(env);
     DEFVARIABLE(result, VariableType::JS_ANY(), linkedTable);
 
     Label reuseExistingTable(env);
@@ -433,7 +439,6 @@ GateRef LinkedHashTableStubBuilder<LinkedHashTableType, LinkedHashTableObject>::
     auto env = GetEnvironment();
     Label entry(env);
     env->SubCfgEntry(&entry);
-    Label exit(env);
     DEFVARIABLE(res, VariableType::JS_ANY(), Undefined());
     DEFVARIABLE(linkedTable, VariableType::JS_ANY(), srcLinkedTable);
 
@@ -443,76 +448,43 @@ GateRef LinkedHashTableStubBuilder<LinkedHashTableType, LinkedHashTableObject>::
     DEFVARIABLE(totalElements, VariableType::INT32(), tmpTotalElements);
     DEFVARIABLE(index, VariableType::INT32(), Int32(0));
 
-    Label loopHead(env);
-    Label loopEnd(env);
-    Label next(env);
-    Label loopExit(env);
-    Jump(&loopHead);
-    LoopBegin(&loopHead);
-    {
-        BRANCH(Int32LessThan(*index, *totalElements), &next, &loopExit);
-        Bind(&next);
+    IR_WHILE (Int32LessThan(*index, *totalElements)) {
         GateRef valueIndex = *index;
 
         GateRef key = GetKey(*linkedTable, *index);
         index = Int32Add(*index, Int32(1));
-        Label keyNotHole(env);
-        BRANCH(TaggedIsHole(key), &loopEnd, &keyNotHole);
-        Bind(&keyNotHole);
+        IR_IF (TaggedIsHole(key)) {
+            IR_CONTINUE();
+        }
 
         GateRef value = key;
         if constexpr (std::is_same_v<LinkedHashTableType, LinkedHashMap>) {
             value = GetValue(*linkedTable, valueIndex);
         }
-        Label hasException(env);
-        Label notHasException(env);
         JSCallArgs callArgs(JSCallMode::CALL_THIS_ARG3_WITH_RETURN);
         callArgs.callThisArg3WithReturnArgs = { thisArg, value, key, thisValue };
         CallStubBuilder callBuilder(this, glue_, callbackFnHandle, Int32(NUM_MANDATORY_JSFUNC_ARGS), 0, nullptr,
-            Circuit::NullGate(), callArgs, ProfileOperation(), false);
+                                    callArgs, ProfileOperation(), false);
         GateRef retValue = callBuilder.JSCallDispatch();
-        BRANCH(HasPendingException(glue_), &hasException, &notHasException);
-        Bind(&hasException);
-        {
+        IR_IF (HasPendingException(glue_)) {
             res = retValue;
-            Jump(&exit);
-        }
-        Bind(&notHasException);
-        {
+            IR_BREAK();
+        } IR_ELSE {
             // Maybe add or delete, get next table
             GateRef tmpNextTable = GetNextTable(*linkedTable);
             DEFVARIABLE(nextTable, VariableType::JS_ANY(), tmpNextTable);
-            Label loopHead1(env);
-            Label loopEnd1(env);
-            Label next1(env);
-            Label loopExit1(env);
-            Jump(&loopHead1);
-            LoopBegin(&loopHead1);
-            {
-                BRANCH(TaggedIsHole(*nextTable), &loopExit1, &next1);
-                Bind(&next1);
+            IR_WHILE (BoolNot(TaggedIsHole(*nextTable))) {
                 GateRef deleted = GetDeletedElementsAt(*linkedTable, *index);
                 index = Int32Sub(*index, deleted);
                 linkedTable = *nextTable;
                 nextTable = GetNextTable(*linkedTable);
-                Jump(&loopEnd1);
             }
-            Bind(&loopEnd1);
-            LoopEnd(&loopHead1);
-            Bind(&loopExit1);
             // update totalElements
             GateRef numberOfEle = GetNumberOfElements(*linkedTable);
             GateRef numberOfDeletedEle = GetNumberOfDeletedElements(*linkedTable);
             totalElements = Int32Add(numberOfEle, numberOfDeletedEle);
-            Jump(&loopEnd);
         }
     }
-    Bind(&loopEnd);
-    LoopEnd(&loopHead);
-    Bind(&loopExit);
-    Jump(&exit);
-
-    Bind(&exit);
     env->SubCfgExit();
     return *res;
 }
@@ -520,6 +492,59 @@ GateRef LinkedHashTableStubBuilder<LinkedHashTableType, LinkedHashTableObject>::
 template GateRef LinkedHashTableStubBuilder<LinkedHashMap, LinkedHashMapObject>::ForEach(GateRef thisValue,
     GateRef linkedTable, GateRef callbackFnHandle, GateRef thisArg);
 template GateRef LinkedHashTableStubBuilder<LinkedHashSet, LinkedHashSetObject>::ForEach(GateRef thisValue,
+    GateRef linkedTable, GateRef callbackFnHandle, GateRef thisArg);
+
+// @ref panda::ecmascript::builtins::BuiltinsSharedMap/BuiltinsSharedSet::ForEach() while loop
+template <typename LinkedHashTableType, typename LinkedHashTableObject>
+GateRef LinkedHashTableStubBuilder<LinkedHashTableType, LinkedHashTableObject>::SendableForEach(GateRef thisValue,
+    GateRef linkedTable, GateRef callbackFnHandle, GateRef thisArg)
+{
+    auto env = GetEnvironment();
+    Label entry(env);
+    env->SubCfgEntry(&entry);
+    DEFVARIABLE(res, VariableType::JS_ANY(), Undefined());
+    DEFVARIABLE(index, VariableType::INT32(), Int32(0));
+
+    // The read scope guarantees the table is not rehashed during the iteration:
+    // linkedTable and totalElements stay constant, mirroring the C++ handles.
+    GateRef numberOfElements = GetNumberOfElements(linkedTable);
+    GateRef numberOfDeletedElements = GetNumberOfDeletedElements(linkedTable);
+    GateRef totalElements = Int32Add(numberOfElements, numberOfDeletedElements);
+
+    IR_WHILE (Int32LessThan(*index, totalElements)) {
+        GateRef valueIndex = *index;
+
+        GateRef key = GetKey(linkedTable, *index);
+        index = Int32Add(*index, Int32(1));
+        IR_IF (TaggedIsHole(key)) {
+            IR_CONTINUE();
+        }
+
+        GateRef value;
+        if constexpr (std::is_same_v<LinkedHashTableType, LinkedHashMap>) {
+            value = GetValue(linkedTable, valueIndex);
+        } else {
+            // Set: the forEach callback receives (key, key, set).
+            value = key;
+        }
+        JSCallArgs callArgs(JSCallMode::CALL_THIS_ARG3_WITH_RETURN);
+        callArgs.callThisArg3WithReturnArgs = { thisArg, value, key, thisValue };
+        CallStubBuilder callBuilder(this, glue_, callbackFnHandle, Int32(NUM_MANDATORY_JSFUNC_ARGS), 0, nullptr,
+                                    callArgs, ProfileOperation(), false);
+        GateRef retValue = callBuilder.JSCallDispatch();
+        IR_IF (HasPendingException(glue_)) {
+            res = retValue;
+            IR_BREAK();
+        }
+    }
+    auto ret = *res;
+    env->SubCfgExit();
+    return ret;
+}
+
+template GateRef LinkedHashTableStubBuilder<LinkedHashMap, LinkedHashMapObject>::SendableForEach(GateRef thisValue,
+    GateRef linkedTable, GateRef callbackFnHandle, GateRef thisArg);
+template GateRef LinkedHashTableStubBuilder<LinkedHashSet, LinkedHashSetObject>::SendableForEach(GateRef thisValue,
     GateRef linkedTable, GateRef callbackFnHandle, GateRef thisArg);
 
 template <typename LinkedHashTableType, typename LinkedHashTableObject>
@@ -626,15 +651,32 @@ void LinkedHashTableStubBuilder<LinkedHashTableType, LinkedHashTableObject>::Sto
     GateRef newTargetHClass, Variable& returnValue)
 {
     NewObjectStubBuilder newBuilder(this);
-    GateRef res = newBuilder.NewJSObject(glue_, newTargetHClass);
+    GateRef res;
+    if (!isShared_) {
+        res = newBuilder.NewJSObject(glue_, newTargetHClass);
+    } else {
+        res = newBuilder.NewSObject(glue_, newTargetHClass);
+    }
     returnValue.WriteVariable(res);
     GateRef table;
     if constexpr (std::is_same_v<LinkedHashTableType, LinkedHashMap>) {
         table = Create(Int32(LinkedHashMap::MIN_CAPACITY));
-        Store(VariableType::JS_ANY(), glue_, *returnValue, IntPtr(JSMap::LINKED_MAP_OFFSET), table);
+        if (isShared_) {
+            Store(VariableType::JS_ANY(), glue_, *returnValue, IntPtr(JSSharedMap::LINKED_MAP_OFFSET), table);
+            GateRef modRecordOffset = IntPtr(JSSharedMap::MOD_RECORD_OFFSET);
+            Store(VariableType::INT32(), glue_, *returnValue, modRecordOffset, Int32(0));
+        } else {
+            Store(VariableType::JS_ANY(), glue_, *returnValue, IntPtr(JSMap::LINKED_MAP_OFFSET), table);
+        }
     } else if constexpr (std::is_same_v<LinkedHashTableType, LinkedHashSet>) {
         table = Create(Int32(LinkedHashSet::MIN_CAPACITY));
-        Store(VariableType::JS_ANY(), glue_, *returnValue, IntPtr(JSSet::LINKED_SET_OFFSET), table);
+        if (isShared_) {
+            Store(VariableType::JS_ANY(), glue_, *returnValue, IntPtr(JSSharedSet::LINKED_SET_OFFSET), table);
+            GateRef modRecordOffset = IntPtr(JSSharedSet::MOD_RECORD_OFFSET);
+            Store(VariableType::INT32(), glue_, *returnValue, modRecordOffset, Int32(0));
+        } else {
+            Store(VariableType::JS_ANY(), glue_, *returnValue, IntPtr(JSSet::LINKED_SET_OFFSET), table);
+        }
     }
 }
 
@@ -708,6 +750,76 @@ template void LinkedHashTableStubBuilder<LinkedHashSet, LinkedHashSetObject>::Ge
     GateRef nativeCode, GateRef func, GateRef newTarget, GateRef thisValue, GateRef numArgs,
     GateRef arg0, GateRef argv);
 
+// @ref panda::ecmascript::builtins::BuiltinsSharedMap::Constructor()
+// @ref panda::ecmascript::builtins::BuiltinsSharedSet::Constructor()
+template <typename LinkedHashTableType, typename LinkedHashTableObject>
+void LinkedHashTableStubBuilder<LinkedHashTableType, LinkedHashTableObject>::GenSharedMapSetConstructor(
+    GateRef nativeCode, GateRef func, GateRef newTarget, GateRef thisValue, GateRef numArgs, GateRef arg0, GateRef argv)
+{
+    // When using GenSharedMapSetConstructor, isShared_ must be true.
+    auto env = GetEnvironment();
+    DEFVARIABLE(returnValue, VariableType::JS_ANY(), Undefined());
+
+    Label newTargetObject(env);
+    Label newTargetFunction(env);
+    Label slowPath(env);
+    Label slowPath1(env);
+    Label exit(env);
+
+    Label isUndefinedOrNull(env);
+    BRANCH(TaggedIsUndefinedOrNull(arg0), &isUndefinedOrNull, &slowPath1);
+
+    // 1. If NewTarget is undefined, throw exception in slowPath
+    Bind(&isUndefinedOrNull);
+    BRANCH(TaggedIsHeapObject(newTarget), &newTargetObject, &slowPath);
+
+    Bind(&newTargetObject);
+    BRANCH(IsJSFunction(glue_, newTarget), &newTargetFunction, &slowPath);
+
+    Bind(&newTargetFunction);
+    Label fastGetHClass(env);
+    GateRef mapOrSetFunc;
+    if constexpr (std::is_same_v<LinkedHashTableType, LinkedHashMap>) {
+        mapOrSetFunc = GetGlobalEnvValue(VariableType::JS_ANY(), glue_, GetCurrentGlobalEnv(),
+                                         GlobalEnv::SHARED_BUILTIN_MAP_FUNCTION_INDEX);
+    } else if constexpr (std::is_same_v<LinkedHashTableType, LinkedHashSet>) {
+        mapOrSetFunc = GetGlobalEnvValue(VariableType::JS_ANY(), glue_, GetCurrentGlobalEnv(),
+                                         GlobalEnv::SHARED_BUILTIN_SET_FUNCTION_INDEX);
+    }
+
+    GateRef newTargetHClass =
+        Load(VariableType::JS_ANY(), glue_, newTarget, IntPtr(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
+    BRANCH(LogicAndBuilder(env).And(Equal(mapOrSetFunc, newTarget)).And(IsJSHClass(glue_, newTargetHClass)).Done(),
+        &fastGetHClass, &slowPath1);
+
+    Bind(&fastGetHClass);
+    StoreHashTableToNewObject(newTargetHClass, returnValue);
+    Jump(&exit);
+
+    Bind(&slowPath1);
+    {
+        returnValue = CallBuiltinRuntimeWithNewTarget(glue_,
+            { glue_, nativeCode, func, thisValue, numArgs, argv, newTarget });
+        Jump(&exit);
+    }
+    Bind(&slowPath);
+    {
+        returnValue = CallBuiltinRuntime(glue_,
+            { glue_, nativeCode, func, thisValue, numArgs, argv }, true);
+        Jump(&exit);
+    }
+
+    Bind(&exit);
+    Return(*returnValue);
+}
+
+template void LinkedHashTableStubBuilder<LinkedHashMap, LinkedHashMapObject>::GenSharedMapSetConstructor(
+    GateRef nativeCode, GateRef func, GateRef newTarget, GateRef thisValue, GateRef numArgs,
+    GateRef arg0, GateRef argv);
+template void LinkedHashTableStubBuilder<LinkedHashSet, LinkedHashSetObject>::GenSharedMapSetConstructor(
+    GateRef nativeCode, GateRef func, GateRef newTarget, GateRef thisValue, GateRef numArgs,
+    GateRef arg0, GateRef argv);
+
 template <typename LinkedHashTableType, typename LinkedHashTableObject>
 GateRef LinkedHashTableStubBuilder<LinkedHashTableType, LinkedHashTableObject>::GetLinked(GateRef jsThis)
 {
@@ -777,10 +889,10 @@ GateRef LinkedHashTableStubBuilder<LinkedHashTableType, LinkedHashTableObject>::
 {
     int32_t linkedTableOffset = 0;
     if constexpr (std::is_same_v<LinkedHashTableType, LinkedHashMap>) {
-        linkedTableOffset = JSMap::LINKED_MAP_OFFSET;
+        linkedTableOffset = isShared_ ? JSSharedMap::LINKED_MAP_OFFSET : JSMap::LINKED_MAP_OFFSET;
     } else {
         static_assert(std::is_same_v<LinkedHashTableType, LinkedHashSet>);
-        linkedTableOffset = JSSet::LINKED_SET_OFFSET;
+        linkedTableOffset = isShared_ ? JSSharedSet::LINKED_SET_OFFSET : JSSet::LINKED_SET_OFFSET;
     }
     return IntPtr(linkedTableOffset);
 }

@@ -18,6 +18,7 @@
 #include <string>
 #include <utility>
 
+#include "ecmascript/aot_literal_info.h"
 #include "ecmascript/base/file_header.h"
 #include "ecmascript/compiler/aot_file/an_file_data_manager.h"
 #include "ecmascript/compiler/aot_file/an_file_info.h"
@@ -42,123 +43,6 @@ namespace kungfu {
     class ArkStackMapParser;
 } // namespace kungfu
 
-/*                  AOTLiteralInfo
- *      +-----------------------------------+----
- *      |              ...                  |  ^
- *      |              ...                  |  |
- *      | cache(store function entry index) |  AOT Function Entry Index, if its value is -1,
- *      |              ...                  |  means the function has not been compiled with AOT.
- *      |              ...                  |  v
- *      +-----------------------------------+----
- *      |         Literal Type              |  JSTaggedValue(int32_t)
- *      +-----------------------------------+----
- *      |      AOT Instance Hclass (IHC)    |  JSTaggedValue(HClass)
- *      +-----------------------------------+----
- *      |   AOT Constructor Hclass (CHC)    |  JSTaggedValue(HClass)
- *      +-----------------------------------+----
- */
-class AOTLiteralInfo : public TaggedArray {
-public:
-    static constexpr size_t NO_FUNC_ENTRY_VALUE = -1;
-    static constexpr size_t AOT_CHC_INDEX = 1;
-    static constexpr size_t AOT_IHC_INDEX = 2;
-    static constexpr size_t LITERAL_TYPE_INDEX = 3;
-    static constexpr size_t RESERVED_LENGTH = LITERAL_TYPE_INDEX;
-
-    static constexpr int32_t METHOD_LITERAL_TYPE = 1;
-    static constexpr int32_t INVALID_LITERAL_TYPE = 0;
-
-    static AOTLiteralInfo* Cast(TaggedObject* object)
-    {
-        ASSERT(JSTaggedValue(object).IsTaggedArray());
-        return static_cast<AOTLiteralInfo*>(object);
-    }
-
-    static size_t ComputeSize(uint32_t cacheSize)
-    {
-        return TaggedArray::ComputeSize(JSTaggedValue::TaggedTypeSize(), cacheSize + RESERVED_LENGTH);
-    }
-
-    void InitializeWithSpecialValue(JSTaggedValue initValue, uint32_t capacity,
-                                    uint32_t extraLength = 0);
-
-    inline uint32_t GetCacheLength() const
-    {
-        return GetLength() - RESERVED_LENGTH;
-    }
-
-    inline void SetIhcPrimitive(JSTaggedValue value)
-    {
-        Barriers::SetPrimitive(GetData(), GetIhcOffset(), value.GetRawData());
-    }
-
-    inline void SetChcPrimitive(JSTaggedValue value)
-    {
-        Barriers::SetPrimitive(GetData(), GetChcOffset(), value.GetRawData());
-    }
-
-    inline void SetIhc(JSThread *thread, JSTaggedValue value)
-    {
-        if (value.IsHeapObject()) {
-            Barriers::SetObject(thread, GetData(), GetIhcOffset(), value.GetRawData());
-        } else {
-            Barriers::SetPrimitive<JSTaggedType>(GetData(), GetIhcOffset(), value.GetRawData());
-        }
-    }
-
-    inline JSTaggedValue GetIhc(JSThread *thread) const
-    {
-        return JSTaggedValue(Barriers::GetTaggedValue(thread, GetData(), GetIhcOffset()));
-    }
-
-    inline void SetChc(JSThread *thread, JSTaggedValue value)
-    {
-        if (value.IsHeapObject()) {
-            Barriers::SetObject(thread, GetData(), GetChcOffset(), value.GetRawData());
-        } else {
-            Barriers::SetPrimitive<JSTaggedType>(GetData(), GetChcOffset(), value.GetRawData());
-        }
-    }
-
-    inline JSTaggedValue GetChc(JSThread *thread) const
-    {
-        return JSTaggedValue(Barriers::GetTaggedValue(thread, GetData(), GetChcOffset()));
-    }
-
-    inline void SetLiteralType(JSTaggedValue value)
-    {
-        Barriers::SetPrimitive(GetData(), GetLiteralTypeOffset(), value.GetRawData());
-    }
-
-    inline int GetLiteralType() const
-    {
-        return JSTaggedValue(Barriers::GetPrimitive<JSTaggedValue>(GetData(), GetLiteralTypeOffset())).GetInt();
-    }
-
-    void SetObjectToCache(JSThread *thread, uint32_t index, JSTaggedValue value);
-
-    inline JSTaggedValue GetObjectFromCache(JSThread *thread, uint32_t index) const
-    {
-        return Get(thread, index);
-    }
-
-private:
-    inline size_t GetIhcOffset() const
-    {
-        return JSTaggedValue::TaggedTypeSize() * (GetLength() - AOT_IHC_INDEX);
-    }
-
-    inline size_t GetChcOffset() const
-    {
-        return JSTaggedValue::TaggedTypeSize() * (GetLength() - AOT_CHC_INDEX);
-    }
-
-    inline size_t GetLiteralTypeOffset() const
-    {
-        return JSTaggedValue::TaggedTypeSize() * (GetLength() - LITERAL_TYPE_INDEX);
-    }
-};
-
 using JsAotReaderCallback = std::function<bool(std::string fileName, uint8_t **buff, size_t *buffSize)>;
 
 class AOTFileManager {
@@ -176,6 +60,8 @@ public:
     static bool TryReadLock();
     static bool InsideStub(uintptr_t pc);
     static bool InsideAOT(uintptr_t pc);
+    // Signal-handler-safe: non-blocking range check; false on lock contention.
+    static bool TryInsideStubOrAot(uintptr_t pc);
     static bool AOTFileExist(const std::string &aotFileName, const std::string &extension);
     PUBLIC_API bool IsEnableAOT() const;
     void Iterate(RootVisitor& v);
@@ -209,9 +95,6 @@ public:
 
     static void DumpAOTInfo() DUMP_API_ATTR;
 
-    uint64_t GetStubFileStart();
-    uint64_t GetStubFileSize();
-
 private:
     using MultiConstantPoolMap = CMap<int32_t, JSTaggedValue>; // key: constpool id, value: constantpool
 
@@ -228,10 +111,15 @@ private:
     void LoadingBaselineStubsLog(size_t id, Address entry);
     void LoadingRuntimeStubsLog(size_t id, Address entry);
     static void PrintAOTEntry(const JSPandaFile *file, const Method *method, uintptr_t entry);
+#if ENABLE_MEMORY_OPTIMIZATION
+    void InitializeStubEntries(const StubFileInfo &stubInfo);
+    static void AdjustBCStubAndDebuggerStubEntries(JSThread *thread,
+                                                   const StubFileInfo &stubInfo);
+#else
     void InitializeStubEntries(const std::vector<AnFileInfo::FuncEntryDes>& stubs);
     static void AdjustBCStubAndDebuggerStubEntries(JSThread *thread,
-                                                   const std::vector<AOTFileInfo::FuncEntryDes> &stubs,
-                                                   const AsmInterParsedOption &asmInterOpt);
+                                                   const std::vector<AOTFileInfo::FuncEntryDes> &stubs);
+#endif
     EcmaVM *vm_ {nullptr};
     ObjectFactory *factory_ {nullptr};
     AIDatum aiDatum_ {};

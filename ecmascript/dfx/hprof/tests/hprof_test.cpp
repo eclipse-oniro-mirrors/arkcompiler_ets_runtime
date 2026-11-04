@@ -63,7 +63,7 @@
 #include "ecmascript/js_set_iterator.h"
 #include "ecmascript/js_string_iterator.h"
 #include "ecmascript/js_tagged_number.h"
-#include "ecmascript/js_tagged_value-inl.h"
+#include "ecmascript/js_tagged_value_wrapper-inl.h"
 #include "ecmascript/js_thread.h"
 #include "ecmascript/js_typed_array.h"
 #include "ecmascript/js_weak_container.h"
@@ -72,7 +72,6 @@
 #include "ecmascript/linked_hash_table.h"
 #include "ecmascript/mem/assert_scope.h"
 #include "ecmascript/mem/c_containers.h"
-#include "ecmascript/mem/machine_code.h"
 #include "ecmascript/object_factory.h"
 #include "ecmascript/tagged_array.h"
 #include "ecmascript/tagged_dictionary.h"
@@ -399,6 +398,13 @@ HWTEST_F_L0(HProfTest, TestSetDumpFormatInRandomNum)
         EcmaVM *vm = instance;
         size_t maxEnumNum = static_cast<size_t>(DumpFormat::OTHER) + 1;
         DumpFormat dumpFormat = static_cast<DumpFormat>(size % maxEnumNum);
+
+#if defined(PANDA_TARGET_ARM32)
+        if (dumpFormat == DumpFormat::BINARY) {
+            dumpFormat = DumpFormat::JSON;
+        }
+#endif
+
         DumpSnapShotOption dumpOption;
         dumpOption.dumpFormat = dumpFormat;
         dumpOption.isVmMode = true;

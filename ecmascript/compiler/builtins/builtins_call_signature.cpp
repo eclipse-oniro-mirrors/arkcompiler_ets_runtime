@@ -18,21 +18,29 @@
 #include "ecmascript/global_env_fields.h"
 
 namespace panda::ecmascript::kungfu {
+
+// Template factory for builtins stubs: takes an extra Gate::InvalidGateRef arg.
+template <typename BuilderT>
+static void *BuiltinStubBuilderFactory(void *env, void *data)
+{
+    return static_cast<void *>(
+        new BuilderT(static_cast<CallSignature *>(data),
+                     static_cast<Environment *>(env), Gate::InvalidGateRef));
+}
+
 CallSignature BuiltinsStubCSigns::callSigns_[BuiltinsStubCSigns::NUM_OF_BUILTINS_STUBS_EXTEND];
 CallSignature BuiltinsStubCSigns::builtinsCSign_;
 CallSignature BuiltinsStubCSigns::builtinsWithArgvCSign_;
 
 void BuiltinsStubCSigns::Initialize()
 {
-#define COMMON_INIT(name)                                               \
-    callSigns_[ID_##name].SetID(ID_##name);                             \
-    callSigns_[ID_##name].SetName(std::string("BuiltinStub_") + #name); \
-    callSigns_[ID_##name].SetConstructor(                               \
-    [](void* env) {                                                     \
-        return static_cast<void*>(                                      \
-            new name##StubBuilder(&callSigns_[ID_##name],               \
-                static_cast<Environment*>(env), Gate::InvalidGateRef)); \
-    });
+#define COMMON_INIT(name)                                                                             \
+    {                                                                                                 \
+        callSigns_[ID_##name].SetID(ID_##name);                                                       \
+        callSigns_[ID_##name].SetName(std::string("BuiltinStub_") + #name);                           \
+        callSigns_[ID_##name].SetConstructor(                                                         \
+            TargetConstructor(BuiltinStubBuilderFactory<name##StubBuilder>, &callSigns_[ID_##name])); \
+    }
 
 #define INIT_BUILTINS_METHOD(name)                                   \
     BuiltinsCallSignature::Initialize(&callSigns_[ID_##name]);       \
@@ -125,6 +133,20 @@ size_t BuiltinsStubCSigns::GetGlobalEnvIndex(ID builtinId)
         {ID::Float64ArrayConstructor, GlobalEnvField::FLOAT64_ARRAY_FUNCTION_INDEX},
         {ID::BigInt64ArrayConstructor, GlobalEnvField::BIGINT64_ARRAY_FUNCTION_INDEX},
         {ID::BigUint64ArrayConstructor, GlobalEnvField::BIGUINT64_ARRAY_FUNCTION_INDEX},
+        {ID::SharedArrayConstructor, GlobalEnvField::SHARED_ARRAY_FUNCTION_INDEX},
+        {ID::SharedSetConstructor, GlobalEnvField::SHARED_BUILTIN_SET_FUNCTION_INDEX},
+        {ID::SharedMapConstructor, GlobalEnvField::SHARED_BUILTIN_MAP_FUNCTION_INDEX},
+        {ID::SharedInt8ArrayConstructor, GlobalEnvField::SHARED_INT8_ARRAY_FUNCTION_INDEX},
+        {ID::SharedUint8ArrayConstructor, GlobalEnvField::SHARED_UINT8_ARRAY_FUNCTION_INDEX},
+        {ID::SharedUint8ClampedArrayConstructor, GlobalEnvField::SHARED_UINT8_CLAMPED_ARRAY_FUNCTION_INDEX},
+        {ID::SharedInt16ArrayConstructor, GlobalEnvField::SHARED_INT16_ARRAY_FUNCTION_INDEX},
+        {ID::SharedUint16ArrayConstructor, GlobalEnvField::SHARED_UINT16_ARRAY_FUNCTION_INDEX},
+        {ID::SharedInt32ArrayConstructor, GlobalEnvField::SHARED_INT32_ARRAY_FUNCTION_INDEX},
+        {ID::SharedUint32ArrayConstructor, GlobalEnvField::SHARED_UINT32_ARRAY_FUNCTION_INDEX},
+        {ID::SharedFloat32ArrayConstructor, GlobalEnvField::SHARED_FLOAT32_ARRAY_FUNCTION_INDEX},
+        {ID::SharedFloat64ArrayConstructor, GlobalEnvField::SHARED_FLOAT64_ARRAY_FUNCTION_INDEX},
+        {ID::SharedBigInt64ArrayConstructor, GlobalEnvField::SHARED_BIGINT64_ARRAY_FUNCTION_INDEX},
+        {ID::SharedBigUint64ArrayConstructor, GlobalEnvField::SHARED_BIGUINT64_ARRAY_FUNCTION_INDEX},
     };
     if (globalEnvIndex.find(builtinId) != globalEnvIndex.end()) {
         return static_cast<size_t>(globalEnvIndex.at(builtinId));

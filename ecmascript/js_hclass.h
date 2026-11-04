@@ -18,9 +18,10 @@
 
 #include "ecmascript/cross_vm/js_hclass_hybrid.h"
 
+#include "ecmascript/base/config.h"
 #include "ecmascript/ecma_macros.h"
 #include "ecmascript/elements.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/mem/tagged_object.h"
 #include "ecmascript/mem/barriers.h"
 #include "ecmascript/mem/slots.h"
@@ -28,6 +29,7 @@
 #include "ecmascript/property_attributes.h"
 #include "ecmascript/string/composite_base_class.h"
 
+#include "ecmascript/pgo_profiler/pgo_utils.h"
 #include "libpandabase/utils/bit_field.h"
 
 /*
@@ -246,7 +248,6 @@ struct Reference;
         V(HCLASS),       /* ///////////////////////////////////////////////////////////////////////////////-PADDING */ \
         V(BIGINT),       /* ///////////////////////////////////////////////////////////////////////////////-PADDING */ \
         V(TAGGED_ARRAY), /* ///////////////////////////////////////////////////////////////////////////////-PADDING */ \
-        V(FUNC_SLOT),    /* ///////////////////////////////////////////////////////////////////////////////-PADDING */ \
         V(MUTANT_TAGGED_ARRAY), /* ////////////////////////////////////////////////////////////////////////-PADDING */ \
         V(BYTE_ARRAY),   /* ///////////////////////////////////////////////////////////////////////////////-PADDING */ \
         V(LEXICAL_ENV),  /* ///////////////////////////////////////////////////////////////////////////////-PADDING */ \
@@ -413,6 +414,7 @@ public:
         PropertyAttributes::MAX_FAST_PROPS_CAPACITY_LOG2 + OFFSET_MAX_OBJECT_SIZE_IN_WORDS_WITHOUT_INLINED;
     static constexpr int MAX_OBJECT_SIZE_IN_WORDS = (1U << OFFSET_MAX_OBJECT_SIZE_IN_WORDS) - 1;
     static constexpr uint8_t SLACK_TRACKING_COUNT = (1 << CONSTRUCTION_COUNTER_BITFIELD_NUM) - 1;
+    static constexpr int OPTIMIZED_FUNCTION_CAPACITY_OF_IN_OBJECTS = 3;
 
     using NumberOfPropsBits = BitField<uint32_t, 0, PropertyAttributes::MAX_FAST_PROPS_CAPACITY_LOG2>;         // 10
     using InlinedPropsStartBits = NumberOfPropsBits::NextField<uint32_t,
@@ -421,6 +423,7 @@ public:
     using HasDeletePropertyBit = ObjectSizeInWordsBits::NextFlag;                                              //
     using IsAllTaggedPropBit = HasDeletePropertyBit::NextFlag;                                                 // 32
     using BitField1LastBit = IsAllTaggedPropBit;
+
     static_assert(BitField1LastBit::START_BIT + BitField1LastBit::SIZE <= sizeof(uint32_t) * BITS_PER_BYTE, "Invalid");
 
     static JSHClass *Cast(const TaggedObject *object)
@@ -449,6 +452,10 @@ public:
                                                     const ElementsKind kind, bool isPrototype);
 
     static void TransitionElementsToDictionary(const JSThread *thread, const JSHandle<JSObject> &obj);
+#if ENABLE_V70_OPTIMIZATION
+    // Elements-only transition: does not normalize named properties.
+    static void TransitionElementsToDictionaryOnly(const JSThread *thread, const JSHandle<JSObject> &obj);
+#endif
     static void OptimizeAsFastElements(const JSThread *thread, JSHandle<JSObject> obj);
     static void OptimizeAsFastProperties(const JSThread *thread, const JSHandle<JSObject> &obj,
                                          const std::vector<int> &indexArray = {}, bool isDictionary = false);
@@ -493,8 +500,8 @@ public:
                                        const JSHandle<JSTaggedValue> &key, PropertyAttributes attr);
     static void TransitionForElementsKindChange(const JSThread *thread, const JSHandle<JSObject> &receiver,
                                          const ElementsKind newKind);
-    static bool IsInitialArrayHClassWithElementsKind(const JSThread *thread, const JSHClass *targetHClass,
-                                                     const ElementsKind targetKind);
+    static bool PUBLIC_API IsInitialArrayHClassWithElementsKind(const JSThread *thread, const JSHClass *targetHClass,
+                                                               const ElementsKind targetKind);
     static bool PUBLIC_API TransitToElementsKindUncheck(const JSThread *thread, const JSHandle<JSObject> &obj,
                                                         ElementsKind newKind);
     static void PUBLIC_API TransitToElementsKind(const JSThread *thread, const JSHandle<JSArray> &array,
@@ -555,9 +562,11 @@ public:
     static bool IsNeedNotifyHclassChangedForAotTransition(const JSThread *thread, const JSHandle<JSHClass> &hclass,
                                                           JSTaggedValue key);
 
+#ifndef EXCLUDE_PGO
     static JSHandle<JSTaggedValue> ParseKeyFromPGOCString(ObjectFactory* factory,
                                                           const CString& key,
                                                           const PGOHandler& handler);
+#endif
 
     static CString GetJSTypeDesc(JSType type);
 
@@ -565,7 +574,7 @@ public:
     {
         SetBitField(0UL);
         SetBitField1(0UL);
-        SetProfileType(0ULL);
+        SetBitField2(0ULL);
     }
 
     inline JSType GetObjectType() const
@@ -753,7 +762,6 @@ public:
             case JSType::SFUNCTION_ENV:
             case JSType::SENDABLE_ENV:
             case JSType::CONSTANT_POOL:
-            case JSType::PROFILE_TYPE_INFO:
             case JSType::IC_INFO:
             case JSType::AOT_LITERAL_INFO:
             case JSType::VTABLE:
@@ -764,11 +772,6 @@ public:
             default:
                 return false;
         }
-    }
-
-    inline bool IsFuncSlot() const
-    {
-        return GetObjectType() == JSType::FUNC_SLOT;
     }
 
     inline bool IsLexicalEnv() const
@@ -1158,6 +1161,66 @@ public:
     inline void SetIsJSShared(bool flag) const
     {
         IsJSSharedBit::Set<uint32_t>(flag, GetBitFieldAddr());
+    }
+
+    // Reserved bits - Newly added bits can be stored in BitField2 high bits
+    // PGO_PROFILE_TYPE_USED_BITS is defined in pgo_utils.h and stays in sync via static_assert in pgo_profile_type.h
+    static constexpr uint64_t PGO_PROFILE_TYPE_MASK = ((1ULL << pgo::PGO_PROFILE_TYPE_USED_BITS) - 1);
+    static constexpr uint64_t BIT_FIELD2_RESERVED_MASK = (~PGO_PROFILE_TYPE_MASK);
+
+    using HasSymbolPropertiesBit = BitField<uint64_t, pgo::PGO_PROFILE_TYPE_USED_BITS, 1>;
+    using MayHaveInterestingPropertiesBit = HasSymbolPropertiesBit::NextFlag;
+    static_assert(MayHaveInterestingPropertiesBit::END_BIT <= sizeof(uint64_t) * BITS_PER_BYTE,
+                  "Optimized flags overflow into uint64_t");
+
+    // Methods for PGO ProfileType - preserves optimized flags in high bits
+    inline uint64_t GetPGOProfileType() const
+    {
+        return GetBitField2() & PGO_PROFILE_TYPE_MASK;
+    }
+
+    inline void SetPGOProfileType(uint64_t pgoType)
+    {
+        uint64_t optimizationBits = GetBitField2() & BIT_FIELD2_RESERVED_MASK;
+        SetBitField2((pgoType & PGO_PROFILE_TYPE_MASK) | optimizationBits);
+    }
+
+    inline void ClearPGOProfileType()
+    {
+        uint64_t optimizationBits = GetBitField2() & BIT_FIELD2_RESERVED_MASK;
+        SetBitField2(optimizationBits);
+    }
+
+    inline bool PGOProfileTypeIsNone() const
+    {
+        return (GetBitField2() & PGO_PROFILE_TYPE_MASK) == 0;
+    }
+
+    inline void SetMayHaveInterestingProperties(bool flag)
+    {
+        uint64_t type = GetBitField2();
+        type = MayHaveInterestingPropertiesBit::Update(type, flag);
+        SetBitField2(type);
+    }
+
+    inline bool MayHaveInterestingProperties() const
+    {
+        return MayHaveInterestingPropertiesBit::Decode(GetBitField2());
+    }
+
+    inline void SetHasSymbolProperties(bool flag)
+    {
+        uint64_t type = GetBitField2();
+        type = HasSymbolPropertiesBit::Update(type, flag);
+        SetBitField2(type);
+        if (flag) {
+            SetMayHaveInterestingProperties(true);
+        }
+    }
+
+    inline bool HasSymbolProperties() const
+    {
+        return HasSymbolPropertiesBit::Decode(GetBitField2());
     }
 
     inline bool IsJSError() const
@@ -1789,11 +1852,15 @@ public:
         return GetObjectType() == JSType::EXTRA_PROFILE_TYPE_INFO;
     }
 
-    // ICInfo is the base for both bare IC containers (IC_INFO) and ProfileTypeInfo (PROFILE_TYPE_INFO).
+    // ICInfo is for bare IC containers (IC_INFO) only, not ProfileTypeInfo.
     inline bool IsICInfo() const
     {
-        JSType jsType = GetObjectType();
-        return jsType == JSType::IC_INFO || jsType == JSType::PROFILE_TYPE_INFO;
+        return GetObjectType() == JSType::IC_INFO;
+    }
+
+    inline bool IsProfileTypeInfo() const
+    {
+        return GetObjectType() == JSType::PROFILE_TYPE_INFO;
     }
 
     inline bool IsProfileTypeInfoCell() const
@@ -2153,8 +2220,8 @@ public:
     ACCESSORS_DCHECK(ProtoChangeMarker, PROTO_CHANGE_MARKER_OFFSET, PROTO_CHANGE_DETAILS_OFFSET, IsString);
     ACCESSORS_DCHECK(ProtoChangeDetails, PROTO_CHANGE_DETAILS_OFFSET, ENUM_CACHE_OFFSET, IsString);
     ACCESSORS_DCHECK(EnumCache, ENUM_CACHE_OFFSET, DEPENDENT_INFOS_OFFSET, IsString);
-    ACCESSORS_DCHECK(DependentInfos, DEPENDENT_INFOS_OFFSET, PROFILE_TYPE_OFFSET, IsString);
-    ACCESSORS_PRIMITIVE_FIELD_DCHECK(ProfileType, uint64_t, PROFILE_TYPE_OFFSET, LAST_OFFSET, IsString);
+    ACCESSORS_DCHECK(DependentInfos, DEPENDENT_INFOS_OFFSET, BIT_FIELD2_OFFSET, IsString);
+    ACCESSORS_PRIMITIVE_FIELD_DCHECK(BitField2, uint64_t, BIT_FIELD2_OFFSET, LAST_OFFSET, IsString);
     DEFINE_ALIGN_SIZE(LAST_OFFSET);
     static_assert(CompositeBaseClass::SIZE >= SIZE,
                   "CompositeBaseClass::SIZE should be larger than JSHClass::SIZE");
@@ -2166,12 +2233,12 @@ public:
     static void SetPrototypeTransition(JSThread *thread, const JSHandle<JSObject> &object,
                                        const JSHandle<JSTaggedValue> &proto,
                                        bool isChangeProto = false);
-    void SetPrototype(const JSThread *thread, JSTaggedValue proto, bool isChangeProto = false);
-    void SetPrototype(const JSThread *thread, const JSHandle<GlobalEnv> &env,
-                      JSTaggedValue proto, bool isChangeProto = false);
-    void PUBLIC_API SetPrototype(const JSThread *thread,
-                                 const JSHandle<JSTaggedValue> &proto,
-                                 bool isChangeProto = false);
+    static void SetPrototype(const JSThread *thread, const JSHandle<JSHClass> &hclass,
+                            JSTaggedValue proto, bool isChangeProto = false);
+    static void SetPrototype(const JSThread *thread, const JSHandle<JSHClass> &hclass,
+                            const JSHandle<GlobalEnv> &env, JSTaggedValue proto, bool isChangeProto = false);
+    static void PUBLIC_API SetPrototype(const JSThread *thread, const JSHandle<JSHClass> &hclass,
+                                        const JSHandle<JSTaggedValue> &proto, bool isChangeProto = false);
     static void OptimizePrototypeForIC(const JSThread *thread, const JSHandle<GlobalEnv> &env,
                                        const JSHandle<JSTaggedValue> &proto,
                                        bool isChangeProto = false);
@@ -2188,8 +2255,9 @@ public:
 
     DECL_DUMP()
 
-    static CString DumpJSType(JSType type);
+    static CString PUBLIC_API DumpJSType(JSType type);
 
+#ifndef EXCLUDE_PGO
     static JSHandle<JSHClass> CreateRootHClassFromPGO(const JSThread* thread,
                                                       const HClassLayoutDesc* desc,
                                                       uint32_t maxNum);
@@ -2204,9 +2272,10 @@ public:
     static bool DumpChildHClassByPGO(const JSThread *thread, const JSHClass* hclass, HClassLayoutDesc* desc);
     static bool UpdateRootLayoutDescByPGO(const JSThread* thread, const JSHClass* hclass, HClassLayoutDesc* rootDesc);
     static bool UpdateChildLayoutDescByPGO(const JSThread* thread, const JSHClass* hclass, HClassLayoutDesc* childDesc);
+#endif
     static std::pair<bool, CString> DumpToString(const JSThread *thread, JSTaggedType hclassVal);
 
-    DECL_VISIT_OBJECT(PROTOTYPE_OFFSET, PROFILE_TYPE_OFFSET);
+    DECL_VISIT_OBJECT(PROTOTYPE_OFFSET, BIT_FIELD2_OFFSET);
     inline JSHClass *FindProtoTransitions(const JSThread *thread, const JSTaggedValue &key,
         const JSTaggedValue &proto);
     inline bool HasTransitions(const JSThread *thread) const
@@ -2257,7 +2326,7 @@ private:
 
     static bool IsJSTypeShared(JSType type);
 
-    inline void Copy(const JSThread *thread, const JSHClass *jshclass);
+    static inline void Copy(const JSThread *thread, JSHandle<JSHClass> newHClass, JSHandle<JSHClass> oldHClass);
 
     uint32_t *GetBitFieldAddr() const
     {

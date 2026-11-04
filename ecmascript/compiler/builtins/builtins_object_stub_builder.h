@@ -56,10 +56,15 @@ private:
     void LayoutInfoGetAllEnumKeys(GateRef end, GateRef offset, GateRef array, GateRef layoutInfo);
     void AssignEnumElementProperty(Variable *res, Label *funcExit, GateRef toAssign, GateRef source);
     void LayoutInfoAssignAllEnumProperty(Variable *res, Label *funcExit, GateRef toAssign, GateRef source);
+    void SharedSourceLayoutAssignAllEnumProperty(Variable *res, Label *funcExit, GateRef toAssign,
+        GateRef source);
+    void SharedSourceLayoutAssignPass(Variable *result, Label *funcExit, GateRef toAssign,
+        GateRef source, bool isStringPass, Variable *stringCount);
     void NameDictionaryAssignAllEnumProperty(Variable *res, Label *funcExit, GateRef toAssign, GateRef source,
         GateRef properties);
     void SlowAssign(Variable *res, Label *funcExit, GateRef toAssign, GateRef source);
     void FastAssign(Variable *res, Label *funcExit, GateRef toAssign, GateRef source);
+    void SharedSourceFastAssign(Variable *res, Label *funcExit, GateRef toAssign, GateRef source);
     void AssignAllEnumProperty(Variable *res, Label *funcExit, GateRef toAssign, GateRef source);
     void Assign(Variable *res, Label *nextIt, Label *funcExit, GateRef toAssign, GateRef source);
 

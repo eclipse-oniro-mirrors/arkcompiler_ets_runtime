@@ -16,6 +16,7 @@
 #include "ecmascript/containers/containers_vector.h"
 
 #include "ecmascript/base/array_helper.h"
+#include "ecmascript/base/sort_helper.h"
 #include "ecmascript/js_array.h"
 #include "ecmascript/js_api/js_api_vector.h"
 #include "ecmascript/tagged_array-inl.h"
@@ -649,6 +650,7 @@ JSTaggedValue ContainersVector::CopyToArray(EcmaRuntimeCallInfo *argv)
     BUILTINS_API_TRACE(thread, Vector, CopyToArray);
     [[maybe_unused]] EcmaHandleScope handleScope(thread);
     JSHandle<JSTaggedValue> self = GetThis(argv);
+
     if (!self->IsJSAPIVector()) {
         if (self->IsJSProxy() && JSHandle<JSProxy>::Cast(self)->GetTarget(thread).IsJSAPIVector()) {
             self = JSHandle<JSTaggedValue>(thread, JSHandle<JSProxy>::Cast(self)->GetTarget(thread));
@@ -660,21 +662,24 @@ JSTaggedValue ContainersVector::CopyToArray(EcmaRuntimeCallInfo *argv)
     if (!arg0->IsJSArray()) {
         return JSTaggedValue::False();
     }
+
     JSHandle<JSAPIVector> vector = JSHandle<JSAPIVector>::Cast(self);
     JSHandle<TaggedArray> vectorElements(thread, vector->GetElements(thread));
     uint32_t vectorLength = static_cast<uint32_t>(vector->GetSize());
+
     JSHandle<JSArray> array = JSHandle<JSArray>::Cast(arg0);
-    JSHandle<TaggedArray> arrayElements(thread, array->GetElements(thread));
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
     uint32_t arrayLength = array->GetArrayLength();
     if (vectorLength <= arrayLength) {
-        TaggedArray::CopyTaggedArrayElement(thread, vectorElements, arrayElements, vectorLength);
+        JSHandle<TaggedArray> newArrayElement = factory->NewAndCopyTaggedArray(vectorElements,
+                                                                               arrayLength, vectorLength);
         for (uint32_t i = vectorLength; i < arrayLength; i++) {
-            arrayElements->Set(thread, i, JSTaggedValue::Undefined());
+            newArrayElement->Set(thread, i, JSTaggedValue::Undefined());
         }
+        array->SetElements(thread, newArrayElement);
     } else {
-        ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
-        JSHandle<TaggedArray> newArrayElement =
-            factory->NewAndCopyTaggedArray(vectorElements, vectorLength, vectorLength);
+        JSHandle<TaggedArray> newArrayElement = factory->NewAndCopyTaggedArray(vectorElements,
+                                                                               vectorLength, vectorLength);
         array->SetElements(thread, newArrayElement);
         array->SetLength(vectorLength);
     }
@@ -749,34 +754,37 @@ JSTaggedValue ContainersVector::Sort(EcmaRuntimeCallInfo *argv)
     }
     JSHandle<JSTaggedValue> callbackFnHandle = GetCallArg(argv, 0);
 
-    JSHandle<TaggedArray> elements(thread, JSHandle<JSAPIVector>::Cast(self)->GetElements(thread));
-    JSMutableHandle<JSTaggedValue> presentValue(thread, JSTaggedValue::Undefined());
-    JSMutableHandle<JSTaggedValue> middleValue(thread, JSTaggedValue::Undefined());
-    JSMutableHandle<JSTaggedValue> previousValue(thread, JSTaggedValue::Undefined());
-    uint32_t length = static_cast<uint32_t>(JSHandle<JSAPIVector>::Cast(self)->GetSize());
-
-    for (uint32_t i = 1; i < length; i++) {
-        uint32_t beginIndex = 0;
-        uint32_t endIndex = i;
-        presentValue.Update(elements->Get(thread, i));
-        while (beginIndex < endIndex) {
-            uint32_t middleIndex = (beginIndex + endIndex) / 2; // 2 : half
-            middleValue.Update(elements->Get(thread, middleIndex));
-            double compareResult = base::ArrayHelper::SortCompare(thread, callbackFnHandle, middleValue, presentValue);
-            RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread);
-            if (compareResult > 0) {
-                endIndex = middleIndex;
-            } else {
-                beginIndex = middleIndex + 1;
-            }
+    JSHandle<JSAPIVector> vector = JSHandle<JSAPIVector>::Cast(self);
+    uint32_t length = static_cast<uint32_t>(vector->GetSize());
+    if (length < 2) { // 2: No need to sort
+        return JSTaggedValue::True();
+    }
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    // 1. Copy elements to a temporary array for safe sorting
+    JSHandle<TaggedArray> srcElements(thread, vector->GetElements(thread));
+    JSHandle<TaggedArray> tempArray = factory->NewAndCopyTaggedArray(srcElements, length, length);
+    // 2. Sort the temporary array (callback modifications to the container won't affect this)
+    base::TimSort::Sort(thread, tempArray, callbackFnHandle);
+    RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread);
+    // 3. Write sorted results back to the container.
+    //    Re-read the backing store after the callback — the comparator may have
+    //    modified the container (e.g. trimToCurrentLength), shrinking the
+    //    TaggedArray.  If so, allocating a fresh array prevents OOB writes.
+    JSHandle<TaggedArray> dstElements(thread, vector->GetElements(thread));
+    if (dstElements->GetLength() < length) {
+        // Backing store was shrunk during the sort callback; allocate a new
+        // array holding the sorted snapshot and replace the container's elements.
+        JSHandle<TaggedArray> sortedArray = factory->NewAndCopyTaggedArray(tempArray, length, length);
+        vector->SetElements(thread, sortedArray);
+        vector->SetLength(length);
+    } else {
+        for (uint32_t k = 0; k < length; k++) {
+            dstElements->Set(thread, k, tempArray->Get(thread, k));
         }
-
-        if (endIndex < i) {
-            for (uint32_t j = i; j > endIndex; j--) {
-                previousValue.Update(elements->Get(thread, j - 1));
-                elements->Set(thread, j, previousValue.GetTaggedValue());
-            }
-            elements->Set(thread, endIndex, presentValue.GetTaggedValue());
+        // Restore logical length in case the comparator removed elements
+        // without shrinking the backing store.
+        if (vector->GetSize() < length) {
+            vector->SetLength(length);
         }
     }
     return JSTaggedValue::True();

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Huawei Device Co., Ltd.
+ * Copyright (c) 2024-2026 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -23,8 +23,8 @@
 #include "ecmascript/js_thread.h"
 #include "ecmascript/jspandafile/js_pandafile_manager.h"
 #include "ecmascript/dfx/dump_code/jit_dump_elf.h"
-#if defined(PANDA_TARGET_OHOS)
-#include "ecmascript/extractortool/src/zip_file.h"
+#if defined(ENABLE_ABILITY_EXTRACTOR)
+#include "adapter/ohos/extractortool/extractor_adapter.h"
 #endif
 
 namespace panda::ecmascript {
@@ -36,8 +36,10 @@ bool IsNativeFunctionFrame(uintptr_t frameType);
 bool IsAotFunctionFrame(uintptr_t frameType);
 bool IsFastJitFunctionFrame(uintptr_t frameType);
 bool IsFastJitFunctionFrame(const FrameType frameType);
+bool IsSteedFunctionFrame(uintptr_t frameType);
+bool IsSteedFunctionFrame(const FrameType frameType);
 template<typename T>
-void ParseJsFrameInfo(JSPandaFile *jsPandaFile, DebugInfoExtractor *debugExtractor,
+bool ParseJsFrameInfo(JSPandaFile *jsPandaFile, DebugInfoExtractor *debugExtractor,
     EntityId methodId, uintptr_t offset, T &jsFrame, SourceMap *sourceMap = nullptr);
 
 static constexpr uint16_t URL_MAX = 1024;
@@ -126,6 +128,13 @@ struct JsFrame {
     int32_t column;
 };
 
+struct __static_local_trace_ptr;
+typedef struct __static_local_trace_ptr *static_local_trace;
+
+using ParseStaticArkLocalFunc = int (*)(static_local_trace, uintptr_t, uintptr_t, uintptr_t, JsFunction*);
+using CreateStaticArkLocalFunc = void (*)(static_local_trace*);
+using DestroyStaticArkLocalFunc = void (*)(static_local_trace);
+
 class JSStackTrace {
 public:
     JSStackTrace() = default;
@@ -140,6 +149,9 @@ public:
     bool GetJsFrameInfo(uintptr_t byteCodePc, uintptr_t mapBase, uintptr_t loadOffset, JsFunction *jsFunction);
     static void AddReference();
     static void ReleaseReference();
+#if defined(ENABLE_STATIC_BACKTRACE)
+    bool GetArkStaticFrameInfo(uintptr_t byteCodePc, uintptr_t mapBase, uintptr_t loadOffset, JsFunction *jsFunction);
+#endif
 private:
     std::shared_ptr<JSPandaFile> FindJSpandaFile(uintptr_t mapBase);
     const CVector<MethodInfo> &FindMethodInfos(uintptr_t mapBase);
@@ -155,6 +167,13 @@ private:
     static JSStackTrace *trace_;
     static std::mutex mutex_;
     static size_t count_;
+#if defined(ENABLE_STATIC_BACKTRACE)
+    static void *arkStaticHandle_;
+    static ParseStaticArkLocalFunc parseStaticArkLocalFunc_;
+    static CreateStaticArkLocalFunc createStaticArkLocalFunc_;
+    static DestroyStaticArkLocalFunc destroyStaticArkLocalFunc_;
+    static static_local_trace arkStaticLocalTracePtr_;
+#endif
 };
 
 class JSSymbolExtractor {
@@ -163,9 +182,9 @@ public:
     ~JSSymbolExtractor();
 
     static JSSymbolExtractor* Create();
-    static bool Destory(JSSymbolExtractor* extractor);
+    static bool Destroy(JSSymbolExtractor* extractor);
 
-    bool Initialize(uintptr_t offset, const char* filePath);
+    bool Initialize(uintptr_t offset, bool needTranslate, bool isStaticArkFrame, const char* filePath);
 
     panda_file::PandaFileType GetPandaFileType(const uint8_t *data);
     uintptr_t GetStaticSymbolExtractor();
@@ -178,7 +197,7 @@ public:
     JSPandaFile* GetJSPandaFile(uint8_t *data = nullptr, size_t dataSize = 0);
     DebugInfoExtractor* GetDebugExtractor();
     SourceMap* GetSourceMap();
-    CVector<MethodInfo> GetMethodInfos();
+    const CVector<MethodInfo> &GetMethodInfos() const;
 
 private:
     void CreateJSPandaFile();
@@ -186,14 +205,15 @@ private:
     void CreateSourceMap(const std::string &hapPath);
     void CreateDebugExtractor();
     bool InitializeAbcFileInfo(const char* filePath);
-    bool InitializeHapFileInfo(uintptr_t offset, const char* filePath);
+    bool InitializeELFFileInfo(uintptr_t offset, const char* filePath);
+    bool InitializeHapFileInfo(uintptr_t offset, bool needTranslate, bool isStaticArkFrame, const char* filePath);
 
     MemMap fileMapMem_ {};
-#if defined(PANDA_TARGET_OHOS)
+#if defined(ENABLE_ABILITY_EXTRACTOR)
     std::shared_ptr<FileMapper> fileMapper_ {nullptr};
 #endif
 
-    CVector<MethodInfo> methodInfo_;
+    mutable CVector<MethodInfo> methodInfo_;
     uintptr_t loadOffset_ {0};
     uintptr_t dataSize_ {0};
     uint8_t* data_ {nullptr};
@@ -259,7 +279,8 @@ extern "C" int ark_create_js_symbol_extractor(uintptr_t *extractorptr);
 extern "C" int ark_destory_js_symbol_extractor(uintptr_t extractorptr);
 extern "C" int ark_parse_js_file_info(
     uintptr_t byteCodePc, uintptr_t mapBase, uintptr_t loadOffset, const char* filePath,
-    uintptr_t extractorptr, panda::ecmascript::JsFunction *jsFunction);
+    uintptr_t extractorptr, bool needTranslate, bool isStaticArkFrame,
+    panda::ecmascript::JsFunction *jsFunction);
 extern "C" int ark_parse_js_frame_info_local(uintptr_t byteCodePc, uintptr_t mapBase,
     uintptr_t loadOffset, panda::ecmascript::JsFunction *jsFunction);
 extern "C" int ark_create_local();
@@ -267,3 +288,5 @@ extern "C" int ark_destroy_local();
 // define in dfx_signal_handler.h
 typedef void(*ThreadInfoCallback)(char *buf, size_t len, void *ucontext);
 extern "C" void SetThreadInfoCallback(ThreadInfoCallback func) __attribute__((weak));
+extern "C" void EnableArkTsHook();
+extern "C" void DisableArkTsHook();

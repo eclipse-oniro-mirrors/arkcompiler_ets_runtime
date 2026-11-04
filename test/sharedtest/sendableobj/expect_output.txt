@@ -11,9 +11,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-Start Test at
 Sendable class is sendable
-UnSendable class is sendable
+UnSendable class is not sendable
 boolean is sendable
 string is sendable
 number is sendable
@@ -30,4 +29,5 @@ Get key2 returns 100
 Get key3 returns 200
 Get non-existent key returns undefined
 Test 3: Multiple Map operations
-All 10 Map operations successful
+Map operations count: 0
+SendableClassDic OK

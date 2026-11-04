@@ -1,5 +1,7 @@
 {
   global:
+    _ZN5panda10ecmascript8Barriers6Update*;
+    _ZN5panda10ecmascript8Barriers12UpdateShared*;
     extern "C++" {
       vtable?for?Initializer;
       vtable?for?panda::LocalScope;
@@ -18,6 +20,7 @@
       panda::ecmascript::HELP_OPTION_MSG*;
       panda::ecmascript::COMPILER_HELP_HEAD_MSG*;
       panda::ecmascript::g_isEnableCMCGC*;
+      panda::ecmascript::g_guardAddress*;
       panda::ArkCrashHolder*;
       panda::ecmascript::ConcurrentMonitor::*;
       panda::ArrayBufferRef::*;
@@ -95,6 +98,7 @@
       panda::JsiRuntimeCallInfo::*;
       panda::JsiNativeScope::*;
       panda::JsiFastNativeScope::*;
+      panda::JsiMicrotaskScope::*;
       panda::JSExecutionScope::*;
       common::BaseRuntime::*;
       common::HeapAllocator::*;
@@ -175,6 +179,9 @@
       panda::ecmascript::AOTFileVersion::CheckAOTVersion*;
       panda::ecmascript::Barriers::Update*;
       panda::ecmascript::ReadBarrierImpl*;
+      panda::ecmascript::ReadBarrierForCompressedImpl*;
+      panda::ecmascript::Barriers::CheckObjectForCMS*;
+      panda::ecmascript::Barriers::CheckValueForCMS*;
       panda::ecmascript::BaseHeap::IsAlive*;
       panda::ecmascript::BigInt::SameValue*;
       panda::ecmascript::BigInt::DoubleToBigInt*;
@@ -225,6 +232,9 @@
       panda::ecmascript::EcmaVM::GetAOTFileManager*;
       panda::ecmascript::EcmaVM::multiThreadCheck_;
       panda::ecmascript::EcmaVM::checkCountApi_;
+      panda::ecmascript::EcmaVM::detectionConfig_;
+      panda::ecmascript::EcmaVM::lastCheckTime_;
+      panda::ecmascript::EcmaVM::count_;
       panda::ecmascript::ElementAccessor::ConvertTaggedValueWithElementsKind*;
       panda::ecmascript::ElementAccessor::Get*;
       panda::ecmascript::Elements::FixElementsKind*;
@@ -262,6 +272,7 @@
       panda::ecmascript::JSArray::ArrayCreate*;
       panda::ecmascript::JSArray::CheckAndCopyArray*;
       panda::ecmascript::JSFunction::GetOrCreateInitialJSHClass*;
+      panda::ecmascript::JSFunction::IsSharedFunction*;
       panda::ecmascript::JSMap::Set*;
       panda::ecmascript::JSObject::AddElementInternal*;
       panda::ecmascript::JSObject::CallSetter*;
@@ -280,13 +291,14 @@
       panda::ecmascript::JSSharedMap::Set*;
       panda::ecmascript::JSTaggedValue::IsBoolean*;
       panda::ecmascript::JSTaggedValue::IsBigInt*;
+      panda::ecmascript::JSTaggedValue::IsConstantPoolSlowForTest*;
       panda::ecmascript::JSTaggedValue::IsTaggedArray*;
-      panda::ecmascript::JSTaggedValue::IsFuncSlot*;
       panda::ecmascript::JSTaggedValue::IsJSProxy*;
       panda::ecmascript::JSTaggedValue::IsJSCOWArray*;
       panda::ecmascript::JSTaggedValue::IsInSharedHeap*;
       panda::ecmascript::JITProfiler::ProfileBytecode*;
       panda::ecmascript::JitThread::GetHostThread*;
+      panda::ecmascript::JitThread::*;
       panda::ecmascript::Jit::TimeScope::TimeScope*;
       panda::ecmascript::Jit::TimeScope::~TimeScope*;
       panda::ecmascript::Jit::GetInstance*;
@@ -294,6 +306,7 @@
       panda::ecmascript::Jit::IsEnableAsyncCopyToFort*;
       panda::ecmascript::Jit::IsEnableFastJit*;
       panda::ecmascript::Jit::IsEnableBaselineJit*;
+      panda::ecmascript::Jit::IsDisableCodeSign*;
       panda::ecmascript::JitTask::ComputePayLoadSize*;
       panda::ecmascript::JitThread::NewHandle*;
       panda::ecmascript::HugeMachineCodeSpace::AllocateFort*;
@@ -302,6 +315,7 @@
       panda::ecmascript::Heap::AddGCListener*;
       panda::ecmascript::Heap::RemoveGCListener*;
       panda::ecmascript::JSTaggedValue::SetProperty*;
+      panda::ecmascript::JSTaggedValue::ToBoolean*;
       panda::ecmascript::JSTaggedValue::ToString*;
       panda::ecmascript::JSTypedArray::FastSetPropertyByIndex*;
       panda::ecmascript::LiteralDataExtractor::ExtractObjectDatas*;
@@ -314,6 +328,7 @@
       panda::ecmascript::MethodLiteral::Initialize*;
       panda::ecmascript::MethodLiteral::MethodLiteral*;
       panda::ecmascript::MethodLiteral::ParseFunctionName*;
+      panda::ecmascript::ModuleManager::CheckModuleValueOutterResolved*;
       panda::ecmascript::ModuleManager::GetRecordName*;
       panda::ecmascript::ModuleManager::HostGetImportedModule*;
       panda::ecmascript::ModuleResolver::HostResolveImportedModule*;
@@ -382,9 +397,11 @@
       panda::ecmascript::filesystem::CreateEmptyFile*;
       panda::ecmascript::base::ArrayHelper::GetLength*;
       panda::ecmascript::base::NumberHelper::DoubleInRangeInt32*;
+      panda::ecmascript::base::NumberHelper::DoubleToInt*;
       panda::ecmascript::base::NumberHelper::StringToBigInt*;
       panda::ecmascript::base::NumberHelper::TruncateDouble*;
       panda::ecmascript::base::Utf8JsonParser::Parse*;
+      panda::ecmascript::builtins::BuiltinsTypedArray::GetLength*;
       panda::ecmascript::kungfu::AOTSnapshot::StoreConstantPoolInfo*;
       panda::ecmascript::kungfu::ArkStackMapBuilder::Collect*;
       panda::ecmascript::kungfu::ArkStackMapBuilder::GenerateArkStackMap*;
@@ -421,12 +438,28 @@
       panda::ecmascript::kungfu::PGOTypeRecorder::GetTransitionElementsKindsForUser*;
       panda::ecmascript::kungfu::ReviseData::Resolve*;
       panda::ecmascript::kungfu::SnapshotConstantPoolData::Record*;
+      panda::ecmascript::kungfu::LazyDeoptAllDependencies::CheckStableHClass*;
       panda::ecmascript::kungfu::LazyDeoptAllDependencies::DependOnArrayDetector*;
       panda::ecmascript::kungfu::LazyDeoptAllDependencies::DependOnDetector*;
       panda::ecmascript::kungfu::LazyDeoptAllDependencies::DependOnNotPrototype*;
       panda::ecmascript::kungfu::LazyDeoptAllDependencies::DependOnStableHClass*;
       panda::ecmascript::kungfu::LazyDeoptAllDependencies::DependOnStableProtoChain*;
       panda::ecmascript::kungfu::LazyDeoptAllDependencies::DependOnNotHotReloadPatchMain*;
+      panda::ecmascript::arksteed::SourcePositionTableBuilder::*;
+      panda::ecmascript::arksteed::ArkSteedSafepointTableBuilder::DefineSafepoint*;
+      panda::ecmascript::arksteed::ArkSteedSafepointTableBuilder::DefineDeoptSafepoint*;
+      panda::ecmascript::arksteed::ArkSteedSafepointTableBuilder::DumpMemoryUsage*;
+      panda::ecmascript::arksteed::ArkSteedSafepointTableBuilder::SetFrameSlots*;
+      panda::ecmascript::arksteed::ArkSteedSafepointTableBuilder::GetTableSize*;
+      panda::ecmascript::arksteed::ArkSteedSafepointTableBuilder::EmitToNewBuffer*;
+      panda::ecmascript::arksteed::ArkSteedTask::SetDeoptTranslationData*;
+      panda::ecmascript::arksteed::ArkSteedTask::SetDeoptLiteralData*;
+      panda::ecmascript::arksteed::ArkSteedTask::SetEmbeddedRefData*;
+      panda::ecmascript::arksteed::BuildDeoptTranslationInputs*;
+      panda::ecmascript::arksteed::DeoptLiteralTableBuilder::GetOrAdd*;
+      panda::ecmascript::arksteed::DeoptTranslationBuilder::AddTranslation*;
+      panda::ecmascript::arksteed::DeoptTranslationBuilder::Encode*;
+      panda::ecmascript::arksteed::GetFloat64RawBits*;
       panda::ecmascript::ohos::DecrypRemoveKey*;
       panda::ecmascript::ohos::DecryptAssociateKey*;
       panda::ecmascript::ohos::DecryptSetKey*;
@@ -463,6 +496,8 @@
       ark_write_jit_code;
       GetAOTVersion;
       LazyDeoptEntry;
+      EnableArkTsHook;
+      DisableArkTsHook;
     };
   local:
     *;

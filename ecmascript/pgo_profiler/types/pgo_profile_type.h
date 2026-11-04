@@ -74,6 +74,8 @@ public:
     using KindBits = AbcIdBits::NextField<Kind, KIND_BITFIELD_NUM>;
     using IsRootBits = KindBits::NextFlag;  // 50
     using EverOutOfBoundsBits = IsRootBits::NextFlag; // 51
+    static_assert(EverOutOfBoundsBits::END_BIT == PGO_PROFILE_TYPE_USED_BITS,
+                  "PGO_PROFILE_TYPE_USED_BITS must match ProfileType");
 
     using StringMap = std::multimap<std::string, std::string>;
     using MapVector = std::vector<std::vector<StringMap>>;
@@ -462,7 +464,7 @@ public:
         if (IsBuiltinsArray()) {
             auto arrayId = BuiltinsArrayId(GetId());
             strId = arrayId.GetIdToString();
-        } else if (IsBuiltinsTypeArray()) {
+        } else if (IsBuiltinsTypedArray()) {
             auto typedArrayId = BuiltinsTypedArrayId(GetId());
             strId = typedArrayId.GetIdToString();
         } else {
@@ -575,7 +577,7 @@ public:
         return false;
     }
 
-    bool IsBuiltinsTypeArray() const
+    bool IsBuiltinsTypedArray() const
     {
         if (IsBuiltinsType()) {
             JSType type = GetBuiltinsType();

@@ -20,11 +20,14 @@
 #include "ecmascript/jobs/micro_job_queue.h"
 #include "ecmascript/jspandafile/js_pandafile_executor.h"
 #include "ecmascript/jspandafile/js_pandafile_manager.h"
+#include "ecmascript/module/js_module_manager.h"
 #include "ecmascript/module/js_shared_module_manager.h"
 #include "ecmascript/module/module_data_extractor.h"
 #include "ecmascript/module/module_message_helper.h"
 #include "ecmascript/module/module_path_helper.h"
+#include "ecmascript/snapshot/common/modules_snapshot_helper.h"
 #include "ecmascript/platform/file.h"
+#include "ecmascript/ohos/ohos_constants.h"
 #include "ecmascript/module/module_value_accessor.h"
 #include "ecmascript/module/module_resolver.h"
 #include "ecmascript/module/module_tools.h"
@@ -37,6 +40,71 @@ namespace panda::ecmascript {
 using PathHelper = base::PathHelper;
 using StringHelper = base::StringHelper;
 using GlobalError = containers::ContainerError;
+
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+void SourceTextModule::SetEcmaModuleFilenameString(JSThread *thread, const CString &fileName)
+{
+    ModuleManager *moduleManager = thread->GetModuleManager();
+    const CString *ptr = moduleManager->AcquireModuleFilename(fileName);
+    DestroyEcmaModuleFilenameString(moduleManager);
+    SetEcmaModuleFilename(ToUintPtr(const_cast<CString *>(ptr)));
+}
+
+void SourceTextModule::SetEcmaSharedModuleFilenameString(const CString &fileName)
+{
+    const CString *ptr = SharedModuleManager::GetInstance()->AcquireModuleFilename(fileName);
+    DestroyEcmaSharedModuleFilenameString();
+    SetEcmaModuleFilename(ToUintPtr(const_cast<CString *>(ptr)));
+}
+
+void SourceTextModule::DestroyEcmaModuleFilenameString(ModuleManager *moduleManager)
+{
+    CString *ptr = reinterpret_cast<CString *>(GetEcmaModuleFilename());
+    if (ptr == nullptr) {
+        return;
+    }
+    moduleManager->ReleaseModuleFilename(ptr);
+    SetEcmaModuleFilename(ToUintPtr(nullptr));
+}
+
+void SourceTextModule::DestroyEcmaSharedModuleFilenameString()
+{
+    CString *ptr = reinterpret_cast<CString *>(GetEcmaModuleFilename());
+    if (ptr == nullptr) {
+        return;
+    }
+    SharedModuleManager::GetInstance()->ReleaseModuleFilename(ptr);
+    SetEcmaModuleFilename(ToUintPtr(nullptr));
+}
+
+void SourceTextModule::SetEcmaModuleFilenameStringForDeserialize(JSThread *thread, const CString &fileName)
+{
+    const CString *ptr = thread->GetModuleManager()->AcquireModuleFilename(fileName);
+    SetEcmaModuleFilename(ToUintPtr(const_cast<CString *>(ptr)));
+}
+
+void SourceTextModule::SetEcmaSharedModuleFilenameStringForDeserialize(const CString &fileName)
+{
+    const CString *ptr = SharedModuleManager::GetInstance()->AcquireModuleFilename(fileName);
+    SetEcmaModuleFilename(ToUintPtr(const_cast<CString *>(ptr)));
+}
+#endif
+
+void SourceTextModule::ReleaseSharedModuleNativeFields(const SourceTextModule::NativeFields &fields)
+{
+    if (fields.lazyImportArray != nullptr) {
+        delete[] fields.lazyImportArray;
+    }
+    if (fields.filename != nullptr) {
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+        SharedModuleManager::GetInstance()->ReleaseModuleFilename(fields.filename);
+#else
+        delete fields.filename;
+#endif
+    }
+    // recordName is released only here.
+    delete fields.recordName;
+}
 
 CVector<std::string> SourceTextModule::GetExportedNames(JSThread *thread, const JSHandle<SourceTextModule> &module,
                                                         const JSHandle<TaggedArray> &exportStarSet)
@@ -116,7 +184,7 @@ JSHandle<JSTaggedValue> SourceTextModule::GetBindingNameByIndex(JSThread *thread
         return globalConstants->GetHandledDefaultString();
     }
 
-    JSHandle<JSTaggedValue> exports = ModuleValueAccessor::GetNativeOrCjsExports(thread, module.GetTaggedValue());
+    JSHandle<JSTaggedValue> exports = ModuleValueAccessor::GetNativeOrCjsExports(thread, module);
     if (exports->IsJSObject()) {
         JSObject *exportObject = JSObject::Cast(exports.GetTaggedValue().GetTaggedObject());
         TaggedArray *properties = TaggedArray::Cast(exportObject->GetProperties(thread).GetTaggedObject());
@@ -419,7 +487,8 @@ JSHandle<JSTaggedValue> SourceTextModule::LoadNativeModuleImpl(EcmaVM *vm, JSThr
     const JSHandle<SourceTextModule> &requiredModule, ModuleTypes moduleType)
 {
     CString moduleRequestName = requiredModule->GetEcmaModuleRecordNameString();
-    ModuleTraceScope moduleTraceScope(thread, "SourceTextModule::LoadNativeModule:" + moduleRequestName);
+    ModuleTraceScope moduleTraceScope = ModuleTraceScope::Open(
+        thread, "SourceTextModule::LoadNativeModule:", moduleRequestName);
     auto undefined = vm->GetJSThread()->GlobalConstants()->GetHandledUndefined();
     ModuleLoggerTimeScope moduleLoggerTimeScope(thread, moduleRequestName);
     CString soName = PathHelper::GetStrippedModuleName(moduleRequestName);
@@ -444,6 +513,9 @@ JSHandle<JSTaggedValue> SourceTextModule::LoadNativeModuleImpl(EcmaVM *vm, JSThr
     RETURN_VALUE_IF_ABRUPT(thread, undefined);
     // Consistent with FunctionRef::Call
     JSHandle<JSTaggedValue> exportObject = LoadNativeModuleCallFunc(vm, info);
+    if (!exportObject->IsJSObject()) {
+        LOG_ECMA(WARN) << "Load native module " << moduleName << " is not a JSObject";
+    }
     RETURN_VALUE_IF_ABRUPT(thread, undefined);
     return exportObject;
 }
@@ -591,6 +663,9 @@ void SourceTextModule::DFSModuleInstantiation(JSThread *thread, JSHandle<SourceT
             stack.pop_back();
             // iii. Set requiredModule.[[Status]] to "instantiated".
             requiredModule->SetStatus(ModuleStatus::INSTANTIATED);
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+            ClearImportEntriesIfNeeded(thread, requiredModule);
+#endif
             // iv. If requiredModule and module are the same Module Record, set done to true.
             if (JSTaggedValue::SameValue(thread, module.GetTaggedValue(), requiredModule.GetTaggedValue())) {
                 done = true;
@@ -611,9 +686,7 @@ bool SourceTextModule::PreModuleInstantiation(JSThread *thread,
     }
     bool isShared = SourceTextModule::IsSharedModule(module);
     if (status == ModuleStatus::EVALUATING) {
-        LOG_FULL(DEBUG) << "ModuleSnapshot is disabled: circular dependency" <<
-            ", current module: " << *SourceTextModule::GetModuleName(module);
-        thread->GetEcmaVM()->GetJSOptions().SetDisableModuleSnapshot(true);
+        LOG_ECMA(DEBUG) << "circular dependency detected, current module: " << *SourceTextModule::GetModuleName(module);
         if (isShared) {
             LOG_FULL(INFO) << "circular dependency occurred of shared-module";
             return true;
@@ -790,8 +863,8 @@ void SourceTextModule::ModuleDeclarationArrayEnvironmentSetup(JSThread *thread,
     // Add a safepoint here to check if a suspension is needed.
     thread->CheckSafepointIfSuspended();
 
-    ModuleTraceScope moduleTraceScope(thread,
-        "SourceTextModule::Instantiating:" + module->GetEcmaModuleRecordNameString());
+    ModuleTraceScope moduleTraceScope = ModuleTraceScope::Open(thread,
+        "SourceTextModule::Instantiating:", module->GetEcmaModuleRecordNameString());
     if (IsSharedModule(module) && SharedModuleManager::GetInstance()->IsInstantiatedSModule(thread, module)) {
         return;
     }
@@ -1007,6 +1080,7 @@ int SourceTextModule::InnerModuleEvaluationUnsafe(JSThread *thread, JSHandle<Sou
         return index;
     }
 
+    ModuleImportStackScope scope(thread, module);
     if (status == ModuleStatus::EVALUATING) {
         return index;
     }
@@ -1110,7 +1184,10 @@ int SourceTextModule::InnerModuleEvaluationUnsafe(JSThread *thread, JSHandle<Sou
             // v. Otherwise, set requiredModule.[[Status]] to EVALUATING-ASYNC.
             if (!requiredModule->IsAsyncEvaluating()) {
                 requiredModule->SetStatus(ModuleStatus::EVALUATED);
-#if ENABLE_MEMORY_OPTIMIZATION
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+                ClearTopLevelCapabilityIfNeeded(thread, requiredModule);
+                ClearModuleRequestsIfNeeded(thread, requiredModule);
+#else
                 ClearImportEntriesIfNeeded(thread, requiredModule);
 #endif
             } else {
@@ -1131,12 +1208,71 @@ int SourceTextModule::InnerModuleEvaluationUnsafe(JSThread *thread, JSHandle<Sou
 
 void SourceTextModule::ClearImportEntriesIfNeeded(JSThread *thread, JSHandle<SourceTextModule> &module)
 {
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+    ASSERT(module->GetStatus() >= ModuleStatus::INSTANTIATED);
+#endif
     EcmaVM *vm = thread->GetEcmaVM();
-    if ((!vm->GetJsDebuggerManager()->IsDebugApp()) && thread->GetModuleLogger() == nullptr) {
-        // After the module is INSTANTIATED, requiredModule.[[ImportEntry]] is no longer meaningful.
-        // Set it to undefinedValue to allow the GC thread to reclaim the memory.
+    if (!vm->GetJsDebuggerManager()->IsDebugApp()) {
         JSTaggedValue undefinedValue = thread->GlobalConstants()->GetUndefined();
-        module->SetImportEntries(thread, undefinedValue);
+        // After the module is INSTANTIATED, requiredModule.[[ImportEntry]] is no longer meaningful.
+        // ModuleLogger reads ImportEntries for diagnostics, so preserve it when logging is enabled.
+        if (thread->GetModuleLogger() == nullptr) {
+            module->SetImportEntries(thread, undefinedValue);
+        }
+    }
+}
+
+void SourceTextModule::ClearTopLevelCapabilityIfNeeded(JSThread *thread, const JSHandle<SourceTextModule> &module)
+{
+    ASSERT(module->GetStatus() >= ModuleStatus::EVALUATED);
+    if (IsSharedModule(module)) {
+        return;
+    }
+    EcmaVM *vm = thread->GetEcmaVM();
+    if (!vm->GetJsDebuggerManager()->IsDebugApp()) {
+        JSTaggedValue undefinedValue = thread->GlobalConstants()->GetUndefined();
+        module->SetTopLevelCapability(thread, undefinedValue);
+    }
+}
+
+bool CanClearModuleRequests(EcmaVM *vm)
+{
+    auto state = vm->GetModuleRequestsClearState();
+    if (state == ModuleRequestsClearState::UNINITIALIZED) {
+        if (vm->GetJSOptions().DisableModuleSnapshot() ||
+            ModulesSnapshotHelper::IsModuleSnapshotDisabled(
+                ohos::OhosConstants::PANDAFILE_AND_MODULE_SNAPSHOT_DIR)) {
+            vm->SetModuleRequestsClearState(ModuleRequestsClearState::CAN_CLEAR);
+            return true;
+        }
+        if (ModulesSnapshotHelper::GetFeatureLoaded() & static_cast<int>(SnapshotFeatureState::MODULE)) {
+            vm->SetModuleRequestsClearState(ModuleRequestsClearState::CAN_CLEAR);
+            return true;
+        }
+        vm->SetModuleRequestsClearState(ModuleRequestsClearState::CANNOT_CLEAR);
+        return false;
+    } else if (state == ModuleRequestsClearState::CAN_CLEAR) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+
+void SourceTextModule::ClearModuleRequestsIfNeeded(JSThread *thread, const JSHandle<SourceTextModule> &module)
+{
+    ASSERT(module->GetStatus() >= ModuleStatus::EVALUATED);
+    if (module->GetModuleRequests(thread).IsUndefined() || IsSharedModule(module) ||
+    module->GetLazyImportStatusArray() != nullptr) {
+        return;
+    }
+    EcmaVM *vm = thread->GetEcmaVM();
+    if (vm->GetJsDebuggerManager()->IsDebugApp()) {
+        return;
+    }
+    if (CanClearModuleRequests(vm)) {
+        JSTaggedValue undefinedValue = thread->GlobalConstants()->GetUndefined();
+        module->SetModuleRequests(thread, undefinedValue);
     }
 }
 
@@ -1169,6 +1305,7 @@ int SourceTextModule::InnerModuleEvaluation(JSThread *thread, JSHandle<SourceTex
         ModuleStatus status = module->GetStatus();
         if (status == ModuleStatus::EVALUATING &&
                 stateVisit.threadId == thread->GetThreadId()) {
+            ModuleImportStackScope circularScope(thread, module);
             return index;
         }
         if (status == ModuleStatus::ERRORED) {
@@ -1261,7 +1398,7 @@ Expected<JSTaggedValue, bool> SourceTextModule::ModuleExecution(JSThread *thread
     } else {
         moduleFilenameStr = module->GetEcmaModuleFilenameString();
     }
-    std::string entryPoint;
+    CString entryPoint;
     CString moduleRecordName = module->GetEcmaModuleRecordNameString();
     if (moduleRecordName.empty()) {
         entryPoint = JSPandaFile::ENTRY_FUNCTION_NAME;
@@ -1425,7 +1562,10 @@ JSTaggedValue SourceTextModule::GetValueFromExportObject(JSThread *thread, JSHan
         JSHClass *jsHclass = obj->GetJSHClass();
         LayoutInfo *layoutInfo = LayoutInfo::Cast(jsHclass->GetLayout(thread).GetTaggedObject());
         PropertyAttributes attr = layoutInfo->GetAttr(thread, index);
-        value = obj->GetProperty(thread, jsHclass, attr);
+        // Expand JSObject::GetProperty here to optimize duplicate GetProperties
+        value = attr.IsInlinedProps() ?
+            obj->GetPropertyInlinedPropsWithRep(thread, jsHclass, attr.GetOffset(), attr) :
+            properties->Get(thread, attr.GetOffset() - jsHclass->GetInlinedProperties());
     } else {
         NameDictionary *dict = NameDictionary::Cast(properties);
         value = dict->GetValue(thread, index);
@@ -1812,12 +1952,9 @@ void SourceTextModule::ExecuteAsyncModule(JSThread *thread, const JSHandle<Sourc
     ASSERT(module->GetHasTLA());
     CString moduleFilenameStr = module->GetEcmaModuleFilenameString();
 
-    std::string entryPoint;
-    CString moduleRecordName = module->GetEcmaModuleRecordNameString();
-    if (moduleRecordName.empty()) {
+    CString entryPoint = module->GetEcmaModuleRecordNameString();
+    if (entryPoint.empty()) {
         entryPoint = JSPandaFile::ENTRY_FUNCTION_NAME;
-    } else {
-        entryPoint = moduleRecordName;
     }
 
     std::shared_ptr<JSPandaFile> jsPandaFile;
@@ -1939,8 +2076,14 @@ void SourceTextModule::AsyncModuleExecutionFulfilled(JSThread *thread, const JSH
         JSHandle<JSPromise> topLevelCapability(thread, JSPromise::Cast(topLevelCapabilityValue.GetTaggedObject()));
         JSHandle<JSTaggedValue> undefinedValue = globalConstants->GetHandledUndefined();
         JSPromise::FulfillPromise(thread, topLevelCapability, undefinedValue);
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+        ClearTopLevelCapabilityIfNeeded(thread, module);
+#endif
         RETURN_IF_ABRUPT_COMPLETION(thread);
     }
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+    ClearModuleRequestsIfNeeded(thread, module);
+#endif
     // 8. Let execList be a new empty List.
     AsyncParentCompletionSet execList;
     // 9. Perform GatherAvailableAncestors(module, execList).
@@ -1981,8 +2124,14 @@ void SourceTextModule::AsyncModuleExecutionFulfilled(JSThread *thread, const JSH
                         JSPromise::Cast(topLevelCapabilityValue.GetTaggedObject()));
                     JSHandle<JSTaggedValue> undefinedValue = globalConstants->GetHandledUndefined();
                     JSPromise::FulfillPromise(thread, topLevelCapability, undefinedValue);
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+                    ClearTopLevelCapabilityIfNeeded(thread, m);
+#endif
                     RETURN_IF_ABRUPT_COMPLETION(thread);
                 }
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+                ClearModuleRequestsIfNeeded(thread, m);
+#endif
             }
         }
     }
@@ -2087,19 +2236,31 @@ void SourceTextModule::SearchCircularImport(JSThread *thread, const CString &cir
                                             CList<CString> &referenceList,
                                             CString &requiredModuleName, bool printOtherCircular)
 {
-    if (module->GetModuleRequests(thread).IsUndefined()) {
+    // Use RequestedModules instead of ModuleRequests, because ModuleRequests may be
+    // cleared after evaluation.
+    if (module->GetRequestedModules(thread).IsUndefined()) {
         return;
     }
     auto globalConstants = thread->GlobalConstants();
-    JSHandle<TaggedArray> moduleRequests(thread, module->GetModuleRequests(thread));
-    size_t moduleRequestsLen = moduleRequests->GetLength();
-    JSMutableHandle<JSTaggedValue> required(thread, globalConstants->GetUndefined());
+    JSHandle<TaggedArray> requestedModules(thread, module->GetRequestedModules(thread));
+    size_t requestedModulesLen = requestedModules->GetLength();
+    JSMutableHandle<JSTaggedValue> request(thread, globalConstants->GetUndefined());
     JSMutableHandle<SourceTextModule> requiredModule(thread, globalConstants->GetUndefined());
-    for (size_t idx = 0; idx < moduleRequestsLen; idx++) {
-        required.Update(moduleRequests->Get(thread, idx));
-        requiredModule.Update(JSHandle<SourceTextModule>::Cast(
-            ModuleResolver::HostResolveImportedModule(thread, module, required)));
-        RETURN_IF_ABRUPT_COMPLETION(thread);
+    for (size_t idx = 0; idx < requestedModulesLen; idx++) {
+        request.Update(requestedModules->Get(thread, idx));
+        // Skip lazy import slots (Hole) and undefined slots
+        if (request->IsHole() || request->IsUndefined()) {
+            continue;
+        }
+        if (request->IsSourceTextModule()) {
+            // Non-shared module: RequestedModules stores SourceTextModule directly
+            requiredModule.Update(JSHandle<SourceTextModule>::Cast(request));
+        } else {
+            // Shared module: RequestedModules stores EcmaString module name, need HostResolveImportedModule
+            requiredModule.Update(JSHandle<SourceTextModule>::Cast(
+                ModuleResolver::HostResolveImportedModule(thread, module, request)));
+            RETURN_IF_ABRUPT_COMPLETION(thread);
+        }
         requiredModuleName = requiredModule->GetEcmaModuleRecordNameString();
         referenceList.push_back(requiredModuleName);
         if (requiredModuleName == circularModuleRecordName) {
@@ -2334,6 +2495,31 @@ JSHandle<JSTaggedValue> SourceTextModule::CreateBindingByIndexBinding(JSThread* 
     return JSHandle<JSTaggedValue>::Cast(factory->NewResolvedBindingRecord(resolvedModule, bindingName));
 }
 
+JSHandle<JSTaggedValue> SourceTextModule::CreateBindingByRecordIndexBinding(JSThread* thread,
+    JSHandle<ResolvedRecordIndexBinding> binding, bool isMergedAbc)
+{
+    const CString *moduleRecordName = binding->GetModuleRecordName();
+    ModuleManager *moduleManager = thread->GetModuleManager();
+    ASSERT(moduleRecordName != nullptr && moduleManager != nullptr);
+    if (!moduleManager->IsEvaluatedModule(*moduleRecordName)) {
+        CString fileName = binding->GetAbcFileNameString();
+        if (!JSPandaFileExecutor::LazyExecuteModule(
+            thread, *moduleRecordName, fileName, isMergedAbc)) { // LCOV_EXCL_BR_LINE
+            // LCOV_EXCL_START
+            if (thread->HasPendingException()) { // LCOV_EXCL_BR_LINE
+                LOG_ECMA(ERROR) << thread->GetException();
+            }
+            LOG_ECMA(FATAL) << "LazyExecuteModule failed, fileName: " << fileName
+                            << ", moduleRecordName: " << *moduleRecordName;
+            // LCOV_EXCL_STOP
+        }
+    }
+    JSHandle<SourceTextModule> resolvedModule = moduleManager->HostGetImportedModule(*moduleRecordName);
+    JSHandle<JSTaggedValue> bindingName = GetBindingNameByIndex(thread, resolvedModule, binding->GetIndex());
+    return JSHandle<JSTaggedValue>::Cast(
+        thread->GetEcmaVM()->GetFactory()->NewSResolvedRecordBindingRecord(*moduleRecordName, bindingName));
+}
+
 JSHandle<JSTaggedValue> SourceTextModule::FindFuncInModuleForHook(JSThread* thread, const std::string &recordName,
                                                                   const std::string &namespaceName,
                                                                   const std::string &className,
@@ -2377,6 +2563,7 @@ JSHandle<SourceTextModule> SourceTextModule::LoadJsonModule(JSThread *thread, co
 {
     JSHandle<SourceTextModule> module = JSHandle<SourceTextModule>::Cast(
         ModuleDataExtractor::ParseJsonModule(thread, jsPandaFile, filename));
+    module->SetEcmaModuleRecordNameString(recordName);
     EvaluateJsonModule(thread, module, jsPandaFile, recordName);
     return module;
 }

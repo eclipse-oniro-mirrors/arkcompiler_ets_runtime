@@ -111,7 +111,11 @@ void GCKeyStats::SendSysEvent() const
     int32_t ret = HiSysEventWrite(OHOS::HiviewDFX::HiSysEvent::Domain::ARKTS_RUNTIME,
         "ARK_STATS_GC",
         OHOS::HiviewDFX::HiSysEvent::EventType::STATISTIC,
+#ifdef EXCLUDE_PGO
+        "BUNDLE_NAME", "",
+#else
         "BUNDLE_NAME", PGOProfilerManager::GetInstance()->GetBundleName(),
+#endif
         "PID", getpid(),
         "TID", syscall(SYS_gettid),
         "GC_TOTAL_COUNT", gcCount_,
@@ -150,12 +154,17 @@ void GCKeyStats::SendSysEventBeforeDump(std::string type, size_t limitSize, size
         OHOS::HiviewDFX::HiSysEvent::EventType::FAULT,
         "PID", pid,
         "TID", tid,
+#ifdef EXCLUDE_PGO
+        "PROCESS_NAME", "",
+#else
         "PROCESS_NAME", PGOProfilerManager::GetInstance()->GetBundleName(),
+#endif
         "LIMITSIZE", limitSize,
         "ACTIVE_MEMORY", activeMemory,
         "TYPE", type,
         "EVENT_CONFIG", eventConfig,
         "APP_RUNNING_UNIQUE_ID", &DFX_GetAppRunningUniqueId == nullptr ? "" : DFX_GetAppRunningUniqueId(),
+        "EVENT_VERSION", "1.0.0",
         "ARKTS_TYPE", DYNAMIC_STR,
         "THREAD_TYPE", threadType,
         "SPACE_TYPE", spaceType,

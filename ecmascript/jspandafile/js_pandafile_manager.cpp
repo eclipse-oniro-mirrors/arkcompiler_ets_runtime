@@ -13,23 +13,43 @@
  * limitations under the License.
  */
 
+
+#include <cstdint>
+#include <string_view>
+#include <zlib.h>
+
 #include "ecmascript/jspandafile/js_pandafile_manager.h"
 
+#include <unistd.h>
+
+#include "constpool_snapshot.h"
 #include "ecmascript/checkpoint/thread_state_transition.h"
+#include "ecmascript/dfx/cpu_profiler/profiler_metadata_registry.h"
+#include "ecmascript/runtime.h"
 #include "ecmascript/jspandafile/abc_buffer_cache.h"
 #include "ecmascript/jspandafile/js_pandafile_executor.h"
 #include "ecmascript/module/module_path_helper.h"
 #include "ecmascript/module/module_message_helper.h"
 #include "ecmascript/module/module_tools.h"
 #include "ecmascript/pgo_profiler/pgo_profiler_manager.h"
+#include "ecmascript/platform/dfx_crash_obj.h"
 #include "ecmascript/platform/pandafile.h"
+#include "ecmascript/platform/signal_manager.h"
 #include "ecmascript/jspandafile/js_pandafile_snapshot.h"
 #include "ecmascript/ohos/ohos_constants.h"
 #include "ecmascript/ohos/ohos_version_info_tools.h"
 
+// Forward-declare existing function from libpandafile (not in public header)
+namespace panda::panda_file {
+std::unique_ptr<const panda_file::File> OpenPandaFileFromZip(
+    FILE *fp, std::string_view location, std::string_view archive_filename,
+    panda_file::File::OpenMode open_mode);
+}
+
 namespace panda::ecmascript {
 using PGOProfilerManager = pgo::PGOProfilerManager;
 static const size_t MALLOC_SIZE_LIMIT = 2147483648; // Max internal memory used by the VM declared in options
+static constexpr const std::string_view DAMAGED_ABC_REPORT_HEADER = "Damaged abc";
 
 JSPandaFileManager *JSPandaFileManager::GetInstance()
 {
@@ -109,13 +129,12 @@ std::shared_ptr<JSPandaFile> JSPandaFileManager::LoadJSPandaFile(JSThread *threa
         RETURN_VALUE_IF_ABRUPT_COMPLETION(thread, nullptr);
         if (!getBuffer) {
             LoadJSPandaFileFailLog("[ArkRuntime Log] Importing shared package in the Previewer.");
-            CString msg = "resolveBufferCallback get hsp buffer failed, hsp path:" + filename +
-                ", errorMsg:" + errorMsg.c_str();
+            CString hspName = ModulePathHelper::GetBundleModuleName(filename);
+            CString msg = "load hsp failed, hsp name:"
+                + hspName + ", errorMsg:" + errorMsg.c_str();
             if (executeType == ExecuteTypes::NAPI) {
 #ifdef ENABLE_HILOG
-                HILOG_COMM_ERROR(
-                    "resolveBufferCallback get hsp buffer failed, "\
-                    "hsp path:%{public}s, errorMsg:%{public}s", filename.c_str(), msg.c_str());
+                HILOG_COMM_ERROR("%{public}s", msg.c_str());
 #else
                 LOG_FULL(ERROR) << msg;
 #endif
@@ -150,9 +169,41 @@ template std::shared_ptr<JSPandaFile> JSPandaFileManager::LoadJSPandaFile<ForHyb
 template std::shared_ptr<JSPandaFile> JSPandaFileManager::LoadJSPandaFile<ForHybridApp::Hybrid>(JSThread *thread,
     const CString &filename, std::string_view entryPoint, bool needUpdate, const ExecuteTypes &executeType);
 
+// This Function is used to load the JSPandaFile from the snapshot file.
+std::shared_ptr<JSPandaFile> JSPandaFileManager::LoadSnapShotCrossBundleHsp(JSThread *thread, const CString &filename,
+    std::string_view entryPoint)
+{
+    ResolveBufferCallback resolveBufferCallback = thread->GetEcmaVM()->GetResolveBufferCallback();
+    if (resolveBufferCallback == nullptr) {
+        LOG_FULL(ERROR) << "LoadSnapShotCrossBundleHsp resolveBufferCallback is nullptr";
+        return nullptr;
+    }
+    std::string hspPath = ModulePathHelper::ParseHapPath(filename);
+    if (hspPath.empty()) {
+        LOG_FULL(ERROR) << "Invalid input hsp path: " << filename;
+        return nullptr;
+    }
+    uint8_t *data = nullptr;
+    size_t dataSize = 0;
+    std::string errorMsg;
+    bool getBuffer = resolveBufferCallback(hspPath, &data, &dataSize, errorMsg);
+    if (!getBuffer) {
+        LOG_FULL(ERROR) << "LoadSnapShotCrossBundleHsp load hsp failed, hsp name:"
+                        << ModulePathHelper::GetBundleModuleName(filename)
+                        << ", errorMsg:" << errorMsg.c_str();
+        return nullptr;
+    }
+    std::unique_ptr<const panda_file::File> pf = OpenPandaFileFromMemory(data, dataSize);
+    if (pf == nullptr) {
+        LOG_ECMA(ERROR) << "LoadSnapShotCrossBundleHsp open file " << filename << " error";
+        return nullptr;
+    }
+    std::shared_ptr<JSPandaFile> jsPandaFile = GenerateJSPandaFile(thread, pf.release(), filename, entryPoint);
+    return jsPandaFile;
+}
 // The security interface needs to be modified accordingly.
 std::shared_ptr<JSPandaFile> JSPandaFileManager::LoadJSPandaFile(JSThread *thread, const CString &filename,
-    std::string_view entryPoint, const void *buffer, size_t size, bool needUpdate)
+    std::string_view entryPoint, const void *buffer, size_t size, bool needUpdate, const std::string &filePath)
 {
     if (buffer == nullptr || size == 0) {
         LOG_FULL(ERROR) << "Input buffer is empty";
@@ -175,9 +226,16 @@ std::shared_ptr<JSPandaFile> JSPandaFileManager::LoadJSPandaFile(JSThread *threa
             return jsPandaFile;
         }
     }
-    auto pf = ParseAndOpenPandaFile(buffer, size, filename);
+
+    std::unique_ptr<const panda_file::File> pf;
+    if (!filePath.empty()) {
+        pf = ParseAndOpenPandaFile(buffer, size, filePath);
+    } else {
+        pf = ParseAndOpenPandaFile(buffer, size, filename.c_str());
+    }
+
     if (pf == nullptr) {
-        LOG_ECMA(ERROR) << "open file " << filename << " error";
+        LOG_ECMA(ERROR) << "open file " << filePath << " error";
         return nullptr;
     }
 
@@ -252,7 +310,7 @@ std::shared_ptr<JSPandaFile> JSPandaFileManager::LoadInsecureJSPandaFile(JSThrea
 }
 
 JSHandle<Program> JSPandaFileManager::GenerateProgram(EcmaVM *vm, const JSPandaFile *jsPandaFile,
-                                                      std::string_view entryPoint)
+                                                      const CString &entryPoint)
 {
     ASSERT(GetJSPandaFile(jsPandaFile->GetPandaFile()) != nullptr);
     return PandaFileTranslator::GenerateProgram(vm, jsPandaFile, entryPoint);
@@ -353,6 +411,7 @@ void JSPandaFileManager::AddJSPandaFile(const std::shared_ptr<JSPandaFile> &jsPa
 
     loadedJSPandaFiles_[filename] = std::move(jsPandaFile);
     JSPandaFileExecutor::BindPandaFileToAot(jsPandaFile.get());
+    ProfilerMetadataRegistry::Instance().OnLoad(jsPandaFile.get());
     LOG_ECMA(DEBUG) << "add file: " << filename;
 }
 
@@ -367,6 +426,8 @@ void JSPandaFileManager::RemoveJSPandaFile(const JSPandaFile *jsPandaFile)
     while (iterOld != oldJSPandaFiles_.end()) {
         if (iterOld->get() == jsPandaFile) {
             extractors_.erase(jsPandaFile);
+            // Keep the file alive until every profiler drained its in-flight samples.
+            ProfilerMetadataRegistry::Instance().OnUnload(jsPandaFile, *iterOld);
             oldJSPandaFiles_.erase(iterOld);
             return;
         }
@@ -376,6 +437,8 @@ void JSPandaFileManager::RemoveJSPandaFile(const JSPandaFile *jsPandaFile)
     auto iter = loadedJSPandaFiles_.find(filename);
     if (iter != loadedJSPandaFiles_.end()) {
         extractors_.erase(jsPandaFile);
+        // Keep the file alive until every profiler drained its in-flight samples.
+        ProfilerMetadataRegistry::Instance().OnUnload(jsPandaFile, iter->second);
         // erase shared_ptr from map, the ref count -1.
         loadedJSPandaFiles_.erase(iter);
     }
@@ -421,11 +484,47 @@ std::shared_ptr<JSPandaFile> JSPandaFileManager::OpenJSPandaFileFromBuffer(uint8
     return NewJSPandaFile(pf.release(), filename);
 }
 
+std::shared_ptr<JSPandaFile> JSPandaFileManager::OpenJSPandaFileFromFd(int fd, const CString &abcName,
+    const CString &desc)
+{
+    if (fd < 0) {
+        LOG_ECMA(ERROR) << "OpenJSPandaFileFromFd: invalid fd=" << fd;
+        return nullptr;
+    }
+    // dup so fclose won't close the caller's fd
+    int dupFd = dup(fd);
+    if (dupFd < 0) {
+        LOG_ECMA(ERROR) << "OpenJSPandaFileFromFd: dup failed for fd=" << fd;
+        return nullptr;
+    }
+    FILE *fp = fdopen(dupFd, "rbe");
+    if (fp == nullptr) {
+        LOG_ECMA(ERROR) << "OpenJSPandaFileFromFd: fdopen failed for fd=" << fd;
+        close(dupFd);
+        return nullptr;
+    }
+    CString location = CString("fd:") + std::to_string(fd).c_str();
+    auto pf = panda_file::OpenPandaFileFromZip(fp, location.c_str(), std::string_view(abcName.c_str()),
+        panda_file::File::READ_WRITE);
+    // OpenPandaFileFromZip in libpandafile never closes fp; we close it here.
+    // fclose closes dupFd, not the original fd.
+    if (fclose(fp) != 0) {
+        LOG_ECMA(WARN) << "OpenJSPandaFileFromFd: fclose failed for fd=" << fd;
+    }
+    if (pf == nullptr) {
+        LOG_ECMA(ERROR) << "OpenJSPandaFileFromFd: OpenPandaFileFromZip failed for fd=" << fd;
+        return nullptr;
+    }
+    return NewJSPandaFile(pf.release(), desc);
+}
+
 std::shared_ptr<JSPandaFile> JSPandaFileManager::NewJSPandaFile(const panda_file::File *pf, const CString &desc)
 {
     std::shared_ptr<JSPandaFile> jsPandaFile = std::make_shared<JSPandaFile>(pf, desc);
+#ifndef EXCLUDE_PGO
     PGOProfilerManager::GetInstance()->SamplePandaFileInfo(jsPandaFile->GetChecksum(),
                                                            jsPandaFile->GetJSPandaFileDesc());
+#endif
     return jsPandaFile;
 }
 
@@ -433,8 +532,10 @@ std::shared_ptr<JSPandaFile> JSPandaFileManager::NewJSPandaFile(JSThread *thread
                                                                 const CString &desc, std::string_view entryPoint)
 {
     std::shared_ptr<JSPandaFile> jsPandaFile = std::make_shared<JSPandaFile>(thread, pf, desc, entryPoint);
+#ifndef EXCLUDE_PGO
     PGOProfilerManager::GetInstance()->SamplePandaFileInfo(jsPandaFile->GetChecksum(),
                                                            jsPandaFile->GetJSPandaFileDesc());
+#endif
     return jsPandaFile;
 }
 
@@ -450,14 +551,18 @@ DebugInfoExtractor *JSPandaFileManager::GetJSPtExtractor(const JSPandaFile *jsPa
         UNREACHABLE();
     }
 
-    auto iter = extractors_.find(jsPandaFile);
-    if (iter == extractors_.end()) {
+    auto *extractors = &extractors_;
+    if (Runtime::GetFork()) {
+        static std::unordered_map<const JSPandaFile *, std::unique_ptr<DebugInfoExtractor>> forkExtractors;
+        extractors = &forkExtractors;
+    }
+    auto iter = extractors->find(jsPandaFile);
+    if (iter == extractors->end()) {
         auto extractorPtr = std::make_unique<DebugInfoExtractor>(jsPandaFile);
         DebugInfoExtractor *extractor = extractorPtr.get();
-        extractors_[jsPandaFile] = std::move(extractorPtr);
+        (*extractors)[jsPandaFile] = std::move(extractorPtr);
         return extractor;
     }
-
     return iter->second.get();
 }
 
@@ -548,10 +653,10 @@ std::shared_ptr<JSPandaFile> JSPandaFileManager::GenerateJSPandaFile(JSThread *t
     std::shared_ptr<JSPandaFile> newJsPandaFile = NewJSPandaFile(thread, pf, desc, entryPoint);
     EcmaVM *vm = thread->GetEcmaVM();
     newJsPandaFile->SetFileMapper(fileMapper);
-    std::string moduleName = GetModuleNameFromDesc(desc.c_str());
     std::string hapPath;
     SearchHapPathCallBack callback = vm->GetSearchHapPathCallBack();
     if (callback) {
+        std::string moduleName = GetModuleNameFromDesc(desc.c_str());
         callback(moduleName, hapPath);
         LOG_ECMA(DEBUG) << "SearchHapPathCallBack moduleName: " << moduleName
                         << ", fileName:" << desc << ", hapPath: " << hapPath;
@@ -566,6 +671,11 @@ std::shared_ptr<JSPandaFile> JSPandaFileManager::GenerateJSPandaFile(JSThread *t
             return jsPandaFile;
         } else {
             AddJSPandaFile(newJsPandaFile);
+            bool isCrossBundleHsp = ModulePathHelper::CheckCrossBundleHsp(vm, desc);
+            if (isCrossBundleHsp) {
+                crossBundleHspPaths_.emplace(desc, entryPoint);
+            }
+            LoadConstpoolSnapshot(thread, newJsPandaFile.get());
             return newJsPandaFile;
         }
     }
@@ -625,7 +735,8 @@ std::shared_ptr<JSPandaFile> JSPandaFileManager::GenerateJSPandafileFromBufferCa
     JSPandaFileManager *jsPandaFileManager = JSPandaFileManager::GetInstance();
     if (bufferInfo.bufferType_ == AbcBufferType::SECURE_BUFFER) {
         return jsPandaFileManager->LoadJSPandaFileSecure(
-            thread, filename, entryPoint, reinterpret_cast<uint8_t *>(bufferInfo.buffer_), bufferInfo.size_);
+            thread, filename, entryPoint, reinterpret_cast<uint8_t *>(bufferInfo.buffer_),
+            bufferInfo.size_, bufferInfo.needUpdate_, bufferInfo.fileMapper_);
     }
     return jsPandaFileManager->LoadJSPandaFile(
         thread, filename, entryPoint, bufferInfo.buffer_, bufferInfo.size_);
@@ -694,12 +805,102 @@ bool JSPandaFileManager::UseSnapshot(JSThread *thread, JSPandaFile *jsPandaFile)
     if (!jsPandaFile->IsBundlePack() && !thread->GetEcmaVM()->GetJSOptions().DisableJSPandaFileAndModuleSnapshot()) {
         CString version = ohos::OhosVersionInfoTools::GetRomVersion();
         if (version.empty()) {
-            LOG_ECMA(ERROR) << "JSPandaFileManager::UseSnapshot rom version is empty";
+            LOG_ECMA(DEBUG) << "JSPandaFileManager::UseSnapshot rom version is empty";
+            return false;
+        }
+        if (!ecmascript::Runtime::GetInstance()->IsMainProcess()) {
+            LOG_ECMA(DEBUG) << "JSPandaFileManager::UseSnapshot skiped in child process";
             return false;
         }
         return JSPandaFileSnapshot::ReadData(
-            thread, jsPandaFile, ohos::OhosConstants::PANDAFILE_AND_MODULE_SNAPSHOT_DIR);
+            thread, jsPandaFile, ohos::OhosConstants::PANDAFILE_AND_MODULE_SNAPSHOT_DIR, version);
     }
     return false;
 }
-}  // namespace panda::ecmascript
+
+bool JSPandaFileManager::LoadConstpoolSnapshot(JSThread *thread, JSPandaFile *jsPandaFile)
+{
+    auto vm = thread->GetEcmaVM();
+    if (!jsPandaFile->IsBundlePack() && !vm->GetJSOptions().DisableJSPandaFileAndModuleSnapshot()) {
+        CString version = ohos::OhosVersionInfoTools::GetRomVersion();
+        if (version.empty()) {
+            LOG_ECMA(DEBUG) << "JSPandaFileManager::LoadConstpoolSnapshot rom version is empty";
+            return false;
+        }
+        if (!ecmascript::Runtime::GetInstance()->IsMainProcess()) {
+            LOG_ECMA(DEBUG) << "JSPandaFileManager::LoadConstpoolSnapshot skiped in child process";
+            return false;
+        }
+        return ConstPoolSnapshot::DeserializeData(vm, jsPandaFile,
+                                                  ohos::OhosConstants::PANDAFILE_AND_MODULE_SNAPSHOT_DIR, version);
+    }
+    return false;
+}
+
+std::string JSPandaFileManager::GenPandafileCheckReport()
+{
+    auto formatPath = [](const std::string_view& path) -> std::string_view {
+        // path starts with ModulePathHelper::BUNDLE_INSTALL_PATH
+        if (path.find(ModulePathHelper::BUNDLE_INSTALL_PATH) == 0) {
+            // [ in] "/data/storage/el1/bundle/entry/ets/modules.abc"
+            // [out] "entry/ets/modules.abc"
+            // [ in] "/data/storage/el1/bundle/com.example.myapplication/entry/entry/ets/modules.abc"
+            // [out] "com.example.myapplication/entry/entry/ets/modules.abc"
+            return path.substr(ModulePathHelper::BUNDLE_INSTALL_PATH.size(),
+                               path.size() - ModulePathHelper::BUNDLE_INSTALL_PATH.size());
+        } else {
+            // [ in] "/system/lib64/module/libmixed_napi_module.so/mix_napi_module.js"
+            // [out] "libmixed_napi_module.so/mix_napi_module.js"
+            // [ in] "/system/etc/abc/framework/my_ts_module.abc"
+            // [out] "framework/my_ts_module.abc"
+            // [ in] "C9840370DCD7DDE94E0D"
+            // [out] "C9840370DCD7DDE94E0D" (not contains path divider, return full string)
+            constexpr char pathDivider = '/';
+            auto pos1 = path.rfind(pathDivider);
+            if (pos1 == 0 || pos1 == std::string_view::npos) {
+                return path;
+            }
+            auto pos2 = path.rfind(pathDivider, pos1 - 1);
+            return (pos2 == std::string_view::npos) ? path : path.substr(pos2 + 1);
+        }
+    };
+    auto appendReport = [&formatPath](std::ostringstream& oss,
+                                     const std::string_view& name, uint32_t actual, uint32_t expect) {
+        // report would like "[entry/ets/modules.abc] checksum failed, expect: 0x12345678, actual: 0x9abcdef0"
+        oss << "    [" << formatPath(name) << "] ";
+        if (actual == 0 && expect == 0) {
+            oss << "invalid buffer pointer";
+        } else {
+            oss << "checksum check failed, expect: 0x" << std::hex << expect
+                << ", actual: 0x" << actual;
+        }
+    };
+    static constexpr uint32_t FILE_CONTENT_OFFSET = 8 + sizeof(uint32_t);  // 8: file header size
+    std::ostringstream oss;
+    LockHolder lock(jsPandaFileLock_);
+    for (auto& [name, pf] : loadedJSPandaFiles_) {
+        auto ptr = pf->GetBase();
+        if (ptr == nullptr) {
+            appendReport(oss, name, 0, 0);
+            continue;
+        }
+        uint32_t actual = adler32(1UL, static_cast<const uint8_t*>(ptr) + FILE_CONTENT_OFFSET,
+                                  pf->GetFileSize() - FILE_CONTENT_OFFSET);
+        uint32_t expect = pf->GetChecksum();
+        if (actual == expect) {
+            continue;
+        }
+        appendReport(oss, name, actual, expect);
+    }
+    return oss.str();
+}
+
+void JSPandaFileManager::RegisterPFCheckCallback(const EcmaVM* vm)
+{
+    const_cast<EcmaVM*>(vm)->RegisterExtraJSCrashMessageCallback(
+        DAMAGED_ABC_REPORT_HEADER, [&](const EcmaVM* vm) -> std::string {
+            return GetInstance()->GenPandafileCheckReport();
+        });
+}
+
+} // namespace panda::ecmascript

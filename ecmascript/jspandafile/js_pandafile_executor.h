@@ -16,7 +16,7 @@
 #ifndef ECMASCRIPT_JSPANDAFILE_JS_PANDAFILE_EXECUTOR_H
 #define ECMASCRIPT_JSPANDAFILE_JS_PANDAFILE_EXECUTOR_H
 
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/js_thread.h"
 #include "ecmascript/jspandafile/js_pandafile.h"
 #include "ecmascript/module/js_module_execute_type.h"
@@ -44,14 +44,15 @@ public:
     static Expected<JSTaggedValue, bool> ExecuteFromBuffer(JSThread *thread, const void *buffer, size_t size,
                                                            std::string_view entryPoint, const CString &filename = "",
                                                            bool needUpdate = false,
-                                                           const ExecuteTypes &executeType = ExecuteTypes::STATIC);
+                                                           const ExecuteTypes &executeType = ExecuteTypes::STATIC,
+                                                           const std::string &filePath = "");
     static Expected<JSTaggedValue, bool> ExecuteModuleBuffer(JSThread *thread, const void *buffer, size_t size,
                                                              const CString &filename = "", bool needUpdate = false);
     static Expected<JSTaggedValue, bool> CommonExecuteBuffer(JSThread *thread, const CString &filename,
                                                              const CString &entry, const void *buffer, size_t size,
                                                              const ExecuteTypes &executeType = ExecuteTypes::STATIC);
     static Expected<JSTaggedValue, bool> Execute(JSThread *thread, const JSPandaFile *jsPandaFile,
-                                                 std::string_view entryPoint,
+                                                 const CString &entryPoint,
                                                  const ExecuteTypes &executeType = ExecuteTypes::STATIC);
     static void BindPreloadedPandaFilesToAOT(EcmaVM *vm, const std::string &moduleName);
     static void BindPandaFileToAot(JSPandaFile *jsPandaFile);
@@ -67,7 +68,7 @@ public:
                                                                  void *fileMapper = nullptr);
     static Expected<JSTaggedValue, bool> ExecuteModuleBufferSecure(JSThread *thread, uint8_t *buffer, size_t size,
                                                                    const CString &filename = "",
-                                                                   bool needUpdate = false);
+                                                                   bool needUpdate = false, void *fileMapper = nullptr);
     static Expected<JSTaggedValue, bool> CommonExecuteBuffer(JSThread *thread, const CString &filename,
                                                              const CString &entry, const JSPandaFile *jsPandaFile);
     static Expected<JSTaggedValue, bool> ExecuteSecureWithOhmUrl(JSThread *thread, uint8_t *buffer,

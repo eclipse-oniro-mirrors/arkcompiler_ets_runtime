@@ -1,0 +1,14 @@
+one
+two
+zero
+one
+zero
+true
+true
+zero:-Infinity
+two:two
+true
+two:undefined
+true
+one:undefined
+OK

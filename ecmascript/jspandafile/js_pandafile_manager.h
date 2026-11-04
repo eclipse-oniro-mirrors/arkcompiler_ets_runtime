@@ -31,7 +31,7 @@ public:
 
     ~JSPandaFileManager();
 
-    JSHandle<Program> GenerateProgram(EcmaVM *vm, const JSPandaFile *jsPandaFile, std::string_view entryPoint);
+    JSHandle<Program> GenerateProgram(EcmaVM *vm, const JSPandaFile *jsPandaFile, const CString &entryPoint);
 
     template<ForHybridApp isHybrid = ForHybridApp::Normal>
     std::shared_ptr<JSPandaFile> LoadJSPandaFile(JSThread *thread, const CString &filename, std::string_view entryPoint,
@@ -39,7 +39,8 @@ public:
                                                  const ExecuteTypes &executeType = ExecuteTypes::STATIC);
 
     std::shared_ptr<JSPandaFile> LoadJSPandaFile(JSThread *thread, const CString &filename, std::string_view entryPoint,
-                                                 const void *buffer, size_t size, bool needUpdate = false);
+                                                 const void *buffer, size_t size, bool needUpdate = false,
+                                                 const std::string &filePath = "");
 
     // load pandafile from secure mem
     std::shared_ptr<JSPandaFile> LoadJSPandaFileSecure(JSThread *thread, const CString &filename,
@@ -49,11 +50,16 @@ public:
     std::shared_ptr<JSPandaFile> LoadInsecureJSPandaFile(JSThread *thread, const CString &filename,
                                                          std::string_view entryPoint);
 
+    std::shared_ptr<JSPandaFile> LoadSnapShotCrossBundleHsp(JSThread *thread, const CString &filename,
+                                                            std::string_view entryPoint);
+
     std::shared_ptr<JSPandaFile> OpenJSPandaFile(const CString &filename);
 
     std::shared_ptr<JSPandaFile> OpenJSPandaFile(const CString &filename, const CString &desc);
 
     std::shared_ptr<JSPandaFile> OpenJSPandaFileFromBuffer(uint8_t *buffer, size_t size, const CString &filename);
+
+    std::shared_ptr<JSPandaFile> OpenJSPandaFileFromFd(int fd, const CString &abcName, const CString &desc);
 
     std::shared_ptr<JSPandaFile> NewJSPandaFile(const panda_file::File *pf, const CString &desc);
     std::shared_ptr<JSPandaFile> NewJSPandaFile(JSThread *thread, const panda_file::File *pf, const CString &desc,
@@ -106,24 +112,38 @@ public:
     void AddJSPandaFile(const std::shared_ptr<JSPandaFile> &jsPandaFile);
     void RemoveJSPandaFile(const JSPandaFile *jsPandaFile);
     void ClearNameMap();
+    std::unordered_map<CString, CString> GetCrossBundleHspPaths()
+    {
+        LockHolder lock(jsPandaFileLock_);
+        return crossBundleHspPaths_;
+    }
 
-    std::unordered_set<std::shared_ptr<JSPandaFile>> GetHapJSPandaFiles(const EcmaVM *vm)
+    std::unordered_set<std::shared_ptr<JSPandaFile>> GetAppJSPandaFiles(const EcmaVM *vm, bool hapOnly = false)
     {
         std::unordered_set<std::shared_ptr<JSPandaFile>> hapJSPandaFiles;
         if (!const_cast<EcmaVM *>(vm)->IsAsynTranslateClasses()) {
             return hapJSPandaFiles;
         }
         LockHolder lock(jsPandaFileLock_);
-        for (const auto &item : loadedJSPandaFiles_) {
-            if (!item.second->IsBundlePack() && item.second->IsHapPath() && item.second->IsNewVersion()) {
+        for (const auto& item : loadedJSPandaFiles_) {
+            if (item.second->IsBundlePack()) {
+                continue;
+            }
+            if (!(hapOnly ? item.second->IsHapPath() : item.second->IsHapOrHspPath())) {
+                continue;
+            }
+            if (item.second->IsNewVersion()) {
                 hapJSPandaFiles.emplace(item.second);
             }
         }
         return hapJSPandaFiles;
     }
+    static void RegisterPFCheckCallback(const EcmaVM *vm);
 
 private:
     JSPandaFileManager() = default;
+    
+    static size_t GenPFCheckReport(char* buffer, char* end);
 
     class JSPandaFileAllocator {
     public:
@@ -145,6 +165,8 @@ private:
     static void FreeBuffer(void *mem, size_t size, bool isBundlePack, CreateMode mode);
 
     static bool UseSnapshot(JSThread *thread, JSPandaFile *jsPandaFile);
+    static bool LoadConstpoolSnapshot(JSThread *thread, JSPandaFile *jsPandaFile);
+    std::string GenPandafileCheckReport();
 
     RecursiveMutex jsPandaFileLock_;
     // JSPandaFile was shared by all vm.
@@ -152,8 +174,10 @@ private:
     // for plugin update.
     std::set<std::shared_ptr<JSPandaFile>> oldJSPandaFiles_;
     std::unordered_map<const JSPandaFile *, std::unique_ptr<DebugInfoExtractor>> extractors_;
+    std::unordered_map<CString, CString> crossBundleHspPaths_;
 
     friend class JSPandaFile;
+    friend class JSPandaFileSnapshot;
     friend class JSPandaFileRecordInfoSnapshot;
 };
 }  // namespace ecmascript

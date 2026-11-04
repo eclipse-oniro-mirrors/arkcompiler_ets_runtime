@@ -37,31 +37,81 @@ void Marker::MarkRoots(RootVisitor &rootVisitor, GlobalVisitType visitType)
 void NonMovableMarker::ProcessOldToNew(uint32_t threadId)
 {
     ASSERT(heap_->IsYoungMark());
-    YoungGCMarkOldToNewRSetVisitor youngGCMarkOldToNewRSetVisitor(workManager_->GetWorkNodeHolder(threadId));
-    heap_->EnumerateOldSpaceRegions(youngGCMarkOldToNewRSetVisitor);
+    WorkNodeHolder *holder = workManager_->GetWorkNodeHolder(threadId);
+    if (heap_->GetCmsGC()) {
+        YoungGCMarkOldToNewRSetVisitor<true> youngGCMarkOldToNewRSetVisitor(holder);
+        heap_->EnumerateOldSpaceRegions(youngGCMarkOldToNewRSetVisitor);
+    } else {
+        YoungGCMarkOldToNewRSetVisitor<false> youngGCMarkOldToNewRSetVisitor(holder);
+        heap_->EnumerateOldSpaceRegions(youngGCMarkOldToNewRSetVisitor);
+    }
     ProcessMarkStack(threadId);
 }
 
 void NonMovableMarker::ProcessOldToNewNoMarkStack(uint32_t threadId)
 {
     ASSERT(heap_->IsYoungMark());
-    YoungGCMarkOldToNewRSetVisitor youngGCMarkOldToNewRSetVisitor(workManager_->GetWorkNodeHolder(threadId));
-    heap_->EnumerateOldSpaceRegions(youngGCMarkOldToNewRSetVisitor);
+    WorkNodeHolder *holder = workManager_->GetWorkNodeHolder(threadId);
+    if (heap_->GetCmsGC()) {
+        YoungGCMarkOldToNewRSetVisitor<true> youngGCMarkOldToNewRSetVisitor(holder);
+        heap_->EnumerateOldSpaceRegions(youngGCMarkOldToNewRSetVisitor);
+    } else {
+        YoungGCMarkOldToNewRSetVisitor<false> youngGCMarkOldToNewRSetVisitor(holder);
+        heap_->EnumerateOldSpaceRegions(youngGCMarkOldToNewRSetVisitor);
+    }
+}
+
+void NonMovableMarker::ProcessOldToNewForSticky(uint32_t threadId)
+{
+    StickyMarkOldToNewRSetVisitor stickyOldToNewVisitor(workManager_->GetWorkNodeHolder(threadId));
+    heap_->EnumerateOldSpaceRegions(stickyOldToNewVisitor);
+    ProcessMarkStack(threadId);
+}
+
+void NonMovableMarker::ProcessOldToNewNoMarkStackForSticky(uint32_t threadId)
+{
+    StickyMarkOldToNewRSetVisitor stickyOldToNewVisitor(workManager_->GetWorkNodeHolder(threadId));
+    heap_->EnumerateOldSpaceRegions(stickyOldToNewVisitor);
+}
+
+void NonMovableMarker::ProcessSnapshotRSetForSticky(uint32_t threadId)
+{
+    StickyMarkOldToNewRSetVisitor stickyOldToNewVisitor(workManager_->GetWorkNodeHolder(threadId));
+    heap_->EnumerateSnapshotSpaceRegions(stickyOldToNewVisitor);
+    ProcessMarkStack(threadId);
+}
+
+void NonMovableMarker::ProcessSnapshotRSetNoMarkStackForSticky(uint32_t threadId)
+{
+    StickyMarkOldToNewRSetVisitor stickyOldToNewVisitor(workManager_->GetWorkNodeHolder(threadId));
+    heap_->EnumerateSnapshotSpaceRegions(stickyOldToNewVisitor);
 }
 
 void NonMovableMarker::ProcessSnapshotRSet(uint32_t threadId)
 {
     ASSERT(heap_->IsYoungMark());
-    YoungGCMarkOldToNewRSetVisitor youngGCMarkOldToNewRSetVisitor(workManager_->GetWorkNodeHolder(threadId));
-    heap_->EnumerateSnapshotSpaceRegions(youngGCMarkOldToNewRSetVisitor);
+    WorkNodeHolder *holder = workManager_->GetWorkNodeHolder(threadId);
+    if (heap_->GetCmsGC()) {
+        YoungGCMarkOldToNewRSetVisitor<true> youngGCMarkOldToNewRSetVisitor(holder);
+        heap_->EnumerateSnapshotSpaceRegions(youngGCMarkOldToNewRSetVisitor);
+    } else {
+        YoungGCMarkOldToNewRSetVisitor<false> youngGCMarkOldToNewRSetVisitor(holder);
+        heap_->EnumerateSnapshotSpaceRegions(youngGCMarkOldToNewRSetVisitor);
+    }
     ProcessMarkStack(threadId);
 }
 
 void NonMovableMarker::ProcessSnapshotRSetNoMarkStack(uint32_t threadId)
 {
     ASSERT(heap_->IsYoungMark());
-    YoungGCMarkOldToNewRSetVisitor youngGCMarkOldToNewRSetVisitor(workManager_->GetWorkNodeHolder(threadId));
-    heap_->EnumerateSnapshotSpaceRegions(youngGCMarkOldToNewRSetVisitor);
+    WorkNodeHolder *holder = workManager_->GetWorkNodeHolder(threadId);
+    if (heap_->GetCmsGC()) {
+        YoungGCMarkOldToNewRSetVisitor<true> youngGCMarkOldToNewRSetVisitor(holder);
+        heap_->EnumerateSnapshotSpaceRegions(youngGCMarkOldToNewRSetVisitor);
+    } else {
+        YoungGCMarkOldToNewRSetVisitor<false> youngGCMarkOldToNewRSetVisitor(holder);
+        heap_->EnumerateSnapshotSpaceRegions(youngGCMarkOldToNewRSetVisitor);
+    }
 }
 
 void NonMovableMarker::MarkJitCodeMap(uint32_t threadId)
@@ -72,27 +122,55 @@ void NonMovableMarker::MarkJitCodeMap(uint32_t threadId)
     if (heap_->IsYoungMark()) {
         return;
     }
-    OldGCMarkObjectVisitor objectVisitor(workManager_->GetWorkNodeHolder(threadId));
-    JitCodeMapVisitor visitor = [&objectVisitor](std::map<JSTaggedType, JitCodeVector *> &jitCodeMaps) {
-        auto it = jitCodeMaps.begin();
-        while (it != jitCodeMaps.end()) {
-            JSTaggedType jsError = it->first;
-            Region *objectRegion = Region::ObjectAddressToRange(reinterpret_cast<TaggedObject *>(jsError));
-            if (!objectRegion->Test(reinterpret_cast<TaggedObject *>(jsError))) {
+    auto visitJitCodeMap = [this](auto &objectVisitor) {
+        JitCodeMapVisitor visitor = [&objectVisitor](std::map<JSTaggedType, JitCodeVector *> &jitCodeMaps) {
+            auto it = jitCodeMaps.begin();
+            while (it != jitCodeMaps.end()) {
+                JSTaggedType jsError = it->first;
+                Region *objectRegion = Region::ObjectAddressToRange(reinterpret_cast<TaggedObject *>(jsError));
+                if (!objectRegion->Test(reinterpret_cast<TaggedObject *>(jsError))) {
+                    ++it;
+                    continue;
+                }
+                for (auto &jitCodeMap : *(it->second)) {
+                    auto &jitCode = std::get<0>(jitCodeMap);
+                    objectVisitor.HandleObject(jitCode, Region::ObjectAddressToRange(jitCode));
+                }
                 ++it;
-                continue;
             }
-            for (auto &jitCodeMap : *(it->second)) {
-                auto &jitCode = std::get<0>(jitCodeMap);
-                objectVisitor.HandleObject(jitCode, Region::ObjectAddressToRange(jitCode));
-            }
-            ++it;
-        }
+        };
+        ObjectXRay::VisitJitCodeMap(heap_->GetEcmaVM(), visitor);
     };
-    ObjectXRay::VisitJitCodeMap(heap_->GetEcmaVM(), visitor);
+    if (heap_->GetCmsGC()) {
+        ASSERT(!heap_->GetEvacuateNonMovableSpace());
+        OldGCMarkObjectVisitor<true, false> objectVisitor(workManager_->GetWorkNodeHolder(threadId));
+        visitJitCodeMap(objectVisitor);
+    } else {
+        if (heap_->GetEvacuateNonMovableSpace()) {
+            OldGCMarkObjectVisitor<false, true> objectVisitor(workManager_->GetWorkNodeHolder(threadId));
+            visitJitCodeMap(objectVisitor);
+        } else {
+            OldGCMarkObjectVisitor<false, false> objectVisitor(workManager_->GetWorkNodeHolder(threadId));
+            visitJitCodeMap(objectVisitor);
+        }
+    }
     ProcessMarkStack(threadId);
     heap_->WaitRunningMarkTaskFinished();
 }
+
+#if ECMASCRIPT_ENABLE_ARK_STEED
+void NonMovableMarker::MarkEmbeddedCodeRefs(uint32_t threadId)
+{
+    WorkNodeHolder *holder = workManager_->GetWorkNodeHolder(threadId);
+    if (heap_->IsYoungMark()) {
+        YoungGCMarkRootVisitor visitor(holder);
+        heap_->GetEmbeddedCodeRefSet()->VisitYoungTargets(visitor);
+        return;
+    }
+    OldGCMarkRootVisitor visitor(holder);
+    heap_->GetEmbeddedCodeRefSet()->VisitMarkedLocalTargets(visitor);
+}
+#endif
 
 void NonMovableMarker::ProcessMarkStack(uint32_t threadId)
 {
@@ -102,23 +180,42 @@ void NonMovableMarker::ProcessMarkStack(uint32_t threadId)
         return;
     }
     if (heap_->IsYoungMark()) {
-        ProcessYoungGCMarkStack(threadId);
+        if (heap_->GetCmsGC()) {
+            ProcessYoungGCMarkStack<true>(threadId);
+        } else {
+            ProcessYoungGCMarkStack<false>(threadId);
+        }
     } else if (heap_->IsFullMark()) {
-        ProcessOldGCMarkStack(threadId);
+        if (heap_->GetCmsGC()) {
+            ASSERT(!heap_->GetEvacuateNonMovableSpace());
+            ProcessOldGCMarkStack<true, false>(threadId);
+        } else {
+            if (heap_->GetEvacuateNonMovableSpace()) {
+                ProcessOldGCMarkStack<false, true>(threadId);
+            } else {
+                ProcessOldGCMarkStack<false, false>(threadId);
+            }
+        }
     } else {
         ASSERT(heap_->IsCCMark());
         ProcessCCGCMarkStack(threadId);
     }
 }
 
+template <bool cmsGC>
 void NonMovableMarker::ProcessYoungGCMarkStack(uint32_t threadId)
 {
     WorkNodeHolder *workNodeHolder = workManager_->GetWorkNodeHolder(threadId);
-    YoungGCMarkObjectVisitor youngGCMarkObjectVisitor(workNodeHolder);
+    YoungGCMarkObjectVisitor<cmsGC> youngGCMarkObjectVisitor(workNodeHolder);
     SemiSpace *newSpace = heap_->GetNewSpace();
     TaggedObject *obj = nullptr;
     while (workNodeHolder->Pop(&obj)) {
         Region *region = Region::ObjectAddressToRange(obj);
+        JSHClass *jsHclass = obj->SynchronizedGetClass();
+        ASSERT(!region->IsFreshRegion());
+        auto size = jsHclass->SizeFromJSHClass(obj);
+        region->IncreaseAliveObject(size);
+
         if (region->IsHalfFreshRegion()) {
             ASSERT(region->InYoungSpace());
             if (newSpace->IsFreshObjectInHalfFreshRegion(obj)) {
@@ -126,24 +223,25 @@ void NonMovableMarker::ProcessYoungGCMarkStack(uint32_t threadId)
                 continue;
             }
         }
-
-        JSHClass *jsHclass = obj->SynchronizedGetClass();
-        ASSERT(!region->IsFreshRegion());
-        auto size = jsHclass->SizeFromJSHClass(obj);
-        region->IncreaseAliveObject(size);
 
         ObjectXRay::VisitObjectBody<VisitType::OLD_GC_VISIT>(obj, jsHclass, youngGCMarkObjectVisitor);
     }
 }
 
+template <bool cmsGC, bool evacuateNonMovableSpace>
 void NonMovableMarker::ProcessOldGCMarkStack(uint32_t threadId)
 {
     WorkNodeHolder *workNodeHolder = workManager_->GetWorkNodeHolder(threadId);
-    OldGCMarkObjectVisitor oldGCMarkObjectVisitor(workNodeHolder);
+    OldGCMarkObjectVisitor<cmsGC, evacuateNonMovableSpace> oldGCMarkObjectVisitor(workNodeHolder);
     SemiSpace *newSpace = heap_->GetNewSpace();
     TaggedObject *obj = nullptr;
     while (workNodeHolder->Pop(&obj)) {
         Region *region = Region::ObjectAddressToRange(obj);
+        JSHClass *jsHclass = obj->SynchronizedGetClass();
+        ASSERT(!region->IsFreshRegion());
+        auto size = jsHclass->SizeFromJSHClass(obj);
+        region->IncreaseAliveObject(size);
+
         if (region->IsHalfFreshRegion()) {
             ASSERT(region->InYoungSpace());
             if (newSpace->IsFreshObjectInHalfFreshRegion(obj)) {
@@ -152,12 +250,7 @@ void NonMovableMarker::ProcessOldGCMarkStack(uint32_t threadId)
             }
         }
 
-        JSHClass *jsHclass = obj->SynchronizedGetClass();
-        ASSERT(!region->IsFreshRegion());
-        auto size = jsHclass->SizeFromJSHClass(obj);
-        region->IncreaseAliveObject(size);
-
-        oldGCMarkObjectVisitor.VisitHClass(jsHclass);
+        oldGCMarkObjectVisitor.VisitHClass(obj, jsHclass);
         ObjectXRay::VisitObjectBody<VisitType::OLD_GC_VISIT>(obj, jsHclass, oldGCMarkObjectVisitor);
     }
 }
@@ -175,7 +268,11 @@ void NonMovableMarker::ProcessCMSGCMarkStack(uint32_t threadId)
         size_t size = jsHclass->SizeFromJSHClass(obj);
         region->IncreaseAliveObject(size);
 
-        sweepGCMarkObjectVisitor.VisitHClass(jsHclass);
+        if constexpr (G_USE_STICKY_CMS_GC) {
+            obj->SetObjectState(ObjectState::OLD);
+        }
+
+        sweepGCMarkObjectVisitor.VisitHClass(obj, jsHclass);
         ObjectXRay::VisitObjectBody<VisitType::OLD_GC_VISIT>(obj, jsHclass, sweepGCMarkObjectVisitor);
     }
 }
@@ -192,29 +289,38 @@ void NonMovableMarker::ProcessCCGCMarkStack(uint32_t threadId)
         auto jsHClass = obj->GetClass();
         auto size = jsHClass->SizeFromJSHClass(obj);
         region->IncreaseAliveObject(size);
-        ccMarkObjectVisitor.VisitObjectHClassImpl(jsHClass);
+        ccMarkObjectVisitor.VisitObjectHClassImpl(obj, jsHClass);
         ObjectXRay::VisitObjectBody<VisitType::OLD_GC_VISIT>(obj, jsHClass, ccMarkObjectVisitor);
     }
 }
 
 void CompressGCMarker::ProcessMarkStack(uint32_t threadId)
 {
+    if (heap_->GetEvacuateNonMovableSpace()) {
+        ProcessMarkStackImpl<true>(threadId);
+    } else {
+        ProcessMarkStackImpl<false>(threadId);
+    }
+}
+
+template <bool evacuateNonMovableSpace>
+void CompressGCMarker::ProcessMarkStackImpl(uint32_t threadId)
+{
     WorkNodeHolder *workNodeHolder = workManager_->GetWorkNodeHolder(threadId);
-    FullGCRunner fullGCRunner(heap_, workNodeHolder, isAppSpawn_);
-    FullGCMarkObjectVisitor &fullGCMarkObjectVisitor = fullGCRunner.GetMarkObjectVisitor();
+    FullGCRunner<evacuateNonMovableSpace> fullGCRunner(heap_, workNodeHolder, isAppSpawn_);
+    FullGCMarkObjectVisitor<evacuateNonMovableSpace> &fullGCMarkObjectVisitor = fullGCRunner.GetMarkObjectVisitor();
     TaggedObject *obj = nullptr;
     WeakAggregate weakAggregate;
     while (true) {
         while (workNodeHolder->Pop(&obj)) {
             auto jsHClass = obj->GetClass();
-            ObjectSlot hClassSlot(ToUintPtr(obj));
-            fullGCMarkObjectVisitor.VisitHClassSlot(hClassSlot, jsHClass);
+            fullGCMarkObjectVisitor.VisitHClass(obj, jsHClass);
             ObjectXRay::VisitObjectBody<VisitType::OLD_GC_VISIT, VisitLinkedWeakHashMapType::AS_WEAK_AGGREGATE>(obj,
                 jsHClass, fullGCMarkObjectVisitor);
         }
         bool doMore = false;
         while (workNodeHolder->PopFreshWeakAggregate(&weakAggregate)) {
-            doMore |= ProcessWeakAggregate(&fullGCRunner, weakAggregate);
+            doMore |= ProcessWeakAggregate<evacuateNonMovableSpace>(&fullGCRunner, weakAggregate);
         }
         if (!doMore) {
             workNodeHolder->pendingWeakAggregateWorkNodeWrapper_.PushWorkNodeToGlobal(workManager_);
@@ -224,7 +330,8 @@ void CompressGCMarker::ProcessMarkStack(uint32_t threadId)
     }
 }
 
-bool CompressGCMarker::ProcessWeakAggregate(FullGCRunner *runner, WeakAggregate weakAggregate)
+template <bool evacuateNonMovableSpace>
+bool CompressGCMarker::ProcessWeakAggregate(FullGCRunner<evacuateNonMovableSpace> *runner, WeakAggregate weakAggregate)
 {
     if (!runner->HandleWeakAggregate(weakAggregate)) {
         runner->RecordPendingWeakAggregate(weakAggregate);
@@ -239,7 +346,33 @@ void CompressGCMarker::MarkJitCodeMap(uint32_t threadId)
     // alive first. So this method must be call after all other mark work finish.
     TRACE_GC(GCStats::Scope::ScopeId::MarkRoots, heap_->GetEcmaVM()->GetEcmaGCStats());
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "GC::MarkJitCodeMap", "");
-    FullGCRunner fullGCRunner(heap_, workManager_->GetWorkNodeHolder(threadId), isAppSpawn_);
+    if (heap_->GetEvacuateNonMovableSpace()) {
+        MarkJitCodeMapImpl<true>(threadId);
+    } else {
+        MarkJitCodeMapImpl<false>(threadId);
+    }
+}
+
+#if ECMASCRIPT_ENABLE_ARK_STEED
+void CompressGCMarker::MarkEmbeddedCodeRefs(uint32_t threadId)
+{
+    WorkNodeHolder *holder = workManager_->GetWorkNodeHolder(threadId);
+    if (heap_->GetEvacuateNonMovableSpace()) {
+        FullGCRunner<true> runner(heap_, holder, isAppSpawn_);
+        FullGCMarkRootVisitor<true> &visitor = runner.GetMarkRootVisitor();
+        heap_->GetEmbeddedCodeRefSet()->VisitMarkedLocalTargets(visitor);
+    } else {
+        FullGCRunner<false> runner(heap_, holder, isAppSpawn_);
+        FullGCMarkRootVisitor<false> &visitor = runner.GetMarkRootVisitor();
+        heap_->GetEmbeddedCodeRefSet()->VisitMarkedLocalTargets(visitor);
+    }
+}
+#endif
+
+template <bool evacuateNonMovableSpace>
+void CompressGCMarker::MarkJitCodeMapImpl(uint32_t threadId)
+{
+    FullGCRunner<evacuateNonMovableSpace> fullGCRunner(heap_, workManager_->GetWorkNodeHolder(threadId), isAppSpawn_);
     JitCodeMapVisitor visitor = [&fullGCRunner] (std::map<JSTaggedType, JitCodeVector *> &jitCodeMaps) {
         std::map<JSTaggedType, JitCodeVector *> tempVec;
         auto it = jitCodeMaps.begin();

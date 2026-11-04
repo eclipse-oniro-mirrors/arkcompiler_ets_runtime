@@ -23,12 +23,11 @@
 #include "ecmascript/compiler/builtins/builtins_call_signature.h"
 #include "ecmascript/ecma_string.h"
 #include "ecmascript/enum_cache.h"
-#include "ecmascript/func_slot.h"
 #include "ecmascript/js_function_kind.h"
 #include "ecmascript/js_handle.h"
 #include "ecmascript/js_hclass.h"
 #include "ecmascript/js_native_pointer.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/js_typed_array.h"
 #include "ecmascript/mem/heap_region_allocator.h"
 #include "ecmascript/mem/machine_code.h"
@@ -218,9 +217,9 @@ public:
                                                 BUILTINS_STUB_ID(INVALID),
                                                 MemSpaceType methodSpaceType = SHARED_OLD_SPACE);
 
-    JSHandle<ProfileTypeInfo> NewProfileTypeInfo(uint32_t length);
+    JSHandle<ProfileTypeInfo> NewProfileTypeInfo(uint32_t length, const JSHandle<Method> &method = JSHandle<Method>());
     JSHandle<ICInfo> NewICInfo(uint32_t length);
-    JSHandle<ConstantPool> NewConstantPool(uint32_t capacity);
+    JSHandle<ConstantPool> NewConstantPool(uint32_t numOfCache);
     JSHandle<Program> NewProgram();
 
     JSHandle<JSObject> PUBLIC_API GetJSError(const ErrorType &errorType, const char *data = nullptr,
@@ -277,7 +276,8 @@ public:
                                       kungfu::BuiltinsStubCSigns::ID builtinId = BUILTINS_STUB_ID(INVALID),
                                       MemSpaceType spaceType = SHARED_OLD_SPACE);
     JSHandle<DependentInfos> NewDependentInfos(uint32_t capacity);
-    void InitializeMethod(const MethodLiteral *methodLiteral, JSHandle<Method> &method);
+    void InitializeMethod(const MethodLiteral *methodLiteral, JSHandle<Method> &method,
+                          const JSPandaFile *jsPandaFile = nullptr);
     // use for method
     JSHandle<JSFunction> NewJSFunction(const JSHandle<GlobalEnv> &env, const JSHandle<Method> &method);
     JSHandle<JSFunction> NewJSBuiltinFunction(const JSHandle<GlobalEnv> &env, const JSHandle<Method> &method);
@@ -425,7 +425,6 @@ public:
     // Copy on write array is allocated in nonmovable space by default.
     JSHandle<COWTaggedArray> NewCOWTaggedArray(uint32_t length, JSTaggedValue initVal = JSTaggedValue::Hole());
     JSHandle<COWMutantTaggedArray> NewCOWMutantTaggedArray(uint32_t length, JSTaggedType initVal = base::SPECIAL_HOLE);
-    JSHandle<FuncSlot> NewFuncSlot(JSTaggedValue initVal = JSTaggedValue::Hole());
     JSHandle<MutantTaggedArray> NewMutantTaggedArray(uint32_t length, JSTaggedType initVal = base::SPECIAL_HOLE);
     JSHandle<TaggedArray> PUBLIC_API NewDictionaryArray(uint32_t length);
     JSHandle<JSForInIterator> NewJSForinIterator(const JSHandle<JSTaggedValue> &obj,
@@ -625,7 +624,8 @@ public:
     JSHandle<JSFunction> NewJSFunctionByHClassWithoutAccessor(const JSHandle<GlobalEnv> &env, const void *func,
         const JSHandle<JSHClass> &clazz, FunctionKind kind = FunctionKind::NORMAL_FUNCTION);
 
-    JSHandle<Method> NewMethod(const MethodLiteral *methodLiteral, MemSpaceType spaceType = OLD_SPACE);
+    JSHandle<Method> NewMethod(const MethodLiteral *methodLiteral, MemSpaceType spaceType = OLD_SPACE,
+                               const JSPandaFile *jsPandaFile = nullptr);
 
     JSHandle<Method> NewMethod(const JSPandaFile *jsPandaFile, MethodLiteral *methodLiteral,
                                JSHandle<ConstantPool> constpool, uint32_t entryIndex,
@@ -810,7 +810,7 @@ public:
     JSHandle<FunctionTemplate> NewFunctionTemplate(
         const JSHandle<Method> &method, const JSHandle<JSTaggedValue> &module, int32_t length);
     JSHandle<VTable> NewVTable(uint32_t length, JSTaggedValue initVal = JSTaggedValue::Hole());
-    JSHandle<JSHClass> NewEcmaHClass(JSHClass *hclass, uint32_t size, JSType type,
+    JSHandle<JSHClass> NewEcmaHClass(JSHandle<JSHClass> hclass, uint32_t size, JSType type,
                                      uint32_t inlinedProps = JSHClass::DEFAULT_CAPACITY_OF_IN_OBJECTS);
 
     // napi interface to create object with initial inline properties
@@ -835,7 +835,7 @@ public:
 
     JSHandle<JSHClass> PUBLIC_API NewSEcmaHClass(uint32_t size, JSType type, uint32_t inlinedProps);
 
-    JSHandle<JSHClass> PUBLIC_API NewSEcmaHClass(JSHClass *hclass, uint32_t size, JSType type,
+    JSHandle<JSHClass> PUBLIC_API NewSEcmaHClass(JSHandle<JSHClass> hclass, uint32_t size, JSType type,
         uint32_t inlinedProps = JSHClass::DEFAULT_CAPACITY_OF_IN_OBJECTS);
 
     JSHandle<JSHClass> PUBLIC_API NewSEcmaHClass(uint32_t size, uint32_t inlinedProps, JSType type,
@@ -844,14 +844,14 @@ public:
     JSHandle<JSHClass> PUBLIC_API NewSEcmaHClassDictMode(uint32_t size, uint32_t inlinedProps, JSType type,
                                               const JSHandle<JSTaggedValue> &prototype);
 
-    JSHandle<JSHClass> NewSEcmaHClassClass(JSHClass *hclass, uint32_t size, JSType type);
+    JSHandle<JSHClass> NewSEcmaHClassClass(uint32_t size, JSType type);
 
     JSHandle<JSHClass> InitSClassClass();
 
-    JSHandle<JSHClass> NewSEcmaReadOnlyHClass(JSHClass *hclass, uint32_t size, JSType type,
+    JSHandle<JSHClass> NewSEcmaReadOnlyHClass(JSHandle<JSHClass> hclass, uint32_t size, JSType type,
                                              uint32_t inlinedProps = JSHClass::DEFAULT_CAPACITY_OF_IN_OBJECTS);
-    JSTaggedValue InitHClassInCompositeBaseClass(JSHClass* hclass, EcmaStringType type);
-    JSHandle<JSHClass> NewSEcmaReadOnlySharedHClass(JSHClass *hclass, uint32_t size, JSType type,
+    JSTaggedValue InitHClassInCompositeBaseClass(JSHandle<JSHClass> hclass, EcmaStringType type);
+    JSHandle<JSHClass> NewSEcmaReadOnlySharedHClass(JSHandle<JSHClass> hclass, uint32_t size, JSType type,
                                                     uint32_t inlinedProps = JSHClass::DEFAULT_CAPACITY_OF_IN_OBJECTS);
 
     JSHandle<TaggedArray> SharedEmptyArray() const;
@@ -891,7 +891,8 @@ public:
         kungfu::BuiltinsStubCSigns::ID builtinId = BUILTINS_STUB_ID(INVALID),
         MemSpaceType spaceType = SHARED_OLD_SPACE);
 
-    JSHandle<Method> NewSMethod(const MethodLiteral *methodLiteral, MemSpaceType methodSpaceType = SHARED_OLD_SPACE);
+    JSHandle<Method> NewSMethod(const MethodLiteral *methodLiteral, MemSpaceType methodSpaceType = SHARED_OLD_SPACE,
+                                const JSPandaFile *jsPandaFile = nullptr);
 
     JSHandle<Method> PUBLIC_API NewSMethod(const JSPandaFile *jsPandaFile,
                                            MethodLiteral *methodLiteral,
@@ -900,7 +901,7 @@ public:
                                            bool needSetAotFlag,
                                            bool *canFastCall = nullptr);
 
-    JSHandle<ConstantPool> NewSConstantPool(uint32_t capacity);
+    JSHandle<ConstantPool> NewSConstantPool(uint32_t numOfCache);
 
     JSHandle<AOTLiteralInfo> NewSAOTLiteralInfo(uint32_t length, JSTaggedValue initVal = JSTaggedValue::Hole());
 
@@ -948,12 +949,12 @@ public:
     JSHandle<ResolvedRecordIndexBinding> NewSResolvedRecordIndexBindingRecord();
 
     JSHandle<ResolvedRecordIndexBinding> NewSResolvedRecordIndexBindingRecord(
-        const JSHandle<EcmaString> &moduleRecord, const JSHandle<EcmaString> &abcFileName, int32_t index);
+        const CString &moduleRecord, const CString &abcFileName, int32_t index);
 
     JSHandle<ResolvedRecordBinding> NewSResolvedRecordBindingRecord();
 
     JSHandle<ResolvedRecordBinding> NewSResolvedRecordBindingRecord(
-        const JSHandle<EcmaString> &moduleRecord, const JSHandle<JSTaggedValue> &bindingName);
+        const CString &moduleRecord, const JSHandle<JSTaggedValue> &bindingName);
 
     JSHandle<LayoutInfo> CopyAndReSortSLayoutInfo(const JSHandle<LayoutInfo> &old, int end, int capacity);
 
@@ -1026,12 +1027,9 @@ private:
 
     void NewObjectHook() const;
     void NewSObjectHook() const;
-    // used for creating jshclass in GlobalEnv, EcmaVM
-    JSHandle<JSHClass> NewEcmaHClassClass(JSHClass *hclass, uint32_t size, JSType type);
 
-    JSHandle<JSHClass> NewEcmaReadOnlyHClass(JSHClass *hclass, uint32_t size, JSType type,
+    JSHandle<JSHClass> NewEcmaReadOnlyHClass(JSHandle<JSHClass> hclass, uint32_t size, JSType type,
                                              uint32_t inlinedProps = JSHClass::DEFAULT_CAPACITY_OF_IN_OBJECTS);
-    JSHandle<JSHClass> InitClassClass();
 
     // used to create nonmovable js_object
     JSHandle<JSObject> NewNonMovableJSObject(const JSHandle<JSHClass> &jshclass);
@@ -1047,8 +1045,8 @@ private:
     JSHandle<JSHClass> CreateFunctionClass(FunctionKind kind, uint32_t size, JSType type,
                                            const JSHandle<JSTaggedValue> &prototype,
                                            uint32_t inlinedProps = JSHClass::DEFAULT_CAPACITY_OF_IN_OBJECTS);
-    JSHandle<JSHClass> CreateDefaultClassPrototypeHClass(JSHClass *hclass);
-    JSHandle<JSHClass> CreateDefaultClassConstructorHClass(JSHClass *hclass);
+    JSHandle<JSHClass> CreateDefaultClassPrototypeHClass(JSHandle<JSHClass> hclass);
+    JSHandle<JSHClass> CreateDefaultClassConstructorHClass(JSHandle<JSHClass> hclass);
 
     // used for creating ref.prototype in buildins, such as Number.prototype
     JSHandle<JSPrimitiveRef> NewJSPrimitiveRef(const JSHandle<JSHClass> &hclass,
@@ -1080,7 +1078,7 @@ private:
 
     JSHandle<JSHClass> CreateJSRegExpInstanceClass(JSHandle<JSTaggedValue> proto);
 
-    inline TaggedObject *AllocObjectWithSpaceType(size_t size, JSHClass *cls, MemSpaceType type);
+    inline TaggedObject *AllocObjectWithSpaceType(size_t size, JSHandle<JSHClass> cls, MemSpaceType type);
     JSHandle<TaggedArray> NewTaggedArrayWithoutInit(uint32_t length, MemSpaceType spaceType);
 
     // For object with many properties, directly create new HClass instead of searching on transitions

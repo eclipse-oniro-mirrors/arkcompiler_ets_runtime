@@ -23,20 +23,19 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <atomic>
 
 #include "ecmascript/common.h"
+#include "ecmascript/extractortool/src/source_map_init_status.h"
 #include "ecmascript/dfx/hprof/file_stream.h"
 #include "ecmascript/dfx/hprof/heap_profiler_interface.h"
 #include "ecmascript/napi/include/jsnapi_expo.h"
-
 #include "libpandabase/macros.h"
 
 namespace panda {
 namespace ecmascript {
 class EcmaVM;
 class JSTaggedValue;
-template<typename T>
-class JSHandle;
 class Stream;
 class Progress;
 struct ProfileInfo;
@@ -63,24 +62,42 @@ using AppFreezeFilterCallback =
 using DumpSnapShotOption = ecmascript::DumpSnapShotOption;
 using DumpFormat = ecmascript::DumpFormat;
 using CropLevel = ecmascript::RawHeapDumpCropLevel;
+struct GCStatistic {
+    size_t count {0};
+    float maxPause {0.0f};
+    float minPause {0.0f};
+    float averagePause {0.0f};
+    uint64_t lastStartTime {0};
+    uint64_t lastEndTime {0};
+    const char *lastType {"UnknownType"};
+};
+
 struct DumpForSnapShotStruct {
     const EcmaVM *vm;
     DumpSnapShotOption dumpOption;
+    uint32_t tid {0};
 };
 
 class PUBLIC_API DFXJSNApi {
 public:
     // progress pointer is used to report the object number for IDE.
     // isVmMode means the internal class in vm is visible. isPrivate means the number and string is not visible.
+    static bool DumpHybridHeapSnapshot(const std::string &path, const DumpSnapShotOption &dumpOption);
     static void DumpHeapSnapshot(const EcmaVM *vm, const std::string &path, const DumpSnapShotOption &dumpOption,
                                  const std::function<void(uint8_t)> &callback = nullptr);
     static void DumpHeapSnapshot(const EcmaVM *vm, Stream *stream, const DumpSnapShotOption &dumpOption,
                                  Progress *progress = nullptr,
                                  std::function<void(uint8_t)> callback = [] (uint8_t) {});
+    static bool DumpHybridRawHeapSnapshot(const std::string &dynamicPath, const std::string &staticPath,
+                                          const DumpSnapShotOption &dumpOption,
+                                          std::function<void(uint8_t)> callback = nullptr);
     static void DumpCpuProfile(const EcmaVM *vm);
     static void DumpHeapSnapshot(const EcmaVM *vm, const DumpSnapShotOption &dumpOption);
     static void DumpHeapSnapshot(const EcmaVM *vm, const DumpSnapShotOption &dumpOption, uint32_t tid);
     static void DumpHeapSnapshotWithVm(const EcmaVM *vm, const DumpSnapShotOption &dumpOption, uint32_t tid);
+    static bool PerformHybridHeapDump(const EcmaVM *vm, const DumpSnapShotOption &dumpOption);
+    static void ScheduleHybridHeapDump(const EcmaVM *vm, const DumpSnapShotOption &dumpOption, uint32_t tid);
+    static void ScheduleHybridDumpOnLoop(const EcmaVM *vm, const DumpSnapShotOption &dumpOption, uint32_t tid);
     static void TriggerGC(const EcmaVM *vm, uint32_t tid);
     static void TriggerGCWithVm(const EcmaVM *vm);
     static void TriggerLocalCCWithVmForTest(const EcmaVM *vm);
@@ -103,6 +120,7 @@ public:
     // GetHeapObjectSize provide a rough estimate.
     static size_t GetHeapUsedSize(const EcmaVM *vm);
     static size_t GetHeapObjectSize(const EcmaVM *vm);
+    static size_t GetSharedHeapSize();
     static size_t GetHeapLimitSize(const EcmaVM *vm);
     static size_t GetProcessHeapLimitSize();
     static size_t GetGCCount(const EcmaVM *vm);
@@ -110,7 +128,9 @@ public:
     static size_t GetAccumulatedAllocateSize(const EcmaVM *vm);
     static size_t GetAccumulatedFreeSize(const EcmaVM *vm);
     static size_t GetFullGCLongTimeCount(const EcmaVM *vm);
+    static GCStatistic GetGCStatistic(const EcmaVM *vm);
     static void GetHeapPrepare(const EcmaVM *vm);
+    static bool GetHandleNodeIdMap(const EcmaVM *vm);
     static void NotifyApplicationState(EcmaVM *vm, bool inBackground);
     static void NotifyIdleStatusControl(const EcmaVM *vm, std::function<void(bool)> callback);
     static void NotifyIdleTime(const EcmaVM *vm, int idleMicroSec);
@@ -124,6 +144,7 @@ public:
 
     static std::pair<std::string, std::uint32_t> GetAnonymizeExtraErrorMessage(const EcmaVM *vm, uint32_t width);
     static void ClearExtraErrorMessage(const EcmaVM *vm);
+    static std::string GetExtraJSCrashMessage(const EcmaVM* vm);
 
     // cpuprofiler
     static bool StopCpuProfilerForColdStart(const EcmaVM *vm);
@@ -137,7 +158,7 @@ public:
     static bool StartCpuProfilerForInfo(const EcmaVM *vm,
                                         int interval = 500); // 500:Default Sampling interval 500 microseconds
     static std::unique_ptr<ProfileInfo> StopCpuProfilerForInfo(const EcmaVM *vm);
-    static void EnableSeriliazationTimeoutCheck(const EcmaVM *ecmaVM, int32_t threshhold);
+    static void EnableSeriliazationTimeoutCheck(const EcmaVM *ecmaVM, int32_t threshold);
     static void DisableSeriliazationTimeoutCheck(const EcmaVM *ecmaVM);
 
     enum class PUBLIC_API ProfilerType : uint8_t { CPU_PROFILER, HEAP_PROFILER };
@@ -146,6 +167,15 @@ public:
         double localHeapThreshold;
         double sharedHeapThreshold;
         double processHeapThreshold;
+    };
+    struct PUBLIC_API MultithreadingDetectionOptions {
+        std::atomic<bool> abort{true};
+        std::atomic<int64_t> frequency{100};
+        std::atomic<int64_t> interval{5};
+
+        MultithreadingDetectionOptions() = default;
+        MultithreadingDetectionOptions(bool abort_, int64_t frequency_, int64_t interval_)
+            : abort(abort_), frequency(frequency_), interval(interval_) {}
     };
     struct ProfilerOption {
         const char *libraryPath;
@@ -172,13 +202,19 @@ public:
     static bool StartTracing(const EcmaVM *vm, std::string &categories);
     static std::unique_ptr<std::vector<TraceEvent>> StopTracing(const EcmaVM *vm);
     static void GetTracingBufferUseage(const EcmaVM *vm, double &percentFull, uint32_t &eventCount, double &value);
-    static void TranslateJSStackInfo(const EcmaVM *vm, std::string &url, int32_t &line, int32_t &column,
-        std::string &packageName);
+
+    // SourceMap singleton interfaces
+    static void SourceMapSplitSourceMap(const std::string &sourceMapData);
+    static bool SourceMapTranslateUrlPosition(std::string &url, int &line, int &column, std::string &packageName);
+    static std::string SourceMapTranslateBySourceMap(const std::string &stackStr, bool useInitStatus = true);
+    static void SourceMapSetInitStatus(ecmascript::InitStatus status);
 
     static uint32_t GetCurrentThreadId();
     static void RegisterAsyncDetectCallBack(const EcmaVM *vm);
     static void GetMainThreadStackTrace(const EcmaVM *vm, std::string &stackTraceStr);
-    static void SetMultithreadingDetectionEnabled(const EcmaVM *vm, bool enabled);
+    static void SetMultithreadingDetectionEnabled(const EcmaVM *vm, bool enabled,
+                                                  const MultithreadingDetectionOptions& options);
+    static const MultithreadingDetectionOptions &GetDetectionConfig();
 
     static bool OnVMHeapMemoryPressure(const EcmaVM *vm, HeapMemoryPressureOptions options,
                                        Local<FunctionRef> callback);
@@ -187,14 +223,17 @@ public:
     static void SetJsRawHeapCropLevel(CropLevel level);
     static void SetProcDumpInSharedOOM(bool enable);
 
-    static ecmascript::JSHandle<JSTaggedValue> FindFunctionForHook(const EcmaVM *vm,
+    static Local<JSValueRef> FindFunctionForHook(const EcmaVM *vm,
         const std::string &recordName, const std::string &namespaceName,
         const std::string &className, const std::string &funcName);
-    static void ReplaceFunctionForHook(const EcmaVM *vm, ecmascript::JSHandle<JSTaggedValue> &target,
-        ecmascript::JSHandle<JSTaggedValue> &hook, ecmascript::JSHandle<JSTaggedValue> &backup);
+    static void ReplaceFunctionForHook(const EcmaVM *vm, Local<JSValueRef> target,
+        Local<JSValueRef> hook, Local<JSValueRef> backup);
     static bool LoadHookModule(const EcmaVM *vm);
     static void SetEnableRuntimeAsyncStack(EcmaVM *vm, bool state);
     static bool GetEnableRuntimeAsyncStack(const EcmaVM *vm);
+    // module
+    static void InsertSoLoadFailure(EcmaVM *vm,
+        Local<StringRef> moduleName, const std::string &failureInfo);
 };
 }
 #endif

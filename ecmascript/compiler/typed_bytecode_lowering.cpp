@@ -21,7 +21,7 @@
 #include "ecmascript/dfx/vmstat/opt_code_profiler.h"
 #include "ecmascript/jit/jit.h"
 #include "ecmascript/js_object-inl.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/js_tagged_value_internals.h"
 
 namespace panda::ecmascript::kungfu {
@@ -1274,7 +1274,7 @@ bool TypedBytecodeLowering::TryLowerTypedLdObjByNameForBuiltin(const LoadBuiltin
             LowerTypedLdStringLength(tacc);
             return true;
         }
-        if (tacc.IsBuiltinsTypeArray()) {
+        if (tacc.IsBuiltinsTypedArray()) {
             LowerTypedLdTypedArrayLength(tacc);
             return true;
         }
@@ -1525,7 +1525,7 @@ bool TypedBytecodeLowering::TryLowerTypedLdObjByIndexForBuiltin(GateRef gate)
     GateRef result = Circuit::NullGate();
     // Just supported mono.
     if (tacc.IsMono()) {
-        if (tacc.IsBuiltinsTypeArray()) {  // pgo need dump profile type
+        if (tacc.IsBuiltinsTypedArray()) {  // pgo need dump profile type
             AddProfiling(gate);
             result = LoadTypedArrayByIndex(tacc);
             acc_.ReplaceHirAndReplaceDeadIfException(gate, builder_.GetStateDepend(), result);
@@ -1593,7 +1593,7 @@ bool TypedBytecodeLowering::TryLowerTypedLdObjByValueForBuiltin(GateRef gate)
             result = LoadJSArrayByIndex(tacc);
             acc_.ReplaceHirAndReplaceDeadIfException(gate, builder_.GetStateDepend(), result);
             return true;
-        } else if (tacc.IsBuiltinsTypeArray()) {
+        } else if (tacc.IsBuiltinsTypedArray()) {
             AddProfiling(gate);
             result = LoadTypedArrayByIndex(tacc);
             acc_.ReplaceHirAndReplaceDeadIfException(gate, builder_.GetStateDepend(), result);
@@ -1715,7 +1715,7 @@ GateRef TypedBytecodeLowering::LoadElmentFromFloat64Array(const LoadBuiltinObjTy
     Variable result(builder_.GetCurrentEnvironment(),
         VariableType::JS_ANY(), builder_.NextVariableId(), builder_.Undefined());
 
-    builder_.Branch(builder_.DoubleIsImpureNaN(resTemp), &ifTrue, &ifFalse);
+    builder_.Branch(builder_.DoubleIsNAN(resTemp), &ifTrue, &ifFalse);
     builder_.Bind(&ifTrue);
     {
         result = builder_.Double(base::NAN_VALUE);
@@ -1852,7 +1852,7 @@ bool TypedBytecodeLowering::TryLowerTypedStObjByValueForBuiltin(GateRef gate)
             StoreJSArrayByIndex(tacc);
             acc_.ReplaceHirAndReplaceDeadIfException(gate, builder_.GetStateDepend(), Circuit::NullGate());
             return true;
-        } else if (tacc.IsBuiltinsTypeArray()) {
+        } else if (tacc.IsBuiltinsTypedArray()) {
             AddProfiling(gate);
             StoreTypedArrayByIndex(tacc);
             acc_.ReplaceHirAndReplaceDeadIfException(gate, builder_.GetStateDepend(), Circuit::NullGate());
@@ -2852,7 +2852,8 @@ void TypedBytecodeLowering::LowerCreateEmptyObject(GateRef gate)
     for (size_t offset = JSObject::SIZE; offset < objectSize; offset += JSTaggedValue::TaggedTypeSize()) {
         builder_.StoreConstOffset(VariableType::INT64(), object, offset, builder_.Undefined());
     }
-    builder_.StoreHClass(glue_, object, hclass, MemoryAttribute::NeedBarrierAndAtomic());
+    builder_.StoreHClass(glue_, object, hclass, RegionSpaceFlag::IN_YOUNG_SPACE,
+                         MemoryAttribute::NeedBarrierAndAtomic());
     builder_.StoreConstOffset(VariableType::INT64(), object, JSObject::HASH_OFFSET,
                               builder_.Int64(JSTaggedValue(0).GetRawData()));
     builder_.StoreConstOffset(VariableType::JS_POINTER(), object, JSObject::PROPERTIES_OFFSET, emptyArray,

@@ -15,10 +15,13 @@
 
 #include <csetjmp>
 #include <csignal>
+#if defined(PANDA_TARGET_OHOS) && defined(IS_EMULATOR)
+#include <sigchain.h>
+#endif
 
 #include "ecmascript/ecma_handle_scope.h"
 #include "ecmascript/global_env.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/jspandafile/program_object.h"
 #include "ecmascript/mem/barriers.h"
 #include "ecmascript/mem/heap-inl.h"
@@ -71,6 +74,9 @@ public:
     static int RegisterSignal()
     {
         segmentFaultFlag = false;
+#if defined(PANDA_TARGET_OHOS) && defined(IS_EMULATOR)
+        remove_all_special_handler(SIGSEGV);
+#endif
         struct sigaction act;
         act.sa_handler = ProcessHandleLeakSegmentFault;
         sigemptyset(&act.sa_mask);
@@ -84,7 +90,7 @@ HWTEST_F_L0(HandleLeakTest, InitializeCheckOneProperty)
 {
     EcmaHandleScope scope(thread);
     JSHandle<Program> newProgram(thread, const_cast<Heap *>(instance->GetHeap())->AllocateYoungOrHugeObject(
-        JSHClass::Cast(thread->GlobalConstants()->GetProgramClass().GetTaggedObject())));
+        JSHandle<JSHClass>(thread->GlobalConstants()->GetHandledProgramClass())));
 
     newProgram->SetMainFunction(thread, JSTaggedValue::Undefined());
 
@@ -116,7 +122,7 @@ HWTEST_F_L0(HandleLeakTest, PartInitializeCheckMoreProperty)
     JSHandle<JSHClass> arrayClass(thread->GlobalConstants()->GetHandledTaggedArrayClass());
     static constexpr int SIZE = 100;
     JSHandle<TaggedArray> newArray(thread, const_cast<Heap *>(instance->GetHeap())->AllocateNonMovableOrHugeObject(
-        *arrayClass, TaggedArray::ComputeSize(JSTaggedValue::TaggedTypeSize(), SIZE)));
+        arrayClass, TaggedArray::ComputeSize(JSTaggedValue::TaggedTypeSize(), SIZE)));
     newArray->SetLength(SIZE);
     for (uint32_t i = 0; i < SIZE / 2; i++) {
         size_t offset = JSTaggedValue::TaggedTypeSize() * i;
@@ -136,7 +142,7 @@ HWTEST_F_L0(HandleLeakTest, InitializeCheckMoreProperty)
     JSHandle<JSHClass> arrayClass(thread->GlobalConstants()->GetHandledTaggedArrayClass());
     static constexpr int SIZE = 100;
     JSHandle<TaggedArray> newArray(thread, const_cast<Heap *>(instance->GetHeap())->AllocateNonMovableOrHugeObject(
-        *arrayClass, TaggedArray::ComputeSize(JSTaggedValue::TaggedTypeSize(), SIZE)));
+        arrayClass, TaggedArray::ComputeSize(JSTaggedValue::TaggedTypeSize(), SIZE)));
 
     newArray->InitializeWithSpecialValue(JSTaggedValue::Hole(), SIZE);
     size_t failCount = 0;

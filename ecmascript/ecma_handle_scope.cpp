@@ -16,6 +16,10 @@
 #include "ecmascript/ecma_handle_scope.h"
 
 #include "ecmascript/ecma_vm.h"
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+#include "ecmascript/napi/jsnapi_handle_scope_check.h"
+#endif
+#include "ecmascript/platform/profiler_signal_guard.h"
 #if defined(ENABLE_LOCAL_HANDLE_LEAK_DETECT)
 #include "ecmascript/dfx/hprof/heap_profiler.h"
 #endif
@@ -28,6 +32,10 @@
 #endif // ENABLE_HITRACE_LOCAL_HANDLE_DETECT
 
 namespace panda::ecmascript {
+namespace {
+constexpr size_t LOCAL_SCOPE_MARKER = 1;
+}
+
 EcmaHandleScope::EcmaHandleScope(JSThread *thread) : thread_(thread)
 {
     auto vm = thread_->GetEcmaVM();
@@ -41,6 +49,7 @@ EcmaHandleScope::EcmaHandleScope(JSThread *thread) : thread_(thread)
 
 #if defined(ENABLE_HITRACE_LOCAL_HANDLE_DETECT)
     const_cast<EcmaVM *>(vm)->IncreaseOpenHandleScopes();
+    scopeLevel_ = vm->GetOpenHandleScopes();
 #endif // ENABLE_HITRACE_LOCAL_HANDLE_DETECT
 }
 
@@ -70,12 +79,28 @@ EcmaHandleScope::~EcmaHandleScope()
 #endif
 
 #if defined(ENABLE_HITRACE_LOCAL_HANDLE_DETECT)
+    if (scopeLevel_ != vm->GetOpenHandleScopes()) {
+        if (vm->GetJSOptions().EnableHandleLeakLogOutput()) {
+            // output backtrace to hilog
+            // pass 0: `this` is the scope address, not a handle to save
+            vm->HandleLeakDetect(0);
+        } else {
+            // report backtrace via restraceExt
+#ifdef HOOK_ENABLE
+            restraceExt(RES_ARK_LOCAL_HANDLE, (void *)this, LOCAL_SCOPE_MARKER,
+                        TAG_RES_ARK_LOCAL_HANDLE, true, false);
+#endif // HOOK_ENABLE
+        }
+    }
     const_cast<EcmaVM *>(vm)->DecreaseOpenHandleScopes();
 #endif // ENABLE_HITRACE_LOCAL_HANDLE_DETECT
 }
 
 void EcmaHandleScope::CloseHandleScope(EcmaVM *vm)
 {
+    if (vm->IsHandleScopeCheckEnabled()) {
+        vm->GuardHandleStorage(prevNext_, prevHandleStorageIndex_);
+    }
     vm->SetHandleScopeStorageNext(prevNext_);
     if (vm->GetHandleScopeStorageEnd() != prevEnd_) {
         vm->SetHandleScopeStorageEnd(prevEnd_);
@@ -85,6 +110,9 @@ void EcmaHandleScope::CloseHandleScope(EcmaVM *vm)
 
 void EcmaHandleScope::ClosePrimitiveScope(EcmaVM *vm)
 {
+    if (vm->IsHandleScopeCheckEnabled()) {
+        vm->GuardPrimitiveStorage(prevPrimitiveNext_, prevPrimitiveStorageIndex_);
+    }
     vm->SetPrimitiveScopeStorageNext(prevPrimitiveNext_);
     if (vm->GetPrimitiveScopeStorageEnd() != prevPrimitiveEnd_) {
         vm->SetPrimitiveScopeStorageEnd(prevPrimitiveEnd_);
@@ -95,6 +123,7 @@ void EcmaHandleScope::ClosePrimitiveScope(EcmaVM *vm)
 uintptr_t EcmaHandleScope::NewHandle(JSThread *thread, JSTaggedType value)
 {
     CHECK_NO_HANDLE_ALLOC;
+    ProfilerSignalGuardCheck();
 #if ECMASCRIPT_ENABLE_THREAD_STATE_CHECK
     if (UNLIKELY(!thread->IsInRunningStateOrProfiling())) {
         LOG_ECMA(FATAL) << "New handle must be in jsthread running state";
@@ -127,9 +156,14 @@ uintptr_t EcmaHandleScope::NewHandle(JSThread *thread, JSTaggedType value)
 
 #ifdef ENABLE_HITRACE_LOCAL_HANDLE_DETECT
     if (vm->GetOpenHandleScopes() == 0) {
+        if (vm->GetJSOptions().EnableHandleLeakLogOutput()) {
+            vm->HandleLeakDetect(reinterpret_cast<uintptr_t>(result));
+        } else {
 #ifdef HOOK_ENABLE
-        restraceExt(RES_ARK_LOCAL_HANDLE, (void *)result, sizeof(JSTaggedType), TAG_RES_ARK_LOCAL_HANDLE, true, false);
+            restraceExt(RES_ARK_LOCAL_HANDLE, (void *)result, sizeof(JSTaggedType),
+                        TAG_RES_ARK_LOCAL_HANDLE, true, false);
 #endif // HOOK_ENABLE
+        }
     }
 #endif // ENABLE_HITRACE_LOCAL_HANDLE_DETECT
     return reinterpret_cast<uintptr_t>(result);
@@ -162,11 +196,23 @@ uintptr_t EcmaHandleScope::NewPrimitiveHandle(JSThread *thread, JSTaggedType val
 
 #ifdef ENABLE_HITRACE_LOCAL_HANDLE_DETECT
     if (vm->GetOpenHandleScopes() == 0) {
+        if (vm->GetJSOptions().EnableHandleLeakLogOutput()) {
+            vm->HandleLeakDetect(reinterpret_cast<uintptr_t>(result));
+        } else {
 #ifdef HOOK_ENABLE
-        restraceExt(RES_ARK_LOCAL_HANDLE, (void *)result, sizeof(JSTaggedType), TAG_RES_ARK_LOCAL_HANDLE, true, false);
+            restraceExt(RES_ARK_LOCAL_HANDLE, (void *)result, sizeof(JSTaggedType),
+                        TAG_RES_ARK_LOCAL_HANDLE, true, false);
 #endif // HOOK_ENABLE
+        }
     }
 #endif // ENABLE_HITRACE_LOCAL_HANDLE_DETECT
     return reinterpret_cast<uintptr_t>(result);
 }
+
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+void EcmaHandleScope::CheckHandleValid(uintptr_t handle)
+{
+    panda::CheckHandleValid(handle);
+}
+#endif
 }  // namespace panda::ecmascript

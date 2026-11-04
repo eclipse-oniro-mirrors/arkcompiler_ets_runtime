@@ -22,7 +22,7 @@ namespace OhosConstants {
     constexpr const char* ARM64 = "arm64";
     constexpr const char* RUNTIME_SO_PATH = "/system/lib64/platformsdk/libark_jsruntime.so";
     constexpr const char* PATH_SEPARATOR = "/";
-    constexpr const char* AOT_RUNTIME_INFO_NAME = "aot_runtime_info.log";
+    constexpr const char* COMPILER_ESCAPE_FILE_NAME = "compiler_crash_info.log";
     constexpr const char* SPLIT_STR = "|";
     constexpr const char* PANDAFILE_AND_MODULE_SNAPSHOT_DIR = "/data/storage/system_optimize/ark_startup_cache/";
     constexpr const char* HOOK_FILE_PATH = "/etc/hookcases/modules.abc";

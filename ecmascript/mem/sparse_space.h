@@ -71,7 +71,10 @@ public:
     void Reset();
     void ResetTopPointer(uintptr_t top);
     uintptr_t Allocate(size_t size, bool allowGC = true);
-    bool Expand();
+    virtual bool Expand();
+
+    void PrepareForIterate() const;
+    void RebuildFreeList();
 
     // For sweeping
     void PrepareSweeping() override;
@@ -98,8 +101,20 @@ public:
     void DetachFreeObjectSet(Region *region);
 
     void IterateOverObjects(const std::function<void(TaggedObject *object)> &objectVisitor) const;
-    void IterateOldToNewOverObjects(
-        const std::function<void(TaggedObject *object, JSTaggedValue value)> &visitor) const;
+    template <typename Visitor>
+    void IterateOldToNewOverObjects(Visitor &visitor) const
+    {
+        auto cb = [&visitor](void *mem, auto referenceTypeWrapper) -> bool {
+            constexpr ReferenceType refType = decltype(referenceTypeWrapper)::value;
+            ObjectSlotBase<refType> slot(ToUintPtr(mem));
+            visitor(reinterpret_cast<TaggedObject *>(mem), slot);
+            return true;
+        };
+        EnumerateRegions([&cb] (Region *region) {
+            region->IterateAllSweepingOldToNewRSetBits(cb);
+            region->IterateAllOldToNewBits(cb);
+        });
+    }
 
     size_t GetHeapObjectSize() const;
 
@@ -283,7 +298,32 @@ public:
     NO_COPY_SEMANTIC(NonMovableSpace);
     NO_MOVE_SEMANTIC(NonMovableSpace);
 
-    uintptr_t  CheckAndAllocate(size_t size);
+    uintptr_t CheckAndAllocate(size_t size);
+
+    uintptr_t AllocateSyncInGC(size_t size);
+
+    bool Expand() override;
+
+    void SelectCSet();
+    void RevertCSet();
+    void ReclaimCSet();
+    void PrepareCompact();
+
+    template<class Callback>
+    void EnumerateCollectRegionSet(const Callback &cb) const
+    {
+        for (Region *current : collectRegionSet_) {
+            if (current != nullptr) {
+                cb(current);
+            }
+        }
+    }
+
+private:
+    void ForceExpandInGC();
+
+    std::vector<Region *> collectRegionSet_ {};
+    Mutex gcAllocLock_ {};
 };
 
 class AppSpawnSpace : public SparseSpace {

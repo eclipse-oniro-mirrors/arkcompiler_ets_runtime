@@ -23,9 +23,15 @@
 #include "ecmascript/tagged_array.h"
 #include "ecmascript/sendable_env.h"
 
+namespace panda::test {
+class EcmaModuleTest;
+}
+
 namespace panda::ecmascript {
 using ResolvedMultiMap = CUnorderedMultiMap<CString *, JSHandle<JSTaggedValue>>;
 struct StateVisit;
+class ModuleManager;
+class ResolvedRecordIndexBinding;
 enum class ModuleStatus : uint8_t {
     // don't change order
     UNINSTANTIATED = 0x0,
@@ -239,12 +245,12 @@ public:
     inline void SetLazyImportArray(bool *lazyImportArray)
     {
         if (lazyImportArray != nullptr) {
-            DestoryLazyImportArray();
+            DestroyLazyImportArray();
         }
         SetLazyImportStatus(ToUintPtr(lazyImportArray));
     }
 
-    inline void DestoryLazyImportArray()
+    inline void DestroyLazyImportArray()
     {
         delete[] GetLazyImportStatusArray();
         SetLazyImportStatus(ToUintPtr(nullptr));
@@ -286,28 +292,67 @@ public:
         return moduleName;
     }
 
-    inline void SetEcmaModuleFilenameString(const CString &fileName)
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+    void SetEcmaModuleFilenameString(JSThread *thread, const CString &fileName);
+    void SetEcmaSharedModuleFilenameString(const CString &fileName);
+#else
+    inline void SetEcmaModuleFilenameString([[maybe_unused]] JSThread *thread, const CString &fileName)
     {
         CString *ptr = new CString(fileName);
-        DestoryEcmaModuleFilenameString();
+        DestroyEcmaModuleFilenameString(nullptr);
         SetEcmaModuleFilename(ToUintPtr(ptr));
     }
+    inline void SetEcmaSharedModuleFilenameString(const CString &fileName)
+    {
+        SetEcmaModuleFilenameString(nullptr, fileName);
+    }
+#endif
 
     inline void SetEcmaModuleRecordNameString(const CString &recordName)
     {
         CString *ptr = new CString(recordName);
-        DestoryEcmaModuleRecordNameString();
+        DestroyEcmaModuleRecordNameString();
         SetEcmaModuleRecordName(ToUintPtr(ptr));
     }
 
-    inline void DestoryEcmaModuleFilenameString()
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+    void DestroyEcmaModuleFilenameString(ModuleManager *moduleManager);
+    void DestroyEcmaSharedModuleFilenameString();
+#else
+    inline void DestroyEcmaModuleFilenameString([[maybe_unused]] ModuleManager *moduleManager)
     {
         CString *ptr = reinterpret_cast<CString *>(GetEcmaModuleFilename());
         delete ptr;
         SetEcmaModuleFilename(ToUintPtr(nullptr));
     }
+    inline void DestroyEcmaSharedModuleFilenameString()
+    {
+        DestroyEcmaModuleFilenameString(nullptr);
+    }
+#endif
 
-    inline void DestoryEcmaModuleRecordNameString()
+    struct NativeFields {
+        bool *lazyImportArray {nullptr};
+        CString *filename {nullptr};
+        CString *recordName {nullptr};
+    };
+
+    // Read out and null the raw native fields for later release.
+    inline NativeFields ExtractSharedModuleNativeFields()
+    {
+        NativeFields fields;
+        fields.lazyImportArray = GetLazyImportStatusArray();
+        SetLazyImportStatus(ToUintPtr(nullptr));
+        fields.filename = reinterpret_cast<CString *>(GetEcmaModuleFilename());
+        SetEcmaModuleFilename(ToUintPtr(nullptr));
+        fields.recordName = reinterpret_cast<CString *>(GetEcmaModuleRecordName());
+        SetEcmaModuleRecordName(ToUintPtr(nullptr));
+        return fields;
+    }
+
+    static void ReleaseSharedModuleNativeFields(const NativeFields &fields);
+
+    inline void DestroyEcmaModuleRecordNameString()
     {
         CString *ptr = reinterpret_cast<CString *>(GetEcmaModuleRecordName());
         delete ptr;
@@ -319,16 +364,47 @@ public:
         SetLazyImportStatus(ToUintPtr(lazyImportArray));
     }
 
-    inline void SetEcmaModuleFilenameStringForDeserialize(const CString &fileName)
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+    void SetEcmaModuleFilenameStringForDeserialize(JSThread *thread, const CString &fileName);
+    void SetEcmaSharedModuleFilenameStringForDeserialize(const CString &fileName);
+#else
+    inline void SetEcmaModuleFilenameStringForDeserialize([[maybe_unused]] JSThread *thread, const CString &fileName)
     {
         CString *ptr = new CString(fileName);
         SetEcmaModuleFilename(ToUintPtr(ptr));
     }
+    inline void SetEcmaSharedModuleFilenameStringForDeserialize(const CString &fileName)
+    {
+        CString *ptr = new CString(fileName);
+        SetEcmaModuleFilename(ToUintPtr(ptr));
+    }
+#endif
 
     inline void SetEcmaModuleRecordNameStringForDeserialize(const CString &recordName)
     {
         CString *ptr = new CString(recordName);
         SetEcmaModuleRecordName(ToUintPtr(ptr));
+    }
+
+    inline void DestroyModuleCNativeFields(ModuleManager *moduleManager)
+    {
+        DestroyLazyImportArray();
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+        if (GetSharedType() > SharedTypes::UNSENDABLE_MODULE) {
+            DestroyEcmaSharedModuleFilenameString();
+        } else {
+            DestroyEcmaModuleFilenameString(moduleManager);
+        }
+#else
+        DestroyEcmaModuleFilenameString(moduleManager);
+#endif
+        DestroyEcmaModuleRecordNameString();
+    }
+
+    inline void DestroySharedModuleCNativeFields()
+    {
+        DestroyLazyImportArray();
+        DestroyEcmaSharedModuleFilenameString();
     }
 
     static constexpr size_t SOURCE_TEXT_MODULE_OFFSET = ModuleRecord::SIZE;
@@ -350,8 +426,8 @@ public:
     ACCESSORS_PRIMITIVE_FIELD(DFSIndex, int32_t, DFS_INDEX_OFFSET, ASYNC_EVALUATION_OFFSET);
     ACCESSORS_PRIMITIVE_FIELD(AsyncEvaluatingOrdinal, uint32_t, ASYNC_EVALUATION_OFFSET, PENDING_DEPENDENCIES_OFFSET);
     ACCESSORS_PRIMITIVE_FIELD(PendingAsyncDependencies,
-        int32_t, PENDING_DEPENDENCIES_OFFSET, LAYZ_IMPORT_STATUS_OFFSET);
-    ACCESSORS_PRIMITIVE_FIELD(LazyImportStatus, uintptr_t, LAYZ_IMPORT_STATUS_OFFSET, ECMA_MODULE_FILENAME);
+        int32_t, PENDING_DEPENDENCIES_OFFSET, LAZY_IMPORT_STATUS_OFFSET);
+    ACCESSORS_PRIMITIVE_FIELD(LazyImportStatus, uintptr_t, LAZY_IMPORT_STATUS_OFFSET, ECMA_MODULE_FILENAME);
     ACCESSORS_PRIMITIVE_FIELD(EcmaModuleFilename, uintptr_t, ECMA_MODULE_FILENAME, ECMA_MODULE_RECORDNAME);
     ACCESSORS_PRIMITIVE_FIELD(EcmaModuleRecordName, uintptr_t, ECMA_MODULE_RECORDNAME, BIT_FIELD_OFFSET);
     ACCESSORS_BIT_FIELD(BitField, BIT_FIELD_OFFSET, LAST_OFFSET)
@@ -450,6 +526,9 @@ public:
     static JSHandle<JSTaggedValue> CreateBindingByIndexBinding(JSThread* thread,
                                                                JSHandle<ResolvedIndexBinding> binding,
                                                                bool isShared);
+    static JSHandle<JSTaggedValue> CreateBindingByRecordIndexBinding(JSThread* thread,
+                                                                     JSHandle<ResolvedRecordIndexBinding> binding,
+                                                                     bool isMergedAbc);
 
     static JSHandle<SourceTextModule> LoadJsonModule(JSThread *thread, const JSPandaFile *jsPandaFile,
                                                      const CString &filename, CString recordName);
@@ -508,10 +587,14 @@ private:
 
     static void ClearImportEntriesIfNeeded(JSThread *thread, JSHandle<SourceTextModule> &module);
 
+    static void ClearTopLevelCapabilityIfNeeded(JSThread *thread, const JSHandle<SourceTextModule> &module);
+
+    static void ClearModuleRequestsIfNeeded(JSThread *thread, const JSHandle<SourceTextModule> &module);
+
     static void EvaluateJsonModule(JSThread *thread, JSHandle<SourceTextModule> module,
                                    const JSPandaFile *jsPandaFile, CString recordName);
 
-    friend class EcmaModuleTest;
+    friend class panda::test::EcmaModuleTest;
     friend class SharedModuleManager;
 };
 

@@ -16,23 +16,32 @@
 #ifndef ECMASCRIPT_MEM_HEAP_H
 #define ECMASCRIPT_MEM_HEAP_H
 
-#include "common_components/taskpool/task.h"
 #include "ecmascript/base/config.h"
+
+#include <array>
+
+#include "common_components/taskpool/task.h"
 #include "ecmascript/cross_vm/heap_hybrid.h"
 #include "ecmascript/daemon/daemon_thread.h"
 #include "ecmascript/frames.h"
 #include "ecmascript/js_object_resizing_strategy.h"
 #include "ecmascript/mem/cms_mem/slot_space-inl.h"
+#if ECMASCRIPT_ENABLE_ARK_STEED
+#include "ecmascript/mem/embedded_code_ref_set.h"
+#endif
 #include "ecmascript/mem/guarded_task.h"
 #include "ecmascript/mem/jit_fort.h"
 #include "ecmascript/mem/linear_space.h"
 #include "ecmascript/mem/machine_code.h"
 #include "ecmascript/mem/mark_stack.h"
+#include "ecmascript/mem/local_cmc/local_cc_native_pointer_callback.h"
+#include "ecmascript/mem/shared_heap/shared_memory_reallocator.h"
 #include "ecmascript/mem/shared_heap/shared_space.h"
 #include "ecmascript/mem/sparse_space.h"
 #include "ecmascript/mem/visitor.h"
 #include "ecmascript/mem/work_manager.h"
 #include "ecmascript/napi/include/jsnapi_expo.h"
+#include "ecmascript/platform/mutex.h"
 #include "ecmascript/string/external_string_table.h"
 
 namespace panda::test {
@@ -43,6 +52,7 @@ class HeapTestHelper;
 
 namespace panda::ecmascript {
 class ConcurrentCopyGC;
+class CCEvacuator;
 class ConcurrentMarker;
 class ConcurrentSweeper;
 class EcmaVM;
@@ -64,16 +74,22 @@ class IdleGCTrigger;
 class NativeAreaAllocator;
 class ParallelEvacuator;
 class PartialGC;
+class StickySweepGC;
 class SweepGC;
 class RSetWorkListHandler;
 class SharedConcurrentMarker;
 class SharedConcurrentSweeper;
+class GlobalGC;
+class GlobalGCMarker;
+class GlobalGCWorkManager;
 class SharedGC;
 class SharedGCEvacuator;
 class SharedGCMarkerBase;
 class SharedGCMarker;
+class SharedCC;
 class SharedFullGC;
 class SharedGCMovableMarker;
+class SharedPartialGC;
 class ThreadLocalAllocationBuffer;
 class JSThread;
 class DaemonThread;
@@ -121,6 +137,7 @@ enum class StartupStatus : uint8_t {
 
 enum class VerifyKind {
     VERIFY_PRE_GC,
+    VERIFY_PRE_STICKY_GC,
     VERIFY_POST_GC,
     VERIFY_MARK_YOUNG,
     VERIFY_EVACUATE_YOUNG,
@@ -135,6 +152,7 @@ enum class VerifyKind {
     VERIFY_POST_SHARED_GC,
     VERIFY_SHARED_GC_MARK,
     VERIFY_SHARED_GC_SWEEP,
+    VERIFY_NO_SLOT_CHECK,
     VERIFY_END,
 };
 
@@ -232,6 +250,36 @@ public:
     TriggerGCType GetGCType() const
     {
         return gcType_;
+    }
+
+    void SetDisableCmsGC(bool disableCmsGC)
+    {
+        disableCmsGC_ = disableCmsGC;
+    }
+
+    bool GetDisableCmsGC() const
+    {
+        return disableCmsGC_;
+    }
+
+    void SetCmsGC(bool cmsGC)
+    {
+        cmsGC_ = cmsGC;
+    }
+
+    bool GetCmsGC() const
+    {
+        return cmsGC_;
+    }
+
+    void SetEvacuateNonMovableSpace(bool evacuateNonMovableSpace)
+    {
+        evacuateNonMovableSpace_ = evacuateNonMovableSpace;
+    }
+
+    bool GetEvacuateNonMovableSpace() const
+    {
+        return evacuateNonMovableSpace_;
     }
 
     bool PUBLIC_API IsAlive(TaggedObject *object) const;
@@ -362,7 +410,7 @@ public:
 
     void OnAllocateEvent(EcmaVM *ecmaVm, TaggedObject* address, size_t size);
     inline void SetHClassAndDoAllocateEvent(JSThread *thread, TaggedObject *object, JSHClass *hclass,
-                                            [[maybe_unused]] size_t size);
+                                            [[maybe_unused]] size_t size, MemSpaceType type);
     inline bool CheckCanDistributeTask() const;
     void WaitRunningMarkTaskFinished();
     void WaitAllMarkTaskFinished();
@@ -428,10 +476,17 @@ protected:
     };
 
     static constexpr double TRIGGER_SHARED_CONCURRENT_MARKING_OBJECT_LIMIT_RATE = 0.75;
+    static constexpr size_t COLD_STARTUP_COMPRESS_LIMIT = 20_MB;
+    static constexpr size_t FRAGMENTATION_COMPRESS_LIMIT = 50_MB;
+
+protected:
 
     const EcmaParamConfiguration config_;
     MarkType markType_ {MarkType::MARK_YOUNG};
     TriggerGCType gcType_ {TriggerGCType::YOUNG_GC};
+    bool disableCmsGC_ {false};
+    bool cmsGC_ {false};
+    bool evacuateNonMovableSpace_ {false};
     Mutex gcCollectGarbageMutex_;
     // Region allocators.
     NativeAreaAllocator *nativeAreaAllocator_ {nullptr};
@@ -445,6 +500,7 @@ protected:
     // parallel marker task count.
     uint32_t maxMarkTaskCount_ {0};
     std::shared_ptr<EpochGuardedTaskMonitor> markTaskMonitor_;
+    std::shared_ptr<EpochGuardedTaskMonitor> globalMarkTaskMonitor_;
     Mutex waitClearTaskFinishedMutex_;
     ConditionVariable waitClearTaskFinishedCV_;
     bool clearTaskFinished_ {true};
@@ -485,6 +541,11 @@ public:
 
     void DisableParallelGC(JSThread *thread);
 
+    void SetParallelGCEnabled(bool enable)
+    {
+        parallelGC_ = enable;
+    }
+
     void AdjustGlobalSpaceAllocLimit();
 
     inline void OnMoveEvent(uintptr_t address, TaggedObject* forwardAddress, size_t size);
@@ -506,6 +567,24 @@ public:
     private:
         SharedHeap *sHeap_ {nullptr};
         SharedParallelMarkPhase taskPhase_;
+        std::shared_ptr<EpochGuardedTaskMonitor> monitor_;
+        uint32_t epoch_ {0};
+    };
+
+    class GlobalGCMarkTask : public GuardedTask {
+    public:
+        GlobalGCMarkTask(int32_t id, SharedHeap *heap,
+            std::shared_ptr<EpochGuardedTaskMonitor> monitor, uint32_t epoch)
+            : GuardedTask(id), sHeap_(heap), monitor_(monitor), epoch_(epoch) {}
+        ~GlobalGCMarkTask() override = default;
+        bool RunInternal(uint32_t threadIndex) override;
+        bool Scheduable() override;
+
+        NO_COPY_SEMANTIC(GlobalGCMarkTask);
+        NO_MOVE_SEMANTIC(GlobalGCMarkTask);
+
+    private:
+        SharedHeap *sHeap_ {nullptr};
         std::shared_ptr<EpochGuardedTaskMonitor> monitor_;
         uint32_t epoch_ {0};
     };
@@ -538,7 +617,10 @@ public:
         LockHolder lock(smartGCStats_.sensitiveStatusMutex_);
         smartGCStats_.sensitiveStatus_ = status;
         if (!InSensitiveStatus()) {
+            recordSensitiveSize_ = config_.GetMaxHeapSize();
             smartGCStats_.sensitiveStatusCV_.Signal();
+        } else if (recordSensitiveSize_ == config_.GetMaxHeapSize()) {
+            recordSensitiveSize_ = GetHeapObjectSize();
         }
     }
 
@@ -565,8 +647,38 @@ public:
             return false;
         }
         smartGCStats_.startupStatus_ = StartupStatus::FINISH_STARTUP;
+        if (sOldSpace_->GetCommittedSize() > COLD_STARTUP_COMPRESS_LIMIT) {
+            tryCompressHeapAfterStartup_ = true;
+        }
         return true;
     }
+
+    bool TryCompressHeap()
+    {
+        if (tryCompressHeapAfterStartup_ && concurrentMarkEnabled_) {
+            tryCompressHeapAfterStartup_ = false;
+            return true;
+        }
+        return false;
+    }
+
+    bool HintSharedPartialGCByFragment() const
+    {
+#if ENABLE_MEMORY_OPTIMIZATION
+        if (!concurrentMarkEnabled_) {
+            return false;
+        }
+        size_t oldSpaceFragment = sOldSpace_->GetCommittedSize() - sOldSpace_->GetHeapObjectSize();
+        if (oldSpaceFragment > FRAGMENTATION_COMPRESS_LIMIT && GetStartupStatus() == StartupStatus::FINISH_STARTUP) {
+            return true;
+        }
+        return false;
+#else
+        return false;
+#endif
+    }
+
+    bool NeedSwitchRBStub() const;
 
     bool FinishStartupEvent() override
     {
@@ -585,6 +697,12 @@ public:
     bool OnStartupEvent() const override
     {
         return smartGCStats_.startupStatus_ == StartupStatus::ON_STARTUP;
+    }
+
+    bool InSensitiveStatusAfterStartup() const
+    {
+        return GetSensitiveStatus() == AppSensitiveStatus::ENTER_HIGH_SENSITIVE &&
+            GetStartupStatus() == StartupStatus::FINISH_STARTUP;
     }
 
     void NotifyPostFork() override
@@ -626,6 +744,16 @@ public:
     void WaitAllTasksFinishedAfterAllJSThreadEliminated();
 
     void WaitAllTasksFinished(JSThread *thread);
+
+    // Used by the daemon thread before entering managed state to block new LocalCC copies and drain active copies.
+    class LocalCCDrainScope final {
+    public:
+        explicit LocalCCDrainScope(JSThread *thread);
+        ~LocalCCDrainScope();
+
+        NO_COPY_SEMANTIC(LocalCCDrainScope);
+        NO_MOVE_SEMANTIC(LocalCCDrainScope);
+    };
 
     void StartConcurrentMarking(TriggerGCType gcType, MarkReason markReason);         // In daemon thread
 
@@ -706,6 +834,15 @@ public:
         }
     }
 
+    // Try to transfer memory capacity from HugeObjectSpace to OldSpace
+    void TryTransferMemoryToOldSpace()
+    {
+        if (memoryReallocator_.TryTransferMemoryToOldSpace(sOldSpace_, sCompressSpace_, sHugeObjectSpace_)) {
+            // If transfer success, reset shouldThrowOOMError_ flag to avoid OOM in advance
+            shouldThrowOOMError_ = false;
+        }
+    }
+
     inline void TryTriggerConcurrentMarking(JSThread *thread);
 
     template<TriggerGCType gcType, MarkReason markReason>
@@ -714,8 +851,8 @@ public:
     template<TriggerGCType gcType, GCReason gcReason>
     void CollectGarbage(JSThread *thread);
 
-    template<GCReason gcReason>
-    void CompressCollectGarbageNotWaiting(JSThread *thread);
+    template<TriggerGCType gcType, GCReason gcReason>
+    void CompressCollectGarbageNotWaiting(JSThread *thread, bool isForceGC = true);
 
     template<TriggerGCType gcType, GCReason gcReason>
     void PostGCTaskForTest(JSThread *thread);
@@ -731,6 +868,10 @@ public:
     void WaitGCFinished(JSThread *thread);
 
     void DaemonCollectGarbage(TriggerGCType gcType, GCReason reason);
+    void DaemonCollectGarbageWithFlip(TriggerGCType gcType, GCReason reason);
+    void RunSharedGC(TriggerGCType gcType, GCReason gcReason);
+
+    void TriggerSharedCC(GCReason gcReason);
 
     inline size_t GetCommittedSize() const override
     {
@@ -823,12 +964,41 @@ public:
     void PrepareByJSThread(JSThread *thread, bool inTriggerGCThread);
     void Reclaim(TriggerGCType gcType);
     void TryPostGCMarkingTask(SharedParallelMarkPhase sharedTaskPhase);
+    void TryPostGlobalGCMarkingTask();
+    inline bool CheckCanDistributeGlobalGCTask() const;
+    void WaitGlobalGCMarkTaskFinished();
     void CompactHeapBeforeFork(JSThread *thread);
     void ReclaimForAppSpawn();
+    void CollectGarbageFinish(bool inDaemon, TriggerGCType gcType);
 
     SharedGCWorkManager *GetWorkManager() const
     {
         return sWorkManager_;
+    }
+
+    GlobalGC *GetGlobalGC() const
+    {
+        return globalGC_;
+    }
+
+    SharedFullGC *GetSharedFullGC() const
+    {
+        return sharedFullGC_;
+    }
+
+    SharedPartialGC *GetSharedPartialGC() const
+    {
+        return sharedPartialGC_;
+    }
+
+    GlobalGCMarker *GetGlobalGCMarker() const
+    {
+        return globalGCMarker_;
+    }
+
+    GlobalGCWorkManager *GetGlobalGCWorkManager() const
+    {
+        return globalGCWorkManager_;
     }
 
     SharedGCMarker *GetSharedGCMarker() const
@@ -852,6 +1022,21 @@ public:
         return sharedMemController_;
     }
 
+    SharedCC *GetSharedCC() const
+    {
+        return sharedCC_;
+    }
+
+    Mutex &GetSharedGCSyncMutex()
+    {
+        return sharedGCSyncMutex_;
+    }
+
+    ConditionVariable &GetSharedGCSyncCV()
+    {
+        return sharedGCSyncCV_;
+    }
+
     void PrepareRecordRegionsForReclaim();
 
     template<class Callback>
@@ -863,29 +1048,31 @@ public:
     template<class Callback>
     void IterateOverObjects(const Callback &cb) const;
 
-    inline TaggedObject *AllocateClassClass(JSThread *thread, JSHClass *hclass, size_t size);
+    inline TaggedObject *AllocateClassClass(JSThread *thread, size_t size);
 
-    inline TaggedObject *AllocateNonMovableOrHugeObject(JSThread *thread, JSHClass *hclass);
+    inline TaggedObject *AllocateNonMovableOrHugeObject(JSThread *thread, JSHandle<JSHClass> hclass);
 
-    inline TaggedObject *AllocateNonMovableOrHugeObject(JSThread *thread, JSHClass *hclass, size_t size);
+    inline TaggedObject *AllocateNonMovableOrHugeObject(JSThread *thread, JSHandle<JSHClass> hclass, size_t size);
 
     inline TaggedObject *AllocateNonMovableOrHugeObject(JSThread *thread, size_t size);
 
-    inline TaggedObject *AllocateOldOrHugeObject(JSThread *thread, JSHClass *hclass);
+    inline TaggedObject *AllocateOldOrHugeObject(JSThread *thread, JSHandle<JSHClass> hclass);
 
-    inline TaggedObject *AllocateOldOrHugeObject(JSThread *thread, JSHClass *hclass, size_t size);
+    inline TaggedObject *AllocateOldOrHugeObject(JSThread *thread, JSHandle<JSHClass> hclass, size_t size);
 
     inline TaggedObject *AllocateOldOrHugeObject(JSThread *thread, size_t size);
 
     inline TaggedObject *AllocateOldOrHugeObjectNoGC(JSThread *thread, size_t size);
 
-    inline TaggedObject *AllocateHugeObject(JSThread *thread, JSHClass *hclass, size_t size);
+    inline TaggedObject *AllocateHugeObject(JSThread *thread, JSHandle<JSHClass> hclass, size_t size);
 
     inline TaggedObject *AllocateHugeObject(JSThread *thread, size_t size);
 
-    inline TaggedObject *AllocateReadOnlyOrHugeObject(JSThread *thread, JSHClass *hclass);
+    inline TaggedObject *HandleSharedHeapOOM(JSThread *thread, size_t size);
 
-    inline TaggedObject *AllocateReadOnlyOrHugeObject(JSThread *thread, JSHClass *hclass, size_t size);
+    inline TaggedObject *AllocateReadOnlyOrHugeObject(JSThread *thread, JSHandle<JSHClass> hclass);
+
+    inline TaggedObject *AllocateReadOnlyOrHugeObject(JSThread *thread, JSHandle<JSHClass> hclass, size_t size);
 
     inline TaggedObject *AllocateSNonMovableTlab(JSThread *thread, size_t size);
 
@@ -903,6 +1090,18 @@ public:
     inline void PushToSharedNativePointerList(JSNativePointer* pointer);
     inline void IteratorNativePointerList(WeakVisitor &visitor);
 
+    // Weak registry (not GC roots) of shared-heap sendable func modules. During SharedGC,
+    // each dead module is passed to onDead; its native fields are released after GC via
+    // Runtime::InvokeSendableModuleCleanup.
+    using DeadObjectHandler = void (*)(TaggedObject *dead);
+    void PushToSendableModuleList(JSTaggedValue module);
+    void ProcessSendableModuleDelete(const WeakRootVisitor& visitor, DeadObjectHandler onDead);
+    void IteratorSendableModuleList(WeakVisitor &visitor, DeadObjectHandler onDead);
+    size_t GetSendableModuleListSize() const
+    {
+        return sendableModuleList_.size();
+    }
+
     void UpdateHeapStatsAfterGC(TriggerGCType gcType) override;
 
     class SharedGCScope {
@@ -911,12 +1110,12 @@ public:
         ~SharedGCScope();
     };
 
-    bool InHeapProfiler() const
+    bool IsProfilerEnabled() const
     {
-        return inHeapProfiler_;
+        return profilerEnabled_;
     }
 
-    void CheckInHeapProfiler();
+    void CheckProfilerEnabled();
     void SetGCThreadQosPriority(common::PriorityMode mode);
 
     Mutex& GetSuspensionRequestMutex()
@@ -926,9 +1125,14 @@ public:
 
     SHAREDHEAP_PUBLIC_HYBRID_EXTENSION();
 
+    inline void InvokeSharedNativePointerCallbacks();
+    void FinishGCTask();
+    void UpdateGCThresholds(TriggerGCType gcType);
+    void FinishGCStats(TriggerGCType gcType);
+
 private:
     void ProcessAllGCListeners();
-    void CollectGarbageFinish(bool inDaemon, TriggerGCType gcType);
+    void NotifyDeferFreezeFinish(TriggerGCType gcType);
 
     void MoveOldSpaceToAppspawn();
 
@@ -936,7 +1140,8 @@ private:
 
     void ForceCollectGarbageWithoutDaemonThread(TriggerGCType gcType, GCReason gcReason, JSThread *thread);
     inline TaggedObject *AllocateInSOldSpace(JSThread *thread, size_t size);
-    inline void InvokeSharedNativePointerCallbacks();
+    inline bool NeedGCInSensitiveStatus() const;
+
     struct SharedHeapSmartGCStats {
         /**
          * For SmartGC.
@@ -961,16 +1166,20 @@ private:
     bool localFullMarkTriggered_ {false};
 
     bool optionalLogEnabled_ {false};
-
     bool parallelGC_ {true};
-
+    bool concurrentMarkEnabled_ {true};
     // Only means the main body of SharedGC is finished, i.e. if parallel_gc is enabled, this flags will be set
     // to true even if sweep_task and clear_task is running asynchronously
     bool gcFinished_ {true};
-    Mutex waitGCFinishedMutex_;
-    ConditionVariable waitGCFinishedCV_;
+    Mutex sharedGCSyncMutex_;
+    ConditionVariable sharedGCSyncCV_;
 
     Mutex suspensionRequestMutex_;
+
+    Mutex localCCDrainMutex_;
+    ConditionVariable localCCDrainCV_;
+    uint32_t activeLocalCCCount_ {0};
+    bool localCCCopyStartBlocked_ {false};
 
     DaemonThread *dThread_ {nullptr};
     const GlobalEnvConstants *globalEnvConstants_ {nullptr};
@@ -984,23 +1193,77 @@ private:
     SharedConcurrentMarker *sConcurrentMarker_ {nullptr};
     SharedConcurrentSweeper *sSweeper_ {nullptr};
     SharedGC *sharedGC_ {nullptr};
+    SharedPartialGC *sharedPartialGC_ {nullptr};
+    GlobalGC *globalGC_ {nullptr};
+    GlobalGCMarker *globalGCMarker_ {nullptr};
+    GlobalGCWorkManager *globalGCWorkManager_ {nullptr};
     SharedFullGC *sharedFullGC_ {nullptr};
+    SharedCC *sharedCC_ {nullptr};
     SharedGCEvacuator *sEvacuator_ {nullptr};
     SharedGCMarker *sharedGCMarker_ {nullptr};
     SharedGCMovableMarker *sharedGCMovableMarker_ {nullptr};
     SharedMemController *sharedMemController_ {nullptr};
     ExternalStringTable* externalStringTable_ {nullptr};
-    size_t growingFactor_ {0};
+    double growingFactor_ {0.0};
+    double triggerSharedConcurrentMarkingObjectLimitRate_ {TRIGGER_SHARED_CONCURRENT_MARKING_OBJECT_LIMIT_RATE};
     size_t growingStep_ {0};
     size_t incNativeSizeTriggerSharedCM_ {0};
     size_t incNativeSizeTriggerSharedGC_ {0};
     size_t fragmentationLimitForSharedFullGC_ {0};
+    size_t recordSensitiveSize_ {0};
     std::atomic<size_t> spaceOvershoot_ {0};
     std::atomic<size_t> nativeSizeAfterLastGC_ {0};
-    bool inHeapProfiler_ {false};
+    bool profilerEnabled_ {false};
+    bool tryCompressHeapAfterStartup_ {false};
     NativePointerList sharedNativePointerList_;
     std::mutex sNativePointerListMutex_;
+    // Weak entries of sendable func modules, see PushToSendableModuleList.
+    NativePointerList sendableModuleList_;
+    std::mutex sSendableModuleListMutex_;
+    // Memory reallocation helper
+    SharedMemoryReallocator memoryReallocator_;
+
     SHAREDHEAP_PRIVATE_HYBRID_EXTENSION();
+
+    friend class ConcurrentCopyGC;
+};
+
+class RunningMarkTaskSnapshot {
+public:
+    RunningMarkTaskSnapshot(uint64_t generation, uint32_t taskCount)
+        : generation_(generation), remainingTaskCount_(taskCount) {}
+
+    void Wait()
+    {
+        LockHolder lock(mutex_);
+        while (remainingTaskCount_ > 0) {
+            cv_.Wait(&mutex_);
+        }
+    }
+
+    bool IsFinished()
+    {
+        LockHolder lock(mutex_);
+        return remainingTaskCount_ == 0;
+    }
+
+private:
+    void NotifyTaskFinished()
+    {
+        LockHolder lock(mutex_);
+        ASSERT(remainingTaskCount_ > 0);
+        remainingTaskCount_--;
+        if (remainingTaskCount_ == 0) {
+            cv_.SignalAll();
+        }
+    }
+
+    uint64_t generation_ {0};
+    uint32_t remainingTaskCount_ {0};
+    Mutex mutex_;
+    ConditionVariable cv_;
+
+    friend class Heap;
 };
 
 class Heap : public BaseHeap {
@@ -1015,9 +1278,10 @@ public:
     void GetHeapPrepare(JSThread *thread);
     void PrepareForIteration() const;
     void ResetLargeCapacity(size_t heapSize);
-    void Resume(TriggerGCType gcType);
+    void Resume(TriggerGCType gcType, bool cmsGC = false);
     void ResumeForAppSpawn();
     void ResumeCC();
+    void ClearGCBitSetForCMS();
     void CompactHeapBeforeFork();
     void DisableParallelGC();
     void EnableParallelGC();
@@ -1084,6 +1348,13 @@ public:
         return hugeMachineCodeSpace_;
     }
 
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    EmbeddedCodeRefSet *GetEmbeddedCodeRefSet()
+    {
+        return &embeddedCodeRefSet_;
+    }
+#endif
+
     SnapshotSpace *GetSnapshotSpace() const
     {
         return snapshotSpace_;
@@ -1104,6 +1375,8 @@ public:
         switch (type) {
             case MemSpaceType::SLOT_SPACE:
                 return slotSpace_;
+            case MemSpaceType::SEMI_SPACE:
+                return activeSemiSpace_;
             case MemSpaceType::OLD_SPACE:
                 return oldSpace_;
             case MemSpaceType::NON_MOVABLE:
@@ -1233,27 +1506,27 @@ public:
 
     // Young
     inline TaggedObject *AllocateInYoungSpace(size_t size);
-    inline TaggedObject *AllocateYoungOrHugeObject(JSHClass *hclass);
-    inline TaggedObject *AllocateYoungOrHugeObject(JSHClass *hclass, size_t size);
+    inline TaggedObject *AllocateYoungOrHugeObject(JSHandle<JSHClass> hclass);
+    inline TaggedObject *AllocateYoungOrHugeObject(JSHandle<JSHClass> hclass, size_t size);
     inline TaggedObject *AllocateYoungOrHugeObject(size_t size);
-    inline TaggedObject *AllocateReadOnlyOrHugeObject(JSHClass *hclass);
-    inline TaggedObject *AllocateReadOnlyOrHugeObject(JSHClass *hclass, size_t size);
+    inline TaggedObject *AllocateReadOnlyOrHugeObject(JSHandle<JSHClass> hclass);
+    inline TaggedObject *AllocateReadOnlyOrHugeObject(JSHandle<JSHClass> hclass, size_t size);
     inline TaggedObject *AllocateReadOnlyOrHugeObject(size_t size);
     inline uintptr_t AllocateYoungSync(size_t size);
-    inline TaggedObject *TryAllocateYoungGeneration(JSHClass *hclass, size_t size);
+    inline TaggedObject *TryAllocateYoungGeneration(JSHandle<JSHClass> hclass, size_t size);
     // Old
-    inline TaggedObject *AllocateOldOrHugeObject(JSHClass *hclass);
-    inline TaggedObject *AllocateOldOrHugeObject(JSHClass *hclass, size_t size);
+    inline TaggedObject *AllocateOldOrHugeObject(JSHandle<JSHClass> hclass);
+    inline TaggedObject *AllocateOldOrHugeObject(JSHandle<JSHClass> hclass, size_t size);
     inline TaggedObject *AllocateOldOrHugeObject(size_t size);
     // Non-movable
-    inline TaggedObject *AllocateNonMovableOrHugeObject(JSHClass *hclass);
-    inline TaggedObject *AllocateNonMovableOrHugeObject(JSHClass *hclass, size_t size);
-    inline TaggedObject *AllocateClassClass(JSHClass *hclass, size_t size);
+    inline TaggedObject *AllocateNonMovableOrHugeObject(JSHandle<JSHClass> hclass);
+    inline TaggedObject *AllocateNonMovableOrHugeObject(JSHandle<JSHClass> hclass, size_t size);
     // Huge
     inline TaggedObject *AllocateHugeObject(size_t size);
-    inline TaggedObject *AllocateHugeObject(JSHClass *hclass, size_t size);
+    inline TaggedObject *AllocateHugeObject(JSHandle<JSHClass> hclass, size_t size);
     // Machine code
-    inline TaggedObject *AllocateMachineCodeObject(JSHClass *hclass, size_t size, MachineCodeDesc *desc = nullptr);
+    inline TaggedObject *AllocateMachineCodeObject(JSHandle<JSHClass> hclass, size_t size,
+                                                   MachineCodeDesc *desc = nullptr);
     inline TaggedObject *AllocateHugeMachineCodeObject(size_t size, MachineCodeDesc *desc = nullptr);
     // Snapshot
     inline uintptr_t AllocateSnapshotSpace(size_t size);
@@ -1267,6 +1540,9 @@ public:
 
     void ResetTlab();
     void FillBumpPointerForTlab();
+    // DIAG: accessors for TLAB state inspection
+    ThreadLocalAllocationBuffer *GetSOldTlab() const { return sOldTlab_; }
+    ThreadLocalAllocationBuffer *GetSNonMovableTlab() const { return sNonMovableTlab_; }
     /*
      * GC triggers.
      */
@@ -1282,6 +1558,7 @@ public:
 
     void PostParallelGCTask(ParallelGCTaskPhase taskPhase);
     void TryPostParallelGCTask(ParallelGCTaskPhase taskPhase);
+    std::shared_ptr<RunningMarkTaskSnapshot> SnapshotRunningMarkTasks();
 
     bool IsParallelGCEnabled() const
     {
@@ -1352,7 +1629,7 @@ public:
     void WaitAllTasksFinished();
     void WaitConcurrentMarkingFinished();
     PUBLIC_API void WaitCCFinished() const;
-    void WaitAndHandleCCFinished() const;
+    void WaitAndHandleCCFinished();
 
     MemGrowingType GetMemGrowingType() const
     {
@@ -1560,7 +1837,7 @@ public:
         WaitAllTasksFinished();
     }
 #endif
-    inline bool InHeapProfiler();
+    inline bool IsProfilerEnabled();
 
     inline void OnMoveEvent(uintptr_t address, TaggedObject* forwardAddress, size_t size);
 
@@ -1617,8 +1894,6 @@ public:
     }
 
     void AdjustSpaceSizeForAppSpawn();
-
-    static bool ShouldMoveToRoSpace(JSHClass *hclass, TaggedObject *object);
 
     bool IsFullMarkRequested() const
     {
@@ -1732,10 +2007,12 @@ public:
 
     inline void ProcessNativeDelete(const WeakRootVisitor& visitor);
     inline void ProcessReferences(const WeakRootVisitor& visitor);
+    void ProcessReferencesForLocalCC(const WeakRootVisitor &visitor);
     inline void PushToNativePointerList(JSNativePointer* pointer, bool isConcurrent);
     inline void RemoveFromNativePointerList(const JSNativePointer* pointer);
     inline void ClearNativePointerList();
     inline void IteratorNativePointerList(WeakVisitor &vistor);
+    void WaitLocalCCNativePointerCallbacks();
 
     size_t GetNativePointerListSize() const
     {
@@ -1770,13 +2047,15 @@ private:
     // record lastRegion for each space, which will be used in ReclaimRegions()
     void PrepareRecordRegionsForReclaim();
     void PrepareRecordNonmovableRegions();
-    inline void ReclaimRegions(TriggerGCType gcType);
+    inline void ReclaimRegions(TriggerGCType gcType, bool cmsGC);
     inline size_t CalculateCommittedCacheSize();
 #if defined(ECMASCRIPT_SUPPORT_SNAPSHOT) && defined(PANDA_TARGET_OHOS) && defined(ENABLE_HISYSEVENT)
     uint64_t GetCurrentTickMillseconds();
     void ThresholdReachedDump();
 #endif
     void CleanCallback();
+    void ProcessLocalCCGCCallback();
+    std::unique_ptr<common::Task> PrepareLocalCCCallback();
     void IncreasePendingAsyncNativeCallbackSize(size_t bindingSize)
     {
         pendingAsyncNativeCallbackSize_ += bindingSize;
@@ -1787,6 +2066,8 @@ private:
     }
     bool CheckOngoingConcurrentMarkingImpl(ThreadType threadType, int threadIndex,
                                            [[maybe_unused]] const char* traceName);
+    uint64_t RegisterRunningMarkTask();
+    void UnregisterRunningMarkTask(uint64_t generation);
     class ParallelGCTask : public GuardedTask {
     public:
         ParallelGCTask(int32_t id, Heap *heap, ParallelGCTaskPhase taskPhase,
@@ -1808,8 +2089,8 @@ private:
 
     class AsyncClearTask : public common::Task {
     public:
-        AsyncClearTask(int32_t id, Heap *heap, TriggerGCType type)
-            : common::Task(id), heap_(heap), gcType_(type) {}
+        AsyncClearTask(int32_t id, Heap *heap, TriggerGCType type, bool cmsGC)
+            : common::Task(id), heap_(heap), gcType_(type), cmsGC_(cmsGC) {}
         ~AsyncClearTask() override = default;
         bool Run(uint32_t threadIndex) override;
 
@@ -1818,6 +2099,7 @@ private:
     private:
         Heap *heap_;
         TriggerGCType gcType_;
+        bool cmsGC_ {false};
     };
 
     class FinishColdStartTask : public common::Task {
@@ -1861,6 +2143,63 @@ private:
     private:
         std::vector<NativePointerCallbackData> nativePointerCallbacks_ {};
     };
+
+    class LocalCCDeleteCallbackTask : public common::Task {
+    public:
+        LocalCCDeleteCallbackTask(int32_t id, Heap *heap,
+                                  std::vector<LocalCCNativePointerCallbackBucket> &callbackBuckets, void *env)
+            : common::Task(id), heap_(heap), env_(env)
+        {
+            std::swap(callbackBuckets, nativePointerCallbackBuckets_);
+        }
+        ~LocalCCDeleteCallbackTask() override;
+        bool Run(uint32_t threadIndex) override;
+
+        NO_COPY_SEMANTIC(LocalCCDeleteCallbackTask);
+        NO_MOVE_SEMANTIC(LocalCCDeleteCallbackTask);
+
+    private:
+        Heap *heap_ {nullptr};
+        std::vector<LocalCCNativePointerCallbackBucket> nativePointerCallbackBuckets_ {};
+        void *env_ {nullptr};
+    };
+
+    static constexpr size_t NATIVE_FLAG_COUNT = static_cast<size_t>(NativeFlag::WRAPPER_DATA) + 1;
+
+    struct ProcessNativePointerTaskResult {
+        size_t liveBindingSize {0};
+        std::vector<size_t> deadIndexes {};
+        std::vector<JSNativePointer *> deadObjects {};
+        std::array<size_t, NATIVE_FLAG_COUNT> deadNativeSizeByFlag {};
+    };
+
+    size_t ProcessNativePointerListSerial(NativePointerList &list, const WeakRootVisitor &visitor);
+    uint32_t PrepareConcurrentNativePointerTasksForLocalCC();
+    void ProcessConcurrentNativePointerTaskForLocalCC(ConcurrentCopyGC *localCCGC, uint32_t threadIndex,
+                                                      uint32_t taskIndex);
+    void MergeConcurrentNativePointerTaskResultsForLocalCC(uint32_t threadIndex);
+    void FinalizeConcurrentNativePointerListForLocalCC();
+    void NotifyLocalCCNativePointerCallbacksFinished();
+    static void AddDeadNativeSize(ProcessNativePointerTaskResult &result, size_t bindingSize, NativeFlag nativeFlag);
+    static void ProcessNativePointerRange(NativePointerList &list, size_t begin, size_t end,
+                                          const WeakRootVisitor &visitor, ProcessNativePointerTaskResult &result);
+    static void ProcessNativePointerBlocks(NativePointerList &list, std::atomic<size_t> &nextIndex, size_t listSize,
+                                           size_t blockSize, const WeakRootVisitor &visitor,
+                                           ProcessNativePointerTaskResult &result);
+    static void BuildDeadNativePointerCallbacks(const ProcessNativePointerTaskResult &result,
+                                                LocalCCNativePointerCallbackBucket &bucket);
+    static void CollectDeadIndexes(const std::vector<ProcessNativePointerTaskResult> &results, size_t deadCount,
+                                   std::vector<size_t> &deadIndexes);
+    static void MarkDeadIndexes(const std::vector<ProcessNativePointerTaskResult> &results,
+                                std::vector<uint8_t> &deadFlags);
+    static void CompactNativePointerListInOrder(NativePointerList &list, const std::vector<uint8_t> &deadFlags);
+    static void CompactNativePointerListUnordered(NativePointerList &list, const std::vector<size_t> &deadIndexes);
+    static void CompactNativePointerList(NativePointerList &list,
+                                         const std::vector<ProcessNativePointerTaskResult> &results,
+                                         size_t deadCount);
+    static void ApplyDeadNativeSizeStats(NativeAreaAllocator *allocator,
+                                         const std::array<size_t, NATIVE_FLAG_COUNT> &deadNativeSizeByFlag);
+    uint32_t CalculateProcessReferencesTaskCount(size_t itemCount) const;
 
     struct MainLocalHeapSmartGCStats {
         /**
@@ -1939,6 +2278,7 @@ private:
     /**
      * An alternative sweep-only gc to `PartialGC`
      */
+    StickySweepGC *stickySweepGC_ {nullptr};
     SweepGC *sweepGC_ {nullptr};
 
     // Full collector which collects garbage in all valid heap spaces.
@@ -2001,10 +2341,18 @@ private:
     bool nearGCInSensitive_ {false};
 
     size_t pendingAsyncNativeCallbackSize_ {0};
+    size_t runningLocalCCNativePointerCallbackTasks_ {0};
+    Mutex localCCNativePointerCallbackMutex_;
+    ConditionVariable localCCNativePointerCallbackCV_;
     MemGrowingType memGrowingtype_ {MemGrowingType::HIGH_THROUGHPUT};
 
     // parallel evacuator task number.
     uint32_t maxEvacuateTaskCount_ {0};
+
+    Mutex runningMarkTaskMutex_;
+    uint64_t runningMarkTaskGeneration_ {0};
+    uint32_t runningMarkTaskCount_ {0};
+    std::shared_ptr<RunningMarkTaskSnapshot> runningMarkTaskSnapshot_;
 
     uint64_t startupDurationInMs_ {0};
 
@@ -2027,7 +2375,21 @@ private:
 
     NativePointerList nativePointerList_;
     NativePointerList concurrentNativePointerList_;
+    NativePointerList localCCConcurrentNativePointerList_;
+    size_t localCCNativePointerLiveBindingSize_ {0};
+    size_t localCCConcurrentNativePointerLiveBindingSize_ {0};
+    size_t localCCNativeBindingSizeBeforeGC_ {0};
+    std::array<size_t, NATIVE_FLAG_COUNT> localCCDeadNativeSizeByFlag_ {};
+    void *localCCNativePointerCallbackEnv_ {nullptr};
+    bool localCCConcurrentNativePointerProcessing_ {false};
+    std::vector<ProcessNativePointerTaskResult> localCCConcurrentNativePointerTaskResults_ {};
+    std::atomic<size_t> localCCConcurrentNativePointerNextIndex_ {0};
+    size_t localCCConcurrentNativePointerSnapshotSize_ {0};
+    size_t localCCConcurrentNativePointerBlockSize_ {0};
     HEAP_PRIVATE_HYBRID_EXTENSION();
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    EmbeddedCodeRefSet embeddedCodeRefSet_;
+#endif
 
     friend class ConcurrentCopyGC;
     friend class ConcurrentMarker;

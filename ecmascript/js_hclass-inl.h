@@ -19,6 +19,7 @@
 #include "ecmascript/js_hclass.h"
 
 #include "ecmascript/byte_array.h"
+#include "ecmascript/ic/profile_type_info.h"
 #include "ecmascript/ic/proto_change_details.h"
 #include "ecmascript/js_bigint.h"
 #include "ecmascript/layout_info.h"
@@ -227,7 +228,6 @@ inline size_t JSHClass::SizeFromJSHClass(TaggedObject *header)
     size_t size = 0;
     switch (type) {
         case JSType::TAGGED_ARRAY:
-        case JSType::FUNC_SLOT:
         case JSType::TAGGED_DICTIONARY:
         case JSType::LEXICAL_ENV:
         case JSType::WEAK_LINKED_HASH_MAP:
@@ -239,10 +239,13 @@ inline size_t JSHClass::SizeFromJSHClass(TaggedObject *header)
         case JSType::COW_TAGGED_ARRAY:
         case JSType::MUTANT_TAGGED_ARRAY:
         case JSType::COW_MUTANT_TAGGED_ARRAY:
-        case JSType::PROFILE_TYPE_INFO:
         case JSType::IC_INFO:
             size = TaggedArray::ComputeSize(JSTaggedValue::TaggedTypeSize(),
                 reinterpret_cast<TaggedArray *>(header)->GetLength());
+            break;
+        case JSType::PROFILE_TYPE_INFO:
+            size = ProfileTypeInfo::ComputeSize(
+                reinterpret_cast<ProfileTypeInfo *>(header)->GetLength());
             break;
         case JSType::BYTE_ARRAY:
             size = ByteArray::ComputeSize(reinterpret_cast<ByteArray *>(header)->GetByteLength(),
@@ -282,21 +285,20 @@ inline size_t JSHClass::SizeFromJSHClass(TaggedObject *header)
     return size;
 }
 
-inline void JSHClass::Copy(const JSThread *thread, const JSHClass *jshclass)
+inline void JSHClass::Copy(const JSThread *thread, JSHandle<JSHClass> newHClass, JSHandle<JSHClass> oldHClass)
 {
-    DISALLOW_GARBAGE_COLLECTION;
-
     // copy jshclass
-    SetPrototype(thread, jshclass->GetPrototype(thread));
-    SetBitField(jshclass->GetBitField());
-    SetIsAllTaggedProp(jshclass->IsAllTaggedProp());
-    SetNumberOfProps(jshclass->NumberOfProps());
+    SetPrototype(thread, newHClass, oldHClass->GetPrototype(thread));
+    newHClass->SetBitField(oldHClass->GetBitField());
+    newHClass->SetIsAllTaggedProp(oldHClass->IsAllTaggedProp());
+    newHClass->SetNumberOfProps(oldHClass->NumberOfProps());
+    newHClass->SetBitField2(oldHClass->GetBitField2() & BIT_FIELD2_RESERVED_MASK);
 }
 
 inline JSHClass *JSHClass::FindRootHClass(const JSThread *thread, JSHClass *hclass)
 {
     auto root = hclass;
-    while (!ProfileType(root->GetProfileType()).IsRootType()) {
+    while (!ProfileType(root->GetPGOProfileType()).IsRootType()) {
         auto parent = root->GetParent(thread);
         if (!parent.IsJSHClass()) {
             break;
@@ -340,7 +342,11 @@ inline int JSHClass::FindPropertyEntry(const JSThread *thread, JSHClass *hclass,
     DISALLOW_GARBAGE_COLLECTION;
     LayoutInfo *layout = LayoutInfo::Cast(hclass->GetLayout(thread).GetTaggedObject());
     uint32_t propsNumber = hclass->NumberOfProps();
+#if ENABLE_V70_OPTIMIZATION
+    int entry = layout->FindElement(thread, hclass, key, propsNumber);
+#else
     int entry = layout->FindElementWithCache(thread, hclass, key, propsNumber);
+#endif
     return entry;
 }
 
@@ -453,6 +459,15 @@ void JSHClass::AddPropertyToNewHClass(const JSThread *thread, JSHandle<JSHClass>
         && (jshclass->IsJSArray() || jshclass->IsTypedArray())) {
         newJsHClass->SetHasConstructor(true);
     }
+    // Inherit HasSymbolProperties from parent HClass, or set if current key is Symbol
+    if (jshclass->HasSymbolProperties() || key.GetTaggedValue().IsSymbol()) {
+        newJsHClass->SetHasSymbolProperties(true);
+    }
+    // When adding toJSON property, set MayHaveInterestingProperties to true
+    // because toJSON affects JSON.stringify behavior
+    if UNLIKELY(key.GetTaggedValue() == thread->GlobalConstants()->GetHandledToJsonString().GetTaggedValue()) {
+        newJsHClass->SetMayHaveInterestingProperties(true);
+    }
 }
 
 void JSHClass::AddInlinedPropToHClass(const JSThread *thread, const PropertyDescriptor &desc, size_t attrOffset,
@@ -475,8 +490,9 @@ JSHandle<JSHClass> JSHClass::SetPropertyOfObjHClass(const JSThread *thread, JSHa
     JSHClass *newClass = jshclass->FindTransitions(thread,
         key.GetTaggedValue(), JSTaggedValue(attr.GetPropertyMetaData()), rep);
     if (newClass != nullptr) {
-        newClass->SetPrototype(thread, jshclass->GetPrototype(thread));
-        return JSHandle<JSHClass>(thread, newClass);
+        JSHandle<JSHClass> newClassHandle(thread, newClass);
+        SetPrototype(thread, newClassHandle, jshclass->GetPrototype(thread));
+        return newClassHandle;
     }
 
     JSHandle<JSHClass> newJsHClass = JSHClass::Clone(thread, jshclass, specificInlinedProps, specificNumInlinedProps);

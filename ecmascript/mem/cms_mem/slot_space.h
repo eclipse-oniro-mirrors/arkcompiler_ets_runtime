@@ -66,9 +66,21 @@ public:
 
     void IterateOverObjects(const std::function<void(TaggedObject *object)> &visitor);
 
-    void PrepareSweeping() override;
+    template <bool isSticky>
+    void PrepareSweeping();
 
-    void Sweep() override;
+    void PrepareSweeping() override
+    {
+        LOG_GC(FATAL) << "should not call this function";
+    }
+
+    template <bool isSticky>
+    void Sweep();
+
+    void Sweep() override
+    {
+        LOG_GC(FATAL) << "should not call this function";
+    }
 
     void AsyncSweep(bool isMain, bool releaseMemory = false) override;
 
@@ -171,6 +183,8 @@ private:
         return res;
     }();
 
+    friend class SnapshotProcessor;
+
     enum class MemoryCheckerKind {
         SOFT,
         HARD,
@@ -193,6 +207,8 @@ private:
     template<bool expandInGC = false>
     void ExpandAllocator(SlotAllocator *allocator);
     
+    Region *ExpandRegionForSnapshot(size_t slotSize, size_t allocSize);
+
     inline ARK_INLINE void InvokeAllocationInspector(Address object, size_t size, size_t alignedSize);
 
     Region *AllocateRegion(size_t slotSize);

@@ -14,12 +14,17 @@
  */
 
 #include "ecmascript/jit/jit_task.h"
+
+#include <limits>
+
 #include "ecmascript/base/config.h"
 #include "common_components/heap/heap_manager.h"
 #include "ecmascript/jspandafile/program_object.h"
+#include "ecmascript/mem/assert_scope.h"
 #include "ecmascript/ohos/jit_tools.h"
 #include "ecmascript/compiler/jit_compilation_env.h"
 #include "ecmascript/platform/file.h"
+#include "ecmascript/platform/map.h"
 
 namespace panda::ecmascript {
 
@@ -101,14 +106,13 @@ void JitTask::InstallOsrCode(JSHandle<MachineCode> &codeObj)
     jsFunction_->SetIsCompiledFastCall(codeObj->GetIsFastCall());
     JSHandle<ProfileTypeInfo> profileInfoHandle =
         JSHandle<ProfileTypeInfo>::Cast(JSHandle<JSTaggedValue>(hostThread_, profile));
-    uint32_t slotId = profileInfoHandle->GetIcSlotToOsrLength() - 1; // 1 : get last slot
-    auto profileData = profileInfoHandle->Get(hostThread_, slotId);
+    auto profileData = profileInfoHandle->GetJitOsr(hostThread_);
     auto factory = hostThread_->GetEcmaVM()->GetFactory();
     if (!profileData.IsTaggedArray()) {
         const uint32_t initLen = 1;
         JSHandle<TaggedArray> newArr = factory->NewTaggedArray(initLen);
         newArr->Set(hostThread_, 0, codeObj.GetTaggedValue());
-        profileInfoHandle->Set(hostThread_, slotId, newArr.GetTaggedValue());
+        profileInfoHandle->SetJitOsr(hostThread_, newArr.GetTaggedValue());
         LOG_JIT(DEBUG) << "[OSR] Install machine code:" << GetMethodName()
                        << ", code address: " << reinterpret_cast<void*>(codeObj->GetFuncAddr())
                        << ", index: " << newArr->GetLength() - 1;
@@ -121,7 +125,7 @@ void JitTask::InstallOsrCode(JSHandle<MachineCode> &codeObj)
         newArr->Set(hostThread_, i, arr->Get(hostThread_, i));
     }
     newArr->Set(hostThread_, i, codeObj.GetTaggedValue());
-    profileInfoHandle->Set(hostThread_, slotId, newArr.GetTaggedValue());
+    profileInfoHandle->SetJitOsr(hostThread_, newArr.GetTaggedValue());
     LOG_JIT(DEBUG) << "[OSR] Install machine code:" << GetMethodName()
                    << ", code address: " << reinterpret_cast<void*>(codeObj->GetFuncAddr())
                    << ", index: " << newArr->GetLength() - 1;
@@ -135,7 +139,8 @@ static void ComputeAlignedSizes(MachineCodeDesc &desc)
     desc.heapConstantTableSizeAlign = AlignUp(desc.heapConstantTableSize, MachineCode::DATA_ALIGN);
     desc.rodataSizeBeforeTextAlign = AlignUp(desc.rodataSizeBeforeText, MachineCode::TEXT_ALIGN);
 
-    if (desc.codeType == MachineCodeType::BASELINE_CODE) {
+    if (desc.codeType == MachineCodeType::BASELINE_CODE ||
+        desc.codeType == MachineCodeType::ARKSTEED_CODE) {
         desc.codeSizeAlign = Jit::GetInstance()->IsEnableJitFort() ?
             AlignUp(desc.codeSize, MachineCode::TEXT_ALIGN) :
             AlignUp(desc.codeSize, MachineCode::DATA_ALIGN);
@@ -177,6 +182,48 @@ size_t JitTask::ComputePayLoadSize(MachineCodeDesc &codeDesc)
             }
         } else {
             return codeDesc.stackMapSizeAlign + codeDesc.codeSizeAlign;
+        }
+    }
+
+    if (codeDesc.codeType == MachineCodeType::ARKSTEED_CODE) {
+        // ArkSteed payload: [code] [stackmap] [heapConstants] [translation info] [translation]
+        size_t translationPayloadSize = 0;
+#if ECMASCRIPT_ENABLE_ARK_STEED
+        CHECK(codeDesc.arkSteedTranslationSize <= std::numeric_limits<uint32_t>::max());
+        CHECK(codeDesc.arkSteedTranslationSize <=
+              std::numeric_limits<size_t>::max() - (MachineCode::DATA_ALIGN - 1U));
+        size_t translationSizeAlign = AlignUp(codeDesc.arkSteedTranslationSize, MachineCode::DATA_ALIGN);
+        CHECK(MachineCode::ARKSTEED_TRANSLATION_INFO_SIZE <=
+              std::numeric_limits<size_t>::max() - translationSizeAlign);
+        translationPayloadSize = MachineCode::ARKSTEED_TRANSLATION_INFO_SIZE + translationSizeAlign;
+#endif
+        CHECK(codeDesc.codeSizeAlign <= std::numeric_limits<uint32_t>::max());
+        CHECK(codeDesc.stackMapSizeAlign <= std::numeric_limits<uint32_t>::max());
+        CHECK(codeDesc.heapConstantTableSizeAlign <= std::numeric_limits<uint32_t>::max());
+        CHECK(codeDesc.stackMapSizeAlign <=
+              std::numeric_limits<size_t>::max() - codeDesc.heapConstantTableSizeAlign);
+        size_t nonTextSize = codeDesc.stackMapSizeAlign + codeDesc.heapConstantTableSizeAlign;
+        CHECK(nonTextSize <= std::numeric_limits<size_t>::max() - translationPayloadSize);
+        nonTextSize += translationPayloadSize;
+        CHECK(codeDesc.codeSizeAlign <= std::numeric_limits<size_t>::max() - nonTextSize);
+        size_t payLoadSize = codeDesc.codeSizeAlign + nonTextSize;
+        CHECK(payLoadSize <= std::numeric_limits<uint32_t>::max());
+        if (Jit::GetInstance()->IsEnableJitFort()) {
+            constexpr size_t objectAlignment = static_cast<size_t>(MemAlignment::MEM_ALIGN_OBJECT);
+            CHECK(payLoadSize <= std::numeric_limits<size_t>::max() - MachineCode::SIZE - (objectAlignment - 1U));
+            size_t allocSize = AlignUp(payLoadSize + MachineCode::SIZE, objectAlignment);
+            codeDesc.instructionsSize = codeDesc.codeSizeAlign;
+            LOG_JIT(DEBUG) << "InstallCode:: ArkSteed MachineCode Object size to allocate: "
+                << allocSize << " (instruction size): " << codeDesc.codeSizeAlign;
+            if (allocSize > g_maxRegularHeapObjectSize) {
+                codeDesc.isHugeObj = true;
+                return payLoadSize;
+            } else {
+                // regular sized: instructions in separate JitFort space
+                return nonTextSize;
+            }
+        } else {
+            return payLoadSize;
         }
     }
 
@@ -263,10 +310,11 @@ static void FillHeapConstantTable(JSHandle<MachineCode> &machineCodeObj, const M
         Region *heapObjRegion = Region::ObjectAddressToRange(heapObj->GetRawData());
         Region *curMachineCodeObjRegion =
             Region::ObjectAddressToRange(machineCodeObj.GetTaggedValue().GetRawHeapObject());
+        uintptr_t addr = reinterpret_cast<uintptr_t>(&(heapConstantTableAddr[i]));
         if (heapObjRegion->InYoungSpace()) {
-            curMachineCodeObjRegion->InsertOldToNewRSet(reinterpret_cast<uintptr_t>(&(heapConstantTableAddr[i])));
+            curMachineCodeObjRegion->InsertOldToNewRSet<ReferenceType::NORMAL>(addr);
         } else if (heapObjRegion->InSharedHeap()) {
-            curMachineCodeObjRegion->InsertLocalToShareRSet(reinterpret_cast<uintptr_t>(&(heapConstantTableAddr[i])));
+            curMachineCodeObjRegion->InsertLocalToShareRSet<ReferenceType::NORMAL>(addr);
         }
     }
 }
@@ -287,6 +335,10 @@ void JitTask::InstallCode()
         return;
     }
 
+#if defined(PANDA_TARGET_MACOS)
+    std::optional<JitWriteScope> jitWriteScope;
+    jitWriteScope.emplace();
+#endif
     JSHandle<MachineCode> machineCodeObj;
     if (Jit::GetInstance()->IsEnableJitFort()) {
         // skip install if JitFort out of memory
@@ -321,16 +373,19 @@ void JitTask::InstallCode()
         hostThread_->ClearExceptionAndExtraErrorMessage();
     }
 
+    // sometimes get ILL_ILLOPC error if i-cache  not flushed for Jit code
+    uintptr_t codeAddr = machineCodeObj->GetFuncAddr();
+    uintptr_t codeAddrEnd = codeAddr + machineCodeObj->GetInstructionsSize();
+    __builtin___clear_cache(reinterpret_cast<char *>(codeAddr), reinterpret_cast<char*>(codeAddrEnd));
+
+#if defined(PANDA_TARGET_MACOS)
+    jitWriteScope.reset();
+#endif
     if (IsOsrTask()) {
         InstallOsrCode(machineCodeObj);
     } else {
         InstallCodeByCompilerTier(machineCodeObj, methodHandle);
     }
-
-    // sometimes get ILL_ILLOPC error if i-cache  not flushed for Jit code
-    uintptr_t codeAddr = machineCodeObj->GetFuncAddr();
-    uintptr_t codeAddrEnd = codeAddr + machineCodeObj->GetInstructionsSize();
-    __builtin___clear_cache(reinterpret_cast<char *>(codeAddr), reinterpret_cast<char*>(codeAddrEnd));
 
     if (Jit::GetInstance()->IsEnableJitFort()) {
         if (g_isEnableCMCGC) {
@@ -346,7 +401,7 @@ void JitTask::InstallCode()
         }
     }
 
-    if (compilerTier_.IsFast()) {
+    if (compilerTier_.IsFastJit()) {
         jsFunction_->SetJitCompilingFlag(false);
     } else {
         ASSERT(compilerTier_.IsBaseLine());
@@ -358,13 +413,14 @@ void JitTask::InstallCodeByCompilerTier(JSHandle<MachineCode> &machineCodeObj,
     JSHandle<Method> &methodHandle)
 {
     uintptr_t codeAddr = machineCodeObj->GetFuncAddr();
-    if (compilerTier_.IsFast()) {
-        jsFunction_->SetCompiledFuncEntry(codeAddr, machineCodeObj->GetIsFastCall());
-        methodHandle->SetDeoptThreshold(hostThread_->GetEcmaVM()->GetJSOptions().GetDeoptThreshold());
-        jsFunction_->SetMachineCode(hostThread_, machineCodeObj);
+    if (compilerTier_.IsFastJit()) {
+        jsFunction_->SetJitCompiledFuncEntry(hostThread_, machineCodeObj, machineCodeObj->GetIsFastCall());
+        if (!compilerTier_.IsArkSteed()) {
+            methodHandle->SetDeoptThreshold(hostThread_->GetEcmaVM()->GetJSOptions().GetDeoptThreshold());
+        }
         jsFunction_->SetJitMachineCodeCache(hostThread_, machineCodeObj);
         uintptr_t codeAddrEnd = codeAddr + machineCodeObj->GetInstructionsSize();
-        LOG_JIT(DEBUG) << "Install fast jit machine code, method name: " << GetMethodName()
+        LOG_JIT(INFO) << "Install fast jit machine code, method name: " << GetMethodName()
                        << ", function addr: 0x" << std::hex << jsFunction_.GetTaggedType()
                        << ", machine code addr: 0x" << machineCodeObj.GetTaggedType()
                        << ", code range: " << reinterpret_cast<void*>(codeAddr)
@@ -413,9 +469,10 @@ void JitTask::CloneProfileTypeInfo()
         JSHandle<ProfileTypeInfo> profileTypeInfo(hostThread_,
             ProfileTypeInfo::Cast(profileTypeInfoVal.GetTaggedObject()));
         newProfileTypeInfo = factory->NewProfileTypeInfo(slotSize);
+        ALLOW_LOCAL_TO_SHARE_WEAK_REF_HANDLE;
         for (uint32_t i = 0; i < slotSize; i++) {
-            JSTaggedValue value = profileTypeInfo->Get(hostThread_, i);
-            newProfileTypeInfo->Set(hostThread_, i, value);
+            JSTaggedValue value = profileTypeInfo->GetICSlot(hostThread_, i);
+            newProfileTypeInfo->SetICSlot(hostThread_, i, value);
         }
     }
     SetProfileTypeInfo(newProfileTypeInfo);
@@ -424,7 +481,7 @@ void JitTask::CloneProfileTypeInfo()
 JitTask::~JitTask()
 {
     ReleaseSustainingJSHandle();
-    jit_->DeleteJitCompilerTask(compilerTask_);
+    jit_->DeleteJitCompilerTask(compilerTask_, compilerTier_.IsArkSteed());
     jit_->DecJitTaskCnt(hostThread_);
     ASSERT(dependencies_ != nullptr);
     delete dependencies_;
@@ -433,8 +490,11 @@ JitTask::~JitTask()
 
 void JitTask::WaitFinish()
 {
+    // A synchronous compiler wait must not keep shared GC waiting for the host.
+    // Release the task mutex before returning to RUNNING, which can wait for GC.
+    ThreadNativeScope native(hostThread_);
     LockHolder lock(runStateMutex_);
-    if (!IsFinish()) {
+    while (!IsFinish()) {
         runStateCondition_.Wait(&runStateMutex_);
     }
 }
@@ -450,7 +510,7 @@ bool JitTask::AsyncTask::Run([[maybe_unused]] uint32_t threadIndex)
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK,
         ConvertToStdString("JIT::Compile:" + info).c_str(), "");
 
-    AsyncTaskRunScope asyncTaskRunScope(jitTask_.get());
+    JitAsyncTaskRunScope asyncTaskRunScope(jitTask_.get());
 
     if (jitTask_->GetJsFunction().GetAddress() == 0) {
         // for unit test
@@ -483,24 +543,25 @@ bool JitTask::AsyncTask::Run([[maybe_unused]] uint32_t threadIndex)
     return true;
 }
 
-JitTask::AsyncTask::AsyncTaskRunScope::AsyncTaskRunScope(JitTask *jitTask)
+JitAsyncTaskRunScope::JitAsyncTaskRunScope(JitTask *task)
+    : task_(task),
+      jitvm_(nullptr)
 {
-    jitTask_ = jitTask;
-    jitTask_->SetRunState(RunState::RUNNING);
-    JSThread *compilerThread = jitTask_->GetCompilerThread();
+    task_->SetRunState(RunState::RUNNING);
+    JSThread *compilerThread = task_->GetCompilerThread();
     ASSERT(compilerThread->IsJitThread());
     JitThread *jitThread = static_cast<JitThread*>(compilerThread);
     jitvm_ = jitThread->GetJitVM();
-    jitvm_->SetHostVM(jitTask_->GetHostThread());
-    jitThread->SetCurrentTask(jitTask);
+    jitvm_->SetHostVM(task_->GetHostThread());
+    jitThread->SetCurrentTask(task_);
 }
 
-JitTask::AsyncTask::AsyncTaskRunScope::~AsyncTaskRunScope()
+JitAsyncTaskRunScope::~JitAsyncTaskRunScope()
 {
-    JSThread *compilerThread = jitTask_->GetCompilerThread();
+    JSThread *compilerThread = task_->GetCompilerThread();
     JitThread *jitThread = static_cast<JitThread*>(compilerThread);
     jitThread->SetCurrentTask(nullptr);
     jitvm_->ReSetHostVM();
-    jitTask_->SetRunStateFinish();
+    task_->SetRunStateFinish();
 }
 }  // namespace panda::ecmascript

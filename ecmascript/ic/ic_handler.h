@@ -17,7 +17,7 @@
 #define ECMASCRIPT_IC_IC_HANDLER_H
 
 #include "ecmascript/ecma_macros.h"
-#include "ecmascript/js_tagged_value-inl.h"
+#include "ecmascript/js_tagged_value_wrapper-inl.h"
 #include "ecmascript/js_typed_array.h"
 #include "ecmascript/mem/tagged_object.h"
 #include "ecmascript/object_operator.h"
@@ -76,7 +76,8 @@ public:
                                                                                       // shared with Load bits: [4, 30)
     using SOutOfBoundsBit = IsOnHeapBit::NextFlag;                                    // reuse: [30, 31) bit
     using SFieldTypeBit = SOutOfBoundsBit::NextField<SharedFieldType, PropertyAttributes::FIELD_TYPE_NUM>;  // [31, 39)
-    static_assert(SFieldTypeBit::END_BIT <= MAX_BIT_SIZE, "store handler overflow");
+    using SHandleCOWBit = SFieldTypeBit::NextFlag;
+    static_assert(SHandleCOWBit::END_BIT <= MAX_BIT_SIZE, "store handler overflow");
     using Type = uint64_t;
     static_assert(sizeof(Type) <= JSTaggedValue::TaggedTypeSize());
 
@@ -121,6 +122,11 @@ public:
     static inline bool IsStoreOutOfBounds(Type handler)
     {
         return SOutOfBoundsBit::Get(handler);
+    }
+
+    static inline bool StoreHandlesCOW(Type handler)
+    {
+        return SHandleCOWBit::Get(handler);
     }
 
     static inline void ClearStoreOutOfBounds(Type &handler)

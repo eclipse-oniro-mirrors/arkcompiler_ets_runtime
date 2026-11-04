@@ -17,6 +17,11 @@
 #define ECMASCRIPT_BUILTINS_BUILTINS_ARK_TOOLS_H
 
 #include "ecmascript/base/builtins_base.h"
+#ifdef ENABLE_BRANCH_PROFILE
+#include "ecmascript/ecma_runtime_call_info.h"
+#include "ecmascript/js_tagged_value.h"
+#endif
+#include "ecmascript/base/config.h"
 #include "ecmascript/js_thread.h"
 
 #if defined(PANDA_TARGET_ARM64)
@@ -85,7 +90,9 @@
     V("iterateFrame",                   IterateFrame,                   0, INVALID)       \
     V("triggerSharedGC",                TriggerSharedGC,                0, INVALID)       \
     V("triggerLocalCCGC",               TriggerLocalCCGC,               0, INVALID)       \
-    V("enableProcDumpInSharedOOM",      EnableProcDumpInSharedOOM,      1, INVALID)
+    V("triggerSharedCC",                TriggerSharedCC,                0, INVALID)       \
+    V("enableProcDumpInSharedOOM",      EnableProcDumpInSharedOOM,      1, INVALID)       \
+    V("GetBranchCount",                 GetBranchCount,                 0, INVALID)
 
 // List of mock ArkTools extension builtins
 #define BUILTIN_ARK_TOOLS_FUNCTIONS_REGRESS(V)                                                                \
@@ -176,6 +183,15 @@
     V("waitJitCompileFinish",                      WaitJitCompileFinish,                      1, INVALID)     \
     V("waitAllJitCompileFinish",                   WaitAllJitCompileFinish,                   0, INVALID)
 
+#if ECMASCRIPT_ENABLE_ARK_STEED
+#define BUILTIN_ARK_TOOLS_FUNCTIONS_ARKSTEED(V)                                                                 \
+    V("arkSteedCompileSync",                       ArkSteedCompileSync,                       1, INVALID)       \
+    V("arkSteedCompileAsync",                      ArkSteedCompileAsync,                      1, INVALID)       \
+    V("arkSteedIsCompiled",                        ArkSteedIsCompiled,                        1, INVALID)
+#else
+#define BUILTIN_ARK_TOOLS_FUNCTIONS_ARKSTEED(V)
+#endif
+
 #if ECMASCRIPT_ENABLE_SCOPE_LOCK_STAT
 #define BUILTIN_ARK_TOOLS_FUNCTIONS_SCOPE_LOCK_STATS(V)                                   \
     V("startScopeLockStats",            StartScopeLockStats,            0, INVALID)       \
@@ -206,6 +222,7 @@
     BUILTIN_ARK_TOOLS_FUNCTIONS_REGRESS(V)              \
     BUILTIN_ARK_TOOLS_FUNCTIONS_SCOPE_LOCK_STATS(V)     \
     BUILTIN_ARK_TOOLS_FUNCTIONS_JITCOMPILE(V)           \
+    BUILTIN_ARK_TOOLS_FUNCTIONS_ARKSTEED(V)             \
     BUILTIN_ARK_TOOLS_FUNCTIONS_COLLECTING_OPCODES(V)
 
 namespace panda::ecmascript::builtins {
@@ -478,6 +495,11 @@ public:
 
     static JSTaggedValue JitCompileSync(EcmaRuntimeCallInfo *info);
     static JSTaggedValue JitCompileAsync(EcmaRuntimeCallInfo *info);
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    static JSTaggedValue ArkSteedCompileSync(EcmaRuntimeCallInfo *info);
+    static JSTaggedValue ArkSteedCompileAsync(EcmaRuntimeCallInfo *info);
+    static JSTaggedValue ArkSteedIsCompiled(EcmaRuntimeCallInfo *info);
+#endif
     static JSTaggedValue IsInFastJit(EcmaRuntimeCallInfo *info);
     static JSTaggedValue WaitJitCompileFinish(EcmaRuntimeCallInfo *info);
     static JSTaggedValue WaitAllJitCompileFinish(EcmaRuntimeCallInfo *info);
@@ -488,6 +510,7 @@ public:
     static JSTaggedValue IterateFrame(EcmaRuntimeCallInfo *info);
     static JSTaggedValue TriggerSharedGC(EcmaRuntimeCallInfo *info);
     static JSTaggedValue TriggerLocalCCGC(EcmaRuntimeCallInfo *info);
+    static JSTaggedValue TriggerSharedCC(EcmaRuntimeCallInfo *info);
 
     static JSTaggedValue EnableProcDumpInSharedOOM(EcmaRuntimeCallInfo *info);
 
@@ -506,6 +529,8 @@ public:
 
     // Create an external string based on the string literal passed in by the user.
     static JSTaggedValue CreateCachedExternalString(EcmaRuntimeCallInfo *info);
+
+    static JSTaggedValue GetBranchCount(EcmaRuntimeCallInfo *info);
 
 private:
 #define BUILTINS_ARK_TOOLS_FUNCTION_ENTRY(name, method, length, id) \

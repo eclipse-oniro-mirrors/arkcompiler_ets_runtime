@@ -1,0 +1,3 @@
+arrow-base: 4 true false true am
+arrow-derived: 6 true true true false mm
+arrow-slow: true

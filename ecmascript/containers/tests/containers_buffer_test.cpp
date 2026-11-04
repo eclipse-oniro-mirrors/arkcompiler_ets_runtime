@@ -23,8 +23,8 @@
 #include "ecmascript/js_array.h"
 #include "ecmascript/js_handle.h"
 #include "ecmascript/js_hclass.h"
-#include "ecmascript/js_tagged_value-inl.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper-inl.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/js_thread.h"
 #include "ecmascript/object_factory.h"
 #include "ecmascript/tests/test_helper.h"
@@ -83,10 +83,9 @@ protected:
     {
         JSHandle<JSFunction> newTarget(thread, InitializeBufferConstructor());
         auto objCallInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
-                                                                 ContainersBufferTest::GetArgvCount(4));
+                                                                 ContainersBufferTest::GetArgvCount(3));
         objCallInfo->SetFunction(newTarget.GetTaggedValue());
         objCallInfo->SetNewTarget(newTarget.GetTaggedValue());
-        objCallInfo->SetThis(JSTaggedValue::Undefined());
         objCallInfo->SetCallArg(0, JSTaggedValue(length));
         [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, objCallInfo);
         JSTaggedValue result = ContainersBuffer::BufferConstructor(objCallInfo);
@@ -118,12 +117,11 @@ protected:
         JSHandle<JSObject> obj =
             factory->NewJSObjectByConstructor(JSHandle<JSFunction>(handleTagValFunc), handleTagValFunc);
         DataViewType arrayType = DataViewType::UINT8;
-        JSTypedArray::Cast(*obj)->SetTypedArrayName(thread, thread->GlobalConstants()->GetUint8ArrayString());
         if (length > 0) {
             TypedArrayHelper::AllocateTypedArrayBuffer(thread, obj, length, arrayType);
         } else {
             auto jsTypedArray = JSTypedArray::Cast(*obj);
-            jsTypedArray->SetContentType(ContentType::Number);
+            jsTypedArray->SetContentType(arrayType);
             jsTypedArray->SetByteLength(0);
             jsTypedArray->SetByteOffset(0);
             jsTypedArray->SetArrayLength(0);
@@ -132,42 +130,119 @@ protected:
     }
 };
 
-HWTEST_F_L0(ContainersBufferTest, CreateFromArrayTest002)
-{
-    JSHandle<JSTaggedValue> arr =
-        JSHandle<JSTaggedValue>(thread, JSArray::ArrayCreate(thread, JSTaggedNumber(10))->GetTaggedObject());
-    InitializeBufferConstructor();
-    JSHandle<JSFunction> newTarget(thread, InitializeBufferConstructor());
-    auto objCallInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
-                                                             ContainersBufferTest::GetArgvCount(4));
-    objCallInfo->SetFunction(newTarget.GetTaggedValue());
-    objCallInfo->SetNewTarget(newTarget.GetTaggedValue());
-    objCallInfo->SetThis(JSTaggedValue::Undefined());
-    objCallInfo->SetCallArg(0, arr.GetTaggedValue());
-    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, objCallInfo);
-    JSTaggedValue result = ContainersBuffer::BufferConstructor(objCallInfo);
-    TestHelper::TearDownFrame(thread, prev);
-    JSHandle<JSAPIFastBuffer> buffer(thread, result);
-    ASSERT_EQ(result, JSTaggedValue::Exception());
-}
-
 HWTEST_F_L0(ContainersBufferTest, BufferConstructor001)
 {
     InitializeBufferConstructor();
     JSHandle<JSFunction> newTarget(thread, InitializeBufferConstructor());
     auto objCallInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
-                                                             ContainersBufferTest::GetArgvCount(4));
+                                                             6);
     objCallInfo->SetFunction(newTarget.GetTaggedValue());
     objCallInfo->SetNewTarget(newTarget.GetTaggedValue());
-    objCallInfo->SetThis(JSTaggedValue::Undefined());
-    objCallInfo->SetCallArg(0, JSTaggedValue(4));
+    objCallInfo->SetCallArg(0, JSTaggedValue(JSAPIFastBuffer::DEFAULT_CAPACITY_LENGTH));
+    EXPECT_EQ(objCallInfo->GetArgsNumber(), 1);
     [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, objCallInfo);
+    EXPECT_EQ(objCallInfo->GetArgsNumber(), 1);
     JSTaggedValue result = ContainersBuffer::BufferConstructor(objCallInfo);
     TestHelper::TearDownFrame(thread, prev);
     ASSERT_TRUE(result.IsJSAPIBuffer());
     JSHandle<JSAPIFastBuffer> buffer(thread, result);
+    JSTaggedValue resultProto = JSObject::GetPrototype(thread, JSHandle<JSObject>::Cast(buffer));
+    JSTaggedValue funcProto = newTarget->GetFunctionPrototype(thread);
+    ASSERT_EQ(resultProto, funcProto);
     int length = buffer->GetLength();
-    ASSERT_EQ(length, 4);
+    ASSERT_EQ(length, JSAPIFastBuffer::DEFAULT_CAPACITY_LENGTH);
+    objCallInfo->SetNewTarget(JSTaggedValue::Undefined());
+    CONTAINERS_API_EXCEPTION_TEST(ContainersBuffer, BufferConstructor, objCallInfo);
+}
+
+HWTEST_F_L0(ContainersBufferTest, BufferConstructor002)
+{
+    InitializeBufferConstructor();
+    std::string ivalue = "Test";
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    JSHandle<EcmaString> strHandle = factory->NewFromStdString(ivalue);
+    JSHandle<JSFunction> newTarget(thread, InitializeBufferConstructor());
+    auto objCallInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+        ContainersBufferTest::GetArgvCount(4));
+    objCallInfo->SetFunction(newTarget.GetTaggedValue());
+    objCallInfo->SetNewTarget(newTarget.GetTaggedValue());
+    objCallInfo->SetCallArg(0, strHandle.GetTaggedValue());
+    objCallInfo->SetCallArg(1, strHandle.GetTaggedValue());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, objCallInfo);
+    JSTaggedValue result = ContainersBuffer::BufferConstructor(objCallInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, BufferConstructor003)
+{
+    InitializeBufferConstructor();
+    std::string ivalue = "Test";
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    JSHandle<EcmaString> strHandle = factory->NewFromStdString(ivalue);
+    JSHandle<JSFunction> newTarget(thread, InitializeBufferConstructor());
+    auto objCallInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+        ContainersBufferTest::GetArgvCount(4));
+    objCallInfo->SetFunction(newTarget.GetTaggedValue());
+    objCallInfo->SetNewTarget(newTarget.GetTaggedValue());
+    objCallInfo->SetCallArg(0, strHandle.GetTaggedValue());
+    objCallInfo->SetCallArg(1, JSTaggedValue(1));
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, objCallInfo);
+    JSTaggedValue result = ContainersBuffer::BufferConstructor(objCallInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_NE(result, JSTaggedValue::Exception());
+    ASSERT_TRUE(result.IsJSAPIBuffer());
+}
+
+
+HWTEST_F_L0(ContainersBufferTest, BufferConstructor004)
+{
+    EcmaVM *ecmaVMPtr = thread->GetEcmaVM();
+    ObjectFactory *factory = ecmaVMPtr->GetFactory();
+    JSHandle<JSFunction> handleFuncArrayBuf(ecmaVMPtr->GetGlobalEnv()->GetArrayBufferFunction());
+    JSHandle<JSTaggedValue> handleTagValFuncArrayBuf(handleFuncArrayBuf);
+    uint32_t lengthDataArrayBuf1 = 8;
+    JSHandle<JSArrayBuffer> handleArrayBuf1(
+        factory->NewJSObjectByConstructor(handleFuncArrayBuf, handleTagValFuncArrayBuf));
+    handleArrayBuf1->SetArrayBufferByteLength(lengthDataArrayBuf1);
+    InitializeBufferConstructor();
+    JSHandle<JSFunction> newTarget(thread, InitializeBufferConstructor());
+    auto objCallInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+        ContainersBufferTest::GetArgvCount(5));
+    objCallInfo->SetFunction(newTarget.GetTaggedValue());
+    objCallInfo->SetNewTarget(newTarget.GetTaggedValue());
+    objCallInfo->SetCallArg(0, handleArrayBuf1.GetTaggedValue());
+    objCallInfo->SetCallArg(1, JSTaggedValue(0));
+    objCallInfo->SetCallArg(1, JSTaggedValue(3));
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, objCallInfo);
+    JSTaggedValue result = ContainersBuffer::BufferConstructor(objCallInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_NE(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, BufferConstructor005)
+{
+    JSHandle<JSAPIFastBuffer> result = CreateJSAPIBuffer(0);
+    ASSERT_EQ(result->GetLength(), 0);
+}
+
+HWTEST_F_L0(ContainersBufferTest, BufferConstructor006)
+{
+    JSHandle<JSAPIFastBuffer> buffer = CreateJSAPIBuffer("abcde");
+    InitializeBufferConstructor();
+    JSHandle<JSFunction> newTarget(thread, InitializeBufferConstructor());
+    auto objCallInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+        ContainersBufferTest::GetArgvCount(5));
+    objCallInfo->SetFunction(newTarget.GetTaggedValue());
+    objCallInfo->SetNewTarget(newTarget.GetTaggedValue());
+    objCallInfo->SetCallArg(0, buffer.GetTaggedValue());
+    objCallInfo->SetCallArg(1, JSTaggedValue(0));
+    objCallInfo->SetCallArg(2, JSTaggedValue(2));
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, objCallInfo);
+    JSTaggedValue result = ContainersBuffer::BufferConstructor(objCallInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_NE(result, JSTaggedValue::Exception());
+    ASSERT_TRUE(result.IsJSAPIBuffer());
 }
 
 HWTEST_F_L0(ContainersBufferTest, Length_001)
@@ -847,7 +922,6 @@ HWTEST_F_L0(ContainersBufferTest, CreateFromArrayTest001)
                                                              ContainersBufferTest::GetArgvCount(4));
     objCallInfo->SetFunction(newTarget.GetTaggedValue());
     objCallInfo->SetNewTarget(newTarget.GetTaggedValue());
-    objCallInfo->SetThis(JSTaggedValue::Undefined());
     objCallInfo->SetCallArg(0, arr.GetTaggedValue());
     [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, objCallInfo);
     JSTaggedValue result = ContainersBuffer::BufferConstructor(objCallInfo);
@@ -856,22 +930,493 @@ HWTEST_F_L0(ContainersBufferTest, CreateFromArrayTest001)
     ASSERT_EQ(result, JSTaggedValue::Exception());
 }
 
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest001)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(6));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, JSTaggedValue::Hole());
+    callInfo->SetCallArg(1, JSTaggedValue::Hole());
+    callInfo->SetCallArg(2, JSTaggedValue::Hole());
+    callInfo->SetCallArg(3, JSTaggedValue::Hole());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::Compare(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest002)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(6));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, JSTaggedValue::Hole());
+    callInfo->SetCallArg(1, JSTaggedValue::Hole());
+    callInfo->SetCallArg(2, JSTaggedValue::Hole());
+    callInfo->SetCallArg(3, JSTaggedValue::Hole());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::Equals(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest003)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(6));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, JSTaggedValue::Hole());
+    callInfo->SetCallArg(1, JSTaggedValue::Hole());
+    callInfo->SetCallArg(2, JSTaggedValue::Hole());
+    callInfo->SetCallArg(3, JSTaggedValue::Hole());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::IndexOf(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest004)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(6));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, JSTaggedValue::Hole());
+    callInfo->SetCallArg(1, JSTaggedValue::Hole());
+    callInfo->SetCallArg(2, JSTaggedValue::Hole());
+    callInfo->SetCallArg(3, JSTaggedValue::Hole());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::Includes(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest005)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(6));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, JSTaggedValue::Hole());
+    callInfo->SetCallArg(1, JSTaggedValue::Hole());
+    callInfo->SetCallArg(2, JSTaggedValue::Hole());
+    callInfo->SetCallArg(3, JSTaggedValue::Hole());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::LastIndexOf(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest006)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(6));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, JSTaggedValue::Hole());
+    callInfo->SetCallArg(1, JSTaggedValue::Hole());
+    callInfo->SetCallArg(2, JSTaggedValue::Hole());
+    callInfo->SetCallArg(3, JSTaggedValue::Hole());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::Fill(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest007)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(6));
+    std::string ivalue = "Test";
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    JSHandle<EcmaString> strHandle = factory->NewFromStdString(ivalue);
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, strHandle.GetTaggedValue());
+    callInfo->SetCallArg(1, strHandle.GetTaggedValue());
+    callInfo->SetCallArg(2, JSTaggedValue::Hole());
+    callInfo->SetCallArg(3, JSTaggedValue::Hole());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::Write(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest008)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(6));
+    std::string ivalue = "Test";
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    JSHandle<EcmaString> strHandle = factory->NewFromStdString(ivalue);
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, strHandle.GetTaggedValue());
+    callInfo->SetCallArg(1, JSTaggedValue::Hole());
+    callInfo->SetCallArg(2, JSTaggedValue::Hole());
+    callInfo->SetCallArg(3, JSTaggedValue::Hole());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::ToString(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest009)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(6));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, JSTaggedValue::Hole());
+    callInfo->SetCallArg(1, JSTaggedValue::Hole());
+    callInfo->SetCallArg(2, JSTaggedValue::Hole());
+    callInfo->SetCallArg(3, JSTaggedValue::Hole());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::Copy(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest010)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(6));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, JSTaggedValue::Hole());
+    callInfo->SetCallArg(1, JSTaggedValue::Hole());
+    callInfo->SetCallArg(2, JSTaggedValue::Hole());
+    callInfo->SetCallArg(3, JSTaggedValue::Hole());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::WriteUIntLE(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest011)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(6));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, JSTaggedValue::Hole());
+    callInfo->SetCallArg(1, JSTaggedValue::Hole());
+    callInfo->SetCallArg(2, JSTaggedValue::Hole());
+    callInfo->SetCallArg(3, JSTaggedValue::Hole());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::WriteUIntBE(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest012)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(6));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, JSTaggedValue::Hole());
+    callInfo->SetCallArg(1, JSTaggedValue::Hole());
+    callInfo->SetCallArg(2, JSTaggedValue::Hole());
+    callInfo->SetCallArg(3, JSTaggedValue::Hole());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::ReadUIntBE(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest013)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(6));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, JSTaggedValue::Hole());
+    callInfo->SetCallArg(1, JSTaggedValue::Hole());
+    callInfo->SetCallArg(2, JSTaggedValue::Hole());
+    callInfo->SetCallArg(3, JSTaggedValue::Hole());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::ReadUIntLE(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest014)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(6));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, JSTaggedValue::Hole());
+    callInfo->SetCallArg(1, JSTaggedValue::Hole());
+    callInfo->SetCallArg(2, JSTaggedValue::Hole());
+    callInfo->SetCallArg(3, JSTaggedValue::Hole());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::ReadIntLE(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest015)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(6));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, JSTaggedValue::Hole());
+    callInfo->SetCallArg(1, JSTaggedValue::Hole());
+    callInfo->SetCallArg(2, JSTaggedValue::Hole());
+    callInfo->SetCallArg(3, JSTaggedValue::Hole());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::ReadIntBE(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest016)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(6));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, JSTaggedValue::Hole());
+    callInfo->SetCallArg(1, JSTaggedValue::Hole());
+    callInfo->SetCallArg(2, JSTaggedValue::Hole());
+    callInfo->SetCallArg(3, JSTaggedValue::Hole());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::WriteIntBE(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest017)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(6));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, JSTaggedValue::Hole());
+    callInfo->SetCallArg(1, JSTaggedValue::Hole());
+    callInfo->SetCallArg(2, JSTaggedValue::Hole());
+    callInfo->SetCallArg(3, JSTaggedValue::Hole());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::WriteIntLE(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest018)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(6));
+    std::string ivalue = "Test";
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    JSHandle<EcmaString> strHandle = factory->NewFromStdString(ivalue);
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, strHandle.GetTaggedValue());
+    callInfo->SetCallArg(1, JSTaggedValue::Hole());
+    callInfo->SetCallArg(2, JSTaggedValue::Hole());
+    callInfo->SetCallArg(3, strHandle.GetTaggedValue());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::Write(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest019)
+{
+    std::string ivalue = "Test";
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    JSHandle<EcmaString> strHandle = factory->NewFromStdString(ivalue);
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(5));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, strHandle.GetTaggedValue());
+    callInfo->SetCallArg(1, JSTaggedValue(0));
+    callInfo->SetCallArg(2, strHandle.GetTaggedValue());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::IndexOf(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest020)
+{
+    std::string ivalue = "Test";
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    JSHandle<EcmaString> strHandle = factory->NewFromStdString(ivalue);
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(5));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, strHandle.GetTaggedValue());
+    callInfo->SetCallArg(1, JSTaggedValue(0));
+    callInfo->SetCallArg(2, strHandle.GetTaggedValue());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::LastIndexOf(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest021)
+{
+    std::string ivalue = "Test";
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    JSHandle<EcmaString> strHandle = factory->NewFromStdString(ivalue);
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(5));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, strHandle.GetTaggedValue());
+    callInfo->SetCallArg(1, JSTaggedValue(0));
+    callInfo->SetCallArg(2, strHandle.GetTaggedValue());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::Includes(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest022)
+{
+    std::string ivalue = "Test";
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    JSHandle<EcmaString> strHandle = factory->NewFromStdString(ivalue);
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(6));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, strHandle.GetTaggedValue());
+    callInfo->SetCallArg(1, strHandle.GetTaggedValue());
+    callInfo->SetCallArg(2, JSTaggedValue::Hole());
+    callInfo->SetCallArg(3, JSTaggedValue::Hole());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::Fill(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, PassInvalidParameterTest023)
+{
+    std::string ivalue = "Test";
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    JSHandle<EcmaString> strHandle = factory->NewFromStdString(ivalue);
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(10);
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(6));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, strHandle.GetTaggedValue());
+    callInfo->SetCallArg(1, JSTaggedValue(0));
+    callInfo->SetCallArg(2, JSTaggedValue(2));
+    callInfo->SetCallArg(3, strHandle.GetTaggedValue());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::Fill(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue::Exception());
+}
+
+HWTEST_F_L0(ContainersBufferTest, OOBTest001)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer("cdefg");
+    JSHandle<JSAPIFastBuffer> target = CreateJSAPIBuffer("abcde");
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(7));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, target.GetTaggedValue());
+    callInfo->SetCallArg(1, JSTaggedValue(3));
+    callInfo->SetCallArg(2, JSTaggedValue(2));
+    callInfo->SetCallArg(3, JSTaggedValue(3));
+    callInfo->SetCallArg(4, JSTaggedValue(2));
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::Compare(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue(0));
+}
+
+HWTEST_F_L0(ContainersBufferTest, OOBTest002)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer("cdefg");
+    JSHandle<JSAPIFastBuffer> target = CreateJSAPIBuffer("abcde");
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(7));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, target.GetTaggedValue());
+    callInfo->SetCallArg(1, JSTaggedValue(0));
+    callInfo->SetCallArg(2, JSTaggedValue(2));
+    callInfo->SetCallArg(3, JSTaggedValue(3));
+    callInfo->SetCallArg(4, JSTaggedValue(2));
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::Compare(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue(-1));
+}
+
+HWTEST_F_L0(ContainersBufferTest, OOBTest003)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer("cdefg");
+    JSHandle<JSAPIFastBuffer> target = CreateJSAPIBuffer("abcde");
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                            ContainersBufferTest::GetArgvCount(7));
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, target.GetTaggedValue());
+    callInfo->SetCallArg(1, JSTaggedValue(3));
+    callInfo->SetCallArg(2, JSTaggedValue(2));
+    callInfo->SetCallArg(3, JSTaggedValue(0));
+    callInfo->SetCallArg(4, JSTaggedValue(2));
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::Compare(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue(1));
+}
+
 HWTEST_F_L0(ContainersBufferTest, CopyTest001)
 {
     JSHandle<JSAPIFastBuffer> src = CreateJSAPIBuffer(10);
-    JSHandle<JSAPIFastBuffer> dst = CreateJSAPIBuffer(5);
+    std::string ivalue = "invalid";
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    JSHandle<EcmaString> invalidTarget = factory->NewFromStdString(ivalue);
     auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
                                                             ContainersBufferTest::GetArgvCount(6));
     callInfo->SetFunction(JSTaggedValue::Undefined());
     callInfo->SetThis(src.GetTaggedValue());
-    callInfo->SetCallArg(0, dst.GetTaggedValue());
+    callInfo->SetCallArg(0, invalidTarget.GetTaggedValue());
     callInfo->SetCallArg(1, JSTaggedValue(0));
     callInfo->SetCallArg(2, JSTaggedValue(0));
     callInfo->SetCallArg(3, JSTaggedValue(10));
     [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
     JSTaggedValue result = ContainersBuffer::Copy(callInfo);
     TestHelper::TearDownFrame(thread, prev);
-    EXPECT_EQ(result, JSTaggedValue(5));
+    EXPECT_EQ(result, JSTaggedValue::Exception());
 }
 
 HWTEST_F_L0(ContainersBufferTest, CopyTest002)
@@ -1185,7 +1730,8 @@ HWTEST_F_L0(ContainersBufferTest, BufferConstructorTest006)
     JSTaggedValue result = ContainersBuffer::BufferConstructor(callInfo);
     TestHelper::TearDownFrame(thread, prev);
     JSHandle<JSAPIFastBuffer> buffer(thread, result);
-    EXPECT_EQ(buffer->GetLength(), 2);
+    // offset=-1 (uint32 overflow) exceeds src byteLength=5, actualAvailable=0, maxLength=0
+    EXPECT_EQ(buffer->GetLength(), 0);
 }
 
 HWTEST_F_L0(ContainersBufferTest, BufferConstructorTest007)
@@ -1205,7 +1751,8 @@ HWTEST_F_L0(ContainersBufferTest, BufferConstructorTest007)
     TestHelper::TearDownFrame(thread, prev);
     EXPECT_TRUE(result.IsJSAPIBuffer());
     JSHandle<JSAPIFastBuffer> buffer(thread, result);
-    EXPECT_EQ(buffer->GetLength(), 2);
+    // offset=10 exceeds src byteLength=5, actualAvailable=0, maxLength=0
+    EXPECT_EQ(buffer->GetLength(), 0);
 }
 
 HWTEST_F_L0(ContainersBufferTest, BufferConstructorTest008)
@@ -1275,16 +1822,16 @@ HWTEST_F_L0(ContainersBufferTest, BufferConstructorTest011)
 HWTEST_F_L0(ContainersBufferTest, CompareTest001)
 {
     JSHandle<JSAPIFastBuffer> src = CreateJSAPIBuffer("abc");
-    JSHandle<JSAPIFastBuffer> target = CreateJSAPIBuffer("xyz");
+    JSHandle<EcmaString> invalidTarget = thread->GetEcmaVM()->GetFactory()->NewFromASCII("invalid");
     auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
                                                             ContainersBufferTest::GetArgvCount(3));
     callInfo->SetFunction(JSTaggedValue::Undefined());
     callInfo->SetThis(src.GetTaggedValue());
-    callInfo->SetCallArg(0, target.GetTaggedValue());
+    callInfo->SetCallArg(0, invalidTarget.GetTaggedValue());
     [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
     JSTaggedValue result = ContainersBuffer::Compare(callInfo);
     TestHelper::TearDownFrame(thread, prev);
-    EXPECT_EQ(result, JSTaggedValue(-1));
+    EXPECT_EQ(result, JSTaggedValue::Exception());
 }
 
 HWTEST_F_L0(ContainersBufferTest, CompareTest002)
@@ -1429,4 +1976,46 @@ HWTEST_F_L0(ContainersBufferTest, CompareTest009)
     EXPECT_EQ(result, JSTaggedValue(0));
 }
 
+HWTEST_F_L0(ContainersBufferTest, WriteEmptyBufferOffsetUnderflowTest001)
+{
+    JSHandle<JSAPIFastBuffer> buf = CreateJSAPIBuffer(0);
+    EXPECT_EQ(buf->GetLength(), 0u);
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    JSHandle<EcmaString> strHandle = factory->NewFromStdString("abc");
+
+    auto callInfo = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                          ContainersBufferTest::GetArgvCount(5)); // 5: args
+    callInfo->SetFunction(JSTaggedValue::Undefined());
+    callInfo->SetThis(buf.GetTaggedValue());
+    callInfo->SetCallArg(0, strHandle.GetTaggedValue());
+    callInfo->SetCallArg(1, JSTaggedValue(5));
+    callInfo->SetCallArg(2, JSTaggedValue::Hole());
+    [[maybe_unused]] auto prev = TestHelper::SetupFrame(thread, callInfo);
+    JSTaggedValue result = ContainersBuffer::Write(callInfo);
+    TestHelper::TearDownFrame(thread, prev);
+    EXPECT_EQ(result, JSTaggedValue(0));
+    EXPECT_FALSE(thread->HasPendingException());
+
+    auto callInfo0 = TestHelper::CreateEcmaRuntimeCallInfo(thread, JSTaggedValue::Undefined(),
+                                                           ContainersBufferTest::GetArgvCount(5)); // 5: args
+    callInfo0->SetFunction(JSTaggedValue::Undefined());
+    callInfo0->SetThis(buf.GetTaggedValue());
+    callInfo0->SetCallArg(0, strHandle.GetTaggedValue());
+    callInfo0->SetCallArg(1, JSTaggedValue(0));
+    callInfo0->SetCallArg(2, JSTaggedValue::Hole());
+    [[maybe_unused]] auto prev0 = TestHelper::SetupFrame(thread, callInfo0);
+    JSTaggedValue result0 = ContainersBuffer::Write(callInfo0);
+    TestHelper::TearDownFrame(thread, prev0);
+    EXPECT_EQ(result0, JSTaggedValue::Exception());
+    thread->ClearException();
+}
+
+HWTEST_F_L0(ContainersBufferTest, ReportSecurityFaultTest001)
+{
+    ContainerError::ReportSecurityFault("UtTestFunc", "ut-error-type");
+    EXPECT_FALSE(thread->HasPendingException());
+
+    ContainerError::ReportSecurityFault("UtTestFunc", "ut-error-type", 1, 2, 3); // 1 2 3 means explicit args
+    EXPECT_FALSE(thread->HasPendingException());
+}
 };  // namespace panda::test

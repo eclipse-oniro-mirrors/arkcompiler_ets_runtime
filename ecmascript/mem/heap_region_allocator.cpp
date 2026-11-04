@@ -16,11 +16,25 @@
 #include "ecmascript/mem/heap_region_allocator.h"
 
 #include "ecmascript/jit/jit.h"
+#include "ecmascript/mem/hole_memory.h"
 #include "ecmascript/mem/mem_map_allocator.h"
+#include "ecmascript/platform/map.h"
 #include "ecmascript/runtime.h"
 #include "ecmascript/runtime_lock.h"
 
 namespace panda::ecmascript {
+
+#ifndef EXCLUDE_JIT
+static bool IsJitFortEnabled()
+{
+    return Jit::GetInstance()->IsEnableJitFort();
+}
+#else
+static bool IsJitFortEnabled()
+{
+    return false;
+}
+#endif
 
 HeapRegionAllocator::HeapRegionAllocator(JSRuntimeOptions &option)
 {
@@ -44,6 +58,9 @@ Region *HeapRegionAllocator::AllocateAlignedRegion(Space *space, size_t capacity
         flags == RegionSpaceFlag::IN_SHARED_READ_ONLY_SPACE;
     bool isMachineCode = (flags == RegionSpaceFlag::IN_MACHINE_CODE_SPACE ||
         flags == RegionSpaceFlag::IN_HUGE_MACHINE_CODE_SPACE);
+#if defined(PANDA_TARGET_MACOS)
+    JIT_WRITE_SCOPE(jitWriteScope, isMachineCode);
+#endif
     JSThread::ThreadId tid = 0;
     bool shouldPageTag = AllocateRegionShouldPageTag(space);
     if (enablePageTagThreadId_) {
@@ -51,7 +68,7 @@ Region *HeapRegionAllocator::AllocateAlignedRegion(Space *space, size_t capacity
     }
     auto pool = MemMapAllocator::GetInstance()->Allocate(tid, capacity, DEFAULT_REGION_SIZE,
         ToSpaceTypeName(space->GetSpaceType()), isRegular, isCompress, isMachineCode,
-        Jit::GetInstance()->IsEnableJitFort(), shouldPageTag, false);
+        IsJitFortEnabled(), shouldPageTag, false);
     void *mapMem = pool.GetMem();
     if (mapMem == nullptr) { // LOCV_EXCL_BR_LINE
         if (heap->InGC()) {
@@ -59,7 +76,7 @@ Region *HeapRegionAllocator::AllocateAlignedRegion(Space *space, size_t capacity
             heap->ShouldForceThrowOOMError();
             pool = MemMapAllocator::GetInstance()->Allocate(tid, capacity, DEFAULT_REGION_SIZE,
                 ToSpaceTypeName(space->GetSpaceType()), isRegular, isCompress, isMachineCode,
-                Jit::GetInstance()->IsEnableJitFort(), shouldPageTag, true);
+                IsJitFortEnabled(), shouldPageTag, true);
             mapMem = pool.GetMem();
             if (mapMem == nullptr) {
                 // This should not happen
@@ -111,7 +128,8 @@ Region *HeapRegionAllocator::AllocateAlignedRegion(Space *space, size_t capacity
         uintptr_t begin = AlignUp(mem + sizeof(DefaultRegion), static_cast<size_t>(MemAlignment::MEM_ALIGN_REGION));
         region = new (ToVoidPtr(mem)) DefaultRegion(heap->GetNativeAreaAllocator(), mem, begin, end, flags, typeFlag);
     } else {
-        ASSERT(G_USE_CMS_GC);
+        // A non-zero slot size explicitly requests a slot-free-list region. Besides CMS
+        // SlotSpace, non-CMS SpecializedSlotSpace also uses this representation.
         // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
         uintptr_t begin = AlignUp(mem + sizeof(CMSRegion), static_cast<size_t>(MemAlignment::MEM_ALIGN_REGION));
         region = new (ToVoidPtr(mem)) CMSRegion(heap->GetNativeAreaAllocator(), mem, begin, end, flags, typeFlag,
@@ -127,6 +145,10 @@ Region *HeapRegionAllocator::AllocateAlignedRegion(Space *space, size_t capacity
 template<bool asyncFreeMem>
 void HeapRegionAllocator::FreeRegion(Region *region, size_t cachedSize, bool skipCache)
 {
+#if defined(PANDA_TARGET_MACOS)
+    const bool isMachineCode = region->InMachineCodeSpace() || region->InHugeMachineCodeSpace();
+    JIT_WRITE_SCOPE(jitWriteScope, isMachineCode);
+#endif
     auto size = region->GetCapacity();
     bool isRegular = !region->InHugeObjectSpace() && !region->InHugeMachineCodeSpace() &&
         !region->InSharedHugeObjectSpace();
@@ -135,12 +157,32 @@ void HeapRegionAllocator::FreeRegion(Region *region, size_t cachedSize, bool ski
     auto allocateBase = region->GetAllocateBase();
     bool shouldPageTag = FreeRegionShouldPageTag(region);
     DecreaseAnnoMemoryUsage(size);
+    // Put anonymous memory back before the range returns to the mem-map pool:
+    // a recycled region must not still be backed by the hole template, or its
+    // next user would see holes instead of zeroes (and PageRelease would keep
+    // restoring them). Not gated on IsEnabled(): a process that disabled the
+    // mechanism after fork still has to release what it mapped before that.
+    if (HoleMemory::IsMappableRegion(region)) {
+        HoleMemory::ReleaseHoleRange(region);
+    }
     region->Invalidate();
 #if ECMASCRIPT_ENABLE_ZAP_MEM
     if (memset_s(ToVoidPtr(allocateBase), size, INVALID_VALUE, size) != EOK) { // LOCV_EXCL_BR_LINE
         LOG_FULL(FATAL) << "memset_s failed";
         UNREACHABLE();
     }
+#endif
+#if defined(PANDA_TARGET_MACOS)
+    if (isMachineCode) {
+        // Match the AsyncFree convention ("MemUsage has been decreased for
+        // async free mem"): asyncFreeMem regions (huge machine code) were
+        // already accounted off by HugeObjectSpace::Sweep -> DecreaseMemMapUsage,
+        // so only decrease the total here for synchronous frees.
+        if constexpr (!asyncFreeMem) {
+            MemMapAllocator::GetInstance()->DecreaseMemMapTotalSize(size);
+        }
+        PageUnmap(MemMap(ToVoidPtr(allocateBase), size));
+    } else
 #endif
     if constexpr (asyncFreeMem) {
         MemMapAllocator::GetInstance()->AsyncFree(ToVoidPtr(allocateBase), size, isRegular, isCompress, shouldPageTag);
@@ -156,7 +198,7 @@ void HeapRegionAllocator::DecreaseMemMapUsage(Region *region)
 {
     bool isRegular = !region->InHugeObjectSpace() && !region->InHugeMachineCodeSpace() &&
         !region->InSharedHugeObjectSpace();
-    MemMapAllocator::GetInstance()->DecreaseMemUsage(region->GetCapacity(), isRegular);
+    MemMapAllocator::GetInstance()->DecreaseMemMapTotalSize(region->GetCapacity());
 }
 
 bool HeapRegionAllocator::AllocateRegionShouldPageTag(Space *space) const

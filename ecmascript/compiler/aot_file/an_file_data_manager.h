@@ -45,11 +45,18 @@ public:
     bool SafeTryReadLock();
     bool SafeInsideStub(uintptr_t pc);
     bool SafeInsideAOT(uintptr_t pc);
+    // Non-blocking variant for the SIGPROF handler path: on write-lock contention
+    // it returns false so the caller can fall back to a coarser stack walk.
+    // Never logs and never waits.
+    bool SafeTryInsideStubOrAOT(uintptr_t pc);
     AOTFileInfo::CallSiteInfo SafeCalCallSiteInfo(uintptr_t retAddr, bool isDeopt);
     static void DestroyFileMapMem(MemMap &fileMapMem);
     void SafeDestroyAllData();
     void SafeDestroyAnData(const std::string &fileName);
     const std::unordered_map<CString, uint32_t> &SafeGetfullFileNameToChecksumMap();
+#if defined(STUB_FUNCTION_REORDERING)
+    void SafePopulateStubIndexMapping();
+#endif
 
     const std::string &GetDir() const
     {
@@ -74,9 +81,6 @@ public:
         anEnable_ = enable;
     }
 
-    uint64_t GetStubFileStart();
-    uint64_t GetStubFileSize();
-
 private:
     AnFileDataManager() = default;
     std::shared_ptr<AnFileInfo> UnsafeFind(const std::string &fileName) const;
@@ -100,6 +104,9 @@ private:
     std::shared_ptr<StubFileInfo> loadedStub_ {nullptr};
     std::string anDir_;
     bool anEnable_ {false};
+#if defined(STUB_FUNCTION_REORDERING)
+    bool stubEntriesInitFlag_ {false};
+#endif
     NO_COPY_SEMANTIC(AnFileDataManager);
     NO_MOVE_SEMANTIC(AnFileDataManager);
 };

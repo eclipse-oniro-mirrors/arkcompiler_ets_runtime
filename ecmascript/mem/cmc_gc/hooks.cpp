@@ -36,7 +36,7 @@ using panda::ecmascript::ObjectXRay;
 using panda::ecmascript::FreeObject;
 using panda::ecmascript::ObjectSlot;
 using panda::ecmascript::JSThread;
-using panda::ecmascript::TaggedType;
+using panda::ecmascript::JSTaggedType;
 
 // A fake EcmaVM which will never used, only for unify the BaseRuntime::Init&Fini
 static panda::ecmascript::EcmaVM *g_fakeEcmaVM = nullptr;
@@ -154,10 +154,12 @@ void VisitDynamicLocalRoots(const RefFieldVisitor &visitorFunc)
         auto vm = thread->GetEcmaVM();
         ObjectXRay::VisitSTWVMRoots(vm, visitor);
 
+#ifndef EXCLUDE_PGO
         auto profiler = vm->GetPGOProfiler();
         if (profiler != nullptr) {
             profiler->IteratePGOPreFuncList(visitor);
         }
+#endif
     });
 
     if (!panda::ecmascript::g_isEnableCMCGCConcurrentRootMarking) {
@@ -183,6 +185,11 @@ void VisitDynamicWeakGlobalRootsOld(const common::WeakRefFieldVisitor &visitorFu
     CMCWeakVisitor visitor(visitorFunc);
 
     panda::ecmascript::SharedHeap::GetInstance()->IteratorNativePointerList(visitor);
+    // Reap dead sendable func modules.
+    panda::ecmascript::SharedHeap::GetInstance()->IteratorSendableModuleList(visitor,
+        [](panda::ecmascript::TaggedObject *dead) {
+            panda::ecmascript::Runtime::GetInstance()->QueueSendableModuleNativeFields(dead);
+        });
 
     panda::ecmascript::Runtime *runtime = panda::ecmascript::Runtime::GetInstance();
 
@@ -198,6 +205,8 @@ void InvokeSharedNativePointerCallbacks()
 {
     panda::ecmascript::Runtime *runtime = panda::ecmascript::Runtime::GetInstance();
     runtime->InvokeSharedNativePointerCallbacks();
+    // Drain point of the sendable module cleanup queue.
+    runtime->InvokeSendableModuleCleanup();
 }
 
 void VisitDynamicWeakLocalRoots(const common::WeakRefFieldVisitor &visitorFunc)
@@ -267,10 +276,12 @@ void VisitDynamicThreadRoot(const RefFieldVisitor &visitorFunc, void *vm)
         ObjectXRay::VisitConcurrentVMRoots(ecmaVm, visitor);
     }
 
+#ifndef EXCLUDE_PGO
     auto profiler = ecmaVm->GetPGOProfiler();
     if (profiler != nullptr) {
         profiler->IteratePGOPreFuncList(visitor);
     }
+#endif
 }
 
 void VisitDynamicWeakThreadRoot(const WeakRefFieldVisitor &visitorFunc, void *vm)
@@ -413,7 +424,7 @@ void JitFortUnProt(size_t size, void* base)
 
 bool IsMachineCodeObject(uintptr_t objPtr)
 {
-    JSTaggedValue value(static_cast<TaggedType>(objPtr));
+    JSTaggedValue value(static_cast<JSTaggedType>(objPtr));
     return value.IsMachineCodeObject();
 }
 

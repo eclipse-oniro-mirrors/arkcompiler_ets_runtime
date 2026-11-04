@@ -22,7 +22,7 @@
 #include "ecmascript/js_handle.h"
 #include "ecmascript/js_hclass.h"
 #include "ecmascript/js_symbol.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/js_thread.h"
 #include "ecmascript/object_factory.h"
 
@@ -225,6 +225,7 @@ private:
     void InitializeMath(const JSHandle<GlobalEnv> &env, const JSHandle<JSTaggedValue> &objFuncPrototypeVal) const;
 
     void InitializeAtomics(const JSHandle<GlobalEnv> &env, const JSHandle<JSTaggedValue> &objFuncPrototypeVal) const;
+    void InitializeSendableAtomics(const JSHandle<GlobalEnv> &env) const;
 
     void InitializeJson(const JSHandle<GlobalEnv> &env, const JSHandle<JSTaggedValue> &objFuncPrototypeVal) const;
 
@@ -251,6 +252,8 @@ private:
 
     void InitializeSetIterator(const JSHandle<GlobalEnv> &env, const JSHandle<JSHClass> &iteratorFuncClass) const;
     void InitializeSSetIterator(const JSHandle<GlobalEnv> &env, const JSHandle<JSHClass> &iteratorFuncClass) const;
+    void InitializeSBitVectorIterator(const JSHandle<GlobalEnv> &env,
+                                      const JSHandle<JSHClass> &iteratorFuncClass) const;
 
     void InitializeArrayIterator(const JSHandle<GlobalEnv> &env, const JSHandle<JSHClass> &iteratorFuncClass,
                                  const JSHandle<JSHClass> &iteratorPrototypeClass) const;
@@ -408,8 +411,6 @@ private:
     // Using to initialize jsapi container
     JSHandle<JSObject> InitializeArkPrivate(const JSHandle<GlobalEnv> &env) const;
 
-    JSHandle<JSTaggedValue> InitializeTreeSet(const JSHandle<GlobalEnv> &env);
-    
     void SetConstantObject(const JSHandle<JSObject> &obj, std::string_view key,
                            JSHandle<JSTaggedValue> &value) const;
     void SetFrozenFunction(const JSHandle<GlobalEnv> &env, const JSHandle<JSObject> &obj, std::string_view key,
@@ -504,7 +505,9 @@ private:
                       const JSHandle<JSTaggedValue> &getter, const JSHandle<JSTaggedValue> &setter) const;
 
     JSHandle<JSTaggedValue> CreateSGetterSetter(const JSHandle<GlobalEnv> &env, EcmaEntrypoint func,
-                                                std::string_view name, int length) const;
+                                                std::string_view name, int length,
+                                                kungfu::BuiltinsStubCSigns::ID builtinId =
+                                                BUILTINS_STUB_ID(INVALID)) const;
     void SharedStrictModeForbiddenAccessCallerArguments(const JSHandle<GlobalEnv> &env, uint32_t &index,
                                                         const JSHandle<JSObject> &prototype) const;
     JSHandle<JSTaggedValue> CreateArrayUnscopables(JSThread *thread) const;

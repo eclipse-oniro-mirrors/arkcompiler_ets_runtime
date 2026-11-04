@@ -17,7 +17,7 @@
 #define ECMASCRIPT_GLOBAL_ENV_CONSTANTS_H
 #include <cstdint>
 #include "ecmascript/compiler/builtins/builtins_call_signature_list.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/mem/visitor.h"
 #include "libpandabase/macros.h"
 #include "ecmascript/cross_vm/global_env_constants_hybrid.h"
@@ -42,7 +42,6 @@ class ObjectFactory;
     V(JSTaggedValue, TreeStringClass, TREE_STRING_CLASS_INDEX, ecma_roots_class)                                      \
     V(JSTaggedValue, CachedExternalStringClass, CACHED_EXTERNAL_STRING_CLASS_INDEX, ecma_roots_class)                 \
     V(JSTaggedValue, TaggedArrayClass, TAGGED_ARRAY_CLASS_INDEX, ecma_roots_class)                                    \
-    V(JSTaggedValue, FuncSlotClass, FUNC_SLOT_CLASS_INDEX, ecma_roots_class)                                          \
     V(JSTaggedValue, ByteArrayClass, BYTE_ARRAY_CLASS_INDEX, ecma_roots_class)                                        \
     V(JSTaggedValue, ConstantPoolClass, CONSTANT_POOL_CLASS_INDEX, ecma_roots_class)                                  \
     V(JSTaggedValue, ProfileTypeInfoClass, PROFILE_TYPE_INFO_CLASS_INDEX, ecma_roots_class)                           \
@@ -109,7 +108,6 @@ class ObjectFactory;
 
 #define SHARED_GLOBAL_ENV_CONSTANT_SHARED_CLASS(V)                                                                    \
     V(JSTaggedValue, SharedTaggedArrayClass, SHARED_TAGGED_ARRAY_CLASS_INDEX, ecma_roots_class)                       \
-    V(JSTaggedValue, SharedFuncSlotClass, SHARED_FUNC_SLOT_CLASS_INDEX, ecma_roots_class)                             \
     V(JSTaggedValue, SharedConstantPoolClass, SHARED_CONSTANT_POOL_CLASS_INDEX, ecma_roots_class)                     \
     /* ProfileTypeInfo only in local now */                                                                           \
     V(JSTaggedValue, SharedDictionaryClass, SHARED_DICTIONARY_CLASS_INDEX, ecma_roots_class)                          \
@@ -264,6 +262,8 @@ class ObjectFactory;
     V(StackString,                    STACK_STRING_INDEX,                    "stack")                       \
     V(TopStackString,                 TOP_STACK_STRING_INDEX,                "topstack")                    \
     V(AsyncStackString,               ASYNC_STACK_STRING_INDEX,              "asyncStack")                  \
+    V(ModuleImportStackString,        MODULE_STACK_IMPORT_STRING_INDEX,      "moduleImportStack")           \
+    V(NativeModuleErrorInfoString,    NATIVE_MODULE_ERROR_INFO_STRING_INDEX, "nativeModuleErrorInfo")       \
     V(StackEmptyString,               STACK_EMPTY_STRING_INDEX,              "stackisempty")                \
     V(ObjNotCoercibleString,          OBJ_NOT_COERCIBLE_STRING_INDEX,        "objectnotcoercible")          \
     /* for Intl. */                                                                                         \
@@ -496,6 +496,7 @@ class ObjectFactory;
     V(SharedPartialGcCause,           SHARED_PARTIAL_GC_CAUSE,               "shared_partial")              \
     V(SharedFullGcCause,              SHARED_FULL_GC_CAUSE,                  "shared_full")                 \
     V(AppSpawnSharedFullGcCause,      APP_SPAWN_SHARED_FULL_GC_CAUSE,        "app_spawn_shared_full")       \
+    V(StickyCMSGcCause,               STICKY_CMS_GC_CAUSE,                   "sticky_cms_gc")               \
     V(CMSGcCause,                     CMS_GC_CAUSE,                          "cms_gc")                      \
     V(LocalCCGcCause,                 LOCALCC_GC_CAUSE,                      "local_cc")                    \
     V(SymbolLeftParentheses,          SYMBOL_LEFT_PARENTHESES,               "Symbol(")                     \
@@ -757,12 +758,12 @@ private:
     void InitSharedDetectors(ObjectFactory *factory);
     void InitSharedStrings(ObjectFactory *factory);
     void InitSharedSymbols(ObjectFactory *factory);
-    void InitCompositeBaseClasses(ObjectFactory* factory, JSHClass* hClass);
+    void InitCompositeBaseClasses(ObjectFactory* factory, JSHandle<JSHClass> hClass);
     void InitSharedRootsClasses(ObjectFactory *factory);
     void InitSharedMiscellaneous(JSThread *thread, ObjectFactory *factory);
     void InitRootsClasses(ObjectFactory *factory);
-    void InitRootsClassesPartOne(JSHClass *hClass, ObjectFactory *factory);
-    void InitRootsClassesPartTwo(JSHClass *hClass, ObjectFactory *factory);
+    void InitRootsClassesPartOne(JSHandle<JSHClass> hClass, ObjectFactory *factory);
+    void InitRootsClassesPartTwo(JSHandle<JSHClass> hClass, ObjectFactory *factory);
     void InitMiscellaneous(JSThread *thread, ObjectFactory *factory);
     void InitGlobalCaches();
 

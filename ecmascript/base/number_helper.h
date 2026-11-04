@@ -20,7 +20,7 @@
 
 #include "ecmascript/string/integer_cache.h"
 #include "ecmascript/ecma_string.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 
 namespace panda::ecmascript::base {
 constexpr double MIN_RADIX = 2;
@@ -208,12 +208,11 @@ public:
     static double PUBLIC_API TruncateDouble(double d);
     static int64_t DoubleToInt64(double d);
     static uint64_t DoubleToUInt64(double d);
-    static bool IsDigitalString(const uint8_t *start, const uint8_t *end);
-    static int StringToInt(const uint8_t *start, const uint8_t *end);
+    static bool TryConvertStringToInt(const uint8_t *start, const uint8_t *end, int &num);
     static std::pair<bool, JSTaggedNumber> FastStringToNumber(const uint8_t *start,
                                                               const uint8_t *end, IntegerCache *cache);
     static double StringToDouble(const uint8_t *start, const uint8_t *end, uint8_t radix, uint32_t flags = NO_FLAGS);
-    static int32_t DoubleToInt(double d, size_t bits);
+    static int32_t PUBLIC_API DoubleToInt(double d, size_t bits);
     static int32_t PUBLIC_API DoubleInRangeInt32(double d);
     static int32_t PUBLIC_API SaturateTruncDoubleToInt32(double d);
     static JSTaggedValue StringToNumber(JSThread *thread, EcmaString *string, int32_t radix);

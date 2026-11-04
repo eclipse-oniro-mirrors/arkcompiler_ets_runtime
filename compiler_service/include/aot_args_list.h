@@ -29,7 +29,6 @@ std::unordered_set<std::string> aotArgsList {
     "ark-properties",
     "ark-bundleName",
     "asm-interpreter",
-    "asm-opcode-disable-range",
     "builtins-lazy",
     "compiler-log",
     "compiler-log-methods",
@@ -149,6 +148,7 @@ std::unordered_set<std::string> aotArgsList {
     "compiler-force-baselinejit-compile-main",
     "compiler-baseline-pgo",
     "compiler-trace-builtins",
+    "hap-fd",
 };
 
 std::unordered_set<std::string> staticAOTArgsList {
@@ -164,13 +164,6 @@ std::vector<std::string> staticAOTDefaultArgs {
     "--compiler-enable-fast-interop=false",
     "--compiler-lower-boxed-boolean=false",
     "--paoc-zip-panda-file=ets/modules_static.abc",
-    "--paoc-generate-symbols=true"
-};
-
-std::vector<std::string> staticFrameworkAOTDefaultArgs {
-    "--load-runtimes=ets",
-    "--compiler-enable-fast-interop=false",
-    "--compiler-lower-boxed-boolean=false",
     "--paoc-generate-symbols=true"
 };
 

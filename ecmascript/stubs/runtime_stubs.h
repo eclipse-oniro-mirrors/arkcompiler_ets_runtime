@@ -19,7 +19,7 @@
 #include "common_components/heap/allocator/region_desc.h"
 #include "ecmascript/frames.h"
 #include "ecmascript/ecma_macros.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/jspandafile/class_info_extractor.h"
 #include "ecmascript/jspandafile/class_literal.h"
 #include "ecmascript/method.h"
@@ -42,10 +42,15 @@ struct EcmaRuntimeCallInfo;
 
 using JSFunctionEntryType = JSTaggedValue (*)(uintptr_t glue, uint32_t argc, const JSTaggedType argV[],
                                               uintptr_t prevFp, bool needPushArgv);
+using ArkSteedCallEntryType = JSTaggedValue (*)(uintptr_t glue, uint32_t argc, const JSTaggedType argV[],
+                                                uintptr_t prevFp);
 using FastCallAotEntryType = JSTaggedValue (*)(uintptr_t glue, uint32_t argc, const JSTaggedType argV[],
                                               uintptr_t prevFp);
 
 PUBLIC_API extern "C" JSTaggedType LazyDeoptEntry();
+PUBLIC_API extern "C" bool PrepareForExceptionLazyDeopt(uintptr_t argGlue);
+PUBLIC_API extern "C" bool PrepareForExceptionLazyDeoptFromLeaveFrame(uintptr_t argGlue);
+
 class RuntimeStubs {
 public:
     static void MarkInBuffer(uintptr_t argGlue, BaseObject* ref);
@@ -99,15 +104,29 @@ public:
     static void Comment(uintptr_t argStr);
     static void FatalPrint(int fmtMessageId, ...);
     static void FatalPrintCustom(uintptr_t fmt, ...);
+    static void FatalPrintIfFalse(bool condition, int fmtMessageId, int line);
+    // `object` must be the object header, not an interior slot address: the owning Region is
+    // resolved via ObjectAddressToRange(object), which mis-resolves for huge-object interiors.
+    // `offset` is header-relative. See .cpp and BarrierStubBuilder::HandleMark.
     static void MarkingBarrier([[maybe_unused]] uintptr_t argGlue,
         uintptr_t object, size_t offset, TaggedObject *value);
+    // Same header + header-relative offset contract as MarkingBarrier.
     static void SharedGCMarkingBarrier(uintptr_t argGlue, uintptr_t object, size_t offset, TaggedObject *value);
     static void TryFillSweptRegion(uintptr_t argGlue);
     static void CMCGCMarkingBarrier(uintptr_t argGlue, uintptr_t object, size_t offset, TaggedObject *value);
-    static JSTaggedType ReadBarrier(uintptr_t argGlue, uintptr_t addr);
+    static void CheckObjectForCMS(uintptr_t argGlue, uintptr_t object, size_t offset, uintptr_t value,
+                                  bool writeBarrierCheck);
+    static JSTaggedType ReadBarrier(uintptr_t argGlue, uintptr_t addr, uintptr_t argValue);
+    static TemporaryJSTaggedValue ReadBarrierForCompressed(uintptr_t argGlue, uintptr_t addr,
+                                                           TemporaryJSTaggedValue temporaryValue);
+    static JSTaggedType TryResolveSendableModule(uintptr_t argGlue, JSTaggedType binding);
     static void CopyCallTarget(uintptr_t argGlue, uintptr_t callTarget);
     static void CopyArgvArray(uintptr_t argGlue, uintptr_t argv, uint64_t argc);
     static JSTaggedType GetActualArgvNoGC(uintptr_t argGlue);
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    static uintptr_t ArkSteedDeoptimize(uintptr_t argGlue, uintptr_t returnPc,
+                                        uintptr_t inputFp, uintptr_t snapshot);
+#endif
     static void InsertOldToNewRSet([[maybe_unused]] uintptr_t argGlue, uintptr_t object, size_t offset);
     static void InsertLocalToShareRSet([[maybe_unused]] uintptr_t argGlue, uintptr_t object, size_t offset);
     static void SetBitAtomic(GCBitset::GCBitsetWord *word, GCBitset::GCBitsetWord mask,
@@ -471,7 +490,16 @@ private:
                                                     const JSHandle<JSTaggedValue> &newTarget,
                                                     const JSHandle<TaggedArray> &argv,
                                                     uint16_t length);
+    static inline JSTaggedValue RuntimeCallRange(JSThread *thread, const JSHandle<JSTaggedValue> &func,
+                                                 const JSHandle<TaggedArray> &argv,
+                                                 uint16_t length);
+    static inline JSTaggedValue RuntimeCallThisRange(JSThread *thread, const JSHandle<JSTaggedValue> &func,
+                                                     const JSHandle<JSTaggedValue> &thisObj,
+                                                     const JSHandle<TaggedArray> &argv,
+                                                     uint16_t length);
     static inline JSTaggedValue RuntimeThrowTypeError(JSThread *thread, const char *message);
+    static inline JSTaggedValue RuntimeThrowContainerBusinessError(JSThread *thread,
+        int32_t errorCode, const char *message);
     static inline JSTaggedValue RuntimeGetCallSpreadArgs(JSThread *thread, const JSHandle<JSTaggedValue> &array);
     static inline JSTaggedValue RuntimeThrowReferenceError(JSThread *thread, JSTaggedValue prop, const char *desc);
     static inline JSTaggedValue RuntimeThrowSyntaxError(JSThread *thread, const char *message);
@@ -509,7 +537,7 @@ private:
     static inline JSTaggedValue RuntimeOptConstructGeneric(JSThread *thread, JSHandle<JSFunction> ctor,
                                                            JSHandle<JSTaggedValue> newTgt,
                                                            JSHandle<JSTaggedValue> preArgs, JSHandle<TaggedArray> args);
-    static inline JSTaggedValue GetResultValue(JSThread *thread, bool isAotMethod, JSHandle<JSFunction> ctor,
+    static inline JSTaggedValue GetResultValue(JSThread *thread, bool isCompiledCode, JSHandle<JSFunction> ctor,
         CVector<JSTaggedType> &values, JSHandle<JSTaggedValue> newTgt, uint32_t &size, JSHandle<JSTaggedValue> obj);
     static inline JSTaggedValue RuntimeOptGenerateScopeInfo(JSThread *thread, uint16_t scopeId, JSTaggedValue func);
     static inline JSTaggedType *GetActualArgv(JSThread *thread);
@@ -567,8 +595,8 @@ private:
                                                      const JSHandle<EcmaString> &str, std::u16string &resStr);
     static inline bool IsFastRegExp(uintptr_t argGlue, JSTaggedValue thisValue);
 
-    static inline RememberedSet* CreateLocalToShare(Region *region);
-    static inline RememberedSet* CreateOldToNew(Region *region);
+    static inline RememberedSet *CreateLocalToShare(Region *region);
+    static inline RememberedSet *CreateOldToNew(Region *region);
     static inline uint8_t GetValueFromTwoHex(uint8_t front, uint8_t behind);
     static inline bool IsTargetBundleName(uintptr_t argGlue);
     static inline bool MaybeHasInterfacesType(JSThread *thread, const JSHandle<TaggedArray> &arrayHandle);

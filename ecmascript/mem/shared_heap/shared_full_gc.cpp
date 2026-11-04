@@ -37,12 +37,10 @@ void SharedFullGC::RunPhases()
         + ";NativeLimitGC" + std::to_string(sHeap_->GetNativeSizeTriggerSharedGC())
         + ";NativeLimitCM" + std::to_string(sHeap_->GetNativeSizeTriggerSharedCM())).c_str(), "");
     TRACE_GC(GCStats::Scope::ScopeId::TotalGC, sHeap_->GetEcmaGCStats());
-    sHeap_->SetGCThreadQosPriority(common::PriorityMode::STW);
     Initialize();
     Mark();
     Sweep();
     Finish();
-    sHeap_->SetGCThreadQosPriority(common::PriorityMode::FOREGROUND);
 }
 
 void SharedFullGC::Initialize()
@@ -86,6 +84,18 @@ void SharedFullGC::Mark()
     marker->ProcessMarkStack(DAEMON_THREAD_INDEX);
     marker->MergeBackAndResetRSetWorkListHandler();
     sHeap_->WaitRunningMarkTaskFinished();
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    // SharedFullGC keeps mutators suspended, so no embedded references can be installed after root marking.
+    // Keep patching after marking finishes and before Sweep can invoke external callbacks.
+    if (marker->hasEmbeddedRefs_) {
+        Runtime::GetInstance()->GCIterateThreadList([](JSThread *thread) {
+            Heap *heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+            if (!heap->GetEmbeddedCodeRefSet()->UpdateSharedTargets()) {
+                LOG_GC(FATAL) << "Failed to update ArkSteed embedded shared-heap references";
+            }
+        });
+    }
+#endif
 }
 
 void SharedFullGC::Sweep()
@@ -96,7 +106,7 @@ void SharedFullGC::Sweep()
     WeakRootVisitor gcUpdateWeak = [](TaggedObject *header) {
         Region *objectRegion = Region::ObjectAddressToRange(header);
         if (!objectRegion) {
-            // existance of string table entry with null value is possible
+            // existence of string table entry with null value is possible
             // only if concurrent sweeping for string table is enabled
             return reinterpret_cast<TaggedObject *>(ToUintPtr(nullptr));
         }
@@ -117,6 +127,7 @@ void SharedFullGC::Sweep()
     Runtime::GetInstance()->ProcessSharedDelete(gcUpdateWeak);
     Runtime::GetInstance()->GCIterateThreadList([&](JSThread *thread) {
         ASSERT(thread->IsSuspended() || thread->HasLaunchedSuspendAll());
+        thread->IterateWeakRoots(gcUpdateWeak);
         thread->IterateWeakEcmaGlobalStorage(gcUpdateWeak, GCKind::SHARED_GC);
         thread->GetEcmaVM()->ProcessSnapShotEnv(gcUpdateWeak);
         const_cast<Heap*>(thread->GetEcmaVM()->GetHeap())->ResetTlab();
@@ -166,7 +177,7 @@ void SharedFullGC::UpdateRecordWeakReference()
                 MarkWord markWord(header, RELAXED_LOAD);
                 if (markWord.IsForwardingAddress()) {
                     TaggedObject *dst = markWord.ToForwardingAddress();
-                    auto weakRef = JSTaggedValue(JSTaggedValue(dst).CreateAndGetWeakRef()).GetRawTaggedObject();
+                    TaggedObject *weakRef = JSTaggedValue(JSTaggedValue(dst).CreateAndGetWeakRef()).GetRawHeapObject();
                     slot.Update(weakRef);
                 } else {
                     slot.Clear();

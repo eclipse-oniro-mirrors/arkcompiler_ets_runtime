@@ -17,6 +17,7 @@
 #include "ecmascript/jspandafile/js_pandafile_snapshot.h"
 #include "ecmascript/ohos/ohos_version_info_tools.h"
 #include "ecmascript/platform/filesystem.h"
+#include "ecmascript/runtime.h"
 #include "ecmascript/snapshot/common/modules_snapshot_helper.h"
 
 namespace panda::ecmascript::ohos {
@@ -27,15 +28,34 @@ void JSPandaFileSnapshotInterfaces::Serialize(const EcmaVM *vm, const CString &p
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "PandaFileSnapshotInterfaces::Serialize", "");
     if (ModulesSnapshotHelper::IsPandafileSnapshotDisabled(path)) {
         LOG_ECMA(DEBUG) << "Serialize: PandaFile Snapshot is not enabled";
-        ModulesSnapshotHelper::RemoveSnapshotFiles(path);
+        ModulesSnapshotHelper::HandleCorruptedFile(path, CString(JSPandaFileSnapshot::JSPANDAFILE_FILE_NAME));
         return;
     }
     CString version = OhosVersionInfoTools::GetRomVersion();
     if (version.empty()) {
-        LOG_ECMA(ERROR) << "PandaFileSnapshotInterfaces::Serialize rom version is empty";
+        LOG_ECMA(DEBUG) << "PandaFileSnapshotInterfaces::Serialize rom version is empty";
+        return;
+    }
+    if (!ecmascript::Runtime::GetInstance()->IsMainProcess()) {
+        LOG_ECMA(DEBUG) << "PandaFileSnapshotInterfaces::Serialize skiped in child process";
         return;
     }
     ModulesSnapshotHelper::MarkJSPandaFileSnapshotLoaded();
     JSPandaFileSnapshot::PostWriteDataToFileJob(vm, path, version);
+}
+
+void JSPandaFileSnapshotInterfaces::ReadCrossBundleHspInfo(const EcmaVM *vm, const CString &path)
+{
+    if (!ecmascript::Runtime::GetInstance()->IsMainProcess()) {
+        LOG_ECMA(DEBUG) << "PandaFileSnapshotInterfaces::ReadCrossBundleHspInfo skiped in child process";
+        return;
+    }
+    ModulesSnapshotHelper::MarkJSPandaFileSnapshotLoaded();
+    CString version = OhosVersionInfoTools::GetRomVersion();
+    bool result = JSPandaFileSnapshot::ReadCrossBundleHspDataFromFile(vm->GetJSThread(), path, version);
+    if (!result) {
+        LOG_ECMA(ERROR) << "PandaFileSnapshotInterfaces::ReadCrossBundleHspInfo failed";
+        ModulesSnapshotHelper::RemoveSnapshotFiles(path);
+    }
 }
 } // namespace panda::ecmascript::ohos

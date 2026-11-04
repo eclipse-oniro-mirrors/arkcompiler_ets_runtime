@@ -1,0 +1,9 @@
+object
+true
+false
+3
+2
+true
+function
+9
+true

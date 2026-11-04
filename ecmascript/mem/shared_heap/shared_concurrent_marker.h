@@ -66,6 +66,12 @@ public:
     {
         return isConcurrentMarking_;
     }
+
+    bool IsSharedPartialGCMode() const
+    {
+        return gcType_ == TriggerGCType::SHARED_PARTIAL_GC;
+    }
+
     void Mark(TriggerGCType gcType);             // In daemon thread
     void ReMark();                          // In daemon thread
 
@@ -118,6 +124,11 @@ private:
     void HandleMarkingFinished();               // In daemon thread
 
     void Finish();                              // In daemon thread
+
+    bool IsCCMode() const
+    {
+        return gcType_ == TriggerGCType::SHARED_CC;
+    }
 
     SharedHeap *sHeap_ {nullptr};
     DaemonThread *dThread_ {nullptr};

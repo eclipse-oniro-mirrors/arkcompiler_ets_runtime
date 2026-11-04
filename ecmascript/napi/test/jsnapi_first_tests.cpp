@@ -39,7 +39,7 @@
 #include "ecmascript/js_runtime_options.h"
 #include "ecmascript/js_set.h"
 #include "ecmascript/js_set_iterator.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/js_thread.h"
 #include "ecmascript/js_weak_container.h"
 #include "ecmascript/linked_hash_table.h"
@@ -1862,7 +1862,7 @@ HWTEST_F_L0(JSNApiTests, ModuleDeserializeReturnEarlyWhenDisableModuleSnapshot)
 {
     uint32_t originalVersion = vm_->GetApplicationVersionCode();
     vm_->GetJSOptions().SetDisableModuleSnapshot(true);
-    int arkProperties = vm_->GetJSOptions().GetArkProperties();
+    int64_t arkProperties = vm_->GetJSOptions().GetArkProperties();
     vm_->GetJSOptions().SetArkProperties(arkProperties & (~ArkProperties::DISABLE_JSPANDAFILE_MODULE_SNAPSHOT));
     JSNApi::ModuleDeserialize(vm_, originalVersion + 1);
     EXPECT_EQ(vm_->GetApplicationVersionCode(), originalVersion);
@@ -1872,7 +1872,7 @@ HWTEST_F_L0(JSNApiTests, ModuleDeserializeReturnEarlyWhenDisableJSPandaFileAndMo
 {
     uint32_t originalVersion = vm_->GetApplicationVersionCode();
     vm_->GetJSOptions().SetDisableModuleSnapshot(false);
-    int arkProperties = vm_->GetJSOptions().GetArkProperties();
+    int64_t arkProperties = vm_->GetJSOptions().GetArkProperties();
     vm_->GetJSOptions().SetArkProperties(arkProperties | ArkProperties::DISABLE_JSPANDAFILE_MODULE_SNAPSHOT);
     JSNApi::ModuleDeserialize(vm_, originalVersion + 1);
     EXPECT_EQ(vm_->GetApplicationVersionCode(), originalVersion);
@@ -1882,7 +1882,7 @@ HWTEST_F_L0(JSNApiTests, ModuleDeserializeReturnEarlyWhenBothDisabled)
 {
     uint32_t originalVersion = vm_->GetApplicationVersionCode();
     vm_->GetJSOptions().SetDisableModuleSnapshot(true);
-    int arkProperties = vm_->GetJSOptions().GetArkProperties();
+    int64_t arkProperties = vm_->GetJSOptions().GetArkProperties();
     vm_->GetJSOptions().SetArkProperties(arkProperties | ArkProperties::DISABLE_JSPANDAFILE_MODULE_SNAPSHOT);
     JSNApi::ModuleDeserialize(vm_, originalVersion);
     EXPECT_EQ(vm_->GetApplicationVersionCode(), originalVersion);
@@ -1892,7 +1892,7 @@ HWTEST_F_L0(JSNApiTests, ModuleDeserializeNormalExecution)
 {
     uint32_t originalVersion = vm_->GetApplicationVersionCode();
     vm_->GetJSOptions().SetDisableModuleSnapshot(false);
-    int arkProperties = vm_->GetJSOptions().GetArkProperties();
+    int64_t arkProperties = vm_->GetJSOptions().GetArkProperties();
     vm_->GetJSOptions().SetArkProperties(arkProperties & (~ArkProperties::DISABLE_JSPANDAFILE_MODULE_SNAPSHOT));
     JSNApi::ModuleDeserialize(vm_, originalVersion + 1);
     EXPECT_EQ(vm_->GetApplicationVersionCode(), originalVersion + 1);
@@ -2020,6 +2020,47 @@ HWTEST_F_L0(JSNApiTests, JSNApi_SetAssetPath_GetAssetPath)
     void *res1 = vm_->GetLoop();
     ASSERT_EQ(res1, data);
 }
+
+#if defined(PANDA_TARGET_PREVIEW)
+/**
+ * @tc.name: JSNApi_SetAssetPath_PreviewMode
+ * @tc.desc: SetAssetPath skips ValidateAbcPath for previewer-style asset paths
+ *           in previewer builds (linux/mingw/mac host).
+ * @tc.type: FUNC
+ * @tc.require: issuesProgram
+ */
+HWTEST_F_L0(JSNApiTests, JSNApi_SetAssetPath_PreviewMode)
+{
+    LocalScope scope(vm_);
+    // linux/cloud previewer intermediate path, not under /data/storage/el1/bundle/
+    std::string linuxPreviewPath =
+        "/home/user/demo/entry/.preview/default/intermediates/assets/default/ets/modules.abc";
+    JSNApi::SetAssetPath(vm_, linuxPreviewPath);
+    ASSERT_EQ(linuxPreviewPath, JSNApi::GetAssetPath(vm_));
+
+    // windows previewer path
+    std::string winPreviewPath =
+        "D:\\test\\entry\\.preview\\default\\intermediates\\assets\\default\\ets\\modules.abc";
+    JSNApi::SetAssetPath(vm_, winPreviewPath);
+    ASSERT_EQ(winPreviewPath, JSNApi::GetAssetPath(vm_));
+}
+#endif
+
+#if !defined(PANDA_TARGET_WINDOWS) && !defined(PANDA_TARGET_MACOS) && !defined(PANDA_TARGET_PREVIEW)
+/**
+ * @tc.name: JSNApi_SetAssetPath_DeviceMode
+ * @tc.desc: SetAssetPath keeps accepting valid bundle install paths on device builds.
+ * @tc.type: FUNC
+ * @tc.require: issuesProgram
+ */
+HWTEST_F_L0(JSNApiTests, JSNApi_SetAssetPath_DeviceMode)
+{
+    LocalScope scope(vm_);
+    std::string validPath = "/data/storage/el1/bundle/moduleName/ets/modules.abc";
+    JSNApi::SetAssetPath(vm_, validPath);
+    ASSERT_EQ(validPath, JSNApi::GetAssetPath(vm_));
+}
+#endif
 
 /**
  * @tc.number: ffi_interface_api_037
@@ -2325,6 +2366,7 @@ HWTEST_F_L0(JSNApiTests, FunctionCallScope)
     ASSERT_TRUE(vm_->IsTopLevelCallDepth());
 }
 
+#ifndef EXCLUDE_PGO
 HWTEST_F_L0(JSNApiTests, AotTrigger)
 {
     std::string bundle;
@@ -2343,6 +2385,7 @@ HWTEST_F_L0(JSNApiTests, AotTrigger)
     ASSERT_EQ(module, "requestAot");
     ASSERT_EQ(trigger, 0);
 }
+#endif
 
 HWTEST_F_L0(JSNApiTests, JSNApiInternalsTest)
 {
@@ -2673,6 +2716,29 @@ HWTEST_F_L0(JSNApiTests, SetReleaseSecureMemCallback)
     ReleaseSecureMemCallback releaseSecureMemCallBack2 =
         ecmascript::Runtime::GetInstance()->GetReleaseSecureMemCallback();
     ASSERT_FALSE(releaseSecureMemCallBack2 == nullptr);
+}
+
+HWTEST_F_L0(JSNApiTests, SetAbilityName)
+{
+    LocalScope scope(vm_);
+    std::string abilityName = "EntryAbility";
+    JSNApi::SetAbilityName(abilityName);
+    CString res = Runtime::GetInstance()->GetEntryAbilityName();
+    ASSERT_FALSE(res.empty());
+
+    std::string anotherName = "AnotherEntryAbility";
+    JSNApi::SetAbilityName(anotherName);
+    CString res2 = Runtime::GetInstance()->GetEntryAbilityName();
+    ASSERT_EQ(res, res2);
+}
+
+HWTEST_F_L0(JSNApiTests, SetAbilityName_EmptyString)
+{
+    LocalScope scope(vm_);
+    CString before = Runtime::GetInstance()->GetEntryAbilityName();
+    JSNApi::SetAbilityName("");
+    CString after = Runtime::GetInstance()->GetEntryAbilityName();
+    ASSERT_EQ(before, after);
 }
 
 static bool g_finalizeCallbackExecuted = false;
@@ -3986,4 +4052,166 @@ HWTEST_F_L0(JSNApiTests, ArrayBufferRef_GetBufferAndLength)
     EXPECT_EQ(length, TEST_ARRAYBUFFER_LENGTH);
 }
 
+/**
+ * @tc.number: ffi_interface_api_108
+ * @tc.name: LocalScope_NestingLevels
+ * @tc.desc: Verify LocalScope nesting levels work correctly with LIFO order and ref creation.
+ * @tc.type: FUNC
+ * @tc.require: parameter
+ */
+HWTEST_F_L0(JSNApiTests, LocalScope_NestingLevels)
+{
+    auto initialLevel = vm_->GetOpenHandleScopes();
+    EXPECT_GE(initialLevel, 0);
+
+    // Test single scope with ref creation
+    {
+        LocalScope scope1(vm_);
+        [[maybe_unused]] Local<IntegerRef> v1 = IntegerRef::New(vm_, 1);
+        EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel + 1);
+    }
+
+    // Test double nested scopes
+    {
+        LocalScope outerScope(vm_);
+        [[maybe_unused]] Local<IntegerRef> outerValue = IntegerRef::New(vm_, 42);
+        EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel + 1);
+
+        {
+            LocalScope innerScope(vm_);
+            [[maybe_unused]] Local<IntegerRef> innerValue = IntegerRef::New(vm_, 100);
+            EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel + 2);
+        }
+
+        EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel + 1);
+    }
+
+    // Test triple nested scopes
+    {
+        LocalScope level1(vm_);
+        EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel + 1);
+
+        {
+            LocalScope level2(vm_);
+            EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel + 2);
+
+            {
+                LocalScope level3(vm_);
+                [[maybe_unused]] Local<IntegerRef> v3 = IntegerRef::New(vm_, 3);
+                EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel + 3);
+            }
+
+            EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel + 2);
+        }
+
+        EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel + 1);
+    }
+
+    EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel);
+}
+
+/**
+ * @tc.number: ffi_interface_api_109
+ * @tc.name: LocalScope_ManualHeapAllocation
+ * @tc.desc: Verify manual heap allocation breaks LIFO order detection.
+ * @tc.type: FUNC
+ * @tc.require: parameter
+ */
+HWTEST_F_L0(JSNApiTests, LocalScope_ManualHeapAllocation)
+{
+    auto initialLevel = vm_->GetOpenHandleScopes();
+    EXPECT_GE(initialLevel, 0);
+
+    // Create heap-allocated scopes and delete in wrong order (LIFO violation)
+    LocalScope *scope1 = new LocalScope(vm_);
+    EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel + 1);
+
+    LocalScope *scope2 = new LocalScope(vm_);
+    EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel + 2);
+
+    // Delete scope1 first (breaking LIFO order)
+    delete scope1;
+    EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel + 1);
+
+    // Delete scope2 second - this triggers scopeLevel_ != GetOpenHandleScopes() detection
+    // scope2->scopeLevel_ (initialLevel + 2) != GetOpenHandleScopes() (initialLevel + 1)
+    delete scope2;
+    EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel);
+}
+
+/**
+ * @tc.number: ffi_interface_api_110
+ * @tc.name: LocalScope_CreateRefs
+ * @tc.desc: Verify creating LocalRefs doesn't change scope level.
+ * @tc.type: FUNC
+ * @tc.require: parameter
+ */
+HWTEST_F_L0(JSNApiTests, LocalScope_CreateRefs)
+{
+    auto initialLevel = vm_->GetOpenHandleScopes();
+    EXPECT_GE(initialLevel, 0);
+
+    // Create refs without explicit scope - uses existing scope from SetUp
+    [[maybe_unused]] Local<IntegerRef> v1 = IntegerRef::New(vm_, 1);
+    [[maybe_unused]] Local<IntegerRef> v2 = IntegerRef::New(vm_, 2);
+    EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel);
+
+    // Create multiple refs in a loop
+    constexpr int refCount = 10;
+    for (int i = 0; i < refCount; i++) {
+        [[maybe_unused]] Local<IntegerRef> value = IntegerRef::New(vm_, i);
+    }
+    EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel);
+
+    // Create various ref types
+    [[maybe_unused]] Local<IntegerRef> intRef = IntegerRef::New(vm_, 42);
+    [[maybe_unused]] Local<IntegerRef> uintRef = IntegerRef::NewFromUnsigned(vm_, 100U);
+    EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel);
+
+    // Create refs in nested scopes
+    {
+        LocalScope s1(vm_);
+        [[maybe_unused]] Local<IntegerRef> v3 = IntegerRef::New(vm_, 3);
+        EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel + 1);
+
+        {
+            LocalScope s2(vm_);
+            [[maybe_unused]] Local<IntegerRef> v4 = IntegerRef::New(vm_, 4);
+            EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel + 2);
+        }
+
+        // Ref created after inner scope closes
+        [[maybe_unused]] Local<IntegerRef> v5 = IntegerRef::New(vm_, 5);
+        EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel + 1);
+    }
+
+    EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel);
+}
+
+/**
+ * @tc.number: ffi_interface_api_111
+ * @tc.name: LocalScope_EscapeLocalScope
+ * @tc.desc: Verify EscapeLocalScope works correctly.
+ * @tc.type: FUNC
+ * @tc.require: parameter
+ */
+HWTEST_F_L0(JSNApiTests, LocalScope_EscapeLocalScope)
+{
+    auto initialLevel = vm_->GetOpenHandleScopes();
+    EXPECT_GE(initialLevel, 0);
+
+    {
+        LocalScope outerScope(vm_);
+        EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel + 1);
+
+        {
+            EscapeLocalScope escapeScope(vm_);
+            EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel + 2);
+        }
+
+        EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel + 1);
+    }
+
+    EXPECT_EQ(vm_->GetOpenHandleScopes(), initialLevel);
+}
 }  // namespace panda::test

@@ -17,7 +17,7 @@
 #define ECMASCRIPT_OBJECT_FAST_OPERATOR_INL_H
 
 #include "ecmascript/js_handle.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/jspandafile/class_info_extractor.h"
 #include "ecmascript/mem/assert_scope.h"
 #include "ecmascript/object_fast_operator.h"
@@ -40,7 +40,7 @@
 #include "ecmascript/js_function.h"
 #include "ecmascript/js_hclass-inl.h"
 #include "ecmascript/js_object-inl.h"
-#include "ecmascript/js_tagged_value-inl.h"
+#include "ecmascript/js_tagged_value_wrapper-inl.h"
 #include "ecmascript/js_typed_array.h"
 #include "ecmascript/message_string.h"
 #include "ecmascript/property_attributes.h"
@@ -157,6 +157,7 @@ JSTaggedValue ObjectFastOperator::TryFastHasProperty(JSThread *thread, JSTaggedV
             keyHandle.Update(JSTaggedValue(string));
             key = keyHandle.GetTaggedValue();
             receiver = receiverHandler.GetTaggedValue();
+            hclass = receiver.GetTaggedObject()->GetClass();
         }
         ASSERT(
             !TaggedArray::Cast(JSObject::Cast(receiver)->GetProperties(thread).GetTaggedObject())->IsDictionaryMode());
@@ -263,8 +264,8 @@ JSTaggedValue ObjectFastOperator::GetPropertyByName(JSThread *thread, JSTaggedVa
         auto *hclass = holder.GetTaggedObject()->GetClass();
         JSType jsType = hclass->GetObjectType();
         if (IsSpecialIndexedObj(jsType)) {
-            if (IsFastTypeArray(jsType)) {
-                JSTaggedValue res = FastGetTypeArrayProperty(thread, receiver, holder, key, jsType);
+            if (IsFastTypedArray(jsType)) {
+                JSTaggedValue res = FastGetTypedArrayProperty(thread, receiver, holder, key, jsType);
                 if (res.IsNull()) {
                     return JSTaggedValue::Hole();
                 } else if (UNLIKELY(!res.IsHole())) {
@@ -408,7 +409,9 @@ JSTaggedValue ObjectFastOperator::TrySetPropertyByNameThroughCacheAtLocal(JSThre
                 auto actualValue = JSHClass::ConvertOrTransitionWithRep(thread, objHandle,
                     key, value, attr);
                 JSObject::TryMigrateToGenericKindForJSObject(thread, objHandle, oldKind);
+                // Refresh receiverVal and hclass after GC
                 receiverVal = receiver.GetTaggedValue();
+                hclass = receiverVal.GetTaggedObject()->GetClass();
                 setValue = actualValue.value;
                 isTagged = actualValue.isTagged;
             }
@@ -435,8 +438,8 @@ JSTaggedValue ObjectFastOperator::SetPropertyByName(JSThread *thread, JSTaggedVa
         auto *hclass = holder.GetTaggedObject()->GetClass();
         JSType jsType = hclass->GetObjectType();
         if (IsSpecialIndexedObj(jsType)) {
-            if (IsFastTypeArray(jsType)) {
-                JSTaggedValue res = FastSetTypeArrayProperty(thread, receiver, holder, key, value, jsType);
+            if (IsFastTypedArray(jsType)) {
+                JSTaggedValue res = FastSetTypedArrayProperty(thread, receiver, holder, key, value, jsType);
                 if (res.IsNull()) {
                     return JSTaggedValue::Hole();
                 } else if (UNLIKELY(!res.IsHole())) {
@@ -660,10 +663,12 @@ JSTaggedValue ObjectFastOperator::SetJsonPropertyByName(JSThread *thread, JSTagg
             auto actualValue = JSHClass::ConvertOrTransitionWithRep(thread, objHandle,
                 keyHandle, valueHandle, attr);
             JSObject::TryMigrateToGenericKindForJSObject(thread, objHandle, oldKind);
+            // Refresh hclass after GC
+            hclass = objHandle->GetClass();
             if (actualValue.isTagged) {
-                JSObject::Cast(receiver)->SetProperty<true>(thread, hclass, attr, actualValue.value);
+                objHandle->SetProperty<true>(thread, hclass, attr, actualValue.value);
             } else {
-                JSObject::Cast(receiver)->SetProperty<false>(thread, hclass, attr, actualValue.value);
+                objHandle->SetProperty<false>(thread, hclass, attr, actualValue.value);
             }
             return JSTaggedValue::Undefined();
         }
@@ -687,7 +692,7 @@ JSTaggedValue ObjectFastOperator::GetPropertyByIndex(JSThread *thread, JSTaggedV
             if (jsType == JSType::JS_TYPED_ARRAY) {
                 return JSTaggedValue::Hole();
             }
-            if (IsFastTypeArray(jsType)) {
+            if (IsFastTypedArray(jsType)) {
                 return JSTypedArray::FastGetPropertyByIndex(thread, holder, index, jsType);
             }
             if (IsSpecialContainer(jsType)) {
@@ -748,7 +753,7 @@ JSTaggedValue ObjectFastOperator::SetPropertyByIndex(JSThread *thread, JSTaggedV
             if (jsType == JSType::JS_TYPED_ARRAY) {
                 return JSTaggedValue::Hole();
             }
-            if (IsFastTypeArray(jsType)) {
+            if (IsFastTypedArray(jsType)) {
                 CHECK_IS_ON_PROTOTYPE_CHAIN(receiver, holder);
                 return JSTypedArray::FastSetPropertyByIndex(thread, receiver, index, value, jsType);
             }
@@ -1118,7 +1123,7 @@ bool ObjectFastOperator::IsJSSharedArray(JSType jsType)
     return jsType == JSType::JS_SHARED_ARRAY;
 }
 
-bool ObjectFastOperator::IsFastTypeArray(JSType jsType)
+bool ObjectFastOperator::IsFastTypedArray(JSType jsType)
 {
     return jsType >= JSType::JS_TYPED_ARRAY_FIRST && jsType <= JSType::JS_TYPED_ARRAY_LAST;
 }
@@ -1138,9 +1143,9 @@ bool ObjectFastOperator::IsJSProxy(JSType jsType)
     return jsType == JSType::JS_PROXY;
 }
 
-JSTaggedValue ObjectFastOperator::FastGetTypeArrayProperty(JSThread *thread, JSTaggedValue receiver,
-                                                           JSTaggedValue holder,
-                                                           JSTaggedValue key, JSType jsType)
+JSTaggedValue ObjectFastOperator::FastGetTypedArrayProperty(JSThread *thread, JSTaggedValue receiver,
+                                                            JSTaggedValue holder,
+                                                            JSTaggedValue key, JSType jsType)
 {
     CHECK_IS_ON_PROTOTYPE_CHAIN(receiver, holder);
     JSTaggedValue negativeZero = thread->GlobalConstants()->GetNegativeZeroString();
@@ -1166,9 +1171,9 @@ bool ObjectFastOperator::TryStringOrSymbolToIndex(JSThread *thread, JSTaggedValu
     return EcmaStringAccessor(strObj).ToTypedArrayIndex(thread, output);
 }
 
-JSTaggedValue ObjectFastOperator::FastSetTypeArrayProperty(JSThread *thread, JSTaggedValue receiver,
-                                                           JSTaggedValue holder, JSTaggedValue key,
-                                                           JSTaggedValue value, JSType jsType)
+JSTaggedValue ObjectFastOperator::FastSetTypedArrayProperty(JSThread *thread, JSTaggedValue receiver,
+                                                            JSTaggedValue holder, JSTaggedValue key,
+                                                            JSTaggedValue value, JSType jsType)
 {
     CHECK_IS_ON_PROTOTYPE_CHAIN(receiver, holder);
     JSTaggedValue negativeZero = thread->GlobalConstants()->GetNegativeZeroString();

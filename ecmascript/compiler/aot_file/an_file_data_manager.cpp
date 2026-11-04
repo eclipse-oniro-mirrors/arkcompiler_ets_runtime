@@ -52,6 +52,9 @@ void AnFileDataManager::SafeDestroyAllData()
     }
     loadedAn_.clear();
     anFileNameVector_.clear();
+#if defined(STUB_FUNCTION_REORDERING)
+    stubEntriesInitFlag_ = false;
+#endif
 }
 
 void AnFileDataManager::SafeDestroyAnData(const std::string &fileName)
@@ -65,6 +68,36 @@ void AnFileDataManager::SafeDestroyAnData(const std::string &fileName)
     auto info = UnSafeGetAnFileInfo(index);
     info->Destroy();
 }
+
+#if defined(STUB_FUNCTION_REORDERING)
+void AnFileDataManager::SafePopulateStubIndexMapping()
+{
+    WriteLockHolder lock(lock_);
+    if (stubEntriesInitFlag_) {
+        return;
+    }
+    if (loadedStub_ == nullptr) {
+        return;
+    }
+#if ENABLE_MEMORY_OPTIMIZATION
+    uint32_t len = loadedStub_->GetEntrySize();
+    const auto *stubs = loadedStub_->GetRawEntries();
+    for (uint32_t i = 0; i < len; i++) {
+        if (stubs[i].IsBCStub()) {
+            loadedStub_->AddIndexMapping(stubs[i].indexInKindOrMethodId_, i);
+        }
+    }
+#else
+    auto stubs = loadedStub_->GetStubs();
+    for (size_t i = 0; i < stubs.size(); i++) {
+        if (stubs[i].IsBCStub()) {
+            loadedStub_->AddIndexMapping(stubs[i].indexInKindOrMethodId_, i);
+        }
+    }
+#endif
+    stubEntriesInitFlag_ = true;
+}
+#endif
 
 bool AnFileDataManager::SafeLoad(const std::string &fileName, Type type)
 {
@@ -103,7 +136,7 @@ bool AnFileDataManager::UnsafeLoadFromStub(const std::string &fileName)
     if (!fileName.empty()) {
         return loadedStub_->MmapLoad(fileName);
     }
-#if defined(PANDA_TARGET_OHOS)
+#if defined(PANDA_TARGET_OHOS) || defined(ANDROID_PLATFORM)
     return loadedStub_->MmapLoad(fileName);
 #else
     return loadedStub_->Load();
@@ -267,8 +300,10 @@ bool AnFileDataManager::SafeTryReadLock()
     // so the status of whether the lock is held by vm thread will not change until the signal callback ends. If the
     // attempt is successful, it means that the current vm thread does not hold the lock，the reentrancy problem will
     // not occur in the callback.
-    if (lock_.TryReadLock()) {
-        lock_.Unlock();
+    // No-log variants: FATAL_IF_ERROR logs on failure, which is forbidden inside
+    // the SIGPROF handler (plan §6.2); any error here is treated as contention.
+    if (lock_.TryReadLockNoLog()) {
+        lock_.UnlockNoLog();
         return true;
     }
     return false;
@@ -312,6 +347,54 @@ bool AnFileDataManager::SafeInsideAOT(uintptr_t pc)
     return false;
 }
 
+// Signal-handler-safe union of SafeInsideStub and SafeInsideAOT: the lock is only
+// taken in try mode, so a concurrent writer (AN file load/remove on another thread)
+// degrades the answer to false instead of blocking the handler. Callers must treat
+// false as "use the fallback walk", not as a definitive range answer.
+namespace {
+bool StubRangeContains(StubFileInfo &stub, uintptr_t pc)
+{
+    uint64_t stubStartAddr = stub.GetAsmStubAddr();
+    uint64_t stubEndAddr = stubStartAddr + stub.GetAsmStubSize();
+    if (pc >= stubStartAddr && pc <= stubEndAddr) {
+        return true;
+    }
+    const std::vector<ModuleSectionDes> &des = stub.GetCodeUnits();
+    for (const auto &curDes : des) {
+        if (curDes.ContainCode(pc)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool AnyAotRangeContains(const std::vector<std::shared_ptr<AnFileInfo>> &loadedAn, uintptr_t pc)
+{
+    for (auto &info : loadedAn) {
+        const std::vector<ModuleSectionDes> &des = info->GetCodeUnits();
+        for (const auto &curDes : des) {
+            if (curDes.ContainCode(pc)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+} // namespace
+
+bool AnFileDataManager::SafeTryInsideStubOrAOT(uintptr_t pc)
+{
+    if (!lock_.TryReadLockNoLog()) {
+        return false;
+    }
+    bool inside = (loadedStub_ != nullptr) && StubRangeContains(*loadedStub_, pc);
+    if (!inside) {
+        inside = AnyAotRangeContains(loadedAn_, pc);
+    }
+    lock_.UnlockNoLog();
+    return inside;
+}
+
 AOTFileInfo::CallSiteInfo AnFileDataManager::SafeCalCallSiteInfo(uintptr_t retAddr, bool isDeopt)
 {
     ReadLockHolder lock(lock_);
@@ -332,23 +415,5 @@ AOTFileInfo::CallSiteInfo AnFileDataManager::SafeCalCallSiteInfo(uintptr_t retAd
         }
     }
     return callsiteInfo;
-}
-
-uint64_t AnFileDataManager::GetStubFileStart()
-{
-    if (loadedStub_ == nullptr) {
-        LOG_COMPILER(ERROR) << "SafeInsideStub: The stub file is not loaded.";
-        return 0;
-    }
-    return loadedStub_->GetStubFileStart();
-}
-
-uint64_t AnFileDataManager::GetStubFileSize()
-{
-    if (loadedStub_ == nullptr) {
-        LOG_COMPILER(ERROR) << "SafeInsideStub: The stub file is not loaded.";
-        return 0;
-    }
-    return loadedStub_->GetStubFileSize();
 }
 }  // namespace panda::ecmascript

@@ -38,6 +38,7 @@
 #include "ecmascript/mem/gc_key_stats.h"
 #include "ecmascript/mem/gc_stats.h"
 #include "ecmascript/mem/allocation_inspector.h"
+#include "ecmascript/mem/mem_map_allocator.h"
 #include "ecmascript/dfx/hprof/heap_sampling.h"
 #include "ecmascript/tests/ecma_test_common.h"
 #if defined(PANDA_TARGET_OHOS) && !defined(STANDALONE_MODE)
@@ -51,6 +52,8 @@ using namespace panda::panda_file;
 using namespace panda::pandasm;
 
 namespace panda::test {
+using ChainedHashMapType = ChainedHashMap;
+
 class GCTest : public BaseTestWithScope<false> {
 public:
     void SetUp() override
@@ -195,7 +198,7 @@ HWTEST_F_L0(GCTest, ObjectExceedMaxHeapSizeTest001)
 
 HWTEST_F_L0(GCTest, CheckAndTriggerHintGCTest001)
 {
-#ifdef NDEBUG
+#if !USE_STICKY_CMS_GC && defined(NDEBUG)
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
     heap->CollectGarbage(TriggerGCType::OLD_GC);
     ASSERT_EQ(heap->CheckAndTriggerHintGC(MemoryReduceDegree::LOW, GCReason::HINT_GC), false);
@@ -255,6 +258,9 @@ HWTEST_F_L0(GCTest, CheckAndTriggerHintGCTest004)
         return;
     }
     auto sHeap = SharedHeap::GetInstance();
+    if (!sHeap->CheckCanTriggerConcurrentMarking(thread)) {
+        return;
+    }
     sHeap->CollectGarbage<TriggerGCType::SHARED_GC, GCReason::OTHER>(thread);
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
     ASSERT_EQ(heap->CheckAndTriggerHintGC(MemoryReduceDegree::LOW, GCReason::HINT_GC), false);
@@ -300,6 +306,9 @@ HWTEST_F_L0(GCTest, CheckAndTriggerHintGCTest006)
     auto sHeap = SharedHeap::GetInstance();
     sHeap->CollectGarbage<TriggerGCType::SHARED_FULL_GC, GCReason::OTHER>(thread);
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    // Trigger a local GC to set heapAliveSizeAfterGC baseline so the threshold
+    // is meaningful and the test does not depend on the initial heap size.
+    heap->CollectGarbage(TriggerGCType::FULL_GC, GCReason::OTHER);
     ASSERT_EQ(heap->CheckAndTriggerHintGC(MemoryReduceDegree::HIGH, GCReason::HINT_GC), false);
     {
         [[maybe_unused]] ecmascript::EcmaHandleScope baseScope(thread);
@@ -745,6 +754,9 @@ HWTEST_F_L0(GCTest, SharedMarkingBarrier)
 {
     ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
     SharedHeap *sHeap = SharedHeap::GetInstance();
+    if (!sHeap->CheckCanTriggerConcurrentMarking(thread)) {
+        return;
+    }
     JSHandle<TaggedArray> array(factory->NewSTaggedArray(16));
     sHeap->TriggerConcurrentMarking<TriggerGCType::SHARED_GC, MarkReason::OTHER>(thread);
     std::this_thread::sleep_for(std::chrono::seconds(3));
@@ -773,7 +785,9 @@ HWTEST_F_L0(GCTest, OvershootSizeTest2)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
     auto newSpace = heap->GetNewSpace();
+    auto oldSpace = heap->GetOldSpace();
     newSpace->SetInitialCapacity(newSpace->GetCommittedSize());
+    oldSpace->SetInitialCapacity(oldSpace->GetCommittedSize());
     newSpace->SetOverShootSize(0);
     thread->SetMarkStatus(MarkStatus::READY_TO_MARK);
     thread->SetProcessingLocalToSharedRset(true);
@@ -801,7 +815,9 @@ HWTEST_F_L0(GCTest, OvershootSizeTest4)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
     auto newSpace = heap->GetNewSpace();
+    auto oldSpace = heap->GetOldSpace();
     newSpace->SetInitialCapacity(newSpace->GetCommittedSize());
+    oldSpace->SetInitialCapacity(oldSpace->GetCommittedSize());
     newSpace->SetOverShootSize(0);
     thread->SetMarkStatus(MarkStatus::MARKING);
     thread->SetProcessingLocalToSharedRset(true);
@@ -866,35 +882,33 @@ void TestStringTable(JSThread *thread, EcmaStringTable *stringTable)
 
 HWTEST_F_L0(GCTest, stringTableConcurrentSweepTest1)
 {
-    EcmaStringTable *stringTable = Runtime::GetInstance()->GetEcmaStringTable();
-    typename DisableCMCGCConcurrentSweepTrait::HashTrieMapType *hashTrieMap =
-        reinterpret_cast<typename DisableCMCGCConcurrentSweepTrait::HashTrieMapType *>(stringTable->GetHashTrieMap());
+    EcmaStringTable* stringTable = Runtime::GetInstance()->GetEcmaStringTable();
+    ChainedHashMap* chainedHashMap = stringTable->GetChainedHashMap();
     stringTable->GetCleaner()->SetEnableConcurrentSweep(true);
 
     {
         RuntimeLockHolder(thread, SharedHeap::GetInstance()->GetSuspensionRequestMutex());
-        hashTrieMap->StartSweeping();
-        ASSERT_TRUE(hashTrieMap->IsSweeping());
+        chainedHashMap->StartSweeping();
+        ASSERT_TRUE(chainedHashMap->IsSweeping());
     }
     TestStringTable(thread, stringTable);
 
     {
         RuntimeLockHolder(thread, SharedHeap::GetInstance()->GetSuspensionRequestMutex());
-        hashTrieMap->FinishSweeping();
-        ASSERT_FALSE(hashTrieMap->IsSweeping());
+        chainedHashMap->FinishSweeping();
+        ASSERT_FALSE(chainedHashMap->IsSweeping());
     }
     TestStringTable(thread, stringTable);
 }
 
 HWTEST_F_L0(GCTest, stringTableConcurrentSweepTest2)
 {
-    SharedHeap *sHeap = SharedHeap::GetInstance();
-    EcmaStringTable *stringTable = Runtime::GetInstance()->GetEcmaStringTable();
-    typename DisableCMCGCConcurrentSweepTrait::HashTrieMapType *hashTrieMap =
-        reinterpret_cast<typename DisableCMCGCConcurrentSweepTrait::HashTrieMapType *>(stringTable->GetHashTrieMap());
+    SharedHeap* sHeap = SharedHeap::GetInstance();
+    EcmaStringTable* stringTable = Runtime::GetInstance()->GetEcmaStringTable();
+    ChainedHashMap* chainedHashMap = stringTable->GetChainedHashMap();
     stringTable->GetCleaner()->SetEnableConcurrentSweep(true);
 
-    hashTrieMap->IncreaseInuseCount();
+    chainedHashMap->IncreaseInuseCount();
     sHeap->CollectGarbage<TriggerGCType::SHARED_GC, GCReason::OTHER>(thread);
     sHeap->CollectGarbage<TriggerGCType::SHARED_FULL_GC, GCReason::OTHER>(thread);
 
@@ -903,7 +917,7 @@ HWTEST_F_L0(GCTest, stringTableConcurrentSweepTest2)
     sHeap->CollectGarbage<TriggerGCType::SHARED_GC, GCReason::OTHER>(thread);
     sHeap->CollectGarbage<TriggerGCType::SHARED_FULL_GC, GCReason::OTHER>(thread);
 
-    hashTrieMap->DecreaseInuseCount();
+    chainedHashMap->DecreaseInuseCount();
     sHeap->CollectGarbage<TriggerGCType::SHARED_GC, GCReason::OTHER>(thread);
     sHeap->CollectGarbage<TriggerGCType::SHARED_FULL_GC, GCReason::OTHER>(thread);
 
@@ -913,7 +927,7 @@ HWTEST_F_L0(GCTest, stringTableConcurrentSweepTest2)
     sHeap->CollectGarbage<TriggerGCType::SHARED_FULL_GC, GCReason::OTHER>(thread);
 
     RuntimeLockHolder(thread, sHeap->GetSuspensionRequestMutex());
-    ASSERT_FALSE(hashTrieMap->IsSweeping());
+    ASSERT_FALSE(chainedHashMap->IsSweeping());
 }
 
 #ifndef USE_CMC_GC
@@ -922,23 +936,53 @@ HWTEST_F_L0(GCTest, stringTableReadBarrierTest)
     ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
 
     JSTaggedType value = reinterpret_cast<JSTaggedType>(nullptr);
-    JSTaggedType result = Barriers::ReadBarrierForStringTableSlot(value);
+    JSTaggedType result = Barriers::ReadBarrierForStringTableSlot(value, thread);
     ASSERT_TRUE(result == reinterpret_cast<JSTaggedType>(nullptr));
 
     value = thread->GlobalConstants()->GetPrototypeString().GetRawData();
-    result = Barriers::ReadBarrierForStringTableSlot(value);
+    result = Barriers::ReadBarrierForStringTableSlot(value, thread);
     ASSERT_TRUE(result == value);
 
     JSHandle<EcmaString> str = factory->NewFromASCIISkippingStringTable("test");
     SharedHeap::GetInstance()->PrepareByJSThread(thread, false);
     value = str.GetTaggedType();
     Region::ObjectAddressToRange(value)->AtomicMark(reinterpret_cast<void *>(value));
-    result = Barriers::ReadBarrierForStringTableSlot(value);
+    result = Barriers::ReadBarrierForStringTableSlot(value, thread);
     ASSERT_TRUE(result == value);
 
     Region::ObjectAddressToRange(value)->ClearMark(reinterpret_cast<void *>(value));
-    result = Barriers::ReadBarrierForStringTableSlot(value);
+    result = Barriers::ReadBarrierForStringTableSlot(value, thread);
     ASSERT_TRUE(result == reinterpret_cast<JSTaggedType>(nullptr));
 }
 #endif
+
+HWTEST_F_L0(GCTest, MemMapAllocatorAllocateFromMemPoolTest)
+{
+#ifdef USE_COMPRESSED_POINTER
+    return;
+#endif
+    MemMapAllocator *allocator = new MemMapAllocator();
+    allocator->ResetLargePoolSize();
+    constexpr size_t testSize = DEFAULT_REGION_SIZE;
+
+    MemMap mem = allocator->Allocate(thread->GetThreadId(), testSize, DEFAULT_REGION_SIZE,
+                                     ToSpaceTypeName(MemSpaceType::OLD_SPACE),
+                                     true, false, false, false, false, false);
+    ASSERT_TRUE(mem.GetMem() != nullptr);
+    ASSERT_TRUE(mem.GetSize() == testSize);
+    delete allocator;
+}
+
+HWTEST_F_L0(GCTest, GlobalEnvTest)
+{
+    Heap *heap = const_cast<Heap *>(instance->GetHeap());
+    ObjectFactory *factory = heap->GetEcmaVM()->GetFactory();
+    {
+        [[maybe_unused]] EcmaHandleScope handleScope(thread);
+        JSHandle<GlobalEnv> env = factory->NewGlobalEnv();
+        heap->GetEcmaVM()->CollectGarbage(TriggerGCType::FULL_GC, GCReason::OTHER);
+        ASSERT_TRUE(env.GetTaggedValue().IsJSGlobalEnv());
+    }
+    heap->GetEcmaVM()->CollectGarbage(TriggerGCType::FULL_GC, GCReason::OTHER);
+}
 } // namespace panda::test

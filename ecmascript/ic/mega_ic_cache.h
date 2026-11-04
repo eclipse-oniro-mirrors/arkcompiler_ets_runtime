@@ -19,7 +19,7 @@
 #include <array>
 
 #include "ecmascript/js_hclass.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/ecma_macros.h"
 #include "ecmascript/log_wrapper.h"
 #include "ecmascript/log_wrapper.h"
@@ -101,6 +101,7 @@ public:
             if (key.hclass_ != nullptr) {
                 auto value = JSTaggedValue::Cast(key.hclass_);
                 v.VisitRoot(Root::ROOT_VM, ObjectSlot(reinterpret_cast<uintptr_t>(&(value))));
+                key.hclass_ = JSHClass::Cast(value.GetHeapObject());
             }
             v.VisitRoot(Root::ROOT_VM, ObjectSlot(reinterpret_cast<uintptr_t>(&(key.key_))));
             v.VisitRoot(Root::ROOT_VM, ObjectSlot(reinterpret_cast<uintptr_t>(&(key.results_))));
@@ -109,6 +110,7 @@ public:
             if (key.hclass_ != nullptr) {
                 auto value = JSTaggedValue::Cast(key.hclass_);
                 v.VisitRoot(Root::ROOT_VM, ObjectSlot(reinterpret_cast<uintptr_t>(&(value))));
+                key.hclass_ = JSHClass::Cast(value.GetHeapObject());
             }
             v.VisitRoot(Root::ROOT_VM, ObjectSlot(reinterpret_cast<uintptr_t>(&(key.key_))));
             v.VisitRoot(Root::ROOT_VM, ObjectSlot(reinterpret_cast<uintptr_t>(&(key.results_))));

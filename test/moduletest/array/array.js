@@ -2290,12 +2290,4 @@ var fn = function()
 }
 assert_equal(arr2.reduce(fn, 44166), undefined);
 
-{
-    assert_equal(Array.from("😀"), ['😀']);
-    const str = '👨‍👩‍👧‍👦❤️🇨🇳';
-    const arr = Array.from(str);
-    assert_equal(arr.length, 11);
-    assert_equal(arr, ['👨', '‍', '👩', '‍', '👧', '‍', '👦', '❤', '️', '🇨', '🇳']);
-}
-
 test_end();

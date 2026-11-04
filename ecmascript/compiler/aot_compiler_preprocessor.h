@@ -76,6 +76,9 @@ struct CompilationOptions {
     bool isEnableTypeLowering_ {true};
     bool isEnableEarlyElimination_ {true};
     bool isEnableLaterElimination_ {true};
+#ifdef CONTROLFLOW_OPTIMIZATION
+    bool isEnableControlFlowOptimization_ {false};
+#endif
     bool isEnableValueNumbering_ {true};
     bool isEnableOptInlining_ {true};
     bool isEnableOptString_ {true};
@@ -97,6 +100,12 @@ struct CompilationOptions {
     bool isEnableBaselinePgo_ {false};
     bool isEnableMergePoly_ {true};
     bool enableAotCodeComment_ {false};
+#ifdef ENABLE_BRANCH_ELIMINATION
+    bool isEnableBranchElimination_ {true};
+#endif
+#ifdef ENABLE_BRANCH_PROFILE
+    bool isEnableBreProfiling_ {false};
+#endif
     std::map<std::string, std::vector<std::string>> optionSelectMethods_;
     std::map<std::string, std::vector<std::string>> optionSkipMethods_;
     size_t anFileMaxByteSize_ {0_MB};
@@ -154,12 +163,6 @@ public:
     bool MethodHasTryCatch(const JSPandaFile *jsPandaFile, const MethodLiteral *methodLiteral) const;
 
     bool HasSkipMethod(const CVector<std::string> &methodList, const std::string &methodName) const;
-
-    bool ForbidenRebuildAOT(std::string &fileName) const;
-
-    bool PUBLIC_API HasPreloadAotFile() const;
-
-    bool PUBLIC_API HasExistsAOTFiles(CompilationOptions &cOptions) const;
 
     void SetIsFastCall(CString fileDesc, uint32_t methodOffset, bool isFastCall)
     {

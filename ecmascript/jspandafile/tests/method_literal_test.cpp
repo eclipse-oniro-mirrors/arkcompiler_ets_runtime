@@ -193,47 +193,6 @@ HWTEST_F_L0(MethodLiteralTest, MethodLiteral_GetLiteralInfo)
 }
 
 /**
- * @tc.name: MethodLiteral_GetHotnessCounter
- * @tc.desc: Test MethodLiteral hotness counter from literal info
- * @tc.type: FUNC
- * @tc.require: issue#13003
- */
-HWTEST_F_L0(MethodLiteralTest, MethodLiteral_GetHotnessCounter)
-{
-    const char *source = R"(
-        .function void foo() {}
-    )";
-    const CString fileName = "MethodLiteralTestHotness.pa";
-    std::shared_ptr<JSPandaFile> jsPandaFile = CreateJSPandaFile(source, fileName);
-    ASSERT_NE(jsPandaFile, nullptr);
-
-    const panda_file::File *pf = jsPandaFile->GetPandaFile();
-    const uint8_t *typeDesc = utf::CStringAsMutf8("L_GLOBAL;");
-    File::EntityId classId = pf->GetClassId(typeDesc);
-
-    ClassDataAccessor cda(*pf, classId);
-    bool foundMethod = false;
-    cda.EnumerateMethods([&](panda_file::MethodDataAccessor &mda) {
-        if (foundMethod) {
-            return;
-        }
-        MethodLiteral methodLiteral(mda.GetMethodId());
-
-        // Get hotness counter from literal info
-        uint64_t literalInfo = methodLiteral.GetLiteralInfo();
-        int16_t hotnessCounter = MethodLiteral::GetHotnessCounter(literalInfo);
-
-        // Hotness counter should be initialized to a valid value
-        EXPECT_GE(hotnessCounter, INT16_MIN);
-        EXPECT_LE(hotnessCounter, INT16_MAX);
-
-        foundMethod = true;
-    });
-
-    EXPECT_TRUE(foundMethod);
-}
-
-/**
  * @tc.name: MethodLiteral_GetFunctionKind
  * @tc.desc: Test MethodLiteral function kind from literal info
  * @tc.type: FUNC

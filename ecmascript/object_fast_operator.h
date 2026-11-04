@@ -18,7 +18,7 @@
 
 #include "ecmascript/js_handle.h"
 #include "ecmascript/js_hclass.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/property_attributes.h"
 
 namespace panda::ecmascript {
@@ -132,7 +132,7 @@ private:
 
     static inline bool IsJSSharedArray(JSType jsType);
 
-    static inline bool IsFastTypeArray(JSType jsType);
+    static inline bool IsFastTypedArray(JSType jsType);
 
     static inline bool IsString(JSType jsType);
 
@@ -142,11 +142,12 @@ private:
 
     static inline bool TryStringOrSymbolToIndex(JSThread *thread, JSTaggedValue key, uint32_t *output);
 
-    static inline JSTaggedValue FastGetTypeArrayProperty(JSThread *thread, JSTaggedValue receiver, JSTaggedValue holder,
-                                                         JSTaggedValue key, JSType jsType);
+    static inline JSTaggedValue FastGetTypedArrayProperty(JSThread *thread, JSTaggedValue receiver,
+                                                          JSTaggedValue holder, JSTaggedValue key, JSType jsType);
 
-    static inline JSTaggedValue FastSetTypeArrayProperty(JSThread *thread, JSTaggedValue receiver, JSTaggedValue holder,
-                                                         JSTaggedValue key, JSTaggedValue value, JSType jsType);
+    static inline JSTaggedValue FastSetTypedArrayProperty(JSThread *thread, JSTaggedValue receiver,
+                                                          JSTaggedValue holder, JSTaggedValue key,
+                                                          JSTaggedValue value, JSType jsType);
 
     // non ECMA standard jsapi container
     static inline bool IsSpecialContainer(JSType jsType);

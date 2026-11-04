@@ -101,7 +101,7 @@
 #include "ecmascript/js_set_iterator.h"
 #include "ecmascript/js_string_iterator.h"
 #include "ecmascript/js_tagged_number.h"
-#include "ecmascript/js_tagged_value-inl.h"
+#include "ecmascript/js_tagged_value_wrapper-inl.h"
 #include "ecmascript/js_thread.h"
 #include "ecmascript/js_typed_array.h"
 #include "ecmascript/js_weak_container.h"
@@ -150,6 +150,27 @@ using Array = panda::ecmascript::builtins::BuiltinsArray;
 namespace panda::test {
 class EcmaDumpTest : public BaseTestWithScope<false> {
 };
+
+HWTEST_F_L0(EcmaDumpTest, ProfileTypeInfoDumpForSnapshotIncludesFixedReferences)
+{
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    JSHandle<ProfileTypeInfo> profileTypeInfo = factory->NewProfileTypeInfo(2);
+    JSHandle<TaggedArray> extraInfo = factory->NewTaggedArray(1);
+    JSHandle<TaggedArray> jitOsr = factory->NewTaggedArray(2);
+    profileTypeInfo->SetExtraInfoMap(thread, extraInfo.GetTaggedValue());
+    profileTypeInfo->SetJitOsr(thread, jitOsr.GetTaggedValue());
+
+    std::vector<Reference> refs;
+    profileTypeInfo->DumpForSnapshot(thread, refs);
+
+    ASSERT_EQ(refs.size(), 4U);
+    EXPECT_EQ(refs[0].name_, "ExtraInfoMap");
+    EXPECT_EQ(refs[0].value_, extraInfo.GetTaggedValue());
+    EXPECT_EQ(refs[1].name_, "JitOsr");
+    EXPECT_EQ(refs[1].value_, jitOsr.GetTaggedValue());
+    EXPECT_EQ(refs[2].name_, "0");
+    EXPECT_EQ(refs[3].name_, "1");
+}
 
 #ifndef NDEBUG
 HWTEST_F_L0(EcmaDumpTest, Dump)
@@ -940,7 +961,7 @@ HWTEST_F_L0(EcmaDumpTest, HeapProfileDump)
             case JSType::JS_FLOAT64_ARRAY:
             case JSType::JS_BIGINT64_ARRAY:
             case JSType::JS_BIGUINT64_ARRAY: {
-                CHECK_DUMP_FIELDS(JSObject::SIZE, JSTypedArray::SIZE, 4U);
+                CHECK_DUMP_FIELDS(JSObject::SIZE, JSTypedArray::SIZE, 3U);
                 NEW_OBJECT_AND_DUMP(JSTypedArray, JS_TYPED_ARRAY);
                 break;
             }
@@ -1064,11 +1085,6 @@ HWTEST_F_L0(EcmaDumpTest, HeapProfileDump)
             case JSType::COW_MUTANT_TAGGED_ARRAY: {
                 JSHandle<COWMutantTaggedArray> array = factory->NewCOWMutantTaggedArray(4);
                 DUMP_FOR_HANDLE(array);
-                break;
-            }
-            case JSType::FUNC_SLOT: {
-                JSHandle<FuncSlot> funcSlot = factory->NewFuncSlot();
-                DUMP_FOR_HANDLE(funcSlot);
                 break;
             }
             case JSType::GLOBAL_ENV: {

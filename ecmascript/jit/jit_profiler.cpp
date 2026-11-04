@@ -189,11 +189,13 @@ void JITProfiler::ProfileBytecode(JSThread *thread, const JSHandle<ProfileTypeIn
                 break;
             }
             case EcmaOpcode::EXP_IMM8_V8:
+            case EcmaOpcode::TONUMBER_IMM8:
             case EcmaOpcode::TONUMERIC_IMM8: {
                 Jit::JitLockHolder lock(thread);
                 uint8_t slotId = READ_INST_8_0();
                 CHECK_SLOTID_BREAK(slotId);
                 ConvertOpType(slotId, bcOffset);
+                UpdateBcOffsetBool(bcOffset, slotId);
                 break;
             }
             case EcmaOpcode::CALLRUNTIME_ISTRUE_PREF_IMM8:
@@ -337,7 +339,7 @@ void JITProfiler::ProfileBytecode(JSThread *thread, const JSHandle<ProfileTypeIn
 // PGOSampleType
 void JITProfiler::ConvertOpType(uint32_t slotId, long bcOffset)
 {
-    JSTaggedValue slotValue = profileTypeInfo_->Get(mainThread_, slotId);
+    JSTaggedValue slotValue = profileTypeInfo_->GetICSlot(mainThread_, slotId);
     if (slotValue.IsInt()) {
         auto type = slotValue.GetInt();
         UpdatePGOType(bcOffset, chunk_->New<PGOSampleType>(type));
@@ -346,14 +348,10 @@ void JITProfiler::ConvertOpType(uint32_t slotId, long bcOffset)
 
 void JITProfiler::ConvertCall(uint32_t slotId, long bcOffset)
 {
-    JSTaggedValue slotValue = profileTypeInfo_->Get(mainThread_, slotId);
+    JSTaggedValue slotValue = profileTypeInfo_->GetICSlot(mainThread_, slotId);
     ProfileType::Kind kind;
     int calleeMethodId = 0;
     ApEntityId calleeAbcId = 0;
-    if (slotValue.IsFuncSlot()) {
-        auto funcSlot = FuncSlot::Cast(slotValue);
-        slotValue = funcSlot->GetFunction(mainThread_);
-    }
     if (slotValue.IsInt()) {
         calleeMethodId = slotValue.GetInt();
         if (calleeMethodId == 0) {
@@ -392,13 +390,9 @@ void JITProfiler::ConvertCall(uint32_t slotId, long bcOffset)
 
 void JITProfiler::ConvertNewObjRange(uint32_t slotId, long bcOffset)
 {
-    JSTaggedValue slotValue = profileTypeInfo_->Get(mainThread_, slotId);
+    JSTaggedValue slotValue = profileTypeInfo_->GetICSlot(mainThread_, slotId);
     int ctorMethodId = 0;
     JSHClass* hclass = nullptr;
-    if (slotValue.IsFuncSlot()) {
-        auto funcSlot = FuncSlot::Cast(slotValue);
-        slotValue = funcSlot->GetFunction(mainThread_);
-    }
     if (slotValue.IsInt()) {
         ctorMethodId = slotValue.GetInt();
         // JIT cannot optimize this scenario because it doesn't know the hclass
@@ -443,7 +437,7 @@ void JITProfiler::ConvertGetIterator(uint32_t slotId, long bcOffset)
     if (mainThread_->GetEnableLazyBuiltins()) {
         return;
     }
-    JSTaggedValue value = profileTypeInfo_->Get(mainThread_, slotId);
+    JSTaggedValue value = profileTypeInfo_->GetICSlot(mainThread_, slotId);
     if (!value.IsInt()) {
         return;
     }
@@ -456,7 +450,7 @@ void JITProfiler::ConvertGetIterator(uint32_t slotId, long bcOffset)
 
 void JITProfiler::ConvertCreateObject(uint32_t slotId, long bcOffset, [[maybe_unused]]int32_t traceId)
 {
-    JSTaggedValue slotValue = profileTypeInfo_->Get(mainThread_, slotId);
+    JSTaggedValue slotValue = profileTypeInfo_->GetICSlot(mainThread_, slotId);
     if (!slotValue.IsHeapObject()) {
         return;
     }
@@ -518,7 +512,7 @@ void JITProfiler::TraceICState(int32_t bcOffset, std::string_view s)
             return;
     }
     std::string icType;
-    JSTaggedValue firstValue = profileTypeInfo_->Get(mainThread_, slotId);
+    JSTaggedValue firstValue = profileTypeInfo_->GetICSlot(mainThread_, slotId);
     if (s != "IC-All") {
         if (!firstValue.IsHeapObject()) {
         } else if (firstValue.IsWeak()) {
@@ -546,9 +540,9 @@ void JITProfiler::ConvertICByName(int32_t bcOffset, uint32_t slotId, BCType type
 {
     IcAccessorLockScope accessorLockScope(vm_->GetJSThreadNoCheck());
     TraceICState(bcOffset, "IC-All");
-    JSTaggedValue firstValue = profileTypeInfo_->Get(mainThread_, slotId);
+    JSTaggedValue firstValue = profileTypeInfo_->GetICSlot(mainThread_, slotId);
     if (!firstValue.IsHeapObject()) {
-        JSTaggedValue secondValue = profileTypeInfo_->Get(mainThread_, slotId + 1);
+        JSTaggedValue secondValue = profileTypeInfo_->GetICSlot(mainThread_, slotId + 1);
         if (firstValue.IsHole() && secondValue.IsString()) {
             // Mega state
             TraceICState(bcOffset, "IC-Mega");
@@ -565,7 +559,7 @@ void JITProfiler::ConvertICByName(int32_t bcOffset, uint32_t slotId, BCType type
     if (firstValue.IsWeak()) {
         TaggedObject *object = firstValue.GetWeakReferentUnChecked();
         if (object->GetClass()->IsHClass()) {
-            JSTaggedValue secondValue = profileTypeInfo_->Get(mainThread_, slotId + 1);
+            JSTaggedValue secondValue = profileTypeInfo_->GetICSlot(mainThread_, slotId + 1);
             JSHClass *hclass = JSHClass::Cast(object);
             ConvertICByNameWithHandler(abcId_, bcOffset, hclass, secondValue, type, slotId + 1);
         }
@@ -801,7 +795,7 @@ void JITProfiler::ConvertICByNameWithPoly(ApEntityId abcId, int32_t bcOffset, JS
 void JITProfiler::ConvertICByValue(int32_t bcOffset, uint32_t slotId, BCType type)
 {
     IcAccessorLockScope accessorLockScope(vm_->GetJSThreadNoCheck());
-    JSTaggedValue firstValue = profileTypeInfo_->Get(mainThread_, slotId);
+    JSTaggedValue firstValue = profileTypeInfo_->GetICSlot(mainThread_, slotId);
     if (!firstValue.IsHeapObject()) {
         if (firstValue.IsHole()) {
             // Mega state
@@ -812,7 +806,7 @@ void JITProfiler::ConvertICByValue(int32_t bcOffset, uint32_t slotId, BCType typ
     if (firstValue.IsWeak()) {
         TaggedObject *object = firstValue.GetWeakReferentUnChecked();
         if (object->GetClass()->IsHClass()) {
-            JSTaggedValue secondValue = profileTypeInfo_->Get(mainThread_, slotId + 1);
+            JSTaggedValue secondValue = profileTypeInfo_->GetICSlot(mainThread_, slotId + 1);
             JSHClass *hclass = JSHClass::Cast(object);
             ConvertICByValueWithHandler(abcId_, bcOffset, hclass, secondValue, type, slotId);
         }
@@ -820,7 +814,7 @@ void JITProfiler::ConvertICByValue(int32_t bcOffset, uint32_t slotId, BCType typ
     }
     // Check key
     if ((firstValue.IsString() || firstValue.IsSymbol())) {
-        JSTaggedValue secondValue = profileTypeInfo_->Get(mainThread_, slotId + 1);
+        JSTaggedValue secondValue = profileTypeInfo_->GetICSlot(mainThread_, slotId + 1);
         ConvertICByValueWithPoly(abcId_, bcOffset, firstValue, secondValue, type, slotId);
         return;
     }
@@ -997,7 +991,7 @@ void JITProfiler::ConvertExternalModuleVar(uint32_t index, uint32_t bcOffset)
 
 void JITProfiler::ConvertInstanceof(int32_t bcOffset, uint32_t slotId)
 {
-    JSTaggedValue firstValue = profileTypeInfo_->Get(mainThread_, slotId);
+    JSTaggedValue firstValue = profileTypeInfo_->GetICSlot(mainThread_, slotId);
     if (!firstValue.IsHeapObject()) {
         if (firstValue.IsHole()) {
             // Mega state
@@ -1031,7 +1025,7 @@ void JITProfiler::ConvertTryldGlobalByName(uint32_t bcOffset, uint32_t slotId)
     if (!jitCompilationEnv->SupportHeapConstant()) {
         return;
     }
-    JSTaggedValue handler = profileTypeInfo_->Get(mainThread_, slotId);
+    JSTaggedValue handler = profileTypeInfo_->GetICSlot(mainThread_, slotId);
     if (handler.IsHeapObject()) {
         ASSERT(handler.IsPropertyBox());
         PropertyBox *cell = PropertyBox::Cast(handler.GetTaggedObject());
@@ -1308,12 +1302,12 @@ bool JITProfiler::IsIncompleteProfileTypeInfo()
     // We may receive an incomplete profile typeinfo. During the execution of a larger function, when the upper part of
     // the function is executed, profiltypeinfo has not yet been created. When profiltypeinfo is created and Jit is
     // triggered, the first half of profiltypeinfo becomes empty.
-    return profileTypeInfo_->Get(mainThread_, 0).IsUndefined();
+    return profileTypeInfo_->GetICSlot(mainThread_, 0).IsUndefined();
 }
 
 bool JITProfiler::SlotValueIsUndefined(uint32_t slotId)
 {
-    return profileTypeInfo_->Get(mainThread_, slotId).IsUndefined();
+    return profileTypeInfo_->GetICSlot(mainThread_, slotId).IsUndefined();
 }
 
 void JITProfiler::UpdateBcOffsetBool(uint32_t offset, uint32_t slotId)

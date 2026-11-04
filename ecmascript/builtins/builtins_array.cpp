@@ -184,7 +184,7 @@ JSTaggedValue BuiltinsArray::From(EcmaRuntimeCallInfo *argv)
     if (items->IsNull()) {
         THROW_TYPE_ERROR_AND_RETURN(thread, "The items is null.", JSTaggedValue::Exception());
     }
-    if (!mapping && items->IsString() && EcmaStringAccessor(items.GetTaggedValue()).IsUtf8()) {
+    if (!mapping && items->IsString()) {
         JSHandle<EcmaString> strItems(items);
         return BuiltinsString::StringToList(thread, strItems);
     }
@@ -884,7 +884,7 @@ JSTaggedValue BuiltinsArray::Fill(EcmaRuntimeCallInfo *argv)
     //   b. Let setStatus be Set(O, Pk, value, true).
     //   c. ReturnIfAbrupt(setStatus).
     //   d. Increase k by 1.
-    if (thisObjVal->IsStableJSArray(thread)) {
+    if (thisObjVal->IsStableJSArray(thread) && JSArray::Cast(*thisObjHandle)->GetLength() >= end) {
         return JSStableArray::Fill(thread, thisObjHandle, value, start, end);
     }
 

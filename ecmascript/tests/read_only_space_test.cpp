@@ -30,6 +30,9 @@
 #include "common_components/heap/heap_manager.h"
 #include <csetjmp>
 #include <csignal>
+#if defined(PANDA_TARGET_OHOS) && defined(IS_EMULATOR)
+#include <sigchain.h>
+#endif
 #include <sys/syscall.h>
 using namespace panda::ecmascript;
 
@@ -67,6 +70,9 @@ public:
 
     static int RegisterSignal()
     {
+#if defined(PANDA_TARGET_OHOS) && defined(IS_EMULATOR)
+        remove_all_special_handler(SIGSEGV);
+#endif
         struct sigaction act;
         act.sa_handler = ProcessReadOnlySegmentFault;
         sigemptyset(&act.sa_mask);
@@ -103,8 +109,7 @@ HWTEST_F_L0(ReadOnlySpaceTest, ReadOnlyTest)
     }
     auto ret = sigsetjmp(g_env, 1);
     if (ret != SIGSEGV) {
-        heap->AllocateReadOnlyOrHugeObject(
-            JSHClass::Cast(thread->GlobalConstants()->GetBigIntClass().GetTaggedObject()));
+        heap->AllocateReadOnlyOrHugeObject(JSHandle<JSHClass>(thread->GlobalConstants()->GetHandledBigIntClass()));
     } else {
         // catch signal SIGSEGV caused by modify read only memory
         EXPECT_TRUE(g_segmentfault_flag);
@@ -118,7 +123,7 @@ HWTEST_F_L0(ReadOnlySpaceTest, AllocateTest)
 {
     auto *heap = const_cast<panda::ecmascript::Heap *>(thread->GetEcmaVM()->GetHeap());
     auto *object = heap->AllocateReadOnlyOrHugeObject(
-        JSHClass::Cast(thread->GlobalConstants()->GetBigIntClass().GetTaggedObject()));
+        JSHandle<JSHClass>(thread->GlobalConstants()->GetHandledBigIntClass()));
     if (!g_isEnableCMCGC) {
         auto *region = Region::ObjectAddressToRange(object);
         EXPECT_TRUE(region->InReadOnlySpace());
@@ -153,7 +158,7 @@ HWTEST_F_L0(ReadOnlySpaceTest, GCTest)
 {
     auto *heap = const_cast<panda::ecmascript::Heap *>(thread->GetEcmaVM()->GetHeap());
     auto *object = heap->AllocateReadOnlyOrHugeObject(
-        JSHClass::Cast(thread->GlobalConstants()->GetBigIntClass().GetTaggedObject()));
+        JSHandle<JSHClass>(thread->GlobalConstants()->GetHandledBigIntClass()));
     if (!g_isEnableCMCGC) {
         heap->CollectGarbage(TriggerGCType::YOUNG_GC);
         heap->CollectGarbage(TriggerGCType::OLD_GC);
@@ -184,7 +189,7 @@ HWTEST_F_L0(ReadOnlySpaceTest, ForkTest)
         heap->CollectGarbage(TriggerGCType::OLD_GC);
     } else {
         auto *object = heap->AllocateReadOnlyOrHugeObject(
-                JSHClass::Cast(thread->GlobalConstants()->GetBigIntClass().GetTaggedObject()));
+                JSHandle<JSHClass>(thread->GlobalConstants()->GetHandledBigIntClass()));
         auto baseRuntime = common::BaseRuntime::GetInstance();
         auto heapManager = baseRuntime->GetHeapManager();
 

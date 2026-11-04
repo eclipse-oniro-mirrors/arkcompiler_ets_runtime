@@ -16,14 +16,27 @@
 #ifndef ECMASCRIPT_COMPILER_PASS_H
 #define ECMASCRIPT_COMPILER_PASS_H
 
+#ifdef ENABLE_BRANCH_ELIMINATION
+#include "ecmascript/compiler/branch_elimination.h"
+#include "ecmascript/compiler/constant_folding2.h"
+#else
+#include "ecmascript/compiler/constant_folding.h"
+#endif
+
+#ifdef ENABLE_BRANCH_PROFILE
+#include "ecmascript/compiler/branch_profile.h"
+#endif
+
 #include "ecmascript/compiler/aot_compilation_env.h"
+#ifdef CONTROLFLOW_OPTIMIZATION
+#include "ecmascript/compiler/controlflow_optimization.h"
+#endif
 #include "ecmascript/compiler/jit_compilation_env.h"
 #include "ecmascript/compiler/async_function_lowering.h"
 #include "ecmascript/compiler/bytecode_circuit_builder.h"
 #include "ecmascript/compiler/codegen/llvm/llvm_codegen.h"
 #include "ecmascript/compiler/combined_pass_visitor.h"
 #include "ecmascript/compiler/compiler_log.h"
-#include "ecmascript/compiler/constant_folding.h"
 #include "ecmascript/compiler/dead_code_elimination.h"
 #include "ecmascript/compiler/early_elimination.h"
 #include "ecmascript/compiler/escape_analysis.h"
@@ -671,6 +684,50 @@ public:
     }
 };
 
+#ifdef ENABLE_BRANCH_ELIMINATION
+class BranchEliminationPass {
+public:
+    bool Run(PassData* data)
+    {
+        TimeScope timescope("BranchEliminationPass", data->GetMethodName(), data->GetMethodOffset(), data->GetLog());
+        Chunk chunk(data->GetNativeAreaAllocator());
+        bool enableLog = data->GetLog()->EnableMethodCIRLog();
+        if (!data->GetPassOptions()->EnableBranchElimination()) {
+            return true;
+        }
+        CombinedPassVisitor visitor(data->GetCircuit(), enableLog, data->GetMethodName(), &chunk);
+        BranchElimination branchElimination(data->GetCircuit(), &visitor, enableLog, &chunk);
+        DeadCodeElimination deadCodeElimination(data->GetCircuit(), &visitor, &chunk);
+        visitor.AddPass(&branchElimination);
+        visitor.AddPass(&deadCodeElimination);
+        visitor.VisitGraph();
+        visitor.PrintLog("BranchEliminationPass");
+        return true;
+    }
+};
+#endif
+
+#ifdef ENABLE_BRANCH_PROFILE
+class BranchProfilePass {
+public:
+    bool Run(PassData* data)
+    {
+        TimeScope timescope("BranchProfilePass", data->GetMethodName(), data->GetMethodOffset(), data->GetLog());
+        Chunk chunk(data->GetNativeAreaAllocator());
+        bool enableLog = data->GetLog()->EnableMethodCIRLog();
+        if (!data->GetPassOptions()->EnableBreProfiling()) {
+            return true;
+        }
+        CombinedPassVisitor visitor(data->GetCircuit(), enableLog, data->GetMethodName(), &chunk);
+        BranchProfile branchprofile(data->GetCircuit(), data->GetPassContext(), &visitor, &chunk);
+        visitor.AddPass(&branchprofile);
+        visitor.VisitGraph();
+        visitor.PrintLog("BranchProfilePass");
+        return true;
+    }
+};
+#endif
+
 class LoopOptimizationPass {
 public:
     bool Run(PassData* data)
@@ -779,6 +836,25 @@ public:
         return true;
     }
 };
+
+#ifdef CONTROLFLOW_OPTIMIZATION
+class ControlFlowOptimizationPass {
+public:
+    bool Run(PassData *data)
+    {
+        TimeScope timescope("ControlFlowOptimizationPass", data->GetMethodName(),
+                            data->GetMethodOffset(), data->GetLog());
+        bool enableLog = data->GetLog()->EnableMethodCIRLog();
+        if (data->GetPassOptions()->EnableControlFlowOptimization()) {
+            Chunk chunk(data->GetNativeAreaAllocator());
+            ControlFlowOptimization controlFlowOptimization(data->GetCircuit(), &chunk,
+                                                            enableLog, data->GetMethodName());
+            controlFlowOptimization.Run();
+        }
+        return true;
+    }
+};
+#endif
 
 class ValueNumberingPass {
 public:
@@ -889,7 +965,7 @@ public:
         Chunk chunk(data->GetNativeAreaAllocator());
         bool enableLog = data->GetLog()->EnableMethodCIRLog();
         bool licm = data->GetPassOptions()->EnableOptLoopInvariantCodeMotion();
-        bool liteCG = data->GetPassContext()->GetCompilationEnv()->GetJSOptions().IsCompilerEnableLiteCG();
+        bool liteCG = IsLiteCGEnabled(data->GetPassContext()->GetCompilationEnv());
         bool enableStoreBarrier = data->GetPassContext()->GetCompilationEnv()->GetJSOptions().IsStoreBarrierOpt();
         GraphLinearizer(data->GetCircuit(), enableLog, data->GetMethodName(), &chunk, false, licm, liteCG)
             .Run(data->GetCfg());
@@ -904,7 +980,9 @@ class CGIRGenPass {
 public:
     void CreateCodeGen(IRModule *module, bool enableLog)
     {
-#ifdef COMPILE_MAPLE
+#ifdef DISABLE_LLVM_BACKEND
+        cgImpl_ = std::make_unique<LiteCGIRGeneratorImpl>(static_cast<LMIRModule*>(module), enableLog);
+#elif defined(COMPILE_MAPLE)
         if (module->GetModuleKind() == MODULE_LLVM) {
             cgImpl_ = std::make_unique<LLVMIRGeneratorImpl>(static_cast<LLVMModule*>(module), enableLog);
         } else {

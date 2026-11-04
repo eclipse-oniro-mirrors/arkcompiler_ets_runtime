@@ -19,9 +19,8 @@
 #include <type_traits>
 
 #include "ecmascript/ecma_handle_scope.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/mem/assert_scope.h"
-#include "ecmascript/mem/barriers.h"
 #include "objects/readonly_handle.h"
 /*
  * JSHandle: A JSHandle provides a reference to an object that survives relocation by the garbage collector.
@@ -69,6 +68,7 @@ class JSHandleTest;
 }  // namespace panda::test
 
 namespace panda::ecmascript {
+extern uintptr_t g_guardAddress;
 class TaggedArray;
 class LinkedHashMap;
 class LinkedHashSet;
@@ -108,7 +108,12 @@ public:
     }
 
     template <typename S>
-    explicit JSHandle(const JSHandle<S> &handle) : address_(handle.GetAddress()) {}
+    explicit JSHandle(const JSHandle<S> &handle) : address_(handle.GetAddress())
+    {
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+        EcmaHandleScope::CheckHandleValid(address_);
+#endif
+    }
 
     template <typename S>
     inline static JSHandle<T> Cast(const JSHandle<S> &handle)
@@ -133,6 +138,21 @@ public:
             return JSTaggedValue::Undefined().GetRawData();
         }
         return *reinterpret_cast<JSTaggedType *>(GetAddress()); // NOLINT(clang-analyzer-core.NullDereference)
+    }
+
+    inline JSTaggedValue GetTaggedValueWithCheck() const
+    {
+        CHECK_NO_DEREF_HANDLE;
+        if (GetAddress() == 0U) {
+            return JSTaggedValue::Undefined();
+        }
+        JSTaggedValue value = *reinterpret_cast<JSTaggedValue *>(GetAddress()); // NOLINT(clang-analyzer-core.NullDereference)
+#if !defined(PANDA_TARGET_WINDOWS)
+        if (value.GetRawData() == static_cast<JSTaggedType>(g_guardAddress)) {
+            LOG_FULL(FATAL) << "invalid handle checked";
+        }
+#endif
+        return value;
     }
 
     inline T *operator*() const
@@ -168,6 +188,9 @@ public:
 
     inline explicit JSHandle(uintptr_t slot) : address_(slot)
     {
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+        EcmaHandleScope::CheckHandleValid(address_);
+#endif
         if (!std::is_convertible<T *, JSTaggedValue *>::value) {
             ASSERT(slot != 0);
             if ((*reinterpret_cast<JSTaggedValue *>(slot)).IsHeapObject()) {
@@ -193,9 +216,19 @@ public:
         return common::ReadOnlyHandle<R>(address_);
     }
 private:
-    inline explicit JSHandle(const JSTaggedType *slot) : address_(reinterpret_cast<uintptr_t>(slot)) {}
-    inline explicit JSHandle(const T *const *slot) : address_(reinterpret_cast<uintptr_t>(slot)) {}
+    inline explicit JSHandle(const JSTaggedType *slot) : address_(reinterpret_cast<uintptr_t>(slot))
+    {
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+        EcmaHandleScope::CheckHandleValid(address_);
+#endif
+    }
 
+    inline explicit JSHandle(const T *const *slot) : address_(reinterpret_cast<uintptr_t>(slot))
+    {
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+        EcmaHandleScope::CheckHandleValid(address_);
+#endif
+    }
     uintptr_t address_;  // NOLINT(misc-non-private-member-variables-in-classes)
     friend class EcmaVM;
     friend class GlobalEnv;
@@ -207,14 +240,12 @@ private:
 template <>
 inline JSTaggedValue *JSHandle<JSTaggedValue>::operator->() const
 {
-    // Barriers::UpdateSlot(reinterpret_cast<JSTaggedValue*>(GetAddress()), 0);
     return reinterpret_cast<JSTaggedValue *>(GetAddress());
 }
 
 template <>
 inline JSTaggedValue *JSHandle<JSTaggedValue>::operator*() const
 {
-    // Barriers::UpdateSlot(reinterpret_cast<JSTaggedValue*>(GetAddress()), 0);
     return reinterpret_cast<JSTaggedValue *>(GetAddress());
 }
 

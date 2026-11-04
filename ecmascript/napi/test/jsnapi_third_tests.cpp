@@ -41,7 +41,7 @@
 #include "ecmascript/js_set.h"
 #include "ecmascript/js_set_iterator.h"
 #include "ecmascript/js_proxy.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/js_thread.h"
 #include "ecmascript/js_weak_container.h"
 #include "ecmascript/ic/ic_info.h"
@@ -150,6 +150,7 @@ public:
 
 protected:
     void RegisterStringCacheTable();
+    void SetupNormalizedOhmUrlPack();
     std::shared_ptr<JSPandaFile> NewMockJSPandaFile(const char *data, const CString &filename,
         const CString &targetFileName, CString &entryPoint) const;
 
@@ -167,6 +168,22 @@ void JSNApiTests::RegisterStringCacheTable()
     } else {
         ASSERT_TRUE(res);
     }
+}
+
+void JSNApiTests::SetupNormalizedOhmUrlPack()
+{
+    std::map<std::string, std::vector<std::vector<std::string>>> pkgList;
+    std::vector<std::string> entryList = {
+        "entry",
+        "packageName", "entry",
+        "bundleName", "",
+        "moduleName", "",
+        "version", "",
+        "entryPath", "src/main/",
+        "isSO", "false"
+    };
+    pkgList["entry"] = {entryList};
+    JSNApi::SetpkgContextInfoList(vm_, pkgList);
 }
 
 std::shared_ptr<JSPandaFile> JSNApiTests::NewMockJSPandaFile(const char *data,
@@ -426,7 +443,7 @@ HWTEST_F_L0(JSNApiTests, JSNApi_GetUncaughtException)
 
 Local<JSValueRef> FuncRefNewCallbackForTest(JsiRuntimeCallInfo *info)
 {
-    GTEST_LOG_(INFO) << "runing FuncRefNewCallbackForTest";
+    GTEST_LOG_(INFO) << "running FuncRefNewCallbackForTest";
     EscapeLocalScope scope(info->GetVM());
     return scope.Escape(ArrayRef::New(info->GetVM(), info->GetArgsNumber()));
 }
@@ -1461,7 +1478,7 @@ HWTEST_F_L0(JSNApiTests, NapiTryFastTest)
     Local<JSValueRef> res2 = JSNApi::NapiGetProperty(vm_, reinterpret_cast<uintptr_t>(*object),
                                                        reinterpret_cast<uintptr_t>(*key2));
     ASSERT_TRUE(value->IsStrictEquals(vm_, res2));
-    
+
     Local<JSValueRef> flag = JSNApi::NapiHasProperty(vm_, reinterpret_cast<uintptr_t>(*object),
                                                      reinterpret_cast<uintptr_t>(*key));
     ASSERT_TRUE(flag->BooleaValue(vm_));
@@ -1783,7 +1800,7 @@ HWTEST_F_L0(JSNApiTests, NapiGetPropertyFastEquivalentStringKeysKeepMono)
     EXPECT_EQ(GetCallsiteState(thread_, info, ICKind::LoadIC), IcAccessor::ICState::MONO);
     JSTaggedValue infoVal = *reinterpret_cast<JSTaggedValue *>(info);
     ICInfo *callsiteInfo = ICInfo::Cast(infoVal.GetTaggedObject());
-    EXPECT_FALSE(callsiteInfo->GetIcSlot(thread_, 0).IsHole());
+    EXPECT_FALSE(callsiteInfo->GetICSlot(thread_, 0).IsHole());
     ASSERT_FALSE(thread_->HasPendingException());
     JSNApi::NapiDeleteCallsiteInfo(vm_, info);
 }
@@ -1814,7 +1831,7 @@ HWTEST_F_L0(JSNApiTests, NapiSetPropertyFastEquivalentStringKeysKeepMono)
     EXPECT_EQ(GetCallsiteState(thread_, info, ICKind::StoreIC), IcAccessor::ICState::MONO);
     JSTaggedValue infoVal = *reinterpret_cast<JSTaggedValue *>(info);
     ICInfo *callsiteInfo = ICInfo::Cast(infoVal.GetTaggedObject());
-    EXPECT_FALSE(callsiteInfo->GetIcSlot(thread_, 0).IsHole());
+    EXPECT_FALSE(callsiteInfo->GetICSlot(thread_, 0).IsHole());
     ASSERT_FALSE(thread_->HasPendingException());
     JSNApi::NapiDeleteCallsiteInfo(vm_, info);
 }
@@ -1845,7 +1862,7 @@ HWTEST_F_L0(JSNApiTests, NapiGetPropertyFastNumericKeyGoesViaElementIC)
     EXPECT_EQ(GetCallsiteState(thread_, info, ICKind::LoadIC), IcAccessor::ICState::MONO);
     JSTaggedValue infoVal = *reinterpret_cast<JSTaggedValue *>(info);
     ICInfo *callsiteInfo = ICInfo::Cast(infoVal.GetTaggedObject());
-    EXPECT_TRUE(callsiteInfo->GetIcSlot(thread_, 0).IsWeak());
+    EXPECT_TRUE(callsiteInfo->GetICSlot(thread_, 0).IsWeak());
     ASSERT_FALSE(thread_->HasPendingException());
     JSNApi::NapiDeleteCallsiteInfo(vm_, info);
 }
@@ -1876,7 +1893,7 @@ HWTEST_F_L0(JSNApiTests, NapiSetPropertyFastNumericKeyGoesViaElementIC)
     EXPECT_EQ(GetCallsiteState(thread_, info, ICKind::StoreIC), IcAccessor::ICState::MONO);
     JSTaggedValue infoVal = *reinterpret_cast<JSTaggedValue *>(info);
     ICInfo *callsiteInfo = ICInfo::Cast(infoVal.GetTaggedObject());
-    EXPECT_TRUE(callsiteInfo->GetIcSlot(thread_, 0).IsWeak());
+    EXPECT_TRUE(callsiteInfo->GetICSlot(thread_, 0).IsWeak());
     ASSERT_FALSE(thread_->HasPendingException());
     JSNApi::NapiDeleteCallsiteInfo(vm_, info);
 }
@@ -1928,7 +1945,7 @@ HWTEST_F_L0(JSNApiTests, NapiGetPropertyFastIntegerKeyHitsElementIC)
     EXPECT_EQ(GetCallsiteState(thread_, info, ICKind::LoadIC), IcAccessor::ICState::MONO);
     JSTaggedValue infoVal = *reinterpret_cast<JSTaggedValue *>(info);
     ICInfo *callsiteInfo = ICInfo::Cast(infoVal.GetTaggedObject());
-    EXPECT_TRUE(callsiteInfo->GetIcSlot(thread_, 0).IsWeak());
+    EXPECT_TRUE(callsiteInfo->GetICSlot(thread_, 0).IsWeak());
 
     ASSERT_FALSE(thread_->HasPendingException());
     JSNApi::NapiDeleteCallsiteInfo(vm_, info);
@@ -1961,7 +1978,7 @@ HWTEST_F_L0(JSNApiTests, NapiGetPropertyFastElementIndexStringKey)
     EXPECT_EQ(GetCallsiteState(thread_, info, ICKind::LoadIC), IcAccessor::ICState::MONO);
     JSTaggedValue infoVal = *reinterpret_cast<JSTaggedValue *>(info);
     ICInfo *callsiteInfo = ICInfo::Cast(infoVal.GetTaggedObject());
-    EXPECT_TRUE(callsiteInfo->GetIcSlot(thread_, 0).IsWeak());
+    EXPECT_TRUE(callsiteInfo->GetICSlot(thread_, 0).IsWeak());
 
     ASSERT_FALSE(thread_->HasPendingException());
     JSNApi::NapiDeleteCallsiteInfo(vm_, info);
@@ -1994,7 +2011,7 @@ HWTEST_F_L0(JSNApiTests, NapiSetPropertyFastElementIndexStringKey)
     EXPECT_EQ(GetCallsiteState(thread_, info, ICKind::StoreIC), IcAccessor::ICState::MONO);
     JSTaggedValue infoVal = *reinterpret_cast<JSTaggedValue *>(info);
     ICInfo *callsiteInfo = ICInfo::Cast(infoVal.GetTaggedObject());
-    EXPECT_TRUE(callsiteInfo->GetIcSlot(thread_, 0).IsWeak());
+    EXPECT_TRUE(callsiteInfo->GetICSlot(thread_, 0).IsWeak());
 
     ASSERT_FALSE(thread_->HasPendingException());
     JSNApi::NapiDeleteCallsiteInfo(vm_, info);
@@ -2027,7 +2044,7 @@ HWTEST_F_L0(JSNApiTests, NapiGetPropertyFastSymbolKeyViaKeyIC)
 
     JSTaggedValue infoVal = *reinterpret_cast<JSTaggedValue *>(info);
     ICInfo *callsiteInfo = ICInfo::Cast(infoVal.GetTaggedObject());
-    EXPECT_TRUE(callsiteInfo->GetIcSlot(thread_, 0).IsSymbol());
+    EXPECT_TRUE(callsiteInfo->GetICSlot(thread_, 0).IsSymbol());
 
     ASSERT_FALSE(thread_->HasPendingException());
     JSNApi::NapiDeleteCallsiteInfo(vm_, info);
@@ -2104,7 +2121,7 @@ HWTEST_F_L0(JSNApiTests, NapiGetPropertyFastSameContentDifferentPointer)
 
     JSTaggedValue infoVal = *reinterpret_cast<JSTaggedValue *>(info);
     ICInfo *callsiteInfo = ICInfo::Cast(infoVal.GetTaggedObject());
-    EXPECT_TRUE(callsiteInfo->GetIcSlot(thread_, 0).IsString());
+    EXPECT_TRUE(callsiteInfo->GetICSlot(thread_, 0).IsString());
 
     ASSERT_FALSE(thread_->HasPendingException());
     JSNApi::NapiDeleteCallsiteInfo(vm_, info);
@@ -2575,12 +2592,12 @@ HWTEST_F_L0(JSNApiTests, NapiGetPropertyFastMonoPolyMegaTransition)
 
     JSTaggedValue infoVal = *reinterpret_cast<JSTaggedValue *>(info);
     ICInfo *callsiteInfo = ICInfo::Cast(infoVal.GetTaggedObject());
-    EXPECT_TRUE(callsiteInfo->GetIcSlot(thread_, 0).IsHole());
+    EXPECT_TRUE(callsiteInfo->GetICSlot(thread_, 0).IsHole());
     auto finalState = GetCallsiteState(thread_, info, ICKind::LoadIC);
     if (finalState == IcAccessor::ICState::IC_MEGA) {
-        EXPECT_TRUE(callsiteInfo->GetIcSlot(thread_, 1).IsString());
+        EXPECT_TRUE(callsiteInfo->GetICSlot(thread_, 1).IsString());
     } else {
-        EXPECT_TRUE(callsiteInfo->GetIcSlot(thread_, 1).IsHole());
+        EXPECT_TRUE(callsiteInfo->GetICSlot(thread_, 1).IsHole());
     }
 
     ASSERT_FALSE(thread_->HasPendingException());
@@ -2618,12 +2635,12 @@ HWTEST_F_L0(JSNApiTests, NapiSetPropertyFastMonoPolyMegaTransition)
 
     JSTaggedValue infoVal = *reinterpret_cast<JSTaggedValue *>(info);
     ICInfo *callsiteInfo = ICInfo::Cast(infoVal.GetTaggedObject());
-    EXPECT_TRUE(callsiteInfo->GetIcSlot(thread_, 0).IsHole());
+    EXPECT_TRUE(callsiteInfo->GetICSlot(thread_, 0).IsHole());
     auto finalState = GetCallsiteState(thread_, info, ICKind::StoreIC);
     if (finalState == IcAccessor::ICState::IC_MEGA) {
-        EXPECT_TRUE(callsiteInfo->GetIcSlot(thread_, 1).IsString());
+        EXPECT_TRUE(callsiteInfo->GetICSlot(thread_, 1).IsString());
     } else {
-        EXPECT_TRUE(callsiteInfo->GetIcSlot(thread_, 1).IsHole());
+        EXPECT_TRUE(callsiteInfo->GetICSlot(thread_, 1).IsHole());
     }
 
     ASSERT_FALSE(thread_->HasPendingException());
@@ -3912,8 +3929,8 @@ HWTEST_F_L0(JSNApiTests, NapiGetPropertyFastDirectMegaSlotFallback)
     // Manually set slot[0] = Hole to simulate MEGA state.
     JSTaggedValue infoVal = *reinterpret_cast<JSTaggedValue *>(info);
     ICInfo *icInfo = ICInfo::Cast(infoVal.GetTaggedObject());
-    icInfo->SetIcSlot(thread_, 0, JSTaggedValue::Hole());
-    icInfo->SetIcSlot(thread_, 1, JSTaggedValue::Hole());
+    icInfo->SetICSlot(thread_, 0, JSTaggedValue::Hole());
+    icInfo->SetICSlot(thread_, 1, JSTaggedValue::Hole());
 
     // With MEGA state, should fall back to NapiGetProperty slow path.
     Local<JSValueRef> res = JSNApi::NapiGetPropertyWithCallsiteInfo(vm_, reinterpret_cast<uintptr_t>(*object),
@@ -3940,8 +3957,8 @@ HWTEST_F_L0(JSNApiTests, NapiSetPropertyFastDirectMegaSlotFallback)
     // Manually set slot[0] = Hole to simulate MEGA state.
     JSTaggedValue infoVal = *reinterpret_cast<JSTaggedValue *>(info);
     ICInfo *icInfo = ICInfo::Cast(infoVal.GetTaggedObject());
-    icInfo->SetIcSlot(thread_, 0, JSTaggedValue::Hole());
-    icInfo->SetIcSlot(thread_, 1, JSTaggedValue::Hole());
+    icInfo->SetICSlot(thread_, 0, JSTaggedValue::Hole());
+    icInfo->SetICSlot(thread_, 1, JSTaggedValue::Hole());
 
     // With MEGA state, should fall back to normal Set() slow path.
     Local<JSValueRef> value = IntegerRef::New(vm_, 888);
@@ -4376,12 +4393,116 @@ HWTEST_F_L0(JSNApiTests, SetStopPreLoadSoCallback)
     EXPECT_EQ(stopPreLoadCallbacks.size(), 0);
 }
 
+static std::pair<std::unique_ptr<uint8_t[]>, size_t> CreateBufferFromString(const std::string &str)
+{
+    size_t size = str.size();
+    auto buffer = std::make_unique<uint8_t[]>(size);
+    std::copy(str.begin(), str.end(), buffer.get());
+    return std::make_pair(std::move(buffer), size);
+}
+
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+[[maybe_unused]] static constexpr size_t PKG_FLAT_ENTRY_COUNT = 12;  // 6 pkg fields x 2 (key, value)
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+static constexpr size_t ENTRY_HAP_PAIR_COUNT = 3;   // non-empty pairs for the "entry" hap
+static constexpr size_t HSP_PAIR_COUNT = 4;         // non-empty pairs for the "hsp"
+static constexpr size_t LIBRARY_PAIR_COUNT = 6;     // non-empty pairs for the "library"
+
+static void VerifyEntryHspPkgInfo(EcmaVM *vm)
+{
+#if ENABLE_LATEST_OPTIMIZATION
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+    CVector<std::pair<CString, CString>> hapInfo{};
+    vm->GetPkgContextInfoListElements("entry", "entry", hapInfo);
+    EXPECT_EQ(hapInfo.size(), ENTRY_HAP_PAIR_COUNT);
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hapInfo, "packageName"), "entry");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hapInfo, "bundleName"), "");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hapInfo, "moduleName"), "");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hapInfo, "version"), "");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hapInfo, "entryPath"), "src/main/");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hapInfo, "isSO"), "false");
+    CVector<std::pair<CString, CString>> hspInfo{};
+    vm->GetPkgContextInfoListElements("hsp", "hsp", hspInfo);
+    EXPECT_EQ(hspInfo.size(), HSP_PAIR_COUNT);
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hspInfo, "packageName"), "hsp");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hspInfo, "bundleName"), "");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hspInfo, "moduleName"), "");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hspInfo, "version"), "1.1.0");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hspInfo, "entryPath"), "Index.ets");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hspInfo, "isSO"), "false");
+#else
+    CVector<CString> hapInfo{};
+    vm->GetPkgContextInfoListElements("entry", "entry", hapInfo);
+    EXPECT_EQ(hapInfo.size(), PKG_FLAT_ENTRY_COUNT);
+    EXPECT_EQ(hapInfo[ModulePathHelper::PKGINFO_PACKAGE_NAME_INDEX], "entry");
+    EXPECT_EQ(hapInfo[ModulePathHelper::PKGINFO_BUDNLE_NAME_INDEX], "");
+    EXPECT_EQ(hapInfo[ModulePathHelper::PKGINFO_MODULE_NAME_INDEX], "");
+    EXPECT_EQ(hapInfo[ModulePathHelper::PKGINFO_VERSION_INDEX], "");
+    EXPECT_EQ(hapInfo[ModulePathHelper::PKGINFO_ENTRY_PATH_INDEX], "src/main/");
+    EXPECT_EQ(hapInfo[ModulePathHelper::PKGINFO_IS_SO_INDEX], "false");
+    CVector<CString> hspInfo{};
+    vm->GetPkgContextInfoListElements("hsp", "hsp", hspInfo);
+    EXPECT_EQ(hspInfo.size(), PKG_FLAT_ENTRY_COUNT);
+    EXPECT_EQ(hspInfo[ModulePathHelper::PKGINFO_PACKAGE_NAME_INDEX], "hsp");
+    EXPECT_EQ(hspInfo[ModulePathHelper::PKGINFO_BUDNLE_NAME_INDEX], "");
+    EXPECT_EQ(hspInfo[ModulePathHelper::PKGINFO_MODULE_NAME_INDEX], "");
+    EXPECT_EQ(hspInfo[ModulePathHelper::PKGINFO_VERSION_INDEX], "1.1.0");
+    EXPECT_EQ(hspInfo[ModulePathHelper::PKGINFO_ENTRY_PATH_INDEX], "Index.ets");
+    EXPECT_EQ(hspInfo[ModulePathHelper::PKGINFO_IS_SO_INDEX], "false");
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+#endif
+}
+
+static void VerifyEntryLibraryPkgInfo(EcmaVM *vm)
+{
+#if ENABLE_LATEST_OPTIMIZATION
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+    CVector<std::pair<CString, CString>> hapInfo{};
+    vm->GetPkgContextInfoListElements("entry", "entry", hapInfo);
+    EXPECT_EQ(hapInfo.size(), ENTRY_HAP_PAIR_COUNT);
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hapInfo, "packageName"), "entry");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hapInfo, "bundleName"), "");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hapInfo, "moduleName"), "");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hapInfo, "version"), "");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hapInfo, "entryPath"), "src/main/");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hapInfo, "isSO"), "false");
+    CVector<std::pair<CString, CString>> libraryInfo{};
+    vm->GetPkgContextInfoListElements("library", "library", libraryInfo);
+    EXPECT_EQ(libraryInfo.size(), LIBRARY_PAIR_COUNT);
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(libraryInfo, "packageName"), "library");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(libraryInfo, "bundleName"), "com.xxx.xxxx");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(libraryInfo, "moduleName"), "library");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(libraryInfo, "version"), "1.0.0");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(libraryInfo, "entryPath"), "Index.ets");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(libraryInfo, "isSO"), "false");
+#else
+    CVector<CString> hapInfo{};
+    vm->GetPkgContextInfoListElements("entry", "entry", hapInfo);
+    EXPECT_EQ(hapInfo.size(), PKG_FLAT_ENTRY_COUNT);
+    EXPECT_EQ(hapInfo[ModulePathHelper::PKGINFO_PACKAGE_NAME_INDEX], "entry");
+    EXPECT_EQ(hapInfo[ModulePathHelper::PKGINFO_BUDNLE_NAME_INDEX], "");
+    EXPECT_EQ(hapInfo[ModulePathHelper::PKGINFO_MODULE_NAME_INDEX], "");
+    EXPECT_EQ(hapInfo[ModulePathHelper::PKGINFO_VERSION_INDEX], "");
+    EXPECT_EQ(hapInfo[ModulePathHelper::PKGINFO_ENTRY_PATH_INDEX], "src/main/");
+    EXPECT_EQ(hapInfo[ModulePathHelper::PKGINFO_IS_SO_INDEX], "false");
+    CVector<CString> libraryInfo{};
+    vm->GetPkgContextInfoListElements("library", "library", libraryInfo);
+    EXPECT_EQ(libraryInfo.size(), PKG_FLAT_ENTRY_COUNT);
+    EXPECT_EQ(libraryInfo[ModulePathHelper::PKGINFO_PACKAGE_NAME_INDEX], "library");
+    EXPECT_EQ(libraryInfo[ModulePathHelper::PKGINFO_BUDNLE_NAME_INDEX], "com.xxx.xxxx");
+    EXPECT_EQ(libraryInfo[ModulePathHelper::PKGINFO_MODULE_NAME_INDEX], "library");
+    EXPECT_EQ(libraryInfo[ModulePathHelper::PKGINFO_VERSION_INDEX], "1.0.0");
+    EXPECT_EQ(libraryInfo[ModulePathHelper::PKGINFO_ENTRY_PATH_INDEX], "Index.ets");
+    EXPECT_EQ(libraryInfo[ModulePathHelper::PKGINFO_IS_SO_INDEX], "false");
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+#endif
+}
+
 HWTEST_F_L0(JSNApiTests, UpdatePkgContextInfoList)
 {
     std::map<std::string, std::vector<std::vector<std::string>>> pkgList;
     std::vector<std::string> entryList = {
-        "entry",
-        "packageName", "entry",
+        "entry", "packageName", "entry",
         "bundleName", "",
         "moduleName", "",
         "version", "",
@@ -4390,11 +4511,9 @@ HWTEST_F_L0(JSNApiTests, UpdatePkgContextInfoList)
     };
     pkgList["entry"] = {entryList};
     JSNApi::SetpkgContextInfoList(vm_, pkgList);
-
     std::map<std::string, std::vector<std::vector<std::string>>> newPkgList;
     std::vector<std::string> hspList = {
-        "hsp",
-        "packageName", "hsp",
+        "hsp", "packageName", "hsp",
         "bundleName", "",
         "moduleName", "",
         "version", "1.1.0",
@@ -4403,32 +4522,20 @@ HWTEST_F_L0(JSNApiTests, UpdatePkgContextInfoList)
     };
     newPkgList["hsp"] = {hspList};
     JSNApi::UpdatePkgContextInfoList(vm_, newPkgList);
-
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+    CMap<CString, CMap<CString, CVector<std::pair<CString, CString>>>> vmPkgList = vm_->GetPkgContextInfoList();
+    EXPECT_EQ(vmPkgList.size(), 2);
+    EXPECT_EQ(vmPkgList["entry"]["entry"].size(), 3);
+    EXPECT_EQ(vmPkgList["hsp"].size(), 1);
+    EXPECT_EQ(vmPkgList["hsp"]["hsp"].size(), 4);
+#else
     CMap<CString, CMap<CString, CVector<CString>>> vmPkgList = vm_->GetPkgContextInfoList();
     EXPECT_EQ(vmPkgList.size(), 2);
     EXPECT_EQ(vmPkgList["entry"]["entry"].size(), 12);
     EXPECT_EQ(vmPkgList["hsp"].size(), 1);
     EXPECT_EQ(vmPkgList["hsp"]["hsp"].size(), 12);
-
-    CVector<CString> hapInfo{};
-    vm_->GetPkgContextInfoListElements("entry", "entry", hapInfo);
-    EXPECT_EQ(hapInfo.size(), 12);
-    EXPECT_EQ(hapInfo[1], "entry");
-    EXPECT_EQ(hapInfo[3], "");
-    EXPECT_EQ(hapInfo[5], "");
-    EXPECT_EQ(hapInfo[7], "");
-    EXPECT_EQ(hapInfo[9], "src/main/");
-    EXPECT_EQ(hapInfo[11], "false");
-
-    CVector<CString> hspInfo{};
-    vm_->GetPkgContextInfoListElements("hsp", "hsp", hspInfo);
-    EXPECT_EQ(hspInfo.size(), 12);
-    EXPECT_EQ(hspInfo[1], "hsp");
-    EXPECT_EQ(hspInfo[3], "");
-    EXPECT_EQ(hspInfo[5], "");
-    EXPECT_EQ(hspInfo[7], "1.1.0");
-    EXPECT_EQ(hspInfo[9], "Index.ets");
-    EXPECT_EQ(hspInfo[11], "false");
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+    VerifyEntryHspPkgInfo(vm_);
 }
 
 HWTEST_F_L0(JSNApiTests, UpdatePkgNameList)
@@ -4470,40 +4577,23 @@ HWTEST_F_L0(JSNApiTests, SetPkgContextInfoListWithBuffer)
         "", "version":"", "entryPath":"src/main/", "isSO":false, "dependencyAlias":""}})";
     std::string libraryString = R"({"library":{"packageName":"library", "bundleName":"com.xxx.xxxx", "moduleName":
         "library", "version":"1.0.0", "entryPath":"Index.ets", "isSO":false, "dependencyAlias":"har"}})";
-    auto createBufferFromString = [](const std::string& str) {
-        size_t size = str.size();
-        auto buffer = std::make_unique<uint8_t[]>(size);
-        std::copy(str.begin(), str.end(), buffer.get());
-        return std::make_pair(std::move(buffer), size);
-    };
-    modulePkgContentMap["entry"] = createBufferFromString(entryString);
-    modulePkgContentMap["library"] = createBufferFromString(libraryString);
+    modulePkgContentMap["entry"] = CreateBufferFromString(entryString);
+    modulePkgContentMap["library"] = CreateBufferFromString(libraryString);
     JSNApi::SetPkgContextInfoList(vm_, modulePkgContentMap);
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+    CMap<CString, CMap<CString, CVector<std::pair<CString, CString>>>> vmPkgList = vm_->GetPkgContextInfoList();
+    EXPECT_EQ(vmPkgList.size(), 2);
+    EXPECT_EQ(vmPkgList["entry"]["entry"].size(), 3);
+    EXPECT_EQ(vmPkgList["library"].size(), 1);
+    EXPECT_EQ(vmPkgList["library"]["library"].size(), 6);
+#else
     CMap<CString, CMap<CString, CVector<CString>>> vmPkgList = vm_->GetPkgContextInfoList();
     EXPECT_EQ(vmPkgList.size(), 2);
     EXPECT_EQ(vmPkgList["entry"]["entry"].size(), 12);
     EXPECT_EQ(vmPkgList["library"].size(), 1);
     EXPECT_EQ(vmPkgList["library"]["library"].size(), 12);
-
-    CVector<CString> hapInfo{};
-    vm_->GetPkgContextInfoListElements("entry", "entry", hapInfo);
-    EXPECT_EQ(hapInfo.size(), 12);
-    EXPECT_EQ(hapInfo[1], "entry");
-    EXPECT_EQ(hapInfo[3], "");
-    EXPECT_EQ(hapInfo[5], "");
-    EXPECT_EQ(hapInfo[7], "");
-    EXPECT_EQ(hapInfo[9], "src/main/");
-    EXPECT_EQ(hapInfo[11], "false");
-
-    CVector<CString> libraryInfo{};
-    vm_->GetPkgContextInfoListElements("library", "library", libraryInfo);
-    EXPECT_EQ(libraryInfo.size(), 12);
-    EXPECT_EQ(libraryInfo[1], "library");
-    EXPECT_EQ(libraryInfo[3], "com.xxx.xxxx");
-    EXPECT_EQ(libraryInfo[5], "library");
-    EXPECT_EQ(libraryInfo[7], "1.0.0");
-    EXPECT_EQ(libraryInfo[9], "Index.ets");
-    EXPECT_EQ(libraryInfo[11], "false");
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+    VerifyEntryLibraryPkgInfo(vm_);
 }
 
 HWTEST_F_L0(JSNApiTests, UpdatePkgContextInfoListWithBuffer)
@@ -4519,6 +4609,18 @@ HWTEST_F_L0(JSNApiTests, UpdatePkgContextInfoListWithBuffer)
     std::unordered_map<std::string, std::pair<std::unique_ptr<uint8_t[]>, size_t>> updatePkgContentMap;
     updatePkgContentMap["hsp"] = createBufferFromString(hspString);
     JSNApi::UpdatePkgContextInfoList(vm_, updatePkgContentMap);
+#if ENABLE_LATEST_OPTIMIZATION
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+    CVector<std::pair<CString, CString>> hspInfo{};
+    vm_->GetPkgContextInfoListElements("hsp", "hsp", hspInfo);
+    EXPECT_EQ(hspInfo.size(), 5);
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hspInfo, "packageName"), "hsp");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hspInfo, "bundleName"), "");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hspInfo, "moduleName"), "hsp");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hspInfo, "version"), "1.1.0");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hspInfo, "entryPath"), "Index.ets");
+    EXPECT_EQ(ModulePathHelper::GetPkgInfoValueOrEmpty(hspInfo, "isSO"), "false");
+#else
     CVector<CString> hspInfo{};
     vm_->GetPkgContextInfoListElements("hsp", "hsp", hspInfo);
     EXPECT_EQ(hspInfo.size(), 12);
@@ -4528,6 +4630,8 @@ HWTEST_F_L0(JSNApiTests, UpdatePkgContextInfoListWithBuffer)
     EXPECT_EQ(hspInfo[7], "1.1.0");
     EXPECT_EQ(hspInfo[9], "Index.ets");
     EXPECT_EQ(hspInfo[11], "false");
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+#endif
 }
 
 HWTEST_F_L0(JSNApiTests, TryGetArrayLengthTest001)
@@ -4774,7 +4878,7 @@ HWTEST_F_L0(JSNApiTests, NewFromUtf8Replacement)
     uint8_t u8Data[1024] = {0xcc, 0x5c, 0x0};
     uint8_t u8Out[1024] = {0};
     size_t u8OutLen = 0;
-    
+
     Local<StringRef> resStr = StringRef::NewFromUtf8Replacement(thread_->GetEcmaVM(),
                                                                 reinterpret_cast<char*>(u8Data), 2);
     u8OutLen = resStr-> Utf8Length(thread_->GetEcmaVM());
@@ -4823,7 +4927,7 @@ HWTEST_F_L0(JSNApiTests, NewFromUtf8WithoutStringTableReplacement)
     uint8_t u8Data[1024] = {0xcc, 0x5c, 0x0};
     uint8_t u8Out[1024] = {0};
     size_t u8OutLen = 0;
-    
+
     Local<StringRef> resStr = StringRef::NewFromUtf8Replacement(thread_->GetEcmaVM(),
                                                                 reinterpret_cast<char*>(u8Data), 2);
     u8OutLen = resStr-> Utf8Length(thread_->GetEcmaVM());
@@ -4962,10 +5066,13 @@ HWTEST_F_L0(JSNApiTests, CrossThreadExecution)
     bool res = JSNApi::CheckAndSetAllowCrossThreadExecution(vm_);
     if (ecmascript::g_isEnableCMCGC) {
         EXPECT_FALSE(res);
+        EXPECT_FALSE(JSNApi::IsCrossThreadExecutionAllowed(vm_));
     } else {
         if (res) {
+            EXPECT_TRUE(JSNApi::IsCrossThreadExecutionAllowed(vm_));
             JSNApi::DisallowCrossThreadExecution(vm_);
         } else {
+            EXPECT_FALSE(JSNApi::IsCrossThreadExecutionAllowed(vm_));
             GTEST_LOG_(INFO) << "vm is in the gc or shared gc";
         }
     }
@@ -5020,5 +5127,326 @@ HWTEST_F_L0(JSNApiTests, GetModuleNameSpaceWithOhmurlForHybridApp)
     Local<ObjectRef> res = JSNApi::GetModuleNameSpaceWithOhmurlForHybridApp(vm_, ohmurl);
     JSHandle<JSTaggedValue> obj = JSNApiHelper::ToJSHandle(res);
     EXPECT_TRUE(obj.GetTaggedValue() != JSTaggedValue::Undefined());
+}
+
+HWTEST_F_L0(JSNApiTests, GetOhmurlByObject_NotNormalizedOhmUrlPack)
+{
+    LocalScope scope(vm_);
+    std::string moduleName;
+    std::string ohmurl;
+    Local<JSValueRef> object = JSValueRef::Undefined(vm_);
+    bool result = JSNApi::GetOhmurlByObject(vm_, object, moduleName, ohmurl);
+    EXPECT_FALSE(result);
+    EXPECT_EQ(moduleName, "");
+    EXPECT_EQ(ohmurl, "");
+}
+
+HWTEST_F_L0(JSNApiTests, GetOhmurlByObject_ObjectNotJSFunction)
+{
+    LocalScope scope(vm_);
+    SetupNormalizedOhmUrlPack();
+
+    std::string moduleName;
+    std::string ohmurl;
+    Local<ObjectRef> obj = ObjectRef::New(vm_);
+    bool result = JSNApi::GetOhmurlByObject(vm_, obj, moduleName, ohmurl);
+    EXPECT_FALSE(result);
+    EXPECT_EQ(moduleName, "");
+    EXPECT_EQ(ohmurl, "");
+}
+
+HWTEST_F_L0(JSNApiTests, GetOhmurlByObject_ModuleNotSourceTextModule)
+{
+    LocalScope scope(vm_);
+    SetupNormalizedOhmUrlPack();
+
+    JSHandle<JSFunction> func = vm_->GetFactory()->NewJSFunction(vm_->GetGlobalEnv(), nullptr);
+    JSHandle<JSTaggedValue> nonModuleValue(thread_, JSTaggedValue::Undefined());
+    func->SetModule(thread_, nonModuleValue.GetTaggedValue());
+
+    Local<JSValueRef> funcLocal = JSNApiHelper::ToLocal<JSValueRef>(JSHandle<JSTaggedValue>(func));
+    std::string moduleName;
+    std::string ohmurl;
+    bool result = JSNApi::GetOhmurlByObject(vm_, funcLocal, moduleName, ohmurl);
+    EXPECT_FALSE(result);
+    EXPECT_EQ(moduleName, "");
+    EXPECT_EQ(ohmurl, "");
+}
+
+HWTEST_F_L0(JSNApiTests, GetOhmurlByObject_EmptyModuleFilename)
+{
+    LocalScope scope(vm_);
+    SetupNormalizedOhmUrlPack();
+
+    JSHandle<SourceTextModule> testModule = vm_->GetFactory()->NewSourceTextModule();
+    testModule->SetEcmaModuleRecordNameString("entry&entry/Index&");
+    testModule->SetEcmaModuleFilenameString(thread_, "");
+
+    JSHandle<JSFunction> func = vm_->GetFactory()->NewJSFunction(vm_->GetGlobalEnv(), nullptr);
+    func->SetModule(thread_, testModule.GetTaggedValue());
+
+    Local<JSValueRef> funcLocal = JSNApiHelper::ToLocal<JSValueRef>(JSHandle<JSTaggedValue>(func));
+    std::string moduleName;
+    std::string ohmurl;
+    bool result = JSNApi::GetOhmurlByObject(vm_, funcLocal, moduleName, ohmurl);
+    EXPECT_FALSE(result);
+    EXPECT_EQ(moduleName, "");
+    EXPECT_EQ(ohmurl, "");
+}
+
+HWTEST_F_L0(JSNApiTests, GetOhmurlByObject_EmptyModuleRecordName)
+{
+    LocalScope scope(vm_);
+    SetupNormalizedOhmUrlPack();
+
+    JSHandle<SourceTextModule> testModule = vm_->GetFactory()->NewSourceTextModule();
+    CString filename = "/data/storage/el1/bundle/com.application.demo/entry/ets/modules.abc";
+    testModule->SetEcmaModuleFilenameString(thread_, filename);
+    testModule->SetEcmaModuleRecordNameString("");
+
+    JSHandle<JSFunction> func = vm_->GetFactory()->NewJSFunction(vm_->GetGlobalEnv(), nullptr);
+    func->SetModule(thread_, testModule.GetTaggedValue());
+
+    Local<JSValueRef> funcLocal = JSNApiHelper::ToLocal<JSValueRef>(JSHandle<JSTaggedValue>(func));
+    std::string moduleName;
+    std::string ohmurl;
+    bool result = JSNApi::GetOhmurlByObject(vm_, funcLocal, moduleName, ohmurl);
+    EXPECT_FALSE(result);
+    EXPECT_EQ(moduleName, "");
+    EXPECT_EQ(ohmurl, "");
+}
+
+HWTEST_F_L0(JSNApiTests, GetOhmurlByObject_CrossBundleHsp)
+{
+    LocalScope scope(vm_);
+    SetupNormalizedOhmUrlPack();
+    JSNApi::SetBundleName(vm_, "com.application.demo");
+
+    JSHandle<SourceTextModule> testModule = vm_->GetFactory()->NewSourceTextModule();
+    CString filename = "/data/storage/el1/bundle/com.application.demo1/crosshsp/ets/modules.abc";
+    testModule->SetEcmaModuleFilenameString(thread_, filename);
+    CString crossHspRecordName = "@normalized:N&crosshsp&com.application.demo1&crosshsp/Index&";
+    testModule->SetEcmaModuleRecordNameString(crossHspRecordName);
+
+    JSHandle<JSFunction> func = vm_->GetFactory()->NewJSFunction(vm_->GetGlobalEnv(), nullptr);
+    func->SetModule(thread_, testModule.GetTaggedValue());
+
+    Local<JSValueRef> funcLocal = JSNApiHelper::ToLocal<JSValueRef>(JSHandle<JSTaggedValue>(func));
+    std::string moduleName;
+    std::string ohmurl;
+    bool result = JSNApi::GetOhmurlByObject(vm_, funcLocal, moduleName, ohmurl);
+    EXPECT_FALSE(result);
+    EXPECT_EQ(moduleName, "");
+    EXPECT_EQ(ohmurl, "");
+}
+
+HWTEST_F_L0(JSNApiTests, GetOhmurlByObject_Success)
+{
+    LocalScope scope(vm_);
+    SetupNormalizedOhmUrlPack();
+    JSNApi::SetBundleName(vm_, "com.application.demo");
+
+    JSHandle<SourceTextModule> testModule = vm_->GetFactory()->NewSourceTextModule();
+    CString filename = "/data/storage/el1/bundle/com.application.demo/entry/ets/modules.abc";
+    CString recordName = "com.application.demo&entry/Index&";
+    testModule->SetEcmaModuleFilenameString(thread_, filename);
+    testModule->SetEcmaModuleRecordNameString(recordName);
+
+    JSHandle<JSFunction> func = vm_->GetFactory()->NewJSFunction(vm_->GetGlobalEnv(), nullptr);
+    func->SetModule(thread_, testModule.GetTaggedValue());
+
+    Local<JSValueRef> funcLocal = JSNApiHelper::ToLocal<JSValueRef>(JSHandle<JSTaggedValue>(func));
+    std::string moduleName;
+    std::string ohmurl;
+    bool result = JSNApi::GetOhmurlByObject(vm_, funcLocal, moduleName, ohmurl);
+    EXPECT_TRUE(result);
+    EXPECT_EQ(moduleName, "entry");
+    EXPECT_EQ(ohmurl, "@normalized:N&&com.application.demo&entry/Index&");
+}
+
+HWTEST_F_L0(JSNApiTests, IsClassConstructor)
+{
+    LocalScope scope(vm_);
+
+    Local<ObjectRef> object = ObjectRef::New(vm_);
+    EXPECT_FALSE(object->IsClassConstructor(vm_));
+}
+
+#ifdef PANDA_TARGET_AMD64
+HWTEST_F_L0(JSNApiTests, GetExportsFromFile)
+{
+    LocalScope scope(vm_);
+
+    std::string baseFileName = ABC_PATH "module_export.abc";
+    JSNApi::EnableUserUncaughtErrorHandler(vm_);
+    Local<ObjectRef> result = JSNApi::GetExportsFromFile(vm_, baseFileName, "module_export");
+
+    Local<JSValueRef> obj = result->Get(vm_, "TestClass2");
+    EXPECT_TRUE(obj->IsClassConstructor(vm_));
+
+    Local<JSValueRef> arr = result->Get(vm_, "arr");
+    EXPECT_FALSE(arr->IsClassConstructor(vm_));
+
+    Local<JSValueRef> sarr = result->Get(vm_, "sarr");
+    EXPECT_FALSE(sarr->IsClassConstructor(vm_));
+}
+#endif
+
+/**
+ * @tc.number: ffi_interface_api_GetGlobalHandleCount_001
+ * @tc.name: GetGlobalHandleCount_GlobalRefIncreaseAndDecrease
+ * @tc.desc: Verify global handle count increases after creating Global<ObjectRef> and
+ *           decreases after freeing it.
+ * @tc.type: FUNC
+ * @tc.require: parameter
+ */
+HWTEST_F_L0(JSNApiTests, GetGlobalHandleCount_001)
+{
+    vm_->SetEnableForceGC(false);
+    size_t countBefore = JSNApi::GetGlobalHandleCount(vm_);
+    {
+        LocalScope scope(vm_);
+        Global<ObjectRef> globalObj(vm_, ObjectRef::New(vm_));
+        size_t countAfter = JSNApi::GetGlobalHandleCount(vm_);
+        EXPECT_GE(countAfter, countBefore + 1);
+        globalObj.FreeGlobalHandleAddr();
+    }
+
+    size_t countAfterFree = JSNApi::GetGlobalHandleCount(vm_);
+    EXPECT_LT(countAfterFree, countBefore + 1);
+    vm_->SetEnableForceGC(true);
+}
+
+/**
+ * @tc.number: ffi_interface_api_GetGlobalHandleCount_002
+ * @tc.name: GetGlobalHandleCount_GlobalRefFreeDecreases
+ * @tc.desc: Verify global handle count decreases after freeing a Global<ObjectRef>.
+ * @tc.type: FUNC
+ * @tc.require: parameter
+ */
+HWTEST_F_L0(JSNApiTests, GetGlobalHandleCount_002)
+{
+    vm_->SetEnableForceGC(false);
+    Global<ObjectRef> globalObj(vm_, ObjectRef::New(vm_));
+    size_t countWithRef = JSNApi::GetGlobalHandleCount(vm_);
+
+    globalObj.FreeGlobalHandleAddr();
+    size_t countAfterFree = JSNApi::GetGlobalHandleCount(vm_);
+    EXPECT_LT(countAfterFree, countWithRef);
+    vm_->SetEnableForceGC(true);
+}
+
+/**
+ * @tc.number: ffi_interface_api_GetGlobalHandleCount_003
+ * @tc.name: GetGlobalHandleCount_LocalRefNotCounted
+ * @tc.desc: Verify Local<ObjectRef> does not contribute to global handle count.
+ * @tc.type: FUNC
+ * @tc.require: parameter
+ */
+HWTEST_F_L0(JSNApiTests, GetGlobalHandleCount_003)
+{
+    vm_->SetEnableForceGC(false);
+    size_t countBefore = JSNApi::GetGlobalHandleCount(vm_);
+    {
+        LocalScope scope(vm_);
+        [[maybe_unused]] Local<ObjectRef> localObj = ObjectRef::New(vm_);
+        size_t countAfter = JSNApi::GetGlobalHandleCount(vm_);
+        EXPECT_EQ(countAfter, countBefore);
+    }
+    vm_->SetEnableForceGC(true);
+}
+
+/**
+ * @tc.number: ffi_interface_api_GetGlobalHandleCount_004
+ * @tc.name: GetGlobalHandleCount_ConsecutiveCallsConsistent
+ * @tc.desc: Verify consecutive calls return the same count when no references are created or deleted.
+ * @tc.type: FUNC
+ * @tc.require: parameter
+ */
+HWTEST_F_L0(JSNApiTests, GetGlobalHandleCount_004)
+{
+    vm_->SetEnableForceGC(false);
+    size_t count1 = JSNApi::GetGlobalHandleCount(vm_);
+    size_t count2 = JSNApi::GetGlobalHandleCount(vm_);
+    EXPECT_EQ(count1, count2);
+    vm_->SetEnableForceGC(true);
+}
+
+/**
+ * @tc.number: ffi_interface_api_GetGlobalHandleCount_005
+ * @tc.name: GetGlobalHandleCount_JSNApiMatchesJSThread
+ * @tc.desc: Verify JSNApi::GetGlobalHandleCount returns the same value as JSThread::GetGlobalHandleCount.
+ * @tc.type: FUNC
+ * @tc.require: parameter
+ */
+HWTEST_F_L0(JSNApiTests, GetGlobalHandleCount_005)
+{
+    vm_->SetEnableForceGC(false);
+    size_t jsnapiCount = JSNApi::GetGlobalHandleCount(vm_);
+    size_t threadCount = thread_->GetGlobalHandleCount();
+    EXPECT_EQ(jsnapiCount, threadCount);
+    vm_->SetEnableForceGC(true);
+}
+
+class JSNApiGlobalLeakCheckTests : public testing::Test {
+public:
+    static void SetUpTestCase()
+    {
+        GTEST_LOG_(INFO) << "SetUpTestCase";
+    }
+
+    static void TearDownTestCase()
+    {
+        GTEST_LOG_(INFO) << "TearDownCase";
+    }
+
+    void SetUp() override
+    {
+        JSRuntimeOptions options;
+        options.SetArkProperties(options.GetArkProperties() | GLOBAL_OBJECT_LEAK_CHECK |
+                                 GLOBAL_PRIMITIVE_LEAK_CHECK);
+        vm_ = JSNApi::CreateEcmaVM(options);
+        ASSERT_TRUE(vm_ != nullptr) << "Cannot create EcmaVM with global leak check";
+        thread_ = vm_->GetJSThread();
+        thread_->ManagedCodeBegin();
+        scope_ = new EcmaHandleScope(thread_);
+        vm_->SetEnableForceGC(false);
+    }
+
+    void TearDown() override
+    {
+        TestHelper::DestroyEcmaVMWithScope(vm_, scope_);
+    }
+
+    JSThread *thread_ {nullptr};
+    EcmaVM *vm_ {nullptr};
+    EcmaHandleScope *scope_ {nullptr};
+};
+
+/**
+ * @tc.number: ffi_interface_api_GetGlobalHandleCount_006
+ * @tc.name: GetGlobalHandleCount_LeakCheckEnabled
+ * @tc.desc: Verify global handle count increases/decreases correctly when global leak check is
+ *           enabled (exercises the globalDebugStorage_ path), and JSNApi count matches JSThread count.
+ * @tc.type: FUNC
+ * @tc.require: parameter
+ */
+HWTEST_F_L0(JSNApiGlobalLeakCheckTests, GetGlobalHandleCount_006)
+{
+    ASSERT_TRUE(vm_->GetJSOptions().EnableGlobalLeakCheck());
+    vm_->SetEnableForceGC(false);
+    size_t countBefore = JSNApi::GetGlobalHandleCount(vm_);
+    {
+        LocalScope scope(vm_);
+        Global<ObjectRef> globalObj(vm_, ObjectRef::New(vm_));
+        size_t countAfter = JSNApi::GetGlobalHandleCount(vm_);
+        EXPECT_GE(countAfter, countBefore + 1);
+        EXPECT_EQ(countAfter, thread_->GetGlobalHandleCount());
+        globalObj.FreeGlobalHandleAddr();
+    }
+    size_t countAfterFree = JSNApi::GetGlobalHandleCount(vm_);
+    EXPECT_LT(countAfterFree, countBefore + 1);
+    EXPECT_EQ(countAfterFree, thread_->GetGlobalHandleCount());
+    vm_->SetEnableForceGC(true);
 }
 } // namespace panda::test

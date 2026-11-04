@@ -23,7 +23,7 @@
 #include "libpandabase/utils/bit_field.h"
 #include "bytecode_instruction-inl.h"
 #include "ecmascript/common.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 
 namespace panda::ecmascript::kungfu {
 using VRegIDType = uint32_t;
@@ -552,9 +552,28 @@ public:
         return id_;
     }
 
+    bool operator == (const VirtualRegister& other) const
+    {
+        return id_ == other.id_;
+    }
+
 private:
     VRegIDType id_;
 };
+
+enum class VRegIdx : size_t {
+    ENV = 0,  // environment
+    ACC = 1,  // accumulator
+    NUM_OF_FIXED_VREG
+};
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+static VirtualRegister GetEnvVreg(size_t numVregs)
+{
+    return VirtualRegister(numVregs + static_cast<int32_t>(VRegIdx::ENV));
+}
+#pragma GCC diagnostic pop
 
 class Immediate {
 public:
@@ -684,9 +703,13 @@ private:
 
 class BytecodeInfo {
 public:
+    using InputVariant = std::variant<ConstDataId, ICSlotId, Immediate, VirtualRegister>;
+
+    static constexpr VRegIDType NO_VREG = -1;
+
     // set of id, immediate and read register
-    std::vector<std::variant<ConstDataId, ICSlotId, Immediate, VirtualRegister>> inputs {};
-    std::vector<VRegIDType> vregOut {}; // write register
+    std::vector<InputVariant> inputs {};
+    VRegIDType vregOut {NO_VREG}; // write register
     ICSlotId slotId {ICSlotId::INVALID_ID};
 
     bool Deopt() const
@@ -736,13 +759,12 @@ public:
 
     bool IsDef() const
     {
-        return (!vregOut.empty()) || AccOut();
+        return (vregOut != NO_VREG) || AccOut();
     }
 
-    bool IsOut(VRegIDType reg, uint32_t index) const
+    bool IsOut(VRegIDType reg) const
     {
-        bool isDefined = (!vregOut.empty() && (reg == vregOut.at(index)));
-        return isDefined;
+        return (vregOut != NO_VREG) && (reg == vregOut);
     }
 
     bool IsMov() const
@@ -753,6 +775,11 @@ public:
     bool IsJump() const
     {
         return metaData_.IsJump();
+    }
+
+    bool IsJumpImm() const
+    {
+        return metaData_.IsJumpImm();
     }
 
     bool IsCondJump() const
@@ -812,7 +839,7 @@ public:
 
     size_t ComputeOutCount() const
     {
-        return (AccOut() ? 1 : 0) + vregOut.size();
+        return (AccOut() ? 1 : 0) + ((vregOut != NO_VREG) ? 1 : 0);
     }
 
     bool IsBc(EcmaOpcode ecmaOpcode) const
@@ -870,19 +897,37 @@ public:
         return metaData_.GetOpcode();
     }
 
+    inline void SetMetaData(const BytecodeMetaData &metaData)
+    {
+        metaData_ = metaData;
+    }
+
+    inline const BytecodeMetaData &GetMetaData() const
+    {
+        return metaData_;
+    }
+
     inline bool IsInsufficientProfile() const
     {
         return isInsufficientProfile_;
     }
 
+    inline void SetInsufficientProfile(bool isInsufficientProfile)
+    {
+        isInsufficientProfile_ = isInsufficientProfile;
+    }
+
     static void InitBytecodeInfo(BytecodeCircuitBuilder *builder,
-        BytecodeInfo &info, const uint8_t* pc);
+                                 BytecodeInfo &info, const uint8_t* pc);
+    static void InitBytecodeInfo(BytecodeInfo &info, const uint8_t* pc,
+                                 uint32_t pcOffset, uint32_t envVregIdx);
 
 private:
     void SetInsufficientProfile(BytecodeCircuitBuilder *builder, const uint8_t *pc);
 
-    BytecodeMetaData metaData_ { 0 };
     bool isInsufficientProfile_ {false};
+    BytecodeMetaData metaData_ { 0 };
+
     friend class BytecodeCircuitBuilder;
 };
 
@@ -991,5 +1036,77 @@ public:
         }
     }
 };
+
+// Check if a bytecode opcode is supported by ArkSteed JIT compiler
+// Returns false for opcodes that ArkSteed cannot handle (e.g., async/generator,
+// certain jump types, debugger, and sendable class opcodes)
+static inline bool IsArkSteedSupportedOpcode(EcmaOpcode opcode)
+{
+    switch (opcode) {
+        // Jump opcodes comparing with null/undefined
+        case EcmaOpcode::JEQNULL_IMM8:
+        case EcmaOpcode::JEQNULL_IMM16:
+        case EcmaOpcode::JNENULL_IMM8:
+        case EcmaOpcode::JNENULL_IMM16:
+        case EcmaOpcode::JSTRICTEQNULL_IMM8:
+        case EcmaOpcode::JSTRICTEQNULL_IMM16:
+        case EcmaOpcode::JNSTRICTEQNULL_IMM8:
+        case EcmaOpcode::JNSTRICTEQNULL_IMM16:
+        case EcmaOpcode::JEQUNDEFINED_IMM8:
+        case EcmaOpcode::JEQUNDEFINED_IMM16:
+        case EcmaOpcode::JNEUNDEFINED_IMM8:
+        case EcmaOpcode::JNEUNDEFINED_IMM16:
+        case EcmaOpcode::JSTRICTEQUNDEFINED_IMM8:
+        case EcmaOpcode::JSTRICTEQUNDEFINED_IMM16:
+        case EcmaOpcode::JNSTRICTEQUNDEFINED_IMM8:
+        case EcmaOpcode::JNSTRICTEQUNDEFINED_IMM16:
+        // Jump opcodes comparing two values
+        case EcmaOpcode::JEQ_V8_IMM8:
+        case EcmaOpcode::JEQ_V8_IMM16:
+        case EcmaOpcode::JNE_V8_IMM8:
+        case EcmaOpcode::JNE_V8_IMM16:
+        case EcmaOpcode::JSTRICTEQ_V8_IMM8:
+        case EcmaOpcode::JSTRICTEQ_V8_IMM16:
+        case EcmaOpcode::JNSTRICTEQ_V8_IMM8:
+        case EcmaOpcode::JNSTRICTEQ_V8_IMM16:
+        // Async/Generator opcodes
+        case EcmaOpcode::ASYNCFUNCTIONENTER:
+        case EcmaOpcode::RESUMEGENERATOR:
+        case EcmaOpcode::GETRESUMEMODE:
+        case EcmaOpcode::SUSPENDGENERATOR_V8:
+        case EcmaOpcode::ASYNCFUNCTIONAWAITUNCAUGHT_V8:
+        case EcmaOpcode::ASYNCFUNCTIONRESOLVE_V8:
+        case EcmaOpcode::ASYNCFUNCTIONREJECT_V8:
+        case EcmaOpcode::GETASYNCITERATOR_IMM8:
+        case EcmaOpcode::SETGENERATORSTATE_IMM8:
+        case EcmaOpcode::CREATEGENERATOROBJ_V8:
+        case EcmaOpcode::CREATEASYNCGENERATOROBJ_V8:
+        case EcmaOpcode::ASYNCGENERATORRESOLVE_V8_V8_V8:
+        case EcmaOpcode::ASYNCGENERATORREJECT_V8:
+        // Debugger opcode
+        case EcmaOpcode::DEBUGGER:
+        // Sendable class/module opcodes
+        case EcmaOpcode::CALLRUNTIME_DEFINESENDABLECLASS_PREF_IMM16_ID16_ID16_IMM16_V8:
+        case EcmaOpcode::CALLRUNTIME_LDSENDABLECLASS_PREF_IMM16:
+        case EcmaOpcode::CALLRUNTIME_LDSENDABLEEXTERNALMODULEVAR_PREF_IMM8:
+        case EcmaOpcode::CALLRUNTIME_WIDELDSENDABLEEXTERNALMODULEVAR_PREF_IMM16:
+        case EcmaOpcode::CALLRUNTIME_LDSENDABLELOCALMODULEVAR_PREF_IMM8:
+        case EcmaOpcode::CALLRUNTIME_WIDELDSENDABLELOCALMODULEVAR_PREF_IMM16:
+        case EcmaOpcode::CALLRUNTIME_NEWSENDABLEENV_PREF_IMM8:
+        case EcmaOpcode::CALLRUNTIME_WIDENEWSENDABLEENV_PREF_IMM16:
+        case EcmaOpcode::CALLRUNTIME_STSENDABLEVAR_PREF_IMM4_IMM4:
+        case EcmaOpcode::CALLRUNTIME_STSENDABLEVAR_PREF_IMM8_IMM8:
+        case EcmaOpcode::CALLRUNTIME_WIDESTSENDABLEVAR_PREF_IMM16_IMM16:
+        case EcmaOpcode::CALLRUNTIME_LDSENDABLEVAR_PREF_IMM4_IMM4:
+        case EcmaOpcode::CALLRUNTIME_LDSENDABLEVAR_PREF_IMM8_IMM8:
+        case EcmaOpcode::CALLRUNTIME_WIDELDSENDABLEVAR_PREF_IMM16_IMM16:
+        case EcmaOpcode::CALLRUNTIME_LDLAZYSENDABLEMODULEVAR_PREF_IMM8:
+        case EcmaOpcode::CALLRUNTIME_WIDELDLAZYSENDABLEMODULEVAR_PREF_IMM16:
+            return false;
+        default:
+            return true;
+    }
+}
+
 }  // panda::ecmascript::kungfu
 #endif  // ECMASCRIPT_COMPILER_BYTECODES_H

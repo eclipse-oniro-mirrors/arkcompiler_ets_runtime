@@ -31,6 +31,8 @@ SharedModuleManager* SharedModuleManager::GetInstance()
 
 void SharedModuleManager::Iterate(RootVisitor &v)
 {
+    // Shared module roots are iterated during STW GC/root-update or raw heap dump after suspend/fork.
+    // No JS thread mutates resolvedSharedModules_ concurrently here.
 #if ENABLE_LATEST_OPTIMIZATION
     resolvedSharedModules_.ForEachValue(
         [&v](GCRoot& root) { root.VisitRoot([&v](ObjectSlot slot) { v.VisitRoot(Root::ROOT_VM, slot); }); });
@@ -76,7 +78,7 @@ bool SharedModuleManager::TryInsertInSModuleManager(JSThread *thread, const CStr
 {
     RuntimeLockHolder locker(thread, mutex_);
     JSHandle<JSTaggedValue> module = JSHandle<JSTaggedValue>::Cast(moduleRecord);
-    return AddResolveImportedSModule(recordName, module.GetTaggedValue());
+    return AddResolveImportedSModuleUnsafe(recordName, module.GetTaggedValue());
 }
 
 void SharedModuleManager::AddToResolvedModulesAndCreateSharedModuleMutex(
@@ -149,26 +151,96 @@ JSHandle<ModuleNamespace> SharedModuleManager::SModuleNamespaceCreate(JSThread *
     return JSSharedModule::SModuleNamespaceCreate(thread, module, exports);
 }
 
-void SharedModuleManager::SharedNativeObjDestory()
+uint32_t SharedModuleManager::GetResolvedSharedModulesSize(JSThread *thread)
 {
+    RuntimeLockHolder locker(thread, mutex_);
+    return resolvedSharedModules_.Size();
+}
+
+void SharedModuleManager::AddSharedSerializeModule(JSThread *thread, JSHandle<TaggedArray> serializerArray,
+                                                   uint32_t idx)
+{
+    RuntimeLockHolder locker(thread, mutex_);
+#if ENABLE_LATEST_OPTIMIZATION
+    resolvedSharedModules_.ForEachValue(
+        [thread, &idx, &serializerArray](GCRoot& root) { serializerArray->Set(thread, idx++, root.Read()); });
+#else
+    resolvedSharedModules_.ForEach(
+        [thread, &idx, &serializerArray](auto it) { serializerArray->Set(thread, idx++, it->second.Read()); });
+#endif
+}
+
+void SharedModuleManager::SharedNativeObjDestroy()
+{
+// Called while destroying the last VM. No JS thread can mutate resolvedSharedModules_ here.
 #if ENABLE_LATEST_OPTIMIZATION
     resolvedSharedModules_.ForEach([](const CString& key, GCRoot& root) {
         ASSERT(!key.empty());
-        JSTaggedValue module = root.Read();
-        SourceTextModule::Cast(module)->DestoryLazyImportArray();
-        SourceTextModule::Cast(module)->DestoryEcmaModuleFilenameString();
-        SourceTextModule::Cast(module)->DestoryEcmaModuleRecordNameString();
+        SourceTextModule::Cast(root.Read())->DestroySharedModuleCNativeFields();
     });
 #else
     resolvedSharedModules_.ForEach([](auto it) {
         CString key = it->first;
         ASSERT(!key.empty());
         GCRoot &root = it->second;
-        JSTaggedValue module = root.Read();
-        SourceTextModule::Cast(module)->DestoryLazyImportArray();
-        SourceTextModule::Cast(module)->DestoryEcmaModuleFilenameString();
-        SourceTextModule::Cast(module)->DestoryEcmaModuleRecordNameString();
+        SourceTextModule::Cast(root.Read())->DestroySharedModuleCNativeFields();
     });
 #endif
 }
+
+const CString *SharedModuleManager::GetOrInsertResolvedSendableBindingName(const CString &recordName)
+{
+    LockHolder locker(resolvedSendableBindingNameMutex_);
+    auto result = resolvedSendableBindingNameStorage_.emplace(recordName);
+    return &(*result.first);
+}
+
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+const CString *SharedModuleManager::AcquireModuleFilename(const CString &moduleFilename)
+{
+    LockHolder locker(moduleFilenameMutex_);
+    auto result = moduleFilenameStorage_.try_emplace(moduleFilename, 0);
+    result.first->second++;
+    return &(result.first->first);
+}
+
+void SharedModuleManager::ReleaseModuleFilename(const CString *moduleFilename)
+{
+    if (moduleFilename == nullptr) {
+        return;
+    }
+    LockHolder locker(moduleFilenameMutex_);
+    auto iter = moduleFilenameStorage_.find(*moduleFilename);
+    if (iter == moduleFilenameStorage_.end() ||
+        std::addressof(iter->first) != moduleFilename ||
+        iter->second == 0) {
+        LOG_ECMA(ERROR) << "ReleaseModuleFilename failed, moduleFilename is " << *moduleFilename;
+        return;
+    }
+    iter->second--;
+    if (iter->second == 0) {
+        moduleFilenameStorage_.erase(iter);
+    }
+}
+
+size_t SharedModuleManager::GetModuleFilenameStorageSizeForTest()
+{
+    LockHolder locker(moduleFilenameMutex_);
+    return moduleFilenameStorage_.size();
+}
+#endif
+
+void SharedModuleManager::ClearResolvedSendableBindingNameStorage()
+{
+    LockHolder locker(resolvedSendableBindingNameMutex_);
+    resolvedSendableBindingNameStorage_.clear();
+}
+
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+void SharedModuleManager::ClearModuleFilenameStorage()
+{
+    LockHolder locker(moduleFilenameMutex_);
+    moduleFilenameStorage_.clear();
+}
+#endif
 } // namespace panda::ecmascript

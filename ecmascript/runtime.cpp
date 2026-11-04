@@ -20,18 +20,21 @@
 #include "base_runtime.h"
 #include "thread/thread_holder_manager.h"
 #include "profiler/heap_profiler_listener.h"
+#if !defined(CROSS_PLATFORM)
 #include "ecmascript/cross_vm/dynamic_object_accessor.h"
 #include "ecmascript/cross_vm/dynamic_object_descriptor.h"
 #include "ecmascript/cross_vm/dynamic_type_converter.h"
+#endif
 #include "ecmascript/ecma_global_storage.h"
 #include "ecmascript/jit/jit.h"
 #include "ecmascript/jspandafile/program_object.h"
 #include "ecmascript/js_runtime_options.h"
 #include "ecmascript/mem/dynamic_object_operator.h"
 #include "ecmascript/mem/heap-inl.h"
+#include "ecmascript/mem/hole_memory.h"
 #include "ecmascript/mem/slots.h"
+#include "ecmascript/module/js_module_source_text.h"
 #include "ecmascript/platform/parameters.h"
-#include "ecmascript/string/string_table_internal.h"
 
 namespace panda::ecmascript {
 using PGOProfilerManager = pgo::PGOProfilerManager;
@@ -39,6 +42,7 @@ using namespace panda;
 int32_t Runtime::vmCount_ = 0;
 int32_t Runtime::destroyCount_ = 0;
 bool Runtime::firstVmCreated_ = false;
+bool Runtime::isFork_ = false;
 Mutex *Runtime::vmCreationLock_ = new Mutex();
 Runtime *Runtime::instance_ = nullptr;
 common::BaseRuntime *Runtime::baseInstance_ = nullptr;
@@ -69,11 +73,6 @@ Runtime::~Runtime()
             delete baseClassRoots_;
             baseClassRoots_ = nullptr;
         }
-        if (baseStringTable_ != nullptr) {
-            baseStringTable_->Fini();
-            delete baseStringTable_;
-            baseStringTable_ = nullptr;
-        }
     }
     DestroySendableGlobalStorage();
     LockHolder lock(constpoolLock_);
@@ -97,11 +96,23 @@ void Runtime::CreateIfFirstVm(const JSRuntimeOptions &options)
         common::Log::Initialize(options.GetLogOptions());
         EcmaVM::InitializeIcuData(options);
         MemMapAllocator::GetInstance()->Initialize(ecmascript::DEFAULT_REGION_SIZE, options.GetLargeHeap());
+        // Must happen before appspawn forks: the memfd is then inherited by
+        // every application process, which all share its physical pages. It is
+        // created conditionally;
+        // either from this option or, after fork, from the system parameter.
+        if (options.IsEnableHoleMemory()) {
+            HoleMemory::Initialize();
+        }
+#ifndef EXCLUDE_PGO
         PGOProfilerManager::GetInstance()->Initialize(options.GetPGOProfilerPath(),
                                                       options.GetPGOHotnessThreshold());
+#endif
         ASSERT(instance_ == nullptr);
         instance_ = new Runtime();
         instance_->SetEnableLargeHeap(options.GetLargeHeap());
+        if (!options.IsEnableEvacuateNonMovableSpace()) {
+            instance_->DisableEvacuateNonMovableSpace();
+        }
         SharedHeap::CreateNewInstance();
         if (g_isEnableCMCGC) {
             // Init common::BaseRuntime before daemon thread because creating mutator may access gcphase in heap
@@ -141,7 +152,9 @@ void Runtime::InitializeIfFirstVm(EcmaVM *vm)
             bool isEnableFastJit = vm->GetJSOptions().IsEnableJIT() && vm->GetJSOptions().GetEnableAsmInterpreter();
             bool isEnableBaselineJit =
                 vm->GetJSOptions().IsEnableBaselineJIT() && vm->GetJSOptions().GetEnableAsmInterpreter();
+#ifndef EXCLUDE_JIT
             Jit::GetInstance()->SetEnableOrDisable(vm->GetJSOptions(), isEnableFastJit, isEnableBaselineJit);
+#endif
             vm->Initialize();
             PostInitialization(vm);
         }
@@ -156,46 +169,20 @@ void Runtime::PreInitialization(const EcmaVM *vm)
 {
     DynamicObjectOperator::Initialize();
     if (g_isEnableCMCGC) {
+#if !defined(CROSS_PLATFORM)
         DynamicObjectAccessor::Initialize();
         DynamicObjectDescriptor::Initialize();
         DynamicTypeConverter::Initialize();
+#endif
     }
     mainThread_ = vm->GetAssociatedJSThread();
     mainThread_->SetMainThread();
     nativeAreaAllocator_ = std::make_unique<NativeAreaAllocator>();
     heapRegionAllocator_ = std::make_unique<HeapRegionAllocator>();
 
-    if (g_isEnableCMCGC) {
-        baseStringTable_ = new (std::nothrow) BaseStringTableImpl();
-        if (baseStringTable_ == nullptr) {
-            LOG_ECMA(FATAL) << "create baseStringTable_ failed";
-            UNREACHABLE();
-        }
-        baseStringTable_->Init();
-        auto& baseStringTable = *baseStringTable_;
-        common::BaseRuntime::GetInstance()->SetStringTableCleanUpCallback([] {
-            auto& stringTable = reinterpret_cast<BaseStringTableImpl&>(Runtime::GetInstance()->GetBaseStringTable());
-            stringTable.GetInternalTable()->GetCleaner()->CleanUp();
-        });
-        common::BaseRuntime::GetInstance()->SetStringTableProcessCallback([](const WeakRefFieldVisitor& visitor) {
-            auto& stringTable = reinterpret_cast<BaseStringTableImpl&>(Runtime::GetInstance()->GetBaseStringTable());
-            auto stringTableCleaner = stringTable.GetInternalTable()->GetCleaner();
-            stringTableCleaner->PostSweepWeakRefTask(visitor);
-            stringTableCleaner->JoinAndWaitSweepWeakRefTask(visitor);
-        });
-        baseClassRoots_ = new (std::nothrow) BaseClassRoots();
-        if (baseClassRoots_ == nullptr) {
-            LOG_ECMA(FATAL) << "create baseClassRoots_ failed";
-            UNREACHABLE();
-        }
-        stringTable_ = std::make_unique<EcmaStringTable>(true, &baseStringTable,
-                                                         &static_cast<BaseStringTableImpl*>(&baseStringTable)->
-                                                          GetInternalTable()->GetHashTrieMap());
-    } else {
-        stringTable_ = std::make_unique<EcmaStringTable>(false);
-        stringTable_->GetCleaner()->SetEnableConcurrentSweep(
-            const_cast<EcmaVM*>(vm)->GetJSOptions().EnableStringTableConcurrentSweep());
-    }
+    stringTable_ = std::make_unique<EcmaStringTable>();
+    stringTable_->GetCleaner()->SetEnableConcurrentSweep(
+        const_cast<EcmaVM*>(vm)->GetJSOptions().EnableStringTableConcurrentSweep());
 
     SharedHeap::GetInstance()->Initialize(nativeAreaAllocator_.get(), heapRegionAllocator_.get(),
         const_cast<EcmaVM*>(vm)->GetJSOptions(), DaemonThread::GetInstance());
@@ -243,8 +230,10 @@ void Runtime::DestroyIfLastVm()
 {
     LockHolder lock(*vmCreationLock_);
     if (--vmCount_ <= 0) {
+#ifndef EXCLUDE_JIT
         Jit::GetInstance()->Destroy();
-        SharedModuleManager::GetInstance()->SharedNativeObjDestory();
+#endif
+        SharedModuleManager::GetInstance()->SharedNativeObjDestroy();
         SharedHeap::GetInstance()->WaitAllTasksFinishedAfterAllJSThreadEliminated();
         DaemonThread::DestroyInstance();
         if (g_isEnableCMCGC) {
@@ -254,7 +243,11 @@ void Runtime::DestroyIfLastVm()
         SharedHeap::DestroyInstance();
         AnFileDataManager::GetInstance()->SafeDestroyAllData();
         MemMapAllocator::GetInstance()->Finalize();
+        // After the heap is gone: closes the template fd and logs the totals.
+        HoleMemory::Destroy();
+#ifndef EXCLUDE_PGO
         PGOProfilerManager::GetInstance()->Destroy();
+#endif
         SharedModuleManager::GetInstance()->Destroy();
         if (g_isEnableCMCGC) {
             // Destroy common::BaseRuntime after daemon thread because it will unregister mutator
@@ -275,6 +268,9 @@ void Runtime::RegisterThread(JSThread* newThread)
         LockHolder lock(threadsLock_);
         ASSERT(std::find(threads_.begin(), threads_.end(), newThread) == threads_.end());
         threads_.emplace_back(newThread);
+        if (UNLIKELY(IsHiProfilerEnabled())) {
+            newThread->SetIsStartHeapSampling(true);
+        }
 
         if (!g_isEnableCMCGC) {
             // send all current suspended requests to the new thread
@@ -284,7 +280,7 @@ void Runtime::RegisterThread(JSThread* newThread)
             return;
         }
     }
-    
+
     ThreadHolder* threadHolder = newThread->GetThreadHolder();
     threadHolder->BindMutator();
     newThread->SetMutator(reinterpret_cast<common::Mutator*>(threadHolder->GetMutator()));
@@ -634,6 +630,23 @@ std::optional<std::reference_wrapper<CMap<int32_t, JSTaggedValue>>> Runtime::Fin
     return iter->second;
 }
 
+void Runtime::ForEachConstpools(const JSPandaFile* jsPandaFile, const ForEachCallback<JSTaggedValue>& cb)
+{
+    if (!cb) {
+        return;
+    }
+    auto constpools = FindConstpools(jsPandaFile);
+    if (!constpools.has_value()) {
+        return;
+    }
+    LockHolder lock(constpoolLock_);
+    auto& constpoolMap = constpools->get();
+    auto total = constpoolMap.size();
+    for (auto& it : constpoolMap) {
+        cb(it.first, it.second, total);
+    }
+}
+
 void Runtime::IteratorNativeDeleteInSharedGC(WeakVisitor &visitor)
 {
     auto iterator = globalSharedConstpools_.begin();
@@ -658,7 +671,7 @@ void Runtime::IteratorNativeDeleteInSharedGC(WeakVisitor &visitor)
             }
             ++constpoolIter;
         }
-        if (constpools.size() == 0) {
+        if (constpools.size() == 0 && !Runtime::GetInstance()->IsHiProfilerEnabled()) {
             LOG_ECMA(INFO) << "remove js pandafile by gc, file:" << iterator->first->GetJSPandaFileDesc();
             JSPandaFileManager::GetInstance()->RemoveJSPandaFile(iterator->first);
             iterator = globalSharedConstpools_.erase(iterator);
@@ -698,7 +711,7 @@ void Runtime::ProcessNativeDeleteInSharedGC(const WeakRootVisitor &visitor)
             }
             ++constpoolIter;
         }
-        if (constpools.size() == 0) {
+        if (constpools.size() == 0 && !Runtime::GetInstance()->IsHiProfilerEnabled()) {
             LOG_ECMA(INFO) << "remove js pandafile by gc, file:" << iterator->first->GetJSPandaFileDesc();
             JSPandaFileManager::GetInstance()->RemoveJSPandaFile(iterator->first);
             iterator = globalSharedConstpools_.erase(iterator);
@@ -728,6 +741,20 @@ void Runtime::ProcessSharedDelete(const WeakRootVisitor &visitor)
     ProcessNativeDeleteInSharedGC(visitor);
     sHeap->ProcessSharedNativeDelete(visitor);
     sHeap->ProcessSharedExternalStringDelete(visitor);
+    // Module-specific death handling.
+    sHeap->ProcessSendableModuleDelete(visitor,
+        [](TaggedObject *dead) { Runtime::GetInstance()->QueueSendableModuleNativeFields(dead); });
+}
+
+void Runtime::QueueSendableModuleNativeFields(TaggedObject *dead)
+{
+    // Extract native fields and queue them for post-GC release.
+    auto *module = SourceTextModule::Cast(dead);
+    auto fields = module->ExtractSharedModuleNativeFields();
+    if ((fields.lazyImportArray != nullptr) || (fields.filename != nullptr) ||
+        (fields.recordName != nullptr)) {
+        GetSendableModuleCleanupQueue().emplace_back(fields);
+    }
 }
 
 void Runtime::ProcessSharedNativeDelete(const WeakRootVisitor &visitor)
@@ -752,6 +779,21 @@ void Runtime::InvokeSharedNativePointerCallbacks()
     }
 }
 
+void Runtime::InvokeSendableModuleCleanup()
+{
+    auto &cleanupQueue = sendableModuleCleanupQueue_;
+    if (cleanupQueue.empty()) {
+        return;
+    }
+    ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK,
+        ("SendableModuleNativeFieldsCleanup:" + std::to_string(cleanupQueue.size())).c_str(), "");
+    while (!cleanupQueue.empty()) {
+        auto fields = cleanupQueue.back();
+        cleanupQueue.pop_back();
+        SourceTextModule::ReleaseSharedModuleNativeFields(fields);
+    }
+}
+
 void Runtime::PreFork(JSThread *thread)
 {
     if (g_isEnableCMCGC) {
@@ -763,6 +805,12 @@ void Runtime::PostFork(bool enableWarmStartup)
 {
     if (g_isEnableCMCGC) {
         baseInstance_->PostFork(enableWarmStartup);
+    }
+    // Per-application opt-out. The template was created before the fork, so all
+    // this does is stop using it in this process; anything already mapped stays
+    // valid and is still released normally.
+    if (IsDisableHoleMemory(false)) {
+        HoleMemory::Disable("persist.ark.disable.hole.memory");
     }
 }
 
@@ -825,4 +873,46 @@ void Runtime::IterateSendableGlobalStorage(RootVisitor &visitor)
         hasCheckedGlobalCount = true;
     }
 }
+
+bool Runtime::ForEachFrameInUnionStack([[maybe_unused]] const EcmaVM *vm,
+    [[maybe_unused]] const std::function<void(const void *frame, bool isStaticFrame)> &callback)
+{
+#ifdef PANDA_JS_ETS_HYBRID_MODE
+    auto vmOperator = vm->GetCrossVMOperator();
+    if (vmOperator == nullptr) {
+        LOG_ECMA(ERROR) << "Get vmOperator failed";
+        return false;
+    }
+    auto stsVMInterface = vmOperator->GetSTSVMInterface();
+    if (stsVMInterface == nullptr) {
+        LOG_ECMA(ERROR) << "Get stsVMInterface failed";
+        return false;
+    }
+    return stsVMInterface->ForEachFrameInUnionStack(callback);
+#else
+    LOG_ECMA(ERROR) << "Not in hybrid mode";
+    return false;
+#endif
+}
+
+bool Runtime::UnionStackIsEmpty([[maybe_unused]] const EcmaVM *vm, [[maybe_unused]] bool *isEmpty)
+{
+#ifdef PANDA_JS_ETS_HYBRID_MODE
+    auto vmOperator = vm->GetCrossVMOperator();
+    if (vmOperator == nullptr) {
+        LOG_ECMA(ERROR) << "Get vmOperator failed";
+        return false;
+    }
+    auto stsVMInterface = vmOperator->GetSTSVMInterface();
+    if (stsVMInterface == nullptr) {
+        LOG_ECMA(ERROR) << "Get stsVMInterface failed";
+        return false;
+    }
+    return stsVMInterface->UnionStackIsEmpty(isEmpty);
+#else
+    LOG_ECMA(ERROR) << "Not in hybrid mode";
+    return false;
+#endif
+}
+
 }  // namespace panda::ecmascript

@@ -16,7 +16,7 @@
 #ifndef ECMASCRIPT_HANDLE_SCOPE_H
 #define ECMASCRIPT_HANDLE_SCOPE_H
 
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 
 namespace panda::ecmascript {
 class JSThread;
@@ -33,6 +33,9 @@ public:
     PUBLIC_API ~EcmaHandleScope();
     static uintptr_t PUBLIC_API NewHandle(JSThread *thread, JSTaggedType value);
     static uintptr_t PUBLIC_API NewPrimitiveHandle(JSThread *thread, JSTaggedType value);
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+    static void PUBLIC_API CheckHandleValid(uintptr_t handle);
+#endif
     void OpenHandleScope(EcmaVM *vm);
     void OpenPrimitiveScope(EcmaVM *vm);
     void CloseHandleScope(EcmaVM *vm);
@@ -51,6 +54,7 @@ private:
     JSTaggedType *prevPrimitiveNext_;
     JSTaggedType *prevPrimitiveEnd_;
     int prevPrimitiveStorageIndex_ {-1};
+    [[maybe_unused]] uint64_t scopeLevel_ {-1};
 
     NO_COPY_SEMANTIC(EcmaHandleScope);
     NO_MOVE_SEMANTIC(EcmaHandleScope);

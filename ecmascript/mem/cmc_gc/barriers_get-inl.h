@@ -16,7 +16,7 @@
 #ifndef ECMASCRIPT_MEM_CMC_GC_BARRIERS_GET_INL_H
 #define ECMASCRIPT_MEM_CMC_GC_BARRIERS_GET_INL_H
 
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/js_thread.h"
 #include "ecmascript/mem/barriers.h"
 
@@ -82,7 +82,8 @@ inline ARK_INLINE JSTaggedType Barriers::ReadBarrierForObject(const JSThread *th
 #endif
 }
 
-inline ARK_INLINE JSTaggedType Barriers::ReadBarrierForStringTableSlot(JSTaggedType value)
+inline ARK_INLINE JSTaggedType Barriers::ReadBarrierForStringTableSlot(JSTaggedType value,
+    [[maybe_unused]] const JSThread *thread)
 {
     LOG_COMMON(FATAL) << "Not implemented";
     UNREACHABLE();
@@ -183,6 +184,13 @@ inline ARK_INLINE JSTaggedType Barriers::UpdateSlot(const JSThread *thread, void
 {
     JSTaggedType value = GetTaggedValue(thread, obj, offset);
     *reinterpret_cast<JSTaggedType *>(ToUintPtr(obj) + offset) = value;
+    return value;
+}
+
+inline ARK_INLINE JSTaggedType Barriers::UpdateSlot(const JSThread *thread, uintptr_t slotAddress)
+{
+    JSTaggedType value = GetTaggedValue(thread, slotAddress);
+    *reinterpret_cast<JSTaggedType *>(slotAddress) = value;
     return value;
 }
 } // namespace panda::ecmascript

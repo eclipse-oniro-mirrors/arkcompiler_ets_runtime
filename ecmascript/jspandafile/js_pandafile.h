@@ -44,6 +44,7 @@ enum class CreateMode : uint8_t {
 class JSPandaFile {
 public:
     struct JSRecordInfo {
+#if !ENABLE_MODULE_MEMORY_OPTIMIZATION
         uint32_t mainMethodIndex {0};
         bool isCjs {false};
         bool isJson {false};
@@ -56,6 +57,33 @@ public:
         uint32_t lazyImportIdx {0};
         uint32_t classId {CLASSID_OFFSET_NOT_FOUND};
         CString npmPackageName;
+#else
+        virtual bool IsFull() const
+        {
+            return false;
+        };
+        virtual ~JSRecordInfo() = default;
+        uint32_t mainMethodIndex {0};
+        bool isCjs {false};
+        bool isJson {false};
+        bool isSharedModule {false};
+        bool hasTopLevelAwait {false};
+        int jsonStringId {-1};
+        int moduleRecordIdx {-1};
+        uint32_t lazyImportIdx {0};
+        uint32_t classId {CLASSID_OFFSET_NOT_FOUND};
+        CString npmPackageName;
+    };
+
+    struct FullJSRecordInfo : public JSRecordInfo {
+        bool IsFull() const override
+        {
+            return true;
+        };
+        ~FullJSRecordInfo() = default;
+        CUnorderedSet<const EcmaVM *> vmListOfParsedConstPool;
+        CUnorderedMap<uint32_t, uint64_t> constpoolMap;
+#endif
 
         void SetParsedConstpoolVM(const EcmaVM *vm)
         {
@@ -95,6 +123,7 @@ public:
     static constexpr char BUNDLE_INSTALL_PATH[] = "/data/storage/el1/bundle/";
 
     static constexpr std::string_view HAP_SUFFIX = ".hap";
+    static constexpr std::string_view HSP_SUFFIX = ".hsp";
     static constexpr int PACKAGE_NAME_LEN = 8;
     static constexpr int TYPE_SUMMARY_OFFSET_NOT_FOUND = 0;
     static constexpr int CLASSID_OFFSET_NOT_FOUND = 0;
@@ -178,26 +207,16 @@ public:
 
     inline void SetMethodLiteralToMap(MethodLiteral *methodLiteral)
     {
-#if ENABLE_LATEST_OPTIMIZATION
         ASSERT(methodLiteral != nullptr);
+        // methodLiteral must point into the contiguous methodLiterals_ array; the index-based
+        // map computes the array index internally and resolves it back to a pointer in Find().
         methodLiteralMap_.Insert(methodLiteral->GetMethodId().GetOffset(), methodLiteral);
-#else
-        ASSERT(methodLiteral != nullptr);
-        methodLiteralMap_.try_emplace(methodLiteral->GetMethodId().GetOffset(), methodLiteral);
-#endif
     }
 
-#if ENABLE_LATEST_OPTIMIZATION
     inline const MethodLiteralIDMap& GetMethodLiteralMap() const
     {
         return methodLiteralMap_;
     }
-#else
-    inline const std::unordered_map<uint32_t, MethodLiteral*>& GetMethodLiteralMap() const
-    {
-        return methodLiteralMap_;
-    }
-#endif
 
     uint32_t GetNumMethods() const
     {
@@ -234,8 +253,13 @@ public:
     const CUnorderedMap<uint32_t, uint64_t> *GetConstpoolMapByReocrd(const CString &recordName) const
     {
         auto info = jsRecordInfo_.find(std::string_view(recordName.c_str(), recordName.size()));
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+        if (info != jsRecordInfo_.end() && info->second->IsFull()) {
+            return &static_cast<FullJSRecordInfo*>(info->second)->constpoolMap;
+#else
         if (info != jsRecordInfo_.end()) {
             return &info->second->constpoolMap;
+#endif
         }
         LOG_FULL(FATAL) << "find entryPoint failed: " << recordName;
         UNREACHABLE();
@@ -264,15 +288,7 @@ public:
 
     inline PUBLIC_API MethodLiteral *FindMethodLiteral(uint32_t offset) const
     {
-#if ENABLE_LATEST_OPTIMIZATION
         return methodLiteralMap_.Find(offset);
-#else
-        auto iter = methodLiteralMap_.find(offset);
-        if (iter == methodLiteralMap_.end()) {
-            return nullptr;
-        }
-        return iter->second;
-#endif
     }
 
     inline int GetModuleRecordIdx(const CString &recordName = ENTRY_FUNCTION_NAME) const
@@ -499,7 +515,13 @@ public:
     inline void DeleteParsedConstpoolVM(const EcmaVM *vm)
     {
         for (auto &recordInfo : jsRecordInfo_) {
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+            if (recordInfo.second->IsFull()) {
+                static_cast<FullJSRecordInfo*>(recordInfo.second)->vmListOfParsedConstPool.erase(vm);
+            }
+#else
             recordInfo.second->vmListOfParsedConstPool.erase(vm);
+#endif
         }
     }
     static FunctionKind PUBLIC_API GetFunctionKind(panda_file::FunctionKind funcKind);
@@ -518,7 +540,19 @@ public:
 
     void TranslateClasses(JSThread *thread, const CString &methodName);
 
-    bool IsHapPath() const
+    /*
+     * hapPath_: 1. /data/app/el1/bundle/public/bundleName/moduleName.hap
+     *           2. /data/app/el1/bundle/public/bundleName/moduleName.hsp
+     */
+    bool IsHapOrHspPath() const
+    {
+        return IsHapPath() || base::StringHelper::StringEndWith(hapPath_, HSP_SUFFIX);
+    }
+
+    /*
+     * hapPath_: 1. /data/app/el1/bundle/public/bundleName/moduleName.hap
+     */
+    inline bool IsHapPath() const
     {
         return base::StringHelper::StringEndWith(hapPath_, HAP_SUFFIX);
     }
@@ -568,14 +602,11 @@ private:
     // please add member after *pf_. static constexpr int32_t PF_OFFSET = 0.
     const panda_file::File *pf_ {nullptr};
     void *fileMapper_ {nullptr};
+    // hapPath_ only supports hap and inner-hsp packages, for other package types, hapPath_ is empty.
     CString hapPath_;
     uint32_t constpoolIndex_ {0};
     uint32_t checksum_ {0};
-#if ENABLE_LATEST_OPTIMIZATION
     MethodLiteralIDMap methodLiteralMap_;
-#else
-    std::unordered_map<uint32_t, MethodLiteral*> methodLiteralMap_;
-#endif
     std::unordered_map<uint32_t, panda_file::File::StringData> methodNameMap_;
     CUnorderedMap<uint32_t, CString> recordNameMap_;
     Mutex methodNameMapMutex_;

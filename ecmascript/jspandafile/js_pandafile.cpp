@@ -53,13 +53,11 @@ JSPandaFile::JSPandaFile(JSThread *thread, const panda_file::File *pf, const CSt
 
     EcmaVM *vm = thread->GetEcmaVM();
 
-    if (!vm->GetJSOptions().DisableJSPandaFileAndModuleSnapshot()) {
-        if (JSPandaFileSnapshot::ReadData(thread, this, ohos::OhosConstants::PANDAFILE_AND_MODULE_SNAPSHOT_DIR)) {
-            // Use snapshot to skip InitializeMergedPF and TranslateClasses
-            return;
-        }
-        ResetAfterSnapshotFail();
+    if (JSPandaFileManager::UseSnapshot(thread, this)) {
+        // Use snapshot to skip InitializeMergedPF and TranslateClasses
+        return;
     }
+    ResetAfterSnapshotFail();
 
     // If snapshot loading fails, fall back to normal initialization and translation
     CString methodName = entryPoint.data();
@@ -98,11 +96,7 @@ void JSPandaFile::ResetAfterSnapshotFail()
         JSPandaFileManager::FreeBuffer(methodLiterals_, sizeof(MethodLiteral) * numMethods_, isBundlePack_, mode_);
         methodLiterals_ = nullptr;
     }
-#if ENABLE_LATEST_OPTIMIZATION
     methodLiteralMap_.Clear();
-#else
-    methodLiteralMap_.clear();
-#endif
     numMethods_ = 0;
     numClasses_ = 0;
 }
@@ -133,9 +127,11 @@ void JSPandaFile::CheckIsBundlePack()
 void JSPandaFile::CheckIsRecordWithBundleName(const CString &entry)
 {
     size_t pos = entry.find('/');
+    // LCOV_EXCL_START
     if (pos == CString::npos) {
         LOG_FULL(FATAL) << "CheckIsRecordWithBundleName Invalid parameter entry";
     }
+    // LCOV_EXCL_STOP
 
     CString bundleName = entry.substr(0, pos);
     size_t bundleNameLen = bundleName.length();
@@ -158,7 +154,7 @@ JSPandaFile::~JSPandaFile()
         delete each.second;
     }
     jsRecordInfo_.clear();
-    
+
     if (pf_ != nullptr) {
         delete pf_;
         CallReleaseSecureMemFunc(fileMapper_);
@@ -167,11 +163,7 @@ JSPandaFile::~JSPandaFile()
     }
 
     constpoolMap_.clear();
-#if ENABLE_LATEST_OPTIMIZATION
     methodLiteralMap_.Clear();
-#else
-    methodLiteralMap_.clear();
-#endif
     ClearNameMap();
     if (methodLiterals_ != nullptr) {
         JSPandaFileManager::FreeBuffer(methodLiterals_, sizeof(MethodLiteral) * numMethods_, isBundlePack_, mode_);
@@ -204,7 +196,11 @@ void JSPandaFile::InitializeUnMergedPF()
 {
     Span<const uint32_t> classIndexes = pf_->GetClasses();
     numClasses_ = classIndexes.size();
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+    JSRecordInfo* info = new FullJSRecordInfo();
+#else
     JSRecordInfo* info = new JSRecordInfo();
+#endif
     jsRecordInfo_.reserve(numClasses_);
     for (const uint32_t index : classIndexes) {
         panda_file::File::EntityId classId(index);
@@ -240,11 +236,7 @@ void JSPandaFile::InitializeUnMergedPF()
     jsRecordInfo_.insert({JSPandaFile::ENTRY_FUNCTION_NAME, info});
     methodLiterals_ = static_cast<MethodLiteral *>(
         JSPandaFileManager::AllocateBuffer(sizeof(MethodLiteral) * numMethods_, isBundlePack_, mode_));
-#if ENABLE_LATEST_OPTIMIZATION
-    methodLiteralMap_.Reserve(numMethods_);
-#else
-    methodLiteralMap_.reserve(numMethods_);
-#endif
+    methodLiteralMap_.Reserve(numMethods_, methodLiterals_);
 }
 
 void JSPandaFile::InitializeMergedPF()
@@ -310,11 +302,7 @@ void JSPandaFile::InitializeMergedPF()
     }
     methodLiterals_ = static_cast<MethodLiteral *>(
         JSPandaFileManager::AllocateBuffer(sizeof(MethodLiteral) * numMethods_, isBundlePack_, mode_));
-#if ENABLE_LATEST_OPTIMIZATION
-    methodLiteralMap_.Reserve(numMethods_);
-#else
-    methodLiteralMap_.reserve(numMethods_);
-#endif
+    methodLiteralMap_.Reserve(numMethods_, methodLiterals_);
 }
 
 CString JSPandaFile::GetEntryPoint(const CString &recordName) const
@@ -445,15 +433,21 @@ std::pair<std::string_view, bool> JSPandaFile::GetMethodName(EntityId methodId)
 {
     LockHolder lock(methodNameMapMutex_);
     uint32_t id = methodId.GetOffset();
-    auto iter = methodNameMap_.find(id);
-    if (iter != methodNameMap_.end()) {
+
+    auto *methodNameMap = &methodNameMap_;
+    if (Runtime::GetFork()) {
+        static std::unordered_map<uint32_t, panda_file::File::StringData> forkMethodNameMap;
+        methodNameMap = &forkMethodNameMap;
+    }
+    auto iter = methodNameMap->find(id);
+    if (iter != methodNameMap->end()) {
         panda_file::StringData sd = iter->second;
         return {std::string_view(utf::Mutf8AsCString(sd.data), sd.utf16_length), sd.is_ascii};
     }
 
     panda_file::MethodDataAccessor mda(*pf_, methodId);
     auto sd = GetStringData(mda.GetNameId());
-    methodNameMap_.emplace(id, sd);
+    methodNameMap->emplace(id, sd);
     return {std::string_view(utf::Mutf8AsCString(sd.data), sd.utf16_length), sd.is_ascii};
 }
 
@@ -469,16 +463,22 @@ CString JSPandaFile::GetRecordName(EntityId methodId)
 {
     LockHolder lock(recordNameMapMutex_);
     uint32_t id = methodId.GetOffset();
-    auto iter = recordNameMap_.find(id);
-    if (iter != recordNameMap_.end()) {
+
+    auto *recordNameMap = &recordNameMap_;
+    if (Runtime::GetFork()) {
+        static CUnorderedMap<uint32_t, CString> forkRecordNameMap;
+        recordNameMap = &forkRecordNameMap;
+    }
+    auto iter = recordNameMap->find(id);
+    if (iter != recordNameMap->end()) {
         return iter->second;
     }
 
     panda_file::MethodDataAccessor mda(*pf_, methodId);
     panda_file::ClassDataAccessor cda(*pf_, mda.GetClassId());
     CString desc = utf::Mutf8AsCString(cda.GetDescriptor());
-    auto name =  JSPandaFile::ParseEntryPoint(desc);
-    recordNameMap_.emplace(id, name);
+    auto name = JSPandaFile::ParseEntryPoint(desc);
+    recordNameMap->emplace(id, name);
     return name;
 }
 

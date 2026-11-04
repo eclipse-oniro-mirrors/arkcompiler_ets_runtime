@@ -18,7 +18,6 @@
 #include "common_components/taskpool/taskpool.h"
 #include "ecmascript/mem/shared_heap/shared_concurrent_marker.h"
 #include "ecmascript/mem/shared_heap/shared_concurrent_sweeper.h"
-#include "ecmascript/mem/shared_heap/shared_gc_evacuator.h"
 #include "ecmascript/mem/shared_heap/shared_gc_marker-inl.h"
 #include "ecmascript/mem/shared_heap/shared_gc_visitor-inl.h"
 #include "ecmascript/mem/verification.h"
@@ -41,7 +40,6 @@ void SharedGC::RunPhases()
         + ";NativeLimitGC" + std::to_string(sHeap_->GetNativeSizeTriggerSharedGC())
         + ";NativeLimitCM" + std::to_string(sHeap_->GetNativeSizeTriggerSharedCM())).c_str(), "");
     TRACE_GC(GCStats::Scope::ScopeId::TotalGC, sHeap_->GetEcmaGCStats());
-    sHeap_->SetGCThreadQosPriority(common::PriorityMode::STW);
     markingInProgress_ = sHeap_->CheckOngoingConcurrentMarking();
     Initialize();
     Mark();
@@ -51,7 +49,6 @@ void SharedGC::RunPhases()
         SharedHeapVerification(sHeap_, VerifyKind::VERIFY_SHARED_GC_MARK).VerifyMark(markingInProgress_);
     }
     PreSweep();
-    Evacuate();
     Sweep();
     if (UNLIKELY(sHeap_->ShouldVerifyHeap())) {
         // verify sweep
@@ -59,9 +56,6 @@ void SharedGC::RunPhases()
         SharedHeapVerification(sHeap_, VerifyKind::VERIFY_SHARED_GC_SWEEP).VerifySweep(markingInProgress_);
     }
     Finish();
-    if (!concurrentProcessStringTable_) {
-        sHeap_->SetGCThreadQosPriority(common::PriorityMode::FOREGROUND);
-    }
     sHeap_->ResetNativeSizeAfterLastGC();
 }
 
@@ -112,16 +106,6 @@ void SharedGC::PreSweep()
     UpdateRecordWeakReference();
 }
 
-void SharedGC::Evacuate()
-{
-    if (sHeap_->HasCSetRegions()) {
-        sHeap_->GetSharedGCEvacuator()->Evacuate();
-        evacuated_ = true;
-    } else {
-        evacuated_ = false;
-    }
-}
-
 void SharedGC::Sweep()
 {
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "SharedGC::Sweep", "");
@@ -129,7 +113,7 @@ void SharedGC::Sweep()
     WeakRootVisitor gcUpdateWeak = [](TaggedObject *header) -> TaggedObject* {
         Region *objectRegion = Region::ObjectAddressToRange(header);
         if (UNLIKELY(objectRegion == nullptr)) {
-            // existance of string table entry with null value is possible
+            // existence of string table entry with null value is possible
             // only if concurrent sweeping for string table is enabled
             return nullptr;
         }
@@ -150,7 +134,7 @@ void SharedGC::Sweep()
     };
     auto stringTableCleaner = Runtime::GetInstance()->GetEcmaStringTable()->GetCleaner();
     if (stringTableCleaner->IsEnableConcurrentSweep()) {
-        concurrentProcessStringTable_ = !evacuated_ && sHeap_->IsParallelGCEnabled() &&
+        concurrentProcessStringTable_ = sHeap_->IsParallelGCEnabled() &&
                                         !Runtime::GetInstance()->GetEcmaStringTable()->IsInUse();
     } else {
         concurrentProcessStringTable_ = false;
@@ -159,16 +143,14 @@ void SharedGC::Sweep()
         LOG_GC(DEBUG) << "process string table stw";
         stringTableCleaner->PostSweepWeakRefTask(gcUpdateWeak);
     }
-    bool needClearCache = sHeap_->HasCSetRegions();
+    ASSERT(!sHeap_->HasCSetRegions());
     Runtime::GetInstance()->ProcessSharedDelete(gcUpdateWeak);
-    Runtime::GetInstance()->GCIterateThreadList([&gcUpdateWeak, needClearCache](JSThread *thread) {
+    Runtime::GetInstance()->GCIterateThreadList([&gcUpdateWeak](JSThread *thread) {
         ASSERT(thread->IsSuspended() || thread->HasLaunchedSuspendAll());
+        thread->IterateWeakRoots(gcUpdateWeak);
         thread->IterateWeakEcmaGlobalStorage(gcUpdateWeak, GCKind::SHARED_GC);
         thread->GetEcmaVM()->ProcessSnapShotEnv(gcUpdateWeak);
         const_cast<Heap*>(thread->GetEcmaVM()->GetHeap())->ResetTlab();
-        if (needClearCache) {
-            thread->ClearVMCachedConstantPool();
-        }
     });
 
     if (!concurrentProcessStringTable_) {

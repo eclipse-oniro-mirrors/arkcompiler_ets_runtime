@@ -15,6 +15,8 @@
 
 #include "ecmascript/napi/include/dfx_jsnapi.h"
 
+#include <cstdio>
+
 #include "ecmascript/base/block_hook_scope.h"
 #include "ecmascript/base/config.h"
 #include "ecmascript/base/json_helper.h"
@@ -24,12 +26,16 @@
 #include "ecmascript/debugger/debugger_api.h"
 #include "ecmascript/debugger/js_debugger_manager.h"
 #include "ecmascript/dfx/hprof/heap_profiler.h"
+#if defined(PANDA_JS_ETS_HYBRID_MODE)
+#include "ecmascript/dfx/hprof/hybrid/hybrid_heap_profiler.h"
+#endif
 #include "ecmascript/dfx/stackinfo/async_stack_trace.h"
 #include "ecmascript/dfx/stackinfo/js_stackinfo.h"
+#include "ecmascript/extractortool/src/source_map.h"
 #include "ecmascript/dfx/tracing/tracing.h"
 #include "ecmascript/dfx/vm_thread_control.h"
 #include "ecmascript/jit/jit.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/jspandafile/js_pandafile_executor.h"
 #include "ecmascript/mem/heap-inl.h"
 #include "ecmascript/ohos/ohos_constants.h"
@@ -44,6 +50,9 @@
 #include "faultloggerd_client.h"
 #include "uv.h"
 #endif
+#if defined(ENABLE_HANDLE_NODE_ID_MAP_PROTO)
+#include "handleNodeIdMap.pb.h"
+#endif
 
 namespace panda {
 using ecmascript::CString;
@@ -53,6 +62,7 @@ using ecmascript::CpuProfiler;
 #endif
 using ecmascript::EcmaString;
 using ecmascript::JSTaggedValue;
+using ecmascript::GCStatisticData;
 using ecmascript::GCStats;
 template<typename T>
 using JSHandle = ecmascript::JSHandle<T>;
@@ -65,13 +75,62 @@ using ecmascript::g_isEnableCMCGC;
 using ecmascript::JSFunction;
 using ecmascript::JSPandaFileExecutor;
 using ecmascript::SourceTextModule;
+using Runtime = ecmascript::Runtime;
+using LanguageEnv = ecmascript::LanguageEnv;
+#if defined(PANDA_JS_ETS_HYBRID_MODE)
+using HybridHeapProfiler = ecmascript::HybridHeapProfiler;
+#endif
 sem_t g_heapdumpCnt;
+
+bool DFXJSNApi::DumpHybridHeapSnapshot([[maybe_unused]] const std::string &path,
+                                       [[maybe_unused]] const DumpSnapShotOption &dumpOption)
+{
+#if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER) && defined(PANDA_JS_ETS_HYBRID_MODE)
+    ecmascript::JSThread *thread = ecmascript::JSThread::GetCurrent();
+    EcmaVM *vm = thread == nullptr ? nullptr : thread->GetEcmaVM();
+    // A pure ArkTS-Sta thread has no current JSThread. Pass nullptr through so
+    // HybridHeapProfiler can select the static-only dump path.
+    auto *hybridProfiler = HybridHeapProfiler::GetInstance();
+    if (hybridProfiler == nullptr) {
+        LOG_ECMA(ERROR) << "[HybridHeapDump] DumpHybridHeapSnapshot: HybridHeapProfiler not available";
+        return false;
+    }
+    if (dumpOption.dumpFormat == DumpFormat::BINARY) {
+        LOG_ECMA(ERROR) << "[HybridHeapDump] DumpHybridHeapSnapshot: binary dump is not supported";
+        return false;
+    }
+    FileStream stream(path);
+    if (!stream.Good()) {
+        LOG_ECMA(ERROR) << "[HybridHeapDump] DumpHybridHeapSnapshot: failed to open output path";
+        return false;
+    }
+    DumpSnapShotOption mutableOption = dumpOption;
+    bool result = hybridProfiler->Dump(vm, &stream, mutableOption);
+    if (dumpOption.isClearNodeIdCache) {
+        EcmaVM *mainVm = Runtime::GetInstance()->GetMainThread()->GetEcmaVM();
+        if (mainVm != nullptr) {
+            mainVm->DeleteHybridHeapProfiler();
+        }
+    }
+    return result;
+#else
+    LOG_ECMA(ERROR) << "[HybridHeapDump] Not support arkcompiler heap snapshot";
+    return false;
+#endif
+}
 
 void DFXJSNApi::DumpHeapSnapshot([[maybe_unused]] const EcmaVM *vm, [[maybe_unused]] const std::string &path,
                                  [[maybe_unused]] const DumpSnapShotOption &dumpOption,
                                  const std::function<void(uint8_t)> &callback)
 {
 #if defined(ECMASCRIPT_SUPPORT_SNAPSHOT)
+    if (dumpOption.languageEnv != LanguageEnv::DYNAMIC && dumpOption.dumpFormat == DumpFormat::BINARY) {
+        LOG_ECMA(ERROR) << "DumpHeapSnapshot: hybrid binary dump does not support an external path";
+        if (callback) {
+            callback(static_cast<uint8_t>(ecmascript::DumpHeapSnapshotStatus::FORK_FAILED));
+        }
+        return;
+    }
     FileStream stream(path);
     DumpHeapSnapshot(vm, &stream, dumpOption, nullptr, callback);
 #else
@@ -79,6 +138,34 @@ void DFXJSNApi::DumpHeapSnapshot([[maybe_unused]] const EcmaVM *vm, [[maybe_unus
         callback(static_cast<uint8_t>(ecmascript::DumpHeapSnapshotStatus::FORK_FAILED));
     }
     LOG_ECMA(ERROR) << "Not support arkcompiler heap snapshot";
+#endif
+}
+
+bool DFXJSNApi::DumpHybridRawHeapSnapshot([[maybe_unused]] const std::string &dynamicPath,
+                                          [[maybe_unused]] const std::string &staticPath,
+                                          [[maybe_unused]] const DumpSnapShotOption &dumpOption,
+                                          [[maybe_unused]] std::function<void(uint8_t)> callback)
+{
+#if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER) && defined(PANDA_JS_ETS_HYBRID_MODE)
+    if (dumpOption.dumpFormat != DumpFormat::BINARY || dumpOption.languageEnv == LanguageEnv::DYNAMIC ||
+        dynamicPath.empty() || staticPath.empty()) {
+        LOG_ECMA(ERROR) << "[HybridHeapDump] DumpHybridRawHeapSnapshot: invalid dump option or output path";
+        return false;
+    }
+    ecmascript::JSThread *thread = ecmascript::JSThread::GetCurrent();
+    EcmaVM *vm = thread == nullptr ? nullptr : thread->GetEcmaVM();
+    // A pure ArkTS-Sta thread has no current JSThread. BinaryDump treats a null
+    // EcmaVM as a static-only request when the current thread is attached to STS.
+    auto *hybridProfiler = HybridHeapProfiler::GetInstance();
+    if (hybridProfiler == nullptr) {
+        LOG_ECMA(ERROR) << "[HybridHeapDump] DumpHybridRawHeapSnapshot: HybridHeapProfiler not available";
+        return false;
+    }
+    DumpSnapShotOption mutableOption = dumpOption;
+    return hybridProfiler->BinaryDump(vm, mutableOption, dynamicPath, staticPath, callback);
+#else
+    LOG_ECMA(ERROR) << "[HybridHeapDump] Not support arkcompiler hybrid rawheap snapshot";
+    return false;
 #endif
 }
 
@@ -91,6 +178,10 @@ void DFXJSNApi::DumpHeapSnapshot([[maybe_unused]] const EcmaVM *vm, [[maybe_unus
 #if defined(ECMASCRIPT_SUPPORT_SNAPSHOT)
     ecmascript::HeapProfilerInterface *heapProfile = ecmascript::HeapProfilerInterface::GetInstance(
         const_cast<EcmaVM *>(vm));
+    if (heapProfile == nullptr) {
+        LOG_ECMA(ERROR) << "DumpHeapSnapshot: heapProfile is nullptr";
+        return;
+    }
 
 #if defined (ENABLE_LOCAL_HANDLE_LEAK_DETECT)
 #if defined (ENABLE_DUMP_IN_FAULTLOG)
@@ -113,7 +204,7 @@ void DFXJSNApi::DumpHeapSnapshot([[maybe_unused]] const EcmaVM *vm, [[maybe_unus
 #endif
 }
 
-[[maybe_unused]] static uint8_t killCount = 0;
+[[maybe_unused]] static uint8_t g_killCount = 0;
 
 void DFXJSNApi::DumpCpuProfile([[maybe_unused]] const EcmaVM *vm)
 {
@@ -128,9 +219,9 @@ void DFXJSNApi::DumpCpuProfile([[maybe_unused]] const EcmaVM *vm)
         return;
     }
 
-    (void)killCount;
+    (void)g_killCount;
     if (DFXJSNApi::CpuProfilerSamplingAnyTime(vm)) {
-        killCount++;
+        g_killCount++;
         return;
     }
 #endif // ECMASCRIPT_SUPPORT_CPUPROFILER
@@ -158,7 +249,7 @@ void DFXJSNApi::DumpHeapSnapshot([[maybe_unused]] const EcmaVM *vm,
 
     // Write in faultlog for heap leak.
     int32_t fd;
-    if (dumpOption.isDumpOOM && dumpOption.dumpFormat == DumpFormat::BINARY) {
+    if (dumpOption.dumpFormat == DumpFormat::BINARY) {
         fd = RequestFileDescriptor(static_cast<int32_t>(FaultLoggerType::JS_RAW_SNAPSHOT));
     } else {
         fd = RequestFileDescriptor(static_cast<int32_t>(FaultLoggerType::JS_HEAP_SNAPSHOT));
@@ -170,6 +261,17 @@ void DFXJSNApi::DumpHeapSnapshot([[maybe_unused]] const EcmaVM *vm,
     FileDescriptorStream stream(fd);
     ecmascript::HeapProfilerInterface *heapProfile = ecmascript::HeapProfilerInterface::GetInstance(
         const_cast<EcmaVM *>(vm));
+#if defined(ENABLE_HITRACE_LOCAL_HANDLE_DETECT) && defined(ENABLE_BACKTRACE_LOCAL)
+    if (const_cast<EcmaVM *>(vm)->GetJSOptions().EnableHandleLeakLogOutput()) {
+        auto heapProfiler = reinterpret_cast<ecmascript::HeapProfiler *>(heapProfile);
+        int32_t leakStackTraceFd = RequestFileDescriptor(static_cast<int32_t>(FaultLoggerType::JS_STACKTRACE));
+        if (leakStackTraceFd < 0) {
+            LOG_ECMA(ERROR) << "Request file descriptor for leak stack trace failed";
+        } else {
+            heapProfiler->SetLeakStackTraceFd(leakStackTraceFd);
+        }
+    }
+#endif // ENABLE_HITRACE_LOCAL_HANDLE_DETECT && ENABLE_BACKTRACE_LOCAL
     ecmascript::NodeIdCacheClearScope guard(const_cast<EcmaVM *>(vm), dumpOption);
     heapProfile->DumpHeapSnapshot(&stream, dumpOption);
 
@@ -192,7 +294,11 @@ void DFXJSNApi::DumpHeapSnapshot([[maybe_unused]] const EcmaVM *vm,
     sem_init(&g_heapdumpCnt, 0, THREAD_COUNT);
     uint32_t curTid = vm->GetTid();
     LOG_ECMA(INFO) << "DumpHeapSnapshot tid " << tid << " curTid " << curTid;
-    DumpHeapSnapshotWithVm(vm, dumpOption, tid);
+    if (dumpOption.languageEnv == LanguageEnv::DYNAMIC) {
+        DumpHeapSnapshotWithVm(vm, dumpOption, tid);
+    } else {
+        ScheduleHybridHeapDump(vm, dumpOption, tid);
+    }
 }
 
 void DFXJSNApi::DumpHeapSnapshotWithVm([[maybe_unused]] const EcmaVM *vm,
@@ -247,6 +353,108 @@ void DFXJSNApi::DumpHeapSnapshotWithVm([[maybe_unused]] const EcmaVM *vm,
         delete work;
     }
 #endif
+#endif
+}
+
+bool DFXJSNApi::PerformHybridHeapDump([[maybe_unused]] const EcmaVM *vm,
+                                      [[maybe_unused]] const DumpSnapShotOption &dumpOption)
+{
+#if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER) && defined(PANDA_JS_ETS_HYBRID_MODE)
+    auto *hybridProfiler = HybridHeapProfiler::GetInstance();
+    if (hybridProfiler == nullptr) {
+        LOG_ECMA(ERROR) << "[HybridHeapDump] PerformHybridHeapDump: HybridHeapProfiler not available";
+        return false;
+    }
+    if (dumpOption.dumpFormat == DumpFormat::BINARY) {
+        return hybridProfiler->BinaryDump(const_cast<EcmaVM *>(vm),
+                                          const_cast<DumpSnapShotOption &>(dumpOption));
+    }
+    bool result = hybridProfiler->Dump(const_cast<EcmaVM *>(vm), nullptr,
+                                       const_cast<DumpSnapShotOption &>(dumpOption));
+    if (dumpOption.isClearNodeIdCache) {
+        EcmaVM *mainVm = Runtime::GetInstance()->GetMainThread()->GetEcmaVM();
+        if (mainVm != nullptr) {
+            mainVm->DeleteHybridHeapProfiler();
+        }
+    }
+    return result;
+#endif
+    return false;
+}
+
+void DFXJSNApi::ScheduleHybridHeapDump([[maybe_unused]] const EcmaVM *vm,
+                                       [[maybe_unused]] const DumpSnapShotOption &dumpOption,
+                                       [[maybe_unused]] uint32_t tid)
+{
+#if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER) && defined(PANDA_JS_ETS_HYBRID_MODE)
+    uint32_t mainTid = vm->GetTid();
+
+    if (tid == 0) {
+        // VM scope: main -> hybrid, workers -> dynamic. Process scope already
+        // includes every dynamic VM and the single static heap in one dump.
+        ScheduleHybridDumpOnLoop(vm, dumpOption, mainTid);
+        if (!dumpOption.isProcDump) {
+            DumpSnapShotOption dynamicOption = dumpOption;
+            const_cast<EcmaVM *>(vm)->EnumerateWorkerVm([&](const EcmaVM *workerVm) {
+                DumpHeapSnapshotWithVm(workerVm, dynamicOption, workerVm->GetTid());
+            });
+        }
+    } else if (tid == mainTid) {
+        // Dump main thread: always hybrid
+        ScheduleHybridDumpOnLoop(vm, dumpOption, mainTid);
+    } else {
+        EcmaVM *workerVm = const_cast<EcmaVM *>(vm)->GetWorkerVm(tid);
+        if (workerVm != nullptr) {
+            // Dump worker: HybridHeapProfiler decides dynamic/hybrid via flags
+            ScheduleHybridDumpOnLoop(workerVm, dumpOption, tid);
+        } else {
+            // No EcmaVM: static-only dump on main VM's loop
+            ScheduleHybridDumpOnLoop(vm, dumpOption, tid);
+        }
+    }
+#endif
+}
+
+void DFXJSNApi::ScheduleHybridDumpOnLoop([[maybe_unused]] const EcmaVM *vm,
+                                         [[maybe_unused]] const DumpSnapShotOption &dumpOption,
+                                         [[maybe_unused]] uint32_t tid)
+{
+#if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER) && defined(PANDA_JS_ETS_HYBRID_MODE) && defined(ENABLE_DUMP_IN_FAULTLOG)
+    uv_loop_t *loop = reinterpret_cast<uv_loop_t *>(vm->GetLoop());
+    if (loop == nullptr || uv_loop_alive(loop) == 0) {
+        LOG_ECMA(ERROR) << "[HybridHeapDump] DFXJSNApi::ScheduleHybridDumpOnLoop: loop nullptr or dead";
+        return;
+    }
+
+    struct DumpForSnapShotStruct *dumpStruct = new DumpForSnapShotStruct();
+    dumpStruct->vm = vm;
+    dumpStruct->dumpOption = dumpOption;
+    dumpStruct->tid = tid;
+
+    uv_work_t *work = new(std::nothrow) uv_work_t;
+    if (work == nullptr) {
+        LOG_ECMA(ERROR) << "[HybridHeapDump] DFXJSNApi::ScheduleHybridDumpOnLoop: work alloc failed";
+        delete dumpStruct;
+        return;
+    }
+    work->data = static_cast<void *>(dumpStruct);
+
+    int ret = uv_queue_work(loop, work, [](uv_work_t *) {},
+        [](uv_work_t *work, int32_t) {
+            struct DumpForSnapShotStruct *dump = static_cast<struct DumpForSnapShotStruct *>(work->data);
+            // A matching VM identifies the dynamic participant. Whether the
+            // current worker also has a static participant can only be decided
+            // here, on that worker's event-loop thread.
+            const EcmaVM *targetVm = (dump->vm->GetTid() == dump->tid) ? dump->vm : nullptr;
+            PerformHybridHeapDump(targetVm, dump->dumpOption);
+            delete dump;
+            delete work;
+        });
+    if (ret != 0) {
+        LOG_ECMA(ERROR) << "[HybridHeapDump] DFXJSNApi::ScheduleHybridDumpOnLoop: uv_queue_work fail, ret " << ret;
+        delete dumpStruct;
+        delete work;
+    }
 #endif
 }
 
@@ -540,6 +748,14 @@ size_t DFXJSNApi::GetHeapObjectSize(const EcmaVM *vm)
     return vm->GetHeap()->GetHeapObjectSize();
 }
 
+size_t DFXJSNApi::GetSharedHeapSize()
+{
+    if (g_isEnableCMCGC) {
+        return 0;
+    }
+    return ecmascript::SharedHeap::GetInstance()->GetHeapObjectSize();
+}
+
 size_t DFXJSNApi::GetHeapLimitSize(const EcmaVM *vm)
 {
     if (g_isEnableCMCGC) {
@@ -603,10 +819,86 @@ size_t DFXJSNApi::GetFullGCLongTimeCount(const EcmaVM *vm)
     return vm->GetEcmaGCStats()->GetFullGCLongTimeCount();
 }
 
+GCStatistic DFXJSNApi::GetGCStatistic(const EcmaVM *vm)
+{
+    auto *thread = vm->GetAssociatedJSThread();
+    if (!thread->IsMainThreadFast()) {
+        LOG_ECMA(FATAL) << "GetGCStatistic only supports the main thread VM";
+        return {};
+    }
+
+    GCStatisticData gcStatisticData = vm->GetEcmaGCStats()->GetGCStatistic();
+    gcStatisticData = GCStats::MergeGCStatistic(gcStatisticData,
+        ecmascript::SharedHeap::GetInstance()->GetEcmaGCStats()->GetGCStatistic());
+    GCStatistic statistic;
+    statistic.count = gcStatisticData.count;
+    statistic.maxPause = gcStatisticData.maxPause;
+    statistic.minPause = gcStatisticData.minPause;
+    statistic.averagePause = gcStatisticData.count == 0 ? 0.0f :
+        (gcStatisticData.totalPause / gcStatisticData.count);
+    statistic.lastStartTime = gcStatisticData.lastStartTime;
+    statistic.lastEndTime = gcStatisticData.lastEndTime;
+    statistic.lastType = gcStatisticData.lastType;
+    LOG_ECMA(INFO) << "GC statistic, count: " << statistic.count
+                   << ", maxPause: " << statistic.maxPause
+                   << ", minPause: " << statistic.minPause
+                   << ", averagePause: " << statistic.averagePause
+                   << ", lastStartTime: " << statistic.lastStartTime
+                   << ", lastEndTime: " << statistic.lastEndTime
+                   << ", lastType: " << statistic.lastType;
+    return statistic;
+}
+
 void DFXJSNApi::GetHeapPrepare(const EcmaVM *vm)
 {
     ecmascript::ThreadManagedScope managedScope(vm->GetJSThread());
     const_cast<ecmascript::Heap *>(vm->GetHeap())->GetHeapPrepare(vm->GetJSThread());
+}
+
+bool DFXJSNApi::GetHandleNodeIdMap([[maybe_unused]] const EcmaVM *vm)
+{
+#if defined(ECMASCRIPT_SUPPORT_SNAPSHOT) && defined(ENABLE_HANDLE_NODE_ID_MAP_PROTO)
+    LOG_ECMA(DEBUG) << "GetHandleNodeIdMap: entry";
+    ecmascript::HeapProfilerInterface *heapProfile = ecmascript::HeapProfilerInterface::GetInstance(
+        const_cast<EcmaVM *>(vm));
+    if (heapProfile == nullptr) {
+        LOG_ECMA(ERROR) << "GetHandleNodeIdMap: HeapProfilerInterface is nullptr";
+        return false;
+    }
+    auto result = heapProfile->GetHandleNodeIdMap();
+    LOG_ECMA(INFO) << "GetHandleNodeIdMap: result size=" << result.size();
+
+    int32_t fd = RequestFileDescriptor(static_cast<int32_t>(FaultLoggerType::JS_MAP));
+    if (fd < 0) {
+        LOG_ECMA(ERROR) << "GetHandleNodeIdMap: RequestFileDescriptor failed, fd=" << fd;
+        return false;
+    }
+
+    ecmascript::FileDescriptorStream stream(fd);
+    if (!stream.Good()) {
+        LOG_ECMA(ERROR) << "GetHandleNodeIdMap: stream invalid";
+        return false;
+    }
+
+    ecmascript::dfx::HandleNodeIdMap chunk;
+
+    // Concatenated protobuf messages merge into one logical message. Stream one
+    // entry per message to avoid building a second in-memory copy of the map.
+    for (const auto &[handleAddr, nodeId] : result) {
+        chunk.Clear();
+        auto *entry = chunk.add_entries();
+        entry->set_handle_address(static_cast<uint64_t>(handleAddr));
+        entry->set_node_id(nodeId);
+        if (!chunk.SerializeToFileDescriptor(fd)) {
+            LOG_ECMA(ERROR) << "GetHandleNodeIdMap: write protobuf entry failed";
+            return false;
+        }
+    }
+    return true;
+#else
+    LOG_ECMA(ERROR) << "GetHandleNodeIdMap: not support arkcompiler handle node id map";
+    return false;
+#endif
 }
 
 void DFXJSNApi::SetJsDumpThresholds([[maybe_unused]] EcmaVM *vm, [[maybe_unused]] size_t thresholds)
@@ -629,7 +921,9 @@ void DFXJSNApi::NotifyApplicationState(EcmaVM *vm, bool inBackground)
 {
     ecmascript::ThreadManagedScope managedScope(vm->GetJSThread());
     const_cast<ecmascript::Heap *>(vm->GetHeap())->ChangeGCParams(inBackground);
+#ifndef EXCLUDE_JIT
     ecmascript::Jit::GetInstance()->ChangeTaskPoolState(inBackground);
+#endif
     ecmascript::Runtime::GetInstance()->SetInBackground(inBackground);
 }
 
@@ -695,9 +989,9 @@ bool DFXJSNApi::StopCpuProfilerForColdStart([[maybe_unused]] const EcmaVM *vm)
 void DFXJSNApi::CpuProfilerAnyTimeMainThread(const EcmaVM *vm)
 {
     const uint8_t KILL_COUNT_FACTOR = 2;
-    if (killCount % KILL_COUNT_FACTOR == 0) {
-        uint8_t fileCount = killCount / KILL_COUNT_FACTOR + 1;
-        LOG_ECMA(INFO) << "Start CpuProfiler Any Time Main Thread, killCount = " << killCount;
+    if (g_killCount % KILL_COUNT_FACTOR == 0) {
+        uint8_t fileCount = g_killCount / KILL_COUNT_FACTOR + 1;
+        LOG_ECMA(INFO) << "Start CpuProfiler Any Time Main Thread, g_killCount = " << g_killCount;
         std::string fileName = ConvertToStdString(const_cast<EcmaVM *>(vm)->GetBundleName())
                                + "_" + std::to_string(fileCount) + ".cpuprofile";
         if (!BuiltinsArkTools::CreateFile(fileName)) {
@@ -706,7 +1000,7 @@ void DFXJSNApi::CpuProfilerAnyTimeMainThread(const EcmaVM *vm)
             DFXJSNApi::StartCpuProfilerForFile(vm, fileName, CpuProfiler::INTERVAL_OF_INNER_START);
         }
     } else {
-        LOG_ECMA(INFO) << "Stop CpuProfiler Any Time Main Thread, killCount = " << killCount;
+        LOG_ECMA(INFO) << "Stop CpuProfiler Any Time Main Thread, g_killCount = " << g_killCount;
         if (vm->GetJSThread()->GetIsProfiling()) {
             DFXJSNApi::StopCpuProfilerForFile(vm);
         }
@@ -717,7 +1011,7 @@ void DFXJSNApi::CpuProfilerAnyTimeMainThread(const EcmaVM *vm)
 bool DFXJSNApi::CpuProfilerSamplingAnyTime([[maybe_unused]] const EcmaVM *vm)
 {
 #if defined(ECMASCRIPT_SUPPORT_CPUPROFILER)
-    (void)killCount;
+    (void)g_killCount;
     bool success = false;
     const uint8_t KILL_COUNT_FACTOR = 2;
     auto &options = const_cast<EcmaVM *>(vm)->GetJSOptions();
@@ -728,9 +1022,9 @@ bool DFXJSNApi::CpuProfilerSamplingAnyTime([[maybe_unused]] const EcmaVM *vm)
 
     if (options.EnableCpuProfilerAnyTimeWorkerThread()) {
         success = true;
-        if (killCount % KILL_COUNT_FACTOR == 0) {
-            uint8_t fileCount = killCount / KILL_COUNT_FACTOR + 1;
-            LOG_ECMA(INFO) << "Start CpuProfiler Any Time Worker Thread, killCount = " << killCount;
+        if (g_killCount % KILL_COUNT_FACTOR == 0) {
+            uint8_t fileCount = g_killCount / KILL_COUNT_FACTOR + 1;
+            LOG_ECMA(INFO) << "Start CpuProfiler Any Time Worker Thread, g_killCount = " << g_killCount;
             const_cast<EcmaVM *>(vm)->EnumerateWorkerVm([&](const EcmaVM *workerVm) -> void {
                 auto *thread = workerVm->GetAssociatedJSThread();
                 std::string fileName = ConvertToStdString(workerVm->GetBundleName()) + "_"
@@ -744,7 +1038,7 @@ bool DFXJSNApi::CpuProfilerSamplingAnyTime([[maybe_unused]] const EcmaVM *vm)
                 }
             });
         } else {
-            LOG_ECMA(INFO) << "Stop CpuProfiler Any Time Worker Thread, killCount = " << killCount;
+            LOG_ECMA(INFO) << "Stop CpuProfiler Any Time Worker Thread, g_killCount = " << g_killCount;
             const_cast<EcmaVM *>(vm)->EnumerateWorkerVm([&](const EcmaVM *workerVm) -> void {
                 auto *thread = workerVm->GetAssociatedJSThread();
                 if (thread->GetIsProfiling()) {
@@ -985,19 +1279,23 @@ void DFXJSNApi::ClearExtraErrorMessage(const EcmaVM *vm)
     thread->SetExtraErrorMessage(JSTaggedValue::Hole());
 }
 
+std::string DFXJSNApi::GetExtraJSCrashMessage(const EcmaVM *vm)
+{
+    return vm->GetExtraJSCrashMessage();
+}
 
 //When some objects invoke GetObjectHash, the return result is 0.
 //The GetObjectHashCode function is added to rectify the fault.
 int32_t DFXJSNApi::GetObjectHash(const EcmaVM *vm, Local<JSValueRef> nativeObject)
 {
     JSHandle<JSTaggedValue> obj = JSNApiHelper::ToJSHandle(nativeObject);
-    return ecmascript::tooling::DebuggerApi::GetObjectHash(vm, obj);
+    return ecmascript::ECMAObject::GetObjectHash(vm->GetJSThread(), obj);
 }
 
 int32_t DFXJSNApi::GetObjectHashCode(const EcmaVM *vm, Local<JSValueRef> nativeObject)
 {
     JSHandle<JSTaggedValue> obj = JSNApiHelper::ToJSHandle(nativeObject);
-    return ecmascript::tooling::DebuggerApi::GetObjectHashCode(vm, obj);
+    return ecmascript::ECMAObject::GetObjectHashCode(vm->GetJSThread(), obj);
 }
 
 bool DFXJSNApi::StartSampling([[maybe_unused]] const EcmaVM *vm, [[maybe_unused]] uint64_t samplingInterval)
@@ -1143,15 +1441,29 @@ void DFXJSNApi::GetTracingBufferUseage([[maybe_unused]] const EcmaVM *vm, [[mayb
 #endif
 }
 
-void DFXJSNApi::TranslateJSStackInfo(const EcmaVM *vm, std::string &url, int32_t &line, int32_t &column,
-    std::string &packageName)
+// SourceMap singleton interfaces
+
+void DFXJSNApi::SourceMapSplitSourceMap(const std::string &sourceMapData)
 {
-    auto cb = vm->GetSourceMapTranslateCallback();
-    if (cb == nullptr) {
-        LOG_ECMA(ERROR) << "Translate failed, callback function is nullptr.";
-    } else if (!cb(url, line, column, packageName)) {
-        LOG_ECMA(ERROR) << "Translate failed, url: " << url;
+    ecmascript::SourceMap::GetInstance().SplitSourceMap(sourceMapData);
+}
+
+bool DFXJSNApi::SourceMapTranslateUrlPosition(std::string &url, int &line, int &column, std::string &packageName)
+{
+    return ecmascript::SourceMap::GetInstance().TranslateUrlPositionBySourceMap(url, line, column, packageName);
+}
+
+std::string DFXJSNApi::SourceMapTranslateBySourceMap(const std::string &stackStr, bool useInitStatus)
+{
+    if (useInitStatus) {
+        return ecmascript::SourceMap::GetInstance().TranslateStackTraceWithStatus(stackStr);
     }
+    return ecmascript::SourceMap::GetInstance().TranslateBySourceMap(stackStr);
+}
+
+void DFXJSNApi::SourceMapSetInitStatus(ecmascript::InitStatus status)
+{
+    ecmascript::SourceMap::GetInstance().SetInitStatus(status);
 }
 
 uint32_t DFXJSNApi::GetCurrentThreadId()
@@ -1185,16 +1497,24 @@ void DFXJSNApi::GetMainThreadStackTrace(const EcmaVM *vm, std::string &stackTrac
                 mainThread, false, false, ecmascript::JS_STACK_TRACE_DEPTH_MAX);
         }
     }
-    auto sourceMapcb = vm->GetSourceMapCallback();
-    if (sourceMapcb != nullptr && !stackTraceStr.empty()) {
-        stackTraceStr = sourceMapcb(stackTraceStr);
+    if (!stackTraceStr.empty()) {
+        stackTraceStr = ecmascript::SourceMap::GetInstance().TranslateStackTraceWithStatus(stackTraceStr);
     }
 }
 
-void DFXJSNApi::SetMultithreadingDetectionEnabled(const EcmaVM *vm, bool enabled)
+void DFXJSNApi::SetMultithreadingDetectionEnabled(const EcmaVM *vm, bool enabled,
+                                                  const MultithreadingDetectionOptions& options)
 {
     EcmaVM::SetMultiThreadCheck(enabled);
     EcmaVM::SetCheckCountApi(enabled);
+    if (enabled) {
+        EcmaVM::SetDetectionConfig(options);
+    }
+}
+
+const DFXJSNApi::MultithreadingDetectionOptions &DFXJSNApi::GetDetectionConfig()
+{
+    return EcmaVM::GetDetectionConfig();
 }
 
 bool DFXJSNApi::OnVMHeapMemoryPressure(const EcmaVM *vm, HeapMemoryPressureOptions options,
@@ -1233,25 +1553,30 @@ void DFXJSNApi::SetProcDumpInSharedOOM(bool enable)
     LOG_ECMA(INFO) << "SetProcDumpInSharedOOM " << enable;
 }
 
-JSHandle<JSTaggedValue> DFXJSNApi::FindFunctionForHook(const EcmaVM *vm, const std::string &recordName,
-                                                       const std::string &namespaceName, const std::string &className,
-                                                       const std::string &funcName)
+Local<JSValueRef> DFXJSNApi::FindFunctionForHook(const EcmaVM *vm, const std::string &recordName,
+                                                 const std::string &namespaceName, const std::string &className,
+                                                 const std::string &funcName)
 {
     JSThread *thread = vm->GetJSThread();
-    return SourceTextModule::FindFuncInModuleForHook(thread, recordName, namespaceName, className, funcName);
+    JSHandle<JSTaggedValue> func =
+        SourceTextModule::FindFuncInModuleForHook(thread, recordName, namespaceName, className, funcName);
+    return JSNApiHelper::ToLocal<JSValueRef>(func);
 }
 
-void DFXJSNApi::ReplaceFunctionForHook(const EcmaVM *vm, JSHandle<JSTaggedValue> &target,
-                                       JSHandle<JSTaggedValue> &hook, JSHandle<JSTaggedValue> &backup)
+void DFXJSNApi::ReplaceFunctionForHook(const EcmaVM *vm, Local<JSValueRef> target,
+                                       Local<JSValueRef> hook, Local<JSValueRef> backup)
 {
-    if (!target->IsJSFunction() || !hook->IsJSFunction() || !backup->IsJSFunction()) {
+    JSHandle<JSTaggedValue> targetVal = JSNApiHelper::ToJSHandle(target);
+    JSHandle<JSTaggedValue> hookVal = JSNApiHelper::ToJSHandle(hook);
+    JSHandle<JSTaggedValue> backupVal = JSNApiHelper::ToJSHandle(backup);
+    if (!targetVal->IsJSFunction() || !hookVal->IsJSFunction() || !backupVal->IsJSFunction()) {
         return;
     }
 
     JSThread *thread = vm->GetJSThread();
-    JSHandle<JSFunction> targetFunc = JSHandle<JSFunction>::Cast(target);
-    JSHandle<JSFunction> hookFunc = JSHandle<JSFunction>::Cast(hook);
-    JSHandle<JSFunction> backupFunc = JSHandle<JSFunction>::Cast(backup);
+    JSHandle<JSFunction> targetFunc = JSHandle<JSFunction>::Cast(targetVal);
+    JSHandle<JSFunction> hookFunc = JSHandle<JSFunction>::Cast(hookVal);
+    JSHandle<JSFunction> backupFunc = JSHandle<JSFunction>::Cast(backupVal);
 
     JSFunction::ReplaceFunctionForHook(thread, backupFunc, targetFunc);
     JSFunction::ReplaceFunctionForHook(thread, targetFunc, hookFunc);
@@ -1280,5 +1605,16 @@ bool DFXJSNApi::GetEnableRuntimeAsyncStack(const EcmaVM *vm)
     LOG_ECMA(ERROR) << "Not support runtime async stack trace";
     return false;
 #endif
+}
+
+void DFXJSNApi::InsertSoLoadFailure(EcmaVM *vm,
+    Local<StringRef> moduleName, const std::string &failureInfo)
+{
+    CROSS_THREAD_AND_EXCEPTION_CHECK(vm);
+    ecmascript::ThreadManagedScope managedScope(thread);
+    JSHandle<JSTaggedValue> moduleNameValue = JSNApiHelper::ToJSHandle(moduleName);
+    JSHandle<EcmaString> moduleNameHandle = JSTaggedValue::ToString(thread, moduleNameValue);
+    ecmascript::CString moduleNameStr = ConvertToString(thread, *moduleNameHandle);
+    vm->InsertSoLoadFailure(moduleNameStr, failureInfo.c_str());
 }
 } // namespace panda

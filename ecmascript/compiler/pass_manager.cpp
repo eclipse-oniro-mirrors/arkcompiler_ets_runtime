@@ -55,6 +55,9 @@ void JitPassManager::RunLitePasses(PassRunner<PassData>& pipeline)
     pipeline.RunPass<NTypeBytecodeLoweringPass>();
     pipeline.RunPass<EarlyEliminationPass>();
     pipeline.RunPass<NumberSpeculativePass>();
+#ifdef CONTROLFLOW_OPTIMIZATION
+    pipeline.RunPass<ControlFlowOptimizationPass>();
+#endif
     if (!compilationEnv_->GetJSOptions().IsEnableJitFastCompile()) {
         pipeline.RunPass<ValueNumberingPass>();
     }
@@ -65,6 +68,9 @@ void JitPassManager::RunLitePasses(PassRunner<PassData>& pipeline)
     pipeline.RunPass<LaterEliminationPass>();
     pipeline.RunPass<LCRLoweringPass>();
     pipeline.RunPass<ConstantFoldingPass>();
+#ifdef ENABLE_BRANCH_ELIMINATION
+    pipeline.RunPass<BranchEliminationPass>();
+#endif
     pipeline.RunPass<SlowPathLoweringPass>();
     pipeline.RunPass<GraphLinearizerPass>(!g_isEnableCMCGC);
 }
@@ -96,6 +102,9 @@ void JitPassManager::RunFullPasses(PassRunner<PassData>& pipeline)
     pipeline.RunPass<NumberSpeculativePass>();
     pipeline.RunPass<UselessGateEliminationPass>();
     pipeline.RunPass<LaterEliminationPass>();
+#ifdef CONTROLFLOW_OPTIMIZATION
+    pipeline.RunPass<ControlFlowOptimizationPass>();
+#endif
     if (!compilationEnv_->GetJSOptions().IsEnableJitFastCompile()) {
         pipeline.RunPass<ValueNumberingPass>();
     }
@@ -110,6 +119,9 @@ void JitPassManager::RunFullPasses(PassRunner<PassData>& pipeline)
     pipeline.RunPass<LCRLoweringPass>();
     pipeline.RunPass<UselessGateEliminationPass>();
     pipeline.RunPass<ConstantFoldingPass>();
+#ifdef ENABLE_BRANCH_ELIMINATION
+    pipeline.RunPass<BranchEliminationPass>();
+#endif
     if (!compilationEnv_->GetJSOptions().IsEnableJitFastCompile()) {
         pipeline.RunPass<ValueNumberingPass>();
     }
@@ -341,6 +353,7 @@ bool PassManager::Compile(JSPandaFile *jsPandaFile, const std::string &fileName,
             LOG_COMPILER(INFO) << "\033[34m" << "aot method [" << fullName
                                << "] recordName [" << recordName << "] log:" << "\033[0m";
         }
+        // std::cout << "now method name:" << fullName << std::endl;
 
         Circuit circuit(compilationEnv_->GetNativeAreaAllocator(), ctx.GetAOTModule()->GetDebugInfo(),
                         fullName.c_str(), cmpCfg->Is64Bit(), FrameType::OPTIMIZED_JS_FUNCTION_FRAME);
@@ -385,6 +398,9 @@ bool PassManager::Compile(JSPandaFile *jsPandaFile, const std::string &fileName,
         pipeline.RunPass<NumberSpeculativePass>();
         pipeline.RunPass<UselessGateEliminationPass>();
         pipeline.RunPass<LaterEliminationPass>();
+#ifdef CONTROLFLOW_OPTIMIZATION
+        pipeline.RunPass<ControlFlowOptimizationPass>();
+#endif
         pipeline.RunPass<ValueNumberingPass>();
         pipeline.RunPass<StateSplitLinearizerPass>();
         pipeline.RunPass<EscapeAnalysisPass>();
@@ -397,6 +413,12 @@ bool PassManager::Compile(JSPandaFile *jsPandaFile, const std::string &fileName,
         pipeline.RunPass<LCRLoweringPass>();
         pipeline.RunPass<UselessGateEliminationPass>();
         pipeline.RunPass<ConstantFoldingPass>();
+#ifdef ENABLE_BRANCH_ELIMINATION
+        pipeline.RunPass<BranchEliminationPass>();
+#endif
+#ifdef ENABLE_BRANCH_PROFILE
+        pipeline.RunPass<BranchProfilePass>();
+#endif
         pipeline.RunPass<ValueNumberingPass>();
         pipeline.RunPass<SlowPathLoweringPass>();
         pipeline.RunPass<ValueNumberingPass>();

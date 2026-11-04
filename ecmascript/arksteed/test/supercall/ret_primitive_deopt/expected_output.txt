@@ -1,0 +1,4 @@
+deopt-int: true int true
+deopt-undef: true undef true
+deopt-obj: false 1 obj true
+deopt-derived: caught true function is non-constructor true

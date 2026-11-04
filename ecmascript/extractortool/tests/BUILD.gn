@@ -20,17 +20,8 @@ host_unittest_action("ExtractorToolTest") {
   module_out_path = module_output_path
 
   sources = [
-    # test file
-    "../src/extractor.cpp",
-    "../src/file_mapper.cpp",
-    "../src/file_path_utils.cpp",
-    "../src/zip_file.cpp",
-    "../src/zip_file_reader.cpp",
-    "../src/zip_file_reader_io.cpp",
-    "../src/zip_file_reader_mem.cpp",
-    "extractor_test.cpp",
+    # test files
     "source_map_test.cpp",
-    "zip_file_test.cpp",
   ]
 
   configs = [ "../../../:ecma_test_config" ]
@@ -43,6 +34,7 @@ host_unittest_action("ExtractorToolTest") {
     "icu:shared_icui18n",
     "icu:shared_icuuc",
     "zlib:libz",
+    "bounds_checking_function:libsec_shared",
   ]
   deps += hiviewdfx_deps
 }

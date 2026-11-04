@@ -16,9 +16,11 @@
 #ifndef ECMASCRIPT_MODULE_JS_MODULE_MANAGER_H
 #define ECMASCRIPT_MODULE_JS_MODULE_MANAGER_H
 
-#include "ecmascript/js_tagged_value-inl.h"
+#include "ecmascript/base/config.h"
+#include "ecmascript/js_tagged_value_wrapper-inl.h"
 #include "ecmascript/jspandafile/js_pandafile.h"
 #include "ecmascript/module/js_module_source_text.h"
+#include "ecmascript/module/module_tools.h"
 #include "ecmascript/napi/jsnapi_helper.h"
 #include "ecmascript/tagged_dictionary.h"
 #include "ecmascript/module/module_manager_map.h"
@@ -34,6 +36,7 @@ public:
     ~ModuleManager()
     {
         resolvedModules_.Clear();
+        resolvedSendableModules_.Clear();
         classLiteralConstPoolMap_.clear();
     }
 
@@ -63,7 +66,17 @@ public:
     JSHandle<JSTaggedValue> GenerateSendableFuncModule(const JSHandle<JSTaggedValue> &module);
 
     JSHandle<JSTaggedValue> TryGetImportedModule(const CString& referencing);
+    JSHandle<JSTaggedValue> TryGetPendingRemovalModule(const CString &referencing);
+    bool TryGetImportedModuleTaggedValue(const CString &referencing, JSTaggedValue &module);
+    JSHandle<JSTaggedValue> TryGetSendableModule(const CString& referencing);
     void Iterate(RootVisitor &v);
+    void ProcessPendingRemovalLocalModules(const WeakRootVisitor &visitor);
+    void BeginConcurrentRootScan();
+    uint32_t PrepareConcurrentRootScan(uint32_t maxTaskCount);
+    void ProcessConcurrentRootScan(uint32_t threadIndex, uint32_t taskCount,
+                                     const ModuleRootVisitor &visitor);
+    void ProcessConcurrentSendableRootScan(uint32_t threadIndex, const ModuleRootVisitor &visitor);
+    void FinishConcurrentRootScan();
 
     ModuleExecuteMode GetExecuteMode() const
     {
@@ -93,25 +106,41 @@ public:
         resolvedModules_.Insert(recordName, module);
     }
 
-    void NativeObjDestory()
+    inline void AddSendableModuleToCache(const CString &recordName, JSTaggedValue module)
+    {
+        resolvedSendableModules_.Emplace(recordName, module);
+    }
+
+    void NativeObjDestroy()
     {
 #if ENABLE_LATEST_OPTIMIZATION
-        resolvedModules_.ForEach([](const CString& key, GCRoot& root) {
+        resolvedModules_.ForEach([this](const CString& key, GCRoot& root) {
             ASSERT(!key.empty());
-            JSTaggedValue module = root.Read();
-            SourceTextModule::Cast(module)->DestoryLazyImportArray();
-            SourceTextModule::Cast(module)->DestoryEcmaModuleFilenameString();
-            SourceTextModule::Cast(module)->DestoryEcmaModuleRecordNameString();
+            SourceTextModule::Cast(root.Read())->DestroyModuleCNativeFields(this);
+        });
+        resolvedSendableModules_.ForEach([](const CString& key, GCRoot& root) {
+            ASSERT(!key.empty());
+            SourceTextModule::Cast(root.Read())->DestroySharedModuleCNativeFields();
+        });
+        pendingRemovalModules_.ForEach([this](const CString& key, GCRoot& root) {
+            ASSERT(!key.empty());
+            SourceTextModule::Cast(root.Read())->DestroyModuleCNativeFields(this);
         });
 #else
-        resolvedModules_.ForEach([](auto it) {
-            CString key = it->first;
-            ASSERT(!key.empty());
+        resolvedModules_.ForEach([this](auto it) {
+            ASSERT(!it->first.empty());
             GCRoot &root = it->second;
-            JSTaggedValue module = root.Read();
-            SourceTextModule::Cast(module)->DestoryLazyImportArray();
-            SourceTextModule::Cast(module)->DestoryEcmaModuleFilenameString();
-            SourceTextModule::Cast(module)->DestoryEcmaModuleRecordNameString();
+            SourceTextModule::Cast(root.Read())->DestroyModuleCNativeFields(this);
+        });
+        resolvedSendableModules_.ForEach([](auto it) {
+            ASSERT(!it->first.empty());
+            GCRoot &root = it->second;
+            SourceTextModule::Cast(root.Read())->DestroySharedModuleCNativeFields();
+        });
+        pendingRemovalModules_.ForEach([this](auto it) {
+            ASSERT(!it->first.empty());
+            GCRoot &root = it->second;
+            SourceTextModule::Cast(root.Read())->DestroyModuleCNativeFields(this);
         });
 #endif
     }
@@ -140,40 +169,106 @@ public:
     void SyncModuleExecuteMode(JSThread *thread);
 
     // fast path ldexternalmodulevar for jit
-    static bool CheckModuleValueOutterResolved(JSThread *thread, int32_t index, JSFunction *jsFunc);
+    PUBLIC_API static bool CheckModuleValueOutterResolved(JSThread *thread, int32_t index, JSFunction *jsFunc);
     static JSTaggedValue GetExternalModuleVarFastPathForJIT(JSThread *thread, int32_t index, JSFunction *jsFunc);
 
     // for ut
     void ClearResolvedModules()
     {
         resolvedModules_.Clear();
+        pendingRemovalModules_.Clear();
+    }
+
+    void ClearSendableModulesForTest()
+    {
+        resolvedSendableModules_.Clear();
     }
 
     void SetClassLiteralConstPoolMap(const CString &recordName, JSHandle<ConstantPool> constpool, uint32_t literalId);
     void ResetConstPoolLiterals(const CString &recordName);
 
+    bool EnterModuleImportScope(ModuleImportStackScope *scope);
+    void ExitModuleImportScope(ModuleImportStackScope *scope);
+
+    std::string_view GetModuleImportStackData() const
+    {
+        return moduleImportData_;
+    }
+
+    std::string GetImportStackDataForJSCrash(size_t maxSize) const
+    {
+        return ModuleTools::TruncateImportStackForJSCrash(moduleImportData_, maxSize);
+    }
+
+    std::string GetImportStackDataForCPPCrash(const CString &moduleName, size_t maxSize) const
+    {
+        return ModuleTools::TruncateImportStackForCPPCrash(moduleName, moduleImportData_, maxSize);
+    }
+
+    std::string GetModuleImportStackContent(size_t headLength) const
+    {
+        return moduleImportData_.substr(headLength);
+    }
+
+    void SetModuleImportStackContent(const std::string &content, std::string_view head)
+    {
+        moduleImportData_ = std::string(head) + content;
+    }
+
+    void InsertModuleImportStackEntry(const std::string &entry, size_t headLength)
+    {
+        moduleImportData_.insert(headLength, entry);
+    }
+
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+    const CString *AcquireModuleFilename(const CString &moduleFilename);
+
+    void ReleaseModuleFilename(const CString *moduleFilename);
+
+    size_t GetModuleFilenameStorageSizeForTest()
+    {
+        return moduleFilenameStorage_.size();
+    }
+#endif
 private:
     NO_COPY_SEMANTIC(ModuleManager);
     NO_MOVE_SEMANTIC(ModuleManager);
 
-    void RemoveModuleFromCache(const CString &recordName);
+    bool IsModuleNameInImportScope(const CString &moduleName) const;
+
+    void RemoveModuleFromCacheToPending(const CString &recordName);
+
+    bool IsPendingRemovalModule(const CString &recordName)
+    {
+        return pendingRemovalModules_.Find(recordName).has_value();
+    }
 
     void RemoveModuleNameFromList(const CString &recordName);
 
-    static constexpr uint32_t DEAULT_DICTIONART_CAPACITY = 4;
+    static constexpr uint32_t DEFAULT_DICTIONARY_CAPACITY = 4;
 
     uint32_t nextModuleAsyncEvaluatingOrdinal_{SourceTextModule::FIRST_ASYNC_EVALUATING_ORDINAL};
 
     EcmaVM *vm_ {nullptr};
 #if ENABLE_LATEST_OPTIMIZATION
     ModuleManagerMap<CString, CStringHash> resolvedModules_;
+    ModuleManagerMap<CString, CStringHash> resolvedSendableModules_;
+    ModuleManagerMap<CString, CStringHash> pendingRemovalModules_;
 #else
     ModuleManagerMap<CString> resolvedModules_;
+    ModuleManagerMap<CString> resolvedSendableModules_;
+    ModuleManagerMap<CString> pendingRemovalModules_;
 #endif
     std::atomic<ModuleExecuteMode> isExecuteBuffer_ {ModuleExecuteMode::ExecuteZipMode};
-
-    // for module deregister. <recordName <unsharedConstPoolIndex, value index>.
+    std::string moduleImportData_ {"\nModuleImportStack:"};
+    ModuleImportStackScope *moduleImportScopeTop_ {nullptr};
+    // for module deregister. <recordName <unsharedConstPoolIndex, value index>>.
     CUnorderedMap<CString, CUnorderedMap<uint32_t, std::vector<uint32_t>>> classLiteralConstPoolMap_;
+#if ENABLE_MODULE_MEMORY_OPTIMIZATION
+    // SourceTextModules share immutable filenames. References remain valid across rehash and are released when the
+    // last module using a filename is destroyed.
+    CUnorderedMap<CString, size_t, CStringHash> moduleFilenameStorage_;
+#endif
 
     friend class EcmaVM;
     friend class PatchLoader;

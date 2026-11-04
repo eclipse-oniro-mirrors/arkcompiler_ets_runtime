@@ -20,7 +20,7 @@
 
 #include "common_components/base/asan_interface.h"
 #include "ecmascript/base/aligned_struct.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/mem/free_object_list.h"
 #include "ecmascript/mem/gc_bitset.h"
 #include "ecmascript/mem/remembered_set.h"
@@ -75,7 +75,7 @@ enum RegionGCFlags {
     // If ZAP_MEM is enabled, the value of the lower 3 bits conflicts with the INVALID_VALUE.
 
     // Below flags are used for GC, and each flag has a dedicated bit starting from the 3rd bit.
-    NEVER_EVACUATE = 1 << 3,
+    FREE_LIST_IN_YOUNG = 1 << 3,
     HAS_AGE_MARK = 1 << 4,
     BELOW_AGE_MARK = 1 << 5,
     IN_COLLECT_SET = 1 << 6,
@@ -327,11 +327,13 @@ public:
 
     void SetGCFlag(RegionGCFlags flag)
     {
+        JIT_WRITE_SCOPE(jitWriteScope, InMachineCodeSpace() || InHugeMachineCodeSpace());
         packedData_.flags_.gcFlags_ |= flag;
     }
 
     void ClearGCFlag(RegionGCFlags flag)
     {
+        JIT_WRITE_SCOPE(jitWriteScope, InMachineCodeSpace() || InHugeMachineCodeSpace());
         // NOLINTNEXTLINE(hicpp-signed-bitwise)
         packedData_.flags_.gcFlags_ &= ~flag;
     }
@@ -355,7 +357,10 @@ public:
     bool Test(void *addr) const;
     bool Test(uintptr_t addr) const;
     // ONLY used for heap verification.
+    template <ReferenceType refType>
     bool TestOldToNew(uintptr_t addr);
+    // ONLY used for heap verification.
+    template <ReferenceType refType>
     bool TestLocalToShare(uintptr_t addr);
     template <typename Visitor>
     void IterateAllMarkedBits(Visitor &&visitor) const;
@@ -363,20 +368,25 @@ public:
     // local to share remembered set
     bool HasLocalToShareRememberedSet() const;
     RememberedSet *CollectLocalToShareRSet();
+    CompressedRememberedSet *CollectCompressedLocalToShareRSet();
+    template <ReferenceType refType>
     void InsertLocalToShareRSet(uintptr_t addr);
+    template <ReferenceType refType>
     void InsertSweepingLocalToShareRSetForCC(uintptr_t addr);
-    template<RegionSpaceKind kind>
+    template <RegionSpaceKind kind>
     Updater<kind> GetBatchRSetUpdater(uintptr_t addr);
+    template <ReferenceType refType>
     void AtomicInsertLocalToShareRSet(uintptr_t addr);
     void ClearLocalToShareRSetInRange(uintptr_t start, uintptr_t end);
-    void AtomicClearLocalToShareRSetInRange(uintptr_t start, uintptr_t end);
     void AtomicClearSweepingLocalToShareRSetInRange(uintptr_t start, uintptr_t end);
     template <typename Visitor>
     void IterateAllLocalToShareBits(Visitor &&visitor);
     void DeleteLocalToShareRSet();
     void DeleteSweepingLocalToShareRSet();
     // Cross region remembered set
+    template <ReferenceType refType>
     void InsertCrossRegionRSet(uintptr_t addr);
+    template <ReferenceType refType>
     void AtomicInsertCrossRegionRSet(uintptr_t addr);
     template <typename Visitor>
     void IterateAllCrossRegionBits(Visitor &&visitor) const;
@@ -385,8 +395,8 @@ public:
     void AtomicClearCrossRegionRSetInRange(uintptr_t start, uintptr_t end);
     void DeleteCrossRegionRSet();
     // Old to new remembered set
+    template <ReferenceType refType>
     void InsertOldToNewRSet(uintptr_t addr);
-    void ClearOldToNewRSet(uintptr_t addr);
 
     template <typename Visitor>
     void IterateAllOldToNewBits(Visitor &&visitor);
@@ -395,12 +405,11 @@ public:
     void DeleteOldToNewRSet();
 
     void AtomicClearSweepingOldToNewRSetInRange(uintptr_t start, uintptr_t end);
-    void ClearSweepingOldToNewRSetInRange(uintptr_t start, uintptr_t end);
     void DeleteSweepingOldToNewRSet();
     template <typename Visitor>
-    void AtomicIterateAllSweepingRSetBits(Visitor &&visitor);
+    void AtomicIterateAllSweepingOldToNewRSetBits(Visitor &&visitor);
     template <typename Visitor>
-    void IterateAllSweepingRSetBits(Visitor &&visitor);
+    void IterateAllSweepingOldToNewRSetBits(Visitor &&visitor);
 
     static Region *ObjectAddressToRange(BaseObject *obj)
     {
@@ -566,6 +575,11 @@ public:
         return space >= RegionSpaceFlag::HEAP_SPACE_BEGIN && space <= RegionSpaceFlag::HEAP_SPACE_END;
     }
 
+    bool IsFreeListInYoung() const
+    {
+        return IsGCFlagSet(RegionGCFlags::FREE_LIST_IN_YOUNG);
+    }
+
     bool InCollectSet() const
     {
         return IsGCFlagSet(RegionGCFlags::IN_COLLECT_SET);
@@ -625,6 +639,7 @@ public:
 
     void SetRegionTypeFlag(RegionTypeFlag typeFlag)
     {
+        JIT_WRITE_SCOPE(jitWriteScope, InMachineCodeSpace() || InHugeMachineCodeSpace());
         packedData_.typeFlag_ = typeFlag;
     }
 
@@ -670,6 +685,16 @@ public:
         ClearGCFlag(RegionGCFlags::IN_INACTIVE_SEMI_SPACE);
     }
 
+    RememberedSet *GetCrossRegionRememberedSet()
+    {
+        return crossRegionSet_;
+    }
+
+    CompressedRememberedSet *GetCompressedCrossRegionRememberedSet()
+    {
+        return compressedCrossRegionSet_;
+    }
+
     void SetSwept()
     {
         SetGCFlag(RegionGCFlags::HAS_BEEN_SWEPT);
@@ -698,6 +723,7 @@ public:
 
     void SetHighWaterMark(uintptr_t mark)
     {
+        JIT_WRITE_SCOPE(jitWriteScope, InMachineCodeSpace() || InHugeMachineCodeSpace());
         ASSERT(InRange(mark));
         highWaterMark_ = mark;
     }
@@ -715,21 +741,13 @@ public:
 
     void IncreaseAliveObject(size_t size)
     {
+        JIT_WRITE_SCOPE(jitWriteScope, InMachineCodeSpace() || InHugeMachineCodeSpace());
         aliveObject_.fetch_add(size, std::memory_order_relaxed);
-    }
-
-    void SetGCAliveSize()
-    {
-        gcAliveSize_ = AliveObject();
-    }
-
-    size_t GetGCAliveSize() const
-    {
-        return gcAliveSize_;
     }
 
     void ResetAliveObject()
     {
+        JIT_WRITE_SCOPE(jitWriteScope, InMachineCodeSpace() || InHugeMachineCodeSpace());
         aliveObject_ = 0;
     }
 
@@ -741,6 +759,26 @@ public:
     bool MostObjectAlive() const
     {
         return aliveObject_ > MOST_OBJECT_ALIVE_THRESHOLD_PERCENT * GetSize();
+    }
+
+    void SetGCAliveSize()
+    {
+        gcAliveSize_ = AliveObject();
+    }
+
+    void IncreaseGCAliveSize(size_t size)
+    {
+        gcAliveSize_ += size;
+    }
+
+    void ResetGCAliveSize()
+    {
+        gcAliveSize_ = 0;
+    }
+
+    size_t GetGCAliveSize() const
+    {
+        return gcAliveSize_;
     }
 
     bool BelowCompressThreasholdAlive() const
@@ -780,6 +818,10 @@ public:
         if (sweepingOldToNewRSet_ != nullptr) {
             SetRSetSwapFlag(RSetSwapFlag::OLD_TO_NEW_SWAPPED_MASK);
         }
+
+        compressedSweepingOldToNewRSet_ = packedData_.compressedOldToNewSet_;
+        packedData_.compressedOldToNewSet_ = nullptr;
+        // const pool do not support copy, so do not need support for batch barrier
     }
 
     void SwapLocalToShareRSetForCS()
@@ -789,6 +831,10 @@ public:
         if (sweepingLocalToShareRSet_ != nullptr) {
             SetRSetSwapFlag(RSetSwapFlag::LOCAL_TO_SHARE_SWAPPED_MASK);
         }
+
+        compressedSweepingLocalToShareRSet_ = packedData_.compressedLocalToShareSet_;
+        packedData_.compressedLocalToShareSet_ = nullptr;
+        // const pool do not support copy, so do not need support for batch barrier
     }
 
     // should call in js-thread
@@ -796,7 +842,8 @@ public:
     void MergeLocalToShareRSetForCS();
 
     // should call in daemon-thread, or in js-thread in RUNNING state
-    void MergeLocalToShareRSetForCM(RememberedSet *set);
+    template <ReferenceType refType>
+    void MergeLocalToShareRSetForCM(RememberedSetBase<refType> *set);
 
     struct alignas(JSTaggedValue::TaggedTypeSize()) PackedPtr : public base::AlignedPointer {
         uint8_t spaceFlag_;
@@ -804,6 +851,8 @@ public:
     };
 
     struct PackedData : public base::AlignedStruct<JSTaggedValue::TaggedTypeSize(),
+                                                 base::AlignedPointer,
+                                                 base::AlignedPointer,
                                                  base::AlignedPointer,
                                                  base::AlignedPointer,
                                                  base::AlignedPointer,
@@ -818,7 +867,9 @@ public:
             TypeFlagIndex,
             MarkGCBitSetIndex,
             OldToNewSetIndex,
+            CompressedOldToNewSetIndex,
             LocalToShareSetIndex,
+            CompressedLocalToShareSetIndex,
             BeginIndex,
             BitSetSizeIndex,
             RSetSwapFlagIndex,
@@ -877,9 +928,19 @@ public:
             return GetOffset<static_cast<size_t>(Index::OldToNewSetIndex)>(isArch32);
         }
 
+        static size_t GetCompressedOldToNewSetOffset(bool isArch32)
+        {
+            return GetOffset<static_cast<size_t>(Index::CompressedOldToNewSetIndex)>(isArch32);
+        }
+
         static size_t GetLocalToShareSetOffset(bool isArch32)
         {
             return GetOffset<static_cast<size_t>(Index::LocalToShareSetIndex)>(isArch32);
+        }
+
+        static size_t GetCompressedLocalToShareSetOffset(bool isArch32)
+        {
+            return GetOffset<static_cast<size_t>(Index::CompressedLocalToShareSetIndex)>(isArch32);
         }
 
         static size_t GetBeginOffset(bool isArch32)
@@ -904,7 +965,9 @@ public:
         alignas(EAS) RegionTypeFlag typeFlag_;
         alignas(EAS) GCBitset *markGCBitset_ {nullptr};
         alignas(EAS) RememberedSet *oldToNewSet_ {nullptr};
+        alignas(EAS) CompressedRememberedSet *compressedOldToNewSet_ {nullptr};
         alignas(EAS) RememberedSet *localToShareSet_ {nullptr};
+        alignas(EAS) CompressedRememberedSet *compressedLocalToShareSet_ {nullptr};
         alignas(EAS) uintptr_t begin_ {0};
         alignas(EAS) size_t bitsetSize_ {0};
         // RSetSwapFlag_ represents if the oldToNewSet_ and localToShareSet_ are swapped, when they are swapped,
@@ -921,12 +984,23 @@ protected:
     static constexpr double COMPRESS_THREASHOLD_PERCENT = 0.1;
 
     RememberedSet *CreateRememberedSet();
+    CompressedRememberedSet *CreateCompressedRememberedSet();
     RememberedSet *GetOrCreateCrossRegionRememberedSet();
+    CompressedRememberedSet *GetOrCreateCompressedCrossRegionRememberedSet();
     RememberedSet *GetOrCreateOldToNewRememberedSet();
+    CompressedRememberedSet *GetOrCreateCompressedOldToNewRememberedSet();
     RememberedSet *GetOrCreateLocalToShareRememberedSet();
+    CompressedRememberedSet *GetOrCreateCompressedLocalToShareRememberedSet();
 
     inline RememberedSet *CreateOldToNewRememberedSet();
+    inline CompressedRememberedSet *CreateCompressedOldToNewRememberedSet();
     inline RememberedSet *CreateLocalToShareRememberedSet();
+    inline CompressedRememberedSet *CreateCompressedLocalToShareRememberedSet();
+
+    void DeleteSweepingLocalToShareRSetImpl();
+    void DeleteCompressedSweepingLocalToShareRSetImpl();
+    void DeleteSweepingOldToNewRSetImpl();
+    void DeleteCompressedSweepingOldToNewRSetImpl();
 
     PackedData packedData_;
     NativeAreaAllocator *nativeAreaAllocator_;
@@ -940,8 +1014,11 @@ protected:
     Region *prev_ {nullptr};
 
     RememberedSet *crossRegionSet_ {nullptr};
+    CompressedRememberedSet *compressedCrossRegionSet_ {nullptr};
     RememberedSet *sweepingOldToNewRSet_ {nullptr};
+    CompressedRememberedSet *compressedSweepingOldToNewRSet_ {nullptr};
     RememberedSet *sweepingLocalToShareRSet_ {nullptr};
+    CompressedRememberedSet *compressedSweepingLocalToShareRSet_ {nullptr};
     Mutex *lock_ {nullptr};
     uint64_t wasted_;
     // snapshotdata_ is used to encode the region for snapshot. Its upper 32 bits are used to store the size of
@@ -953,6 +1030,7 @@ protected:
     friend class RuntimeStubs;
     friend class ToSpace;
     friend class SlotSpace;
+    friend class SpecializedSlotSpace;
 };
 
 class BumpPointerFreeListWrapper {
@@ -1050,7 +1128,8 @@ public:
         return static_cast<DerivedRegion *>(region);
     }
 
-    template <typename = std::enable_if<freeListType == FreeListType::SLOT_FREE_LIST>>
+    template <typename Dummy = void,
+              typename = std::enable_if_t<freeListType == FreeListType::SLOT_FREE_LIST, Dummy>>
     static size_t GetAllocatableEnd(FreeListBasedRegion<FreeListType::SLOT_FREE_LIST> *cmsRegion, size_t slotSize)
     {
         ASSERT(cmsRegion->GetFreeListType() == FreeListType::SLOT_FREE_LIST);
@@ -1059,7 +1138,8 @@ public:
         return cmsRegion->GetBegin() + allocatableSize;
     }
 
-    template <typename = std::enable_if<freeListType == FreeListType::BUMP_POINTER_FREE_LIST>>
+    template <typename Dummy = void,
+              typename = std::enable_if_t<freeListType == FreeListType::BUMP_POINTER_FREE_LIST, Dummy>>
     FreeListBasedRegion(NativeAreaAllocator *allocator, uintptr_t allocateBase, uintptr_t begin, uintptr_t end,
                         RegionSpaceFlag spaceType, RegionTypeFlag typeFlag)
         : Region(allocator, allocateBase, begin, end, spaceType, typeFlag, freeListType),
@@ -1070,7 +1150,8 @@ public:
         }
     }
 
-    template <typename = std::enable_if<freeListType == FreeListType::SLOT_FREE_LIST>>
+    template <typename Dummy = void,
+              typename = std::enable_if_t<freeListType == FreeListType::SLOT_FREE_LIST, Dummy>>
     FreeListBasedRegion(NativeAreaAllocator *allocator, uintptr_t allocateBase, uintptr_t begin, uintptr_t end,
                         RegionSpaceFlag spaceType, RegionTypeFlag typeFlag, size_t slotSize)
         : Region(allocator, allocateBase, begin, end, spaceType, typeFlag, freeListType),

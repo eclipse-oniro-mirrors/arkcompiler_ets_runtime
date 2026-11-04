@@ -81,6 +81,12 @@ enum ArkProperties {
     ENABLE_RAWHEAP_CROP = 1ULL << 31,
     DISABLE_BOOT_SNAPSHOT_ESCAPE = 1ULL << 32,
     DISABLE_STRING_TABLE_CONCURRENT_SWEEP = 1ULL << 33,
+    ENABLE_RUNTIME_MODULE_STACK = 1ULL << 34,
+    ENABLE_HANDLE_LEAK_LOG_OUTPUT = 1ULL << 35,
+    DISABLE_CONSTPOOL_SNAPSHOT = 1ULL << 36,
+    ENABLE_SNAPSHOT_STATS = 1ULL << 37,
+    ENABLE_MODULE_DEPENDENCY_LOG = 1ULL << 38,
+    ENABLE_HANDLE_SCOPE_CHECK = 1ULL << 39,
 };
 
 enum ArkTSMode {
@@ -91,8 +97,6 @@ enum ArkTSMode {
 
 // asm interpreter control parsed option
 struct AsmInterParsedOption {
-    int handleStart {-1};
-    int handleEnd {-1};
     bool enableAsm {false};
 };
 
@@ -106,6 +110,7 @@ enum CommandValues {
     OPTION_HELP,
     OPTION_ENABLE_ARK_TOOLS,
     OPTION_STUB_FILE,
+    OPTION_STUB_ORDERING_FILE,
     OPTION_ENABLE_FORCE_GC,
     OPTION_ENABLE_CMC_GC,
     OPTION_ENABLE_CMC_GC_CONCURRENT_ROOT_MARKING,
@@ -122,7 +127,6 @@ enum CommandValues {
     OPTION_MAX_UNMOVABLE_SPACE,
     OPTION_ENABLE_ASM_INTERPRETER,
     OPTION_ENABLE_BUILTINS_LAZY,
-    OPTION_ASM_OPCODE_DISABLE_RANGE,
     OPTION_SERIALIZER_BUFFER_SIZE_LIMIT,
     OPTION_HEAP_SIZE_LIMIT,
     OPTION_ENABLE_IC,
@@ -130,6 +134,16 @@ enum CommandValues {
     OPTION_STARTUP_TIME,
     OPTION_COMPILER_LOG_OPT,
     OPTION_COMPILER_LOG_METHODS,
+    OPTION_COMPILER_ARKSTEED_PRINT_GRAPH,
+    OPTION_COMPILER_ARKSTEED_PRINT_METHOD_NAME,
+    OPTION_COMPILER_ARKSTEED_ENABLE_CODE_COMMENT,
+    OPTION_COMPILER_ARKSTEED_PRINT_CODE,
+    OPTION_COMPILER_ARKSTEED_PRINT_WITH_COLORS,
+    OPTION_COMPILER_ARKSTEED_REUSE_STACK_SLOTS,
+    OPTION_COMPILER_ARKSTEED_DEOPT_ON_INSUFFICIENT_PROFILE,
+    OPTION_COMPILER_ARKSTEED_SOURCE_POSITION_TABLE,
+    OPTION_COMPILER_ARKSTEED_PASS_TRACE,
+    OPTION_COMPILER_ARKSTEED_PASS_TRACE_METHODS,
     OPTION_COMPILER_TYPE_THRESHOLD,
     OPTION_ENABLE_RUNTIME_STAT,
     OPTION_COMPILER_LOG_SNAPSHOT,
@@ -207,6 +221,7 @@ enum CommandValues {
     OPTION_COMPILER_ENABLE_OSR,
     OPTION_COMPILER_JIT_HOTNESS_THRESHOLD,
     OPTION_COMPILER_JIT_CALL_THRESHOLD,
+    OPTION_COMPILER_JIT_IC_FEEDBACK_THRESHOLD,
     OPTION_COMPILER_OSR_HOTNESS_THRESHOLD,
     OPTION_COMPILER_FORCE_JIT_COMPILE_MAIN,
     OPTION_COMPILER_TRACE_JIT,
@@ -261,15 +276,35 @@ enum CommandValues {
     OPTION_COMPILER_ENABLE_JIT_LAZY_DEOPT,
     OPTION_COMPILER_ENABLE_LAZY_DEOPT_TRACE,
     OPTION_ENABLE_LOADING_STUBS_LOG,
+#ifdef CONTROLFLOW_OPTIMIZATION
+    OPTION_COMPILER_OPT_CONTROLFLOW_OPT,
+#endif
     OPTION_COMPILER_JIT_METHOD_DICHOTOMY,
     OPTION_COMPILER_JIT_METHOD_PATH,
     OPTION_COMPILER_ENABLE_MERGE_POLY,
     OPTION_MEM_CONFIG,
     OPTION_MULTI_CONTEXT,
     OPTION_PGO_NAPI,
+#ifdef ENABLE_BRANCH_ELIMINATION
+    OPTION_ENABLE_BRANCH_ELIMINATION,
+#endif
+    OPTION_ENABLE_BRE_PROFILE,
+
+    // .an file descriptor passed from compiler_service via Binder
+    OPTION_AN_FD,
+
+    // .hap file descriptor passed from compiler_service via Binder
+    OPTION_HAP_FD,
+
+    OPTION_COMPILER_JIT_BACKEND,
 
     // OPTION_LAST should at the last
     OPTION_LAST,
+};
+
+enum class JitBackend : uint8_t {
+    ARKSTEED,
+    FASTJIT,
 };
 
 class PUBLIC_API JSRuntimeOptions {
@@ -372,6 +407,16 @@ public:
         stubFile_ = std::move(value);
     }
 
+    std::string GetStubOrderingFile() const
+    {
+        return stubOrderingFile_;
+    }
+
+    void SetStubOrderingFile(std::string value)
+    {
+        stubOrderingFile_ = std::move(value);
+    }
+
     void SetCompilerPkgJsonInfo(std::string pkgJsonInfo)
     {
         compilerPkgInfo_ = std::move(pkgJsonInfo);
@@ -380,6 +425,26 @@ public:
     const std::string& GetCompilerPkgJsonInfo() const
     {
         return compilerPkgInfo_;
+    }
+
+    void SetAnFd(int fd)
+    {
+        anFd_ = fd;
+    }
+
+    int GetAnFd() const
+    {
+        return anFd_;
+    }
+
+    void SetHapFd(int fd)
+    {
+        hapFd_ = fd;
+    }
+
+    int GetHapFd() const
+    {
+        return hapFd_;
     }
 
     void SetCompilerExternalPkgJsonInfo(std::string pkgJsonInfo)
@@ -405,6 +470,11 @@ public:
     bool WasStubFileSet() const
     {
         return WasOptionSet(OPTION_STUB_FILE);
+    }
+
+    bool WasStubOrderingFileSet() const
+    {
+        return WasOptionSet(OPTION_STUB_ORDERING_FILE);
     }
 
     void SetEnableAOT(bool value)
@@ -527,7 +597,7 @@ public:
         return longPauseTime_;
     }
 
-    void SetArkProperties(int prop)
+    void SetArkProperties(int64_t prop)
     {
         if (prop != ArkProperties::DEFAULT) {
             arkProperties_ = prop;
@@ -554,7 +624,7 @@ public:
                ArkProperties::ENABLE_ARKTOOLS | ArkProperties::ENABLE_IDLE_GC;
     }
 
-    int GetArkProperties()
+    int64_t GetArkProperties()
     {
         return arkProperties_;
     }
@@ -613,6 +683,11 @@ public:
     bool EnableRuntimeAsyncStack() const
     {
         return (static_cast<uint64_t>(arkProperties_) & ArkProperties::ENABLE_RUNTIME_ASYNC_STACK) != 0;
+    }
+
+    bool EnableModuleImportStack() const
+    {
+        return (static_cast<uint64_t>(arkProperties_) & ArkProperties::ENABLE_RUNTIME_MODULE_STACK) != 0;
     }
 
     bool EnableExceptionBacktrace() const
@@ -709,6 +784,11 @@ public:
         return enableHeapVerify_ && (static_cast<uint64_t>(arkProperties_) & ArkProperties::ENABLE_HEAP_VERIFY) != 0;
     }
 
+    bool EnableHandleScopeCheck() const
+    {
+        return (static_cast<uint64_t>(arkProperties_) & ArkProperties::ENABLE_HANDLE_SCOPE_CHECK) != 0;
+    }
+
     bool EnableMicroJobTrace() const
     {
         return (static_cast<uint64_t>(arkProperties_) & ArkProperties::ENABLE_MICROJOB_TRACE) != 0;
@@ -722,6 +802,11 @@ public:
     bool EnableModuleLog() const
     {
         return (static_cast<uint64_t>(arkProperties_) & ArkProperties::ENABLE_MODULE_LOG) != 0;
+    }
+
+    bool EnableModuleDependencyLog() const
+    {
+        return (static_cast<uint64_t>(arkProperties_) & ArkProperties::ENABLE_MODULE_DEPENDENCY_LOG) != 0;
     }
 
     bool EnableSerializationTimeoutCheck() const
@@ -754,6 +839,11 @@ public:
         return (static_cast<uint64_t>(arkProperties_) & ArkProperties::DISABLE_JSPANDAFILE_MODULE_SNAPSHOT) != 0;
     }
 
+    bool IsSnapshotStatsEnabled() const
+    {
+        return (static_cast<uint64_t>(arkProperties_) & ArkProperties::ENABLE_SNAPSHOT_STATS) != 0;
+    }
+
     bool IsBootSnapshotEscapeDisabled() const
     {
         return (static_cast<uint64_t>(arkProperties_) & ArkProperties::DISABLE_BOOT_SNAPSHOT_ESCAPE) != 0;
@@ -762,6 +852,16 @@ public:
     bool EnableStringTableConcurrentSweep() const
     {
         return (static_cast<uint64_t>(arkProperties_) & ArkProperties::DISABLE_STRING_TABLE_CONCURRENT_SWEEP) == 0;
+    }
+
+    bool EnableHandleLeakLogOutput() const
+    {
+        return (static_cast<uint64_t>(arkProperties_) & ArkProperties::ENABLE_HANDLE_LEAK_LOG_OUTPUT) != 0;
+    }
+
+    bool EnableConstPoolSnapshot() const
+    {
+        return (static_cast<uint64_t>(arkProperties_) & ArkProperties::DISABLE_CONSTPOOL_SNAPSHOT) == 0;
     }
 
     bool WasSetMaxNonmovableSpaceCapacity() const
@@ -797,11 +897,6 @@ public:
     bool GetEnableBuiltinsLazy() const
     {
         return enableBuiltinsLazy_;
-    }
-
-    void SetAsmOpcodeDisableRange(std::string value)
-    {
-        asmOpcodeDisableRange_ = std::move(value);
     }
 
     void SetDisableCodeSign(bool value)
@@ -882,6 +977,106 @@ public:
                GetCompilerLogOption().find("all") == std::string::npos;
     }
 
+    void SetCompilerArkSteedPrintGraph(bool value)
+    {
+        compilerArkSteedPrintGraph_ = value;
+    }
+
+    bool GetCompilerArkSteedPrintGraph() const
+    {
+        return compilerArkSteedPrintGraph_;
+    }
+
+    void SetCompilerArkSteedPrintMethodName(bool value)
+    {
+        compilerArkSteedPrintMethodName_ = value;
+    }
+
+    bool GetCompilerArkSteedPrintMethodName() const
+    {
+        return compilerArkSteedPrintMethodName_;
+    }
+
+    void SetCompilerArkSteedEnableCodeComment(bool value)
+    {
+        compilerArkSteedEnableCodeComment_ = value;
+    }
+
+    bool GetCompilerArkSteedEnableCodeComment() const
+    {
+        return compilerArkSteedEnableCodeComment_;
+    }
+
+    void SetCompilerArkSteedPrintCode(bool value)
+    {
+        compilerArkSteedPrintCode_ = value;
+    }
+
+    bool GetCompilerArkSteedPrintCode() const
+    {
+        return compilerArkSteedPrintCode_;
+    }
+
+    void SetCompilerArkSteedPrintWithColors(bool value)
+    {
+        compilerArkSteedPrintWithColors_ = value;
+    }
+
+    bool GetCompilerArkSteedPrintWithColors() const
+    {
+        return compilerArkSteedPrintWithColors_;
+    }
+
+    void SetCompilerArkSteedReuseStackSlots(bool value)
+    {
+        compilerArkSteedReuseStackSlots_ = value;
+    }
+
+    bool GetCompilerArkSteedReuseStackSlots() const
+    {
+        return compilerArkSteedReuseStackSlots_;
+    }
+
+    void SetCompilerArkSteedDeoptOnInsufficientProfile(bool value)
+    {
+        compilerArkSteedDeoptOnInsufficientProfile_ = value;
+    }
+
+    bool GetCompilerArkSteedDeoptOnInsufficientProfile() const
+    {
+        return compilerArkSteedDeoptOnInsufficientProfile_;
+    }
+
+    void SetCompilerArkSteedSourcePositionTable(bool value)
+    {
+        compilerArkSteedSourcePositionTable_ = value;
+    }
+
+    bool GetCompilerArkSteedSourcePositionTable() const
+    {
+        return compilerArkSteedSourcePositionTable_;
+    }
+
+    void SetCompilerArkSteedPassTrace(bool value)
+    {
+        compilerArkSteedPassTrace_ = value;
+    }
+
+    bool GetCompilerArkSteedPassTrace() const
+    {
+        return compilerArkSteedPassTrace_;
+    }
+
+    void SetCompilerArkSteedPassTraceMethods(std::string value)
+    {
+        compilerArkSteedPassTraceMethods_ = std::move(value);
+    }
+
+    std::string GetCompilerArkSteedPassTraceMethods() const
+    {
+        return compilerArkSteedPassTraceMethods_;
+    }
+
     void SetCompilerLogSnapshot(bool value)
     {
         compilerLogSnapshot_ = value;
@@ -941,6 +1136,20 @@ public:
     {
         return isRestrictedWorker_;
     }
+
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+    // True for the form (card) thread: pkg-context accessors demux to thread-local storage
+    // instead of the process-level Runtime shared store. Set once at thread creation.
+    void SetIsFormThread(bool isFormThread)
+    {
+        isFormThread_ = isFormThread;
+    }
+
+    bool IsFormThread() const
+    {
+        return isFormThread_;
+    }
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
 
     bool EnableIC() const
     {
@@ -1337,6 +1546,16 @@ public:
         return enableFastJIT_;
     }
 
+    void SetCompilerJitBackend(JitBackend value)
+    {
+        compilerJitBackend_ = value;
+    }
+
+    JitBackend GetCompilerJitBackend() const
+    {
+        return compilerJitBackend_;
+    }
+
     void SetEnableDFXHiSysEvent(bool value)
     {
         enableDFXHiSysEvent_ = value;
@@ -1405,6 +1624,16 @@ public:
     uint16_t GetJitHotnessThreshold() const
     {
         return jitHotnessThreshold_;
+    }
+
+    void SetJitIcFeedbackThreshold(uint32_t value)
+    {
+        jitIcFeedbackThreshold_ = value;
+    }
+
+    uint32_t GetJitIcFeedbackThreshold() const
+    {
+        return jitIcFeedbackThreshold_;
     }
 
     void SetJitCallThreshold(uint16_t value)
@@ -2368,6 +2597,18 @@ public:
         return multiContext_;
     }
 
+#ifdef ENABLE_BRANCH_ELIMINATION
+    void SetEnableBranchElimination(bool value)
+    {
+        enableBranchElimination_ = value;
+    }
+
+    bool IsEnableBranchElimination() const
+    {
+        return enableBranchElimination_;
+    }
+#endif
+
     void SetDisableModuleSnapshot(bool isdisable)
     {
         disableModuleSnapshot_ = isdisable;
@@ -2404,12 +2645,55 @@ public:
         return arkTSMode_;
     }
 
+    void DisableEvacuateNonMovableSpace()
+    {
+        enableEvacuateNonMovableSpace_ = false;
+    }
+
+    bool IsEnableEvacuateNonMovableSpace() const
+    {
+        return enableEvacuateNonMovableSpace_;
+    }
+
+    // Back large hole-initialised objects with a shared, copy-on-write template
+    // instead of writing JSTaggedValue::Hole into every page. On by default;
+    bool IsEnableHoleMemory() const
+    {
+        return enableHoleMemory_;
+    }
+
+    void SetEnableHoleMemory(bool value)
+    {
+        enableHoleMemory_ = value;
+    }
+
+    void SetEnableBreProfiling(bool value)
+    {
+        enableBreProfiling_ = value;
+    }
+
+    bool IsEnableBreProfiling() const
+    {
+        return enableBreProfiling_;
+    }
+
     static bool ParseBool(const std::string &arg, bool* argBool);
     static bool ParseInt(const std::string &arg, int* argInt);
     static bool ParseUint32(const std::string &arg, uint32_t* argUInt32);
     static bool ParseUint64(const std::string &arg, uint64_t* argUInt64);
     static bool ParseDouble(const std::string &arg, double* argDouble);
 
+#ifdef CONTROLFLOW_OPTIMIZATION
+    bool IsEnableControlFlowOptimization() const
+    {
+        return enableControlFlowOptimization_;
+    }
+
+    void SetControlFlowOptimization(bool value)
+    {
+        enableControlFlowOptimization_ = value;
+    }
+#endif
 public:
     static constexpr int32_t MAX_APP_COMPILE_METHOD_SIZE = 4_KB;
 
@@ -2554,8 +2838,11 @@ private:
     bool enableArkTools_ {true};
     bool openArkTools_ {false};
     std::string stubFile_ {"stub.an"};
+    std::string stubOrderingFile_ {""};
     std::string compilerPkgInfo_ {};
     std::string compilerExternalPkgInfo_ {};
+    int anFd_ {-1};
+    int hapFd_ {-1};
     bool compilerEnableExternalPkg_ {true};
     bool enableForceGc_ {true};
     bool enableLoadingStubsLog_ {false};
@@ -2576,7 +2863,6 @@ private:
     uint32_t maxNonmovableSpaceCapacity_ {4_MB};
     bool enableAsmInterpreter_ {true};
     bool enableBuiltinsLazy_ {true};
-    std::string asmOpcodeDisableRange_ {""};
     AsmInterParsedOption asmInterParsedOption_;
     uint64_t serializerBufferSizeLimit_ {2_GB};
     bool enableIC_ {true};
@@ -2584,12 +2870,25 @@ private:
     bool startupTime_ {false};
     std::string compilerLogOpt_ {"none"};
     std::string compilerLogMethods_ {"none"};
+    bool compilerArkSteedPrintGraph_ {false};
+    bool compilerArkSteedPrintMethodName_ {false};
+    bool compilerArkSteedEnableCodeComment_ {false};
+    bool compilerArkSteedPrintCode_ {false};
+    bool compilerArkSteedPrintWithColors_ {false};
+    bool compilerArkSteedReuseStackSlots_ {true};
+    bool compilerArkSteedDeoptOnInsufficientProfile_ {true};
+    bool compilerArkSteedSourcePositionTable_ {false};
+    bool compilerArkSteedPassTrace_ {false};
+    std::string compilerArkSteedPassTraceMethods_ {""};
     bool compilerLogSnapshot_ {false};
     bool compilerLogTime_ {false};
     bool enableCompilerLogAllMethodsTime_ {false};
     bool enableRuntimeStat_ {false};
     bool isWorker_ {false};
     bool isRestrictedWorker_ {false};
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+    bool isFormThread_ {false};
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
     bool traceBc_ {false};
     std::string logLevel_ {"error"};
     arg_list_t logDebug_ {{"all"}};
@@ -2608,6 +2907,9 @@ private:
     bool enableTypeLowering_ {true};
     bool enableEarlyElimination_ {true};
     bool enableLaterElimination_ {true};
+#ifdef CONTROLFLOW_OPTIMIZATION
+    bool enableControlFlowOptimization_ {false};
+#endif
     bool enableValueNumbering_ {true};
     bool enableOptString_ {true};
     bool enableMutantArray_ {false};
@@ -2621,12 +2923,18 @@ private:
     bool enableTraceCallNum_{false};
     bool enableOptPGOType_ {true};
     bool enableFastJIT_ {false};
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    JitBackend compilerJitBackend_ {JitBackend::ARKSTEED};
+#else
+    JitBackend compilerJitBackend_ {JitBackend::FASTJIT};
+#endif
     bool enableDFXHiSysEvent_ {true};
     bool enableAPPJIT_ {false};
     bool isEnableJitDfxDump_ {false};
     bool enableOSR_ {false};
     uint16_t jitHotnessThreshold_ {2};
     uint16_t jitCallThreshold_ {1};
+    uint32_t jitIcFeedbackThreshold_ {0};
     uint16_t osrHotnessThreshold_ {2};
     bool forceJitCompileMain_ {false};
     bool enableBaselineJIT_ {false};
@@ -2681,7 +2989,7 @@ private:
     bool enableLexenvSpecialization_ {false};
     bool enableNativeInline_ {true};
     bool enableLoweringBuiltin_ {true};
-    bool enableLiteCG_ {false};
+    bool enableLiteCG_ {true};
     bool enableTypedOpProfiler_ {false};
     bool enableBranchProfiling_ {true};
     bool enablePgoSpace_ {false};
@@ -2710,7 +3018,7 @@ private:
     bool forceDump_ {true};
     bool concurrentCompile {true};
     bool aotHasException_ {false};
-    bool enableInlinePropertyOptimization_ {NEXT_OPTIMIZATION_BOOL};
+    bool enableInlinePropertyOptimization_ {true};
     bool enableLdObjValueOpt_ {true};
 #ifdef USE_CMC_GC
     bool enableCMCGC_ {true};
@@ -2721,8 +3029,12 @@ private:
     bool storeBarrierOpt_ {true};
     uint64_t CompilerAnFileMaxByteSize_ {0_MB};
     bool enableJitVerifyPass_ {true};
+    bool enableBreProfiling_ {false};
     bool enableMergePoly_ {true};
     bool multiContext_ {false};
+#ifdef ENABLE_BRANCH_ELIMINATION
+    bool enableBranchElimination_ {true};
+#endif
     std::string jitMethodDichotomy_ {"disable"};
     std::string jitMethodPath_ {"method_compiled_by_jit.cfg"};
     size_t heapSize_ = {0};
@@ -2731,6 +3043,8 @@ private:
     bool disableModuleSnapshot_ { false };
     bool enableGCTimeoutCheck_ {true};
     ArkTSMode arkTSMode_ {ArkTSMode::DYNAMIC};
+    bool enableEvacuateNonMovableSpace_ {true};
+    bool enableHoleMemory_ {true};
 };
 } // namespace panda::ecmascript
 

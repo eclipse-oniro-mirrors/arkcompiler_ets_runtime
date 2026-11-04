@@ -1,0 +1,6 @@
+warm-fast: true
+null-proto: caught true
+object-proto: caught true
+arrow-proto: caught true
+restored: true
+in-frame-catch: true

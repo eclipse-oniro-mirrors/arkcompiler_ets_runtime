@@ -1,0 +1,53 @@
+/*
+ * Copyright (c) 2026 Huawei Device Co., Ltd.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+//! COMPILE_COUNT_GE *Vec* 1
+//! EXEC_COUNT_GE *Vec* 1
+//! COMPILE_COUNT_GE *spread_constructor_2* 1
+//! EXEC_COUNT_GE *spread_constructor_2* 1
+//! DEOPT_COUNT *Deoptimize* 0
+
+//! METHOD Vec
+//! HAS CallRuntime OptCopyRestArgs
+class Vec {
+    data: number[];
+
+    constructor(...nums: number[]) {
+        this.data = nums;
+    }
+
+    sum(): number {
+        let s = 0;
+        for (let i = 0; i < this.data.length; i++) {
+            s += this.data[i];
+        }
+        return s;
+    }
+}
+
+//! METHOD spread_constructor_2
+//! HAS CallRuntime NewObjApply
+//! HAS CallRuntime StArraySpread
+//! HAS Call
+function spread_constructor_2(nums: number[]): number {
+    const v = new Vec(...nums);
+    return v.sum();
+}
+
+ArkTools.arkSteedCompileSync(Vec);
+ArkTools.arkSteedCompileSync(spread_constructor_2);
+
+
+print(spread_constructor_2([1, 2, 3, 4, 5]));

@@ -23,6 +23,7 @@
 
 namespace panda::ecmascript {
 class FullGC;
+template <bool evacuateNonMovableSpace>
 class FullGCRunner;
 class Heap;
 class Region;
@@ -45,6 +46,13 @@ public:
         LOG_GC(FATAL) << "can not call this method";
     }
 
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    virtual void MarkEmbeddedCodeRefs([[maybe_unused]] uint32_t threadId)
+    {
+        LOG_GC(FATAL) << "can not call this method";
+    }
+#endif
+
     virtual void ProcessMarkStack([[maybe_unused]] uint32_t threadId)
     {
         LOG_GC(FATAL) << "can not call this method";
@@ -55,6 +63,7 @@ protected:
     WorkManager *workManager_ {nullptr};
 
     friend class Heap;
+    template <bool evacuateNonMovableSpace>
     friend class FullGCMarkRootVisitor;
 };
 
@@ -68,11 +77,21 @@ public:
     void ProcessSnapshotRSet(uint32_t threadId);                // for non-concurrent YoungGC
     void ProcessSnapshotRSetNoMarkStack(uint32_t threadId);     // for concurrent YoungGC
 
+    void ProcessOldToNewForSticky(uint32_t threadId);                    // for non-concurrent StickyCMS
+    void ProcessOldToNewNoMarkStackForSticky(uint32_t threadId);         // for concurrent StickyCMS
+    void ProcessSnapshotRSetForSticky(uint32_t threadId);                // for non-concurrent StickyCMS
+    void ProcessSnapshotRSetNoMarkStackForSticky(uint32_t threadId);     // for concurrent StickyCMS
+
 protected:
     void ProcessMarkStack(uint32_t threadId) override;
     void MarkJitCodeMap(uint32_t threadId) override;
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    void MarkEmbeddedCodeRefs(uint32_t threadId) override;
+#endif
 private:
+    template <bool cmsGC>
     void ProcessYoungGCMarkStack(uint32_t threadId);
+    template <bool cmsGC, bool evacuateNonMovableSpace>
     void ProcessOldGCMarkStack(uint32_t threadId);
     void ProcessCMSGCMarkStack(uint32_t threadId);
     void ProcessCCGCMarkStack(uint32_t threadId);
@@ -90,10 +109,18 @@ public:
 
 protected:
     void MarkJitCodeMap(uint32_t threadId) override;
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    void MarkEmbeddedCodeRefs(uint32_t threadId) override;
+#endif
     void ProcessMarkStack(uint32_t threadId) override;
 
 private:
-    bool ProcessWeakAggregate(FullGCRunner *runner, WeakAggregate weakAggregate);
+    template <bool evacuateNonMovableSpace>
+    void ProcessMarkStackImpl(uint32_t threadId);
+    template <bool evacuateNonMovableSpace>
+    void MarkJitCodeMapImpl(uint32_t threadId);
+    template <bool evacuateNonMovableSpace>
+    bool ProcessWeakAggregate(FullGCRunner<evacuateNonMovableSpace> *runner, WeakAggregate weakAggregate);
 
     bool isAppSpawn_ {false};
     Mutex mutex_;

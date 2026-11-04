@@ -84,6 +84,13 @@ public:
 
     void Unlock();
 
+    // Signal-context variants for the CPU profiler handler: error logging is a
+    // malloc/print hazard in a signal handler, so failures are silent and the
+    // caller treats any non-zero result as contention (drop the sample).
+    bool TryReadLockNoLog();
+
+    void UnlockNoLog();
+
 private:
     pthread_rwlock_t rwlock_;
 

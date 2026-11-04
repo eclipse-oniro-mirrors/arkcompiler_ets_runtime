@@ -31,10 +31,14 @@ void JitResources::Destroy()
         createJitCompilerTask_ = nullptr;
         deleteJitCompilerTask_ = nullptr;
     }
+    libResolved_ = false;
 }
 
 bool JitResources::InitJitEnv(const JSRuntimeOptions &options)
 {
+    if (!libResolved_) {
+        return false;
+    }
     jsRuntimeOptions_ = options;
     InitCompiler();
     InitJitTaskpool();
@@ -50,12 +54,16 @@ bool JitResources::ResolveLib()
     static const std::string JITCOMPILE = "JitCompile";
     static const std::string JITFINALIZE = "JitFinalize";
     static const std::string DELETEJITCOMPILERTASK = "DeleteJitCompilerTask";
+#if defined(PANDA_TARGET_MACOS)
+    static const std::string LIBARK_JSOPTIMIZER = "libark_jsoptimizer.dylib";
+#else
     static const std::string LIBARK_JSOPTIMIZER = "libark_jsoptimizer.so";
+#endif
 
     libHandle_ = LoadLib(LIBARK_JSOPTIMIZER);
     if (libHandle_ == nullptr) {
         char *error = LoadLibError();
-        LOG_JIT(ERROR) << "jit dlopen libark_jsoptimizer.so failed, as:" <<
+        LOG_JIT(ERROR) << "jit dlopen " << LIBARK_JSOPTIMIZER << " failed, as:" <<
             ((error == nullptr) ? "unknown error" : error);
         return false;
     }
@@ -65,6 +73,7 @@ bool JitResources::ResolveLib()
         LOG_JIT(ERROR) << "jit can't find symbol initJitCompiler";
         return false;
     }
+
     jitCompile_ = reinterpret_cast<JitCompileFuncType>(FindSymbol(libHandle_, JITCOMPILE.c_str()));
     if (jitCompile_ == nullptr) {
         LOG_JIT(ERROR) << "jit can't find symbol jitCompile";

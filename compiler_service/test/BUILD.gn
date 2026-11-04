@@ -22,6 +22,7 @@ group("compiler_service_unittest") {
     "unittest/aotcompilerproxy_unit:AotCompilerProxyUnitTest",
     "unittest/aotcompilerservice_unit:AotCompilerServiceUnitTest",
     "unittest/aotcompilerstub_unit:AotCompilerStubUnitTest",
+    "unittest/securityguardreport_unit:SecurityGuardReportUnitTest",
   ]
 }
 

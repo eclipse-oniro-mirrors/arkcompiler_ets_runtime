@@ -16,8 +16,10 @@
 #ifndef ECMASCRIPT_DFX_HPROF_HEAP_PROFILER_INTERFACE_H
 #define ECMASCRIPT_DFX_HPROF_HEAP_PROFILER_INTERFACE_H
 
+#include <atomic>
 #include <functional>
 #include <memory>
+#include <unordered_map>
 #include "libpandabase/macros.h"
 
 namespace panda::ecmascript {
@@ -27,6 +29,7 @@ class Progress;
 class Stream;
 struct SamplingInfo;
 enum class DumpFormat { JSON, BINARY, OTHER };
+enum class LanguageEnv : uint8_t { DYNAMIC = 0, STATIC = 1, HYBRID = 2 };
 struct DumpSnapShotOption {
     DumpFormat dumpFormat; // dumpformat like JSON BINARY and OTHER
     bool isVmMode = true; // vmMode do more dump.
@@ -42,6 +45,12 @@ struct DumpSnapShotOption {
     bool isForSharedOOM = false;   // for shared heap oom dump
     bool isProcDump = false;  // whether need process dump
     bool isClearNodeIdCache = false;  // whether clear node id map cache after dump
+    bool dumpDynamicHeap = false;     // whether to dump dynamic (ArkTS) heap
+    bool dumpStaticHeap = false;      // whether to dump static heap
+    bool isForHybridXRef = false;     // whether dynamic node IDs are needed by a hybrid XRef dump
+    std::string spaceType = "";  // space type for raw heap dump
+    std::string heapType = "";  // heap type: local heap or shared heap
+    LanguageEnv languageEnv = LanguageEnv::DYNAMIC;  // language environment selection
 };
 
 enum class RawHeapDumpCropLevel {
@@ -60,6 +69,17 @@ public:
     static void DestroyInstance(HeapProfilerInterface *heapProfiler);
 
     static void DumpHeapSnapshotForCMCOOM(void *thread);
+
+    /**
+     * Claim the process-wide dynamic OOM dump attempt.
+     *
+     * Production code never releases this one-shot claim because cascading
+     * OOM notifications must not start another dump.
+     */
+    static bool TryStartOOMDump();
+
+    /** Reset the OOM dump claim for isolated tests. */
+    static void ResetOOMDump();
 
     HeapProfilerInterface() = default;
     virtual ~HeapProfilerInterface() = default;
@@ -83,8 +103,13 @@ public:
     virtual void StopHeapSampling() = 0;
     virtual const struct SamplingInfo *GetAllocationProfile() = 0;
 
+    virtual std::unordered_map<uintptr_t, uint64_t> GetHandleNodeIdMap() = 0;
+
     NO_MOVE_SEMANTIC(HeapProfilerInterface);
     NO_COPY_SEMANTIC(HeapProfilerInterface);
+
+private:
+    static std::atomic<bool> oomDumpActive_;
 };
 }  // namespace panda::ecmascript
 #endif  // ECMASCRIPT_DFX_HPROF_HEAP_PROFILER_INTERFACE_H

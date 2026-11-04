@@ -19,14 +19,16 @@
 
 namespace panda::ecmascript {
 
-void CMSRegionChainManager::Initialize(Heap *localHeap, size_t slotSize)
+void CMSRegionChainManager::Initialize(Heap *localHeap, size_t slotSize, Space *ownerSpace)
 {
-    ASSERT(localHeap_ == nullptr && localHeap != nullptr);
+    ASSERT(localHeap_ == nullptr && localHeap != nullptr && ownerSpace != nullptr);
     ASSERT(slotSize_ == 0);
     localHeap_ = localHeap;
+    ownerSpace_ = ownerSpace;
     slotSize_ = slotSize;
 }
 
+template <bool isSticky>
 size_t CMSRegionChainManager::Sweep(std::vector<Region *> &pendingReclaimFromRegions)
 {
     ASSERT(TryTakeSweepingRegion() == nullptr);
@@ -36,13 +38,17 @@ size_t CMSRegionChainManager::Sweep(std::vector<Region *> &pendingReclaimFromReg
     usableSlotFreeList_.clear();
     size_t survivalObjectSize = 0;
     EnumerateRegions([this, &pendingReclaimFromRegions, &survivalObjectSize](Region *region) {
+        if constexpr (isSticky) {
+            region->IncreaseAliveObject(region->GetGCAliveSize());
+        }
         size_t survivalSize = region->AliveObject();
+        region->SetGCAliveSize();
         region->ResetAliveObject();
         survivalObjectSize += survivalSize;
         if (survivalSize == 0) {
             regionList_.RemoveNode(region);
             pendingReclaimFromRegions.emplace_back(region);
-            localHeap_->GetSlotSpace()->DecreaseCommitted(region->GetCapacity());
+            ownerSpace_->DecreaseCommitted(region->GetCapacity());
         } else {
             // fixme: Full alived region do not need to sweep
             SlotFreeListMetaInfo freeList = SweepRegionImpl(region);
@@ -55,6 +61,10 @@ size_t CMSRegionChainManager::Sweep(std::vector<Region *> &pendingReclaimFromReg
     return survivalObjectSize;
 }
 
+template size_t CMSRegionChainManager::Sweep<true>(std::vector<Region *> &pendingReclaimFromRegions);
+template size_t CMSRegionChainManager::Sweep<false>(std::vector<Region *> &pendingReclaimFromRegions);
+
+template <bool isSticky>
 size_t CMSRegionChainManager::PrepareSweeping(std::vector<Region *> &pendingReclaimFromRegions)
 {
     ASSERT(TryTakeSweepingRegion() == nullptr);
@@ -66,13 +76,17 @@ size_t CMSRegionChainManager::PrepareSweeping(std::vector<Region *> &pendingRecl
     size_t survivalObjectSize = 0;
     EnumerateRegions([this, &pendingReclaimFromRegions, &survivalObjectSize](Region *region) {
         ASSERT(!region->IsGCFlagSet(RegionGCFlags::HAS_BEEN_SWEPT));
+        if constexpr (isSticky) {
+            region->IncreaseAliveObject(region->GetGCAliveSize());
+        }
         size_t survivalSize = region->AliveObject();
+        region->SetGCAliveSize();
         region->ResetAliveObject();
         survivalObjectSize += survivalSize;
         if (survivalSize == 0) {
             regionList_.RemoveNode(region);
             pendingReclaimFromRegions.emplace_back(region);
-            localHeap_->GetSlotSpace()->DecreaseCommitted(region->GetCapacity());
+            ownerSpace_->DecreaseCommitted(region->GetCapacity());
         } else {
             // fixme: Full alived region do not need to sweep
             region->SwapLocalToShareRSetForCS();
@@ -86,6 +100,9 @@ size_t CMSRegionChainManager::PrepareSweeping(std::vector<Region *> &pendingRecl
     }
     return survivalObjectSize;
 }
+
+template size_t CMSRegionChainManager::PrepareSweeping<true>(std::vector<Region *> &pendingReclaimFromRegions);
+template size_t CMSRegionChainManager::PrepareSweeping<false>(std::vector<Region *> &pendingReclaimFromRegions);
 
 void CMSRegionChainManager::ConcurrentSweep(const SweepMode sweepMode)
 {
@@ -102,7 +119,8 @@ void CMSRegionChainManager::ConcurrentSweep(const SweepMode sweepMode)
         }
     }
     if (swept > 0 && numPendingSweepingRegions_.fetch_sub(swept, std::memory_order_relaxed) == swept) {
-        localHeap_->GetSlotSpace()->AddSweptRegionChainManager(this);
+        ASSERT(sweptChainManagerCallback_ != nullptr);
+        sweptChainManagerCallback_(ownerSpace_, this);
     }
 }
 
@@ -203,6 +221,8 @@ void CMSRegionChainManager::PrepareCompact(std::vector<Region *> &pendingReclaim
     EnumerateRegions([&pendingReclaimFromRegions](Region *region) {
         pendingReclaimFromRegions.emplace_back(region);
         region->SetRegionTypeFlag(RegionTypeFlag::FROM);
+        // The survival size needs to be reset here for compact, but no need to do this for copy
+        region->ResetGCAliveSize();
     });
     regionList_.Clear();
     usableSlotFreeList_.clear();

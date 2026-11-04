@@ -19,7 +19,6 @@
 #include "assembler/assembly-emitter.h"
 #include "assembler/assembly-parser.h"
 #include "class_data_accessor-inl.h"
-
 #define private public
 #define protected public
 #include "ecmascript/jspandafile/js_pandafile.h"
@@ -39,6 +38,8 @@
 #include "ecmascript/jspandafile/program_object.h"
 #include "ecmascript/tests/test_helper.h"
 
+constexpr std::string_view TEST_ROM_VERSION = "version 205.0.1.120(SP20)";
+
 using namespace panda::ecmascript;
 using namespace panda::panda_file;
 using namespace panda::pandasm;
@@ -50,12 +51,25 @@ public:
     {
         return JSPandaFileSnapshot::WriteDataToFile(thread, jsPandaFile, path, version);
     }
+
+    static CString GetSnapshotFileName(const CString &fileName, const CString &path)
+    {
+        return JSPandaFileSnapshot::GetJSPandaFileFileName(fileName, path);
+    }
+
+    static bool ReadDataFromFile(JSThread *thread, JSPandaFile *jsPandaFile, const CString &path,
+                                 const CString &version)
+    {
+        return JSPandaFileSnapshot::ReadDataFromFile(thread, jsPandaFile, path, version);
+    }
 };
 class JSPandaFileSnapshotTest : public testing::Test {
 public:
     static void SetUpTestCase()
     {
         GTEST_LOG_(INFO) << "SetUpTestCase";
+        ModulesSnapshotHelper::g_featureState_ = static_cast<int>(SnapshotFeatureState::DEFAULT);
+        ModulesSnapshotHelper::g_featureLoaded_ = static_cast<int>(SnapshotFeatureState::DEFAULT);
     }
 
     static void TearDownTestCase()
@@ -66,14 +80,18 @@ public:
     void SetUp() override
     {
         CString path = GetSnapshotPath();
-        CString fileName = path + "entry" + JSPandaFileSnapshot::JSPANDAFILE_FILE_NAME.data();
-        if (remove(fileName.c_str()) != 0) {
-            GTEST_LOG_(ERROR) << "remove " << fileName << " failed";
-        }
+        Iterdir(path.c_str(), [&path](const std::string_view &fileName, FileType) {
+            if (fileName.find("_Pandafile.ams") == std::string_view::npos) {
+                return;
+            }
+            CString fullPath = path;
+            fullPath += fileName;
+            Unlink(fullPath.c_str());
+        });
         CString stateFilePath = path + ModulesSnapshotHelper::MODULE_SNAPSHOT_STATE_FILE_NAME.data();
         if (FileExist(stateFilePath.c_str())) {
-            if (remove(stateFilePath.c_str()) != 0) {
-                GTEST_LOG_(ERROR) << "remove '" << stateFilePath << "' failed when setup";
+            if (Unlink(stateFilePath.c_str()) != 0) {
+                GTEST_LOG_(ERROR) << "Unlink '" << stateFilePath << "' failed when setup";
             }
         }
         disabledFeature = ModulesSnapshotHelper::g_featureState_;
@@ -84,10 +102,14 @@ public:
     void TearDown() override
     {
         CString path = GetSnapshotPath();
-        CString fileName = path + "entry" + JSPandaFileSnapshot::JSPANDAFILE_FILE_NAME.data();
-        if (remove(fileName.c_str()) != 0) {
-            GTEST_LOG_(ERROR) << "remove " << fileName << " failed";
-        }
+        Iterdir(path.c_str(), [&path](const std::string_view &fileName, FileType) {
+            if (fileName.find("_Pandafile.ams") == std::string_view::npos) {
+                return;
+            }
+            CString fullPath = path;
+            fullPath += fileName;
+            Unlink(fullPath.c_str());
+        });
         ModulesSnapshotHelper::g_featureState_ = disabledFeature;
         ModulesSnapshotHelper::g_featureLoaded_ = loadedFeature;
         TestHelper::DestroyEcmaVMWithScope(instance, scope);
@@ -120,6 +142,17 @@ public:
         return pfManager->NewJSPandaFile(pfPtr.release(), CString(filename));
     }
 
+    std::shared_ptr<JSPandaFile> CreateJSPandaFile(const char *source, const CString filename)
+    {
+        Parser parser;
+        const std::string fn = "SRC.pa";
+        auto res = parser.Parse(source, fn);
+        EXPECT_EQ(parser.ShowError().err, Error::ErrorType::ERR_NONE);
+        std::unique_ptr<const File> pfPtr = pandasm::AsmEmitter::Emit(res.Value());
+        JSPandaFileManager *pfManager = JSPandaFileManager::GetInstance();
+        std::shared_ptr<JSPandaFile> pf = pfManager->NewJSPandaFile(pfPtr.release(), filename);
+        return pf;
+    }
     std::shared_ptr<JSPandaFile> NewMockJSPandaFileWithSnapshotLoad() const
     {
         Parser parser;
@@ -197,8 +230,6 @@ public:
     static std::vector<uint8_t> BuildValidRecordInfoSectionBuffer()
     {
         uint32_t numClasses = 1;
-        uint32_t numMethods = 1;
-        uint8_t isBundlePack = 0;
         uint32_t recordCount = 1;
         const char *recordName = "test";
         uint32_t recordNameLen = std::strlen(recordName);
@@ -214,7 +245,7 @@ public:
         uint32_t keyLen = std::strlen(key);
         const char *value = "value";
         uint32_t valLen = std::strlen(value);
-        constexpr size_t baseSectionSize = sizeof(numClasses) + sizeof(numMethods) + sizeof(isBundlePack);
+        constexpr size_t baseSectionSize = sizeof(numClasses);
         const size_t jsRecordInfoSize = sizeof(recordCount) + sizeof(recordNameLen) + recordNameLen + sizeof(flags) +
                                         sizeof(jsonStringId) + sizeof(moduleRecordIdx) + sizeof(lazyImportIdx) +
                                         sizeof(classId) + sizeof(pkgNameLen) + pkgNameLen;
@@ -223,8 +254,6 @@ public:
         std::vector<uint8_t> buffer(bufLen, 0);
         size_t offset = 0;
         WriteBufferData(buffer, offset, bufLen, &numClasses, sizeof(numClasses));
-        WriteBufferData(buffer, offset, bufLen, &numMethods, sizeof(numMethods));
-        WriteBufferData(buffer, offset, bufLen, &isBundlePack, sizeof(isBundlePack));
         WriteBufferData(buffer, offset, bufLen, &recordCount, sizeof(recordCount));
         WriteBufferData(buffer, offset, bufLen, &recordNameLen, sizeof(recordNameLen));
         WriteBufferData(buffer, offset, bufLen, recordName, recordNameLen);
@@ -246,7 +275,7 @@ public:
     bool ReadCorruptRecordInfoSection(size_t mappedSize, const char *sceneName) const
     {
         const std::shared_ptr<JSPandaFile> pf = NewMockJSPandaFile();
-        NormalTranslateJSPandaFile(pf);
+        pf->ResetAfterSnapshotFail();
         pf->SetBundlePack(false);
 
         std::vector<uint8_t> buffer = JSPandaFileSnapshotTest::BuildValidRecordInfoSectionBuffer();
@@ -264,6 +293,9 @@ public:
 
 HWTEST_F_L0(JSPandaFileSnapshotTest, SerializeAndDeserializeTest)
 {
+    // Reset global snapshot state: earlier tests may have triggered
+    // UpdateFromStateFile with non-existent paths, leaving featureState=disableAll.
+    ModulesSnapshotHelper::ResetStateForTest();
     // construct JSPandaFile
     CString path = GetSnapshotPath();
     CString version = "version 205.0.1.120(SP20)";
@@ -275,6 +307,7 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, SerializeAndDeserializeTest)
     // deserialize
     const std::shared_ptr<JSPandaFile> pf = NewMockJSPandaFile();
     JSPandaFile *deserializePf = pf.get();
+    deserializePf->SetBundlePack(false);
     ASSERT_TRUE(JSPandaFileSnapshot::ReadDataFromFile(thread, deserializePf, path, version));
 
     // check numMethods
@@ -310,10 +343,11 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, ShouldNotDeSerializeWhenFileIsNotExists)
     // construct JSPandaFile
     CString path = GetSnapshotPath();
     CString fileName = path + "entry" + JSPandaFileSnapshot::JSPANDAFILE_FILE_NAME.data();
+    CString version = "version 205.0.1.120(SP20)";
     const std::shared_ptr<JSPandaFile> deserializePf = NewMockJSPandaFile();
     // return false when file is not exists
     ASSERT_FALSE(FileExist(fileName.c_str()));
-    ASSERT_FALSE(JSPandaFileSnapshot::ReadData(thread, deserializePf.get(), path));
+    ASSERT_FALSE(JSPandaFileSnapshot::ReadData(thread, deserializePf.get(), path, version));
 }
 
 HWTEST_F_L0(JSPandaFileSnapshotTest, ShouldDeSerializeFailedWhenFileIsEmpty)
@@ -321,12 +355,13 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, ShouldDeSerializeFailedWhenFileIsEmpty)
     // construct JSPandaFile
     CString path = GetSnapshotPath();
     CString fileName = path + "entry" + JSPandaFileSnapshot::JSPANDAFILE_FILE_NAME.data();
+    CString version = "version 205.0.1.120(SP20)";
     const std::shared_ptr<JSPandaFile> deserializePf = NewMockJSPandaFile();
     std::ofstream ofStream(fileName.c_str());
     ofStream.close();
     // return false when file is empty
     ASSERT_TRUE(FileExist(fileName.c_str()));
-    ASSERT_FALSE(JSPandaFileSnapshot::ReadData(thread, deserializePf.get(), path));
+    ASSERT_FALSE(JSPandaFileSnapshot::ReadData(thread, deserializePf.get(), path, version));
     // check file is deleted
     ASSERT_FALSE(FileExist(fileName.c_str()));
 }
@@ -472,11 +507,15 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, ShouldDeSerializeFailedWhenModuleNameIsNotM
 
 HWTEST_F_L0(JSPandaFileSnapshotTest, WriteAndReadRecordInfoSectionWithMergedPF)
 {
+    // Reset global snapshot state: earlier tests may have triggered
+    // UpdateFromStateFile with non-existent paths, leaving featureState=disableAll.
+    ModulesSnapshotHelper::ResetStateForTest();
     // serialize
     CString path = GetSnapshotPath();
     CString version = "version 205.0.1.120(SP20)";
     const std::shared_ptr<JSPandaFile> serializePf = NewMockJSPandaFile();
     NormalTranslateJSPandaFile(serializePf);
+    bool bundlePackSave = serializePf->IsBundlePack();
     serializePf->SetBundlePack(false);
     JSRecordInfo *recordInfo = serializePf->CheckAndGetRecordInfo("func_main_0");
     if (recordInfo != nullptr) {
@@ -492,17 +531,15 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, WriteAndReadRecordInfoSectionWithMergedPF)
         {std::string_view(serializeNpmEntry.first.c_str(), serializeNpmEntry.first.size()),
          std::string_view(serializeNpmEntry.second.c_str(), serializeNpmEntry.second.size())});
     ASSERT_TRUE(MockJSPandaFileSnapshot::WriteDataToFile(thread, serializePf.get(), path, version));
+    serializePf->SetBundlePack(bundlePackSave);
 
     // deserialize
     const std::shared_ptr<JSPandaFile> deserializePf = NewMockJSPandaFile();
     deserializePf->jsRecordInfo_.clear();
     deserializePf->npmEntries_.clear();
     deserializePf->methodLiterals_ = nullptr;
-#if ENABLE_LATEST_OPTIMIZATION
+    deserializePf->SetBundlePack(false);
     deserializePf->methodLiteralMap_.Clear();
-#else
-    deserializePf->methodLiteralMap_.clear();
-#endif
     ASSERT_TRUE(JSPandaFileSnapshot::ReadDataFromFile(thread, deserializePf.get(), path, version));
 
     ASSERT_TRUE(deserializePf != nullptr);
@@ -518,7 +555,7 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, WriteAndReadRecordInfoSectionWithMergedPF)
 HWTEST_F_L0(JSPandaFileSnapshotTest, ReadRecordInfoSection)
 {
     const std::shared_ptr<JSPandaFile> pf = NewMockJSPandaFile();
-    NormalTranslateJSPandaFile(pf);
+    pf->ResetAfterSnapshotFail();
     pf->SetBundlePack(false);
 
     std::vector<uint8_t> buffer = JSPandaFileSnapshotTest::BuildValidRecordInfoSectionBuffer();
@@ -543,6 +580,7 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, WriteRecordInfoSection_EmptyPkgName)
 {
     const std::shared_ptr<JSPandaFile> pf = NewMockJSPandaFile();
     NormalTranslateJSPandaFile(pf);
+    bool bundlePackSave = pf->IsBundlePack();
     pf->SetBundlePack(false);
     JSRecordInfo *recordInfo = pf->CheckAndGetRecordInfo("func_main_0");
     ASSERT_NE(recordInfo, nullptr);
@@ -551,20 +589,18 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, WriteRecordInfoSection_EmptyPkgName)
     MemMap memMap(buffer.data(), buffer.size());
     FileMemMapWriter writer(memMap, "WriteRecordInfoSection_EmptyPkgName");
     ASSERT_TRUE(JSPandaFileRecordInfoSnapshot::WriteRecordInfoSection(thread->GetEcmaVM(), pf.get(), writer));
+    pf->SetBundlePack(bundlePackSave);
 }
 
 HWTEST_F_L0(JSPandaFileSnapshotTest, ReadRecordInfoSection_EmptyPkgNameAndZeroMethods)
 {
     std::vector<uint8_t> buffer = BuildValidRecordInfoSectionBuffer();
     constexpr uint32_t zero = 0;
-    constexpr size_t numMethodsOffset = sizeof(uint32_t);
     constexpr size_t recordNameLen = sizeof("test") - 1;
-    constexpr size_t pkgNameLenOffset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint32_t) +
+    constexpr size_t pkgNameLenOffset = sizeof(uint32_t) + sizeof(uint32_t) +
                                         sizeof(uint32_t) + recordNameLen + sizeof(uint8_t) + sizeof(uint32_t) * 4;
     buffer.resize(pkgNameLenOffset + sizeof(uint32_t) * 2);
-    size_t offset = numMethodsOffset;
-    WriteBufferData(buffer, offset, buffer.size(), &zero, sizeof(uint32_t));
-    offset = pkgNameLenOffset;
+    size_t offset = pkgNameLenOffset;
     WriteBufferData(buffer, offset, buffer.size(), &zero, sizeof(uint32_t));
     WriteBufferData(buffer, offset, buffer.size(), &zero, sizeof(uint32_t));
     const std::shared_ptr<JSPandaFile> pf = NewMockJSPandaFile();
@@ -574,11 +610,7 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, ReadRecordInfoSection_EmptyPkgNameAndZeroMe
     pf->ownedNpmEntries_.clear();
     pf->methodLiterals_ = nullptr;
     pf->numMethods_ = 0;
-#if ENABLE_LATEST_OPTIMIZATION
     pf->methodLiteralMap_.Clear();
-#else
-    pf->methodLiteralMap_.clear();
-#endif
     MemMap memMap(buffer.data(), buffer.size());
     FileMemMapReader reader(memMap, []() {}, "ReadRecordInfoSection_EmptyPkgNameAndZeroMethods");
     ASSERT_TRUE(JSPandaFileRecordInfoSnapshot::ReadRecordInfoSection(pf.get(), reader));
@@ -595,33 +627,21 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_NumClas
     ASSERT_FALSE(ReadCorruptRecordInfoSection(offset, "CorruptRecordInfo_NumClasses"));
 }
 
-HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_NumMethods)
-{
-    size_t offset = sizeof(uint32_t);
-    ASSERT_FALSE(ReadCorruptRecordInfoSection(offset, "CorruptRecordInfo_NumMethods"));
-}
-
-HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_IsBundlePack)
-{
-    size_t offset = sizeof(uint32_t) + sizeof(uint32_t);
-    ASSERT_FALSE(ReadCorruptRecordInfoSection(offset, "CorruptRecordInfo_IsBundlePack"));
-}
-
 HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_RecordCount)
 {
-    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t);
+    size_t offset = sizeof(uint32_t);
     ASSERT_FALSE(ReadCorruptRecordInfoSection(offset, "CorruptRecordInfo_RecordCount"));
 }
 
 HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_RecordNameLen)
 {
-    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint32_t);
+    size_t offset = sizeof(uint32_t) + sizeof(uint32_t);
     ASSERT_FALSE(ReadCorruptRecordInfoSection(offset, "CorruptRecordInfo_RecordNameLen"));
 }
 
 HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_RecordName)
 {
-    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t);
+    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t);
     ASSERT_FALSE(ReadCorruptRecordInfoSection(offset, "CorruptRecordInfo_RecordName"));
 }
 
@@ -629,14 +649,14 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_Flags)
 {
     size_t recordNameLen = std::strlen("test");
     size_t offset =
-        sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) + recordNameLen;
+        sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) + recordNameLen;
     ASSERT_FALSE(ReadCorruptRecordInfoSection(offset, "CorruptRecordInfo_Flags"));
 }
 
 HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_JsonStringId)
 {
     size_t recordNameLen = std::strlen("test");
-    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) +
+    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
                     recordNameLen + sizeof(uint8_t);
     ASSERT_FALSE(ReadCorruptRecordInfoSection(offset, "CorruptRecordInfo_JsonStringId"));
 }
@@ -644,7 +664,7 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_JsonStr
 HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_ModuleRecordIdx)
 {
     size_t recordNameLen = std::strlen("test");
-    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) +
+    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
                     recordNameLen + sizeof(uint8_t) + sizeof(uint32_t);
     ASSERT_FALSE(ReadCorruptRecordInfoSection(offset, "CorruptRecordInfo_ModuleRecordIdx"));
 }
@@ -652,7 +672,7 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_ModuleR
 HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_LazyImportIdx)
 {
     size_t recordNameLen = std::strlen("test");
-    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) +
+    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
                     recordNameLen + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t);
     ASSERT_FALSE(ReadCorruptRecordInfoSection(offset, "CorruptRecordInfo_LazyImportIdx"));
 }
@@ -660,7 +680,7 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_LazyImp
 HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_ClassId)
 {
     size_t recordNameLen = std::strlen("test");
-    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) +
+    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
                     recordNameLen + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t);
     ASSERT_FALSE(ReadCorruptRecordInfoSection(offset, "CorruptRecordInfo_ClassId"));
 }
@@ -668,7 +688,7 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_ClassId
 HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_PkgNameLen)
 {
     size_t recordNameLen = std::strlen("test");
-    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) +
+    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
                     recordNameLen + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
                     sizeof(uint32_t);
     ASSERT_FALSE(ReadCorruptRecordInfoSection(offset, "CorruptRecordInfo_PkgNameLen"));
@@ -677,7 +697,7 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_PkgName
 HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_PkgName)
 {
     size_t recordNameLen = std::strlen("test");
-    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) +
+    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
                     recordNameLen + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
                     sizeof(uint32_t) + sizeof(uint32_t);
     ASSERT_FALSE(ReadCorruptRecordInfoSection(offset, "CorruptRecordInfo_PkgName"));
@@ -687,7 +707,7 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_NpmCoun
 {
     size_t recordNameLen = std::strlen("test");
     size_t pkgNameLen = std::strlen("@ohos/testpkg");
-    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) +
+    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
                     recordNameLen + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
                     sizeof(uint32_t) + sizeof(uint32_t) + pkgNameLen;
     ASSERT_FALSE(ReadCorruptRecordInfoSection(offset, "CorruptRecordInfo_NpmCount"));
@@ -697,7 +717,7 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_KeyLen)
 {
     size_t recordNameLen = std::strlen("test");
     size_t pkgNameLen = std::strlen("@ohos/testpkg");
-    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) +
+    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
                     recordNameLen + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
                     sizeof(uint32_t) + sizeof(uint32_t) + pkgNameLen + sizeof(uint32_t);
     ASSERT_FALSE(ReadCorruptRecordInfoSection(offset, "CorruptRecordInfo_KeyLen"));
@@ -707,7 +727,7 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_Key)
 {
     size_t recordNameLen = std::strlen("test");
     size_t pkgNameLen = std::strlen("@ohos/testpkg");
-    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) +
+    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
                     recordNameLen + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
                     sizeof(uint32_t) + sizeof(uint32_t) + pkgNameLen + sizeof(uint32_t) + sizeof(uint32_t);
     ASSERT_FALSE(ReadCorruptRecordInfoSection(offset, "CorruptRecordInfo_Key"));
@@ -718,7 +738,7 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_ValLen)
     size_t recordNameLen = std::strlen("test");
     size_t pkgNameLen = std::strlen("@ohos/testpkg");
     size_t keyLen = std::strlen("key");
-    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) +
+    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
                     recordNameLen + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
                     sizeof(uint32_t) + sizeof(uint32_t) + pkgNameLen + sizeof(uint32_t) + sizeof(uint32_t) + keyLen;
     ASSERT_FALSE(ReadCorruptRecordInfoSection(offset, "CorruptRecordInfo_ValLen"));
@@ -729,7 +749,7 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, RecordInfoSection_CorruptRecordInfo_Value)
     size_t recordNameLen = std::strlen("test");
     size_t pkgNameLen = std::strlen("@ohos/testpkg");
     size_t keyLen = std::strlen("key");
-    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) +
+    size_t offset = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
                     recordNameLen + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
                     sizeof(uint32_t) + sizeof(uint32_t) + pkgNameLen + sizeof(uint32_t) + sizeof(uint32_t) + keyLen +
                     sizeof(uint32_t);
@@ -743,13 +763,13 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, UseSnapshotSuccessTest)
         return;
     }
     JSRuntimeOptions &options = thread->GetEcmaVM()->GetJSOptions();
-    int arkProperties = options.GetArkProperties();
-    options.SetArkProperties(options.GetArkProperties() &
-                             ~static_cast<int>(ArkProperties::DISABLE_JSPANDAFILE_MODULE_SNAPSHOT));
+    int64_t arkProperties = options.GetArkProperties();
+    options.SetArkProperties(arkProperties & ~static_cast<int>(ArkProperties::DISABLE_JSPANDAFILE_MODULE_SNAPSHOT));
     ModulesSnapshotHelper::g_featureState_ = static_cast<int>(SnapshotFeatureState::DEFAULT);
     ModulesSnapshotHelper::g_featureLoaded_ = static_cast<int>(SnapshotFeatureState::DEFAULT);
     const std::shared_ptr<JSPandaFile> serializePf = NewMockJSPandaFile();
     NormalTranslateJSPandaFile(serializePf);
+    bool bundlePackSave = serializePf->IsBundlePack();
     serializePf->SetBundlePack(false);
     JSRecordInfo *recordInfo = serializePf->CheckAndGetRecordInfo("func_main_0");
     if (recordInfo != nullptr) {
@@ -762,8 +782,8 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, UseSnapshotSuccessTest)
          std::string_view(snapshotNpmEntry.second.c_str(), snapshotNpmEntry.second.size())});
     CString fileName = JSPandaFileSnapshot::GetJSPandaFileFileName(serializePf->GetJSPandaFileDesc(), path);
     CString stateFilePath = path + ModulesSnapshotHelper::MODULE_SNAPSHOT_STATE_FILE_NAME.data();
-    remove(fileName.c_str());
-    remove(stateFilePath.c_str());
+    Unlink(fileName.c_str());
+    Unlink(stateFilePath.c_str());
     if (memset_s(ModulesSnapshotHelper::g_stateFilePathBuffer_, PATH_MAX, 0, PATH_MAX) != EOK) {
         return;
     }
@@ -773,6 +793,7 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, UseSnapshotSuccessTest)
     }
     MockJSPandaFileSnapshot::WriteDataToFile(thread, serializePf.get(), path,
                                              ohos::OhosVersionInfoTools::GetRomVersion());
+    serializePf->SetBundlePack(bundlePackSave);
     ASSERT_TRUE(FileExist(fileName.c_str()));
     const std::shared_ptr<JSPandaFile> deserializePf = NewMockJSPandaFileWithSnapshotLoad();
     JSRecordInfo *deserializeRecordInfo = deserializePf->CheckAndGetRecordInfo("func_main_0");
@@ -783,15 +804,41 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, UseSnapshotSuccessTest)
     ASSERT_EQ(deserializeRecordInfo->npmPackageName, "@ohos/testpkg");
     ASSERT_EQ(it->second, "testEntry");
     options.SetArkProperties(arkProperties);
-    remove(fileName.c_str());
-    remove(stateFilePath.c_str());
+    Unlink(fileName.c_str());
+    Unlink(stateFilePath.c_str());
+}
+
+HWTEST_F_L0(JSPandaFileSnapshotTest, UseSnapshotSuccessWithStatsTest)
+{
+    // Reset global snapshot state: earlier tests may have triggered
+    // UpdateFromStateFile with non-existent paths, leaving featureState=disableAll.
+    ModulesSnapshotHelper::ResetStateForTest();
+    CString path = GetSnapshotPath();
+    CString version = TEST_ROM_VERSION.data();
+    const std::shared_ptr<JSPandaFile> serializePf = NewMockJSPandaFile();
+    NormalTranslateJSPandaFile(serializePf);
+    ASSERT_TRUE(MockJSPandaFileSnapshot::WriteDataToFile(thread, serializePf.get(), path, version));
+
+    // ENABLE_SNAPSHOT_STATS is a high bit (1ULL << 37), keep the whole int64_t properties word
+    JSRuntimeOptions &options = thread->GetEcmaVM()->GetJSOptions();
+    int64_t arkProperties = options.GetArkProperties();
+    options.SetArkProperties(arkProperties | static_cast<int64_t>(ArkProperties::ENABLE_SNAPSHOT_STATS));
+
+    // ReadDataFromFile runs with the stats option on: exercises the stats log branch.
+    const std::shared_ptr<JSPandaFile> pf = NewMockJSPandaFile();
+    JSPandaFile *deserializePf = pf.get();
+    deserializePf->SetBundlePack(false);
+    // EXPECT so arkProperties is restored below even on failure.
+    EXPECT_TRUE(JSPandaFileSnapshot::ReadDataFromFile(thread, deserializePf, path, version));
+    EXPECT_EQ(serializePf->GetNumMethods(), deserializePf->GetNumMethods());
+
+    options.SetArkProperties(arkProperties);
 }
 
 HWTEST_F_L0(JSPandaFileSnapshotTest, ResetAfterSnapshotFailTest)
 {
     const std::shared_ptr<JSPandaFile> pf = NewMockJSPandaFile();
     NormalTranslateJSPandaFile(pf);
-    pf->SetBundlePack(false);
     JSRecordInfo *recordInfo = pf->CheckAndGetRecordInfo("func_main_0");
     if (recordInfo != nullptr) {
         recordInfo->npmPackageName = "@ohos/testpkg";
@@ -812,5 +859,50 @@ HWTEST_F_L0(JSPandaFileSnapshotTest, ResetAfterSnapshotFailTest)
     ASSERT_EQ(pf->GetMethodLiterals(), nullptr);
     ASSERT_EQ(pf->numMethods_, 0U);
     ASSERT_EQ(pf->numClasses_, 0U);
+}
+
+/**
+ * @tc.name: ConstructorWithThread_SnapshotReadSuccess
+ * @tc.desc: Test JSPandaFile(thread, pf, desc, entryPoint) constructor when snapshot read succeeds (line 59 return)
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(JSPandaFileSnapshotTest, ConstructorWithThread_SnapshotReadSuccess)
+{
+    CString path = GetSnapshotPath();
+    const char *abcFilename = "/data/storage/el1/bundle/entry/ets/main/modules.abc";
+    const char *source = R"(
+        .function any func_main_0(any a0, any a1, any a2) {
+            ldai 1
+            return
+        }
+    )";
+    std::shared_ptr<JSPandaFile> serializePf = CreateJSPandaFile(source, CString(abcFilename));
+    NormalTranslateJSPandaFile(serializePf);
+    bool bundlePackSave = serializePf->IsBundlePack();
+    serializePf->SetBundlePack(false);
+    serializePf->ownedNpmEntries_.emplace_back("testRecord", "testEntry");
+    const auto &npmEntry = serializePf->ownedNpmEntries_.back();
+    serializePf->npmEntries_.insert(
+        {std::string_view(npmEntry.first.c_str(), npmEntry.first.size()),
+         std::string_view(npmEntry.second.c_str(), npmEntry.second.size())});
+    CString snapshotFileName =
+        MockJSPandaFileSnapshot::GetSnapshotFileName(serializePf->GetJSPandaFileDesc(), path);
+    Unlink(snapshotFileName.c_str());
+    CString version = "test_version";
+    EXPECT_TRUE(MockJSPandaFileSnapshot::WriteDataToFile(
+        thread, serializePf.get(), path, version));
+    serializePf->SetBundlePack(bundlePackSave);
+    ASSERT_TRUE(FileExist(snapshotFileName.c_str()));
+
+    std::shared_ptr<JSPandaFile> deserializePf = CreateJSPandaFile(source, CString(abcFilename));
+    EXPECT_TRUE(MockJSPandaFileSnapshot::ReadDataFromFile(
+        thread, deserializePf.get(), path, version));
+    EXPECT_NE(deserializePf, nullptr);
+
+    auto it = deserializePf->npmEntries_.find("testRecord");
+    EXPECT_NE(it, deserializePf->npmEntries_.end());
+    EXPECT_EQ(it->second, "testEntry");
+
+    Unlink(snapshotFileName.c_str());
 }
 }

@@ -109,6 +109,7 @@ module_test_list = [
   "inline_property_literal",
   "instanceofic",
   "intl",
+  "mathfastpath",
   "memleakobjectcreate",
   "merge",
   "module",
@@ -124,6 +125,7 @@ module_test_list = [
   "newtaggedsubarray",
   "nextinternalslowpath",
   "object",
+  "typedarraystore",
   "typedarraymapoverflow",
   "objectcloneproperties",
   "objectdefineproperties",
@@ -151,6 +153,7 @@ module_test_list = [
   "regressparseInt",
   "regressmathmaxmin",
 
+  "stablearraymapfilter",
   "string",
   "stringlocalecompare",
   "stringrepeat",
@@ -165,6 +168,7 @@ module_test_list = [
   "sendablefunc",
   "sendablecontext",
   "sendableclassuseimport",
+  "sendableirbaseline",
   "sharedmodule",
   "sharedset",
   "sharedset_extern",
@@ -173,7 +177,10 @@ module_test_list = [
   "sharedic",
   "sendable",
   "sendablearray",
+  "sendableobj",
+  "sendablebuiltinsir",
   "sharedobjectstorebarrier_treestring",
+  "supercallforwardallargs",
 
   "weakmap",
   "weakmap_complex_scenarios",
@@ -215,6 +222,10 @@ if (enable_latest_optimization) {
     "string_wrapper_string_prototype_proto_toprimitive",
     "string_wrapper_unrelated_class_toprimitive",
   ]
+}
+
+if (enable_v70_optimization) {
+  module_test_list += ["loadpolyic"]
 }
 
 # TODO: CMC-GC UT FIX LATER
@@ -280,6 +291,7 @@ group("ark_js_assert_moduletest") {
     "externalstring",
     "isin",
     "jsonparser",
+    "jsonparsesendablev2",
     "jsonstringifier",
     "jsonstringifier2",
     "ldmodulensbyic",
@@ -288,23 +300,38 @@ group("ark_js_assert_moduletest") {
     "linkedhashtable",
     "loadicbyname",
     "loadicbyvalue",
+    "loadicprimitive",
+    "loadicobject",
+    "loadicarray",
+    "loadicproto",
+    "loadicglobal",
+    "loadicfunction",
+    "loadicclass",
     "localelowercase",
     "mapforeach",
     "mapget",
     "nanhash",
-    "obj_dictionarymode",
+    "notfoundic_dictmode",
     "object_assign",
     "proxy2",
     "regressdefineproperty",
     "regresssstring",
     "require",
-    "setconstructor",
     "setobjectwithproto",
     "spreadoperator",
     "stackoverflow",
     "storeglobalvarIC",
     "storeicbyname",
     "storeicbyvalue",
+    "storeicprimitive",
+    "storeicobject",
+    "storeicarray",
+    "storeicproto",
+    "storeicglobal",
+    "loadstoreicmixed",
+    "ictransitions",
+    "icpolymorphic",
+    "icmegamorphic",
     "stringfromcharcode",
     "stringreplace",
     "stringreplaceall",
@@ -314,7 +341,7 @@ group("ark_js_assert_moduletest") {
     "throwdyn",
     "throwerror",
     "trycatch",
-    "typearray",
+    "typedarray",
     "typedarrayat",
     "typedarrayfill",
     "typedarrayfilter",
@@ -325,6 +352,7 @@ group("ark_js_assert_moduletest") {
     "typedarrayiterator",
     "typedarraymap",
     "typedarraynan",
+    "impurenan",
     "typedarrayreverse",
     "typedarraysort",
     "typedarraysubarray",
@@ -332,7 +360,6 @@ group("ark_js_assert_moduletest") {
     "typedarraywith",
     "typedarrayjoin",
     "watch",
-    "reflectownkeys",
     "weakcollectionswithsymbol",
     "wrapperclassfunc",
     "yieldstar",
@@ -354,8 +381,14 @@ group("ark_js_assert_moduletest") {
     "functionbind",
   ]
 
-  if (enable_next_optimization) {
+  if (enable_latest_optimization) {
     assert_test_list += ["jsonstringifier_optimized"]
+  }
+
+  if (enable_v70_optimization) {
+    assert_test_list += ["obj_dictionarymode"]
+  } else {
+    assert_test_list += ["obj_dictionarymode_legacy"]
   }
 
   deps = []
@@ -434,6 +467,7 @@ group("ark_asm_assert_test") {
     "arrayfill",
     "array",
     "arrayconcat",
+    "arrayconcatbarrier",
     "arrayconstructor",
     "arrayderived",
     "arrayfillproto",
@@ -448,6 +482,7 @@ group("ark_asm_assert_test") {
     "externalstring",
     "isin",
     "jsonparser",
+    "jsonparsesendablev2",
     "jsonstringifier",
     "jsonstringifier2",
     "ldmodulensbyic",
@@ -457,9 +492,8 @@ group("ark_asm_assert_test") {
     "mapforeach",
     "mapget",
     "nanhash",
-    "obj_dictionarymode",
+    "notfoundic_dictmode",
     "object_assign",
-    "setconstructor",
     "setobjectwithproto",
     "spreadoperator",
     "stackoverflow",
@@ -470,7 +504,7 @@ group("ark_asm_assert_test") {
     "throwdyn",
     "throwerror",
     "trycatch",
-    "typearray",
+    "typedarray",
     "arraytospliced",
     "typedarrayat",
     "typedarrayfill",
@@ -482,12 +516,12 @@ group("ark_asm_assert_test") {
     "typedarrayiterator",
     "typedarraymap",
     "typedarraynan",
+    "impurenan",
     "typedarrayreverse",
     "typedarraysort",
     "typedarraytosorted",
     "typedarraywith",
     "watch",
-    "reflectownkeys",
     "weakcollectionswithsymbol",
     "wrapperclassfunc",
     "yieldstar",
@@ -505,6 +539,12 @@ group("ark_asm_assert_test") {
 
   if (enable_latest_optimization) {
     assert_test_list += ["jsonstringifier_optimized"]
+  }
+
+  if (enable_v70_optimization) {
+    assert_test_list += ["obj_dictionarymode"]
+  } else {
+    assert_test_list += ["obj_dictionarymode_legacy"]
   }
 
   deps = []

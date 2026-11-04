@@ -16,6 +16,7 @@
 #include "ecmascript/compiler/aot_file/stub_file_info.h"
 #include "ecmascript/compiler/aot_file/elf_builder.h"
 #include "ecmascript/compiler/aot_file/elf_reader.h"
+#include "ecmascript/platform/backtrace.h"
 
 #ifndef PANDA_TARGET_OHOS
 extern const uint8_t _binary_stub_an_start[];
@@ -80,6 +81,9 @@ bool StubFileInfo::MmapLoad(const std::string &fileName)
         return false;
     }
 
+    UpdateStubFileRange(reinterpret_cast<uint64_t>(fileMapMem_.GetOriginAddr()),
+        static_cast<uint64_t>(fileMapMem_.GetSize()));
+
     ElfReader reader(fileMapMem_);
     std::vector<ElfSecName> secs = GetDumpSectionNames();
     reader.ParseELFSections(des_, secs);
@@ -96,12 +100,17 @@ bool StubFileInfo::MmapLoad(const std::string &fileName)
     uint32_t funcEntrySize = des.GetSecSize(ElfSecName::ARK_FUNCENTRY);
     FuncEntryDes *entryDes = reinterpret_cast<FuncEntryDes *>(funcEntryAddr);
     entryNum_ = funcEntrySize / sizeof(FuncEntryDes);
+#if ENABLE_MEMORY_OPTIMIZATION
+    rawEntries_ = entryDes;
+#else
     entries_.assign(entryDes, entryDes + entryNum_);
+#endif
     uint64_t asmStubAddr = des.GetSecAddr(ElfSecName::ARK_ASMSTUB);
     uint32_t asmStubSize = des.GetSecSize(ElfSecName::ARK_ASMSTUB);
     SetAsmStubAddr(asmStubAddr);
     SetAsmStubSize(asmStubSize);
 
+#if !ENABLE_MEMORY_OPTIMIZATION
     for (auto &entry : entries_) {
         if (entry.IsGeneralRTStub()) {
             uint64_t begin = GetAsmStubAddr();
@@ -111,9 +120,29 @@ bool StubFileInfo::MmapLoad(const std::string &fileName)
             entry.codeAddr_ += moduleDes.GetSecAddr(ElfSecName::TEXT);
         }
     }
+#endif
     LOG_COMPILER(INFO) << "loaded stub file successfully";
     return true;
 }
+#if defined(STUB_FUNCTION_REORDERING)
+void StubFileInfo::AddIndexMapping(uint32_t compileTimeIndex, uint32_t runtimePosition)
+{
+    bcStubIndexMap_[compileTimeIndex] = runtimePosition;
+#ifndef NDEBUG
+    LOG_ECMA(DEBUG) << "Mapping Enum: " << compileTimeIndex << " pos: " << runtimePosition;
+#endif
+}
+
+uint32_t StubFileInfo::GetRuntimeStubIndex(uint32_t compileTimeIndex) const
+{
+    const auto& bcStubMap = GetBCStubIndexMap();
+    if (auto it = bcStubMap.find(compileTimeIndex); it != bcStubMap.end()) {
+        return it->second;
+    }
+    LOG_ECMA(WARN) << "No mapping found " << compileTimeIndex;
+    return compileTimeIndex;
+}
+#endif
 #ifndef PANDA_TARGET_OHOS
 bool StubFileInfo::Load()
 {
@@ -137,12 +166,17 @@ bool StubFileInfo::Load()
     uint32_t funcEntrySize = des.GetSecSize(ElfSecName::ARK_FUNCENTRY);
     FuncEntryDes *entryDes = reinterpret_cast<FuncEntryDes *>(funcEntryAddr);
     entryNum_ = funcEntrySize / sizeof(FuncEntryDes);
+#if ENABLE_MEMORY_OPTIMIZATION
+    rawEntries_ = entryDes;
+#else
     entries_.assign(entryDes, entryDes + entryNum_);
+#endif
     uint64_t asmStubAddr = des.GetSecAddr(ElfSecName::ARK_ASMSTUB);
     uint32_t asmStubSize = des.GetSecSize(ElfSecName::ARK_ASMSTUB);
     SetAsmStubAddr(asmStubAddr);
     SetAsmStubSize(asmStubSize);
 
+#if !ENABLE_MEMORY_OPTIMIZATION
     for (auto &entry : entries_) {
         if (entry.IsGeneralRTStub()) {
             uint64_t begin = GetAsmStubAddr();
@@ -152,8 +186,9 @@ bool StubFileInfo::Load()
             entry.codeAddr_ += moduleDes.GetSecAddr(ElfSecName::TEXT);
         }
     }
+#endif
     LOG_COMPILER(INFO) << "loaded stub file successfully";
-    if (!PageProtect(stubsMem_.addr_, stubsMem_.size_, PAGE_PROT_EXEC_READ)) {
+    if (PageProtect(stubsMem_.addr_, stubsMem_.size_, PAGE_PROT_EXEC_READ) != 0) {
         return false;
     }
     return true;

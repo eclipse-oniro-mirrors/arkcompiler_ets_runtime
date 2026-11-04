@@ -40,7 +40,7 @@
 #include "ecmascript/js_api/js_api_stack.h"
 #include "ecmascript/js_api/js_api_tree_map.h"
 #include "ecmascript/js_date_time_format.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/object_factory.h"
 #include "ecmascript/tagged_tree.h"
 #include "ecmascript/tests/test_common.h"
@@ -164,9 +164,9 @@ public:
         ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
         auto result = TestCommon::CreateContainerTaggedValue(thread, containers::ContainerTag::LinkedList);
 
-        JSHandle<JSTaggedValue> contianer(thread, result);
+        JSHandle<JSTaggedValue> container(thread, result);
         JSHandle<JSAPILinkedList> linkedList = JSHandle<JSAPILinkedList>::Cast(
-            factory->NewJSObjectByConstructor(JSHandle<JSFunction>(contianer), contianer));
+            factory->NewJSObjectByConstructor(JSHandle<JSFunction>(container), container));
         JSTaggedValue doubleList = TaggedDoubleList::Create(thread);
         linkedList->SetDoubleList(thread, doubleList);
         return *linkedList;

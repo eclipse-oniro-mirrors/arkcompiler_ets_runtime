@@ -701,7 +701,7 @@ void AsmInterpreterCall::CallNativeInternal(ExtendedAssembler *assembler, Regist
 }
 
 // ResumeRspAndDispatch(uintptr_t glue, uintptr_t sp, uintptr_t pc, uintptr_t constantPool,
-//     uint64_t profileTypeInfo, uint64_t acc, uint32_t hotnessCounter, size_t jumpSize)
+//     uint64_t profileTypeInfo, uint64_t acc, size_t jumpSize)
 // GHC calling convention
 // x19 - glue
 // fp  - sp
@@ -709,8 +709,7 @@ void AsmInterpreterCall::CallNativeInternal(ExtendedAssembler *assembler, Regist
 // x21 - constantPool
 // x22 - profileTypeInfo
 // x23 - acc
-// x24 - hotnessCounter
-// x25 - jumpSizeAfterCall
+// x24 - jumpSizeAfterCall
 void AsmInterpreterCall::ResumeRspAndDispatch(ExtendedAssembler *assembler)
 {
     __ BindAssemblerStub(RTSTUB_ID(ResumeRspAndDispatch));
@@ -719,7 +718,7 @@ void AsmInterpreterCall::ResumeRspAndDispatch(ExtendedAssembler *assembler)
     Register rsp = sp;
     Register currentSp = fp;
     Register pc = x20;
-    Register jumpSizeRegister = x25;
+    Register jumpSizeRegister = x24;
 
     Register ret = x23;
     Register opcode = w6;
@@ -930,7 +929,7 @@ void AsmInterpreterCall::ResumeRspAndReturnBaseline(ExtendedAssembler *assembler
 }
 
 // ResumeCaughtFrameAndDispatch(uintptr_t glue, uintptr_t sp, uintptr_t pc, uintptr_t constantPool,
-//     uint64_t profileTypeInfo, uint64_t acc, uint32_t hotnessCounter)
+//     uint64_t profileTypeInfo, uint64_t acc)
 // GHC calling convention
 // X19 - glue
 // FP  - sp
@@ -938,7 +937,6 @@ void AsmInterpreterCall::ResumeRspAndReturnBaseline(ExtendedAssembler *assembler
 // X21 - constantPool
 // X22 - profileTypeInfo
 // X23 - acc
-// X24 - hotnessCounter
 void AsmInterpreterCall::ResumeCaughtFrameAndDispatch(ExtendedAssembler *assembler)
 {
     __ BindAssemblerStub(RTSTUB_ID(ResumeCaughtFrameAndDispatch));
@@ -988,7 +986,7 @@ void AsmInterpreterCall::ResumeUncaughtFrameAndReturn(ExtendedAssembler *assembl
 }
 
 // ResumeRspAndRollback(uintptr_t glue, uintptr_t sp, uintptr_t pc, uintptr_t constantPool,
-//     uint64_t profileTypeInfo, uint64_t acc, uint32_t hotnessCounter, size_t jumpSize)
+//     uint64_t profileTypeInfo, uint64_t acc, size_t jumpSize)
 // GHC calling convention
 // X19 - glue
 // FP  - sp
@@ -996,8 +994,7 @@ void AsmInterpreterCall::ResumeUncaughtFrameAndReturn(ExtendedAssembler *assembl
 // X21 - constantPool
 // X22 - profileTypeInfo
 // X23 - acc
-// X24 - hotnessCounter
-// X25 - jumpSizeAfterCall
+// X24 - jumpSizeAfterCall
 void AsmInterpreterCall::ResumeRspAndRollback(ExtendedAssembler *assembler)
 {
     __ BindAssemblerStub(RTSTUB_ID(ResumeRspAndRollback));
@@ -1006,7 +1003,7 @@ void AsmInterpreterCall::ResumeRspAndRollback(ExtendedAssembler *assembler)
     Register rsp = sp;
     Register currentSp = fp;
     Register pc = x20;
-    Register jumpSizeRegister = x25;
+    Register jumpSizeRegister = x24;
 
     Register ret = x23;
     Register opcode = w6;
@@ -1261,6 +1258,41 @@ void AsmInterpreterCall::ASMFastWriteBarrier(ExtendedAssembler* assembler)
         __ B(GE, &valueMaybeSweepableShare);
         // if value may be SweepableShare, goto valueMaybeSweepableShare
     }
+#if USE_STICKY_CMS_GC
+    __ Bind(&valueNotShare);
+    {
+        // valueNotShare:
+        // x3 & WeakTag removeWeakTag
+        // %x0 - glue
+        // %x1 - obj
+        // %x2 - offset
+        // %x3 - value
+        // *x3 loadHClass-> x15 hclass
+        // hclass & ~TaggedObject::GC_STATE_MASK x15
+        // x15 compare TaggedStateWord::YOUNG_STATE
+        // if false goto checkMark
+        // x1 loadHClass-> x15 hclass
+        // hclass & ~TaggedObject::GC_STATE_MASK x15
+        // x15 compare TaggedStateWord::YOUNG_STATE
+        // if not goto needCallNotShare
+        // return
+
+        __ And(x15, x3, LogicalImmediate::Create(~JSTaggedValue::TAG_WEAK, X_REG_SIZE));
+        // Remove weaktag of X3 value
+        __ Ldr(x15, MemoryOperand(x15, 0));
+        // Load head value of the value
+        static_assert(TaggedStateWord::OLD_STATE == (0ULL << TaggedStateWord::ADDRESS_WIDTH));
+        static_assert(TaggedStateWord::YOUNG_STATE == (1ULL << TaggedStateWord::ADDRESS_WIDTH));
+        // old/young state should use 1-bit, otherwise tbz should be replaced with cmp
+        __ Tbz(x15, static_cast<uint32_t>(TaggedStateWord::ADDRESS_WIDTH), &checkMark);
+        // if the value state is equal ObjectState::OLD, goto checkMark
+
+        __ Ldr(x15, MemoryOperand(x1, 0));
+        // Load head value of the object
+        __ Tbz(x15, static_cast<uint32_t>(TaggedStateWord::ADDRESS_WIDTH), &needCallNotShare);
+        // if the object state is equal ObjectState::OLD, needCallNotShare
+    }
+#else
     __ Bind(&valueNotShare);
     {
         // valueNotShare:
@@ -1285,7 +1317,7 @@ void AsmInterpreterCall::ASMFastWriteBarrier(ExtendedAssembler* assembler)
         __ B(NE, &needCallNotShare);
         // if obj is not in young, goto needCallNotShare
     }
-
+#endif
     __ Bind(&checkMark);
     {
         // checkMark:
@@ -1722,7 +1754,6 @@ void AsmInterpreterCall::DispatchCall(ExtendedAssembler *assembler, Register pcR
     if (glueRegister != x19) {
         __ Mov(x19, glueRegister);
     }
-    __ Ldrh(w24, MemoryOperand(methodRegister, Method::LITERAL_INFO_OFFSET));
     if (!accRegister.IsValid()) {
         __ Mov(x23, Immediate(JSTaggedValue::VALUE_HOLE));
     } else {
@@ -1875,7 +1906,6 @@ void AsmInterpreterCall::CallBCStub(ExtendedAssembler *assembler, Register &newS
     __ Ldr(x22, MemoryOperand(callTarget, JSFunction::RAW_PROFILE_TYPE_INFO_OFFSET));
     __ Ldr(x22, MemoryOperand(x22, ProfileTypeInfoCell::VALUE_OFFSET));  // X22 - profileTypeInfo
     __ Mov(x23, Immediate(JSTaggedValue::Hole().GetRawData()));                   // X23 - acc
-    __ Ldr(x24, MemoryOperand(method, Method::LITERAL_INFO_OFFSET)); // X24 - hotnessCounter
 
     // call the first bytecode handler
     __ Ldrb(temp.W(), MemoryOperand(pc, 0));

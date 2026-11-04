@@ -15,9 +15,15 @@
 
 #include "ecmascript/ecma_vm.h"
 
+#include <algorithm>
 #include <cmath>
+#ifdef LOW_MEMORY_DEVICE
+#include <cstdint>
+#include "common_components/platform/cpu.h"
+#endif
 #include "common_components/taskpool/taskpool.h"
 #include "ecmascript/base/config.h"
+#include "ecmascript/platform/debug_signal.h"
 #include "ecmascript/builtins/builtins_ark_tools.h"
 #include "ecmascript/checkpoint/thread_state_transition.h"
 #include "ecmascript/compiler/aot_constantpool_patcher.h"
@@ -38,13 +44,16 @@
 #if !WIN_OR_MAC_OR_IOS_PLATFORM
 #include "ecmascript/dfx/hprof/heap_profiler.h"
 #include "ecmascript/dfx/hprof/heap_profiler_interface.h"
+#ifdef PANDA_JS_ETS_HYBRID_MODE
+#include "ecmascript/dfx/hprof/hybrid/hybrid_heap_profiler.h"
+#endif  // PANDA_JS_ETS_HYBRID_MODE
 #endif
 #include "ecmascript/dfx/stackinfo/async_stack_trace.h"
 #include "ecmascript/dfx/tracing/tracing.h"
 #include "ecmascript/dfx/vmstat/function_call_timer.h"
 #include "ecmascript/dfx/vmstat/opt_code_profiler.h"
 #include "ecmascript/jit/jit_task.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/jspandafile/abc_buffer_cache.h"
 #include "ecmascript/linked_hash_table.h"
 #include "ecmascript/mem/heap-inl.h"
@@ -67,6 +76,9 @@
 #include "ecmascript/symbol_table.h"
 #include "ecmascript/base/gc_helper.h"
 #include "ecmascript/platform/backtrace.h"
+#if defined(ENABLE_BACKTRACE_LOCAL)
+#include "backtrace_local.h"
+#endif
 #include "ecmascript/napi/include/jsnapi.h"
 #include "ecmascript/napi/include/jsnapi_expo.h"
 
@@ -78,6 +90,7 @@ namespace panda::ecmascript {
 using RandomGenerator = base::RandomGenerator;
 using PGOProfilerManager = pgo::PGOProfilerManager;
 using JitTools = ohos::JitTools;
+
 constexpr const char* HEAP_MEM_PRESSURE_PROCESS = "ProcessHeapMemPressure";
 constexpr const char* HEAP_MEM_PRESSURE_LOCAL = "LocalHeapMemPressure";
 constexpr const char* HEAP_MEM_PRESSURE_SHARED = "SharedHeapMemPressure";
@@ -85,6 +98,9 @@ constexpr const char* HEAP_MEM_PRESSURE_SHARED = "SharedHeapMemPressure";
 AOTFileManager *JsStackInfo::loader = nullptr;
 std::atomic<bool> EcmaVM::multiThreadCheck_ = false;
 std::atomic<bool> EcmaVM::checkCountApi_ = false;
+DFXJSNApi::MultithreadingDetectionOptions EcmaVM::detectionConfig_;
+std::atomic<uint64_t> EcmaVM::lastCheckTime_ = 0;
+std::atomic<uint64_t> EcmaVM::count_ = 0;
 bool EcmaVM::errorInfoEnhanced_ = false;
 
 void EcmaVM::TriggerMemoryPressureCallback(const char *heapType)
@@ -197,9 +213,18 @@ EcmaVM *EcmaVM::Create(const JSRuntimeOptions &options)
             break;
     }
 #endif
+    auto tier = EcmaParamConfiguration::DeviceMemoryTier::TIER_DEFAULT;
+#ifdef LOW_MEMORY_DEVICE
+    constexpr uint64_t DEVICE_6G_LOWER_BYTES = 5ULL * 1024 * 1024 * 1024;
+    constexpr uint64_t DEVICE_6G_UPPER_BYTES = 7ULL * 1024 * 1024 * 1024;
+    uint64_t deviceRamBytes = common::PhysicalSize();
+    if (deviceRamBytes > DEVICE_6G_LOWER_BYTES && deviceRamBytes < DEVICE_6G_UPPER_BYTES) {
+        tier = EcmaParamConfiguration::DeviceMemoryTier::TIER_6G;
+    }
+#endif
     auto config = EcmaParamConfiguration(heapType,
                                          MemMapAllocator::GetInstance()->GetCapacity(),
-                                         heapSize);
+                                         heapSize, tier);
 #if defined(PANDA_TARGET_OHOS) && !defined(STANDALONE_MODE)
     EcmaVM::InitConfigurableParam(config);
 #endif
@@ -217,7 +242,7 @@ EcmaVM *EcmaVM::Create(const JSRuntimeOptions &options)
         JsStackInfo::loader = vm->GetAOTFileManager();
     }
 #if defined(PANDA_TARGET_OHOS) && !defined(STANDALONE_MODE)
-    int arkProperties = OHOS::system::GetIntParameter<int>("persist.ark.properties", -1);
+    int64_t arkProperties = OHOS::system::GetIntParameter<int64_t>("persist.ark.properties", -1);
     vm->GetJSOptions().SetArkProperties(arkProperties);
     bool pgoNapi = OHOS::system::GetBoolParameter("persist.ark.pgonapi", false);
     vm ->GetJSOptions().SetPgoNapi(pgoNapi);
@@ -257,7 +282,9 @@ void EcmaVM::PreFork()
     SetPreForked(true);
     SetPostForked(false);
     Runtime::GetInstance()->SetPostForked(false);
+#ifndef EXCLUDE_JIT
     Jit::GetInstance()->PreFork();
+#endif
 }
 
 void EcmaVM::PostFork(const JSRuntimeOptions &option)
@@ -287,17 +314,21 @@ void EcmaVM::PostFork(const JSRuntimeOptions &option)
     SetPostForked(true);
 
     LOG_ECMA(INFO) << "multi-thread check enabled: " << GetThreadCheckStatus();
-    SignalAllReg();
     options_.SetPgoForceDump(false);
+#ifndef EXCLUDE_PGO
     std::string bundleName = PGOProfilerManager::GetInstance()->GetBundleName();
     pgo::PGOTrace::GetInstance()->SetEnable(ohos::AotTools::GetPgoTraceEnable());
     AotCrashInfo::GetInstance().SetOptionPGOProfiler(&options_, bundleName);
     ResetPGOProfiler();
     processStartRealtime_ = InitializeStartRealTime();
-
+#ifndef EXCLUDE_JIT
     Jit::GetInstance()->SetJitEnablePostFork(this, bundleName);
+#endif
+#else
+    processStartRealtime_ = InitializeStartRealTime();
+#endif
 #if defined(PANDA_TARGET_OHOS) && !defined(STANDALONE_MODE)
-    int arkProperties = OHOS::system::GetIntParameter<int>("persist.ark.properties", -1);
+    int64_t arkProperties = OHOS::system::GetIntParameter<int64_t>("persist.ark.properties", -1);
     GetJSOptions().SetArkProperties(arkProperties);
     bool pgoNapi = OHOS::system::GetBoolParameter("persist.ark.pgonapi", false);
     GetJSOptions().SetPgoNapi(pgoNapi);
@@ -315,11 +346,12 @@ void EcmaVM::PostFork(const JSRuntimeOptions &option)
         LOG_ECMA(INFO) << "Modules snapshot disabled: runtime option";
         ModulesSnapshotHelper::MarkSnapshotDisabledByOption();
     } else {
-        ModulesSnapshotHelper::RegisterSignalHandler();
+        ModulesSnapshotHelper::InitEscaper(this);
     }
     if (option.IsBootSnapshotEscapeDisabled()) {
         ModulesSnapshotHelper::DisableSnapshotEscaper();
     }
+    JSPandaFileManager::RegisterPFCheckCallback(this);
 }
 
 EcmaVM::EcmaVM(JSRuntimeOptions options, EcmaParamConfiguration config)
@@ -359,6 +391,7 @@ void EcmaVM::InitializeForJit(JitThread *jitThread)
 
 void EcmaVM::InitializePGOProfiler()
 {
+#ifndef EXCLUDE_PGO
     LOG_PGO(INFO) << "initializing pgo profiler, pgo is " << (IsEnablePGOProfiler() ? "enabled" : "disabled")
                   << ", worker is " << (options_.IsWorker() ? "enabled" : "disabled")
                   << ", profiler: " << pgoProfiler_;
@@ -373,16 +406,19 @@ void EcmaVM::InitializePGOProfiler()
     }
     pgo::PGOTrace::GetInstance()->SetEnable(options_.GetPGOTrace() || ohos::AotTools::GetPgoTraceEnable());
     thread_->SetPGOProfilerEnable(isEnablePGOProfiler);
+#endif
 }
 
 void EcmaVM::ResetPGOProfiler()
 {
+#ifndef EXCLUDE_PGO
     if (pgoProfiler_ != nullptr) {
         bool isEnablePGOProfiler = IsEnablePGOProfiler();
         PGOProfilerManager::GetInstance()->Reset(pgoProfiler_, isEnablePGOProfiler);
         thread_->SetPGOProfilerEnable(isEnablePGOProfiler);
         thread_->CheckOrSwitchPGOStubs();
     }
+#endif
 }
 
 void EcmaVM::DisablePGOProfilerWithAOTFile(const std::string &aotFileName)
@@ -391,7 +427,9 @@ void EcmaVM::DisablePGOProfilerWithAOTFile(const std::string &aotFileName)
         AOTFileManager::AOTFileExist(aotFileName, AOTFileManager::FILE_EXTENSION_AI)) {
         LOG_PGO(INFO) << "disable pgo profiler due to aot file exist: " << aotFileName;
         options_.SetEnablePGOProfiler(false);
+#ifndef EXCLUDE_PGO
         PGOProfilerManager::GetInstance()->SetDisablePGO(true);
+#endif
         ResetPGOProfiler();
     }
 }
@@ -399,7 +437,11 @@ void EcmaVM::DisablePGOProfilerWithAOTFile(const std::string &aotFileName)
 bool EcmaVM::IsEnablePGOProfiler() const
 {
     if (options_.IsWorker()) {
+#ifndef EXCLUDE_PGO
         return PGOProfilerManager::GetInstance()->IsEnable();
+#else
+        return false;
+#endif
     }
     return options_.GetEnableAsmInterpreter() && options_.IsEnablePGOProfiler();
 }
@@ -421,12 +463,20 @@ bool EcmaVM::IsEnableElementsKind() const
 
 bool EcmaVM::IsEnableFastJit() const
 {
+#ifndef EXCLUDE_JIT
     return GetJit()->IsEnableFastJit();
+#else
+    return false;
+#endif
 }
 
 bool EcmaVM::IsEnableBaselineJit() const
 {
+#ifndef EXCLUDE_JIT
     return GetJit()->IsEnableBaselineJit();
+#else
+    return false;
+#endif
 }
 
 uint32_t EcmaVM::GetTid() const
@@ -436,7 +486,11 @@ uint32_t EcmaVM::GetTid() const
 
 Jit *EcmaVM::GetJit() const
 {
+#ifndef EXCLUDE_JIT
     return Jit::GetInstance();
+#else
+    return nullptr;
+#endif
 }
 
 bool EcmaVM::Initialize()
@@ -471,13 +525,11 @@ bool EcmaVM::Initialize()
     pcVector_.reserve(MAX_HYBRID_STACK_SIZE);
     if (options_.GetEnableAsmInterpreter()) {
         LoadStubFile();
-        UpdateStubFileRange(aotFileManager_->GetStubFileStart(),
-            aotFileManager_->GetStubFileSize());
     }
     [[maybe_unused]] EcmaHandleScope scope(thread_);
     auto globalConst = const_cast<GlobalEnvConstants *>(thread_->GlobalConstants());
     globalConst->Init(thread_);
-    InitDataViewTypeTable(globalConst);
+    InitTypedArrayNameTable(globalConst);
     Runtime::GetInstance()->InitSharedConstIfNeed(globalConst);
     thread_->SetReadyForGCIterating(true);
     thread_->SetSharedMarkStatus(DaemonThread::GetInstance()->GetSharedMarkStatus());
@@ -486,7 +538,9 @@ bool EcmaVM::Initialize()
     thread_->SetEnableLazyBuiltins(builtinsLazyEnabled);
     JSHandle<GlobalEnv> globalEnv = factory_->NewGlobalEnv(builtinsLazyEnabled);
     thread_->SetGlueGlobalEnv(globalEnv.GetTaggedValue());
+#ifndef EXCLUDE_PGO
     ptManager_ = new kungfu::PGOTypeManager(this);
+#endif
     optCodeProfiler_ = new OptCodeProfiler();
     if (options_.GetTypedOpProfiler()) {
         typedOpProfiler_ = new TypedOpProfiler();
@@ -511,7 +565,9 @@ bool EcmaVM::Initialize()
     SetRegisterSymbols(SymbolTable::Create(thread_).GetTaggedValue());
     microJobQueue_ = factory_->NewMicroJobQueue().GetTaggedValue();
     if (IsEnableFastJit() || IsEnableBaselineJit()) {
+#ifndef EXCLUDE_JIT
         Jit::GetInstance()->ConfigJit(this);
+#endif
     }
     sustainingJSHandleList_ = new SustainingJSHandleList();
     initialized_ = true;
@@ -547,6 +603,10 @@ EcmaVM::~EcmaVM()
         UNREACHABLE();
     }
 #endif
+#if ENABLE_LOCALCC_OPTIMIZATION
+    heap_->WaitAndHandleCCFinished();
+    heap_->WaitLocalCCNativePointerCallbacks();
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
     initialized_ = false;
 #if defined(ECMASCRIPT_SUPPORT_CPUPROFILER)
     if (profiler_ != nullptr) {
@@ -565,11 +625,15 @@ EcmaVM::~EcmaVM()
     DeleteHeapProfile();
 #endif
     if (IsEnableFastJit() || IsEnableBaselineJit()) {
+#ifndef EXCLUDE_JIT
         GetJit()->ClearTaskWithVm(this);
+#endif
     }
     // Destroy pgoProfiler should add after JIT::ClearTaskWithVm, and before ClearBufferData
     if (pgoProfiler_ != nullptr) {
+#ifndef EXCLUDE_PGO
         PGOProfilerManager::GetInstance()->Destroy(thread_, pgoProfiler_);
+#endif
         pgoProfiler_ = nullptr;
     }
     ClearBufferData();
@@ -611,7 +675,9 @@ EcmaVM::~EcmaVM()
     if (JsStackInfo::loader == aotFileManager_) {
         JsStackInfo::loader = nullptr;
     }
-    Runtime::GetInstance()->SetMainThreadAliveForMemoryPressure(false);
+    if (thread_->IsMainThread()) {
+        Runtime::GetInstance()->SetMainThreadAliveForMemoryPressure(false);
+    }
     if (heap_ != nullptr) {
         heap_->Destroy();
         delete heap_;
@@ -624,6 +690,9 @@ EcmaVM::~EcmaVM()
     }
 
 #ifdef PANDA_JS_ETS_HYBRID_MODE
+#ifdef ECMASCRIPT_SUPPORT_HEAPPROFILER
+    DeleteHybridHeapProfiler();
+#endif  // ECMASCRIPT_SUPPORT_HEAPPROFILER
     if (Runtime::GetInstance()->IsHybridVm() && crossVMOperator_ != nullptr) {
         delete crossVMOperator_;
         crossVMOperator_ = nullptr;
@@ -634,7 +703,7 @@ EcmaVM::~EcmaVM()
         SharedHeap *sHeap = SharedHeap::GetInstance();
         const Heap *heap = Runtime::GetInstance()->GetMainThread()->GetEcmaVM()->GetHeap();
         if (IsWorkerThread() && Runtime::SharedGCRequest()) {
-            // destory workervm to release mem.
+            // destroy workervm to release mem.
             thread_->SetReadyForGCIterating(false);
             if (sHeap->CheckCanTriggerConcurrentMarking(thread_)) {
                 sHeap->TriggerConcurrentMarking<TriggerGCType::SHARED_GC, MarkReason::WORKER_DESTRUCTION>(thread_);
@@ -732,7 +801,9 @@ EcmaVM::~EcmaVM()
     }
 
     if (ptManager_ != nullptr) {
+#ifndef EXCLUDE_PGO
         delete ptManager_;
+#endif
         ptManager_ = nullptr;
     }
 
@@ -819,13 +890,22 @@ void EcmaVM::CheckThread() const
         UNREACHABLE();
     }
     DaemonThread *dThread = DaemonThread::GetInstance();
-    if (!common::Taskpool::GetCurrentTaskpool()->IsInThreadPool(std::this_thread::get_id()) &&
-        !(dThread != nullptr && dThread->GetThreadId() == JSThread::GetCurrentThreadId()) &&
-        thread_->CheckMultiThread()) {
+    if (thread_->CheckMultiThread() &&
+        !common::Taskpool::GetCurrentTaskpool()->IsInThreadPool(std::this_thread::get_id()) &&
+        !(dThread != nullptr && dThread->GetThreadId() == JSThread::GetCurrentThreadId())) {
+        if (detectionConfig_.abort.load()) {
             LOG_FULL(FATAL) << "Fatal: ecma_vm cannot run in multi-thread!"
                                 << " thread:" << thread_->GetThreadId()
                                 << " currentThread:" << JSThread::GetCurrentThreadId();
-        UNREACHABLE();
+            UNREACHABLE();
+        } else if (CheckTimeInterval()) {
+            lastCheckTime_.store(GetTimeStamp());
+            std::string msg = "Fatal: ecma_vm cannot run in multi-thread! thread:"
+                                + std::to_string(thread_->GetThreadId())
+                                + " currentThread:"
+                                + std::to_string(JSThread::GetCurrentThreadId());
+            NotifyMultiThreadError(msg);
+        }
     }
 }
 
@@ -973,12 +1053,28 @@ void EcmaVM::ProcessNativeDelete(const WeakRootVisitor& visitor)
 void EcmaVM::ProcessReferences(const WeakRootVisitor& visitor)
 {
     heap_->ProcessReferences(visitor);
+#ifndef EXCLUDE_PGO
     GetPGOProfiler()->ProcessReferences(visitor);
+#endif
+}
+
+void EcmaVM::ProcessReferencesForLocalCC(const WeakRootVisitor &visitor)
+{
+    heap_->ProcessReferencesForLocalCC(visitor);
+#ifndef EXCLUDE_PGO
+    GetPGOProfiler()->ProcessReferences(visitor);
+#endif
 }
 
 void EcmaVM::ProcessSnapShotEnv(const WeakRootVisitor& visitor)
 {
     GetSnapshotEnv()->ProcessSnapShotEnv(visitor);
+}
+
+void EcmaVM::ProcessPendingRemovalLocalModules(const WeakRootVisitor &visitor)
+{
+    ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "EcmaVM::ProcessPendingRemovalLocalModules", "");
+    moduleManagers_.ProcessPendingRemovalLocalModules(visitor);
 }
 
 // for cmc-gc
@@ -1047,6 +1143,32 @@ void EcmaVM::IterateConcurrentRoots(RootVisitor &v)
     moduleManagers_.Iterate(v);
 }
 
+uint32_t EcmaVM::PrepareConcurrentRootScan(uint32_t maxTaskCount)
+{
+    ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "PrepareConcurrentRootScan", "");
+    return moduleManagers_.PrepareConcurrentRootScan(maxTaskCount);
+}
+
+void EcmaVM::BeginConcurrentRootScan()
+{
+    moduleManagers_.BeginConcurrentRootScan();
+}
+
+void EcmaVM::ProcessConcurrentRootScan(uint32_t threadIndex, uint32_t taskCount, const ModuleRootVisitor &visitor)
+{
+    moduleManagers_.ProcessConcurrentRootScan(threadIndex, taskCount, visitor);
+}
+
+void EcmaVM::ProcessConcurrentSendableRootScan(uint32_t threadIndex, const ModuleRootVisitor &visitor)
+{
+    moduleManagers_.ProcessConcurrentSendableRootScan(threadIndex, visitor);
+}
+
+void EcmaVM::FinishConcurrentRootScan()
+{
+    moduleManagers_.FinishConcurrentRootScan();
+}
+
 void EcmaVM::Iterate(RootVisitor &v)
 {
     IterateSTWRoots(v);
@@ -1061,7 +1183,9 @@ void EcmaVM::IterateSTWRoots(RootVisitor &v)
             ObjectSlot(ToUintPtr(&internalNativeMethods_.back()) + JSTaggedValue::TaggedTypeSize()));
     }
     if (pgoProfiler_ != nullptr) {
+#ifndef EXCLUDE_PGO
         pgoProfiler_->Iterate(v);
+#endif
     }
     if (aotFileManager_) {
         aotFileManager_->Iterate(v);
@@ -1106,7 +1230,9 @@ void EcmaVM::IterateSTWRoots(RootVisitor &v)
     }
 
     if (ptManager_) {
+#ifndef EXCLUDE_PGO
         ptManager_->Iterate(v);
+#endif
     }
 #ifdef ARK_USE_SATB_BARRIER
     auto iterator = cachedSharedConstpools_.begin();
@@ -1143,6 +1269,27 @@ size_t EcmaVM::IterateHandle(RootVisitor &visitor)
     return handleCount;
 }
 
+#if ECMASCRIPT_ENABLE_HANDLE_SCOPE_CHECK
+size_t EcmaVM::IteratePrimitive(RootVisitor &visitor)
+{
+    // EnableGlobalLeakCheck.
+    size_t handleCount = 0;
+    if (currentPrimitiveStorageIndex_ != -1) {
+        DISALLOW_HANDLE_ALLOC;
+
+        int32_t nid = currentPrimitiveStorageIndex_;
+        for (int32_t i = 0; i <= nid; ++i) {
+            auto node = primitiveStorageNodes_.at(i);
+            auto start = node->data();
+            auto end = (i != nid) ? &(node->data()[NODE_BLOCK_SIZE]) : primitiveScopeStorageNext_;
+            visitor.VisitRangeRoot(Root::ROOT_LOCAL_HANDLE, ObjectSlot(ToUintPtr(start)), ObjectSlot(ToUintPtr(end)));
+            handleCount += (ToUintPtr(end) - ToUintPtr(start)) / sizeof(JSTaggedType);
+        }
+    }
+    return handleCount;
+}
+#endif
+
 void EcmaVM::IterateWeakGlobalEnvList(WeakVisitor &visitor)
 {
     for (auto it = globalEnvRecordList_.begin(); it != globalEnvRecordList_.end();) {
@@ -1177,6 +1324,41 @@ void EcmaVM::IterateGlobalEnvField(RootVisitor &visitor)
     }
 }
 
+#if defined(ENABLE_HITRACE_LOCAL_HANDLE_DETECT)
+void EcmaVM::HandleLeakDetect(uintptr_t handle)
+{
+#if defined(ENABLE_BACKTRACE_LOCAL)
+    std::string backtrace;
+    if (job::GetBacktrace(backtrace, true)) {
+        auto it = std::find_if(handleLeakRecords_.begin(), handleLeakRecords_.end(),
+            [&backtrace](const HandleLeakRecord &record) { return record.backtrace == backtrace; });
+        if (it != handleLeakRecords_.end()) {
+            it->leakCount++;
+        } else {
+            if (handleLeakRecords_.size() >= MAX_BACKTRACE_RECORDS) {
+                handleLeakRecords_.pop_front();
+            }
+            handleLeakRecords_.push_back({handle, 1, backtrace});
+            LOG_ECMA(ERROR) << "LOCAL_HANDLE_LEAK " << backtrace;
+        }
+    }
+#endif // ENABLE_BACKTRACE_LOCAL
+}
+
+#if defined(ENABLE_BACKTRACE_LOCAL)
+void EcmaVM::ClearHandleLeakRecords()
+{
+    handleLeakRecords_.clear();
+}
+
+auto EcmaVM::GetHandleLeakRecords() const
+    -> const std::deque<HandleLeakRecord>&
+{
+    return handleLeakRecords_;
+}
+#endif // ENABLE_BACKTRACE_LOCAL
+#endif // ENABLE_HITRACE_LOCAL_HANDLE_DETECT
+
 uintptr_t *EcmaVM::ExpandHandleStorage()
 {
     uintptr_t *result = nullptr;
@@ -1207,6 +1389,40 @@ void EcmaVM::DeleteHandleStorage()
     handleScopeStorageNext_ = handleScopeStorageEnd_ = nullptr;
 }
 
+bool EcmaVM::FreeStorageNodesTask::Run([[maybe_unused]] uint32_t threadIndex)
+{
+    std::string traceName =
+        "EcmaVM::FreeStorageNodesTask::Run freed " + std::to_string(nodes_.size()) + " nodes";
+    ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, traceName.c_str(), "");
+    for (auto *node : nodes_) {
+        delete node;
+    }
+    return true;
+}
+
+void EcmaVM::FreeStorageNodes(std::vector<StorageNode *> &nodes, int32_t toDelete)
+{
+    // The caller (mutator thread) owns `nodes`, so detaching via pop_back here is
+    // race-free. Only the heap free of detached nodes is posted to the taskpool,
+    // which never touches `nodes` afterwards, avoiding vector races with the caller.
+    auto *taskpool = common::Taskpool::GetCurrentTaskpool();
+    bool asyncFree = thread_->IsMainThreadFast() && toDelete > ASYNC_SHRINK_NODE_THRESHOLD && taskpool != nullptr;
+    if (asyncFree) {
+        std::vector<StorageNode *> toFree;
+        toFree.reserve(toDelete);
+        for (int32_t i = 0; i < toDelete; i++) {
+            toFree.push_back(nodes.back());
+            nodes.pop_back();
+        }
+        taskpool->PostTask(std::make_unique<FreeStorageNodesTask>(std::move(toFree)));
+    } else {
+        for (int32_t i = 0; i < toDelete; i++) {
+            delete nodes.back();
+            nodes.pop_back();
+        }
+    }
+}
+
 void EcmaVM::ShrinkHandleStorage(int prevIndex)
 {
     currentHandleStorageIndex_ = prevIndex;
@@ -1230,13 +1446,92 @@ void EcmaVM::ShrinkHandleStorage(int prevIndex)
     }
 #endif
 
-    if (lastIndex > MIN_HANDLE_STORAGE_SIZE && currentHandleStorageIndex_ < MIN_HANDLE_STORAGE_SIZE) {
+    if (lastIndex <= MIN_HANDLE_STORAGE_SIZE) {
+        return;
+    }
+    if (enableHandleMemoryOptimization_) {
+        int32_t totalNodes = lastIndex + 1;
+        int32_t currentUsage = currentHandleStorageIndex_ + 1;
+        int32_t targetNodes = std::max(MIN_HANDLE_STORAGE_SIZE, currentUsage * SHRINK_HEADROOM_FACTOR);
+        int32_t toDelete = totalNodes - targetNodes;
+        // Only shrink when at least a quarter of the nodes would be freed, to avoid churn.
+        if (toDelete >= std::max(totalNodes / SHRINK_HYSTERESIS_DIVISOR, SHRINK_MIN_FREE_NODES)) {
+            LOG_ECMA(DEBUG) << "ShrinkHandleStorage currentUsage:" << currentUsage
+                            << " totalNodes:" << totalNodes << " targetNodes:" << targetNodes;
+            FreeStorageNodes(handleStorageNodes_, toDelete);
+        }
+        return;
+    }
+    // Legacy conservative shrink: free back down to MIN+1 only when usage < MIN.
+    if (currentHandleStorageIndex_ < MIN_HANDLE_STORAGE_SIZE) {
         for (int i = MIN_HANDLE_STORAGE_SIZE; i < lastIndex; i++) {
             auto node = handleStorageNodes_.back();
             delete node;
             handleStorageNodes_.pop_back();
         }
     }
+}
+
+void EcmaVM::GuardHandleStorage(void *prevNext, int prevIndex)
+{
+#if !ECMASCRIPT_ENABLE_ZAP_MEM
+    if (handleScopeStorageNext_ == prevNext) {
+        return;
+    }
+    if (LIKELY(currentHandleStorageIndex_ == prevIndex)) {
+        if (prevIndex != -1) {
+            uintptr_t addrBegin = ToUintPtr(prevNext);
+            uintptr_t addrEnd = ToUintPtr(handleScopeStorageNext_);
+            for (uintptr_t addr = addrBegin; addr < addrEnd; addr += sizeof(JSTaggedType)) {
+                *reinterpret_cast<JSTaggedType *>(addr) = static_cast<JSTaggedType>(g_guardAddress);
+            }
+        }
+    } else {
+        if (prevIndex != -1) {
+            uintptr_t addrBegin = ToUintPtr(prevNext);
+            uintptr_t addrEnd = ToUintPtr(&handleStorageNodes_[prevIndex]->data()[NODE_BLOCK_SIZE]);
+            for (uintptr_t addr = addrBegin; addr < addrEnd; addr += sizeof(JSTaggedType)) {
+                *reinterpret_cast<JSTaggedType *>(addr) = static_cast<JSTaggedType>(g_guardAddress);
+            }
+        }
+        for (int i = prevIndex + 1; i < currentHandleStorageIndex_; i++) {
+            uintptr_t addrBegin = ToUintPtr(&handleStorageNodes_[i]->data()[0]);
+            uintptr_t addrEnd = ToUintPtr(&handleStorageNodes_[i]->data()[NODE_BLOCK_SIZE]);
+            for (uintptr_t addr = addrBegin; addr < addrEnd; addr += sizeof(JSTaggedType)) {
+                *reinterpret_cast<JSTaggedType *>(addr) = static_cast<JSTaggedType>(g_guardAddress);
+            }
+        }
+        uintptr_t addrBegin = ToUintPtr(&handleStorageNodes_[currentHandleStorageIndex_]->data()[0]);
+        uintptr_t addrEnd = ToUintPtr(handleScopeStorageNext_);
+        for (uintptr_t addr = addrBegin; addr < addrEnd; addr += sizeof(JSTaggedType)) {
+            *reinterpret_cast<JSTaggedType *>(addr) = static_cast<JSTaggedType>(g_guardAddress);
+        }
+    }
+#endif
+}
+
+bool EcmaVM::IsValidOrCachedHandleAddress(uintptr_t handleAddress)
+{
+    DISALLOW_HANDLE_ALLOC;
+    uint32_t nid = handleStorageNodes_.size();
+    for (uint32_t i = 0; i < nid; i++) {
+        auto node = handleStorageNodes_.at(i);
+        auto startAddress = ToUintPtr(&(node->data()[0]));
+        auto endAddress = ToUintPtr(&(node->data()[NODE_BLOCK_SIZE]));
+        if (handleAddress >= startAddress && handleAddress < endAddress) {
+            return true;
+        }
+    }
+    nid = primitiveStorageNodes_.size();
+    for (uint32_t i = 0; i < nid; i++) {
+        auto node = primitiveStorageNodes_.at(i);
+        auto startAddress = ToUintPtr(&(node->data()[0]));
+        auto endAddress = ToUintPtr(&(node->data()[NODE_BLOCK_SIZE]));
+        if (handleAddress >= startAddress && handleAddress < endAddress) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void EcmaVM::PrintOptStat()
@@ -1260,19 +1555,25 @@ std::tuple<uint64_t, uint8_t*, int, kungfu::CalleeRegAndOffsetVec> EcmaVM::CalCa
 void EcmaVM::LoadStubFile()
 {
     std::string stubFile = "";
+#ifdef ANDROID_PLATFORM
+    stubFile = options_.GetStubFile();
+#else
     if (options_.WasStubFileSet()) {
         stubFile = options_.GetStubFile();
     }
+#endif
     aotFileManager_->LoadStubFile(stubFile);
 }
 
 bool EcmaVM::LoadAOTFilesInternal(const std::string& aotFileName)
 {
 #ifdef ENABLE_OHOS_PARAMETER
+#ifndef EXCLUDE_PGO
     std::string bundleName = pgo::PGOProfilerManager::GetInstance()->GetBundleName();
     if (AotCrashInfo::GetInstance().IsAotEscapedOrNotInEnableList(this, bundleName)) {
         return false;
     }
+#endif
 #endif
     std::string anFile = aotFileName + AOTFileManager::FILE_EXTENSION_AN;
     if (!aotFileManager_->LoadAnFile(anFile)) {
@@ -1281,6 +1582,8 @@ bool EcmaVM::LoadAOTFilesInternal(const std::string& aotFileName)
         return false;
     }
 
+    // disable evacuate nonmovable space in aot.
+    Runtime::GetInstance()->DisableEvacuateNonMovableSpace();   // may gc in load ai
     std::string aiFile = aotFileName + AOTFileManager::FILE_EXTENSION_AI;
     if (!aotFileManager_->LoadAiFile(aiFile)) {
         LOG_ECMA(WARN) << "Load " << aiFile << " failed. Destroy aot data and rollback to interpreter";
@@ -1351,13 +1654,68 @@ void EcmaVM::ShrinkPrimitiveStorage(int prevIndex)
     }
 #endif
 
-    if (lastIndex > MIN_PRIMITIVE_STORAGE_SIZE && currentPrimitiveStorageIndex_ < MIN_PRIMITIVE_STORAGE_SIZE) {
+    if (lastIndex <= MIN_PRIMITIVE_STORAGE_SIZE) {
+        return;
+    }
+    if (enableHandleMemoryOptimization_) {
+        int32_t totalNodes = lastIndex + 1;
+        int32_t currentUsage = currentPrimitiveStorageIndex_ + 1;
+        int32_t targetNodes = std::max(MIN_PRIMITIVE_STORAGE_SIZE, currentUsage * SHRINK_HEADROOM_FACTOR);
+        int32_t toDelete = totalNodes - targetNodes;
+        // Only shrink when at least a quarter of the nodes would be freed, to avoid churn.
+        if (toDelete >= std::max(totalNodes / SHRINK_HYSTERESIS_DIVISOR, SHRINK_MIN_FREE_NODES)) {
+            LOG_ECMA(DEBUG) << "ShrinkPrimitiveStorage currentUsage:" << currentUsage
+                            << " totalNodes:" << totalNodes << " targetNodes:" << targetNodes;
+            FreeStorageNodes(primitiveStorageNodes_, toDelete);
+        }
+        return;
+    }
+    // Legacy conservative shrink: free back down to MIN+1 only when usage < MIN.
+    if (currentPrimitiveStorageIndex_ < MIN_PRIMITIVE_STORAGE_SIZE) {
         for (int i = MIN_PRIMITIVE_STORAGE_SIZE; i < lastIndex; i++) {
             auto node = primitiveStorageNodes_.back();
             delete node;
             primitiveStorageNodes_.pop_back();
         }
     }
+}
+
+void EcmaVM::GuardPrimitiveStorage(void *prevNext, int prevIndex)
+{
+#if !ECMASCRIPT_ENABLE_ZAP_MEM
+    if (primitiveScopeStorageNext_ == prevNext) {
+        return;
+    }
+    if (LIKELY(currentPrimitiveStorageIndex_ == prevIndex)) {
+        if (prevIndex != -1) {
+            uintptr_t addrBegin = ToUintPtr(prevNext);
+            uintptr_t addrEnd = ToUintPtr(primitiveScopeStorageNext_);
+            for (uintptr_t addr = addrBegin; addr < addrEnd; addr += sizeof(JSTaggedType)) {
+                *reinterpret_cast<JSTaggedType *>(addr) = static_cast<JSTaggedType>(g_guardAddress);
+            }
+        }
+    } else {
+        if (prevIndex != -1) {
+            uintptr_t addrBegin = ToUintPtr(prevNext);
+            uintptr_t addrEnd = ToUintPtr(&primitiveStorageNodes_[prevIndex]->data()[NODE_BLOCK_SIZE]);
+            for (uintptr_t addr = addrBegin; addr < addrEnd; addr += sizeof(JSTaggedType)) {
+                *reinterpret_cast<JSTaggedType *>(addr) = static_cast<JSTaggedType>(g_guardAddress);
+            }
+        }
+        for (int i = prevIndex + 1; i < currentPrimitiveStorageIndex_; i++) {
+            uintptr_t addrBegin = ToUintPtr(&primitiveStorageNodes_[i]->data()[0]);
+            uintptr_t addrEnd = ToUintPtr(&primitiveStorageNodes_[i]->data()[NODE_BLOCK_SIZE]);
+            for (uintptr_t addr = addrBegin; addr < addrEnd; addr += sizeof(JSTaggedType)) {
+                *reinterpret_cast<JSTaggedType *>(addr) = static_cast<JSTaggedType>(g_guardAddress);
+            }
+        }
+        uintptr_t addrBegin = ToUintPtr(&primitiveStorageNodes_[currentPrimitiveStorageIndex_]->data()[0]);
+        uintptr_t addrEnd = ToUintPtr(primitiveScopeStorageNext_);
+        for (uintptr_t addr = addrBegin; addr < addrEnd; addr += sizeof(JSTaggedType)) {
+            *reinterpret_cast<JSTaggedType *>(addr) = static_cast<JSTaggedType>(g_guardAddress);
+        }
+    }
+#endif
 }
 
 void EcmaVM::DeletePrimitiveStorage()
@@ -1397,6 +1755,27 @@ HeapProfilerInterface *EcmaVM::GetOrNewHeapProfile()
     ASSERT(heapProfile_ != nullptr);
     return heapProfile_;
 }
+
+#ifdef PANDA_JS_ETS_HYBRID_MODE
+void EcmaVM::DeleteHybridHeapProfiler()
+{
+    if (hybridHeapProfiler_ == nullptr) {
+        return;
+    }
+    delete hybridHeapProfiler_;
+    hybridHeapProfiler_ = nullptr;
+}
+
+HybridHeapProfiler *EcmaVM::GetOrNewHybridHeapProfiler()
+{
+    if (hybridHeapProfiler_ != nullptr) {
+        return hybridHeapProfiler_;
+    }
+    hybridHeapProfiler_ = new HybridHeapProfiler(this);
+    ASSERT(hybridHeapProfiler_ != nullptr);
+    return hybridHeapProfiler_;
+}
+#endif  // PANDA_JS_ETS_HYBRID_MODE
 
 void EcmaVM::StartHeapTracking()
 {
@@ -1674,13 +2053,173 @@ bool EcmaVM::IsHmsModule(const CString &moduleStr) const
     return true;
 }
 
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+bool EcmaVM::IsNormalizedOhmUrlPack()
+{
+    if (IsFormThread()) {
+        ReadLockHolder lock(pkgContextInfoLock_);
+        return !pkgContextInfoList_.empty();
+    }
+    return Runtime::GetInstance()->GetPkgContextStore().IsNormalizedOhmUrlPack();
+}
+
+void EcmaVM::SetPkgNameList(const CMap<CString, CString> &list)
+{
+    if (IsFormThread()) {
+        WriteLockHolder lock(pkgNameListLock_);
+        pkgNameList_ = list;
+        return;
+    }
+    Runtime::GetInstance()->GetPkgContextStore().SetPkgNameList(list);
+}
+
+void EcmaVM::UpdatePkgNameList(const CMap<CString, CString> &list)
+{
+    if (IsFormThread()) {
+        WriteLockHolder lock(pkgNameListLock_);
+        pkgNameList_.insert(list.begin(), list.end());
+        return;
+    }
+    Runtime::GetInstance()->GetPkgContextStore().UpdatePkgNameList(list);
+}
+
+CMap<CString, CString> EcmaVM::GetPkgNameList()
+{
+    if (IsFormThread()) {
+        ReadLockHolder lock(pkgNameListLock_);
+        return pkgNameList_;
+    }
+    return Runtime::GetInstance()->GetPkgContextStore().GetPkgNameList();
+}
+
+CString EcmaVM::GetPkgName(const CString &moduleName)
+{
+    if (IsFormThread()) {
+        ReadLockHolder lock(pkgNameListLock_);
+        auto it = pkgNameList_.find(moduleName);
+        if (it == pkgNameList_.end()) {
+            LOG_ECMA(INFO) << " Get Pkg Name failed";
+            return moduleName;
+        }
+        return it->second;
+    }
+    return Runtime::GetInstance()->GetPkgContextStore().GetPkgName(moduleName);
+}
+
+void EcmaVM::UpdatePkgContextInfoList(const CMap<CString, CMap<CString, CVector<std::pair<CString, CString>>>> &list)
+{
+    if (IsFormThread()) {
+        WriteLockHolder lock(pkgContextInfoLock_);
+        pkgContextInfoList_.insert(list.begin(), list.end());
+        return;
+    }
+    Runtime::GetInstance()->GetPkgContextStore().UpdatePkgContextInfoList(list);
+}
+
+CMap<CString, CMap<CString, CVector<std::pair<CString, CString>>>> EcmaVM::GetPkgContextInfoList()
+{
+    if (IsFormThread()) {
+        ReadLockHolder lock(pkgContextInfoLock_);
+        return pkgContextInfoList_;
+    }
+    return Runtime::GetInstance()->GetPkgContextStore().GetPkgContextInfoList();
+}
+
+CString EcmaVM::GetPkgNameWithAlias(const CString &alias)
+{
+    if (IsFormThread()) {
+        ReadLockHolder lock(pkgAliasListLock_);
+        auto it = pkgAliasList_.find(alias);
+        if (it == pkgAliasList_.end()) {
+            return alias;
+        }
+        return it->second;
+    }
+    return Runtime::GetInstance()->GetPkgContextStore().GetPkgNameWithAlias(alias);
+}
+
+void EcmaVM::SetPkgAliasList(const CMap<CString, CString> &list)
+{
+    if (IsFormThread()) {
+        WriteLockHolder lock(pkgAliasListLock_);
+        pkgAliasList_ = list;
+        return;
+    }
+    Runtime::GetInstance()->GetPkgContextStore().SetPkgAliasList(list);
+}
+
+void EcmaVM::UpdatePkgAliasList(const CMap<CString, CString> &list)
+{
+    if (IsFormThread()) {
+        WriteLockHolder lock(pkgAliasListLock_);
+        pkgAliasList_.insert(list.begin(), list.end());
+        return;
+    }
+    Runtime::GetInstance()->GetPkgContextStore().UpdatePkgAliasList(list);
+}
+
+CMap<CString, CString> EcmaVM::GetPkgAliasList()
+{
+    if (IsFormThread()) {
+        ReadLockHolder lock(pkgAliasListLock_);
+        return pkgAliasList_;
+    }
+    return Runtime::GetInstance()->GetPkgContextStore().GetPkgAliasList();
+}
+
+CUnorderedMap<CString, CUnorderedMap<CString, CUnorderedSet<CString>>> EcmaVM::GetOhExportList()
+{
+    if (IsFormThread()) {
+        ReadLockHolder lock(ohExportListLock_);
+        return ohExportsList_;
+    }
+    return Runtime::GetInstance()->GetPkgContextStore().GetOhExportList();
+}
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+void EcmaVM::SetpkgContextInfoList(const CMap<CString, CMap<CString, CVector<std::pair<CString, CString>>>> &list)
+{
+    if (IsFormThread()) {
+        WriteLockHolder lock(pkgContextInfoLock_);
+        pkgContextInfoList_ = list;
+        return;
+    }
+    Runtime::GetInstance()->GetPkgContextStore().SetPkgContextInfoList(list);
+}
+#else
 void EcmaVM::SetpkgContextInfoList(const CMap<CString, CMap<CString, CVector<CString>>> &list)
 {
     WriteLockHolder lock(pkgContextInfoLock_);
     pkgContextInfoList_ = list;
 }
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
 
 #if ENABLE_LATEST_OPTIMIZATION
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+void EcmaVM::GetPkgContextInfoListElements(const CString &moduleName, const CString &packageName,
+                                           CVector<std::pair<CString, CString>> &resultList)
+{
+    if (IsFormThread()) {
+        ReadLockHolder lock(pkgContextInfoLock_);
+        if (packageName.empty()) {
+            return;
+        }
+        auto pkgContextIt = pkgContextInfoList_.find(moduleName);
+        if (pkgContextIt == pkgContextInfoList_.end()) {
+            return;
+        }
+        const CMap<CString, CVector<std::pair<CString, CString>>> &pkgList = pkgContextIt->second;
+        auto pkgIt = pkgList.find(packageName);
+        if (pkgIt == pkgList.end()) {
+            return;
+        }
+        resultList = pkgIt->second;
+        return;
+    }
+    Runtime::GetInstance()->GetPkgContextStore().GetPkgContextInfoListElements(moduleName, packageName, resultList);
+}
+#else
 void EcmaVM::GetPkgContextInfoListElements(const CString &moduleName, const CString &packageName,
                                            CVector<CString> &resultList)
 {
@@ -1699,6 +2238,7 @@ void EcmaVM::GetPkgContextInfoListElements(const CString &moduleName, const CStr
     }
     resultList = pkgIt->second;
 }
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
 #endif
 
 void EcmaVM::StopPreLoadSoOrAbc()
@@ -1713,20 +2253,69 @@ void EcmaVM::StopPreLoadSoOrAbc()
     }
 }
 
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+void EcmaVM::SetOhExportsList(const CUnorderedMap<CString, CUnorderedMap<CString,
+    CUnorderedSet<CString>>> &ohExportsMap)
+{
+    if (IsFormThread()) {
+        WriteLockHolder lock(ohExportListLock_);
+        ohExportsList_ = ohExportsMap;
+        return;
+    }
+    Runtime::GetInstance()->GetPkgContextStore().SetOhExportsList(ohExportsMap);
+}
+#else
 void EcmaVM::SetOhExportsList(const CUnorderedMap<CString, CUnorderedMap<CString,
     CUnorderedSet<CString>>> &ohExportsMap)
 {
     WriteLockHolder lock(ohExportListLock_);
     ohExportsList_ = ohExportsMap;
 }
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
 
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+void EcmaVM::UpdateOhExportsList(const CUnorderedMap<CString, CUnorderedMap<CString,
+                                 CUnorderedSet<CString>>> &ohExportsMap)
+{
+    if (IsFormThread()) {
+        WriteLockHolder lock(ohExportListLock_);
+        ohExportsList_.insert(ohExportsMap.begin(), ohExportsMap.end());
+        return;
+    }
+    Runtime::GetInstance()->GetPkgContextStore().UpdateOhExportsList(ohExportsMap);
+}
+#else
 void EcmaVM::UpdateOhExportsList(const CUnorderedMap<CString, CUnorderedMap<CString,
                                  CUnorderedSet<CString>>> &ohExportsMap)
 {
     WriteLockHolder lock(ohExportListLock_);
     ohExportsList_.insert(ohExportsMap.begin(), ohExportsMap.end());
 }
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
 
+#if ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
+bool EcmaVM::CheckOhExportsWithOhmurl(const CString &moduleName, const CString &packageName, const CString &ohmurl)
+{
+    if (IsFormThread()) {
+        ReadLockHolder lock(ohExportListLock_);
+        if (packageName.empty()) {
+            return true;
+        }
+        auto moduleIt = ohExportsList_.find(moduleName);
+        if (moduleIt == ohExportsList_.end()) {
+            return true;
+        }
+        const CUnorderedMap<CString, CUnorderedSet<CString>> &moduleExportsList = moduleIt->second;
+        auto packageIt = moduleExportsList.find(packageName);
+        if (packageIt == moduleExportsList.end()) {
+            return true;
+        }
+        const CUnorderedSet<CString> &packageExportsList = packageIt->second;
+        return (packageExportsList.find(ohmurl) != packageExportsList.end());
+    }
+    return Runtime::GetInstance()->GetPkgContextStore().CheckOhExportsWithOhmurl(moduleName, packageName, ohmurl);
+}
+#else
 bool EcmaVM::CheckOhExportsWithOhmurl(const CString &moduleName, const CString &packageName, const CString &ohmurl)
 {
     ReadLockHolder lock(ohExportListLock_);
@@ -1745,6 +2334,7 @@ bool EcmaVM::CheckOhExportsWithOhmurl(const CString &moduleName, const CString &
     const CUnorderedSet<CString> &packageExportsList = packageIt->second;
     return (packageExportsList.find(ohmurl) != packageExportsList.end());
 }
+#endif // ENABLE_MODULE_PKGCONTEXT_OPTIMIZATION
 
 // Initialize IcuData Path
 void EcmaVM::InitializeIcuData(const JSRuntimeOptions &options)
@@ -1836,6 +2426,27 @@ bool EcmaVM::ExecutePromisePendingJob()
     }
     return false;
 }
+
+bool EcmaVM::OpenMicrotaskScope()
+{
+    if (microtaskScopeOpen_) {
+        LOG_ECMA(ERROR) << "EcmaVM::OpenMicrotaskScope nested open is not allowed";
+        return false;
+    }
+    microtaskScopeOpen_ = true;
+    return true;
+}
+
+bool EcmaVM::CloseMicrotaskScope()
+{
+    if (!microtaskScopeOpen_) {
+        LOG_ECMA(ERROR) << "EcmaVM::CloseMicrotaskScope without matching open";
+        return false;
+    }
+    microtaskScopeOpen_ = false;
+    return true;
+}
+
 // just find unshared constpool, not create
 JSTaggedValue EcmaVM::FindUnsharedConstpool(JSTaggedValue sharedConstpool)
 {
@@ -1881,7 +2492,6 @@ void EcmaVM::EraseUnusedConstpool(const JSPandaFile *jsPandaFile, int32_t index,
 {
     // unshared constpool index is default INT32_MAX.
     ASSERT(0 <= constpoolIndex && constpoolIndex < GetUnsharedConstpoolsArrayLen());
-
     SetUnsharedConstpool(constpoolIndex, JSTaggedValue::Hole());
     auto iter = cachedSharedConstpools_.find(jsPandaFile);
     if (iter == cachedSharedConstpools_.end()) {
@@ -2035,6 +2645,11 @@ void EcmaVM::UpdateConstpoolWhenDeserialAI(const std::string& fileName,
     ConstantPool::UpdateConstpoolWhenDeserialAI(thread_->GetEcmaVM(), aiCP, sharedCP, unsharedCP);
 }
 
+void EcmaVM::ForEachSharedConstpool(const JSPandaFile *jsPandaFile, const ForEachCallback<JSTaggedValue>& cb)
+{
+    Runtime::GetInstance()->ForEachConstpools(jsPandaFile, cb);
+}
+
 JSTaggedValue EcmaVM::FindCachedConstpoolAndLoadAiIfNeeded(const JSPandaFile *jsPandaFile, int32_t index)
 {
     JSTaggedValue constpool = FindConstpoolFromContextCache(jsPandaFile, index);
@@ -2151,37 +2766,50 @@ JSTaggedValue EcmaVM::ExecuteAot(size_t actualNumArgs, JSTaggedType *args,
     return res;
 }
 
+#if ECMASCRIPT_ENABLE_ARK_STEED
+JSTaggedValue EcmaVM::ExecuteArkSteed(size_t actualNumArgs, JSTaggedType *args, const JSTaggedType *prevFp)
+{
+    ASSERT(thread_->IsInManagedState());
+    SaveEnv envScope(thread_);
+    auto entry = thread_->GetRTInterface(kungfu::RuntimeStubCSigns::ID_ArkSteedCallEntry);
+    auto res = reinterpret_cast<ArkSteedCallEntryType>(entry)(thread_->GetGlueAddr(),
+                                                              actualNumArgs,
+                                                              args,
+                                                              reinterpret_cast<uintptr_t>(prevFp));
+    return res;
+}
+#endif
+
 Expected<JSTaggedValue, bool> EcmaVM::CommonInvokeEcmaEntrypoint(const JSPandaFile *jsPandaFile,
-    std::string_view entryPoint, JSHandle<JSFunction> &func, const ExecuteTypes &executeType)
+    const CString& entryPoint, JSHandle<JSFunction> &func, const ExecuteTypes &executeType)
 {
     ASSERT(thread_->IsInManagedState());
     JSHandle<JSTaggedValue> global = GetGlobalEnv()->GetJSGlobalObject();
     JSHandle<JSTaggedValue> undefined = thread_->GlobalConstants()->GetHandledUndefined();
+#ifndef EXCLUDE_PGO
     if (IsEnablePGOProfiler() && IsPgoNapi()) {
         JSHandle<JSFunction> objectFunction(GetGlobalEnv()->GetObjectFunction());
         JSHandle<JSHClass> protoOrHClass(GetGlobalEnv()->GetObjectFunctionNapiClass());
         GetPGOProfiler()->ProfileNapiRootHClass(
             objectFunction.GetTaggedType(), protoOrHClass.GetTaggedType(), pgo::ProfileType::Kind::NapiId);
     }
-    CString entry = entryPoint.data();
-    JSRecordInfo *recordInfo = jsPandaFile->CheckAndGetRecordInfo(entry);
+#endif
+    JSRecordInfo *recordInfo = jsPandaFile->CheckAndGetRecordInfo(entryPoint);
     if (recordInfo == nullptr) {
-        CString msg = "Cannot find module '" + entry + "' , which is application Entry Point";
+        CString msg = "Cannot find module '" + entryPoint + "' , which is application Entry Point";
         THROW_REFERENCE_ERROR_AND_RETURN(thread_, msg.c_str(), Unexpected(false));
     }
 
-    ModuleLoggerTimeScope moduleLoggerTimeScope(thread_, entry);
+    ModuleLoggerTimeScope moduleLoggerTimeScope(thread_, entryPoint);
     if (jsPandaFile->IsModule(recordInfo)) {
         global = undefined;
-        CString moduleName = jsPandaFile->GetJSPandaFileDesc();
-        if (!jsPandaFile->IsBundlePack()) {
-            moduleName = entry;
-        }
+        const CString& moduleName = jsPandaFile->GetJSPandaFileDesc();
         JSHandle<SourceTextModule> module;
         if (jsPandaFile->IsSharedModule(recordInfo)) {
-            module = SharedModuleManager::GetInstance()->GetSModule(thread_, entry);
+            module = SharedModuleManager::GetInstance()->GetSModule(thread_, entryPoint);
         } else {
-            module = thread_->GetModuleManager()->HostGetImportedModule(moduleName);
+            module = thread_->GetModuleManager()->HostGetImportedModule(
+                jsPandaFile->IsBundlePack() ? moduleName : entryPoint);
         }
         // esm -> SourceTextModule; cjs or script -> string of recordName
         module->SetSendableEnv(thread_, JSTaggedValue::Undefined());
@@ -2189,7 +2817,7 @@ Expected<JSTaggedValue, bool> EcmaVM::CommonInvokeEcmaEntrypoint(const JSPandaFi
     } else {
         // if it is Cjs at present, the module slot of the function is not used. We borrow it to store the recordName,
         // which can avoid the problem of larger memory caused by the new slot
-        JSHandle<EcmaString> recordName = factory_->NewFromUtf8(entry);
+        JSHandle<EcmaString> recordName = factory_->NewFromUtf8(entryPoint);
         func->SetModule(thread_, recordName);
     }
     CheckStartCpuProfiler();
@@ -2198,10 +2826,12 @@ Expected<JSTaggedValue, bool> EcmaVM::CommonInvokeEcmaEntrypoint(const JSPandaFi
     if (jsPandaFile->IsCjs(recordInfo)) {
         CJSExecution(func, global, jsPandaFile, entryPoint);
     } else {
-        if (aotFileManager_->IsLoadMain(jsPandaFile, entry) && thread_->HasSwitchedToStwStub()) {
+        if (aotFileManager_->IsLoadMain(jsPandaFile, entryPoint) && thread_->HasSwitchedToStwStub()) {
             EcmaRuntimeStatScope runtimeStatScope(this);
             result = InvokeEcmaAotEntrypoint(func, global, jsPandaFile, entryPoint);
-        } else if (GetJSOptions().IsEnableForceJitCompileMain() && thread_->HasSwitchedToStwStub()) {
+        } else
+#ifndef EXCLUDE_JIT
+        if (GetJSOptions().IsEnableForceJitCompileMain() && thread_->HasSwitchedToStwStub()) {
             Jit::Compile(this, func, CompilerTier::Tier::FAST);
             EcmaRuntimeStatScope runtimeStatScope(this);
             result = JSFunction::InvokeOptimizedEntrypoint(thread_, func, global, nullptr);
@@ -2211,7 +2841,9 @@ Expected<JSTaggedValue, bool> EcmaVM::CommonInvokeEcmaEntrypoint(const JSPandaFi
                 EcmaInterpreter::NewRuntimeCallInfo(thread_, JSHandle<JSTaggedValue>(func), global, undefined, 0);
             EcmaRuntimeStatScope runtimeStatScope(this);
             result = EcmaInterpreter::Execute(info);
-        } else {
+        } else
+#endif
+        {
             EcmaRuntimeCallInfo *info =
                 EcmaInterpreter::NewRuntimeCallInfo(thread_, JSHandle<JSTaggedValue>(func), global, undefined, 0);
             EcmaRuntimeStatScope runtimeStatScope(this);
@@ -2232,13 +2864,13 @@ Expected<JSTaggedValue, bool> EcmaVM::CommonInvokeEcmaEntrypoint(const JSPandaFi
 }
 
 Expected<JSTaggedValue, bool> EcmaVM::InvokeEcmaEntrypoint(const JSPandaFile *jsPandaFile,
-                                                           std::string_view entryPoint,
+                                                           const CString& entryPoint,
                                                            const ExecuteTypes &executeType)
 {
     [[maybe_unused]] EcmaHandleScope scope(thread_);
     auto &options = const_cast<EcmaVM *>(thread_->GetEcmaVM())->GetJSOptions();
     if (options.EnableModuleLog()) {
-        LOG_FULL(INFO) << "current executing file's name " << entryPoint.data();
+        LOG_FULL(INFO) << "current executing file's name " << entryPoint;
     }
 
     JSHandle<Program> program = JSPandaFileManager::GetInstance()->GenerateProgram(this, jsPandaFile, entryPoint);
@@ -2258,7 +2890,7 @@ Expected<JSTaggedValue, bool> EcmaVM::InvokeEcmaEntrypoint(const JSPandaFile *js
 }
 
 Expected<JSTaggedValue, bool> EcmaVM::InvokeEcmaEntrypointForHotReload(
-    const JSPandaFile *jsPandaFile, std::string_view entryPoint, const ExecuteTypes &executeType)
+    const JSPandaFile *jsPandaFile, const CString& entryPoint, const ExecuteTypes &executeType)
 {
     [[maybe_unused]] EcmaHandleScope scope(thread_);
     JSHandle<Program> program = JSPandaFileManager::GetInstance()->GenerateProgram(this, jsPandaFile, entryPoint);
@@ -2271,8 +2903,7 @@ Expected<JSTaggedValue, bool> EcmaVM::InvokeEcmaEntrypointForHotReload(
     GlobalHandleCollection gloalHandleCollection(thread_);
     JSHandle<JSTaggedValue> moduleRecordHandle =
         gloalHandleCollection.NewHandle<JSTaggedValue>(finalModuleRecord->GetRawData());
-    CString recordName = entryPoint.data();
-    AddPatchModule(recordName, moduleRecordHandle);
+    AddPatchModule(entryPoint, moduleRecordHandle);
 
     // print exception information
     if (thread_->HasPendingException() &&
@@ -2360,32 +2991,144 @@ void EcmaVM::AddModuleManager(ModuleManager *moduleManager)
     moduleManagers_.PushBack(moduleManager);
 }
 
+std::string EcmaVM::GetExtraJSCrashMessage() const
+{
+    std::string report {};
+    for (auto& [name, cb] : extraJSCrashMessageCallbacks_) {
+        if (!cb) {
+            continue;
+        }
+        auto msg = cb(this);
+        if (msg.empty()) {
+            continue;
+        }
+        report += name;
+        report += ":\n";
+        report += msg;
+        report += "\n";
+    }
+    return report;
+}
+
+size_t EcmaVM::RegisterExtraJSCrashMessageCallback(const std::string_view &name, ExtraJSCrashMessageCallback cb)
+{
+    if (!cb) {
+        return 0;
+    }
+    extraJSCrashMessageCallbacks_.emplace_back(std::pair{std::string(name), cb});
+    return extraJSCrashMessageCallbacks_.size();
+}
+
+void EcmaVM::NotifyANR()
+{
+    ModulesSnapshotHelper::TryDisableSnapshotOnANR();
+}
+
 void EcmaVM::ModuleManagers::Iterate(RootVisitor &v)
 {
     LockHolder lock(CMCGCMutex_);
+#if ENABLE_LOCALCC_OPTIMIZATION
+    WaitForConcurrentRootScanCheckRequired();
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
     for (ModuleManager *moduleManager : moduleManagersVec_) {
         moduleManager->Iterate(v);
     }
+}
+
+void EcmaVM::ModuleManagers::ProcessPendingRemovalLocalModules(const WeakRootVisitor &visitor)
+{
+    LockHolder lock(CMCGCMutex_);
+    for (ModuleManager *moduleManager : moduleManagersVec_) {
+        moduleManager->ProcessPendingRemovalLocalModules(visitor);
+    }
+}
+
+void EcmaVM::ModuleManagers::WaitForConcurrentRootScanCheckRequired()
+{
+    while (concurrentRootScanCheckRequired_.load(std::memory_order_relaxed)) {
+        concurrentRootScanCV_.Wait(&CMCGCMutex_);
+    }
+}
+
+uint32_t EcmaVM::ModuleManagers::PrepareConcurrentRootScan(uint32_t maxTaskCount)
+{
+    LockHolder lock(CMCGCMutex_);
+    ASSERT(concurrentRootScanCheckRequired_.load(std::memory_order_relaxed));
+    uint32_t taskCount = 0;
+    for (ModuleManager *moduleManager : moduleManagersVec_) {
+        taskCount = std::max(taskCount, moduleManager->PrepareConcurrentRootScan(maxTaskCount));
+    }
+    concurrentRootScanActive_ = true;
+    return taskCount;
+}
+
+void EcmaVM::ModuleManagers::BeginConcurrentRootScan()
+{
+    LockHolder lock(CMCGCMutex_);
+    WaitForConcurrentRootScanCheckRequired();
+    ASSERT(!concurrentRootScanActive_);
+    ASSERT(!concurrentRootScanCheckRequired_.load(std::memory_order_relaxed));
+    concurrentRootScanCheckRequired_.store(true, std::memory_order_relaxed);
+    for (ModuleManager *moduleManager : moduleManagersVec_) {
+        moduleManager->BeginConcurrentRootScan();
+    }
+}
+
+void EcmaVM::ModuleManagers::ProcessConcurrentRootScan(uint32_t threadIndex, uint32_t taskCount,
+    const ModuleRootVisitor &visitor)
+{
+    for (ModuleManager *moduleManager : moduleManagersVec_) {
+        moduleManager->ProcessConcurrentRootScan(threadIndex, taskCount, visitor);
+    }
+}
+
+void EcmaVM::ModuleManagers::ProcessConcurrentSendableRootScan(uint32_t threadIndex, const ModuleRootVisitor &visitor)
+{
+    for (ModuleManager *moduleManager : moduleManagersVec_) {
+        moduleManager->ProcessConcurrentSendableRootScan(threadIndex, visitor);
+    }
+}
+
+void EcmaVM::ModuleManagers::FinishConcurrentRootScan()
+{
+    for (ModuleManager *moduleManager : moduleManagersVec_) {
+        moduleManager->FinishConcurrentRootScan();
+    }
+    LockHolder lock(CMCGCMutex_);
+    ASSERT(concurrentRootScanActive_);
+    ASSERT(concurrentRootScanCheckRequired_.load(std::memory_order_relaxed));
+    concurrentRootScanActive_ = false;
+    concurrentRootScanCheckRequired_.store(false, std::memory_order_relaxed);
+    concurrentRootScanCV_.SignalAll();
 }
 
 template <typename T>
 void EcmaVM::ModuleManagers::PushBack(T v)
 {
     LockHolder lock(CMCGCMutex_);
+#if ENABLE_LOCALCC_OPTIMIZATION
+    WaitForConcurrentRootScanCheckRequired();
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
     moduleManagersVec_.push_back(v);
 }
 
 void EcmaVM::ModuleManagers::DestroyAllNativeObj()
 {
     LockHolder lock(CMCGCMutex_);
+#if ENABLE_LOCALCC_OPTIMIZATION
+    WaitForConcurrentRootScanCheckRequired();
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
     for (auto &moduleManager : moduleManagersVec_) {
-        moduleManager->NativeObjDestory();
+        moduleManager->NativeObjDestroy();
     }
 }
 
 void EcmaVM::ModuleManagers::Clear()
 {
     LockHolder lock(CMCGCMutex_);
+#if ENABLE_LOCALCC_OPTIMIZATION
+    WaitForConcurrentRootScanCheckRequired();
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
     for (auto &moduleManager : moduleManagersVec_) {
         delete moduleManager;
         moduleManager = nullptr;
@@ -2393,48 +3136,45 @@ void EcmaVM::ModuleManagers::Clear()
     moduleManagersVec_.clear();
 }
 
-void EcmaVM::InitDataViewTypeTable(const GlobalEnvConstants *constant)
+void EcmaVM::InitTypedArrayNameTable(const GlobalEnvConstants *globalConst)
 {
-    dataViewTypeTable_.emplace(constant->GetInt8ArrayString().GetRawData(), static_cast<int8_t>(DataViewType::INT8));
-    dataViewTypeTable_.emplace(
-        constant->GetSharedInt8ArrayString().GetRawData(), static_cast<int8_t>(DataViewType::INT8));
-    dataViewTypeTable_.emplace(constant->GetUint8ArrayString().GetRawData(), static_cast<int8_t>(DataViewType::UINT8));
-    dataViewTypeTable_.emplace(
-        constant->GetSharedUint8ArrayString().GetRawData(), static_cast<int8_t>(DataViewType::UINT8));
-    dataViewTypeTable_.emplace(
-        constant->GetUint8ClampedArrayString().GetRawData(), static_cast<int8_t>(DataViewType::UINT8_CLAMPED));
-    dataViewTypeTable_.emplace(
-        constant->GetSharedUint8ClampedArrayString().GetRawData(), static_cast<int8_t>(DataViewType::UINT8_CLAMPED));
-    dataViewTypeTable_.emplace(constant->GetInt16ArrayString().GetRawData(), static_cast<int8_t>(DataViewType::INT16));
-    dataViewTypeTable_.emplace(
-        constant->GetSharedInt16ArrayString().GetRawData(), static_cast<int8_t>(DataViewType::INT16));
-    dataViewTypeTable_.emplace(
-        constant->GetUint16ArrayString().GetRawData(), static_cast<int8_t>(DataViewType::UINT16));
-    dataViewTypeTable_.emplace(
-        constant->GetSharedUint16ArrayString().GetRawData(), static_cast<int8_t>(DataViewType::UINT16));
-    dataViewTypeTable_.emplace(constant->GetInt32ArrayString().GetRawData(), static_cast<int8_t>(DataViewType::INT32));
-    dataViewTypeTable_.emplace(
-        constant->GetSharedInt32ArrayString().GetRawData(), static_cast<int8_t>(DataViewType::INT32));
-    dataViewTypeTable_.emplace(
-        constant->GetUint32ArrayString().GetRawData(), static_cast<int8_t>(DataViewType::UINT32));
-    dataViewTypeTable_.emplace(
-        constant->GetSharedUint32ArrayString().GetRawData(), static_cast<int8_t>(DataViewType::UINT32));
-    dataViewTypeTable_.emplace(
-        constant->GetFloat32ArrayString().GetRawData(), static_cast<int8_t>(DataViewType::FLOAT32));
-    dataViewTypeTable_.emplace(
-        constant->GetSharedFloat32ArrayString().GetRawData(), static_cast<int8_t>(DataViewType::FLOAT32));
-    dataViewTypeTable_.emplace(
-        constant->GetFloat64ArrayString().GetRawData(), static_cast<int8_t>(DataViewType::FLOAT64));
-    dataViewTypeTable_.emplace(
-        constant->GetSharedFloat64ArrayString().GetRawData(), static_cast<int8_t>(DataViewType::FLOAT64));
-    dataViewTypeTable_.emplace(
-        constant->GetBigInt64ArrayString().GetRawData(), static_cast<int8_t>(DataViewType::BIGINT64));
-    dataViewTypeTable_.emplace(
-        constant->GetSharedBigInt64ArrayString().GetRawData(), static_cast<int8_t>(DataViewType::BIGINT64));
-    dataViewTypeTable_.emplace(
-        constant->GetBigUint64ArrayString().GetRawData(), static_cast<int8_t>(DataViewType::BIGUINT64));
-    dataViewTypeTable_.emplace(
-        constant->GetSharedBigUint64ArrayString().GetRawData(), static_cast<int8_t>(DataViewType::BIGUINT64));
+    typedArrayNameTable_.resize(static_cast<std::size_t>(DataViewType::COUNT));
+    typedArrayNameTable_[static_cast<std::size_t>(DataViewType::BIGINT64)] = globalConst->GetBigInt64ArrayString();
+    typedArrayNameTable_[static_cast<std::size_t>(DataViewType::BIGUINT64)] = globalConst->GetBigUint64ArrayString();
+    typedArrayNameTable_[static_cast<std::size_t>(DataViewType::FLOAT32)] = globalConst->GetFloat32ArrayString();
+    typedArrayNameTable_[static_cast<std::size_t>(DataViewType::FLOAT64)] = globalConst->GetFloat64ArrayString();
+    typedArrayNameTable_[static_cast<std::size_t>(DataViewType::INT8)] = globalConst->GetInt8ArrayString();
+    typedArrayNameTable_[static_cast<std::size_t>(DataViewType::INT16)] = globalConst->GetInt16ArrayString();
+    typedArrayNameTable_[static_cast<std::size_t>(DataViewType::INT32)] = globalConst->GetInt32ArrayString();
+    typedArrayNameTable_[static_cast<std::size_t>(DataViewType::UINT8)] = globalConst->GetUint8ArrayString();
+    typedArrayNameTable_[static_cast<std::size_t>(DataViewType::UINT16)] = globalConst->GetUint16ArrayString();
+    typedArrayNameTable_[static_cast<std::size_t>(DataViewType::UINT32)] = globalConst->GetUint32ArrayString();
+    typedArrayNameTable_[static_cast<std::size_t>(DataViewType::UINT8_CLAMPED)] =
+        globalConst->GetUint8ClampedArrayString();
+
+    sharedTypedArrayNameTable_.resize(static_cast<std::size_t>(DataViewType::COUNT));
+    sharedTypedArrayNameTable_[static_cast<std::size_t>(DataViewType::BIGINT64)] =
+        globalConst->GetSharedBigInt64ArrayString();
+    sharedTypedArrayNameTable_[static_cast<std::size_t>(DataViewType::BIGUINT64)] =
+        globalConst->GetSharedBigUint64ArrayString();
+    sharedTypedArrayNameTable_[static_cast<std::size_t>(DataViewType::FLOAT32)] =
+        globalConst->GetSharedFloat32ArrayString();
+    sharedTypedArrayNameTable_[static_cast<std::size_t>(DataViewType::FLOAT64)] =
+        globalConst->GetSharedFloat64ArrayString();
+    sharedTypedArrayNameTable_[static_cast<std::size_t>(DataViewType::INT8)] =
+        globalConst->GetSharedInt8ArrayString();
+    sharedTypedArrayNameTable_[static_cast<std::size_t>(DataViewType::INT16)] =
+        globalConst->GetSharedInt16ArrayString();
+    sharedTypedArrayNameTable_[static_cast<std::size_t>(DataViewType::INT32)] =
+        globalConst->GetSharedInt32ArrayString();
+    sharedTypedArrayNameTable_[static_cast<std::size_t>(DataViewType::UINT8)] =
+        globalConst->GetSharedUint8ArrayString();
+    sharedTypedArrayNameTable_[static_cast<std::size_t>(DataViewType::UINT16)] =
+        globalConst->GetSharedUint16ArrayString();
+    sharedTypedArrayNameTable_[static_cast<std::size_t>(DataViewType::UINT32)] =
+        globalConst->GetSharedUint32ArrayString();
+    sharedTypedArrayNameTable_[static_cast<std::size_t>(DataViewType::UINT8_CLAMPED)] =
+        globalConst->GetSharedUint8ClampedArrayString();
 }
 
 void EcmaVM::SetEnableRuntimeAsyncStack(const bool state)
@@ -2518,7 +3258,10 @@ void EcmaVM::CheckSharedHeapMemoryPressure()
         size_t sharedHugeHeapSize = hugeSpace->GetHeapObjectSize();
         size_t sharedHugeHeapLimit = hugeSpace->GetMaximumCapacity();
         double sharedHugeRatio = static_cast<double>(sharedHugeHeapSize) / static_cast<double>(sharedHugeHeapLimit);
-        if (sharedOldRatio >= sharedThreshold || sharedHugeRatio >= sharedThreshold) {
+        size_t sharedHeapSize = SharedHeap::GetInstance()->GetHeapObjectSize();
+        size_t sharedHeapLimit = SharedHeap::GetInstance()->GetEcmaParamConfiguration().GetMaxHeapSize();
+        double sharedRatio = static_cast<double>(sharedHeapSize) / static_cast<double>(sharedHeapLimit);
+        if (sharedOldRatio >= sharedThreshold || sharedHugeRatio >= sharedThreshold || sharedRatio >= sharedThreshold) {
             needSharedMemoryPressureCallback_ = true;
             return;
         }

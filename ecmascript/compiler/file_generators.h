@@ -87,7 +87,7 @@ public:
                                  const std::string &filename = "");
 
     void DisassemblerFunc(std::map<uintptr_t, std::string> &addr2name, uint64_t textOffset, const CompilerLog &log,
-                          const MethodLogList &logList, std::ostringstream &codeStream);
+                          const MethodLogList &logList, std::string &codeStream);
 
     void DestroyModule();
 
@@ -143,7 +143,6 @@ public:
     virtual ~FileGenerator()
     {
         codeStream_.clear();
-        codeStream_.str("");
     }
 
     const CompilerLog GetLog() const
@@ -153,17 +152,18 @@ public:
 
     void PrintMergedCodeComment()
     {
-        if (codeStream_.str().empty()) {
+        if (codeStream_.empty()) {
             return;
         }
-        LOG_COMPILER(INFO) << "\n" << codeStream_.str();
+        LOG_COMPILER(INFO) << "\n" << codeStream_;
+        std::string().swap(codeStream_);
     }
 
 protected:
     std::vector<Module> modulePackage_ {};
     const CompilerLog *log_ {nullptr};
     const MethodLogList *logList_ {nullptr};
-    std::ostringstream codeStream_;
+    std::string codeStream_;
 
     virtual void RunLLVMAssembler()
     {
@@ -185,7 +185,7 @@ protected:
 class AOTFileGenerator : public FileGenerator {
 public:
     AOTFileGenerator(const CompilerLog *log, const MethodLogList *logList, CompilationEnv *env,
-                     const std::string &triple, bool useLiteCG = false, size_t anFileMaxByteSize = 0)
+                     const std::string &triple, bool useLiteCG = true, size_t anFileMaxByteSize = 0)
         : FileGenerator(log, logList),
           cfg_(triple),
           compilationEnv_(env),
@@ -215,6 +215,10 @@ public:
 
     // save function for aot files containing normal func translated from JS/TS
     bool PUBLIC_API SaveAOTFile(const std::string &filename, const std::string &appSignature,
+                                const std::unordered_map<CString, uint32_t> &fileNameToChecksumMap);
+
+    // FD-version: skip SetFileModeAsDefault/SetSecurityLabel/CodeSignatureForAOTFile (child process has dropped privs)
+    bool PUBLIC_API SaveAOTFile(int anFd, const std::string &filename, const std::string &appSignature,
                                 const std::unordered_map<CString, uint32_t> &fileNameToChecksumMap);
 
     static void PUBLIC_API SaveEmptyAOTFile(const std::string& filename, const std::string& appSignature,
@@ -272,7 +276,10 @@ enum class StubFileKind {
     BUILTIN,
     BASELINE,
     BC_STW_COPY,
-    BUILTIN_STW_COPY
+    BUILTIN_STW_COPY,
+#if defined(STUB_FUNCTION_REORDERING)
+    MERGED
+#endif
 };
 
 class StubFileGenerator : public FileGenerator {
@@ -286,8 +293,15 @@ public:
     }
     ~StubFileGenerator() override = default;
 
+#if defined(STUB_FUNCTION_REORDERING)
+    Module *AddModule(NativeAreaAllocator *allocator, const std::string &name,
+                      const std::string &triple, LOptions option, bool logDebug,
+                      StubFileKind k, const std::string &stub_ordering = "",
+                      StubFileInfo *stubInfo = 0);
+#else
     Module* AddModule(NativeAreaAllocator *allocator, const std::string &name, const std::string &triple,
                       LOptions option, bool logDebug, StubFileKind k);
+#endif
 
     void DisassembleEachFunc(std::map<uintptr_t, std::string> &addr2name)
     {
@@ -298,6 +312,9 @@ public:
     }
 
     void DisassembleAsmStubs(std::map<uintptr_t, std::string> &addr2name);
+#if defined(STUB_FUNCTION_REORDERING)
+    StubFileInfo *GetStubInfo() { return &stubInfo_; }
+#endif
     // save function funcs for aot files containing stubs
     void SaveStubFile(const std::string &filename);
 protected:

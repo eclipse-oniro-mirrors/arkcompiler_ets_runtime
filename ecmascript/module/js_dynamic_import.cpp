@@ -15,7 +15,9 @@
 
 #include "ecmascript/module/js_dynamic_import.h"
 #include "ecmascript/base/path_helper.h"
+#include "ecmascript/ecma_vm.h"
 #include "ecmascript/interpreter/interpreter.h"
+#include "ecmascript/module/dependency_extractor.h"
 #include "ecmascript/module/js_module_deregister.h"
 #include "ecmascript/module/js_module_manager.h"
 #include "ecmascript/module/module_data_extractor.h"
@@ -30,8 +32,17 @@ JSTaggedValue DynamicImport::ExecuteNativeOrJsonModule(JSThread *thread, const C
                                                        ModuleTypes moduleType,
                                                        JSHandle<JSPromiseReactionsFunction> resolve,
                                                        JSHandle<JSPromiseReactionsFunction> reject,
-                                                       const JSPandaFile *jsPandaFile)
+                                                       const JSPandaFile *jsPandaFile,
+                                                       const CString &callerRecord,
+                                                       const CString &callerFile)
 {
+    if (moduleType != ModuleTypes::JSON_MODULE &&
+        thread->GetEcmaVM()->GetJSOptions().EnableModuleDependencyLog() &&
+        (!callerRecord.empty() || !callerFile.empty())) {
+        DynamicImportRecorder::RecordDynamicImport(
+            callerRecord, callerFile, specifierString, specifierString);
+    }
+
     ModuleManager *moduleManager = thread->GetModuleManager();
     JSMutableHandle<JSTaggedValue> requiredModule(thread, thread->GlobalConstants()->GetUndefined());
     // IsInstantiatedModule is for lazy module to execute

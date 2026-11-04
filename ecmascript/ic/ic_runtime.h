@@ -19,7 +19,7 @@
 #include "ecmascript/ic/profile_type_info.h"
 #include "ecmascript/accessor_data.h"
 #include "ecmascript/ecma_vm.h"
-#include "ecmascript/js_tagged_value.h"
+#include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/js_handle.h"
 #include "ecmascript/object_operator.h"
 
@@ -31,15 +31,7 @@ class ObjectOperator;
 class ICRuntime {
 public:
     ICRuntime(JSThread *thread, JSHandle<ProfileTypeInfo> profileTypeInfo, uint32_t slotId, ICKind kind)
-        : thread_(thread), icAccessor_(thread, profileTypeInfo, slotId, kind)
-    {
-    }
-
-    ICRuntime(JSThread *thread, JSHandle<ICInfo> icInfo, uint32_t slotId, ICKind kind)
-        : thread_(thread), icAccessor_(thread, icInfo, slotId, kind)
-    {
-    }
-
+        : thread_(thread), nexus_(thread, profileTypeInfo, slotId, kind) {}
     ~ICRuntime() = default;
 
     bool GetHandler(const ObjectOperator &op, const JSHandle<JSHClass> &hclass,
@@ -49,53 +41,24 @@ public:
     void UpdateTypedArrayHandler(JSHandle<JSTaggedValue> receiver);
     void UpdateStoreHandler(const ObjectOperator &op, JSHandle<JSTaggedValue> key, JSHandle<JSTaggedValue> receiver);
 
-    bool IsMegaIC()
-    {
-        return icAccessor_.GetICState() == IcAccessor::ICState::IC_MEGA;
-    }
-
-    JSThread *GetThread() const
-    {
-        return thread_;
-    }
-
-    void UpdateReceiverHClass(JSHandle<JSTaggedValue> receiverHClass)
-    {
-        receiverHClass_ = receiverHClass;
-    }
-
-    ICKind GetICKind() const
-    {
-        return icAccessor_.GetKind();
-    }
-
-    uint32_t GetSlotId() const
-    {
-        return icAccessor_.GetSlotId();
-    }
-
+    bool IsMegaIC() { return nexus_.GetICState() == ProfileTypeInfoNexus::ICState::IC_MEGA; }
+    JSThread *GetThread() const { return thread_; }
+    void UpdateReceiverHClass(JSHandle<JSTaggedValue> receiverHClass) { receiverHClass_ = receiverHClass; }
+    ICKind GetICKind() const { return nexus_.GetKind(); }
+    uint32_t GetSlotId() const { return nexus_.GetSlotId(); }
+    ProfileTypeInfoNexus &GetNexus() { return nexus_; }
     void TraceIC(JSThread *thread, JSHandle<JSTaggedValue> receiver, JSHandle<JSTaggedValue> key) const;
 
 protected:
     JSThread *thread_;
     JSHandle<JSTaggedValue> receiverHClass_{};
-    IcAccessor icAccessor_;
+    ProfileTypeInfoNexus nexus_;
 };
 
 class LoadICRuntime : public ICRuntime {
 public:
-    LoadICRuntime(JSThread *thread, JSHandle<ProfileTypeInfo> profileTypeInfo, uint32_t slotId, ICKind kind)
-        : ICRuntime(thread, profileTypeInfo, slotId, kind)
-    {
-    }
-
-    LoadICRuntime(JSThread *thread, JSHandle<ICInfo> icInfo, uint32_t slotId, ICKind kind)
-        : ICRuntime(thread, icInfo, slotId, kind)
-    {
-    }
-
+    using ICRuntime::ICRuntime;
     ~LoadICRuntime() = default;
-
     JSTaggedValue LoadMiss(JSHandle<JSTaggedValue> receiver, JSHandle<JSTaggedValue> key);
     JSTaggedValue LoadValueMiss(JSHandle<JSTaggedValue> receiver, JSHandle<JSTaggedValue> key);
     JSTaggedValue LoadTypedArrayValueMiss(JSHandle<JSTaggedValue> receiver, JSHandle<JSTaggedValue> key);
@@ -106,21 +69,10 @@ private:
 
 class StoreICRuntime : public ICRuntime {
 public:
-    StoreICRuntime(JSThread *thread, JSHandle<ProfileTypeInfo> profileTypeInfo, uint32_t slotId, ICKind kind)
-        : ICRuntime(thread, profileTypeInfo, slotId, kind)
-    {
-    }
-
-    StoreICRuntime(JSThread *thread, JSHandle<ICInfo> icInfo, uint32_t slotId, ICKind kind)
-        : ICRuntime(thread, icInfo, slotId, kind)
-    {
-    }
-
+    using ICRuntime::ICRuntime;
     ~StoreICRuntime() = default;
-
     JSTaggedValue StoreMiss(JSHandle<JSTaggedValue> receiver, JSHandle<JSTaggedValue> key,
                             JSHandle<JSTaggedValue> value, bool isOwn = false, bool isDefPropByName = false);
-    
     JSTaggedValue StoreTypedArrayValueMiss(JSHandle<JSTaggedValue> receiver, JSHandle<JSTaggedValue> key,
                                            JSHandle<JSTaggedValue> value);
 private:
@@ -128,6 +80,7 @@ private:
                                            JSHandle<JSTaggedValue> value);
     JSTaggedValue HandleAccesor(ObjectOperator *op, const JSHandle<JSTaggedValue> &value);
 };
+
 }  // namespace panda::ecmascript
 
 #endif  // ECMASCRIPT_IC_IC_RUNTIME_H

@@ -16,6 +16,7 @@
 #ifndef ECMASCRIPT_MEM_GC_STATS_H
 #define ECMASCRIPT_MEM_GC_STATS_H
 
+#include "ecmascript/base/config.h"
 #include <chrono>
 #include <cstring>
 #include <ctime>
@@ -38,10 +39,22 @@ enum class GCType : int {
     SHARED_GC,
     SHARED_PARTIAL_GC,
     SHARED_FULL_GC,
-    // fixme: support sticky
+    SHARED_CC,
+    GLOBAL_GC,
+    STICKY_CMS_GC,
     CMS_GC,
     OTHER,
     START,
+};
+
+struct GCStatisticData {
+    size_t count {0};
+    float maxPause {0.0f};
+    float minPause {0.0f};
+    float totalPause {0.0f};
+    uint64_t lastStartTime {0};
+    uint64_t lastEndTime {0};
+    const char *lastType {"UnknownType"};
 };
 
 enum class RecordData : uint8_t {
@@ -68,6 +81,8 @@ enum class RecordDuration : uint8_t {
     FIRST_DATA = SEMI_MIN_PAUSE,
 };
 
+// SharedCC finalizes TotalGC and STW3(SuspendAll) manually (see SharedCC::RunPhases/FinalizeAndReclaim);
+// do not wrap them with TRACE_GC.
 #define TRACE_GC(scope_id, gc_stats)    \
     [[maybe_unused]] GCStats::Scope sp(scope_id, gc_stats)
 
@@ -96,6 +111,11 @@ public:
     virtual void PrintGCMemoryStatistic();
     bool CheckIfLongTimePause();
     virtual void PrintGCStatistic();
+    void RefreshLongGCNativeStatsAfterConcurrentGC();
+    virtual bool EnableGCTracer() const
+    {
+        return false;
+    }
     GCType GetGCType(TriggerGCType gcType);
     float GetGCSpeed(SpeedData data)
     {
@@ -156,8 +176,14 @@ public:
                 return "SharedPartialGC";
             case GCType::SHARED_FULL_GC:
                 return "SharedCompressGC";
+            case GCType::SHARED_CC:
+                return "SharedCC";
+            case GCType::GLOBAL_GC:
+                return "GlobalGC";
             case GCType::CMS_GC:
                 return "CMSGC";
+            case GCType::STICKY_CMS_GC:
+                return "StickyCMSGC";
             default:
                 return "UnknownType";
         }
@@ -212,6 +238,11 @@ public:
         return scopeDuration_[pos];
     }
 
+    void RecordScopeDuration(Scope::ScopeId id, float duration)
+    {
+        SetScopeId(id, duration);
+    }
+
     void IncreaseTotalDuration(float duration)
     {
         gcDuration_ += duration;
@@ -245,9 +276,17 @@ public:
         return fullGCLongTimeCount_;
     }
 
+    GCStatisticData GetGCStatistic();
+    static GCStatisticData MergeGCStatistic(const GCStatisticData &localStats,
+        const GCStatisticData &sharedStats);
+    static const char *GetGCStatisticType(GCType type);
+    void RecordGCStatisticStart();
+    void RecordGCStatisticEnd();
+
 protected:
     bool CheckIfNeedPrint(GCType type);
     void PrintVerboseGCStatistic();
+    void PrintStorageStatistic();
     void PrintGCDurationStatistic();
     void PrintGCSummaryStatistic(GCType type = GCType::START);
     void InitializeRecordList();
@@ -341,6 +380,7 @@ protected:
         DEFAULT_OLD_EVACUATE_SPACE_SPEED, DEFAULT_YOUNG_CLEAR_NATIVE_OBJ_SPEED};
     float recordDuration_[(uint8_t)RecordDuration::NUM_OF_DURATION] {0.0f};
     bool concurrentMark_ {false};
+    bool currentGCIsLong_ {false};
 
     static constexpr uint32_t THOUSAND = 1000;
 
@@ -348,6 +388,9 @@ protected:
     NO_MOVE_SEMANTIC(GCStats);
 private:
     LongGCStats *longGCStats_;
+    uint64_t lastGCStartTime_ {0};
+    uint64_t lastGCEndTime_ {0};
+    const char *lastGCType_ {"UnknownType"};
 };
 
 class SharedGCStats : public GCStats {
@@ -366,7 +409,12 @@ public:
     void RecordStatisticBeforeGC(TriggerGCType gcType, GCReason reason) override;
     void RecordStatisticAfterGC() override;
     size_t GetAccumulatedAllocateSize() override;
+    bool EnableGCTracer() const override
+    {
+        return enableGCTracer_;
+    }
 private:
+    void PrintSharedGCOverview();
     void PrintSharedGCDuration();
     void PrintSharedGCSummaryStatistic();
     void SharedGCFinishTrace();

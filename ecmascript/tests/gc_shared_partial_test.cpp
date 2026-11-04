@@ -14,6 +14,8 @@
  */
 
 #include "ecmascript/dfx/hprof/heap_sampling.h"
+#include "ecmascript/jit/jit_thread.h"
+#include "ecmascript/mem/shared_heap/shared_partial_gc.h"
 #include "ecmascript/tests/ecma_test_common.h"
 
 using namespace panda;
@@ -34,6 +36,11 @@ public:
         scope = new EcmaHandleScope(thread);
     }
     JSHandle<TaggedObject> CreateSharedObjectsInOneRegion(std::shared_ptr<SharedTestSpace> space, double aliveRate);
+
+    JSHandle<TaggedArray> AllocateSharedArray(std::shared_ptr<SharedTestSpace> space, size_t arrayLen);
+    JSHandle<TaggedArray> AllocateSharedArrayNewRegion(std::shared_ptr<SharedTestSpace> space, size_t arrayLen);
+
+    void InitializeBaseObjects(std::shared_ptr<SharedTestSpace> space);
     void InitTaggedArray(TaggedObject *obj, size_t arrayLen);
     void CreateTaggedArray();
 };
@@ -41,22 +48,29 @@ public:
 class SharedTestSpace : public MonoSpace {
 public:
     static constexpr size_t CAP = 10 * 1024 * 1024;
-    explicit SharedTestSpace(SharedHeap *heap)
-        : MonoSpace(heap, heap->GetHeapRegionAllocator(), MemSpaceType::SHARED_OLD_SPACE, CAP, CAP), sHeap_(heap) {}
+    explicit SharedTestSpace(SharedHeap *heap, JSThread *thread)
+        : MonoSpace(heap, heap->GetHeapRegionAllocator(), MemSpaceType::SHARED_OLD_SPACE, CAP, CAP),
+          sHeap_(heap), thread_(thread) {}
     ~SharedTestSpace() override = default;
     NO_COPY_SEMANTIC(SharedTestSpace);
     NO_MOVE_SEMANTIC(SharedTestSpace);
 
-    void Expand(JSThread *thread)
+    void Expand()
     {
-        Region *region = heapRegionAllocator_->AllocateAlignedRegion(this, DEFAULT_REGION_SIZE, thread, sHeap_);
+        Region *region = heapRegionAllocator_->AllocateAlignedRegion(this, DEFAULT_REGION_SIZE, thread_, sHeap_);
         FillBumpPointer();
         allocator_.Reset(region->GetBegin(), region->GetEnd());
+        regionList_.push_back(region);
     }
 
     uintptr_t Allocate(size_t size)
     {
-        return allocator_.Allocate(size);
+        uintptr_t obj = allocator_.Allocate(size);
+        if (obj == 0) {
+            Expand();
+            obj = allocator_.Allocate(size);
+        }
+        return obj;
     }
 
     uintptr_t GetTop()
@@ -75,9 +89,33 @@ public:
     {
         return allocator_.GetEnd();
     }
+
+    uintptr_t Evacuate(TaggedObject *obj)
+    {
+        size_t size = obj->GetSize();
+        uintptr_t toAddress = Allocate(size);
+        ASSERT(toAddress != 0);
+        if (memcpy_s(reinterpret_cast<void*>(toAddress), size, reinterpret_cast<void*>(obj), size) != EOK) {
+            UNREACHABLE();
+        }
+        Barriers::SetPrimitive(obj, 0, MarkWord::FromForwardingAddress(toAddress));
+        return toAddress;
+    }
+
+    void Merge()
+    {
+        FillBumpPointer();
+        SharedOldSpace *sOldSpace = sHeap_->GetOldSpace();
+        for (auto region : regionList_) {
+            sOldSpace->AddRegion(region);
+        }
+        regionList_.clear();
+    }
 private:
     SharedHeap *sHeap_ {nullptr};
     BumpPointerAllocator allocator_;
+    std::vector<Region*> regionList_ {};
+    JSThread *thread_ {nullptr};
 };
 
 void SharedPartialGCTest::InitTaggedArray(TaggedObject *obj, size_t arrayLen)
@@ -87,11 +125,30 @@ void SharedPartialGCTest::InitTaggedArray(TaggedObject *obj, size_t arrayLen)
     TaggedArray::Cast(obj)->InitializeWithSpecialValue(JSTaggedValue::Undefined(), arrayLen);
 }
 
+void SharedPartialGCTest::InitializeBaseObjects(std::shared_ptr<SharedTestSpace> space)
+{
+    static constexpr size_t SMALL_PER_REGION_SIZE = 240 * 1024 * SharedOldSpace::CSET_REGION_ALIVE_RATIO;
+    static constexpr size_t SMALL_ARRAY_LEN = SMALL_PER_REGION_SIZE / 8;
+    static constexpr size_t BIG_ARRAY_LEN = 13 * 1024;
+    static constexpr size_t SMALL_REGION_COUNT =
+        static_cast<size_t>(SharedOldSpace::MAX_EVACUATION_SIZE) / SMALL_PER_REGION_SIZE + 1;
+    size_t bigRegionCount = 1;
+    if (SMALL_REGION_COUNT < SharedOldSpace::MIN_COLLECT_REGION_SIZE) {
+        bigRegionCount = SharedOldSpace::MIN_COLLECT_REGION_SIZE - SMALL_REGION_COUNT;
+    }
+    for (size_t i = 0; i < SMALL_REGION_COUNT; i++) {
+        AllocateSharedArrayNewRegion(space, SMALL_ARRAY_LEN);
+    }
+    for (size_t i = 0; i < bigRegionCount; i++) {
+        AllocateSharedArrayNewRegion(space, BIG_ARRAY_LEN);
+    }
+}
+
 JSHandle<TaggedObject> SharedPartialGCTest::CreateSharedObjectsInOneRegion(std::shared_ptr<SharedTestSpace> space,
     double aliveRate)
 {
     constexpr size_t TAGGED_TYPE_SIZE = 8;
-    space->Expand(thread);
+    space->Expand();
     size_t totalSize = space->GetEnd() - space->GetTop();
     size_t alive = totalSize * aliveRate;
     size_t arrayLen = alive / TAGGED_TYPE_SIZE;
@@ -102,46 +159,132 @@ JSHandle<TaggedObject> SharedPartialGCTest::CreateSharedObjectsInOneRegion(std::
     return JSHandle<TaggedObject>(thread, obj);
 }
 
-HWTEST_F_L0(SharedPartialGCTest, PartialGCTest)
+JSHandle<TaggedArray> SharedPartialGCTest::AllocateSharedArray(std::shared_ptr<SharedTestSpace> space, size_t arrayLen)
 {
-    constexpr double ALIVE_RATE = 0.1;
-    constexpr size_t ARRAY_SIZE = SharedOldSpace::MIN_COLLECT_REGION_SIZE;
+    constexpr size_t TAGGED_TYPE_SIZE = 8;
+    size_t size = TaggedArray::ComputeSize(TAGGED_TYPE_SIZE, arrayLen);
+    TaggedObject *obj = reinterpret_cast<TaggedObject *>(space->Allocate(size));
+    EXPECT_TRUE(obj != nullptr);
+    InitTaggedArray(obj, arrayLen);
+    return JSHandle<TaggedArray>(thread, obj);
+}
+
+JSHandle<TaggedArray> SharedPartialGCTest::AllocateSharedArrayNewRegion(std::shared_ptr<SharedTestSpace> space,
+    size_t arrayLen)
+{
+    constexpr size_t TAGGED_TYPE_SIZE = 8;
+    space->Expand();
+    size_t size = TaggedArray::ComputeSize(TAGGED_TYPE_SIZE, arrayLen);
+    TaggedObject *obj = reinterpret_cast<TaggedObject *>(space->Allocate(size));
+    EXPECT_TRUE(obj != nullptr);
+    InitTaggedArray(obj, arrayLen);
+    return JSHandle<TaggedArray>(thread, obj);
+}
+
+HWTEST_F_L0(SharedPartialGCTest, BarrierTest)
+{
+    constexpr size_t ARRAY_LEN = 10;
     instance->GetJSOptions().SetEnableForceGC(false);
     Heap *heap = const_cast<Heap *>(instance->GetHeap());
     SharedHeap *sHeap = SharedHeap::GetInstance();
     ObjectFactory *factory = heap->GetEcmaVM()->GetFactory();
-    JSHandle<TaggedArray> localObj = factory->NewTaggedArray(ARRAY_SIZE, JSTaggedValue::Undefined(), false);
+    JSHandle<TaggedArray> localArray = factory->NewTaggedArray(ARRAY_LEN, JSTaggedValue::Undefined(), false);
+    JSHandle<TaggedArray> sNonmovableArray =
+        factory->NewSTaggedArray(ARRAY_LEN, JSTaggedValue::Undefined(), MemSpaceType::SHARED_NON_MOVABLE);
     heap->CollectGarbage(TriggerGCType::FULL_GC);
     sHeap->CollectGarbage<TriggerGCType::SHARED_GC, GCReason::OTHER>(thread);
     heap->GetHeapPrepare(thread);
-    SharedOldSpace *sOldSpace = sHeap->GetOldSpace();
-    std::shared_ptr<SharedTestSpace> space= std::make_shared<SharedTestSpace>(sHeap);
-    std::vector<std::pair<Region*, JSHandle<TaggedObject>>> checkObjList;
-    for (size_t i = 0; i < SharedOldSpace::MIN_COLLECT_REGION_SIZE; i++) {
-        auto obj = CreateSharedObjectsInOneRegion(space, ALIVE_RATE);
-        Region *region = Region::ObjectAddressToRange(*obj);
-        checkObjList.emplace_back(region, obj);
-        sOldSpace->AddRegion(region);
+    if (!sHeap->CheckCanTriggerConcurrentMarking(thread)) {
+        return;
     }
-    space->FillBumpPointer();
-    EXPECT_TRUE(sHeap->CheckCanTriggerConcurrentMarking(thread));
+    std::shared_ptr<SharedTestSpace> space= std::make_shared<SharedTestSpace>(sHeap, thread);
+    // sOld1 and sOld2 are in same region and sOld3 in another region.
+    JSHandle<TaggedArray> sOld1 = AllocateSharedArray(space, ARRAY_LEN);
+    JSHandle<TaggedArray> sOld2 = AllocateSharedArray(space, ARRAY_LEN);
+    JSHandle<TaggedArray> sOld3 = AllocateSharedArrayNewRegion(space, ARRAY_LEN);
+    InitializeBaseObjects(space);
+    space->Merge();
+    // trigger concurrent mark
     sHeap->TriggerConcurrentMarking<TriggerGCType::SHARED_PARTIAL_GC, MarkReason::OTHER>(thread);
     while (!thread->HasSuspendRequest());
     thread->CheckSafepointIfSuspended();
     if (thread->IsSharedConcurrentMarkingOrFinished()) {
-        EXPECT_TRUE(sOldSpace->GetCollectSetRegionCount() > 0);
-        Region *localRegion = Region::ObjectAddressToRange(*localObj);
-        for (uint32_t i = 0; i < SharedOldSpace::MIN_COLLECT_REGION_SIZE; i++) {
-            auto each = checkObjList[i];
-            Region *checkRegion = each.first;
-            JSHandle<TaggedObject> checkObj = each.second;
-            EXPECT_TRUE(checkRegion->InSCollectSet());
-            localObj->Set(thread, i, checkObj);
-            JSTaggedType *localSlot = localObj->GetData() + i;
-            EXPECT_TRUE(localRegion->TestLocalToShare(reinterpret_cast<uintptr_t>(localSlot)));
-        }
+        // test allocate new region during concurrent mark.
+        AllocateSharedArrayNewRegion(space, ARRAY_LEN);
+        space->Merge();
+        // Mark Barrier Test
+        localArray->Set(thread, 0, sOld1);
+        auto weakArray = sOld3.GetTaggedValue();
+        weakArray.CreateWeakRef();
+        sOld1->Set(thread, 0, sOld2);
+        sOld2->Set(thread, 0, weakArray);
+        sOld2->Set(thread, 1, sOld3);
+        sOld3->Set(thread, 0, sNonmovableArray);
+        Region *region1 = Region::ObjectAddressToRange(*sOld1);
+        auto crossRSet1 = region1->GetCrossRegionRememberedSet();
+        Region *region2 = Region::ObjectAddressToRange(*sOld2);
+        auto crossRSet2 = region1->GetCrossRegionRememberedSet();
+        EXPECT_EQ(region1, region2);
+        JSTaggedType *slot1 = sOld1->GetData();
+        JSTaggedType *slot2 = sOld1->GetData() + 1;
+        JSTaggedType *slot3 = sOld2->GetData();
+        JSTaggedType *slot4 = sOld2->GetData() + 1;
+        EXPECT_FALSE(crossRSet1->TestBit((uintptr_t)(region1), reinterpret_cast<uintptr_t>(slot1)));
+        EXPECT_FALSE(crossRSet1->TestBit((uintptr_t)(region1), reinterpret_cast<uintptr_t>(slot2)));
+        EXPECT_TRUE(crossRSet2->TestBit((uintptr_t)(region2), reinterpret_cast<uintptr_t>(slot3)));
+        EXPECT_TRUE(crossRSet2->TestBit((uintptr_t)(region2), reinterpret_cast<uintptr_t>(slot4)));
+        sHeap->WaitGCFinished(thread);
     }
+}
+
+HWTEST_F_L0(SharedPartialGCTest, ReadBarrierTest)
+{
+    constexpr size_t ARRAY_LEN = 10;
+    instance->GetJSOptions().SetEnableForceGC(false);
+    Heap *heap = const_cast<Heap *>(instance->GetHeap());
+    SharedHeap *sHeap = SharedHeap::GetInstance();
+    heap->CollectGarbage(TriggerGCType::FULL_GC);
+    sHeap->CollectGarbage<TriggerGCType::SHARED_GC, GCReason::OTHER>(thread);
+    heap->GetHeapPrepare(thread);
+
+    std::shared_ptr<SharedTestSpace> fromSpace= std::make_shared<SharedTestSpace>(sHeap, thread);
+    std::shared_ptr<SharedTestSpace> toSpace= std::make_shared<SharedTestSpace>(sHeap, thread);
+    JSHandle<TaggedArray> fromObj = AllocateSharedArray(fromSpace, ARRAY_LEN);
+    Region *fromRegion = Region::ObjectAddressToRange(*fromObj);
+    fromRegion->SetGCFlag(RegionGCFlags::IN_SHARED_COLLECT_SET);
+    fromRegion->NonAtomicMark(*fromObj);
+    uintptr_t toObj = toSpace->Evacuate(*fromObj);
+    Region *toRegion = Region::ObjectAddressToRange(toObj);
+    toRegion->SetRegionTypeFlag(RegionTypeFlag::TO);
+    JSTaggedType toObjFromBarrier= Barriers::ReadBarrierForStringTableSlot(fromObj.GetTaggedType(), thread);
+    JSTaggedType toObjFromBarrier2= Barriers::ReadBarrierForStringTableSlot(toObj, thread);
+    EXPECT_EQ(toObjFromBarrier, toObj);
+    EXPECT_EQ(toObjFromBarrier2, toObj);
+}
+
+HWTEST_F_L0(SharedPartialGCTest, SensitiveTest)
+{
+    instance->GetJSOptions().SetEnableForceGC(false);
+    Heap *heap = const_cast<Heap *>(instance->GetHeap());
+    SharedHeap *sHeap = SharedHeap::GetInstance();
+    heap->CollectGarbage(TriggerGCType::FULL_GC);
+    sHeap->CollectGarbage<TriggerGCType::SHARED_GC, GCReason::OTHER>(thread);
+    heap->GetHeapPrepare(thread);
+    if (!sHeap->CheckCanTriggerConcurrentMarking(thread)) {
+        return;
+    }
+    std::shared_ptr<SharedTestSpace> space= std::make_shared<SharedTestSpace>(sHeap, thread);
+    sHeap->SetSensitiveStatus(AppSensitiveStatus::ENTER_HIGH_SENSITIVE);
+    sHeap->SetForceGC(true);
+    InitializeBaseObjects(space);
+    space->Merge();
+    // trigger concurrent mark
+    sHeap->TriggerConcurrentMarking<TriggerGCType::SHARED_PARTIAL_GC, MarkReason::OTHER>(thread);
+    while (!thread->HasSuspendRequest());
+    thread->CheckSafepointIfSuspended();
     sHeap->WaitGCFinished(thread);
+    sHeap->SetSensitiveStatus(AppSensitiveStatus::EXIT_HIGH_SENSITIVE);
+    EXPECT_FALSE(sHeap->InSensitiveStatus());
 }
 
 HWTEST_F_L0(SharedPartialGCTest, SharedOldSpace1)
@@ -150,7 +293,7 @@ HWTEST_F_L0(SharedPartialGCTest, SharedOldSpace1)
     SharedHeap *sHeap = SharedHeap::GetInstance();
     SharedOldSpace *sOldSpace = sHeap->GetOldSpace();
     size_t maxOldSpaceCapacity = sHeap->GetOldSpace()->GetMaximumCapacity();
-    std::shared_ptr<SharedTestSpace> space= std::make_shared<SharedTestSpace>(sHeap);
+    std::shared_ptr<SharedTestSpace> space= std::make_shared<SharedTestSpace>(sHeap, thread);
     SharedLocalSpace *sLocalSpace = new SharedLocalSpace(sHeap, maxOldSpaceCapacity, maxOldSpaceCapacity);
     ASSERT_TRUE(sLocalSpace != nullptr);
     for (size_t i = 0; i < SharedOldSpace::MIN_COLLECT_REGION_SIZE; i++) {
@@ -225,5 +368,144 @@ HWTEST_F_L0(SharedPartialGCTest, Expand2)
     SharedReadOnlySpace *sReadOnlySpace = sHeap->GetReadOnlySpace();
     sReadOnlySpace->IncreaseCommitted(10000);
     EXPECT_FALSE(sReadOnlySpace->Expand(thread));
+}
+
+HWTEST_F_L0(SharedPartialGCTest, LocalCCConflictTest)
+{
+    instance->GetJSOptions().SetEnableForceGC(false);
+    Heap *heap = const_cast<Heap *>(instance->GetHeap());
+    SharedHeap *sHeap = SharedHeap::GetInstance();
+    heap->CollectGarbage(TriggerGCType::FULL_GC);
+    sHeap->CollectGarbage<TriggerGCType::SHARED_GC, GCReason::OTHER>(thread);
+    heap->GetHeapPrepare(thread);
+    if (!sHeap->CheckCanTriggerConcurrentMarking(thread)) {
+        return;
+    }
+    std::shared_ptr<SharedTestSpace> space= std::make_shared<SharedTestSpace>(sHeap, thread);
+    InitializeBaseObjects(space);
+    bool succ = heap->TryTriggerCCMarking(MarkReason::OTHER);
+    EXPECT_TRUE(succ);
+    sHeap->TriggerConcurrentMarking<TriggerGCType::SHARED_PARTIAL_GC, MarkReason::OTHER>(thread);
+    while (!thread->HasSuspendRequest()) {
+        continue;
+    }
+    thread->CheckSafepointIfSuspended();
+    if (thread->IsSharedConcurrentMarkingOrFinished()) {
+        sHeap->CollectGarbage<TriggerGCType::SHARED_PARTIAL_GC, GCReason::OTHER>(thread);
+    }
+    // conflict with local gc;
+    heap->CollectGarbage(TriggerGCType::FULL_GC);
+    if (sHeap->GetSharedPartialGC()->IsConcurrentUpdating()) {
+        EXPECT_TRUE(thread->NeedReadBarrier());
+        EXPECT_FALSE(thread->HasSwitchedToStwStub());
+    } else {
+        EXPECT_FALSE(thread->NeedReadBarrier());
+        EXPECT_TRUE(thread->HasSwitchedToStwStub());
+    }
+    sHeap->WaitAllTasksFinished(thread);
+    EXPECT_FALSE(thread->NeedReadBarrier());
+    EXPECT_TRUE(thread->HasSwitchedToStwStub());
+}
+
+HWTEST_F_L0(SharedPartialGCTest, LocalCCConflictTest2)
+{
+    instance->GetJSOptions().SetEnableForceGC(false);
+    Heap *heap = const_cast<Heap *>(instance->GetHeap());
+    SharedHeap *sHeap = SharedHeap::GetInstance();
+    heap->CollectGarbage(TriggerGCType::FULL_GC);
+    sHeap->CollectGarbage<TriggerGCType::SHARED_GC, GCReason::OTHER>(thread);
+    heap->GetHeapPrepare(thread);
+    if (!sHeap->CheckCanTriggerConcurrentMarking(thread)) {
+        return;
+    }
+    std::shared_ptr<SharedTestSpace> space= std::make_shared<SharedTestSpace>(sHeap, thread);
+    InitializeBaseObjects(space);
+    bool succ = heap->TryTriggerCCMarking(MarkReason::OTHER);
+    EXPECT_TRUE(succ);
+    sHeap->TriggerConcurrentMarking<TriggerGCType::SHARED_PARTIAL_GC, MarkReason::OTHER>(thread);
+    while (!thread->HasSuspendRequest()) {
+        continue;
+    }
+    thread->CheckSafepointIfSuspended();
+    if (thread->IsSharedConcurrentMarkingOrFinished()) {
+        sHeap->CollectGarbage<TriggerGCType::SHARED_PARTIAL_GC, GCReason::OTHER>(thread);
+    }
+    // conflict with local gc.
+    heap->CollectGarbageFromCCMark(GCReason::OTHER);
+    EXPECT_TRUE(thread->IsConcurrentCopying());
+    EXPECT_TRUE(thread->NeedReadBarrier());
+    EXPECT_FALSE(thread->HasSwitchedToStwStub());
+    sHeap->WaitAllTasksFinished(thread);
+    // local cc still running.
+    EXPECT_TRUE(thread->IsConcurrentCopying());
+    EXPECT_TRUE(thread->NeedReadBarrier());
+    EXPECT_FALSE(thread->HasSwitchedToStwStub());
+}
+
+HWTEST_F_L0(SharedPartialGCTest, DisableParallelGCTest)
+{
+    instance->GetJSOptions().SetEnableForceGC(false);
+    Heap *heap = const_cast<Heap *>(instance->GetHeap());
+    SharedHeap *sHeap = SharedHeap::GetInstance();
+    sHeap->SetParallelGCEnabled(false);
+    Runtime::GetInstance()->GetEcmaStringTable()->GetCleaner()->SetEnableConcurrentSweep(false);
+    heap->CollectGarbage(TriggerGCType::FULL_GC);
+    sHeap->CollectGarbage<TriggerGCType::SHARED_GC, GCReason::OTHER>(thread);
+    heap->GetHeapPrepare(thread);
+    if (!sHeap->CheckCanTriggerConcurrentMarking(thread)) {
+        return;
+    }
+    std::shared_ptr<SharedTestSpace> space= std::make_shared<SharedTestSpace>(sHeap, thread);
+    InitializeBaseObjects(space);
+    sHeap->TriggerConcurrentMarking<TriggerGCType::SHARED_PARTIAL_GC, MarkReason::OTHER>(thread);
+    while (!thread->HasSuspendRequest()) {
+        continue;
+    }
+    thread->CheckSafepointIfSuspended();
+    if (thread->IsSharedConcurrentMarkingOrFinished()) {
+        sHeap->CollectGarbage<TriggerGCType::SHARED_PARTIAL_GC, GCReason::OTHER>(thread);
+    }
+    sHeap->WaitAllTasksFinished(thread);
+    EXPECT_FALSE(thread->NeedReadBarrier());
+    EXPECT_TRUE(thread->HasSwitchedToStwStub());
+}
+
+HWTEST_F_L0(SharedPartialGCTest, CheckSwitchRBStubTest)
+{
+    instance->GetJSOptions().SetEnableForceGC(false);
+    thread->SetSwitchRBStubRequest(true);
+    thread->CheckSwitchRBStub();
+    EXPECT_TRUE(!thread->HasSwitchedToStwStub());
+    thread->ReleaseReadBarrier(ReadBarrierOwner::SHARED_PARTIAL_GC);
+    EXPECT_TRUE(thread->TryRestoreNormalStubs());
+    thread->SetSwitchRBStubRequest(false);
+    thread->CheckSwitchRBStub();
+    EXPECT_TRUE(thread->HasSwitchedToStwStub());
+}
+
+HWTEST_F_L0(SharedPartialGCTest, SharedCCWeakRefUpdateTest)
+{
+    constexpr size_t ARRAY_LEN = 10;
+    instance->GetJSOptions().SetEnableForceGC(false);
+    Heap *heap = const_cast<Heap *>(instance->GetHeap());
+    SharedHeap *sHeap = SharedHeap::GetInstance();
+    heap->CollectGarbage(TriggerGCType::FULL_GC);
+    sHeap->CollectGarbage<TriggerGCType::SHARED_GC, GCReason::OTHER>(thread);
+    heap->GetHeapPrepare(thread);
+    if (!sHeap->CheckCanTriggerConcurrentMarking(thread)) {
+        return;
+    }
+    std::shared_ptr<SharedTestSpace> space = std::make_shared<SharedTestSpace>(sHeap, thread);
+    JSHandle<TaggedArray> sOld1 = AllocateSharedArray(space, ARRAY_LEN);
+    JSHandle<TaggedArray> sOld2 = AllocateSharedArray(space, ARRAY_LEN);
+    InitializeBaseObjects(space);
+    space->Merge();
+    auto weakRef = sOld2.GetTaggedValue();
+    weakRef.CreateWeakRef();
+    sOld1->Set(thread, 0, weakRef);
+    EXPECT_TRUE(JSTaggedValue(sOld1->Get(thread, 0)).IsWeak());
+    sHeap->CollectGarbage<TriggerGCType::SHARED_CC, GCReason::OTHER>(thread);
+    JSTaggedValue afterGC = sOld1->Get(thread, 0);
+    EXPECT_TRUE(afterGC.IsWeak());
 }
 } // namespace panda::test

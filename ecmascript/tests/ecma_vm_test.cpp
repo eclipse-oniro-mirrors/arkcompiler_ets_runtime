@@ -123,26 +123,6 @@ HWTEST_F_L0(EcmaVMTest, CreateEcmaVMInTwoWays)
         EXPECT_TRUE(options1Out.GetArkProperties() != options2Out.GetArkProperties());
         EXPECT_TRUE(options2Out.GetHeapSize() == 500_MB);
 
-        options2.SetAsmOpcodeDisableRange("1,10");
-        options2.ParseAsmInterOption();
-        EXPECT_TRUE(options2.GetAsmInterParsedOption().handleStart == 1); // 1 targer start
-        EXPECT_TRUE(options2.GetAsmInterParsedOption().handleEnd == 10); // 10 targer end
-
-        options2.SetAsmOpcodeDisableRange("0x1,0xa");
-        options2.ParseAsmInterOption();
-        EXPECT_TRUE(options2.GetAsmInterParsedOption().handleStart == 1); // 1 targer start
-        EXPECT_TRUE(options2.GetAsmInterParsedOption().handleEnd == 10); // 10 targer end
-
-        options2.SetAsmOpcodeDisableRange(",");
-        options2.ParseAsmInterOption();
-        EXPECT_TRUE(options2.GetAsmInterParsedOption().handleStart == 0);
-        EXPECT_TRUE(options2.GetAsmInterParsedOption().handleEnd == kungfu::BYTECODE_STUB_END_ID);
-
-        options2.SetAsmOpcodeDisableRange("@,@");
-        options2.ParseAsmInterOption();
-        EXPECT_TRUE(options2.GetAsmInterParsedOption().handleStart == 0);
-        EXPECT_TRUE(options2.GetAsmInterParsedOption().handleEnd == kungfu::BYTECODE_STUB_END_ID);
-
         JSNApi::DestroyJSVM(ecmaVm2);
     });
     t1.join();
@@ -155,10 +135,29 @@ HWTEST_F_L0(EcmaVMTest, DumpExceptionObject)
     option.SetLogLevel(common::LOG_LEVEL::ERROR);
     EcmaVM *ecmaVm = JSNApi::CreateJSVM(option);
     auto thread = ecmaVm->GetJSThread();
-    int arkProperties = thread->GetEcmaVM()->GetJSOptions().GetArkProperties();
+    int64_t arkProperties = thread->GetEcmaVM()->GetJSOptions().GetArkProperties();
     ecmaVm->GetJSOptions().SetArkProperties(arkProperties | ArkProperties::EXCEPTION_BACKTRACE);
     EXPECT_TRUE(ecmaVm->GetJSOptions().EnableExceptionBacktrace());
     JSNApi::DestroyJSVM(ecmaVm);
+}
+
+/*
+ * @tc.name: ArkPropertiesHighBitReadWrite
+ * @tc.desc: Read-modify-write of low property bits must preserve high bits (>= bit 32).
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(EcmaVMTest, ArkPropertiesHighBitReadWrite)
+{
+    JSRuntimeOptions options;
+    constexpr int64_t highBit = static_cast<int64_t>(ArkProperties::ENABLE_SNAPSHOT_STATS);
+    options.SetArkProperties(highBit | ArkProperties::THREAD_CHECK);
+    // a 32-bit truncated getter would silently drop the high bit on read-modify-write
+    options.SetArkProperties(options.GetArkProperties() | ArkProperties::EXCEPTION_BACKTRACE);
+    EXPECT_NE(options.GetArkProperties() & highBit, 0);
+    EXPECT_TRUE(options.IsSnapshotStatsEnabled());
+    EXPECT_TRUE(options.EnableThreadCheck());
+    EXPECT_TRUE(options.EnableExceptionBacktrace());
 }
 
 HWTEST_F_L0(EcmaVMTest, LargeHeap)
@@ -265,6 +264,33 @@ HWTEST_F_L0(EcmaVMTest, TestInitConfigurableParam)
     EXPECT_TRUE(cfg.GetStepNativeSizeInc() != 2048_MB);
     EXPECT_TRUE(cfg.GetDefaultGlobalAllocLimit() != 256_MB);
 #endif
+}
+
+HWTEST_F_L0(EcmaVMTest, InitializeFor6GDeviceParams)
+{
+    EcmaParamConfiguration cfg6g(EcmaParamConfiguration::HeapType::DEFAULT_HEAP, MAX_HEAP_SIZE, MAX_HEAP_SIZE,
+                                 EcmaParamConfiguration::DeviceMemoryTier::TIER_6G);
+    EXPECT_DOUBLE_EQ(cfg6g.GetSharedHeapLimitGrowingFactor(), 1.5);
+    EXPECT_EQ(cfg6g.GetSharedHeapLimitGrowingStep(), 20_MB);
+    EXPECT_EQ(cfg6g.GetStepNativeSizeInc(), 256_MB);
+    EXPECT_EQ(cfg6g.GetMinNativeLimitGrowingStep(), 32_MB);
+    EXPECT_DOUBLE_EQ(cfg6g.GetSharedConcurrentMarkRate(), 0.8);
+    EXPECT_EQ(cfg6g.GetSemiSpaceTriggerConcurrentMark(), 1_MB);
+    EXPECT_EQ(cfg6g.GetOldSpaceStepOvershootSize(), 4_MB);
+    EXPECT_EQ(cfg6g.GetOldSpaceMaxOvershootSize(), 8_MB);
+    EXPECT_EQ(cfg6g.GetSlotSpaceTriggerConcurrentMark(), 1.5_MB);
+    EXPECT_EQ(cfg6g.GetMinGrowingStep(), 8_MB);
+    EXPECT_EQ(cfg6g.GetIncObjSizeThresholdInSensitive(), 20_MB);
+    EXPECT_EQ(cfg6g.GetSIncObjSizeThresholdInSensitive(), 80_MB);
+    EXPECT_EQ(cfg6g.GetSemiSpaceCommittedSizeThresholdForCmsInSensitive(), 100_MB);
+
+    EcmaParamConfiguration cfgDefault(EcmaParamConfiguration::HeapType::DEFAULT_HEAP, MAX_HEAP_SIZE, MAX_HEAP_SIZE,
+                                      EcmaParamConfiguration::DeviceMemoryTier::TIER_DEFAULT);
+    EXPECT_DOUBLE_EQ(cfgDefault.GetSharedHeapLimitGrowingFactor(), 2.0);
+    EXPECT_EQ(cfgDefault.GetSharedHeapLimitGrowingStep(), 40_MB);
+    EXPECT_EQ(cfgDefault.GetStepNativeSizeInc(), 300_MB);
+    EXPECT_EQ(cfgDefault.GetMinNativeLimitGrowingStep(), 64_MB);
+    EXPECT_DOUBLE_EQ(cfgDefault.GetSharedConcurrentMarkRate(), 0.75);
 }
 
 }  // namespace panda::ecmascript

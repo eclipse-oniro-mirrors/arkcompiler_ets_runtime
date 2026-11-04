@@ -14,24 +14,49 @@
  */
 
 #include "ecmascript/mem/machine_code.h"
+
+#include <limits>
+
 #include "ecmascript/base/config.h"
 #include "ecmascript/compiler/aot_file/func_entry_des.h"
 #include "ecmascript/jit/jit.h"
 #include "ecmascript/compiler/jit_compilation_env.h"
 #if ECMASCRIPT_ENABLE_CAST_CHECK
-#include "ecmascript/js_tagged_value-inl.h"
+#include "ecmascript/js_tagged_value_wrapper-inl.h"
 #endif
 
 namespace panda::ecmascript {
 
+#ifndef EXCLUDE_JIT
+static bool IsJitFortEnabled()
+{
+    return Jit::GetInstance()->IsEnableJitFort();
+}
+
+static bool IsAsyncCopyToFortEnabled()
+{
+    return Jit::GetInstance()->IsEnableAsyncCopyToFort();
+}
+#else
+static bool IsJitFortEnabled()
+{
+    return false;
+}
+
+static bool IsAsyncCopyToFortEnabled()
+{
+    return false;
+}
+#endif
+
 static bool SetPageProtect(uint8_t *textStart, size_t dataSize)
 {
-    if (!Jit::GetInstance()->IsEnableJitFort()) {
+    if (!IsJitFortEnabled()) {
         constexpr size_t pageSize = 4096;
         uintptr_t startPage = AlignDown(reinterpret_cast<uintptr_t>(textStart), pageSize);
         uintptr_t endPage = AlignUp(reinterpret_cast<uintptr_t>(textStart) + dataSize, pageSize);
         size_t protSize = endPage - startPage;
-        return PageProtect(reinterpret_cast<void*>(startPage), protSize, PAGE_PROT_EXEC_READWRITE);
+        return PageProtect(reinterpret_cast<void*>(startPage), protSize, PAGE_PROT_EXEC_READWRITE) == 0;
     }
     return true;
 }
@@ -84,7 +109,7 @@ bool MachineCode::SetText(const MachineCodeDesc &desc)
         }
         pText += desc.rodataSizeBeforeTextAlign;
     }
-    if (!Jit::GetInstance()->IsEnableJitFort() || !Jit::GetInstance()->IsEnableAsyncCopyToFort() ||
+    if (!IsJitFortEnabled() || !IsAsyncCopyToFortEnabled() ||
         !desc.isAsyncCompileMode) {
         if (MachineCodeCopyToCache(desc, pText) == false) {
             return false;
@@ -144,12 +169,20 @@ bool MachineCode::SetData(JSThread *thread, const MachineCodeDesc &desc, JSHandl
     if (desc.codeType == MachineCodeType::BASELINE_CODE) {
         return SetBaselineCodeData(thread, desc, method, dataSize);
     }
+    if (desc.codeType == MachineCodeType::ARKSTEED_CODE) {
+#if ECMASCRIPT_ENABLE_ARK_STEED
+        return SetArkSteedData(thread, desc, method, dataSize);
+#else
+        UNREACHABLE();
+#endif
+    }
 
     SetLocalHeapAddress(reinterpret_cast<uint64_t>(thread->GetEcmaVM()->GetHeap()));
 
     SetOSROffset(MachineCode::INVALID_OSR_OFFSET);
     SetOsrDeoptFlag(false);
     SetOsrExecuteCnt(0);
+    SetIsArkSteedCode(false);
 
     size_t instrSize = desc.rodataSizeBeforeTextAlign + desc.codeSizeAlign + desc.rodataSizeAfterTextAlign;
 
@@ -158,7 +191,7 @@ bool MachineCode::SetData(JSThread *thread, const MachineCodeDesc &desc, JSHandl
     SetHeapConstantTableSize(desc.heapConstantTableSizeAlign);
     SetHeapConstantTableAddr(reinterpret_cast<uint64_t>(GetHeapConstantTableAddress()));
     SetPayLoadSizeInBytes(dataSize);
-    if (Jit::GetInstance()->IsEnableJitFort()) {
+    if (IsJitFortEnabled()) {
         SetInstructionsAddr(desc.instructionsAddr);
         ASSERT(desc.instructionsAddr != 0);
         ASSERT(dataSize == (desc.funcEntryDesSizeAlign + desc.stackMapSizeAlign + desc.heapConstantTableSizeAlign) ||
@@ -175,13 +208,7 @@ bool MachineCode::SetData(JSThread *thread, const MachineCodeDesc &desc, JSHandl
         return false;
     }
 
-    uint8_t *stackmapAddr = GetStackMapOrOffsetTableAddress();
     uint8_t *textStart = reinterpret_cast<uint8_t*>(GetText());
-    CString methodName = method->GetRecordNameStr(thread) + "." + CString(method->GetMethodName(thread));
-    LOG_JIT(DEBUG) << "Fast JIT MachineCode :" << methodName << ", "  << " text addr:" <<
-        reinterpret_cast<void*>(GetText()) << ", size:" << instrSize  <<
-        ", stackMap addr:" << reinterpret_cast<void*>(stackmapAddr) <<
-        ", size:" << desc.stackMapSizeAlign;
 
     if (!SetPageProtect(textStart, dataSize)) {
         LOG_JIT(ERROR) << "MachineCode::SetData SetPageProtect failed";
@@ -199,7 +226,7 @@ bool MachineCode::SetBaselineCodeData(JSThread *thread, const MachineCodeDesc &d
     SetInstructionsSize(instrSizeAlign);
 
     SetStackMapOrOffsetTableSize(desc.stackMapSizeAlign);
-    if (Jit::GetInstance()->IsEnableJitFort()) {
+    if (IsJitFortEnabled()) {
         ASSERT(desc.instructionsAddr != 0);
         ASSERT(dataSize == (desc.stackMapSizeAlign) ||  // reg. obj
                dataSize == (instrSizeAlign + desc.stackMapSizeAlign)); // huge obj
@@ -210,7 +237,7 @@ bool MachineCode::SetBaselineCodeData(JSThread *thread, const MachineCodeDesc &d
     SetPayLoadSizeInBytes(dataSize);
 
     uint8_t *textStart = reinterpret_cast<uint8_t*>(GetText());
-    if (Jit::GetInstance()->IsEnableJitFort()) {
+    if (IsJitFortEnabled()) {
         // relax assert for now until machine code padding for JitFort resolved
         ASSERT(IsAligned(reinterpret_cast<uintptr_t>(textStart), TEXT_ALIGN) ||
             IsAligned(reinterpret_cast<uintptr_t>(textStart), DATA_ALIGN));
@@ -219,7 +246,7 @@ bool MachineCode::SetBaselineCodeData(JSThread *thread, const MachineCodeDesc &d
     }
     uint8_t *pText = textStart;
 
-    if (!Jit::GetInstance()->IsEnableJitFort() || !Jit::GetInstance()->IsEnableAsyncCopyToFort() ||
+    if (!IsJitFortEnabled() || !IsAsyncCopyToFortEnabled() ||
         !desc.isAsyncCompileMode) {
         if (MachineCodeCopyToCache(desc, pText) == false) {
             return false;
@@ -248,6 +275,117 @@ bool MachineCode::SetBaselineCodeData(JSThread *thread, const MachineCodeDesc &d
     }
     return true;
 }
+
+#if ECMASCRIPT_ENABLE_ARK_STEED
+bool MachineCode::SetArkSteedData(JSThread *thread, const MachineCodeDesc &desc,
+                                  JSHandle<Method> &method, size_t dataSize)
+{
+    DISALLOW_GARBAGE_COLLECTION;
+
+    SetLocalHeapAddress(reinterpret_cast<uint64_t>(thread->GetEcmaVM()->GetHeap()));
+
+    SetOSROffset(MachineCode::INVALID_OSR_OFFSET);
+    SetOsrDeoptFlag(false);
+    SetOsrExecuteCnt(0);
+    SetIsArkSteedCode(true);
+
+    size_t instrSizeAlign = desc.codeSizeAlign;
+    SetInstructionsSize(instrSizeAlign);
+    SetStackMapOrOffsetTableSize(desc.stackMapSizeAlign);
+    SetHeapConstantTableSize(desc.heapConstantTableSizeAlign);
+    SetHeapConstantTableAddr(reinterpret_cast<uint64_t>(GetHeapConstantTableAddress()));
+    SetPayLoadSizeInBytes(dataSize);
+
+    if (IsJitFortEnabled()) {
+        SetInstructionsAddr(desc.instructionsAddr);
+    }
+
+    uint8_t *textStart = reinterpret_cast<uint8_t*>(GetText());
+    uint8_t *pText = textStart;
+
+    // Copy code to text area (skipped if async copy to JitFort already done)
+    if (!IsJitFortEnabled() || !IsAsyncCopyToFortEnabled() ||
+        !desc.isAsyncCompileMode) {
+        if (MachineCodeCopyToCache(desc, pText) == false) {
+            return false;
+        }
+    }
+    pText += instrSizeAlign;
+
+    // Copy safepoint table
+    if (desc.stackMapOrOffsetTableSize > 0) {
+        uint8_t *stackmapAddr = GetStackMapOrOffsetTableAddress();
+        if (memcpy_s(stackmapAddr, desc.stackMapOrOffsetTableSize,
+                     reinterpret_cast<uint8_t*>(desc.stackMapOrOffsetTableAddr),
+                     desc.stackMapOrOffsetTableSize) != EOK) {
+            LOG_JIT(ERROR) << "memcpy fail in copy ArkSteed safepoint table";
+            return false;
+        }
+    }
+
+    if (!SetArkSteedTranslationData(desc)) {
+        return false;
+    }
+
+    // Set frame info from FuncEntryDes at funcEntryDesAddr
+    FuncEntryDes *funcEntryDes = reinterpret_cast<FuncEntryDes*>(desc.funcEntryDesAddr);
+    SetFuncAddr(reinterpret_cast<uintptr_t>(textStart));
+    SetIsFastCall(funcEntryDes->isFastCall_);
+    SetFpDeltaPrevFrameSp(funcEntryDes->fpDeltaPrevFrameSp_);
+    SetFuncSize(funcEntryDes->funcSize_);
+    SetCalleeRegisterNum(funcEntryDes->calleeRegisterNum_);
+    SetCalleeReg2OffsetArray(const_cast<int32_t*>(funcEntryDes->CalleeReg2Offset_));
+
+    CString methodName = method->GetRecordNameStr(thread) + "." + CString(method->GetMethodName(thread));
+    LOG_JIT(DEBUG) << "ArkSteed MachineCode:" << methodName
+                   << ", text addr:" << reinterpret_cast<void*>(GetText())
+                   << ", size:" << instrSizeAlign
+                   << ", stackMap addr:" << reinterpret_cast<void*>(GetStackMapOrOffsetTableAddress())
+                   << ", size:" << desc.stackMapSizeAlign;
+
+    if (!SetPageProtect(textStart, dataSize)) {
+        LOG_JIT(ERROR) << "MachineCode::SetArkSteedData SetPageProtect failed";
+        return false;
+    }
+    return true;
+}
+
+bool MachineCode::SetArkSteedTranslationData(const MachineCodeDesc &desc)
+{
+    ASSERT(desc.arkSteedTranslationSize <= std::numeric_limits<uint32_t>::max());
+    ASSERT((desc.arkSteedTranslationSize == 0) == (desc.arkSteedTranslationAddr == 0));
+
+    uint32_t translationSize = static_cast<uint32_t>(desc.arkSteedTranslationSize);
+    size_t translationSizeAlign = AlignUp(translationSize, DATA_ALIGN);
+    uint8_t *infoAddress = GetHeapConstantTableAddress() + GetHeapConstantTableSize();
+    uint8_t *translationAddress = infoAddress + ARKSTEED_TRANSLATION_INFO_SIZE;
+
+    uint32_t translationOffset = 0;
+    if (translationSize > 0) {
+        uintptr_t offset = reinterpret_cast<uintptr_t>(translationAddress) - reinterpret_cast<uintptr_t>(this);
+        ASSERT(offset <= std::numeric_limits<uint32_t>::max());
+        translationOffset = static_cast<uint32_t>(offset);
+
+        if (memcpy_s(translationAddress, translationSizeAlign,
+                     reinterpret_cast<const void *>(desc.arkSteedTranslationAddr), translationSize) != EOK) {
+            LOG_JIT(ERROR) << "memcpy fail in copy ArkSteed deopt translation";
+            return false;
+        }
+        size_t paddingSize = translationSizeAlign - translationSize;
+        if (paddingSize > 0 &&
+            memset_s(translationAddress + translationSize, paddingSize, 0, paddingSize) != EOK) {
+            LOG_JIT(ERROR) << "memset fail in padding ArkSteed deopt translation";
+            return false;
+        }
+    }
+
+    ASSERT(IsAligned(reinterpret_cast<uintptr_t>(infoAddress), alignof(uint32_t)));
+    auto *translationInfo = reinterpret_cast<uint32_t *>(infoAddress);
+    translationInfo[0] = translationOffset;
+    translationInfo[1] = translationSize;
+    return true;
+}
+#endif
 
 bool MachineCode::IsInText(const uintptr_t pc) const
 {
@@ -278,7 +416,7 @@ std::tuple<uint64_t, uint8_t*, int, kungfu::CalleeRegAndOffsetVec> MachineCode::
 
 uintptr_t MachineCode::GetText() const
 {
-    if (Jit::GetInstance()->IsEnableJitFort()) {
+    if (IsJitFortEnabled()) {
         return GetInstructionsAddr();
     } else {
         return GetNonTextAddress();
@@ -287,7 +425,7 @@ uintptr_t MachineCode::GetText() const
 
 uint8_t *MachineCode::GetStackMapOrOffsetTableAddress() const
 {
-    if (Jit::GetInstance()->IsEnableJitFort()) {
+    if (IsJitFortEnabled()) {
         // stackmap immediately follows MachineCode NonText area
         return reinterpret_cast<uint8_t*>(GetNonTextAddress());
     } else {
@@ -300,11 +438,62 @@ uint8_t *MachineCode::GetHeapConstantTableAddress() const
     return reinterpret_cast<uint8_t*>(GetStackMapOrOffsetTableAddress() + GetStackMapOrOffsetTableSize());
 }
 
+#if ECMASCRIPT_ENABLE_ARK_STEED
+bool MachineCode::GetArkSteedTranslationData(const uint8_t **data, size_t *size) const
+{
+    if (data == nullptr || size == nullptr) {
+        return false;
+    }
+    *data = nullptr;
+    *size = 0;
+
+    uintptr_t objectStart = reinterpret_cast<uintptr_t>(this);
+    size_t objectSize = SIZE + GetPayLoadSizeInBytes();
+    if (objectSize < SIZE || objectStart > std::numeric_limits<uintptr_t>::max() - objectSize) {
+        return false;
+    }
+    uintptr_t objectEnd = objectStart + objectSize;
+    uintptr_t infoAddress = reinterpret_cast<uintptr_t>(GetHeapConstantTableAddress());
+    if (infoAddress > std::numeric_limits<uintptr_t>::max() - GetHeapConstantTableSize()) {
+        return false;
+    }
+    infoAddress += GetHeapConstantTableSize();
+    if (infoAddress < objectStart || infoAddress > objectEnd ||
+        ARKSTEED_TRANSLATION_INFO_SIZE > objectEnd - infoAddress) {
+        return false;
+    }
+
+    uint32_t translationOffset = 0;
+    uint32_t translationSize = 0;
+    if (memcpy_s(&translationOffset, sizeof(translationOffset), reinterpret_cast<const void *>(infoAddress),
+                 sizeof(translationOffset)) != EOK ||
+        memcpy_s(&translationSize, sizeof(translationSize),
+                 reinterpret_cast<const void *>(infoAddress + sizeof(translationOffset)), sizeof(translationSize)) != EOK) {
+        return false;
+    }
+    if (translationOffset == 0 || translationSize == 0) {
+        return false;
+    }
+    uintptr_t infoEnd = infoAddress + ARKSTEED_TRANSLATION_INFO_SIZE;
+    if (translationOffset > objectSize || translationSize > objectSize - translationOffset) {
+        return false;
+    }
+    uintptr_t translationAddress = objectStart + translationOffset;
+    if (translationAddress != infoEnd || translationAddress + translationSize > objectEnd) {
+        return false;
+    }
+
+    *data = reinterpret_cast<const uint8_t *>(translationAddress);
+    *size = translationSize;
+    return true;
+}
+#endif
+
 void MachineCode::ProcessMarkObject()
 {
     Heap* heap = reinterpret_cast<Heap*>(this->GetLocalHeapAddress());
     if (g_isEnableCMCGC) {
-        // Skip HugeMachinecode or VM that is already destoryed
+        // Skip HugeMachinecode or VM that is already destroyed
         // We should implement a proper wait for VM destructor
         if (heap && heap->GetMachineCodeSpace()) {
             heap->GetMachineCodeSpace()->MarkJitFortMemAlive(this);
@@ -315,6 +504,15 @@ void MachineCode::ProcessMarkObject()
             // fake machinecode, skip.
             return;
         }
+#if defined(PANDA_TARGET_MACOS)
+        // Without JitFort the generated instructions live inside the
+        // MachineCode object and are kept alive by the object's own region
+        // mark. Treating that MAP_JIT address as a JitFort address produces
+        // an invalid region index on macOS.
+        if (!Jit::GetInstance()->IsEnableJitFort()) {
+            return;
+        }
+#endif
         auto *jitfort = heap->GetOrCreateJitFort();
         ASSERT(jitfort != nullptr);
         bool inHuge = jitfort->InHugeRange(textAddr);

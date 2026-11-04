@@ -17,7 +17,7 @@
 #define ECMASCRIPT_JS_SHARED_MAP_H
 
 #include "ecmascript/js_object.h"
-#include "ecmascript/js_tagged_value-inl.h"
+#include "ecmascript/js_tagged_value_wrapper-inl.h"
 
 namespace panda::ecmascript {
 class JSSharedMap : public JSObject {
@@ -39,6 +39,12 @@ public:
     static JSTaggedValue GetKey(JSThread *thread, const JSHandle<JSSharedMap> &map, uint32_t entry);
 
     static JSTaggedValue GetValue(JSThread *thread, const JSHandle<JSSharedMap> &map, uint32_t entry);
+
+    static JSTaggedValue PutAllFromLinkedMap(JSThread *thread, const JSHandle<JSSharedMap> &receiver,
+                                             const JSHandle<LinkedHashMap> &from);
+    static JSTaggedValue SetEntryForPutAll(JSThread *thread, const JSHandle<JSSharedMap> &receiver,
+                                           const JSHandle<JSTaggedValue> &key,
+                                           const JSHandle<JSTaggedValue> &value);
 
     static constexpr size_t LINKED_MAP_OFFSET = JSObject::SIZE;
     ACCESSORS(LinkedMap, LINKED_MAP_OFFSET, MOD_RECORD_OFFSET)

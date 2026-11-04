@@ -16,6 +16,7 @@
 #ifndef ECMASCRIPT_MEM_LOCAL_CMC_CC_EVACUATOR_INL_H
 #define ECMASCRIPT_MEM_LOCAL_CMC_CC_EVACUATOR_INL_H
 
+#include "ecmascript/base/config.h"
 #include "ecmascript/mem/local_cmc/cc_evacuator.h"
 
 #include "ecmascript/mem/object_xray.h"
@@ -64,12 +65,30 @@ void CCUpdateRootVisitor::HandleSlot(ObjectSlot slot)
     }
 }
 
+void CCConcurrentUpdateRootVisitor::VisitRoot(GCRoot &root)
+{
+    JSTaggedValue value = root.AtomicLoad();
+    if (!value.IsHeapObject()) {
+        return;
+    }
+    ASSERT(!value.IsWeak());
+    TaggedObject *object = value.GetHeapObject();
+    Region *objectRegion = Region::ObjectAddressToRange(object);
+    if (objectRegion->InSharedHeap() || !objectRegion->IsFromRegion()) {
+        return;
+    }
+
+    MarkWord markWord(object, RELAXED_LOAD);
+    TaggedObject *toObject = markWord.IsForwardingAddress() ? markWord.ToForwardingAddress() :
+        evacuator_->Copy(object, markWord);
+    JSTaggedValue forwarded(toObject);
+    root.AtomicStore(forwarded);
+}
+
 template<bool needUpdateLocalToShare>
-void CCUpdateVisitor<needUpdateLocalToShare>::VisitObjectRangeImpl(BaseObject *root, uintptr_t start, uintptr_t end,
+void CCUpdateVisitor<needUpdateLocalToShare>::VisitObjectRangeImpl(BaseObject *root, ObjectSlot start, ObjectSlot end,
     VisitObjectArea area)
 {
-    ObjectSlot startSlot(start);
-    ObjectSlot endSlot(end);
     auto rootObject = TaggedObject::Cast(root);
     Region *rootRegion = Region::ObjectAddressToRange(rootObject);
     ASSERT(!rootRegion->InSharedHeap());
@@ -78,10 +97,10 @@ void CCUpdateVisitor<needUpdateLocalToShare>::VisitObjectRangeImpl(BaseObject *r
         ASSERT(!hclass->IsAllTaggedProp());
         int index = 0;
         LayoutInfo *layout = LayoutInfo::UncheckCast(hclass->GetLayout(thread_).GetTaggedObject());
-        ObjectSlot realEnd(start);
+        ObjectSlot realEnd = start;
         realEnd += layout->GetPropertiesCapacity();
-        endSlot = endSlot > realEnd ? realEnd : endSlot;
-        for (ObjectSlot slot = startSlot; slot < endSlot; slot++) {
+        end = end > realEnd ? realEnd : end;
+        for (ObjectSlot slot = start; slot < end; slot++) {
             PropertyAttributes attr = layout->GetAttr(thread_, index++);
             if (attr.IsTaggedRep()) {
                 HandleSlot(slot, rootRegion);
@@ -89,22 +108,35 @@ void CCUpdateVisitor<needUpdateLocalToShare>::VisitObjectRangeImpl(BaseObject *r
         }
         return;
     }
-    for (ObjectSlot slot = startSlot; slot < endSlot; slot++) {
+    for (ObjectSlot slot = start; slot < end; slot++) {
         HandleSlot(slot, rootRegion);
     }
 }
 
-template<bool needUpdateLocalToShare>
-void CCUpdateVisitor<needUpdateLocalToShare>::HandleSlot(ObjectSlot slot, Region *rootRegion)
+template <bool needUpdateLocalToShare>
+void CCUpdateVisitor<needUpdateLocalToShare>::VisitCompressedObjectRangeImpl(BaseObject *root,
+    CompressedObjectSlot start, CompressedObjectSlot end)
 {
-    JSTaggedValue value(slot.GetTaggedType());
+    auto rootObject = TaggedObject::Cast(root);
+    Region *rootRegion = Region::ObjectAddressToRange(rootObject);
+    ASSERT(!rootRegion->InSharedHeap());
+    for (CompressedObjectSlot slot = start; slot < end; slot++) {
+        HandleSlot(slot, rootRegion);
+    }
+}
+
+template <bool needUpdateLocalToShare>
+template <ReferenceType refType>
+void CCUpdateVisitor<needUpdateLocalToShare>::HandleSlot(ObjectSlotBase<refType> slot, Region *rootRegion)
+{
+    TaggedValueType<refType> value = slot.GetTaggedValue();
     if (!value.IsHeapObject()) {
         return;
     }
     Region *objectRegion = Region::ObjectAddressToRange(value.GetRawHeapObject());
     if (objectRegion->InSharedSweepableSpace()) {
         if constexpr (needUpdateLocalToShare) {
-            rootRegion->InsertSweepingLocalToShareRSetForCC(slot.SlotAddress());
+            rootRegion->InsertSweepingLocalToShareRSetForCC<refType>(slot.SlotAddress());
         }
         return;
     }
@@ -114,13 +146,15 @@ void CCUpdateVisitor<needUpdateLocalToShare>::HandleSlot(ObjectSlot slot, Region
         MarkWord markWord(object, RELAXED_LOAD);
         ASSERT(markWord.IsForwardingAddress());
         TaggedObject *dst = markWord.ToForwardingAddress();
-        if (value.IsWeakForHeapObject()) {
-            JSTaggedValue dstValue = JSTaggedValue(dst);
-            dstValue.CreateWeakRef();
-            dst = dstValue.GetRawHeapObject();
+        if constexpr (ReferenceIsCompressed<refType>) {
+            ASSERT(!value.IsWeakForHeapObject());
             slot.CASUpdate(rawObject, dst);
         } else {
-            slot.CASUpdate(rawObject, dst);
+            if (value.IsWeakForHeapObject()) {
+                slot.CASUpdateWeak(rawObject, dst);
+            } else {
+                slot.CASUpdate(rawObject, dst);
+            }
         }
     }
 }

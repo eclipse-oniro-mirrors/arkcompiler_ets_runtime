@@ -1,0 +1,1739 @@
+/*
+ * Copyright (c) 2026 Huawei Device Co., Ltd.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "ecmascript/arksteed/arksteed_opcode.h"
+
+#include "ecmascript/arksteed/arksteed_assembler-inl.h"  // IWYU pragma: keep
+#include "ecmascript/arksteed/arksteed_bb.h"
+#include "ecmascript/arksteed/arksteed_condition_code.h"
+#include "ecmascript/arksteed/arksteed_dump_helper.h"
+#include "ecmascript/arksteed/arksteed_graph_processor.h"
+#include "ecmascript/arksteed/arksteed_opcode_list.h"
+#include "ecmascript/arksteed/arksteed_vertex.h"
+#include "ecmascript/compiler/common_stub_csigns.h"
+#include "ecmascript/compiler/rt_call_signature.h"
+#include <ios>
+#include <sstream>
+#include <type_traits>
+
+namespace panda::ecmascript::arksteed {
+
+namespace {
+void UseDeoptFrameSlot(InputLocation *location)
+{
+    location->GetOperand() = UnallocatedState(UnallocatedState::ExtendedPolicy::MUST_HAVE_SLOT,
+                                              UnallocatedState::LifetimeFlag::USED_AT_END, NO_VREG);
+}
+
+void UseEagerDeoptFrameSlots(EagerDeoptimizableMixin *deopt)
+{
+    for (uint32_t index = 0; index < deopt->GetDeoptFrameValueCount(); ++index) {
+        UseDeoptFrameSlot(deopt->GetDeoptSourceLocation(index));
+    }
+}
+
+void UseLazyDeoptFrameSlots(LazyDeoptimizableMixin *deopt)
+{
+    if (!deopt->HasLazyDeoptFrameState()) {
+        return;
+    }
+    for (uint32_t index = 0, valueCount = deopt->GetDeoptFrameValueCount(); index < valueCount; ++index) {
+        UseDeoptFrameSlot(deopt->GetDeoptSourceLocation(index));
+    }
+}
+
+}  // namespace
+
+#define __ masm->
+
+// Helper function for stub calls (CallRuntime, CallCommonStub)
+// Uses C calling convention (CCallConv) in arksteed
+void SetStubValueLocationConstraints(Vertex *vertex, size_t inputCount)
+{
+    for (size_t paramIdx = 0; paramIdx < inputCount; paramIdx++) {
+        if (paramIdx < static_cast<size_t>(ArkSteedAssembler::NUM_ARG_REGISTERS)) {
+            ArkSteedRegister paramReg = ArkSteedAssembler::GetParameterRegister(static_cast<int>(paramIdx));
+            UseAndClobberFixed(vertex->Arg(paramIdx), paramReg);
+        } else {
+            UseAny(vertex->Arg(paramIdx));
+        }
+    }
+}
+
+// ========================================= Common Value Opcode =========================================
+
+void Int32ConstantVertex::DoLoadToRegister(ArkSteedAssembler *masm, ArkSteedRegister reg) const
+{
+    __ Move(reg, GetValue());
+}
+
+void Int32ConstantVertex::SetValueLocationConstraints()
+{
+    DefineAsConstant(this);
+}
+
+void Int64ConstantVertex::DoLoadToRegister(ArkSteedAssembler *masm, ArkSteedRegister reg) const
+{
+    __ Move(reg, static_cast<int64_t>(GetValue()));
+}
+
+void Int64ConstantVertex::SetValueLocationConstraints()
+{
+    DefineAsConstant(this);
+}
+
+void Float64ConstantVertex::DoLoadToRegister(ArkSteedAssembler *masm, ArkSteedDoubleRegister reg) const
+{
+    __ Move(reg, GetValue());
+}
+
+void Float64ConstantVertex::SetValueLocationConstraints()
+{
+    DefineAsConstant(this);
+}
+
+void TaggedConstantVertex::SetValueLocationConstraints()
+{
+    DefineAsConstant(this);
+}
+
+void TaggedConstantVertex::DoLoadToRegister(ArkSteedAssembler *masm, ArkSteedRegister reg) const
+{
+    __ Move(reg, GetValue());
+}
+
+void HeapConstantVertex::SetValueLocationConstraints()
+{
+    DefineAsConstant(this);
+}
+
+void HeapConstantVertex::DoLoadToRegister(ArkSteedAssembler *masm, ArkSteedRegister reg) const
+{
+    masm->MoveEmbeddedTagged(reg, GetHandleIndex());
+}
+
+void InitialValueVertex::SetValueLocationConstraints()
+{
+    // Convert fp-slot index (word units from fp) to tagged-slot index.
+    // tagged_slot[0] is at fp-slot -4 (i.e. FP + 4n where n = pointer size).
+    constexpr int32_t kTaggedSlot0FpSlotIndex = -4;
+    int32_t taggedSlotIndex = kTaggedSlot0FpSlotIndex - frameSlotIndex_;
+    Result().SetUnallocated(UnallocatedState::BasicPolicy::FIXED_SLOT, taggedSlotIndex);
+}
+
+void ActualArgcVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+}
+
+void LoadActualArgumentVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INDEX_INDEX));
+    SetTemporariesNeeded(1);
+}
+
+void CallRuntimeVertex::SetValueLocationConstraints()
+{
+    // Define return value in x0/rax (C calling convention)
+    DefineAsFixed(this, 0);
+
+    // Set parameter location constraints using helper function
+    SetStubValueLocationConstraints(this, GetArgCount());
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
+
+void CallVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+#if defined(PANDA_TARGET_AMD64)
+    // Reserve temporaries for the function guards and call argument preparation.
+    SetTemporariesNeeded(2);
+#elif defined(PANDA_TARGET_ARM64)
+    // The guards run before the call scratch is acquired; retain the call's temporary budget.
+    SetTemporariesNeeded(3);  // 3: arm64: call guards plus the call scratch budget (see above)
+#else
+    SetTemporariesNeeded(1);
+#endif
+    UseRegister(Arg(TARGET_INDEX));
+    for (uint32_t i = NEW_TARGET_INDEX; i < GetInputCount(); i++) {
+        UseAny(Arg(i));
+    }
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
+
+void CallNewObjRangeBaseVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+#if defined(PANDA_TARGET_ARM64)
+    SetTemporariesNeeded(3);  // 3: arm64 scratch registers for the constructor-call sequence
+#else
+    SetTemporariesNeeded(2);  // 2: x64 scratch registers for the constructor-call sequence
+#endif
+    if (UsesCommonStub()) {
+        using Inputs = kungfu::ArkSteedCallConstructorBodyInputs;
+        UseAndClobberFixed(Arg(TARGET_INDEX), ArkSteedAssembler::GetParameterRegister(Inputs::TARGET));
+        UseAndClobberFixed(Arg(NEW_TARGET_INDEX), ArkSteedAssembler::GetParameterRegister(Inputs::NEW_TARGET));
+        UseSlot(Arg(THIS_INDEX));
+    } else {
+        UseAndClobberFixed(Arg(TARGET_INDEX), ArkSteedAssembler::CALLEE_TARGET_REGISTER);
+        UseAny(Arg(NEW_TARGET_INDEX));
+        UseSlot(Arg(THIS_INDEX));
+    }
+    for (uint32_t index = FIRST_ARG_INDEX; index < GetInputCount(); index++) {
+        UseAny(Arg(index));
+    }
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
+
+void CallNewObjRangeDerivedVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+#if defined(PANDA_TARGET_ARM64)
+    SetTemporariesNeeded(3);  // 3: arm64 scratch registers for the derived constructor call
+#else
+    SetTemporariesNeeded(2);  // 2: x64 scratch registers for the derived constructor call
+#endif
+    if (UsesCommonStub()) {
+        using Inputs = kungfu::ArkSteedCallConstructorBodyInputs;
+        UseAndClobberFixed(Arg(TARGET_INDEX), ArkSteedAssembler::GetParameterRegister(Inputs::TARGET));
+        UseAndClobberFixed(Arg(NEW_TARGET_INDEX), ArkSteedAssembler::GetParameterRegister(Inputs::NEW_TARGET));
+        UseAndClobberFixed(Arg(THIS_INDEX), ArkSteedAssembler::GetParameterRegister(Inputs::RECEIVER));
+    } else {
+        UseAndClobberFixed(Arg(TARGET_INDEX), ArkSteedAssembler::CALLEE_TARGET_REGISTER);
+        UseAny(Arg(NEW_TARGET_INDEX));
+        UseAny(Arg(THIS_INDEX));
+    }
+    for (uint32_t index = FIRST_ARG_INDEX; index < GetInputCount(); index++) {
+        UseAny(Arg(index));
+    }
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
+
+void LoadBuiltinObjectVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(GLUE_INDEX));
+}
+
+void BranchIfECMAObjectVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(0));
+    SetTemporariesNeeded(1);
+}
+
+void CallKnownJSFunctionVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+    SetTemporariesNeeded(1);
+    UseAndClobberFixed(Arg(TARGET_INDEX), ArkSteedAssembler::CALLEE_TARGET_REGISTER);
+    UseAny(Arg(NEW_TARGET_INDEX));
+    UseAny(Arg(RECEIVER_INDEX));
+    UseAndClobberFixed(Arg(CONTEXT_INDEX), ArkSteedAssembler::CALLEE_CONTEXT_REGISTER);
+    for (uint32_t index = FIRST_ARG_INDEX; index < GetInputCount(); ++index) {
+        UseAny(Arg(index));
+    }
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
+
+uint32_t CallKnownBuiltinVertex::GetReservedCallSlotCount() const
+{
+    uint32_t logicalSlotCount = 0;
+    if (UsesFastStub()) {
+        constexpr uint32_t BUILTIN_ARG_COUNT = static_cast<uint32_t>(kungfu::BuiltinsArgs::NUM_OF_INPUTS);
+        uint32_t registerArgCount = static_cast<uint32_t>(ArkSteedAssembler::NUM_ARG_REGISTERS);
+        logicalSlotCount = BUILTIN_ARG_COUNT > registerArgCount ? BUILTIN_ARG_COUNT - registerArgCount : 0;
+    } else {
+        logicalSlotCount = actualArgc_ + NUM_MANDATORY_JSFUNC_ARGS + 2U;  // Glue and total argc.
+    }
+    return (logicalSlotCount + 1U) & ~1U;
+}
+
+void CallKnownBuiltinVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+    if (UsesFastStub()) {
+        UseAndClobberFixed(Arg(TARGET_INDEX), ArkSteedAssembler::GetParameterRegister(2));  // 2: builtin call target
+        UseAndClobberFixed(Arg(NEW_TARGET_INDEX), ArkSteedAssembler::GetParameterRegister(3));  // 3: builtin newTarget
+        UseAndClobberFixed(Arg(RECEIVER_INDEX), ArkSteedAssembler::GetParameterRegister(4));  // 4: builtin this value
+        constexpr uint32_t FIRST_USER_ARG_PARAMETER = static_cast<uint32_t>(kungfu::BuiltinsArgs::ARG0_OR_ARGV);
+        for (uint32_t index = 0; index < actualArgc_; index++) {
+            uint32_t parameterIndex = FIRST_USER_ARG_PARAMETER + index;
+            if (parameterIndex < static_cast<uint32_t>(ArkSteedAssembler::NUM_ARG_REGISTERS)) {
+                UseAndClobberFixed(Arg(FIRST_ARG_INDEX + index),
+                                   ArkSteedAssembler::GetParameterRegister(static_cast<int>(parameterIndex)));
+            } else {
+                UseAny(Arg(FIRST_ARG_INDEX + index));
+            }
+        }
+    } else {
+        UseRegister(Arg(TARGET_INDEX));
+        for (uint32_t index = NEW_TARGET_INDEX; index < GetInputCount(); index++) {
+            UseAny(Arg(index));
+        }
+    }
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
+
+void CallSelfVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+    UseAndClobberFixed(Arg(TARGET_INDEX), ArkSteedAssembler::CALLEE_TARGET_REGISTER);
+    UseAny(Arg(NEW_TARGET_INDEX));
+    UseAny(Arg(RECEIVER_INDEX));
+    UseAndClobberFixed(Arg(CONTEXT_INDEX), ArkSteedAssembler::CALLEE_CONTEXT_REGISTER);
+    for (uint32_t index = FIRST_ARG_INDEX; index < GetInputCount(); ++index) {
+        UseAny(Arg(index));
+    }
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
+
+void CanAllocateInYoungVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(GLUE_INDEX));
+    UseRegister(Arg(SIZE_INDEX));
+    DefineAsRegister(this);
+    SetTemporariesNeeded(2);  // 2: scratch registers for young-space top and end bounds
+}
+
+void AllocateInYoungVertex::SetValueLocationConstraints()
+{
+    // The fast path uses ordinary result allocation, preserving all input registers.
+    DefineAsRegister(this);
+    UseRegister(Arg(GLUE_INDEX));
+    UseRegister(Arg(SIZE_INDEX));
+    SetTemporariesNeeded(1);
+}
+
+void InitializeEmptyArrayVertex::SetValueLocationConstraints()
+{
+    DefineSameAsFirst(this);
+    for (uint32_t index = 0; index < NUM_INPUTS; ++index) {
+        UseRegister(Arg(index));
+    }
+    SetTemporariesNeeded(1);
+}
+
+void InitializeArrayWithBufferVertex::SetValueLocationConstraints()
+{
+    DefineSameAsFirst(this);
+    for (uint32_t index = 0; index < NUM_INPUTS; ++index) {
+        UseRegister(Arg(index));
+    }
+    SetTemporariesNeeded(1);
+}
+
+void InitializeUnmappedArgumentsElementsVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    SetTemporariesNeeded(1);
+    UseRegister(Arg(NUM_ARGS_INDEX));
+    UseRegister(Arg(ALLOCATION_INDEX));
+    UseRegister(Arg(HCLASS_INDEX));
+}
+
+void InitializeUnmappedArgumentsVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    SetTemporariesNeeded(3);  // 3 : value and two internally acquired write-barrier region scratches
+    UseRegister(Arg(GLUE_INDEX));
+    UseRegister(Arg(NUM_ARGS_INDEX));
+    UseRegister(Arg(ALLOCATION_INDEX));
+    UseRegister(Arg(ELEMENTS_INDEX));
+    UseRegister(Arg(GLOBAL_ENV_INDEX));
+    UseRegister(Arg(HCLASS_INDEX));
+}
+
+void CallBaseConstructorVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+    // Pre-call: the call scratch plus the compiled-code guard bitfield. Post-call:
+    // JumpIfNotEcmaObject needs two concurrent scratch registers on arm64 (hclass
+    // plus objectType) but only one on x64, on top of the vertex-level scratch
+    // held across the call for the slot-loaded select.
+#if defined(PANDA_TARGET_ARM64)
+    SetTemporariesNeeded(3);  // 3: arm64: hclass and objectType scratches plus the vertex-level scratch
+#else
+    SetTemporariesNeeded(2);  // 2: x64: objectType scratch plus the vertex-level scratch (see above)
+#endif
+    UseRegister(Arg(TARGET_INDEX));
+    UseAny(Arg(NEW_TARGET_INDEX));
+    // this must live in a spill slot: the not-object arm of the inline result
+    // select reads it after the embedded call, which clobbers every register, and
+    // the deopt bundle references the same slot as BASE_CONSTRUCTOR_THIS_INDEX.
+    // Call-argument placement reads slot operands fine.
+    UseSlot(Arg(THIS_INDEX));
+    for (uint32_t i = FIRST_ARG_INDEX; i < GetInputCount(); i++) {
+        UseAny(Arg(i));
+    }
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
+
+void CallDerivedConstructorVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+    // Pre-call: the call scratch plus the compiled-code guard bitfield. Post-call:
+    // JumpIfNotEcmaObject needs two concurrent scratch registers on arm64 (hclass
+    // plus objectType) but only one on x64. The cold throw path marshals its
+    // runtime id through reserved scratch, not RA temporaries.
+#if defined(PANDA_TARGET_ARM64)
+    SetTemporariesNeeded(3);  // 3: arm64: two concurrent check scratches plus the vertex-level scratch
+#else
+    SetTemporariesNeeded(2);  // 2: x64 scratch registers (see comment above)
+#endif
+    UseRegister(Arg(TARGET_INDEX));
+    UseAny(Arg(NEW_TARGET_INDEX));
+    // this is the undefined placeholder, pure call-argument forwarding: nothing
+    // reads it after the embedded call (the derived normalization only tests the
+    // result), so unlike the base variant any location is fine.
+    UseAny(Arg(THIS_INDEX));
+    for (uint32_t i = FIRST_ARG_INDEX; i < GetInputCount(); i++) {
+        UseAny(Arg(i));
+    }
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
+
+void CallCommonStubVertex::SetValueLocationConstraints()
+{
+    // Define return value in x0/rax (C calling convention)
+    DefineAsFixed(this, 0);
+
+    // Set parameter location constraints using helper function
+    SetStubValueLocationConstraints(this, GetArgCount());
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
+
+void FastSuperAllocateThisVertex::SetValueLocationConstraints()
+{
+    // Define return value in x0/rax (C calling convention), like CallCommonStubVertex
+    DefineAsFixed(this, 0);
+
+    SetStubValueLocationConstraints(this, GetArgCount());
+}
+
+void LineStringLoadElementVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(STRING_INDEX));
+    UseRegister(Arg(ELEMENT_INDEX));
+    UseRegister(Arg(LENGTH_AND_FLAGS_INDEX));
+}
+
+void DeoptIfReferenceNotEqualVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+}
+
+void DeoptIfHClassMismatchVertex::SetValueLocationConstraints()
+{
+    SetTemporariesNeeded(2);  // 2: actual hclass and tag/address mask
+    UseRegister(Arg(RECEIVER_INDEX));
+}
+
+void DeoptIfHClassNotInVertex::SetValueLocationConstraints()
+{
+    SetTemporariesNeeded(2);  // 2: actual hclass and tag/address mask
+    UseRegister(Arg(RECEIVER_INDEX));
+}
+
+void DeoptIfPrototypeChangedVertex::SetValueLocationConstraints()
+{
+    SetTemporariesNeeded(2);  // 2: traversed heap object and mask/check value
+    UseRegister(Arg(RECEIVER_INDEX));
+    UseEagerDeoptFrameSlots(this);
+}
+
+void DeoptIfTaggedConditionVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+    UseEagerDeoptFrameSlots(this);
+}
+
+void DeoptIfInt32ConditionVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+}
+
+void DeoptIfFloat64ConditionVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+    UseEagerDeoptFrameSlots(this);
+}
+void DeoptIfNotNumberVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    SetTemporariesNeeded(1);
+    UseEagerDeoptFrameSlots(this);
+}
+
+void DeoptIfNotBooleanVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    SetTemporariesNeeded(1);
+    UseEagerDeoptFrameSlots(this);
+}
+
+void DeoptIfNotBigIntVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    SetTemporariesNeeded(1);
+    UseEagerDeoptFrameSlots(this);
+}
+
+void DeoptIfNotUndefinedOrNullVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    SetTemporariesNeeded(1);
+    UseEagerDeoptFrameSlots(this);
+}
+
+void DeoptIfNotHeapObjectVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    SetTemporariesNeeded(1);
+    UseEagerDeoptFrameSlots(this);
+}
+
+void DeoptIfNotJSHClassVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    SetTemporariesNeeded(1);
+    UseEagerDeoptFrameSlots(this);
+}
+
+void DeoptIfArrayBufferDetachedVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(RECEIVER_INDEX));
+    SetTemporariesNeeded(1);
+    UseEagerDeoptFrameSlots(this);
+}
+
+void DeoptIfCOWElementsVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(ELEMENTS_INDEX));
+    UseEagerDeoptFrameSlots(this);
+    SetTemporariesNeeded(1);
+}
+
+void DeoptIfElementsUnstableVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(RECEIVER_INDEX));
+    UseEagerDeoptFrameSlots(this);
+    SetTemporariesNeeded(1);
+}
+void DeoptVertex::SetValueLocationConstraints()
+{
+    for (uint32_t i = 0, n = GetInputCount(); i < n; i++) {
+        UseSlot(Arg(i));
+    }
+    UseEagerDeoptFrameSlots(this);
+}
+
+// ========================================= Slow Value Opcode =========================================
+
+void LoadTaggedFromAddressVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(OBJECT_INDEX));
+}
+
+void LoadI32FromAddressVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(OBJECT_INDEX));
+}
+
+void LoadI64FromAddressVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(OBJECT_INDEX));
+}
+
+void LoadF64FromAddressVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(OBJECT_INDEX));
+}
+
+void LoadExceptionVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(GLUE_INDEX));
+}
+
+void LoadTaggedFieldVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(OBJECT_INDEX));
+}
+
+void LoadInt32FieldVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(OBJECT_INDEX));
+}
+
+void LoadTaggedElementVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(ELEMENTS_INDEX));
+    UseRegister(Arg(INDEX_INDEX));
+}
+
+void LoadSingleCharTableElementVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(GLUE_INDEX));
+    UseRegister(Arg(CHAR_CODE_INDEX));
+    SetTemporariesNeeded(1);
+}
+
+void TypedArrayIntLoadElementVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(RECEIVER_INDEX));
+    UseRegister(Arg(ELEMENT_INDEX));
+    UseRegister(Arg(STORAGE_INDEX));
+    SetTemporariesNeeded(2);  // 2: data-pointer and element-load scratches
+}
+
+void TypedArrayDoubleLoadElementVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(RECEIVER_INDEX));
+    UseRegister(Arg(ELEMENT_INDEX));
+    UseRegister(Arg(STORAGE_INDEX));
+    SetTemporariesNeeded(2);  // 2: data-pointer and element-load scratches
+}
+
+void LoadPrototypeFromNonJSProxyObjectVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(OBJECT_INDEX));
+}
+
+void LoadPrototypeHolderByHClassVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(RECEIVER_INDEX));
+    SetTemporariesNeeded(2);  // 2: current hclass and mask/check value
+}
+
+void ConvertHoleToUndefinedVertex::SetValueLocationConstraints()
+{
+    DefineSameAsFirst(this);
+    UseRegister(Arg(VALUE_INDEX));
+}
+
+void LoadHClassAddressVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(OBJECT_INDEX));
+    SetTemporariesNeeded(1);
+}
+
+void StoreTaggedToAddressVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(OBJECT_INDEX));
+    UseRegister(Arg(VALUE_INDEX));
+}
+
+void StoreI32ToAddressVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(OBJECT_INDEX));
+    UseRegister(Arg(VALUE_INDEX));
+}
+
+void StoreI64ToAddressVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(OBJECT_INDEX));
+    UseRegister(Arg(VALUE_INDEX));
+}
+
+void StoreF64ToAddressVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(OBJECT_INDEX));
+    UseRegister(Arg(VALUE_INDEX));
+}
+
+void StoreTaggedFieldVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(OBJECT_INDEX));
+    UseRegister(Arg(VALUE_INDEX));
+}
+
+void StoreTaggedFieldWithBarrierVertex::SetValueLocationConstraints()
+{
+    SetTemporariesNeeded(2);  // 2: object and value region scratch registers
+    UseRegister(Arg(GLUE_INDEX));
+    UseRegister(Arg(OBJECT_INDEX));
+    UseRegister(Arg(VALUE_INDEX));
+}
+
+void StoreTaggedElementVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(OBJECT_INDEX));
+    UseRegister(Arg(INDEX_INDEX));
+    UseRegister(Arg(VALUE_INDEX));
+    SetTemporariesNeeded(1);
+}
+
+void StoreTaggedElementWithBarrierVertex::SetValueLocationConstraints()
+{
+    UseFixed(Arg(GLUE_INDEX), static_cast<uint32_t>(ArkSteedAssembler::GetParameterRegister(0).Code()));
+    UseFixed(Arg(OBJECT_INDEX), static_cast<uint32_t>(ArkSteedAssembler::GetParameterRegister(1).Code()));
+    UseRegister(Arg(INDEX_INDEX));
+    // 3: value parameter slot of the write-barrier stub
+    UseFixed(Arg(VALUE_INDEX), static_cast<uint32_t>(ArkSteedAssembler::GetParameterRegister(3).Code()));
+    // 2: byteOffset parameter slot, doubles as the element-address scratch
+    RequireSpecificTemporary(this, ArkSteedAssembler::GetParameterRegister(2));
+    SetTemporariesNeeded(1);
+}
+
+void StoreIntTypedArrayElementVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(RECEIVER_INDEX));
+    UseRegister(Arg(INDEX_INDEX));
+    UseRegister(Arg(VALUE_INDEX));
+    // 1: on-heap data-pointer scratch; 2: off-heap adds the backing-offset scratch
+    SetTemporariesNeeded(OnHeap::IsOnHeap(onHeapMode_) ? 1 : 2);
+}
+
+void StoreFloatTypedArrayElementVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(RECEIVER_INDEX));
+    UseRegister(Arg(INDEX_INDEX));
+    UseRegister(Arg(VALUE_INDEX));
+    // 2: base and byteOffset scratches; 3: off-heap adds the backing offset
+    SetTemporariesNeeded(OnHeap::IsOnHeap(onHeapMode_) ? 2 : 3);
+    SetDoubleTemporariesNeeded(1);
+}
+void StoreSharedFieldWithBarrierVertex::SetValueLocationConstraints()
+{
+    SetTemporariesNeeded(2);  // 2: object and value region scratch registers
+    UseRegister(Arg(GLUE_INDEX));
+    UseRegister(Arg(OBJECT_INDEX));
+    UseRegister(Arg(VALUE_INDEX));
+}
+
+void TransitionHClassWithBarrierVertex::SetValueLocationConstraints()
+{
+    SetTemporariesNeeded(2);  // 2: object and HClass region scratch registers
+    UseRegister(Arg(GLUE_INDEX));
+    UseRegister(Arg(OBJECT_INDEX));
+    UseRegister(Arg(HCLASS_INDEX));
+}
+
+void EnsureWritableElementsVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(ELEMENTS_INDEX));
+    UseRegister(Arg(OBJECT_INDEX));
+    DefineSameAsFirst(this);
+    SetTemporariesNeeded(1);
+}
+
+void PrepareSharedStoreFieldVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+    SetTemporariesNeeded(1);
+    SetStubValueLocationConstraints(this, GetArgCount());
+    UseLazyDeoptFrameSlots(this);
+}
+
+void EnsurePropertiesCapacityVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+    SetTemporariesNeeded(2);  // 2: properties and length
+    SetStubValueLocationConstraints(this, GetArgCount());
+    UseLazyDeoptFrameSlots(this);
+}
+
+void InitializeEmptyObjectVertex::SetValueLocationConstraints()
+{
+    DefineSameAsFirst(this);
+    for (uint32_t index = 0; index < NUM_INPUTS; ++index) {
+        UseRegister(Arg(index));
+    }
+    SetTemporariesNeeded(1);
+}
+
+void InitializeObjectWithBufferVertex::SetValueLocationConstraints()
+{
+    DefineSameAsFirst(this);
+    for (uint32_t index = 0; index < NUM_INPUTS; ++index) {
+        UseRegister(Arg(index));
+    }
+    SetTemporariesNeeded(1);
+}
+
+void StoreInt32FieldVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(STORE_TARGET_INDEX));
+    UseRegister(Arg(VALUE_INDEX));
+}
+
+void StoreDoubleFieldVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(STORE_TARGET_INDEX));
+    UseRegister(Arg(VALUE_INDEX));
+}
+
+void StoreInt32FieldWithRepVertex::SetValueLocationConstraints()
+{
+    SetTemporariesNeeded(2);  // 2: tag and expected tag
+    UseRegister(Arg(STORE_TARGET_INDEX));
+    UseRegister(Arg(VALUE_INDEX));
+    UseEagerDeoptFrameSlots(this);
+}
+
+void StoreDoubleFieldWithRepVertex::SetValueLocationConstraints()
+{
+    SetTemporariesNeeded(2);  // 2: tag and expected tag
+    UseRegister(Arg(STORE_TARGET_INDEX));
+    UseRegister(Arg(VALUE_INDEX));
+    UseEagerDeoptFrameSlots(this);
+}
+
+void StoreTaggedFieldByHClassVertex::SetValueLocationConstraints()
+{
+    SetTemporariesNeeded(3);  // 3: HClass dispatch and write-barrier scratch registers
+    UseRegister(Arg(GLUE_INDEX));
+    UseRegister(Arg(OBJECT_INDEX));
+    UseRegister(Arg(VALUE_INDEX));
+    UseEagerDeoptFrameSlots(this);
+}
+
+void StoreEnvSlotVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(ENV_INDEX));
+    UseRegister(Arg(VALUE_INDEX));
+}
+
+void SetValueWithBarrierVertex::SetValueLocationConstraints()
+{
+    UseFixed(Arg(GLUE_INDEX), static_cast<uint32_t>(ArkSteedAssembler::GetParameterRegister(0).Code()));
+    UseFixed(Arg(OBJECT_INDEX), static_cast<uint32_t>(ArkSteedAssembler::GetParameterRegister(1).Code()));
+    // 3: value parameter slot of the write-barrier stub
+    UseFixed(Arg(VALUE_INDEX), static_cast<uint32_t>(ArkSteedAssembler::GetParameterRegister(3).Code()));
+}
+
+void TaggedIntToI32Vertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+}
+
+void CheckedTaggedIntToI32Vertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+    SetTemporariesNeeded(1);
+}
+
+void CheckedTaggedStringVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(INPUT_INDEX));
+    DefineSameAsFirst(this);
+    SetTemporariesNeeded(2);  // 2: scratches for the string hclass type-range check
+}
+
+void I32ConditionCheckVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+}
+
+void F64ConditionCheckVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+}
+
+void Float64ToBooleanVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+    SetTemporariesNeeded(1);
+}
+
+void TaggedNumberToBooleanVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+    SetTemporariesNeeded(2);  // 2: scratch registers for the tagged-number boolean decode
+    UseEagerDeoptFrameSlots(this);
+}
+
+void TaggedDoubleToBooleanVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+    SetTemporariesNeeded(2);  // 2: scratch registers for the tagged-double boolean decode
+    UseEagerDeoptFrameSlots(this);
+}
+
+void TaggedEqualVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+}
+
+void TaggedNotEqualVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+}
+
+void StringEqualVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+    SetStubValueLocationConstraints(this, GetInputCount());
+}
+
+#if defined(PANDA_TARGET_AMD64)
+#define DEFINE_I32_WITH_OVERFLOW_RESULT_CONSTRAINT() DefineSameAsFirst(this)
+#else
+#define DEFINE_I32_WITH_OVERFLOW_RESULT_CONSTRAINT() DefineAsRegister(this)
+#endif
+
+#define DEFINE_I32_WITH_OVERFLOW_CONSTRAINTS(Name)                     \
+    void I32##Name##WithOverflowVertex::SetValueLocationConstraints()  \
+    {                                                                  \
+        UseRegister(Arg(LEFT_INDEX));                                  \
+        UseRegister(Arg(RIGHT_INDEX));                                 \
+        DEFINE_I32_WITH_OVERFLOW_RESULT_CONSTRAINT();                   \
+    }
+
+DEFINE_I32_WITH_OVERFLOW_CONSTRAINTS(Add)
+DEFINE_I32_WITH_OVERFLOW_CONSTRAINTS(Sub)
+#undef DEFINE_I32_WITH_OVERFLOW_CONSTRAINTS
+#undef DEFINE_I32_WITH_OVERFLOW_RESULT_CONSTRAINT
+
+void I32MulWithOverflowVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+#if defined(PANDA_TARGET_AMD64)
+    DefineSameAsFirst(this);
+#else
+    DefineAsRegister(this);
+#endif
+    SetTemporariesNeeded(1);
+}
+
+void I32DivWithOverflowVertex::SetValueLocationConstraints()
+{
+#if defined(PANDA_TARGET_AMD64)
+    DefineAsFixed(this, x64::rax);
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+    RequireSpecificTemporary(this, x64::rax);
+    RequireSpecificTemporary(this, x64::rdx);
+#else
+    DefineAsRegister(this);
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+#endif
+}
+
+void I32DivByConstWithCheckVertex::SetValueLocationConstraints()
+{
+#if defined(PANDA_TARGET_AMD64)
+    DefineAsFixed(this, x64::rax);
+    UseRegister(Arg(INPUT_INDEX));
+    RequireSpecificTemporary(this, x64::rax);
+    RequireSpecificTemporary(this, x64::rdx);
+    RequireSpecificTemporary(this, x64::rcx);
+    RequireSpecificTemporary(this, x64::r8);
+#else
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+    SetTemporariesNeeded(2);  // 2: work and saved-original dividend scratches
+#endif
+}
+
+void I32AddVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(LEFT_INDEX));
+    if (GetInput(RIGHT_INDEX)->Is<Int32ConstantVertex>()) {
+        UseAny(Arg(RIGHT_INDEX));
+    } else {
+        UseRegister(Arg(RIGHT_INDEX));
+    }
+    DefineSameAsFirst(this);
+}
+
+void I32SubVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(LEFT_INDEX));
+    if (GetInput(RIGHT_INDEX)->Is<Int32ConstantVertex>()) {
+        UseAny(Arg(RIGHT_INDEX));
+    } else {
+        UseRegister(Arg(RIGHT_INDEX));
+    }
+    DefineSameAsFirst(this);
+}
+
+void I32MulVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(LEFT_INDEX));
+    if (GetInput(RIGHT_INDEX)->Is<Int32ConstantVertex>()) {
+        UseAny(Arg(RIGHT_INDEX));
+    } else {
+        UseRegister(Arg(RIGHT_INDEX));
+    }
+    DefineSameAsFirst(this);
+}
+
+void I32DivVertex::SetValueLocationConstraints()
+{
+#if defined(PANDA_TARGET_AMD64)
+    DefineAsFixed(this, x64::rax);
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+    RequireSpecificTemporary(this, x64::rax);
+    RequireSpecificTemporary(this, x64::rdx);
+#else
+    DefineAsRegister(this);
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+#endif
+}
+
+void CheckedI32ModVertex::SetValueLocationConstraints()
+{
+#if defined(PANDA_TARGET_AMD64)
+    DefineAsRegister(this);
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+    RequireSpecificTemporary(this, x64::rax);
+    RequireSpecificTemporary(this, x64::rdx);
+#else
+    DefineAsRegister(this);
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+#endif
+}
+
+void I32BitwiseBinaryVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(LEFT_INDEX));
+    if (RightInputIsConstant()) {
+        UseAny(Arg(RIGHT_INDEX));
+    } else if (IsShift()) {
+#if defined(PANDA_TARGET_AMD64)
+        UseFixed(Arg(RIGHT_INDEX), x64::rcx);
+#else
+        UseRegister(Arg(RIGHT_INDEX));
+#endif
+    } else {
+        UseRegister(Arg(RIGHT_INDEX));
+    }
+    DefineSameAsFirst(this);
+}
+
+void CheckedNonNegativeI32ToTaggedIntVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+}
+
+void I32BNotVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    DefineSameAsFirst(this);
+}
+
+#if defined(PANDA_TARGET_AMD64)
+#define DEFINE_I32_UNARY_WITH_OVERFLOW_RESULT_CONSTRAINT() DefineSameAsFirst(this)
+#else
+#define DEFINE_I32_UNARY_WITH_OVERFLOW_RESULT_CONSTRAINT() DefineAsRegister(this)
+#endif
+
+#define DEFINE_I32_UNARY_WITH_OVERFLOW_CONSTRAINTS(Name)     \
+    void I32##Name##WithOverflowVertex::SetValueLocationConstraints() \
+    {                                                         \
+        UseRegister(Arg(VALUE_INDEX));                       \
+        DEFINE_I32_UNARY_WITH_OVERFLOW_RESULT_CONSTRAINT();  \
+    }
+
+DEFINE_I32_UNARY_WITH_OVERFLOW_CONSTRAINTS(Neg)
+DEFINE_I32_UNARY_WITH_OVERFLOW_CONSTRAINTS(Inc)
+DEFINE_I32_UNARY_WITH_OVERFLOW_CONSTRAINTS(Dec)
+#undef DEFINE_I32_UNARY_WITH_OVERFLOW_CONSTRAINTS
+#undef DEFINE_I32_UNARY_WITH_OVERFLOW_RESULT_CONSTRAINT
+
+void I32ToF64Vertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+}
+
+void CheckedNumberToF64Vertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+    SetTemporariesNeeded(2);  // 2: tag-bits and tag-constant scratches for the int/double decode
+}
+
+void F64ToI32TruncVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+}
+
+void I32ToUint8ClampedVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(INPUT_INDEX));
+    DefineSameAsFirst(this);
+}
+
+void F64ToUint8ClampedVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(INPUT_INDEX));
+    DefineAsRegister(this);
+    SetTemporariesNeeded(2);  // 2: immediate and half-bits scratches for the clamp sequence
+    SetDoubleTemporariesNeeded(1);
+}
+
+void DoubleToInt32CallVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+    UseFixed(Arg(INPUT_INDEX), ArkSteedDoubleRegister::FromCode(0));
+}
+void F64ToTaggedDoubleVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+}
+
+void F64NegVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+#if defined(PANDA_TARGET_AMD64)
+    DefineSameAsFirst(this);
+#else
+    DefineAsRegister(this);
+#endif
+}
+
+#define DEFINE_F64_BINOP_CONSTRAINTS(Name)       \
+    void F64##Name##Vertex::SetValueLocationConstraints() \
+    {                                           \
+        UseRegister(Arg(LEFT_INDEX));           \
+        UseRegister(Arg(RIGHT_INDEX));          \
+        DefineSameAsFirst(this);                \
+    }
+
+DEFINE_F64_BINOP_CONSTRAINTS(Add)
+DEFINE_F64_BINOP_CONSTRAINTS(Sub)
+DEFINE_F64_BINOP_CONSTRAINTS(Mul)
+DEFINE_F64_BINOP_CONSTRAINTS(Div)
+#undef DEFINE_F64_BINOP_CONSTRAINTS
+
+// ========================================= Control Opcode =========================================
+
+void JumpVertex::SetValueLocationConstraints() {}
+
+void JumpLoopVertex::SetValueLocationConstraints() {}
+
+void BranchIfTrueVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(0));
+}
+
+void BranchIfTaggedNumberVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    SetTemporariesNeeded(1);
+}
+
+void BranchIfTaggedBooleanVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    SetTemporariesNeeded(1);
+}
+
+void BranchIfTaggedStringVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    SetTemporariesNeeded(2);  // 2: scratches for the string hclass type-range check
+}
+
+void BranchIfHClassInVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    // 1: expected-hclass scratch; 2: adds the actual-hclass load scratch
+    SetTemporariesNeeded(InputIsHClassAddress() ? 1 : 2);
+}
+
+void BranchIfInt32CompareVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(LEFT_INDEX));
+    if (GetInput(RIGHT_INDEX)->Is<Int32ConstantVertex>()) {
+        UseAny(Arg(RIGHT_INDEX));
+    } else {
+        UseRegister(Arg(RIGHT_INDEX));
+    }
+}
+
+void BranchIfInt64CompareVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+}
+
+void BranchIfFloat64CompareVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+}
+
+void BranchIfReferenceEqualVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+}
+
+void BranchIfObjectTypeVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    SetTemporariesNeeded(1);
+}
+
+void BranchIfCallableVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    SetTemporariesNeeded(1);
+}
+
+void ReturnVertex::SetValueLocationConstraints()
+{
+    UseFixed(Arg(0), 0);
+}
+
+void ThrowVertex::SetValueLocationConstraints()
+{
+    SetStubValueLocationConstraints(this, GetArgCount());
+}
+
+// ========================================= Non-Value Opcode =========================================
+
+void BranchIfTaggedHeapObjectVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    SetTemporariesNeeded(1);
+}
+
+void BranchIfJSConstructorFunctionVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    // 1 : JumpIfNotJSConstructorFunction chains hclass -> bitfield -> type through one RA temporary on every platform.
+    SetTemporariesNeeded(1);
+}
+
+void BranchIfNewTargetHClassReadyVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    // JumpIfNewTargetHClassNotReady keeps the loaded proto-or-hclass slot live while
+    // the hclass checks chain through a second RA temporary on every platform.
+    SetTemporariesNeeded(2);  // 2 : See above
+}
+
+void BranchIfBaseVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    // 2 : JumpIfConstructorIsBase acquires two RA temporaries (method pointer + function kind).
+    SetTemporariesNeeded(2);
+}
+
+void GapMoveVertex::SetValueLocationConstraints()
+{
+    UNREACHABLE();
+}
+
+void ConstantGapMoveVertex::SetValueLocationConstraints()
+{
+    UNREACHABLE();
+}
+
+void PhiVertex::SetValueLocationConstraints()
+{
+    DefineSameAsFirst(this);
+}
+
+void I32ToTaggedIntVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+}
+
+void RawI64ToTaggedVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+}
+
+void U32ToTaggedNumberVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+    SetDoubleTemporariesNeeded(1);
+}
+
+void TaggedToRawI64Vertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+}
+
+void I64AddVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+    DefineSameAsFirst(this);
+}
+
+void I64SubVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+    DefineSameAsFirst(this);
+}
+
+void I64ShiftLeftVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(INPUT_INDEX));
+    DefineSameAsFirst(this);
+}
+
+void I64BitwiseBinaryVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+}
+
+namespace {
+#define HAS_COMMON_MIXIN(Field, _) +std::is_base_of_v<Field##Mixin, VertexT>
+
+template <class VertexT>
+struct DumpCommonHelper {
+    static constexpr int COMMON_COUNT = COMMON_MIXINS_LIST(HAS_COMMON_MIXIN) +
+                                        std::is_base_of_v<EagerDeoptimizableMixin, VertexT> +
+                                        std::is_base_of_v<LazyDeoptimizableMixin, VertexT>;
+
+    static constexpr bool HAS_COMMON = static_cast<bool>(COMMON_COUNT);
+
+    static void Dump(std::ostream &out, const VertexT *vertex)
+    {
+        if constexpr (std::is_base_of_v<CommonStubIDMixin, VertexT>) {
+            out << "  " << kungfu::CommonStubCSigns::GetName(vertex->GetCommonStubID());
+        }
+        if constexpr (std::is_base_of_v<RuntimeStubIDMixin, VertexT>) {
+            out << "  " << kungfu::RuntimeStubCSigns::GetRTName(vertex->GetRuntimeStubID());
+        }
+        if constexpr (std::is_base_of_v<ConditionMixin, VertexT>) {
+            out << "  cc = " << ConditionName(vertex->GetCondition());
+        }
+        if constexpr (std::is_base_of_v<OffsetMixin, VertexT>) {
+            out << "  offset = " << vertex->GetOffset();
+        }
+        if constexpr (std::is_base_of_v<EagerDeoptimizableMixin, VertexT>) {
+            out << "  bpc = " << vertex->GetBytecodeOffset();
+        }
+        if constexpr (std::is_base_of_v<LazyDeoptimizableMixin, VertexT>) {
+            if (vertex->HasLazyDeoptFrameState()) {
+                out << "  bpc = " << vertex->GetBytecodeOffset();
+            }
+        }
+    }
+};
+
+#undef HAS_COMMON_MIXIN
+
+template <class VertexT>
+struct DumpExtraHelper {
+    static constexpr bool HAS_EXTRA = false;
+};
+
+#define DUMP_EXTRA(Type)                                                                        \
+    template <>                                                                                 \
+    struct DumpExtraHelper<Type##Vertex> {                                                      \
+        static constexpr bool HAS_EXTRA = true;                                                 \
+        static void Dump(std::ostream &out, const Type##Vertex *vertex);                        \
+    };                                                                                          \
+    void DumpExtraHelper<Type##Vertex>::Dump(std::ostream &out, const Type##Vertex *vertex)
+
+DUMP_EXTRA(Int32Constant)
+{
+    int32_t value = vertex->GetValue();
+    uint32_t uValue = static_cast<uint32_t>(value);
+    out << "  value = " << value << " (0x" << std::hex << uValue << ')' << std::dec;
+}
+
+DUMP_EXTRA(Int64Constant)
+{
+    int64_t value = vertex->GetValue();
+    uint64_t uValue = static_cast<uint64_t>(value);
+    out << "  value = " << value << " (0x" << std::hex << uValue << ')' << std::dec;
+}
+
+DUMP_EXTRA(Float64Constant)
+{
+    double value = vertex->GetValue();
+    out << "  value = " << value << " (0x" << std::hex << value << ')' << std::dec;
+}
+
+DUMP_EXTRA(TaggedConstant)
+{
+    JSTaggedType rawValue = vertex->GetValue();
+    JSTaggedValue value(rawValue);
+    out << "  value = 0x" << std::hex << rawValue << std::dec << " (";
+
+    if (value.IsInt()) {
+        out << "tagged int: " << value.GetInt() << ')';
+        return;
+    }
+    if (value.IsDouble()) {
+        out << "tagged double: " << value.GetDouble() << ')';
+        return;
+    }
+    switch (rawValue) {
+        case JSTaggedValue::VALUE_UNDEFINED:
+            out << "tagged undefined)";
+            return;
+        case JSTaggedValue::VALUE_NULL:
+            out << "tagged null)";
+            return;
+        case JSTaggedValue::VALUE_TRUE:
+            out << "tagged true)";
+            return;
+        case JSTaggedValue::VALUE_FALSE:
+            out << "tagged false)";
+            return;
+        case JSTaggedValue::VALUE_HOLE:
+            out << "tagged hole)";
+            return;
+        case JSTaggedValue::VALUE_EXCEPTION:
+            out << "tagged exception)";
+            return;
+        default:
+            break;
+    }
+    if (value.IsObject()) {
+        out << "tagged heap object)";
+        return;
+    }
+    out << "unknown)";
+}
+
+DUMP_EXTRA(InitialValue)
+{
+    out << "  frameSlot = " << vertex->GetFrameSlotIndex();
+}
+
+DUMP_EXTRA(Call)
+{
+    out << "  actualArgc = " << vertex->GetActualArgc();
+}
+
+DUMP_EXTRA(CallNewObjRangeBase)
+{
+    out << "  actualArgc = " << vertex->GetActualArgc();
+    if (vertex->UsesCommonStub()) {
+        out << "  commonStub = ArkSteedCallConstructorBody";
+        return;
+    }
+    if (vertex->HasKnownExpectedParameterCount()) {
+        out << "  expectedParameterCount = " << vertex->GetExpectedParameterCount() << "  argumentPreparation = "
+            << (vertex->GetActualArgc() == vertex->GetExpectedParameterCount() ? "fixed" : "dynamic");
+    } else {
+        out << "  expectedParameterCount = unknown  argumentPreparation = dynamic";
+    }
+}
+
+DUMP_EXTRA(CallNewObjRangeDerived)
+{
+    out << "  actualArgc = " << vertex->GetActualArgc();
+    if (vertex->UsesCommonStub()) {
+        out << "  commonStub = ArkSteedCallConstructorBody";
+        return;
+    }
+    if (vertex->HasKnownExpectedParameterCount()) {
+        out << "  expectedParameterCount = " << vertex->GetExpectedParameterCount() << "  argumentPreparation = "
+            << (vertex->GetActualArgc() == vertex->GetExpectedParameterCount() ? "fixed" : "dynamic");
+    } else {
+        out << "  expectedParameterCount = unknown  argumentPreparation = dynamic";
+    }
+}
+
+DUMP_EXTRA(CallKnownJSFunction)
+{
+    out << "  actualArgc = " << vertex->GetActualArgc()
+        << "  reservedCallSlotCount = " << vertex->GetReservedCallSlotCount()
+        << "  source = feedback";
+}
+
+DUMP_EXTRA(CallKnownBuiltin)
+{
+    out << "  actualArgc = " << vertex->GetActualArgc()
+        << "  builtin = " << kungfu::BuiltinsStubCSigns::GetBuiltinName(vertex->GetBuiltinId())
+        << "  entry = " << (vertex->UsesFastStub() ? "fast-stub" : "native-cpp")
+        << "  reservedCallSlotCount = " << vertex->GetReservedCallSlotCount()
+        << "  source = feedback";
+}
+
+DUMP_EXTRA(CallSelf)
+{
+    out << "  actualArgc = " << vertex->GetActualArgc()
+        << "  expectedParameterCount = " << vertex->GetExpectedParameterCount()
+        << "  reservedCallSlotCount = " << vertex->GetReservedCallSlotCount();
+}
+
+DUMP_EXTRA(LoadBuiltinObject)
+{
+    out << "  builtinIndex = " << vertex->GetBuiltinIndex();
+}
+
+DUMP_EXTRA(DeoptIfReferenceNotEqual)
+{
+    out << "  type = " << static_cast<int>(vertex->GetDeoptType());
+}
+
+DUMP_EXTRA(DeoptIfNotJSHClass)
+{
+    out << "  type = " << static_cast<int>(vertex->GetDeoptType());
+}
+
+DUMP_EXTRA(DeoptIfHClassMismatch)
+{
+    out << "  expected = heap#" << vertex->GetExpectedHClassHandleIndex();
+}
+
+DUMP_EXTRA(DeoptIfHClassNotIn)
+{
+    out << "  expected = [";
+    for (uint32_t i = 0; i < vertex->GetExpectedHClassCount(); ++i) {
+        if (i != 0) {
+            out << ", ";
+        }
+        out << "heap#" << vertex->GetExpectedHClassHandleIndex(i);
+    }
+    out << ']';
+}
+
+DUMP_EXTRA(DeoptIfPrototypeChanged)
+{
+    out << std::boolalpha;
+    out << "  checkProtoChangeMarker = " << vertex->ShouldCheckProtoChangeMarker()
+        << ", checkNotPrototype = " << vertex->ShouldCheckNotPrototype();
+    out << std::noboolalpha;
+}
+
+DUMP_EXTRA(DeoptIfInt32Condition)
+{
+    out << "  type = " << static_cast<int>(vertex->GetDeoptType());
+}
+
+DUMP_EXTRA(Deopt)
+{
+    out << "  type = " << static_cast<int>(vertex->GetDeoptType());
+}
+
+DUMP_EXTRA(LoadPrototypeHolderByHClass)
+{
+    out << "  depth = " << vertex->GetHolderDepth() << "  prototypes = [";
+    for (uint32_t i = 0; i < vertex->GetHolderDepth(); ++i) {
+        if (i != 0) {
+            out << ", ";
+        }
+        out << "heap#" << vertex->GetExpectedHClassHandleIndex(i);
+    }
+    out << "]";
+}
+
+DUMP_EXTRA(PrepareSharedStoreField)
+{
+    out << "  handlerInfo = 0x" << std::hex << vertex->GetHandlerInfo() << std::dec;
+}
+
+DUMP_EXTRA(EnsurePropertiesCapacity)
+{
+    out << "  fieldIndex = " << vertex->GetFieldIndex();
+}
+
+DUMP_EXTRA(InitializeEmptyArray)
+{
+    out << "  objectSize = " << vertex->GetObjectSize();
+}
+
+DUMP_EXTRA(I64ShiftLeft)
+{
+    out << "  shift = " << vertex->GetShift();
+}
+
+DUMP_EXTRA(InitializeArrayWithBuffer)
+{
+    out << "  objectSize = " << vertex->GetObjectSize();
+}
+
+DUMP_EXTRA(InitializeEmptyObject)
+{
+    out << "  objectSize = " << vertex->GetObjectSize();
+}
+
+DUMP_EXTRA(InitializeObjectWithBuffer)
+{
+    const auto& info = vertex->GetInfo();
+    out << "  objectSize = " << info.objectSize << "  fieldCount = " << info.fieldCount << "  fieldConstants = [";
+    for (uint32_t i = 0; i < info.fieldCount; ++i) {
+        out << (i == 0 ? "" : ", ") << info.fieldValues[i];
+    }
+    out << "]";
+}
+
+DUMP_EXTRA(StoreTaggedFieldByHClass)
+{
+    out << "  numCases = " << vertex->GetCases().size()
+        << "  value_kind = " << WriteBarrierValueKindName(vertex->GetValueKind());
+    for (uint32_t i = 0; i < vertex->GetCases().size(); ++i) {
+        const StoreTaggedFieldByHClassCase &storeCase = vertex->GetCases()[i];
+        out << "  case[" << i << "] = { hclass = heap#" << storeCase.expectedHClassHandleIndex
+            << ", offset = " << storeCase.fieldOffset
+            << ", storage = " << (storeCase.propertiesArray ? "properties" : "in-object") << " }";
+    }
+}
+
+DUMP_EXTRA(StoreTaggedFieldWithBarrier)
+{
+    out << "  value_kind = " << WriteBarrierValueKindName(vertex->GetValueKind());
+}
+
+DUMP_EXTRA(StoreSharedFieldWithBarrier)
+{
+    out << "  value_kind = " << WriteBarrierValueKindName(vertex->GetValueKind());
+}
+
+DUMP_EXTRA(I32DivByConstWithCheck)
+{
+    out << "  divisor = " << vertex->GetDivisor() << "  magic = " << vertex->GetMagic()
+        << "  shift = " << vertex->GetShift();
+}
+
+DUMP_EXTRA(I32BitwiseBinary)
+{
+    out << "  kind = " << IntBitwiseKindName(vertex->GetKind());
+}
+
+DUMP_EXTRA(BranchIfHClassIn)
+{
+    out << "  expected = [";
+    for (uint32_t i = 0; i < vertex->GetExpectedHClassCount(); ++i) {
+        if (i != 0) {
+            out << ", ";
+        }
+        out << "heap#" << vertex->GetExpectedHClassHandleIndex(i);
+    }
+    out << "]";
+}
+
+DUMP_EXTRA(BranchIfObjectType)
+{
+    CString name = JSHClass::DumpJSType(vertex->GetExpectedType());
+    out << "  expected = " << name;
+}
+
+DUMP_EXTRA(GapMove)
+{
+    out << "-> " << vertex->GetTarget().GetRegisterCode();
+}
+
+DUMP_EXTRA(ConstantGapMove)
+{
+    out << "-> " << vertex->GetTarget().GetRegisterCode();
+}
+
+#undef DUMP_EXTRA
+}  // namespace
+
+void Vertex::Dump(std::ostream &out, bool withColors) const
+{
+    out << FormatVertexLabel(this) << ":  ";
+    WITH_ANSI_COLOR_SCOPE(BrightRed(out, withColors))
+    {
+        out << OpcodeToString(GetOpcode());
+    }
+    ValueRepresentation repr = GetValueRepresentation();
+    if (repr != ValueRepresentation::NONE) {
+        out << " [";
+        WITH_ANSI_COLOR_SCOPE(BrightRed(out, withColors))
+        {
+            out << ValueRepresentationName(repr);
+        }
+        out << ']';
+    }
+    uint32_t n = GetInputCount();
+    if (n > 0) {
+        out << "  (";
+        for (uint32_t i = 0; i < n; i++) {
+            if (i != 0) {
+                out << ", ";
+            }
+            out << FormatVertexLabel(GetInput(i));
+        }
+        out << ")";
+    }
+
+    auto doDumpFields = [&out](const auto *self) {
+        using VertexT = std::remove_const_t<std::remove_pointer_t<decltype(self)>>;
+        if constexpr (DumpCommonHelper<VertexT>::HAS_COMMON) {
+            DumpCommonHelper<VertexT>::Dump(out, self);
+        }
+        if constexpr (DumpExtraHelper<VertexT>::HAS_EXTRA) {
+            DumpExtraHelper<VertexT>::Dump(out, self);
+        }
+    };
+    WITH_ANSI_COLOR_SCOPE(BrightGreen(out, withColors))
+    {
+        switch (GetOpcode()) {
+#define CASE(Type)                                  \
+            case VertexOpcode::Type:                \
+                doDumpFields(Cast<Type##Vertex>()); \
+                break;
+            ALL_VERTEX_LIST(CASE)
+#undef CASE
+            default:
+                break;  // No-op otherwise
+        }
+    }
+}
+
+std::string Vertex::Dump(bool withColors) const
+{
+    std::ostringstream out;
+    Dump(out, withColors);
+    return out.str();
+}
+
+}  // namespace panda::ecmascript::arksteed
