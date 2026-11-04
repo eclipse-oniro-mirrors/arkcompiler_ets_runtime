@@ -181,6 +181,10 @@ private:
     // Legacy blocking form used by GetStackSignalHandler only.
     bool IsAddrAtStubOrAot(uint64_t pc) const;
 #endif
+    // Signal-safe variant: try-lock stub/AOT + lock-free JIT-fort check.
+    bool IsAddrAtStubOrAotOrJitSafe(AnFileDataManager *manager, uint64_t pc) const;
+    // Lock-free JIT-fort range check (signal-safe).
+    bool IsPcInJitFort(uint64_t pc) const;
     bool CheckFileName(const std::string &fileName, std::string &absoluteFilePath) const;
     bool RegisterGetStackSignal();
     bool PrepareProfilerSession(void **taskHandle);

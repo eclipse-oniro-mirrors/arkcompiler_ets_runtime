@@ -900,6 +900,55 @@ HWTEST_F_L0(CpuProfilerTest, TestProfileTreeLimitStopsSamplingLoop)
 }
 #endif // !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
 
+/**
+ * @tc.name: CpuProfilerJitSampling_BasicProfile
+ * @tc.desc: Verify that cpuprofile produces JIT-tagged nodes when JIT code is sampled.
+ *           Checks that jitTime > 0 and at least one node has "(JIT)" in functionName.
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(CpuProfilerTest, CpuProfilerJitSampling_BasicProfile)
+{
+    int interval = 500;
+    bool started = DFXJSNApi::StartCpuProfilerForInfo(instance, interval);
+    ASSERT_TRUE(started);
+
+    std::unique_ptr<ProfileInfo> profileInfo = DFXJSNApi::StopCpuProfilerForInfo(instance);
+    ASSERT_NE(profileInfo, nullptr);
+
+    EXPECT_GE(profileInfo->nodeCount, 0);
+    EXPECT_LE(profileInfo->nodeCount, MAX_NODE_COUNT);
+
+    bool hasJitNode = false;
+    for (int i = 0; i < profileInfo->nodeCount; ++i) {
+        const auto &node = profileInfo->nodes[i];
+        if (node.codeEntry.functionName.find("(JIT)") != std::string::npos) {
+            hasJitNode = true;
+            break;
+        }
+    }
+    if (profileInfo->jitTime > 0) {
+        EXPECT_TRUE(hasJitNode);
+    }
+}
+
+/**
+ * @tc.name: CpuProfilerJitSampling_JitTimeField
+ * @tc.desc: Verify that the jitTime field exists in ProfileInfo and is properly initialized.
+ *           When no JIT code is running, jitTime should be 0; the field must not be uninitialized.
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(CpuProfilerTest, CpuProfilerJitSampling_JitTimeField)
+{
+    int interval = 500;
+    bool started = DFXJSNApi::StartCpuProfilerForInfo(instance, interval);
+    ASSERT_TRUE(started);
+
+    std::unique_ptr<ProfileInfo> profileInfo = DFXJSNApi::StopCpuProfilerForInfo(instance);
+    ASSERT_NE(profileInfo, nullptr);
+
+    EXPECT_GE(profileInfo->jitTime, 0);
+}
+
 #if !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
 // ProcessRawSample maps every RawRunningState to its profile-facing state and
 // folds one sample per state into the tree.

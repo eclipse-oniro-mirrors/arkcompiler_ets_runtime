@@ -1681,13 +1681,15 @@ void ArkSteedAssembler::Prologue(Graph *graph)
 {
     RecordComment("Prologue");
 
-    // 1. Set up fp.
+    // 1. Save prevFp and returnAddr.
     // -16: space for fp and lr (two 64-bit registers, 16 bytes)
     aarch64::MemoryOperand saveFpLr(aarch64::sp, -16, aarch64::AddrMode::PREINDEX);
     assembler_.Stp(aarch64::fp, aarch64::lr, saveFpLr);
-    assembler_.Mov(aarch64::fp, aarch64::sp);
+    // Delay setting fp until all frame header fields are written, so that
+    // x29 is valid at any signalable point (e.g. SIGPROF for CpuProfiler).
+    assembler_.Mov(aarch64::x10, aarch64::sp);
 
-    // 2. Reserve the aligned local frame once, then fill slots in push order.
+    // 2. Build the SteedFunctionFrame fixed header in push order.
     // [fp - 8] = frameType, [fp - 16] = jsFunc, [fp - 24] = lexicalEnv.
     ArkSteedRegister x19 = aarch64::x19;
     ArkSteedRegister x20 = aarch64::x20;
@@ -1709,21 +1711,19 @@ void ArkSteedAssembler::Prologue(Graph *graph)
         ASSERT(slotSize <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
         Sub(aarch64::sp, static_cast<int32_t>(slotSize));
     }
+    // Now all frame header fields are written — safe to set fp.
+    assembler_.Mov(aarch64::fp, aarch64::x10);
     SetHasFrame(true);
 }
 
 void ArkSteedAssembler::Epilogue()
 {
     RecordComment("Epilogue");
-    // LeaveFrame: restore sp, lr, fp
+    // LeaveFrame: restore sp, then restore fp (prevFp) and lr.
     assembler_.Mov(aarch64::sp, aarch64::fp);
-
-    aarch64::MemoryOperand lrSlot(aarch64::sp, 8, aarch64::AddrMode::OFFSET);  // 8: lr is stored 8 bytes above fp
-    assembler_.Ldr(aarch64::lr, lrSlot);
-
     // 16: space for fp and lr (two 64-bit registers, 16 bytes)
-    aarch64::MemoryOperand postPop(aarch64::sp, 16, aarch64::AddrMode::POSTINDEX);
-    assembler_.Ldr(aarch64::fp, postPop);
+    aarch64::MemoryOperand restoreFpLr(aarch64::sp, 16, aarch64::AddrMode::POSTINDEX);
+    assembler_.Ldp(aarch64::fp, aarch64::lr, restoreFpLr);
 }
 
 // =============================================================================

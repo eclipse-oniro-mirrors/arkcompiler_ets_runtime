@@ -2001,6 +2001,17 @@ public:
     MachineCode *GetMachineCodeObject(uintptr_t pc) const;
     void SetMachineCodeObject(uintptr_t start, uintptr_t end, uintptr_t address) const;
 
+    bool IsInJitFortRange(uintptr_t pc) const
+    {
+        if (machineCodeSpace_ != nullptr && machineCodeSpace_->InJitFortRange(pc)) {
+            return true;
+        }
+        if (hugeMachineCodeSpace_ != nullptr && hugeMachineCodeSpace_->InJitFortRange(pc)) {
+            return true;
+        }
+        return false;
+    }
+
     PUBLIC_API GCListenerId AddGCListener(FinishGCListener listener, void *data);
     PUBLIC_API void RemoveGCListener(GCListenerId listenerId);
     void ProcessGCListeners();
