@@ -48,6 +48,7 @@ ohos_unittest("SecurityGuardReportUnitTest") {
     "googletest:gtest_main",
     "hilog:libhilog",
     "ipc:ipc_core",
+    "json:nlohmann_json_static",
     "runtime_core:libarkfile_static",
   ]
   defines = []

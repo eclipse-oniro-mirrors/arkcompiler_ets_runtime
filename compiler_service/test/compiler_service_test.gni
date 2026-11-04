@@ -27,8 +27,8 @@ declare_args() {
 
   security_guard_enable_test = false
   if (defined(global_parts_info) &&
-      defined(global_parts_info.security_guard) &&
-      global_parts_info.security_guard) {
+      defined(global_parts_info.security_security_guard) &&
+      global_parts_info.security_security_guard) {
     security_guard_enable_test = true
   }
 }
