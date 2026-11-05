@@ -1293,8 +1293,13 @@ DECLARE_ASM_HANDLER(HandleInstanceofImm8V8)
     GateRef currentEnv = GetEnvFromFrame(glue, GetFrame(sp));
     GateRef globalEnv = GetCurrentGlobalEnv(glue, currentEnv);
     SetCurrentGlobalEnv(globalEnv);
-    GateRef result = InstanceOf(glue, obj, target, profileTypeInfo, slotId, callback);
-    CHECK_PENDING_EXCEPTION(result, INT_PTR(INSTANCEOF_IMM8_V8));
+    if (IsJitStub()) {
+        GateRef result = InstanceOfSingleSlot(glue, obj, target, profileTypeInfo, slotId, callback);
+        CHECK_PENDING_EXCEPTION(result, INT_PTR(INSTANCEOF_IMM8_V8));
+    } else {
+        GateRef result = InstanceOf(glue, obj, target, profileTypeInfo, slotId, callback);
+        CHECK_PENDING_EXCEPTION(result, INT_PTR(INSTANCEOF_IMM8_V8));
+    }
 }
 
 DECLARE_ASM_HANDLER(HandleStrictnoteqImm8V8)

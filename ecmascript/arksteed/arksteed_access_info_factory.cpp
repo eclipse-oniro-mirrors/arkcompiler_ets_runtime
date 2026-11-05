@@ -18,6 +18,8 @@
 #include "ecmascript/ic/ic_handler.h"
 #include "ecmascript/js_array.h"
 #include "ecmascript/js_hclass.h"
+#include "ecmascript/js_object.h"
+#include "ecmascript/mem/barriers.h"
 #include "ecmascript/js_hclass-inl.h"
 #include "ecmascript/tagged_array.h"
 
@@ -285,6 +287,13 @@ void FillNamedAccessInfo(const NamedAccessCaseFeedback &caseFeedback, uint64_t h
         info->dependencies.protoChainDependency = AccessDependencyKind::PROTOTYPE_CHAIN;
     }
 }
+
+JSTaggedValue ReadTaggedFieldAt(const JSThread *thread, JSTaggedValue object, int32_t offset)
+{
+    return JSTaggedValue(Barriers::GetTaggedValue(thread, object.GetTaggedObject(),
+                                                  static_cast<size_t>(offset)));
+}
+
 }  // namespace
 
 bool ArkSteedAccessInfoFactory::TryMakeNamedStoreAccessInfo(const NamedAccessCaseFeedback &caseFeedback,
@@ -640,6 +649,52 @@ bool ArkSteedAccessInfoFactory::TryBuildNamedLoadAccessInfo(int slotIndex, Named
         return false;
     }
     return ComputeNamedLoadAccessInfo(feedback, AccessFeedbackSlotKind::NAMED_LOAD, access);
+}
+
+bool ArkSteedAccessInfoFactory::TryBuildInstanceofAccessInfo(InstanceofAccessInfo *access) const
+{
+    *access = {};
+    if (env_ == nullptr) {
+        return false;
+    }
+    InstanceofFeedback feedback;
+    if (!broker_->GetFeedbackForInstanceof(feedbackReader_, &feedback)) {
+        return false;
+    }
+    access->ctorFunc = feedback.ctorFunc;
+    if (!broker_->TryGetInstanceofCtorHClass(feedback.ctorFunc, &access->ctorHClass)) {
+        return false;
+    }
+    access->canAssumeStableProtoChain = dependencyRecorder_.InstallStableProtoChain(access->ctorHClass);
+    access->canAssumeStableHClass = dependencyRecorder_.InstallStableHClass(access->ctorHClass);
+    return true;
+}
+
+bool ArkSteedAccessInfoFactory::InstallFunctionPrototypeDetector() const
+{
+    return dependencyRecorder_.InstallFunctionPrototypeDetector();
+}
+
+bool ArkSteedAccessInfoFactory::TryPrewalkInstanceofLhsChain(JSHClass *lhsHClass, ArkSteedHClassRef *lhsRef,
+                                                             InstanceofLhsChainInfo *chain) const
+{
+    *chain = {};
+    if (broker_ == nullptr || lhsHClass == nullptr) {
+        return false;
+    }
+    ArkSteedHeapBroker::InstanceofProtoChainWalk walk;
+    if (!broker_->WalkInstanceofProtoChain(lhsHClass, lhsRef, &walk)) {
+        return false;
+    }
+    if (!dependencyRecorder_.InstallStableProtoChain(*lhsRef)) {
+        return false;
+    }
+    for (uint32_t i = 0; i < walk.count; ++i) {
+        chain->members[i] = walk.members[i];
+    }
+    chain->count = walk.count;
+    chain->truncated = walk.truncated;
+    return true;
 }
 
 bool ArkSteedAccessInfoFactory::ComputeNamedLoadAccessInfo(const NamedAccessFeedback &feedback,

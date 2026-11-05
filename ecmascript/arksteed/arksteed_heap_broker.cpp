@@ -19,8 +19,10 @@
 #include "ecmascript/accessor_data.h"
 #include "ecmascript/builtins/builtins_typedarray.h"
 #include "ecmascript/ic/ic_handler.h"
+#include "ecmascript/js_function.h"
 #include "ecmascript/js_hclass-inl.h"
 #include "ecmascript/js_object-inl.h"
+#include "ecmascript/mem/barriers.h"
 #include "ecmascript/layout_info-inl.h"
 #include "ecmascript/compiler/lazy_deopt_dependency.h"
 #include "ecmascript/ecma_string-inl.h"
@@ -890,6 +892,136 @@ bool ArkSteedHeapBroker::GetFeedbackForCall(const ArkSteedFeedbackReader &reader
     NoGCScope scope(this);
     return reader.ReadCallFeedback(feedback);
 }
+
+bool ArkSteedHeapBroker::GetFeedbackForInstanceof(const ArkSteedFeedbackReader &reader,
+                                                  InstanceofFeedback *feedback) const
+{
+    *feedback = {};
+    NoGCScope scope(this);
+    return reader.ReadInstanceofFeedback(feedback);
+}
+
+namespace {
+JSTaggedValue FindHasInstanceHClassInPrototypeChain(const JSThread *thread, JSHClass *currHC, JSTaggedValue key)
+{
+    while (!JSTaggedValue(currHC).IsUndefinedOrNull()) {
+        if (currHC->IsDictionaryMode()) {
+            return JSTaggedValue::Undefined();
+        }
+        if (JSHClass::FindPropertyEntry(thread, currHC, key) != -1) {
+            return JSTaggedValue(currHC);
+        }
+        JSTaggedValue proto = currHC->GetProto(thread);
+        if (!proto.IsHeapObject()) {
+            return JSTaggedValue::Undefined();
+        }
+        currHC = proto.GetTaggedObject()->GetClass();
+    }
+    return JSTaggedValue::Undefined();
+}
+}  // namespace
+
+bool ArkSteedHeapBroker::TryGetInstanceofCtorHClass(ArkSteedFunctionRef ctorFunc,
+                                                    ArkSteedHClassRef *hclassRef) const
+{
+    NoGCScope scope(this);
+    JSTaggedValue ctorFuncValue;
+    if (!TryResolveRef(ctorFunc, &ctorFuncValue) || !ctorFuncValue.IsJSFunction()) {
+        return false;
+    }
+    JSHClass *hclass = ctorFuncValue.GetTaggedObject()->GetClass();
+    JSType objectType = hclass->GetObjectType();
+    if (objectType < JSType::JS_FUNCTION_FIRST || objectType > JSType::JS_FUNCTION_LAST ||
+        objectType == JSType::JS_BOUND_FUNCTION || !hclass->IsCallable()) {
+        return false;
+    }
+    GlobalEnv *globalEnv = env_->GetGlobalEnv().GetObject<GlobalEnv>();
+    JSTaggedValue key = compilerThread_->GlobalConstants()->GetHasInstanceSymbol();
+    JSHClass *functionPrototypeHC =
+        JSObject::Cast(globalEnv->GetFunctionPrototype().GetTaggedValue())->GetClass();
+    JSTaggedValue foundHClass = FindHasInstanceHClassInPrototypeChain(compilerThread_, hclass, key);
+    if (foundHClass.IsUndefined() || JSHClass::Cast(foundHClass.GetTaggedObject()) != functionPrototypeHC) {
+        return false;
+    }
+    *hclassRef = MakeHClassRef(JSTaggedValue(hclass));
+    return hclassRef->IsSafeForCompile();
+}
+
+bool ArkSteedHeapBroker::TryGetInstanceofCtorProto(ArkSteedFunctionRef ctorFunc,
+                                                   ArkSteedObjectRef *ctorProto) const
+{
+    NoGCScope scope(this);
+    JSTaggedValue ctorFuncValue;
+    if (!TryResolveRef(ctorFunc, &ctorFuncValue) || !ctorFuncValue.IsJSFunction()) {
+        return false;
+    }
+    JSTaggedValue protoOrDyn = JSTaggedValue(Barriers::GetTaggedValue(
+        compilerThread_, ctorFuncValue.GetTaggedObject(),
+        static_cast<size_t>(JSFunction::PROTO_OR_DYNCLASS_OFFSET)));
+    if (!protoOrDyn.IsHeapObject()) {
+        return false;
+    }
+    JSTaggedValue ctorProtoValue = protoOrDyn;
+    if (protoOrDyn.IsJSHClass()) {
+        ctorProtoValue = JSHClass::Cast(protoOrDyn.GetTaggedObject())->GetPrototype(compilerThread_);
+        if (!ctorProtoValue.IsHeapObject()) {
+            return false;
+        }
+    }
+    if (!ctorProtoValue.IsECMAObject()) {
+        return false;
+    }
+    *ctorProto = MakeObjectRef(ctorProtoValue);
+    return ctorProto->IsSafeForCompile();
+}
+
+bool ArkSteedHeapBroker::SameHeapObject(const ArkSteedHeapRef &lhs, const ArkSteedHeapRef &rhs) const
+{
+    NoGCScope scope(this);
+    JSTaggedValue lhsValue = JSTaggedValue::Undefined();
+    JSTaggedValue rhsValue = JSTaggedValue::Undefined();
+    if (!TryResolveRef(lhs, &lhsValue) || !TryResolveRef(rhs, &rhsValue)) {
+        return false;
+    }
+    return lhsValue.GetRawData() == rhsValue.GetRawData();
+}
+
+bool ArkSteedHeapBroker::WalkInstanceofProtoChain(JSHClass *lhsHClass, ArkSteedHClassRef *lhsRef,
+                                                  InstanceofProtoChainWalk *walk) const
+{
+    NoGCScope scope(this);
+    *lhsRef = MakeHClassRef(JSTaggedValue(lhsHClass));
+    if (!lhsRef->IsSafeForCompile()) {
+        return false;
+    }
+    JSHClass *current = lhsHClass;
+    while (walk->count < InstanceofProtoChainWalk::MAX_CHAIN_LENGTH) {
+        JSTaggedValue proto = JSTaggedValue(Barriers::GetTaggedValue(
+            compilerThread_, current, static_cast<size_t>(JSHClass::PROTOTYPE_OFFSET)));
+        if (proto.IsNull()) {
+            return true;
+        }
+        if (!proto.IsHeapObject()) {
+            return false;
+        }
+        JSHClass *protoHClass = proto.GetTaggedObject()->GetClass();
+        if (!protoHClass->IsECMAObject() || protoHClass->IsJSProxy()) {
+            return false;
+        }
+        ArkSteedObjectRef member = MakeObjectRef(proto);
+        ArkSteedHClassRef protoHClassRef = MakeHClassRef(JSTaggedValue(protoHClass));
+        if (!member.IsSafeForCompile() || !protoHClassRef.IsSafeForCompile()) {
+            return false;
+        }
+        walk->members[walk->count] = member;
+        walk->hopHClasses[walk->count] = protoHClassRef;
+        walk->count++;
+        current = protoHClass;
+    }
+    walk->truncated = true;
+    return true;
+}
+
 
 bool ArkSteedHeapBroker::GetFeedbackForConstructor(const ArkSteedFeedbackReader &reader,
                                                    ConstructorFeedback *feedback) const

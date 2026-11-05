@@ -136,6 +136,7 @@ namespace panda::ecmascript {
     V(GetCallSpreadArgs)             \
     V(TryLoadICByName)               \
     V(LoadICByName)                  \
+    V(RecordInstanceofIC)            \
     V(GetPropertyByName)             \
     V(TryLoadICByValue)              \
     V(LoadICByValue)                 \

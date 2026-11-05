@@ -1,0 +1,2 @@
+arkSteedHit=1
+arkSteedMiss=0

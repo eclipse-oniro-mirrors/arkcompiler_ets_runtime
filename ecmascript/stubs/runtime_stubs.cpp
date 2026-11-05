@@ -1049,6 +1049,22 @@ DEF_RUNTIME_STUBS(InstanceOf)
     return RuntimeInstanceof(thread, obj, target).GetRawData();
 }
 
+DEF_RUNTIME_STUBS(InstanceofIC)
+{
+    RUNTIME_STUBS_HEADER(InstanceofIC);
+    JSHandle<JSTaggedValue> obj = GetHArg<JSTaggedValue>(argv, argc, 0);  // 0: means the zeroth parameter
+    JSHandle<JSTaggedValue> target = GetHArg<JSTaggedValue>(argv, argc, 1);  // 1: means the first parameter
+    JSHandle<JSTaggedValue> profileHandle = GetHArg<JSTaggedValue>(argv, argc, 2);  // 2: means the second parameter
+    JSTaggedValue slotId = GetArg(argv, argc, 3);  // 3: means the third parameter
+
+    if (!target->IsECMAObject() || profileHandle->IsUndefined() || !profileHandle->IsProfileTypeInfo()) {
+        return RuntimeInstanceof(thread, obj, target).GetRawData();
+    }
+    ProfileTypeInfo *profileTypeInfo = ProfileTypeInfo::Cast(profileHandle.GetTaggedValue().GetTaggedObject());
+    ICRuntimeStub::RecordInstanceofIC(thread, profileTypeInfo, target.GetTaggedValue(), slotId.GetInt());
+    return RuntimeInstanceof(thread, obj, target).GetRawData();
+}
+
 DEF_RUNTIME_STUBS(DumpObject)
 {
     RUNTIME_STUBS_HEADER(DumpObject);

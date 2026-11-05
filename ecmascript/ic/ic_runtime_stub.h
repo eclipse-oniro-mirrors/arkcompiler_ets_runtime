@@ -91,6 +91,8 @@ public:
     static inline JSTaggedValue StoreMiss(JSThread *thread, ProfileTypeInfo *profileTypeInfo, JSTaggedValue receiver,
                                           JSTaggedValue key, JSTaggedValue value,
                                           uint32_t slotId, ICKind kind, bool isOwn = false);
+    static inline void RecordInstanceofIC(JSThread *thread, ProfileTypeInfo *profileTypeInfo,
+                                          JSTaggedValue target, uint32_t slotId);
 };
 }  // namespace panda::ecmascript
 

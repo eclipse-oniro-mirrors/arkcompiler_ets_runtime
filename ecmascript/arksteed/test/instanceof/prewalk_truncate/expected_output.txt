@@ -1,0 +1,2 @@
+deepHit=5
+sink=4950

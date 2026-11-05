@@ -184,6 +184,10 @@ struct GlobalAccessFeedback {
     ArkSteedObjectRef box {};
 };
 
+struct InstanceofFeedback {
+    ArkSteedFunctionRef ctorFunc {};
+};
+
 }  // namespace panda::ecmascript::arksteed
 
 #endif  // ECMASCRIPT_ARKSTEED_PROCESSED_FEEDBACK_H

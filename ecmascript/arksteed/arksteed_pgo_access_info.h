@@ -329,6 +329,20 @@ struct ElementStoreAccessInfo {
     }
 };
 
+struct InstanceofAccessInfo {
+    ArkSteedFunctionRef ctorFunc {};
+    ArkSteedHClassRef ctorHClass {};
+    bool canAssumeStableProtoChain {false};
+    bool canAssumeStableHClass {false};
+};
+
+struct InstanceofLhsChainInfo {
+    static constexpr uint32_t MAX_CHAIN_LENGTH = 8;
+    ArkSteedObjectRef members[MAX_CHAIN_LENGTH] {};
+    uint32_t count {0};
+    bool truncated {false};
+};
+
 }  // namespace panda::ecmascript::arksteed
 
 #endif  // ECMASCRIPT_ARKSTEED_PGO_ACCESS_INFO_H

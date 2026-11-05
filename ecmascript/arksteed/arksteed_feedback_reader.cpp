@@ -14,6 +14,7 @@
  */
 
 #include "ecmascript/arksteed/arksteed_feedback_reader.h"
+#include "ecmascript/ic/ic_handler.h"
 #include "ecmascript/ic/property_box.h"
 #include "ecmascript/js_function.h"
 #include "ecmascript/method.h"
@@ -541,6 +542,43 @@ bool ArkSteedFeedbackReader::ReadGlobalAccessFeedback(GlobalAccessFeedback *feed
     feedback->base.source = {slotId, false, AccessFeedbackSlotKind::UNKNOWN};
     feedback->box = broker_->MakeObjectRef(handler);
     if (!feedback->box.IsSafeForCompile()) {
+        *feedback = {};
+        return false;
+    }
+    return true;
+}
+
+bool ArkSteedFeedbackReader::ReadInstanceofFeedback(InstanceofFeedback *feedback) const
+{
+    *feedback = {};
+    uint32_t slotId = 0;
+    if (!TryGetFeedbackSlotId(ACCESS_SLOT_INPUT, false, &slotId)) {
+        *feedback = {};
+        return false;
+    }
+
+    ProfileTypeInfo *profileTypeArray = nullptr;
+    if (!broker_->TryGetProfileTypeInfo(&profileTypeArray)) {
+        *feedback = {};
+        return false;
+    }
+    if (slotId >= profileTypeArray->GetLength()) {
+        *feedback = {};
+        return false;
+    }
+
+    JSTaggedValue first = profileTypeArray->GetICSlot(compilerThread_, slotId);
+    if (!first.IsWeak()) {
+        *feedback = {};
+        return false;
+    }
+    JSTaggedValue ctorFunc(first.GetWeakReferentUnChecked());
+    if (!ctorFunc.IsJSFunction()) {
+        *feedback = {};
+        return false;
+    }
+    feedback->ctorFunc = broker_->MakeFunctionRef(ctorFunc);
+    if (!feedback->ctorFunc.IsSafeForCompile()) {
         *feedback = {};
         return false;
     }

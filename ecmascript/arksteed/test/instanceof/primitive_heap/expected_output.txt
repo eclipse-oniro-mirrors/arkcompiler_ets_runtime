@@ -1,0 +1,5 @@
+string=0
+symbol=0
+bigInt=0
+number=0
+hit=1

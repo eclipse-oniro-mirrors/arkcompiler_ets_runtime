@@ -191,6 +191,17 @@ function fixtureEmptySlot(receiver, flag) {
     return 0;
 }
 
+const fixtureLhsObject = { value: 1 };
+const fixtureLhsOtherObject = { alpha: 0, value: 1 };
+const fixtureLhsTarget = function() {};
+const fixtureOtherArrowTarget = (value) => value;
+fixtureOtherArrowTarget.extra = 1;
+
+function fixtureLhsTerminated() {
+    let value = fixtureLhsObject.value;
+    return fixtureLhsObject instanceof fixtureLhsTarget ? value : 0;
+}
+
 globalThis.__arksteedFixtures = {
     LINEAR: fixtureLinear,
     BRANCH: fixtureBranch,
@@ -208,6 +219,10 @@ globalThis.__arksteedFixtures = {
     CALL_BUILTIN: fixtureCallBuiltin,
     OPERATION: fixtureOperation,
     EMPTY_SLOT: fixtureEmptySlot,
+    INSTANCEOF_LHS_TERMINATED: fixtureLhsTerminated,
+    INSTANCEOF_LHS_OBJECT: fixtureLhsObject,
+    INSTANCEOF_OTHER_OBJECT: fixtureLhsOtherObject,
+    INSTANCEOF_OTHER_ARROW: fixtureOtherArrowTarget,
 };
 
 /*
@@ -286,5 +301,6 @@ globalThis.__arksteedFixtures = {
         fixtureOperation(call, 3, "s", 4, false, objectValue, 8n, null, true);
         // The access site of EMPTY_SLOT stays unexecuted: `flag` is false.
         fixtureEmptySlot(mono, false);
+        fixtureLhsTerminated();
     }
 })();

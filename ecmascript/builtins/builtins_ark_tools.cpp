@@ -1255,10 +1255,28 @@ JSTaggedValue BuiltinsArkTools::EnsureFeedbackVectorForFunction([[maybe_unused]]
     return JSTaggedValue(!prof.IsUndefined());
 }
 
-// empty function for regress-xxx test cases
-JSTaggedValue BuiltinsArkTools::CompileBaseline([[maybe_unused]] EcmaRuntimeCallInfo *info)
+JSTaggedValue BuiltinsArkTools::CompileBaseline(EcmaRuntimeCallInfo *info)
 {
-    return UnimplementedBuiltin(__func__, info);
+#if defined(ECMASCRIPT_ENABLE_BASELINE_STUB) && !defined(EXCLUDE_JIT)
+    JSThread *thread = info->GetThread();
+    if (!thread->GetEcmaVM()->GetJSOptions().IsEnableJIT() || !Jit::GetInstance()->IsEnableBaselineJit()) {
+        return JSTaggedValue::False();
+    }
+    RETURN_IF_DISALLOW_ARKTOOLS(thread);
+    [[maybe_unused]] EcmaHandleScope handleScope(thread);
+
+    JSHandle<JSTaggedValue> thisValue = GetCallArg(info, 0);
+    if (!thisValue->IsJSFunction()) {
+        return JSTaggedValue::False();
+    }
+    JSHandle<JSFunction> jsFunction(thisValue);
+    Jit::Compile(thread->GetEcmaVM(), jsFunction, CompilerTier::Tier::BASELINE,
+                 MachineCode::INVALID_OSR_OFFSET, JitCompileMode::Mode::SYNC);
+    return JSTaggedValue(jsFunction->GetBaselineCode(thread).IsMachineCodeObject());
+#else
+    (void)info;
+    return JSTaggedValue::False();
+#endif
 }
 
 JSTaggedValue BuiltinsArkTools::DebugGetLoadedScriptIds([[maybe_unused]] EcmaRuntimeCallInfo *info)

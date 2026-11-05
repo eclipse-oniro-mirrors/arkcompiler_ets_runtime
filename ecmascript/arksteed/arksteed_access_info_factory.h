@@ -42,6 +42,10 @@ public:
     bool TryBuildNamedLoadAccessInfo(int slotIndex, NamedLoadAccessSet *access) const;
     bool TryBuildValueLoadAccessInfo(ValueLoadAccessSet *access) const;
     bool TryBuildElementStoreAccessInfo(int slotIndex, ElementStoreAccessInfo *access) const;
+    bool TryBuildInstanceofAccessInfo(InstanceofAccessInfo *access) const;
+    bool InstallFunctionPrototypeDetector() const;
+    bool TryPrewalkInstanceofLhsChain(JSHClass *lhsHClass, ArkSteedHClassRef *lhsRef,
+                                      InstanceofLhsChainInfo *chain) const;
 
 private:
     bool ComputeNamedStoreAccessInfo(const NamedAccessFeedback &feedback, NamedStoreAccessSet *access) const;

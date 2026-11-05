@@ -1,0 +1,4 @@
+hitA=1
+afterRebind=6
+reboundHit=1
+sink=100

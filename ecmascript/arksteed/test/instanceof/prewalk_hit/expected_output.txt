@@ -1,0 +1,3 @@
+hit=1
+miss=0
+sink=4950

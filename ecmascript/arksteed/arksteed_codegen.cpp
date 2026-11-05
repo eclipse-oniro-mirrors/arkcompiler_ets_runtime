@@ -2717,6 +2717,96 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<LoadPrototypeFromNonJSProxyObj
     __ LoadField(dst, dst, JSHClass::PROTOTYPE_OFFSET);
 }
 
+struct ArkSteedCodeGenerator::HasInPrototypeChainContext {
+    HasInPrototypeChainVertex *walk;
+    ArkSteedRegister current;
+    ArkSteedRegister hClass;
+    ArkSteedRegister typeBits;
+    ArkSteedRegister depth;
+    ArkSteedRegister expected;
+    ArkSteedRegister result;
+    Label loop;
+    Label returnFalse;
+    Label returnTrue;
+    Label pass;
+    Label *deopt;
+};
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<HasInPrototypeChainVertex>(HasInPrototypeChainVertex *walk)
+{
+#ifndef NDEBUG
+    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << walk->GetId() << ": HasInPrototypeChainVertex";
+#endif
+    ASSERT(safepointBuilder_ != nullptr);
+    TemporaryRegisterScope scope(assembler_);
+    HasInPrototypeChainContext context {
+        .walk = walk,
+        .current = scope.Acquire(),
+        .hClass = scope.Acquire(),
+        .typeBits = scope.Acquire(),
+        .depth = GetInputRegister(walk, HasInPrototypeChainVertex::DEPTH_INDEX),
+        .expected = GetInputRegister(walk, HasInPrototypeChainVertex::PROTOTYPE_INDEX),
+        .result = GetResultRegister(walk),
+        .deopt = nullptr,
+    };
+#if defined(PANDA_TARGET_AMD64)
+    context.deopt = RecordEagerDeoptTarget(walk, kungfu::DeoptType::KEYMISSMATCH);
+#else
+    Label deoptLabel;
+    context.deopt = &deoptLabel;
+#endif
+
+    ArkSteedRegister object = GetInputRegister(walk, HasInPrototypeChainVertex::OBJECT_INDEX);
+    __ Move(context.current, object);
+    __ Move(context.typeBits, context.current);
+    __ And(context.typeBits, static_cast<int64_t>(JSTaggedValue::TAG_HEAPOBJECT_MASK));
+    __ Compare(context.typeBits, 0);
+    __ JumpIf(Condition::NOT_EQUAL, &context.returnFalse);
+    EmitHasInPrototypeChainLoop(context);
+
+    Label done;
+    __ Bind(&context.returnTrue);
+    __ Move(context.result, static_cast<int64_t>(JSTaggedValue::VALUE_TRUE));
+    __ Jump(&done);
+    __ Bind(&context.returnFalse);
+    __ Move(context.result, static_cast<int64_t>(JSTaggedValue::VALUE_FALSE));
+    __ Bind(&done);
+}
+
+void ArkSteedCodeGenerator::EmitHasInPrototypeChainLoop(HasInPrototypeChainContext &context)
+{
+    constexpr int64_t MAX_INLINE_PROTO_DEPTH = 32;
+    __ Bind(&context.loop);
+    __ LoadField(context.hClass, context.current, TaggedObject::HCLASS_OFFSET);
+    __ And(context.hClass, static_cast<int64_t>(TaggedStateWord::ADDRESS_MASK));
+    __ LoadInt32Field(context.typeBits, context.hClass, static_cast<int32_t>(JSHClass::BIT_FIELD_OFFSET));
+    __ And(context.typeBits, static_cast<int64_t>((1U << JSHClass::ObjectTypeBits::SIZE) - 1));
+    __ Compare(context.typeBits, static_cast<int64_t>(JSType::JS_OBJECT));
+    __ JumpIf(Condition::BELOW, &context.returnFalse);
+    __ Sub(context.typeBits, static_cast<int64_t>(JSType::JS_OBJECT));
+    __ Compare(context.typeBits, static_cast<int64_t>(JSType::JS_PROXY) - static_cast<int64_t>(JSType::JS_OBJECT));
+    __ JumpIf(Condition::ABOVE, &context.returnFalse);
+#if defined(PANDA_TARGET_AMD64)
+    __ JumpIf(Condition::EQUAL, context.deopt);
+#else
+    __ JumpIf(Condition::BELOW, &context.pass);
+    __ Bind(context.deopt);
+    EmitEagerDeoptExit(context.walk, kungfu::DeoptType::KEYMISSMATCH);
+    __ Bind(&context.pass);
+#endif
+    __ LoadField(context.result, context.hClass, JSHClass::PROTOTYPE_OFFSET);
+    __ Compare(context.result, static_cast<int64_t>(JSTaggedValue::VALUE_NULL));
+    __ JumpIf(Condition::EQUAL, &context.returnFalse);
+    __ Compare(context.result, context.expected);
+    __ JumpIf(Condition::EQUAL, &context.returnTrue);
+    __ Move(context.current, context.result);
+    __ Add(context.depth, 1);
+    __ Compare(context.depth, MAX_INLINE_PROTO_DEPTH);
+    __ JumpIf(Condition::ABOVE_OR_EQUAL, context.deopt);
+    __ Jump(&context.loop);
+}
+
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<LoadPrototypeHolderByHClassVertex>(
     LoadPrototypeHolderByHClassVertex *loadHolder)

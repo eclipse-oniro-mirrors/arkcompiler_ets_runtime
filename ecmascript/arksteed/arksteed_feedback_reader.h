@@ -35,6 +35,7 @@ public:
     bool ReadValueAccessFeedback(ValueAccessFeedback *feedback) const;
     bool ReadElementAccessFeedback(int slotIndex, ElementAccessFeedback *feedback) const;
     bool ReadGlobalAccessFeedback(GlobalAccessFeedback *feedback) const;
+    bool ReadInstanceofFeedback(InstanceofFeedback *feedback) const;
     bool TryGetFeedbackSlotId(int index, bool allowImmediate, uint32_t *slotId) const; // input slot
     bool TryGetFeedbackSlotId(uint32_t *slotId) const; // primary slot
     bool ReadCallFeedback(CallFeedback *feedback) const;

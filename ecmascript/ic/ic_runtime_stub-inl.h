@@ -753,6 +753,35 @@ JSTaggedValue ICRuntimeStub::StoreMiss(JSThread *thread, ProfileTypeInfo *profil
     StoreICRuntime icRuntime(thread, JSHandle<ProfileTypeInfo>::Cast(profileInfoHandle), slotId, kind);
     return icRuntime.StoreMiss(receiverHandle, keyHandle, valueHandle, isOwn);
 }
+
+void ICRuntimeStub::RecordInstanceofIC(JSThread *thread, ProfileTypeInfo *profileTypeInfo,
+                                        JSTaggedValue target, uint32_t slotId)
+{
+    INTERPRETER_TRACE(thread, RecordInstanceofIC);
+    JSTaggedValue first = profileTypeInfo->GetICSlot(thread, slotId);
+    if (!first.IsUndefined()) {
+        return;
+    }
+    [[maybe_unused]] EcmaHandleScope handleScope(thread);
+    auto targetHandle = JSHandle<JSTaggedValue>(thread, target);
+    auto profileInfoHandle = JSHandle<JSTaggedValue>(thread, profileTypeInfo);
+    bool isRecordable = false;
+    if (targetHandle->IsHeapObject() && !targetHandle->IsInSharedHeap()) {
+        JSTaggedValue unwrapped = targetHandle.GetTaggedValue();
+        while (unwrapped.IsBoundFunction()) {
+            unwrapped = JSBoundFunction::Cast(unwrapped.GetTaggedObject())->GetBoundTarget(thread);
+        }
+        if (unwrapped.IsJSFunction()) {
+            isRecordable = true;
+            JSHandle<JSHClass> targetHClassHandle(thread, targetHandle->GetTaggedObject()->GetClass());
+            JSHClass::EnableProtoChangeMarker(thread, targetHClassHandle);
+        }
+    }
+    auto *pti = ProfileTypeInfo::Cast(profileInfoHandle.GetTaggedValue().GetTaggedObject());
+    IcAccessorLockScope accessorLockScope(thread);
+    pti->SetICSlot(
+        thread, slotId, isRecordable ? targetHandle.GetTaggedValue().CreateAndGetWeakRef() : JSTaggedValue::Hole());
+}
 }  // namespace panda::ecmascript
 
 #endif  // ECMASCRIPT_IC_IC_RUNTIME_STUB_INL_H

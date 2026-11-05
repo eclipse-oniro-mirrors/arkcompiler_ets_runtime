@@ -19,6 +19,7 @@
 #include "ecmascript/arksteed/arksteed_heap_broker.h"
 #include "ecmascript/arksteed/arksteed_pgo_access_info.h"
 #include "ecmascript/compiler/jit_compilation_env.h"
+#include "ecmascript/compiler/lazy_deopt_dependency.h"
 
 namespace panda::ecmascript::arksteed {
 
@@ -54,6 +55,17 @@ public:
             return false;
         }
         return CheckStableHClass(hclass) && DependOnStableHClass(hclass);
+    }
+
+    bool InstallFunctionPrototypeDetector() const
+    {
+        if (!CanUseLazyDeopt()) {
+            return false;
+        }
+        auto *dependencies = env_->GetDependencies();
+        return dependencies != nullptr &&
+            dependencies->DependOnDetector(GlobalEnv::FunctionPrototypeChangedDetectorBits::START_BIT,
+                                           env_->GetGlobalEnv().GetObject<GlobalEnv>());
     }
 
     bool InstallArrayDetector() const { return broker_ != nullptr && broker_->DependOnArrayDetector(); }

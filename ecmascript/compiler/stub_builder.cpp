@@ -25,6 +25,7 @@
 #include "ecmascript/elements.h"
 #include "ecmascript/compiler/stub_builder.h"
 #include "ecmascript/ic/mega_ic_cache.h"
+#include "ecmascript/ic/ic_handler.h"
 #include "ecmascript/js_api/js_api_arraylist.h"
 #include "ecmascript/js_primitive_ref.h"
 #include "ecmascript/lexical_env.h"
@@ -6787,6 +6788,79 @@ GateRef StubBuilder::FastTypeOf(GateRef glue, GateRef obj)
     return ret;
 }
 
+void StubBuilder::InstanceofGenericResolve(GateRef glue, GateRef target, Label *icHitBuiltin, Label *icCustom,
+                                           Label *exit, Variable *result, Variable *customHandler)
+{
+    auto env = GetEnvironment();
+    GateRef hasInstanceSymbol = GetGlobalConstantValue(VariableType::JS_ANY(), glue,
+                                                       ConstantIndex::HASINSTANCE_SYMBOL_INDEX);
+    GateRef instof = GetMethodWithoutIC(glue, target, hasInstanceSymbol);
+    Label isPendingException(env);
+    Label noPendingException(env);
+    BRANCH(HasPendingException(glue), &isPendingException, &noPendingException);
+    Bind(&isPendingException);
+    {
+        result->WriteVariable(Exception());
+        Jump(exit);
+    }
+    Bind(&noPendingException);
+    Label instOfIsUndefined(env);
+    Label instOfNotUndefined(env);
+    Label targetNotCallable(env);
+    BRANCH(TaggedIsUndefined(instof), &instOfIsUndefined, &instOfNotUndefined);
+    Bind(&instOfIsUndefined);
+    {
+        BRANCH(IsCallable(glue, target), icHitBuiltin, &targetNotCallable);
+    }
+    Bind(&targetNotCallable);
+    {
+        GateRef taggedId = Int32(GET_MESSAGE_STRING_ID(InstanceOfErrorTargetNotCallable));
+        CallRuntime(glue, RTSTUB_ID(ThrowTypeError), { IntToTaggedInt(taggedId) });
+        result->WriteVariable(Exception());
+        Jump(exit);
+    }
+    Bind(&instOfNotUndefined);
+    {
+        GateRef globalEnv = GetCurrentGlobalEnv();
+        GateRef builtinHasInstance = GetGlobalEnvValue(VariableType::JS_ANY(), glue, globalEnv,
+                                                       GlobalEnv::HASINSTANCE_FUNCTION_INDEX);
+        Label isBuiltin(env);
+        Label notBuiltin(env);
+        BRANCH(Equal(instof, builtinHasInstance), &isBuiltin, &notBuiltin);
+        Bind(&isBuiltin);
+        {
+            Jump(icHitBuiltin);
+        }
+        Bind(&notBuiltin);
+        {
+            customHandler->WriteVariable(instof);
+            Jump(icCustom);
+        }
+    }
+}
+
+void StubBuilder::InstanceofCustomCall(GateRef glue, GateRef target, GateRef object, Variable *customHandler,
+                                       Variable *result, Label *exit, ProfileOperation callback)
+{
+    auto env = GetEnvironment();
+    JSCallArgs callArgs(JSCallMode::CALL_SETTER);
+    callArgs.callSetterArgs = { target, object };
+    if (env->IsBaselineBuiltin()) {
+        Label callExit(env);
+        DEFVARIABLE(callRes, VariableType::JS_ANY(), Undefined());
+        CallStubBuilder callBuilder(this, glue, customHandler->Value(), Int32(1), 0, &callRes, callArgs,
+                                    callback);
+        callBuilder.JSCallDispatchForBaseline(&callExit);
+        Bind(&callExit);
+        result->WriteVariable(FastToBoolean(glue, *callRes));
+    } else {
+        CallStubBuilder callBuilder(this, glue, customHandler->Value(), Int32(1), 0, nullptr, callArgs, callback);
+        GateRef retValue = callBuilder.JSCallDispatch();
+        result->WriteVariable(FastToBoolean(glue, retValue));
+    }
+    Jump(exit);
+}
+
 GateRef StubBuilder::InstanceOf(
     GateRef glue, GateRef object, GateRef target, GateRef profileTypeInfo, GateRef slotId, ProfileOperation callback)
 {
@@ -6898,7 +6972,8 @@ void StubBuilder::TryFastHasInstance(GateRef glue, GateRef instof, GateRef targe
     }
 }
 
-GateRef StubBuilder::GetMethod(GateRef glue, GateRef obj, GateRef key, GateRef profileTypeInfo, GateRef slotId)
+template <bool useIC>
+GateRef StubBuilder::GetMethodImpl(GateRef glue, GateRef obj, GateRef key, GateRef profileTypeInfo, GateRef slotId)
 {
     auto env = GetEnvironment();
     Label entry(env);
@@ -6906,9 +6981,14 @@ GateRef StubBuilder::GetMethod(GateRef glue, GateRef obj, GateRef key, GateRef p
     DEFVARIABLE(result, VariableType::JS_ANY(), Hole());
     Label exit(env);
 
-    StringIdInfo info;
-    AccessObjectStubBuilder builder(this, GetCurrentGlobalEnv());
-    GateRef value = builder.LoadObjByName(glue, obj, key, info, profileTypeInfo, slotId, ProfileOperation());
+    GateRef value = Circuit::NullGate();
+    if constexpr (useIC) {
+        StringIdInfo info;
+        AccessObjectStubBuilder builder(this, GetCurrentGlobalEnv());
+        value = builder.LoadObjByName(glue, obj, key, info, profileTypeInfo, slotId, ProfileOperation());
+    } else {
+        value = GetPropertyByName(glue, obj, key);
+    }
 
     Label isPendingException(env);
     Label noPendingException(env);
@@ -6946,6 +7026,106 @@ GateRef StubBuilder::GetMethod(GateRef glue, GateRef obj, GateRef key, GateRef p
             result = value;
             Jump(&exit);
         }
+    }
+    Bind(&exit);
+    auto ret = *result;
+    env->SubCfgExit();
+    return ret;
+}
+
+GateRef StubBuilder::GetMethod(GateRef glue, GateRef obj, GateRef key, GateRef profileTypeInfo, GateRef slotId)
+{
+    return GetMethodImpl<true>(glue, obj, key, profileTypeInfo, slotId);
+}
+
+GateRef StubBuilder::GetMethodWithoutIC(GateRef glue, GateRef obj, GateRef key)
+{
+    return GetMethodImpl<false>(glue, obj, key, Circuit::NullGate(), Circuit::NullGate());
+}
+
+void StubBuilder::CheckInstanceofTarget(GateRef glue, GateRef target, Label *targetIsEcmaObject, Label *exit,
+                                        Variable *result)
+{
+    auto env = GetEnvironment();
+    Label targetIsHeapObject(env);
+    Label targetNotEcmaObject(env);
+    BRANCH(TaggedIsHeapObject(target), &targetIsHeapObject, &targetNotEcmaObject);
+    Bind(&targetIsHeapObject);
+    BRANCH(TaggedObjectIsEcmaObject(glue, target), targetIsEcmaObject, &targetNotEcmaObject);
+    Bind(&targetNotEcmaObject);
+    {
+        GateRef taggedId = Int32(GET_MESSAGE_STRING_ID(TargetTypeNotObject));
+        CallRuntime(glue, RTSTUB_ID(ThrowTypeError), { IntToTaggedInt(taggedId) });
+        result->WriteVariable(Exception());
+        Jump(exit);
+    }
+}
+
+void StubBuilder::InstanceofPopulate(GateRef glue, GateRef object, GateRef target, GateRef profileTypeInfo,
+                                     GateRef slotId, Label *exit, Variable *result)
+{
+    result->WriteVariable(CallRuntime(glue, RTSTUB_ID(InstanceofIC),
+                                      { object, target, profileTypeInfo, IntToTaggedInt(slotId) }));
+    Jump(exit);
+}
+
+void StubBuilder::InstanceofExecuteSingleSlot(GateRef glue, GateRef object, GateRef target,
+                                              ProfileOperation callback, Label *exit, Variable *result,
+                                              Variable *customHandler)
+{
+    auto env = GetEnvironment();
+    Label icHitBuiltin(env);
+    Label icCustom(env);
+    InstanceofGenericResolve(glue, target, &icHitBuiltin, &icCustom, exit, result, customHandler);
+    Bind(&icHitBuiltin);
+    {
+        result->WriteVariable(OrdinaryHasInstance(glue, target, object));
+        Jump(exit);
+    }
+    Bind(&icCustom);
+    {
+        InstanceofCustomCall(glue, target, object, customHandler, result, exit, callback);
+    }
+}
+
+GateRef StubBuilder::InstanceOfSingleSlot(
+    GateRef glue, GateRef object, GateRef target, GateRef profileTypeInfo, GateRef slotId, ProfileOperation callback)
+{
+    auto env = GetEnvironment();
+    Label entry(env);
+    env->SubCfgEntry(&entry);
+    DEFVARIABLE(result, VariableType::JS_ANY(), Hole());
+    DEFVARIABLE(customHandler, VariableType::JS_ANY(), Undefined());
+    Label exit(env);
+
+    Label targetIsEcmaObject(env);
+    CheckInstanceofTarget(glue, target, &targetIsEcmaObject, &exit, &result);
+    Bind(&targetIsEcmaObject);
+    {
+        Label icPopulate(env);
+        Label icMegaGeneric(env);
+        Label feedbackCheck(env);
+        BRANCH(TaggedIsUndefined(profileTypeInfo), &icMegaGeneric, &feedbackCheck);
+        Bind(&feedbackCheck);
+        {
+            GateRef firstValue = GetICSlot(glue, profileTypeInfo, slotId);
+            Label slotUninit(env);
+            Label slotNotUninit(env);
+            BRANCH(TaggedIsUndefined(firstValue), &slotUninit, &slotNotUninit);
+            Bind(&slotUninit);
+            {
+                callback.TryPreDump();
+                Jump(&icPopulate);
+            }
+            Bind(&slotNotUninit);
+            {
+                Jump(&icMegaGeneric);
+            }
+        }
+        Bind(&icPopulate);
+        InstanceofPopulate(glue, object, target, profileTypeInfo, slotId, &exit, &result);
+        Bind(&icMegaGeneric);
+        InstanceofExecuteSingleSlot(glue, object, target, callback, &exit, &result, &customHandler);
     }
     Bind(&exit);
     auto ret = *result;

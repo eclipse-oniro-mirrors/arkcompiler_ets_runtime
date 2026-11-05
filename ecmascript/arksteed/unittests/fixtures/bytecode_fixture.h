@@ -123,6 +123,7 @@ enum class FixtureMethodKind : uint8_t {
     CALL_BUILTIN,
     OPERATION,
     EMPTY_SLOT,
+    INSTANCEOF_LHS_TERMINATED,
 };
 
 /*

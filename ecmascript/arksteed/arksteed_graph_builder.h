@@ -70,6 +70,7 @@ private:
     struct InheritedCatchContext;
     struct LocalClosureInfo;
     struct BytecodeVisitor;
+    friend class ArkSteedGraphBuilderTestAccess;
 
     enum class LoopPeelingStage : uint8_t {
         NONE,

@@ -100,6 +100,11 @@ private:
     StringIdType stringIdType { StringIdType::STRING_ID_INFO };
 };
 
+enum class BCStubMode {
+    INTERPRETER,
+    JIT,
+};
+
 class InterpreterStubBuilder : public StubBuilder {
 public:
     InterpreterStubBuilder(CallSignature *callSignature, Environment *env)
@@ -208,6 +213,15 @@ public:
     template <bool needPrint>
     void DebugPrintInstruction();
 
+protected:
+    BCStubMode bcStubMode_ {BCStubMode::INTERPRETER};
+
+public:
+    bool IsJitStub() const
+    {
+        return bcStubMode_ == BCStubMode::JIT;
+    }
+
 private:
     template<typename... Args>
     void DispatchBase(GateRef target, GateRef glue, Args... args);
@@ -252,6 +266,7 @@ public:
         explicit name##StubBuilder(CallSignature *callSignature, Environment *env) \
             : base##StubBuilder(callSignature, env)                                \
         {                                                                          \
+            bcStubMode_ = BCStubMode::JIT;                                          \
         }                                                                          \
         ~name##StubBuilder() = default;                                            \
         NO_MOVE_SEMANTIC(name##StubBuilder);                                       \
@@ -267,6 +282,7 @@ public:
         explicit name##StubBuilder(CallSignature *callSignature, Environment *env) \
             : base##StubBuilder(callSignature, env)                                \
         {                                                                          \
+            bcStubMode_ = BCStubMode::JIT;                                          \
         }                                                                          \
         ~name##StubBuilder() = default;                                            \
         NO_MOVE_SEMANTIC(name##StubBuilder);                                       \

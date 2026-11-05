@@ -64,9 +64,15 @@
 
 #include "common_components/taskpool/task.h"
 #include "common_components/taskpool/taskpool.h"
+#include "ecmascript/arksteed/arksteed_bytecode_analysis.h"
+#include "ecmascript/arksteed/arksteed_bytecode_preprocessor.h"
+#include "ecmascript/arksteed/arksteed_graph.h"
+#include "ecmascript/arksteed/arksteed_graph_builder.h"
 #include "ecmascript/arksteed/arksteed_heap_broker.h"
+#include "ecmascript/arksteed/unittests/graph_builder_test_access.h"
 #include "ecmascript/arksteed/arksteed_pgo_access_info.h"
 #include "ecmascript/arksteed/arksteed_processed_feedback.h"
+#include "ecmascript/mem/native_area_allocator.h"
 #include "ecmascript/checkpoint/thread_state_transition.h"
 #include "ecmascript/compiler/bytecodes.h"
 #include "ecmascript/ic/profile_type_info.h"
@@ -1309,6 +1315,79 @@ TEST_F(ArkSteedBytecodeFixtureLifecycleTest, OutOfBudgetReadinessFailsBoundedAnd
     EXPECT_EQ(HostVm(), nullptr) << FailureDiagnostic();
     EXPECT_EQ(HostThread(), nullptr) << FailureDiagnostic();
     EXPECT_EQ(CompilerThread(), nullptr) << FailureDiagnostic();
+}
+
+class ArkSteedInstanceofGraphBuilderTest : public ArkSteedFeedbackReaderTest {
+protected:
+    JSTaggedValue GetFixtureProperty(const char *name)
+    {
+        JSHandle<JSTaggedValue> global(HostThread(), HostVm()->GetGlobalEnv()->GetGlobalObject());
+        JSHandle<EcmaString> fixturesName = HostVm()->GetFactory()->NewFromUtf8("__arksteedFixtures");
+        JSHandle<JSTaggedValue> fixturesKey(fixturesName);
+        JSHandle<JSTaggedValue> fixtures = JSObject::GetProperty(HostThread(), global, fixturesKey).GetValue();
+        JSHandle<EcmaString> keyString = HostVm()->GetFactory()->NewFromUtf8(name);
+        JSHandle<JSTaggedValue> key(keyString);
+        return JSObject::GetProperty(HostThread(), fixtures, key).GetValue().GetTaggedValue();
+    }
+
+    void BuildGraph(FixtureMethodKind kind, Graph *graph, Chunk *chunk, JSTaggedValue object,
+                    JSTaggedValue target, JSHClass *lhsHClass)
+    {
+        const auto &method = GetMethod(kind);
+        ArkSteedCompilationUnit unit(method.env);
+        BytecodePreprocessor preproc(&unit, chunk);
+        ASSERT_TRUE(preproc.Run());
+        BytecodeAnalysis analysis(&preproc);
+        ASSERT_TRUE(analysis.Run());
+        GraphBuilder builder(CompilerThread(), graph, HostThread()->GetGlueAddr(), &preproc, &analysis, false);
+        const auto *site = method.FindBytecode(kungfu::EcmaOpcode::INSTANCEOF_IMM8_V8);
+        ASSERT_NE(site, nullptr);
+        EXPECT_TRUE(ArkSteedGraphBuilderTestAccess::TryBuildInlineInstanceofWithConstants(&builder, site, object,
+                                                                                          target, lhsHClass));
+    }
+
+    static void ExpectUnconditionalDeoptWithoutBody(const Graph &graph)
+    {
+        size_t blockCount = 0;
+        size_t deoptCount = 0;
+        size_t genericCallCount = 0;
+        for (const BB *block : graph) {
+            blockCount++;
+            const ControlVertex *control = block->GetControlVertex();
+            if (control != nullptr && control->GetOpcode() == VertexOpcode::Deopt) {
+                deoptCount++;
+            }
+            for (const NonControlVertex *vertex : block->GetVertices()) {
+                if (vertex->GetOpcode() != VertexOpcode::CallCommonStub) {
+                    continue;
+                }
+                auto stubID = static_cast<kungfu::CommonStubCSigns::ID>(
+                    static_cast<const CallCommonStubVertex *>(vertex)->GetCommonStubID());
+                if (stubID == kungfu::CommonStubCSigns::ID::InstanceofJit) {
+                    genericCallCount++;
+                }
+            }
+        }
+        EXPECT_EQ(blockCount, 2U);
+        EXPECT_EQ(deoptCount, 1U);
+        EXPECT_EQ(genericCallCount, 0U);
+    }
+};
+
+TEST_F(ArkSteedInstanceofGraphBuilderTest, PlanStageTerminatedSkipsBody)
+{
+    GetMethod(FixtureMethodKind::INSTANCEOF_LHS_TERMINATED);
+    JSHandle<JSTaggedValue> object(HostThread(), GetFixtureProperty("INSTANCEOF_OTHER_OBJECT"));
+    JSHandle<JSTaggedValue> target(HostThread(), GetFixtureProperty("INSTANCEOF_OTHER_ARROW"));
+    JSHandle<JSTaggedValue> lhsObject(HostThread(), GetFixtureProperty("INSTANCEOF_LHS_OBJECT"));
+    RunOnJitThread([this, &object, &target, &lhsObject] {
+        NativeAreaAllocator native;
+        Chunk chunk {&native};
+        Graph graph {&chunk};
+        BuildGraph(FixtureMethodKind::INSTANCEOF_LHS_TERMINATED, &graph, &chunk, object.GetTaggedValue(),
+                   target.GetTaggedValue(), lhsObject.GetTaggedValue().GetTaggedObject()->GetClass());
+        ExpectUnconditionalDeoptWithoutBody(graph);
+    });
 }
 
 }  // namespace panda::ecmascript::arksteed

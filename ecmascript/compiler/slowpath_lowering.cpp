@@ -1757,7 +1757,7 @@ void SlowPathLowering::LowerInstanceof(GateRef gate)
     ASSERT(acc_.GetNumValueIn(gate) == 3);
     GateRef obj = acc_.GetValueIn(gate, 1);     // 1: the second parameter
     GateRef target = acc_.GetValueIn(gate, 2);  // 2: the third parameter
-    LowerCallStubWithIC(gate, CommonStubCSigns::Instanceof, {obj, target, circuit_->GetGlobalEnvCache()});
+    LowerCallStubWithIC(gate, CommonStubCSigns::InstanceofJit, {obj, target, circuit_->GetGlobalEnvCache()});
 }
 
 void SlowPathLowering::LowerFastStrictNotEqual(GateRef gate)

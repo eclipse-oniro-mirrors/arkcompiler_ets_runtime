@@ -1,0 +1,4 @@
+customNum=1
+customObj=0
+bound=1
+boundMiss=0

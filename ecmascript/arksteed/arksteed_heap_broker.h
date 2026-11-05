@@ -47,6 +47,7 @@ enum class ArkSteedBrokerMode : uint8_t {
 class ArkSteedHeapBroker {
   private:
     friend class ArkSteedHeapBrokerTestAccess;
+    friend class ArkSteedGraphBuilderTestAccess;
 
   public:
     class NoGCScope {
@@ -207,6 +208,20 @@ class ArkSteedHeapBroker {
         NoGCScope scope(this);
         return MakeObjectRef(handle.GetTaggedValue());
     }
+
+    // Instanceof compile-time queries (single NoGCScope per multi-read sequence).
+    bool TryGetInstanceofCtorHClass(ArkSteedFunctionRef ctorFunc, ArkSteedHClassRef *hclassRef) const;
+    bool TryGetInstanceofCtorProto(ArkSteedFunctionRef ctorFunc, ArkSteedObjectRef *ctorProto) const;
+    bool SameHeapObject(const ArkSteedHeapRef &lhs, const ArkSteedHeapRef &rhs) const;
+    struct InstanceofProtoChainWalk {
+        static constexpr uint32_t MAX_CHAIN_LENGTH = 8;
+        ArkSteedObjectRef members[MAX_CHAIN_LENGTH] {};
+        ArkSteedHClassRef hopHClasses[MAX_CHAIN_LENGTH] {};
+        uint32_t count {0};
+        bool truncated {false};
+    };
+    bool WalkInstanceofProtoChain(JSHClass *lhsHClass, ArkSteedHClassRef *lhsRef,
+                                  InstanceofProtoChainWalk *walk) const;
 
     ArkSteedHClassRef MakeHClassRef(JSTaggedValue value) const
     {
@@ -428,6 +443,8 @@ class ArkSteedHeapBroker {
                                      ElementAccessFeedback *feedback) const;
 
     bool GetFeedbackForGlobalAccess(const ArkSteedFeedbackReader &reader, GlobalAccessFeedback *feedback) const;
+
+    bool GetFeedbackForInstanceof(const ArkSteedFeedbackReader &reader, InstanceofFeedback *feedback) const;
 
     bool GetFeedbackForOperation(const ArkSteedFeedbackReader &reader, OperationFeedback *feedback) const;
 

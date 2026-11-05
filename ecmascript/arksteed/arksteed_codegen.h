@@ -56,6 +56,9 @@ public:
     void Generate();
 
 private:
+    struct HasInPrototypeChainContext;
+    void EmitHasInPrototypeChainLoop(HasInPrototypeChainContext &context);
+
     static int32_t ComputeFrameSize(Graph *graph);
 
     void ProcessValueVertex(ValueVertex *valueVertex);
