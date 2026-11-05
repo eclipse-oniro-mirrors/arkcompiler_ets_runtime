@@ -10656,22 +10656,31 @@ struct GraphBuilder::BytecodeVisitor {
             BuildDeoptIfInt32Condition(stage, patchMain, Condition::EQUAL, kungfu::DeoptType::HOTRELOAD_PATCHMAIN);
         }
 
-        int32_t moduleOffset = static_cast<int32_t>(JSFunction::ECMA_MODULE_OFFSET);
-        ValueVertex *module =
-            self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {jsFunc}, moduleOffset);
-        int32_t environmentOffset = static_cast<int32_t>(SourceTextModule::SOURCE_TEXT_MODULE_OFFSET);
-        ValueVertex *environment =
-            self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {module}, environmentOffset);
-        ValueVertex *binding = GetValueFromTaggedArray(environment, static_cast<uint32_t>(index));
-        int32_t targetModuleOffset = static_cast<int32_t>(ResolvedIndexBinding::MODULE_OFFSET);
-        ValueVertex *targetModule =
-            self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {binding}, targetModuleOffset);
-        int32_t targetIndexOffset = static_cast<int32_t>(ResolvedIndexBinding::INDEX_OFFSET);
-        ValueVertex *targetIndex =
-            self->NewVertex<LoadInt32FieldVertex>(compileInfoFacts_, currentBlock, {binding}, targetIndexOffset);
-        int32_t dictionaryIndex = static_cast<int32_t>(SourceTextModule::NAME_DICTIONARY_OFFSET);
-        ValueVertex *dictionary =
-            self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {targetModule}, dictionaryIndex);
+        PropertyKey dictionaryKey = PropertyKey::ExternalModuleDictionary(index);
+        PropertyKey targetIndexKey = PropertyKey::ExternalModuleIndex(index);
+        ValueVertex *dictionary = compileInfoFacts_->LookupLoadedConstantProperty(jsFunc, dictionaryKey);
+        ValueVertex *targetIndex = compileInfoFacts_->LookupLoadedConstantProperty(jsFunc, targetIndexKey);
+        if (dictionary == nullptr) {
+            ValueVertex *environment =
+                compileInfoFacts_->LookupLoadedConstantProperty(jsFunc, PropertyKey::ModuleEnvironment());
+            if (environment == nullptr) {
+                ValueVertex *module = self->NewVertex<LoadTaggedFieldVertex>(
+                    compileInfoFacts_, currentBlock, {jsFunc}, static_cast<int32_t>(JSFunction::ECMA_MODULE_OFFSET));
+                environment = self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {module},
+                    static_cast<int32_t>(SourceTextModule::SOURCE_TEXT_MODULE_OFFSET));
+                compileInfoFacts_->RecordLoadedConstantProperty(jsFunc, PropertyKey::ModuleEnvironment(), environment);
+            }
+            //@ref panda::ecmascript::ModuleValueAccessor::GetModuleValueOuter()
+            ValueVertex *binding = GetValueFromTaggedArray(environment, static_cast<uint32_t>(index));
+            ValueVertex *targetModule = self->NewVertex<LoadTaggedFieldVertex>(
+                compileInfoFacts_, currentBlock, {binding}, static_cast<int32_t>(ResolvedIndexBinding::MODULE_OFFSET));
+            targetIndex = self->NewVertex<LoadInt32FieldVertex>(
+                compileInfoFacts_, currentBlock, {binding}, static_cast<int32_t>(ResolvedIndexBinding::INDEX_OFFSET));
+            dictionary = self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {targetModule},
+                static_cast<int32_t>(SourceTextModule::NAME_DICTIONARY_OFFSET));
+            compileInfoFacts_->RecordLoadedConstantProperty(jsFunc, dictionaryKey, dictionary);
+            compileInfoFacts_->RecordLoadedConstantProperty(jsFunc, targetIndexKey, targetIndex);
+        }
         ValueVertex *result =
             self->NewVertex<LoadTaggedElementVertex>(compileInfoFacts_, currentBlock, {dictionary, targetIndex});
         frameState.SetAcc(result);
