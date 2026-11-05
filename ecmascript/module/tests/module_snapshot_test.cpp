@@ -1297,7 +1297,7 @@ HWTEST_F_L0(ModuleSnapshotTest, SerializeDataAndPostSavingJobNormal)
     // Call the real SerializeDataAndPostSavingJob
     ModuleSnapshot::SerializeDataAndPostSavingJob(vm, path, version);
     // Wait briefly for the async task to complete
-    usleep(500000); // 500ms
+    usleep(2000000); // 2s
     // The file should be created by the async task
     ASSERT_TRUE(FileExist(fileName.c_str()));
 }

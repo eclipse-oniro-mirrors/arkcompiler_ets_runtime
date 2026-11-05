@@ -12,6 +12,3 @@ obj/arkcompiler/ets_runtime/ecmascript/arksteed/unittests/ArkSteedInitialization
 obj/arkcompiler/ets_runtime/ecmascript/arksteed/unittests/ArkSteedDeoptTranslationTest
 obj/arkcompiler/ets_runtime/ecmascript/arksteed/unittests/ArkSteedGraphVerifierTest
 obj/arkcompiler/ets_runtime/ecmascript/arksteed/unittests/ArkSteedHeapRefTest
-
-#workitem 47
-obj/arkcompiler/ets_runtime/ecmascript/module/tests/ModuleTest
