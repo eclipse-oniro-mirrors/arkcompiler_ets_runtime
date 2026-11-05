@@ -1116,6 +1116,7 @@ public:
     bool IsNative(const EcmaVM *vm);
     void SetData(const EcmaVM *vm, void *data, NativePointerCallback deleter = nullptr, bool callNapi = false);
     void* GetData(const EcmaVM *vm);
+    bool IsNapiFunction(const EcmaVM *vm);
 };
 
 class PUBLIC_API PrimitiveRef : public JSValueRef {

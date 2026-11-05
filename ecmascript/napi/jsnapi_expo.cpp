@@ -4456,7 +4456,7 @@ bool FunctionRef::IsNative(const EcmaVM *vm)
     return method->IsNativeWithCallField();
 }
 
-void FunctionRef::SetData(const EcmaVM *vm, void *data, NativePointerCallback deleter, [[maybe_unused]] bool callNapi)
+void FunctionRef::SetData(const EcmaVM *vm, void *data, NativePointerCallback deleter, bool callNapi)
 {
     CROSS_THREAD_AND_EXCEPTION_CHECK(vm);
     ecmascript::ThreadManagedScope managedScope(thread);
@@ -4467,6 +4467,7 @@ void FunctionRef::SetData(const EcmaVM *vm, void *data, NativePointerCallback de
     } else {
         JSFunction::SetFunctionExtraInfo(thread, function, nullptr, deleter, data, 0);
     }
+    function->SetCallNapi(callNapi);
 }
 
 void* FunctionRef::GetData(const EcmaVM *vm)
@@ -4481,6 +4482,15 @@ void* FunctionRef::GetData(const EcmaVM *vm)
     }
     auto extraInfo = JSNativePointer::Cast(extraInfoValue.GetTaggedObject());
     return extraInfo->GetData();
+}
+
+bool FunctionRef::IsNapiFunction(const EcmaVM *vm)
+{
+    CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, false);
+    ecmascript::ThreadManagedScope managedScope(thread);
+    JSHandle<JSTaggedValue> funcValue = JSNApiHelper::ToJSHandle(this);
+    JSHandle<JSFunction> function(funcValue);
+    return function->IsCallNapi();
 }
 
 // ----------------------------------- ArrayRef ----------------------------------------
