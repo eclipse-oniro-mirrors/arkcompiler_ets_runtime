@@ -4689,7 +4689,11 @@ inline GateRef StubBuilder::IsResolvedBinding(GateRef glue, GateRef resolvedBind
 inline GateRef StubBuilder::IsResolvedRecordIndexBinding(GateRef glue, GateRef resolvedBinding)
 {
     GateRef objectType = GetObjectType(LoadHClass(glue, resolvedBinding));
-    return Int32Equal(objectType, Int32(static_cast<int32_t>(JSType::RESOLVEDRECORDINDEXBINDING_RECORD)));
+    GateRef isBase = Int32Equal(objectType,
+        Int32(static_cast<int32_t>(JSType::RESOLVEDRECORDINDEXBINDING_RECORD)));
+    GateRef isNative = Int32Equal(objectType,
+        Int32(static_cast<int32_t>(JSType::RESOLVEDNATIVERECORDBINDING_RECORD)));
+    return BitOr(isBase, isNative);
 }
 
 inline GateRef StubBuilder::IsResolvedRecordBinding(GateRef glue, GateRef resolvedBinding)

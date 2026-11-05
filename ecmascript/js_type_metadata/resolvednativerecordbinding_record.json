@@ -1,0 +1,15 @@
+{
+    "name": "RESOLVEDNATIVERECORDBINDING_RECORD",
+    "node_name": "ResolvedNativeRecordBinding",
+    "offsets": [
+        {
+            "name": "BindingName",
+            "offset": 0,
+            "size": 8
+        }
+    ],
+    "end_offset": 8,
+    "parents": [
+        "RESOLVEDRECORDINDEXBINDING_RECORD"
+    ]
+}

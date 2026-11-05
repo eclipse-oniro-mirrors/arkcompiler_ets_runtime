@@ -814,6 +814,9 @@ public:
             case JSType::RESOLVEDRECORDINDEXBINDING_RECORD:
                 ResolvedRecordIndexBinding::Cast(object)->VisitRangeSlot<visitType>(visitor);
                 break;
+            case JSType::RESOLVEDNATIVERECORDBINDING_RECORD:
+                ResolvedNativeRecordBinding::Cast(object)->VisitRangeSlot<visitType>(visitor);
+                break;
             case JSType::RESOLVEDRECORDBINDING_RECORD:
                 ResolvedRecordBinding::Cast(object)->VisitRangeSlot<visitType>(visitor);
                 break;

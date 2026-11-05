@@ -117,6 +117,8 @@ JSHandle<TaggedArray> SendableClassModule::CloneModuleEnvironment(JSThread *thre
                     break;
                 case JSType::RESOLVEDRECORDBINDING_RECORD:
                     break;
+                case JSType::RESOLVEDNATIVERECORDBINDING_RECORD:
+                    break;
                 default:
                     LOG_FULL(FATAL) << "UNREACHABLE";
             }

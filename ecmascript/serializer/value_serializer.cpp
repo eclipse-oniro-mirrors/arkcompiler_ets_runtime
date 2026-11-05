@@ -316,6 +316,11 @@ void ValueSerializer::SerializeObjectImpl(TaggedObject *object, bool isWeak, boo
             }
             break;
         }
+        case JSType::RESOLVEDNATIVERECORDBINDING_RECORD: {
+            LOG_ECMA(ERROR) << "ResolvedNativeRecordBinding must be restored before serialization";
+            notSupport_ = true;
+            return;
+        }
         default:
             break;
     }

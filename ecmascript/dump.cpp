@@ -471,6 +471,8 @@ CString JSHClass::DumpJSType(JSType type)
             return "ResolvedIndexBindingRecord";
         case JSType::RESOLVEDRECORDINDEXBINDING_RECORD:
             return "ResolvedRecordIndexBindingRecord";
+        case JSType::RESOLVEDNATIVERECORDBINDING_RECORD:
+            return "ResolvedNativeRecordBindingRecord";
         case JSType::RESOLVEDRECORDBINDING_RECORD:
             return "ResolvedRecordBindingRecord";
         case JSType::IMPORTENTRY_RECORD:
@@ -1253,6 +1255,9 @@ static void DumpObject(const JSThread *thread, TaggedObject *obj, std::ostream &
             break;
         case JSType::RESOLVEDRECORDINDEXBINDING_RECORD:
             ResolvedRecordIndexBinding::Cast(obj)->Dump(thread, os);
+            break;
+        case JSType::RESOLVEDNATIVERECORDBINDING_RECORD:
+            ResolvedNativeRecordBinding::Cast(obj)->Dump(thread, os);
             break;
         case JSType::RESOLVEDRECORDBINDING_RECORD:
             ResolvedRecordBinding::Cast(obj)->Dump(thread, os);
@@ -3949,6 +3954,14 @@ void ResolvedRecordIndexBinding::Dump(const JSThread *thread, std::ostream &os) 
     os << "\n";
 }
 
+void ResolvedNativeRecordBinding::Dump(const JSThread *thread, std::ostream &os) const
+{
+    ResolvedRecordIndexBinding::Dump(thread, os);
+    os << " - BindingName: ";
+    GetBindingName(thread).Dump(thread, os);
+    os << "\n";
+}
+
 void ResolvedRecordBinding::Dump(const JSThread *thread, std::ostream &os) const
 {
     os << " - Module: ";
@@ -4618,6 +4631,9 @@ static void DumpObject(const JSThread *thread, TaggedObject *obj, std::vector<Re
             break;
         case JSType::RESOLVEDRECORDINDEXBINDING_RECORD:
             ResolvedRecordIndexBinding::Cast(obj)->DumpForSnapshot(thread, vec);
+            break;
+        case JSType::RESOLVEDNATIVERECORDBINDING_RECORD:
+            ResolvedNativeRecordBinding::Cast(obj)->DumpForSnapshot(thread, vec);
             break;
         case JSType::RESOLVEDRECORDBINDING_RECORD:
             ResolvedRecordBinding::Cast(obj)->DumpForSnapshot(thread, vec);
@@ -6323,6 +6339,12 @@ void ResolvedRecordIndexBinding::DumpForSnapshot(const JSThread *thread, std::ve
     vec.emplace_back(CString("Index"), JSTaggedValue(GetIndex()));
     vec.emplace_back(CString("IsUpdatedFromResolvedRecordBinding"),
                      JSTaggedValue(GetIsUpdatedFromResolvedRecordBinding()));
+}
+
+void ResolvedNativeRecordBinding::DumpForSnapshot(const JSThread *thread, std::vector<Reference> &vec) const
+{
+    ResolvedRecordIndexBinding::DumpForSnapshot(thread, vec);
+    vec.emplace_back(CString("BindingName"), GetBindingName(thread));
 }
 
 void ResolvedRecordBinding::DumpForSnapshot(const JSThread *thread, std::vector<Reference> &vec) const

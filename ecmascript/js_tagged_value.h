@@ -761,6 +761,7 @@ public:
     bool IsResolvedBinding() const;
     bool IsResolvedIndexBinding() const;
     bool IsResolvedRecordIndexBinding() const;
+    bool IsResolvedNativeRecordBinding() const;
     bool IsResolvedRecordBinding() const;
     bool IsModuleNamespace() const;
     bool IsNativeModuleFailureInfo() const;

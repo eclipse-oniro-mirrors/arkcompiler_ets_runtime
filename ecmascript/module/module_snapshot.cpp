@@ -33,7 +33,16 @@ void RestoreEnvironmentBinding(JSThread *thread, const JSHandle<SourceTextModule
 {
     [[maybe_unused]] EcmaHandleScope handleScope(thread);
     JSTaggedValue binding = environment->Get(thread, bindingIdx);
-    if (binding.IsResolvedIndexBinding() &&
+    if (binding.IsResolvedNativeRecordBinding()) {
+        JSHandle<ResolvedNativeRecordBinding> nativeBinding(thread, binding);
+        const CString *moduleRecord = nativeBinding->GetModuleRecordName();
+        ASSERT(moduleRecord != nullptr);
+        JSHandle<JSTaggedValue> bindingName(thread, nativeBinding->GetBindingName(thread));
+        ASSERT(bindingName->IsString());
+        JSHandle<ResolvedRecordBinding> restored =
+            thread->GetEcmaVM()->GetFactory()->NewSResolvedRecordBindingRecord(*moduleRecord, bindingName);
+        environment->Set(thread, bindingIdx, restored);
+    } else if (binding.IsResolvedIndexBinding() &&
         ResolvedIndexBinding::Cast(binding)->GetIsUpdatedFromResolvedBinding()) {
         JSHandle<ResolvedIndexBinding> indexBinding(thread, binding);
         bool isShared = SourceTextModule::IsSharedModule(module);
@@ -43,9 +52,8 @@ void RestoreEnvironmentBinding(JSThread *thread, const JSHandle<SourceTextModule
     } else if (binding.IsResolvedRecordIndexBinding() &&
         ResolvedRecordIndexBinding::Cast(binding)->GetIsUpdatedFromResolvedRecordBinding()) {
         JSHandle<ResolvedRecordIndexBinding> recordIndexBinding(thread, binding);
-        bool isMergedAbc = !module->GetEcmaModuleRecordNameString().empty();
         JSHandle<JSTaggedValue> nameBinding =
-            SourceTextModule::CreateBindingByRecordIndexBinding(thread, recordIndexBinding, isMergedAbc);
+            SourceTextModule::CreateBindingByRecordIndexBinding(thread, recordIndexBinding);
         environment->Set(thread, bindingIdx, nameBinding);
     }
 }
