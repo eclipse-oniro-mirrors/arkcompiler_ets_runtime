@@ -272,7 +272,7 @@ protected:
 
     inline void CheckValueInput(uint32_t index, ValueRepresentation expectedRepr) const
     {
-        const ValueVertex *input = this->GetInput(index);
+        [[maybe_unused]] const ValueVertex *input = this->GetInput(index);
         ASSERT(input != nullptr);
         ASSERT(input->GetValueRepresentation() == expectedRepr);
     }
@@ -1949,7 +1949,7 @@ public:
                        && "Allocation requires a tagged HClass");
             }
             if (auto* constant = GetInput(0)->TryCast<TaggedConstantVertex>()) {
-                auto size = JSTaggedValue(constant->GetValue());
+                [[maybe_unused]] auto size = JSTaggedValue(constant->GetValue());
                 ASSERT(size.IsInt());
                 ASSERT(size.GetLargeUInt() >= TaggedArray::DATA_OFFSET
                        && size.GetLargeUInt() % JSTaggedValue::TaggedTypeSize() == 0);

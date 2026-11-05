@@ -662,7 +662,7 @@ TEST_F(ArkSteedFeedbackReaderTest, NamedAccessRefusesOverflowMegaAndUnmaterializ
             ASSERT_TRUE(first.IsUndefined()) << SlotText(first);
         }
 
-        RunOnJitThread([this, &method, site, slot, &state] {
+        RunOnJitThread([this, &method, site, &state] {
             ArkSteedFeedbackReader reader(CompilerThread(), site, method.broker);
             NamedAccessFeedback feedback {};
             bool read = true;
@@ -730,7 +730,7 @@ TEST_F(ArkSteedFeedbackReaderTest, ValueAndElementAccessStates)
     ASSERT_TRUE(ProfileOf(empty)->GetICSlot(HostThread(), emptySlot).IsUndefined());
 
     RunOnJitThread([this, &mono, monoSite, monoSlot, monoExpected, &poly, polySite, polySlot, polyExpected, &empty,
-                    emptySite, emptySlot] {
+                    emptySite] {
         // Element access reader on the mono pair.
         {
             ArkSteedFeedbackReader reader(CompilerThread(), monoSite, mono.broker);
@@ -1079,7 +1079,7 @@ TEST_F(ArkSteedFeedbackReaderTest, RepeatedReadsAndImmediateLiteralAreStable)
     ASSERT_TRUE(std::holds_alternative<kungfu::Immediate>(immediateSite->inputs[0]))
         << "the first input of the fixture immediate site is not an immediate";
 
-    RunOnJitThread([this, &method, site, slot, expected, &linear, immediateSite] {
+    RunOnJitThread([this, &method, site, expected, &linear, immediateSite] {
         NamedAccessFeedback first {};
         NamedAccessFeedback second {};
         {

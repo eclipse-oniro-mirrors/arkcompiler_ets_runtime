@@ -818,7 +818,6 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, CompileInfoFactsCloneVariants)
     ValueVertex *withoutInfo = fixture.Int32(8);
     ValueVertex *receiver = fixture.Int32(9);
     ValueVertex *value = fixture.Int32(10);
-    ValueVertex *constant = fixture.Int32(11);
     ValueVertex *env = fixture.NewInitialValue();
     CompileInfoFacts::ExpressionInputs inputs = fixture.Inputs({receiver, value});
     CompileInfoFacts::ExpressionOptions options = fixture.Options(1);
