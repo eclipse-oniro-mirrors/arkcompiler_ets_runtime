@@ -141,7 +141,8 @@
 //! HAS_NOT Call
 
 //! METHOD callRestAfterEagerDeopt
-//! COUNT DeoptIfTaggedCondition 6
+// Repeated rest-element loads share their successful hole check.
+//! COUNT DeoptIfTaggedCondition 5
 //! HAS_NOT CallKnownJSFunction
 //! HAS_NOT Call
 
@@ -272,7 +273,8 @@
 //! HAS_NOT Call
 
 //! METHOD callCumulativeBudget
-//! COUNT DeoptIfTaggedCondition 2
+// The repeated inlined callee shares its successful check.
+//! COUNT DeoptIfTaggedCondition 1
 //! COUNT CallKnownJSFunction 2
 //! HAS_NOT Call
 

@@ -13,16 +13,12 @@
  * limitations under the License.
  */
 
-// Core DCE removal evidence: ordinary compilation removes the dead
-// `RemovableValue` arithmetic results of four methods while the `Required`
-// checked-arithmetic guards stay. The guard assertions prove that the dead
-// computation really reached the graph (so the removal witness is not vacuous)
-// and the `HAS_NOT`/`COUNT` assertion is the final-IR absence of the removed
-// `I32ToTaggedInt` tagged result. IR-level behavior is anchored by the C++
-// fixtures of the `ArkSteedDceTest` domain, which assert the same closure on
-// exact graphs; the independent oracle here is the hand-computed arithmetic
-// semantics (the interpreter twin `dce_dead_arithmetic_value_interp_twin`
-// prints the same constants with the JIT disabled).
+// Dead arithmetic coverage combines graph-builder skipping with DCE. Once the
+// operands are known numeric, unused consumers can be skipped before IR creation.
+// The first checked addition still establishes the numeric facts, while its tagged
+// result survives only when returned. Compile/execute and no-deopt witnesses keep
+// the final-IR checks tied to optimized execution; the interpreter twin retains
+// the independent expected-output oracle.
 
 //! PARAMS --compiler-jit-hotness-threshold=60000
 
@@ -34,32 +30,28 @@
 //! COMPILE_COUNT dce_dead_value 1
 //! EXEC_COUNT_GE *dce_dead_value* 1
 
-// Dead chain: the checked multiplication consumes the raw addition result.
-// Its eager frame recovers `dead0` with INT32_TO_TAGGED, so neither arithmetic
-// result needs an I32ToTaggedInt node. Both checked guards must remain.
+// The numeric dead multiplication is skipped during graph building, leaving
+// the checked addition but no tagged arithmetic result.
 //! METHOD dce_dead_chain
 //! HAS I32AddWithOverflow
-//! HAS I32MulWithOverflow
+//! HAS_NOT I32MulWithOverflow
 //! HAS_NOT I32ToTaggedInt
 //! COMPILE_COUNT dce_dead_chain 1
 //! EXEC_COUNT_GE *dce_dead_chain* 1
 
-// Shared live operand: the returned `shared` value and its dead consumer both
-// use the same producer, so the live tagged result survives and only the dead
-// consumer's tagged result is removed (one `I32ToTaggedInt` instead of two).
+// The dead numeric subtraction is skipped; the returned sum keeps its tagged result.
 //! METHOD dce_shared_live_operand
 //! HAS I32AddWithOverflow
-//! HAS I32SubWithOverflow
+//! HAS_NOT I32SubWithOverflow
 //! COUNT I32ToTaggedInt 1
 //! COMPILE_COUNT dce_shared_live_operand 1
 //! EXEC_COUNT_GE *dce_shared_live_operand* 1
 
-// Dead consumer exposing a dead producer: the multiplication's eager frame
-// recovers `producer` directly from the raw int32 result. Both tagged wrappers
-// are dead, but the checked addition and multiplication must remain.
+// Skipping the dead multiplication also removes its frame-state use of the
+// producer's tagged result; only the checked addition remains.
 //! METHOD dce_exposed_dead_producer
 //! HAS I32AddWithOverflow
-//! HAS I32MulWithOverflow
+//! HAS_NOT I32MulWithOverflow
 //! HAS_NOT I32ToTaggedInt
 //! COMPILE_COUNT dce_exposed_dead_producer 1
 //! EXEC_COUNT_GE *dce_exposed_dead_producer* 1

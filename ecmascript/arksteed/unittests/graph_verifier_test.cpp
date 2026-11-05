@@ -22,9 +22,12 @@
 #include "ecmascript/mem/native_area_allocator.h"
 #include "ecmascript/tests/test_helper.h"
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <initializer_list>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -681,6 +684,51 @@ protected:
     }
 #endif
 };
+
+/**
+ * @tc.name: ArkSteedGraphVerifierTest.ConstantInterningKeepsCanonicalIdentityAndKeyOrder
+ * @tc.desc: constant pools reuse canonical vertices and retain key ordering,
+ *           including integer boundaries, signed zero and a repeated NaN bit pattern.
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ArkSteedGraphVerifierTest, ConstantInterningKeepsCanonicalIdentityAndKeyOrder)
+{
+    Graph graph {&chunk_};
+    std::array<int32_t, 8> keys {
+        128, -1, 127, 0, 15, 1, std::numeric_limits<int32_t>::min(), std::numeric_limits<int32_t>::max()};
+    std::array<ValueVertex *, 8> first {};
+    for (size_t index = 0; index < keys.size(); ++index) {
+        first[index] = graph.GetInt32Constant(keys[index]);
+    }
+    for (size_t index = keys.size(); index != 0; --index) {
+        EXPECT_EQ(graph.GetInt32Constant(keys[index - 1U]), first[index - 1U]);
+    }
+    EXPECT_EQ(graph.GetInt32Constants().size(), keys.size());
+
+    std::sort(keys.begin(), keys.end());
+    size_t index = 0;
+    for (const auto &[key, vertex] : graph.GetInt32Constants()) {
+        ASSERT_LT(index, keys.size());
+        EXPECT_EQ(key, keys[index++]);
+        EXPECT_EQ(graph.GetInt32Constant(key), vertex);
+    }
+    EXPECT_EQ(index, keys.size());
+
+    auto *positiveZero = graph.GetFloat64Constant(0.0);
+    auto *negativeZero = graph.GetFloat64Constant(-0.0);
+    EXPECT_NE(positiveZero, negativeZero);
+    EXPECT_EQ(graph.GetFloat64Constant(0.0), positiveZero);
+    EXPECT_EQ(graph.GetFloat64Constant(-0.0), negativeZero);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_EQ(graph.GetFloat64Constant(nan), graph.GetFloat64Constant(nan));
+    EXPECT_EQ(graph.GetFloat64Constants().size(), 3U);
+
+    auto *minimum = graph.GetInt64Constant(std::numeric_limits<int64_t>::min());
+    auto *maximum = graph.GetInt64Constant(std::numeric_limits<int64_t>::max());
+    EXPECT_EQ(graph.GetInt64Constant(std::numeric_limits<int64_t>::min()), minimum);
+    EXPECT_EQ(graph.GetInt64Constant(std::numeric_limits<int64_t>::max()), maximum);
+    EXPECT_EQ(graph.GetInt64Constants().size(), 2U);
+}
 
 /**
  * @tc.name: ArkSteedGraphVerifierTest.ValidGraphPassesEveryProcessorStageWithoutMutation

@@ -202,6 +202,8 @@ struct DeoptTranslation {
 class PUBLIC_API DeoptTranslationBuilder {
 public:
     DeoptId AddTranslation(uint32_t bytecodeOffset, kungfu::DeoptType type, std::vector<DeoptTranslationInput> inputs);
+    uint32_t GetOrAddBody(uint32_t bytecodeOffset, std::vector<DeoptTranslationInput> inputs);
+    DeoptId AddTranslationForBody(uint32_t bodyId, kungfu::DeoptType type);
     std::vector<uint8_t> Encode() const;
 
 private:

@@ -98,6 +98,9 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(I32ConditionCheck)                        \
     V(F64ConditionCheck)                        \
     V(Float64ToBoolean)                         \
+    V(NumberToBoolean)                          \
+    V(DoubleToBoolean)                          \
+    V(StringToBoolean)                          \
     V(TaggedNumberToBoolean)                    \
     V(TaggedDoubleToBoolean)                    \
     V(TaggedEqual)                              \
@@ -126,11 +129,13 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(CheckedNonNegativeI32ToTaggedInt)         \
     V(I32BNot)                                  \
     V(I32NegWithOverflow)                       \
+    V(I32Inc)                                   \
     V(I32IncWithOverflow)                       \
     V(I32DecWithOverflow)                       \
     V(U32ToF64)                                \
     V(I32ToF64)                                 \
     V(I32ToI64)                                 \
+    V(TaggedDoubleToF64)                        \
     V(TaggedNumberToF64)                       \
     V(CheckedNumberToF64)                       \
     V(CheckedF64ToI32)                         \

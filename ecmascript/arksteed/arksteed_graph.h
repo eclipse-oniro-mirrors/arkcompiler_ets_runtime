@@ -72,14 +72,7 @@ public:
     ValueVertex *GetFloat64Constant(double value)
     {
         // Preserve NaN payloads and distinguish +0 from -0.
-        uint64_t bits = base::bit_cast<uint64_t>(value);
-        auto it = float64Constants_.find(bits);
-        if (it != float64Constants_.end()) {
-            return it->second;
-        }
-        auto *vertex = Vertex::New<Float64ConstantVertex>(chunk_, 0, value);
-        float64Constants_.emplace(bits, vertex);
-        return vertex;
+        return GetOrAddNewConstantVertex(float64Constants_, base::bit_cast<uint64_t>(value), value);
     }
 
     ValueVertex *GetTaggedConstant(uint64_t value)
@@ -89,13 +82,13 @@ public:
 
     ValueVertex *GetHeapConstant(uint32_t handleIndex, uint16_t staticNodeType)
     {
-        auto it = heapConstants_.find(handleIndex);
-        if (it != heapConstants_.end()) {
+        auto it = heapConstants_.lower_bound(handleIndex);
+        if (it != heapConstants_.end() && it->first == handleIndex) {
             ASSERT(it->second->GetStaticNodeType() == staticNodeType);
             return it->second;
         }
         HeapConstantVertex *vertex = Vertex::New<HeapConstantVertex>(chunk_, 0, handleIndex, staticNodeType);
-        heapConstants_.emplace(handleIndex, vertex);
+        heapConstants_.emplace_hint(it, handleIndex, vertex);
         return vertex;
     }
 
@@ -319,12 +312,18 @@ private:
     template <typename VertexT, typename T>
     VertexT *GetOrAddNewConstantVertex(ChunkMap<T, VertexT *> &container, T constant)
     {
-        auto it = container.find(constant);
-        if (it != container.end()) {
+        return GetOrAddNewConstantVertex(container, constant, constant);
+    }
+
+    template <typename VertexT, typename KeyT, typename ValueT>
+    VertexT *GetOrAddNewConstantVertex(ChunkMap<KeyT, VertexT *> &container, const KeyT &key, ValueT constant)
+    {
+        auto it = container.lower_bound(key);
+        if (it != container.end() && !container.key_comp()(key, it->first)) {
             return it->second;
         }
         VertexT *vertex = Vertex::New<VertexT>(chunk_, 0, constant);
-        container.emplace(constant, vertex);
+        container.emplace_hint(it, key, vertex);
         return vertex;
     }
 

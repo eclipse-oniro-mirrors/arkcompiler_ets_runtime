@@ -26,10 +26,10 @@
 //! METHOD float64Loop
 //! HAS Phi
 //! HAS F64ToTaggedDouble
-//! COUNT CheckedNumberToF64 2
+//! COUNT CheckedNumberToF64 1
 //! METHOD float64StoreLoop
 //! HAS Phi
-//! COUNT CheckedNumberToF64 2
+//! COUNT CheckedNumberToF64 1
 //! HAS_NOT F64ToTaggedDouble
 //! METHOD float64CallLoop
 //! HAS Phi

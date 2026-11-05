@@ -16,7 +16,6 @@
 #include "ecmascript/arksteed/arksteed_compile_info_facts.h"
 
 #include <algorithm>
-#include <tuple>
 
 #include "ecmascript/arksteed/arksteed_opcode.h"
 #include "ecmascript/arksteed/arksteed_loop_effects.h"
@@ -145,6 +144,58 @@ void AlternativeNodes::MergeWith(const AlternativeNodes &other)
     }
 }
 
+NodeInfo::NodeInfo(Chunk *chunk, const NodeInfo &other)
+    : type_(other.type_),
+      nonHole_(other.nonHole_),
+      possibleHClassesAreStale_(other.possibleHClassesAreStale_),
+      alternatives_(other.alternatives_),
+      truthinessResults_(other.truthinessResults_),
+      chunk_(chunk),
+      possibleHClasses_(chunk)
+{
+    if (other.sharedHClasses_ != nullptr && other.chunk_ == chunk) {
+        sharedHClasses_ = other.sharedHClasses_;
+    } else {
+        const auto &classes = other.GetHClassStorage();
+        possibleHClasses_.assign(classes.begin(), classes.end());
+    }
+}
+
+NodeInfo NodeInfo::CopyForUpdate(const NodeInfo &stored)
+{
+    NodeInfo info(stored.chunk_);
+    info.type_ = stored.type_;
+    info.nonHole_ = stored.nonHole_;
+    info.alternatives_ = stored.alternatives_;
+    info.truthinessResults_ = stored.truthinessResults_;
+    info.sharedHClasses_ = &stored.GetHClassStorage();
+    info.possibleHClassesAreStale_ = stored.possibleHClassesAreStale_;
+    return info;
+}
+
+void NodeInfo::EnsureWritableHClasses()
+{
+    if (sharedHClasses_ == nullptr) {
+        return;
+    }
+    possibleHClasses_.assign(sharedHClasses_->begin(), sharedHClasses_->end());
+    sharedHClasses_ = nullptr;
+}
+
+bool NodeInfo::IsSameAs(const NodeInfo &other, bool effectiveStale) const
+{
+    if (type_ != other.type_ || nonHole_ != other.nonHole_ || !(alternatives_ == other.alternatives_) ||
+        truthinessResults_ != other.truthinessResults_ || effectiveStale != other.possibleHClassesAreStale_) {
+        return false;
+    }
+    const auto &left = GetHClassStorage();
+    const auto &right = other.GetHClassStorage();
+    return &left == &right || (left.size() == right.size() &&
+                               std::equal(left.begin(), left.end(), right.begin(), [](const auto &a, const auto &b) {
+                                   return a.hclass.Equals(b.hclass) && a.isStable == b.isStable;
+                               }));
+}
+
 NodeInfo::PossibleHClasses NodeInfo::GetFreshPossibleHClasses() const
 {
     if (!HasFreshPossibleHClasses()) {
@@ -156,8 +207,8 @@ NodeInfo::PossibleHClasses NodeInfo::GetFreshPossibleHClasses() const
 NodeInfo::PossibleHClasses NodeInfo::GetPossibleHClassesForRevalidation() const
 {
     PossibleHClasses result;
-    result.reserve(possibleHClasses_.size());
-    for (const auto &info : possibleHClasses_) {
+    result.reserve(GetHClassStorage().size());
+    for (const auto &info : GetHClassStorage()) {
         result.push_back(info.hclass);
     }
     return result;
@@ -165,20 +216,20 @@ NodeInfo::PossibleHClasses NodeInfo::GetPossibleHClassesForRevalidation() const
 
 bool NodeInfo::HasUnstablePossibleHClass() const
 {
-    return std::any_of(possibleHClasses_.begin(), possibleHClasses_.end(),
-                       [](const PossibleHClassInfo &info) { return !info.isStable; });
+    const auto &classes = GetHClassStorage();
+    return std::any_of(classes.begin(), classes.end(), [](const PossibleHClassInfo &info) { return !info.isStable; });
 }
 
 bool NodeInfo::ContainsPossibleHClass(ArkSteedHClassRef hclass) const
 {
-    return std::any_of(possibleHClasses_.begin(), possibleHClasses_.end(),
+    const auto &classes = GetHClassStorage();
+    return std::any_of(classes.begin(), classes.end(),
                        [hclass](const PossibleHClassInfo &info) { return info.hclass.Equals(hclass); });
 }
 
 void NodeInfo::RecordHClass(ArkSteedHClassRef hclass, bool isStable)
 {
-    possibleHClasses_.clear();
-    possibleHClassesAreStale_ = false;
+    ClearPossibleHClasses();
     AddPossibleHClass(hclass, isStable);
     IntersectTypeWithPossibleHClasses();
     CheckPossibleHClassInvariants();
@@ -186,8 +237,7 @@ void NodeInfo::RecordHClass(ArkSteedHClassRef hclass, bool isStable)
 
 void NodeInfo::RecordPossibleHClasses(const PossibleHClasses &hclasses, bool isStable)
 {
-    possibleHClasses_.clear();
-    possibleHClassesAreStale_ = false;
+    ClearPossibleHClasses();
     for (ArkSteedHClassRef hclass : hclasses) {
         AddPossibleHClass(hclass, isStable);
     }
@@ -197,8 +247,7 @@ void NodeInfo::RecordPossibleHClasses(const PossibleHClasses &hclasses, bool isS
 
 void NodeInfo::RecordPossibleHClasses(const PossibleHClassInfos &hclasses)
 {
-    possibleHClasses_.clear();
-    possibleHClassesAreStale_ = false;
+    ClearPossibleHClasses();
     for (const PossibleHClassInfo &info : hclasses) {
         AddPossibleHClass(info.hclass, info.isStable);
     }
@@ -209,13 +258,17 @@ void NodeInfo::RecordPossibleHClasses(const PossibleHClassInfos &hclasses)
 bool NodeInfo::NarrowPossibleHClasses(const PossibleHClasses &hclasses)
 {
     ASSERT(HasFreshPossibleHClasses());
-    possibleHClasses_.erase(
-        std::remove_if(possibleHClasses_.begin(), possibleHClasses_.end(), [&hclasses](const auto &info) {
-            return std::none_of(hclasses.begin(), hclasses.end(),
-                [&info](ArkSteedHClassRef hclass) { return info.hclass.Equals(hclass); });
-        }),
-        possibleHClasses_.end());
-    if (possibleHClasses_.empty()) {
+    auto isRemoved = [&hclasses](const auto &info) {
+        return std::none_of(hclasses.begin(), hclasses.end(),
+                            [&info](ArkSteedHClassRef hclass) { return info.hclass.Equals(hclass); });
+    };
+    const auto &classes = GetHClassStorage();
+    if (std::any_of(classes.begin(), classes.end(), isRemoved)) {
+        EnsureWritableHClasses();
+        possibleHClasses_.erase(std::remove_if(possibleHClasses_.begin(), possibleHClasses_.end(), isRemoved),
+                                possibleHClasses_.end());
+    }
+    if (GetHClassStorage().empty()) {
         possibleHClassesAreStale_ = false;
         CheckPossibleHClassInvariants();
         return false;
@@ -227,6 +280,7 @@ bool NodeInfo::NarrowPossibleHClasses(const PossibleHClasses &hclasses)
 
 void NodeInfo::ClearPossibleHClasses()
 {
+    sharedHClasses_ = nullptr;
     possibleHClasses_.clear();
     possibleHClassesAreStale_ = false;
     CheckPossibleHClassInvariants();
@@ -245,14 +299,25 @@ void NodeInfo::MarkHClassesStaleForElementsKindTransition(const PossibleHClasses
     if (!HasFreshPossibleHClasses()) {
         return;
     }
+    auto matches = [&sourceHClasses](const auto &info) {
+        return std::any_of(sourceHClasses.begin(), sourceHClasses.end(),
+                           [&info](ArkSteedHClassRef source) { return info.hclass.Equals(source); });
+    };
     bool containsMatchingHClass = false;
-    for (PossibleHClassInfo &info : possibleHClasses_) {
-        if (std::none_of(sourceHClasses.begin(), sourceHClasses.end(),
-                         [&info](ArkSteedHClassRef source) { return info.hclass.Equals(source); })) {
-            continue;
+    bool changesStability = false;
+    for (const auto &info : GetHClassStorage()) {
+        if (matches(info)) {
+            containsMatchingHClass = true;
+            changesStability |= info.isStable;
         }
-        info.isStable = false;
-        containsMatchingHClass = true;
+    }
+    if (changesStability) {
+        EnsureWritableHClasses();
+        for (auto &info : possibleHClasses_) {
+            if (matches(info)) {
+                info.isStable = false;
+            }
+        }
     }
     if (containsMatchingHClass) {
         possibleHClassesAreStale_ = true;
@@ -262,7 +327,7 @@ void NodeInfo::MarkHClassesStaleForElementsKindTransition(const PossibleHClasses
 
 void NodeInfo::MarkPossibleHClassesFresh()
 {
-    ASSERT(!possibleHClasses_.empty());
+    ASSERT(!GetHClassStorage().empty());
     possibleHClassesAreStale_ = false;
     CheckPossibleHClassInvariants();
 }
@@ -270,12 +335,17 @@ void NodeInfo::MarkPossibleHClassesFresh()
 bool NodeInfo::MarkPossibleHClassStable(ArkSteedHClassRef hclass)
 {
     ASSERT(!possibleHClassesAreStale_);
-    auto it = std::find_if(possibleHClasses_.begin(), possibleHClasses_.end(),
+    const auto &classes = GetHClassStorage();
+    auto it = std::find_if(classes.begin(), classes.end(),
                            [hclass](const PossibleHClassInfo &info) { return info.hclass.Equals(hclass); });
-    if (it == possibleHClasses_.end()) {
+    if (it == classes.end()) {
         return false;
     }
-    it->isStable = true;
+    if (!it->isStable) {
+        size_t index = static_cast<size_t>(it - classes.begin());
+        EnsureWritableHClasses();
+        possibleHClasses_[index].isStable = true;
+    }
     CheckPossibleHClassInvariants();
     return true;
 }
@@ -285,9 +355,14 @@ bool NodeInfo::MergeWith(const NodeInfo &other)
     UnionType(other.type_);
     nonHole_ = nonHole_ && other.nonHole_;
     alternatives_.MergeWith(other.alternatives_);
+    for (size_t index = 0; index < truthinessResults_.size(); ++index) {
+        if (truthinessResults_[index] != other.truthinessResults_[index]) {
+            truthinessResults_[index] = nullptr;
+        }
+    }
     bool mergedHClassesAreStale = possibleHClassesAreStale_ || other.possibleHClassesAreStale_;
     UnionPossibleHClasses(other);
-    possibleHClassesAreStale_ = possibleHClasses_.empty() ? false : mergedHClassesAreStale;
+    possibleHClassesAreStale_ = GetHClassStorage().empty() ? false : mergedHClassesAreStale;
     CheckPossibleHClassInvariants();
     return !NoInfoAvailable();
 }
@@ -297,22 +372,28 @@ bool NodeInfo::IsCompatibleWith(const NodeInfo &expected) const
     if (!NodeTypeIs(type_, expected.type_)) {
         return false;
     }
+    for (size_t index = 0; index < truthinessResults_.size(); ++index) {
+        if (expected.truthinessResults_[index] != nullptr &&
+            truthinessResults_[index] != expected.truthinessResults_[index]) {
+            return false;
+        }
+    }
     if (expected.possibleHClassesAreStale_) {
         return true;
     }
-    bool expectedHasUnstableHClass = std::any_of(
-        expected.possibleHClasses_.begin(), expected.possibleHClasses_.end(),
-        [](const PossibleHClassInfo &info) { return !info.isStable; });
-    if (!expectedHasUnstableHClass) {
+    if (!expected.HasUnstablePossibleHClass()) {
         return true;
     }
-    if (possibleHClasses_.empty() || possibleHClassesAreStale_) {
+    if (GetHClassStorage().empty() || possibleHClassesAreStale_) {
         return false;
     }
-    for (const PossibleHClassInfo &actual : possibleHClasses_) {
-        auto expectedIt = std::find_if(expected.possibleHClasses_.begin(), expected.possibleHClasses_.end(),
-            [&actual](const PossibleHClassInfo &candidate) { return candidate.hclass.Equals(actual.hclass); });
-        if (expectedIt == expected.possibleHClasses_.end() || (expectedIt->isStable && !actual.isStable)) {
+    const auto &expectedClasses = expected.GetHClassStorage();
+    for (const PossibleHClassInfo &actual : GetHClassStorage()) {
+        auto expectedIt = std::find_if(expectedClasses.begin(), expectedClasses.end(),
+                                       [&actual](const PossibleHClassInfo &candidate) {
+                                           return candidate.hclass.Equals(actual.hclass);
+                                       });
+        if (expectedIt == expectedClasses.end() || (expectedIt->isStable && !actual.isStable)) {
             return false;
         }
     }
@@ -324,12 +405,18 @@ void NodeInfo::AddPossibleHClass(ArkSteedHClassRef hclass, bool isStable)
     if (!hclass.IsJSHClass()) {
         return;
     }
-    auto it = std::find_if(possibleHClasses_.begin(), possibleHClasses_.end(),
+    const auto &classes = GetHClassStorage();
+    auto it = std::find_if(classes.begin(), classes.end(),
                            [hclass](const PossibleHClassInfo &info) { return info.hclass.Equals(hclass); });
-    if (it != possibleHClasses_.end()) {
-        it->isStable = it->isStable && isStable;
+    if (it != classes.end()) {
+        if (it->isStable && !isStable) {
+            size_t index = static_cast<size_t>(it - classes.begin());
+            EnsureWritableHClasses();
+            possibleHClasses_[index].isStable = false;
+        }
         return;
     }
+    EnsureWritableHClasses();
     possibleHClasses_.push_back(PossibleHClassInfo {
         .hclass = hclass,
         .isStable = isStable,
@@ -338,13 +425,13 @@ void NodeInfo::AddPossibleHClass(ArkSteedHClassRef hclass, bool isStable)
 
 void NodeInfo::IntersectTypeWithPossibleHClasses()
 {
-    if (possibleHClasses_.empty()) {
+    if (GetHClassStorage().empty()) {
         return;
     }
     // Strings, symbols and bigints have HClasses too, but are not JS receivers.
     IntersectType(NodeType::ANY_HEAP_OBJECT);
     NodeType possibleType = NodeType::NONE;
-    for (const PossibleHClassInfo &info : possibleHClasses_) {
+    for (const PossibleHClassInfo &info : GetHClassStorage()) {
         possibleType = UnionNodeType(possibleType, NodeTypeFromHClass(info.hclass));
     }
     possibleType = IntersectNodeType(possibleType, NodeType::ANY_HEAP_OBJECT);
@@ -355,25 +442,23 @@ void NodeInfo::IntersectTypeWithPossibleHClasses()
 
 void NodeInfo::UnionPossibleHClasses(const NodeInfo &other)
 {
-    if (possibleHClasses_.empty() || other.possibleHClasses_.empty()) {
+    if (GetHClassStorage().empty() || other.GetHClassStorage().empty()) {
+        sharedHClasses_ = nullptr;
         possibleHClasses_.clear();
         return;
     }
-    for (const auto &otherInfo : other.possibleHClasses_) {
+    if (&GetHClassStorage() == &other.GetHClassStorage()) {
+        return;
+    }
+    for (const auto &otherInfo : other.GetHClassStorage()) {
         AddPossibleHClass(otherInfo.hclass, otherInfo.isStable);
     }
 }
 
 void NodeInfo::CheckPossibleHClassInvariants() const
 {
-    ASSERT(!possibleHClasses_.empty() || !possibleHClassesAreStale_);
+    ASSERT(!GetHClassStorage().empty() || !possibleHClassesAreStale_);
     ASSERT(!possibleHClassesAreStale_ || HasUnstablePossibleHClass());
-}
-
-bool LoadedPropertyKeyCompare::operator()(const LoadedPropertyKey &lhs, const LoadedPropertyKey &rhs) const
-{
-    return std::tie(lhs.receiver_, lhs.propertyKey_, lhs.propertyLookupResult_) <
-           std::tie(rhs.receiver_, rhs.propertyKey_, rhs.propertyLookupResult_);
 }
 
 CompileInfoFacts::CompileInfoFacts(Chunk *chunk)
@@ -383,7 +468,7 @@ CompileInfoFacts::CompileInfoFacts(Chunk *chunk)
       loadedConstantProperties_(chunk),
       loadedEnvSlots_(chunk),
       loadedEnvConstants_(chunk),
-      availableExpressions_(chunk)
+      cse_(chunk)
 {
     ASSERT(chunk_ != nullptr);
 }
@@ -391,133 +476,106 @@ CompileInfoFacts::CompileInfoFacts(Chunk *chunk)
 CompileInfoFacts *CompileInfoFacts::Clone() const
 {
     auto *copy = chunk_->New<CompileInfoFacts>(chunk_);
-    copy->nodeInfos_.insert(nodeInfos_.begin(), nodeInfos_.end());
-    copy->CopyLoadedProperties(copy->loadedProperties_, loadedProperties_);
-    copy->CopyLoadedProperties(copy->loadedConstantProperties_, loadedConstantProperties_);
-    copy->CopyEnvSlots(copy->loadedEnvSlots_, loadedEnvSlots_);
-    copy->CopyEnvSlots(copy->loadedEnvConstants_, loadedEnvConstants_);
-    for (const auto &entry : availableExpressions_) {
-        const AvailableExpression &expression = entry.second;
-        copy->availableExpressions_.emplace(entry.first, AvailableExpression {
-                                                             expression.node,
-                                                             expression.opcode,
-                                                             copy->CopyExpressionInputs(*expression.inputs),
-                                                             copy->CopyExpressionOptions(*expression.options),
-                                                             expression.effectEpoch,
-                                                         });
-    }
+    copy->nodeInfos_.CopyFrom(nodeInfos_);
+    copy->loadedProperties_.CopyFrom(loadedProperties_);
+    copy->loadedConstantProperties_.CopyFrom(loadedConstantProperties_);
+    copy->loadedEnvSlots_.CopyFrom(loadedEnvSlots_);
+    copy->loadedEnvConstants_.CopyFrom(loadedEnvConstants_);
+    copy->cse_.CopyFrom(cse_);
     copy->effectEpoch_ = effectEpoch_;
     copy->envSlotAliasMode_ = envSlotAliasMode_;
-    copy->freshUnstableHClassesRequireInvalidation_ = freshUnstableHClassesRequireInvalidation_;
+    copy->hclassGeneration_ = hclassGeneration_;
+    copy->mayHaveFreshUnstableHClasses_ = mayHaveFreshUnstableHClasses_;
     return copy;
 }
 
 CompileInfoFacts *CompileInfoFacts::CloneForLoopHeader() const
 {
-    auto *copy = chunk_->New<CompileInfoFacts>(chunk_);
-    copy->nodeInfos_.insert(nodeInfos_.begin(), nodeInfos_.end());
-    for (auto infoIt = copy->nodeInfos_.begin(); infoIt != copy->nodeInfos_.end();) {
-        infoIt->second.MarkUnstableHClassesStale();
-        if (infoIt->second.NoInfoAvailable()) {
-            infoIt = copy->nodeInfos_.erase(infoIt);
-        } else {
-            ++infoIt;
-        }
-    }
-    copy->CopyLoadedProperties(copy->loadedConstantProperties_, loadedConstantProperties_);
-    copy->CopyEnvSlots(copy->loadedEnvConstants_, loadedEnvConstants_);
-    copy->effectEpoch_ = effectEpoch_;
+    auto *copy = Clone();
+    copy->MarkAllFreshUnstableHClassesStale();
+    copy->nodeInfos_.TransformWithReuse(
+        [](ValueVertex *, const StoredNodeInfo *info) { return info->info.NoInfoAvailable() ? nullptr : info; },
+        [](const auto &metadata) { return !metadata.hasEmptyInfo; });
+    copy->loadedProperties_.Clear();
+    copy->loadedEnvSlots_.Clear();
     copy->IncrementEffectEpoch();
-    copy->CopyAvailableExpressionsForLoopHeader(*this);
+    copy->cse_.IntersectWith(copy->cse_, copy->effectEpoch_);
     copy->envSlotAliasMode_ = EnvSlotAliasMode::NONE;
-    copy->freshUnstableHClassesRequireInvalidation_ = false;
     return copy;
 }
 
 CompileInfoFacts *CompileInfoFacts::CloneForOptimisticLoopHeader(const LoopEffects &effects) const
 {
-    auto *copy = chunk_->New<CompileInfoFacts>(chunk_);
-    copy->nodeInfos_.insert(nodeInfos_.begin(), nodeInfos_.end());
+    auto *copy = Clone();
     if (effects.ClearsUnstableNodeInfo()) {
-        for (auto it = copy->nodeInfos_.begin(); it != copy->nodeInfos_.end();) {
-            it->second.MarkUnstableHClassesStale();
-            if (it->second.NoInfoAvailable()) {
-                it = copy->nodeInfos_.erase(it);
-            } else {
-                ++it;
-            }
-        }
+        copy->MarkAllFreshUnstableHClassesStale();
+        copy->nodeInfos_.TransformWithReuse(
+            [](ValueVertex *, const StoredNodeInfo *info) { return info->info.NoInfoAvailable() ? nullptr : info; },
+            [](const auto &metadata) { return !metadata.hasEmptyInfo; });
     }
 
-    for (const auto &entry : loadedProperties_) {
-        const LoadedPropertyKey &key = entry.first;
-        if (!effects.InvalidatesPropertyKey(key.GetPropertyKey()) && !effects.WritesReceiver(key.GetReceiver())) {
-            copy->loadedProperties_.emplace(entry);
-        }
-    }
-    copy->CopyLoadedProperties(copy->loadedConstantProperties_, loadedConstantProperties_);
-
+    copy->loadedProperties_.Transform([&effects](const LoadedPropertyKey &key, ValueVertex *value) {
+        return !effects.InvalidatesPropertyKey(key.GetPropertyKey()) && !effects.WritesReceiver(key.GetReceiver())
+                   ? value
+                   : nullptr;
+    });
     if (!effects.InvalidatesAllEnvSlots() && !effects.ClearsUnstableNodeInfo()) {
-        for (const auto &entry : loadedEnvSlots_) {
-            if (!effects.WritesEnvSlot(entry.first.GetEnv(), entry.first.GetSlot())) {
-                copy->loadedEnvSlots_.emplace(entry);
-            }
-        }
-        if (!copy->loadedEnvSlots_.empty()) {
+        copy->loadedEnvSlots_.Transform([&effects](const EnvSlotKey &key, ValueVertex *value) {
+            return effects.WritesEnvSlot(key.GetEnv(), key.GetSlot()) ? nullptr : value;
+        });
+        if (!copy->loadedEnvSlots_.Empty()) {
             copy->envSlotAliasMode_ = effects.MayHaveAliasingEnvs() ? EnvSlotAliasMode::MAY_ALIAS : envSlotAliasMode_;
+        } else {
+            copy->envSlotAliasMode_ = EnvSlotAliasMode::NONE;
         }
+    } else {
+        copy->loadedEnvSlots_.Clear();
+        copy->envSlotAliasMode_ = EnvSlotAliasMode::NONE;
     }
-    copy->CopyEnvSlots(copy->loadedEnvConstants_, loadedEnvConstants_);
 
     const auto &transitionSources = effects.GetElementsKindTransitionSources();
     if (!transitionSources.empty()) {
-        // Reuse the straight-line alias rules after copying properties, before invalidating the source maps.
         copy->MarkHClassesStaleForElementsKindTransition(
             NodeInfo::PossibleHClasses(transitionSources.begin(), transitionSources.end()));
     }
-    copy->RecomputeFreshUnstableHClassesRequireInvalidation();
-    copy->effectEpoch_ = effectEpoch_;
     copy->IncrementEffectEpoch();
-    copy->CopyAvailableExpressionsForLoopHeader(*this);
+    copy->cse_.IntersectWith(copy->cse_, copy->effectEpoch_);
     return copy;
 }
 
 bool CompileInfoFacts::IsCompatibleWithLoopHeader(const CompileInfoFacts &headerFacts, const BB *loopHeader) const
 {
-    // NodeInfo copies rely on both facts objects sharing one compilation chunk.
     ASSERT(chunk_ == headerFacts.chunk_);
-    if (!headerFacts.loadedEnvSlots_.empty() && headerFacts.envSlotAliasMode_ != EnvSlotAliasMode::MAY_ALIAS &&
+    if (!headerFacts.loadedEnvSlots_.Empty() && headerFacts.envSlotAliasMode_ != EnvSlotAliasMode::MAY_ALIAS &&
         headerFacts.envSlotAliasMode_ != envSlotAliasMode_ && envSlotAliasMode_ != EnvSlotAliasMode::NONE) {
         return false;
     }
     bool hadEffects = effectEpoch_ != headerFacts.effectEpoch_;
-    for (const auto &entry : headerFacts.nodeInfos_) {
-        auto *phi = entry.first->TryCast<PhiVertex>();
+    bool compatible = true;
+    headerFacts.nodeInfos_.ForEach([&](ValueVertex *node, const StoredNodeInfo *expectedStored) {
+        auto *phi = node->TryCast<PhiVertex>();
         if (phi != nullptr && static_cast<ValueVertex *>(phi)->GetOwner() == loopHeader) {
-            continue;
+            return;
         }
-        auto it = nodeInfos_.find(entry.first);
-        if (it == nodeInfos_.end()) {
-            return false;
+        NodeInfoView actual = TryGetInfoFor(node);
+        if (actual == nullptr) {
+            compatible = false;
+            return;
         }
-        bool compatible = hadEffects
-            ? it->second.IsCompatibleWith(entry.second)
-            : NodeInfo::NodeTypeIs(it->second.GetType(), entry.second.GetType());
-        if (!compatible) {
-            return false;
-        }
+        NodeInfoView expected(expectedStored, headerFacts.hclassGeneration_);
+        compatible &= hadEffects ? actual.Materialize().IsCompatibleWith(expected.Materialize())
+                                 : NodeInfo::NodeTypeIs(actual.GetType(), expected.GetType());
+    });
+    if (!compatible) {
+        return false;
     }
     if (!hadEffects) {
         return true;
     }
     auto containsSameEntries = [](const auto &actual, const auto &expected) {
-        for (const auto &entry : expected) {
-            auto it = actual.find(entry.first);
-            if (it == actual.end() || it->second != entry.second) {
-                return false;
-            }
-        }
-        return true;
+        bool same = true;
+        expected.ForEach([&](const auto &key, auto value) { same &= actual.Find(key) == value; });
+        return same;
     };
     if (!containsSameEntries(loadedProperties_, headerFacts.loadedProperties_) ||
         !containsSameEntries(loadedEnvSlots_, headerFacts.loadedEnvSlots_)) {
@@ -528,16 +586,30 @@ bool CompileInfoFacts::IsCompatibleWithLoopHeader(const CompileInfoFacts &header
 
 void CompileInfoFacts::Merge(const CompileInfoFacts &other)
 {
-    // NodeInfo copies rely on both facts objects sharing one compilation chunk.
     ASSERT(chunk_ == other.chunk_);
-    for (auto infoIt = nodeInfos_.begin(); infoIt != nodeInfos_.end();) {
-        auto otherIt = other.nodeInfos_.find(infoIt->first);
-        if (otherIt == other.nodeInfos_.end() || !infoIt->second.MergeWith(otherIt->second)) {
-            infoIt = nodeInfos_.erase(infoIt);
-        } else {
-            ++infoIt;
-        }
-    }
+    const HClassGeneration *leftGeneration = hclassGeneration_;
+    const HClassGeneration *rightGeneration = other.hclassGeneration_;
+    const HClassGeneration *mergedGeneration =
+        leftGeneration == rightGeneration ? leftGeneration : chunk_->New<HClassGeneration>();
+    // In a shared subtree with different generations, an unstable HClass cannot
+    // be fresh on both paths. The new generation makes that same value stale.
+    nodeInfos_.IntersectWith(
+        other.nodeInfos_,
+        [this, leftGeneration, rightGeneration, mergedGeneration](
+            ValueVertex *, const StoredNodeInfo *left, const StoredNodeInfo *right) -> const StoredNodeInfo* {
+            NodeInfoView leftView(left, leftGeneration);
+            NodeInfo merged = leftView.Materialize();
+            NodeInfo otherInfo = NodeInfoView(right, rightGeneration).Materialize();
+            if (!merged.MergeWith(otherInfo)) {
+                return nullptr;
+            }
+            if (mergedGeneration == leftGeneration && leftView.IsSameAs(merged)) {
+                return left;
+            }
+            return chunk_->New<StoredNodeInfo>(chunk_, merged, mergedGeneration);
+        },
+        [](const auto &metadata) { return !metadata.hasEmptyInfo; });
+    hclassGeneration_ = mergedGeneration;
 
     MergeLoadedProperties(loadedProperties_, other.loadedProperties_);
     MergeLoadedProperties(loadedConstantProperties_, other.loadedConstantProperties_);
@@ -546,35 +618,29 @@ void CompileInfoFacts::Merge(const CompileInfoFacts &other)
     }
     MergeEnvSlots(loadedEnvSlots_, other.loadedEnvSlots_);
     MergeEnvSlots(loadedEnvConstants_, other.loadedEnvConstants_);
-    MergeAvailableExpressions(other);
+    cse_.IntersectWith(other.cse_, effectEpoch_);
     envSlotAliasMode_ = MergeEnvSlotAliasMode(envSlotAliasMode_, other.envSlotAliasMode_);
-    RecomputeFreshUnstableHClassesRequireInvalidation();
+    mayHaveFreshUnstableHClasses_ |= other.mayHaveFreshUnstableHClasses_;
 }
 
-NodeInfo *CompileInfoFacts::GetOrCreateInfoFor(ValueVertex *node)
+void CompileInfoFacts::UpdateInfoForImpl(ValueVertex *node, void *context, void (*callback)(void *, NodeInfo &))
 {
-    ASSERT(node != nullptr);
-    auto [it, inserted] = nodeInfos_.emplace(node, NodeInfo(chunk_));
-    static_cast<void>(inserted);
-    return &it->second;
-}
-
-NodeInfo *CompileInfoFacts::TryGetInfoFor(ValueVertex *node)
-{
-    auto it = nodeInfos_.find(node);
-    return it == nodeInfos_.end() ? nullptr : &it->second;
-}
-
-const NodeInfo *CompileInfoFacts::TryGetInfoFor(ValueVertex *node) const
-{
-    auto it = nodeInfos_.find(node);
-    return it == nodeInfos_.end() ? nullptr : &it->second;
+    nodeInfos_.Update(node, [this, context, callback](const StoredNodeInfo *stored) -> const StoredNodeInfo* {
+        NodeInfoView existing(stored, hclassGeneration_);
+        NodeInfo info = stored == nullptr ? NodeInfo(chunk_) : existing.Materialize();
+        callback(context, info);
+        if (stored != nullptr && existing.IsSameAs(info)) {
+            return stored;
+        }
+        mayHaveFreshUnstableHClasses_ |= info.HasFreshPossibleHClasses() && info.HasUnstablePossibleHClass();
+        return chunk_->New<StoredNodeInfo>(chunk_, info, hclassGeneration_);
+    });
 }
 
 NodeInfo::NodeType CompileInfoFacts::GetKnownType(ValueVertex *node) const
 {
     NodeInfo::NodeType staticType = node == nullptr ? NodeInfo::NodeType::UNKNOWN : node->GetStaticType();
-    const NodeInfo *info = TryGetInfoFor(node);
+    NodeInfoView info = TryGetInfoFor(node);
     if (info == nullptr) {
         return staticType;
     }
@@ -594,34 +660,44 @@ bool CompileInfoFacts::CheckType(ValueVertex *node, NodeInfo::NodeType type) con
 
 NodeInfo::NodeType CompileInfoFacts::EnsureType(ValueVertex *node, NodeInfo::NodeType type)
 {
-    return GetOrCreateInfoFor(node)->IntersectType(type);
+    ASSERT(node != nullptr);
+    NodeInfoView existing = TryGetInfoFor(node);
+    if (existing != nullptr) {
+        NodeInfo::NodeType result = NodeInfo::IntersectNodeType(existing->GetType(), type);
+        if (result == existing->GetType()) {
+            return result;
+        }
+    }
+    NodeInfo::NodeType result = NodeInfo::NodeType::UNKNOWN;
+    UpdateInfoFromView(node, existing, [&](NodeInfo &info) { result = info.IntersectType(type); });
+    return result;
 }
 
 void CompileInfoFacts::RecordNonHole(ValueVertex *node)
 {
     ASSERT(node != nullptr);
-    GetOrCreateInfoFor(node)->MarkNonHole();
+    NodeInfoView existing = TryGetInfoFor(node);
+    if (existing != nullptr && existing->IsNonHole()) {
+        return;
+    }
+    UpdateInfoFromView(node, existing, [](NodeInfo &info) { info.MarkNonHole(); });
 }
 
 bool CompileInfoFacts::IsKnownNonHole(ValueVertex *node) const
 {
     ASSERT(node != nullptr);
-    const NodeInfo *info = TryGetInfoFor(node);
+    NodeInfoView info = TryGetInfoFor(node);
     return info != nullptr && info->IsNonHole();
 }
 
 void CompileInfoFacts::RecordHClass(ValueVertex *node, ArkSteedHClassRef hclass, bool isStable)
 {
-    NodeInfo *info = GetOrCreateInfoFor(node);
-    info->RecordHClass(hclass, isStable);
-    if (info->HasFreshPossibleHClasses() && info->HasUnstablePossibleHClass()) {
-        freshUnstableHClassesRequireInvalidation_ = true;
-    }
+    UpdateInfoFor(node, [&](NodeInfo &info) { info.RecordHClass(hclass, isStable); });
 }
 
 ArkSteedHClassRef CompileInfoFacts::TryGetHClass(ValueVertex *node) const
 {
-    const NodeInfo *info = TryGetInfoFor(node);
+    NodeInfoView info = TryGetInfoFor(node);
     if (info == nullptr || !info->HasFreshKnownHClass()) {
         return {};
     }
@@ -631,32 +707,23 @@ ArkSteedHClassRef CompileInfoFacts::TryGetHClass(ValueVertex *node) const
 void CompileInfoFacts::RecordPossibleHClasses(ValueVertex *node, const NodeInfo::PossibleHClasses &hclasses,
                                               bool isStable)
 {
-    NodeInfo *info = GetOrCreateInfoFor(node);
-    info->RecordPossibleHClasses(hclasses, isStable);
-    if (info->HasFreshPossibleHClasses() && info->HasUnstablePossibleHClass()) {
-        freshUnstableHClassesRequireInvalidation_ = true;
-    }
+    UpdateInfoFor(node, [&](NodeInfo &info) { info.RecordPossibleHClasses(hclasses, isStable); });
 }
 
 void CompileInfoFacts::RecordPossibleHClasses(ValueVertex *node, const NodeInfo::PossibleHClassInfos &hclasses)
 {
-    NodeInfo *info = GetOrCreateInfoFor(node);
-    info->RecordPossibleHClasses(hclasses);
-    if (info->HasFreshPossibleHClasses() && info->HasUnstablePossibleHClass()) {
-        freshUnstableHClassesRequireInvalidation_ = true;
-    }
+    UpdateInfoFor(node, [&](NodeInfo &info) { info.RecordPossibleHClasses(hclasses); });
 }
 
 bool CompileInfoFacts::NarrowPossibleHClasses(ValueVertex *node, const NodeInfo::PossibleHClasses &hclasses)
 {
-    NodeInfo *info = TryGetInfoFor(node);
-    if (info == nullptr || !info->HasFreshPossibleHClasses() || !info->NarrowPossibleHClasses(hclasses)) {
+    NodeInfoView info = TryGetInfoFor(node);
+    if (info == nullptr || !info->HasFreshPossibleHClasses()) {
         return false;
     }
-    if (info->HasUnstablePossibleHClass()) {
-        freshUnstableHClassesRequireInvalidation_ = true;
-    }
-    return true;
+    bool narrowed = false;
+    UpdateInfoFromView(node, info, [&](NodeInfo &current) { narrowed = current.NarrowPossibleHClasses(hclasses); });
+    return narrowed;
 }
 
 void CompileInfoFacts::SetPossibleHClasses(ValueVertex *node, const ChunkVector<ArkSteedHClassRef> &hclasses,
@@ -665,14 +732,15 @@ void CompileInfoFacts::SetPossibleHClasses(ValueVertex *node, const ChunkVector<
     NodeInfo::PossibleHClasses copy;
     copy.reserve(hclasses.size());
     copy.insert(copy.end(), hclasses.begin(), hclasses.end());
-    RecordPossibleHClasses(node, copy, false);
-    NodeInfo *info = GetOrCreateInfoFor(node);
-    info->IntersectType(possibleType);
+    UpdateInfoFor(node, [&](NodeInfo &info) {
+        info.RecordPossibleHClasses(copy, false);
+        info.IntersectType(possibleType);
+    });
 }
 
 std::optional<NodeInfo::PossibleHClasses> CompileInfoFacts::TryGetPossibleHClasses(ValueVertex *node) const
 {
-    const NodeInfo *info = TryGetInfoFor(node);
+    NodeInfoView info = TryGetInfoFor(node);
     if (info == nullptr || !info->HasFreshPossibleHClasses()) {
         return std::nullopt;
     }
@@ -682,7 +750,7 @@ std::optional<NodeInfo::PossibleHClasses> CompileInfoFacts::TryGetPossibleHClass
 std::optional<NodeInfo::PossibleHClasses> CompileInfoFacts::TryGetPossibleHClassesForRevalidation(
     ValueVertex *node) const
 {
-    const NodeInfo *info = TryGetInfoFor(node);
+    NodeInfoView info = TryGetInfoFor(node);
     if (info == nullptr || info->PossibleHClassCount() == 0) {
         return std::nullopt;
     }
@@ -691,35 +759,58 @@ std::optional<NodeInfo::PossibleHClasses> CompileInfoFacts::TryGetPossibleHClass
 
 bool CompileInfoFacts::PossibleHClassesAreStale(ValueVertex *node) const
 {
-    const NodeInfo *info = TryGetInfoFor(node);
+    NodeInfoView info = TryGetInfoFor(node);
     return info != nullptr && info->PossibleHClassesAreStale();
 }
 
 void CompileInfoFacts::MarkPossibleHClassesFresh(ValueVertex *node)
 {
-    NodeInfo *info = TryGetInfoFor(node);
+    NodeInfoView info = TryGetInfoFor(node);
     ASSERT(info != nullptr && info->PossibleHClassesAreStale());
-    info->MarkPossibleHClassesFresh();
-    if (info->HasUnstablePossibleHClass()) {
-        freshUnstableHClassesRequireInvalidation_ = true;
-    }
+    UpdateInfoFromView(node, info, [](NodeInfo &current) { current.MarkPossibleHClassesFresh(); });
 }
 
 bool CompileInfoFacts::MarkPossibleHClassStable(ValueVertex *node, ArkSteedHClassRef hclass)
 {
-    NodeInfo *info = TryGetInfoFor(node);
-    return info != nullptr && info->MarkPossibleHClassStable(hclass);
+    NodeInfoView existing = TryGetInfoFor(node);
+    if (existing == nullptr) {
+        return false;
+    }
+    bool result = false;
+    UpdateInfoFromView(node, existing, [&](NodeInfo &info) { result = info.MarkPossibleHClassStable(hclass); });
+    return result;
 }
 
 void CompileInfoFacts::SetAlternative(ValueVertex *node, AlternativeNodes::Kind kind, ValueVertex *alternative)
 {
-    GetOrCreateInfoFor(node)->GetAlternatives().Set(kind, alternative);
+    ASSERT(node != nullptr && alternative != nullptr);
+    NodeInfoView existing = TryGetInfoFor(node);
+    if (existing != nullptr && existing->GetAlternatives().Get(kind) == alternative) {
+        return;
+    }
+    UpdateInfoFromView(node, existing, [&](NodeInfo &info) { info.GetAlternatives().Set(kind, alternative); });
 }
 
 ValueVertex *CompileInfoFacts::TryGetAlternative(ValueVertex *node, AlternativeNodes::Kind kind) const
 {
-    const NodeInfo *info = TryGetInfoFor(node);
+    NodeInfoView info = TryGetInfoFor(node);
     return info == nullptr ? nullptr : info->GetAlternatives().Get(kind);
+}
+
+ValueVertex *CompileInfoFacts::LookupTruthinessResult(ValueVertex *node, bool trueIfTruthy) const
+{
+    NodeInfoView info = TryGetInfoFor(node);
+    return info == nullptr ? nullptr : info->GetTruthinessResult(trueIfTruthy);
+}
+
+void CompileInfoFacts::RecordTruthinessResult(ValueVertex *node, bool trueIfTruthy, ValueVertex *result)
+{
+    ASSERT(node != nullptr && result != nullptr);
+    NodeInfoView existing = TryGetInfoFor(node);
+    if (existing != nullptr && existing->GetTruthinessResult(trueIfTruthy) == result) {
+        return;
+    }
+    UpdateInfoFromView(node, existing, [&](NodeInfo &info) { info.SetTruthinessResult(trueIfTruthy, result); });
 }
 
 void CompileInfoFacts::RecordLoadedProperty(const LoadedPropertyKey &key, ValueVertex *value)
@@ -764,7 +855,7 @@ ValueVertex *CompileInfoFacts::LookupLoadedConstantProperty(ValueVertex *object,
 
 void CompileInfoFacts::ClearLoadedProperties()
 {
-    loadedProperties_.clear();
+    loadedProperties_.Clear();
 }
 
 void CompileInfoFacts::ClearLoadedPropertiesForReceiver(ValueVertex *receiver, LoopEffects *effects)
@@ -772,13 +863,9 @@ void CompileInfoFacts::ClearLoadedPropertiesForReceiver(ValueVertex *receiver, L
     if (effects != nullptr) {
         effects->RecordReceiverWrite(receiver);
     }
-    for (auto it = loadedProperties_.begin(); it != loadedProperties_.end();) {
-        if (it->first.MatchesReceiver(receiver)) {
-            it = loadedProperties_.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    loadedProperties_.Transform([receiver](const LoadedPropertyKey &key, ValueVertex *value) {
+        return key.MatchesReceiver(receiver) ? nullptr : value;
+    });
 }
 
 void CompileInfoFacts::ClearLoadedPropertiesForKey(PropertyKey key, LoopEffects *effects)
@@ -790,48 +877,45 @@ void CompileInfoFacts::ClearLoadedPropertiesForKey(PropertyKey key, LoopEffects 
         ClearLoadedProperties();
         return;
     }
-    for (auto it = loadedProperties_.begin(); it != loadedProperties_.end();) {
-        PropertyKey cachedKey = it->first.GetPropertyKey();
+    loadedProperties_.Transform([key, effects](const LoadedPropertyKey &entry, ValueVertex *value) {
+        PropertyKey cachedKey = entry.GetPropertyKey();
         // Named keys from different representations may refer to the same property.
         bool mayAliasNamedKey = key.GetKind() == PropertyKey::Kind::CONST_DATA_ID &&
             (cachedKey.GetKind() == PropertyKey::Kind::HEAP_CONSTANT ||
              cachedKey.GetKind() == PropertyKey::Kind::NAMED || cachedKey.GetKind() == PropertyKey::Kind::INDEX);
-        if (it->first.MatchesPropertyKey(key) || mayAliasNamedKey) {
+        if (entry.MatchesPropertyKey(key) || key.MayAliasConstDataId(cachedKey) || mayAliasNamedKey) {
             if (effects != nullptr) {
                 effects->RecordPropertyWrite(cachedKey);
             }
-            it = loadedProperties_.erase(it);
-        } else {
-            ++it;
+            return static_cast<ValueVertex *>(nullptr);
         }
-    }
+        return value;
+    });
 }
 
 void CompileInfoFacts::RecordEnvSlot(ValueVertex *env, int32_t slot, ValueVertex *value)
 {
     ASSERT(env != nullptr);
     ASSERT(value != nullptr);
-    loadedEnvSlots_[EnvSlotKey(env, slot)] = value;
+    loadedEnvSlots_.InsertOrAssign(EnvSlotKey(env, slot), value);
     UpdateEnvSlotAliasMode(env);
 }
 
 ValueVertex *CompileInfoFacts::LookupEnvSlot(ValueVertex *env, int32_t slot) const
 {
-    auto it = loadedEnvSlots_.find(EnvSlotKey(env, slot));
-    return it == loadedEnvSlots_.end() ? nullptr : it->second;
+    return loadedEnvSlots_.Find(EnvSlotKey(env, slot));
 }
 
 void CompileInfoFacts::RecordEnvConstant(ValueVertex *env, int32_t slot, ValueVertex *value)
 {
     ASSERT(env != nullptr);
     ASSERT(value != nullptr);
-    loadedEnvConstants_[EnvSlotKey(env, slot)] = value;
+    loadedEnvConstants_.InsertOrAssign(EnvSlotKey(env, slot), value);
 }
 
 ValueVertex *CompileInfoFacts::LookupEnvConstant(ValueVertex *env, int32_t slot) const
 {
-    auto it = loadedEnvConstants_.find(EnvSlotKey(env, slot));
-    return it == loadedEnvConstants_.end() ? nullptr : it->second;
+    return loadedEnvConstants_.Find(EnvSlotKey(env, slot));
 }
 
 CompileInfoFacts::ClearedEnvSlotKeys CompileInfoFacts::ClearAliasedEnvSlotsFor(ValueVertex *env, int32_t slot,
@@ -854,15 +938,13 @@ CompileInfoFacts::ClearedEnvSlotKeys CompileInfoFacts::ClearAliasedEnvSlotsFor(V
         return cleared;
     }
 
-    for (auto it = loadedEnvSlots_.begin(); it != loadedEnvSlots_.end();) {
-        const EnvSlotKey &key = it->first;
-        if (key.GetSlot() == slot && key.GetEnv() != env && EnvMayAlias(key.GetEnv(), env) && it->second != newValue) {
+    loadedEnvSlots_.Transform([&](const EnvSlotKey &key, ValueVertex *value) {
+        if (key.GetSlot() == slot && key.GetEnv() != env && EnvMayAlias(key.GetEnv(), env) && value != newValue) {
             cleared.emplace_back(key);
-            it = loadedEnvSlots_.erase(it);
-            continue;
+            return static_cast<ValueVertex *>(nullptr);
         }
-        ++it;
-    }
+        return value;
+    });
     return cleared;
 }
 
@@ -872,71 +954,16 @@ void CompileInfoFacts::ClearEnvSlotsFor(ValueVertex *env)
         return;
     }
     bool erased = false;
-    for (auto it = loadedEnvSlots_.begin(); it != loadedEnvSlots_.end();) {
-        if (it->first.GetEnv() == env) {
-            it = loadedEnvSlots_.erase(it);
+    loadedEnvSlots_.Transform([&](const EnvSlotKey &key, ValueVertex *value) {
+        if (key.GetEnv() == env) {
             erased = true;
-            continue;
+            return static_cast<ValueVertex *>(nullptr);
         }
-        ++it;
-    }
+        return value;
+    });
     if (erased) {
         RecomputeEnvSlotAliasMode();
     }
-}
-
-void CompileInfoFacts::AddExpression(uint32_t hash, ValueVertex *node, const ExpressionInputs &inputs,
-                                     const ExpressionOptions &options, bool needsEpochCheck)
-{
-    ASSERT(node != nullptr);
-    uint32_t epoch = needsEpochCheck ? effectEpoch_ : EFFECT_EPOCH_FOR_PURE_INSTRUCTIONS;
-    if (epoch == EFFECT_EPOCH_OVERFLOW) {
-        return;
-    }
-    availableExpressions_.emplace(hash, AvailableExpression {
-                                            node,
-                                            node->GetOpcode(),
-                                            CopyExpressionInputs(inputs),
-                                            CopyExpressionOptions(options),
-                                            epoch,
-                                        });
-}
-
-void CompileInfoFacts::CopyAvailableExpressionsForLoopHeader(const CompileInfoFacts &source)
-{
-    for (const auto &entry : source.availableExpressions_) {
-        const AvailableExpression &expression = entry.second;
-        if (expression.effectEpoch < effectEpoch_) {
-            continue;
-        }
-        availableExpressions_.emplace(entry.first, AvailableExpression {
-                                                       expression.node,
-                                                       expression.opcode,
-                                                       CopyExpressionInputs(*expression.inputs),
-                                                       CopyExpressionOptions(*expression.options),
-                                                       expression.effectEpoch,
-                                                   });
-    }
-}
-
-ValueVertex *CompileInfoFacts::FindExpression(uint32_t hash, VertexOpcode opcode, const ExpressionInputs &inputs,
-                                              const ExpressionOptions &options, bool needsEpochCheck)
-{
-    auto it = availableExpressions_.find(hash);
-    if (it == availableExpressions_.end()) {
-        return nullptr;
-    }
-    AvailableExpression &expression = it->second;
-    if (needsEpochCheck && effectEpoch_ > expression.effectEpoch) {
-        availableExpressions_.erase(it);
-        return nullptr;
-    }
-    return ExpressionMatches(expression, opcode, inputs, options, needsEpochCheck) ? expression.node : nullptr;
-}
-
-void CompileInfoFacts::ClearAvailableExpressions()
-{
-    availableExpressions_.clear();
 }
 
 void CompileInfoFacts::MarkPossibleSideEffect(const SideEffectDescriptor &effect, LoopEffects *loopEffects)
@@ -979,105 +1006,100 @@ void CompileInfoFacts::MarkPossibleSideEffect(const SideEffectDescriptor &effect
             OnSideEffect();
             return;
         case SideEffectKind::TYPED_ARRAY_WRITE:
-        case SideEffectKind::SAFE_CALL:
             IncrementEffectEpoch();
+            return;
+        case SideEffectKind::SAFE_CALL:
+            if (effect.advancesEffectEpoch) {
+                IncrementEffectEpoch();
+            }
             return;
     }
 }
 
 void CompileInfoFacts::MarkAllFreshUnstableHClassesStale()
 {
-    if (!freshUnstableHClassesRequireInvalidation_) {
+    if (!mayHaveFreshUnstableHClasses_) {
         return;
     }
-    for (auto &entry : nodeInfos_) {
-        entry.second.MarkUnstableHClassesStale();
-    }
-    freshUnstableHClassesRequireInvalidation_ = false;
+    // Generations are never reused, including across independently built paths.
+    hclassGeneration_ = chunk_->New<HClassGeneration>();
+    mayHaveFreshUnstableHClasses_ = false;
 }
 
 void CompileInfoFacts::MarkHClassesStaleForTransition(ValueVertex *receiver)
 {
-    if (!freshUnstableHClassesRequireInvalidation_) {
+    if (!mayHaveFreshUnstableHClasses_) {
         return;
     }
-    const NodeInfo *receiverInfo = TryGetInfoFor(receiver);
+    NodeInfoView receiverInfo = TryGetInfoFor(receiver);
     ArkSteedHClassRef oldHClass = receiverInfo == nullptr ? ArkSteedHClassRef {} : receiverInfo->GetFreshKnownHClass();
     if (!oldHClass.IsJSHClass()) {
         MarkAllFreshUnstableHClassesStale();
         return;
     }
-    bool hasRemainingFreshUnstableHClasses = false;
-    for (auto &entry : nodeInfos_) {
-        NodeInfo &info = entry.second;
-        if (!info.HasFreshPossibleHClasses() || !info.HasUnstablePossibleHClass()) {
-            continue;
+    nodeInfos_.Transform([&](ValueVertex *, const StoredNodeInfo *stored) -> const StoredNodeInfo* {
+        NodeInfoView info(stored, hclassGeneration_);
+        if (!info.HasFreshPossibleHClasses() || !info.HasUnstablePossibleHClass() ||
+            !info.ContainsPossibleHClass(oldHClass)) {
+            return stored;
         }
-        if (info.ContainsPossibleHClass(oldHClass)) {
-            info.MarkUnstableHClassesStale();
-            continue;
-        }
-        hasRemainingFreshUnstableHClasses = true;
-    }
-    freshUnstableHClassesRequireInvalidation_ = hasRemainingFreshUnstableHClasses;
+        NodeInfo updated = info.Materialize();
+        updated.MarkUnstableHClassesStale();
+        return chunk_->New<StoredNodeInfo>(chunk_, updated, hclassGeneration_);
+    });
 }
 
 void CompileInfoFacts::MarkHClassesStaleForElementsKindTransition(const NodeInfo::PossibleHClasses &sourceHClasses)
 {
     ASSERT(!sourceHClasses.empty());
-    for (auto it = loadedProperties_.begin(); it != loadedProperties_.end();) {
-        if (!(it->first.GetPropertyKey() == PropertyKey::Elements())) {
-            ++it;
-            continue;
+    loadedProperties_.Transform([&](const LoadedPropertyKey &key, ValueVertex *value) {
+        if (!(key.GetPropertyKey() == PropertyKey::Elements())) {
+            return value;
         }
-        const NodeInfo *info = TryGetInfoFor(it->first.GetReceiver());
+        NodeInfoView info = TryGetInfoFor(key.GetReceiver());
         bool mayAlias = info == nullptr || !info->HasFreshPossibleHClasses() ||
-            std::any_of(sourceHClasses.begin(), sourceHClasses.end(),
-                [info](ArkSteedHClassRef source) { return info->ContainsPossibleHClass(source); });
-        if (mayAlias) {
-            it = loadedProperties_.erase(it);
-        } else {
-            ++it;
+                        std::any_of(sourceHClasses.begin(), sourceHClasses.end(),
+                                    [info](ArkSteedHClassRef source) { return info.ContainsPossibleHClass(source); });
+        return mayAlias ? nullptr : value;
+    });
+    nodeInfos_.Transform([&](ValueVertex *, const StoredNodeInfo *stored) -> const StoredNodeInfo* {
+        NodeInfoView info(stored, hclassGeneration_);
+        bool affected = info.HasFreshPossibleHClasses() &&
+                        std::any_of(sourceHClasses.begin(), sourceHClasses.end(),
+                                    [info](ArkSteedHClassRef source) { return info.ContainsPossibleHClass(source); });
+        if (!affected) {
+            return stored;
         }
-    }
-    for (auto &entry : nodeInfos_) {
-        entry.second.MarkHClassesStaleForElementsKindTransition(sourceHClasses);
-    }
-    RecomputeFreshUnstableHClassesRequireInvalidation();
-}
-
-void CompileInfoFacts::RecomputeFreshUnstableHClassesRequireInvalidation()
-{
-    freshUnstableHClassesRequireInvalidation_ =
-        std::any_of(nodeInfos_.begin(), nodeInfos_.end(), [](const auto &entry) {
-            const NodeInfo &info = entry.second;
-            return info.HasFreshPossibleHClasses() && info.HasUnstablePossibleHClass();
-        });
+        NodeInfo updated = info.Materialize();
+        updated.MarkHClassesStaleForElementsKindTransition(sourceHClasses);
+        return chunk_->New<StoredNodeInfo>(chunk_, updated, hclassGeneration_);
+    });
 }
 
 void CompileInfoFacts::ClearAll()
 {
-    nodeInfos_.clear();
-    loadedProperties_.clear();
-    loadedConstantProperties_.clear();
-    loadedEnvSlots_.clear();
-    loadedEnvConstants_.clear();
-    availableExpressions_.clear();
+    nodeInfos_.Clear();
+    loadedProperties_.Clear();
+    loadedConstantProperties_.Clear();
+    loadedEnvSlots_.Clear();
+    loadedEnvConstants_.Clear();
+    cse_.Clear();
     envSlotAliasMode_ = EnvSlotAliasMode::NONE;
-    freshUnstableHClassesRequireInvalidation_ = false;
+    mayHaveFreshUnstableHClasses_ = false;
 }
 
 void CompileInfoFacts::OnSideEffect()
 {
     MarkAllFreshUnstableHClassesStale();
     ClearLoadedProperties();
-    loadedEnvSlots_.clear();
+    loadedEnvSlots_.Clear();
     envSlotAliasMode_ = EnvSlotAliasMode::NONE;
     IncrementEffectEpoch();
 }
 
 void CompileInfoFacts::IncrementEffectEpoch()
 {
+    cse_.ClearMemoryExpressions();
     if (effectEpoch_ < EFFECT_EPOCH_OVERFLOW) {
         ++effectEpoch_;
     }
@@ -1085,6 +1107,7 @@ void CompileInfoFacts::IncrementEffectEpoch()
 
 void CompileInfoFacts::AdvanceEpochAfterMerge(uint32_t otherEpoch)
 {
+    cse_.ClearMemoryExpressions();
     uint32_t mergedEpoch = std::max(effectEpoch_, otherEpoch);
     if (mergedEpoch < EFFECT_EPOCH_OVERFLOW) {
         effectEpoch_ = mergedEpoch + 1;
@@ -1093,104 +1116,31 @@ void CompileInfoFacts::AdvanceEpochAfterMerge(uint32_t otherEpoch)
     effectEpoch_ = EFFECT_EPOCH_OVERFLOW;
 }
 
-CompileInfoFacts::ExpressionInputs *CompileInfoFacts::CopyExpressionInputs(const ExpressionInputs &inputs)
-{
-    auto *copy = chunk_->New<ExpressionInputs>(chunk_);
-    copy->insert(copy->end(), inputs.begin(), inputs.end());
-    return copy;
-}
-
-CompileInfoFacts::ExpressionOptions *CompileInfoFacts::CopyExpressionOptions(const ExpressionOptions &options)
-{
-    auto *copy = chunk_->New<ExpressionOptions>(chunk_);
-    copy->insert(copy->end(), options.begin(), options.end());
-    return copy;
-}
-
-bool CompileInfoFacts::ExpressionMatches(const AvailableExpression &expression, VertexOpcode opcode,
-                                         const ExpressionInputs &inputs, const ExpressionOptions &options,
-                                         bool needsEpochCheck) const
-{
-    if (expression.opcode != opcode || (needsEpochCheck && effectEpoch_ > expression.effectEpoch)) {
-        return false;
-    }
-    if (expression.inputs->size() != inputs.size() || expression.options->size() != options.size()) {
-        return false;
-    }
-    return std::equal(expression.inputs->begin(), expression.inputs->end(), inputs.begin()) &&
-           std::equal(expression.options->begin(), expression.options->end(), options.begin());
-}
-
 ValueVertex *CompileInfoFacts::LookupLoadedProperty(const LoadedPropertyMap &map, const LoadedPropertyKey &key) const
 {
-    auto it = map.find(key);
-    return it == map.end() ? nullptr : it->second;
+    return map.Find(key);
 }
 
 void CompileInfoFacts::RecordLoadedProperty(LoadedPropertyMap &map, const LoadedPropertyKey &key, ValueVertex *value)
 {
     ASSERT(key.GetReceiver() != nullptr);
     ASSERT(value != nullptr);
-    map[key] = value;
+    map.InsertOrAssign(key, value);
 }
 
 void CompileInfoFacts::MergeLoadedProperties(LoadedPropertyMap &target, const LoadedPropertyMap &other)
 {
-    for (auto it = target.begin(); it != target.end();) {
-        auto otherIt = other.find(it->first);
-        if (otherIt == other.end() || otherIt->second != it->second) {
-            it = target.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    target.IntersectWith(
+        other,
+        [](const LoadedPropertyKey &, ValueVertex *left, ValueVertex *right) { return left == right ? left : nullptr; },
+        [](const auto &) { return true; });
 }
 
 void CompileInfoFacts::MergeEnvSlots(LoadedEnvSlots &target, const LoadedEnvSlots &other)
 {
-    for (auto it = target.begin(); it != target.end();) {
-        auto otherIt = other.find(it->first);
-        if (otherIt == other.end() || otherIt->second != it->second) {
-            it = target.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
-void CompileInfoFacts::MergeAvailableExpressions(const CompileInfoFacts &other)
-{
-    for (auto it = availableExpressions_.begin(); it != availableExpressions_.end();) {
-        auto otherIt = other.availableExpressions_.find(it->first);
-        if (otherIt == other.availableExpressions_.end()) {
-            it = availableExpressions_.erase(it);
-            continue;
-        }
-
-        const AvailableExpression &expression = it->second;
-        const AvailableExpression &otherExpression = otherIt->second;
-        if (expression.node == otherExpression.node && expression.effectEpoch == otherExpression.effectEpoch &&
-            ExpressionMatches(expression, otherExpression.opcode, *otherExpression.inputs, *otherExpression.options,
-                              false) &&
-            expression.effectEpoch >= effectEpoch_) {
-            ++it;
-            continue;
-        }
-
-        it = availableExpressions_.erase(it);
-    }
-}
-
-void CompileInfoFacts::CopyLoadedProperties(LoadedPropertyMap &target, const LoadedPropertyMap &source) const
-{
-    ASSERT(target.empty());
-    target.insert(source.begin(), source.end());
-}
-
-void CompileInfoFacts::CopyEnvSlots(LoadedEnvSlots &target, const LoadedEnvSlots &source) const
-{
-    ASSERT(target.empty());
-    target.insert(source.begin(), source.end());
+    target.IntersectWith(
+        other, [](const EnvSlotKey &, ValueVertex *left, ValueVertex *right) { return left == right ? left : nullptr; },
+        [](const auto &) { return true; });
 }
 
 void CompileInfoFacts::UpdateEnvSlotAliasMode(ValueVertex *env)
@@ -1210,9 +1160,7 @@ void CompileInfoFacts::UpdateEnvSlotAliasMode(ValueVertex *env)
 void CompileInfoFacts::RecomputeEnvSlotAliasMode()
 {
     envSlotAliasMode_ = EnvSlotAliasMode::NONE;
-    for (const auto &entry : loadedEnvSlots_) {
-        UpdateEnvSlotAliasMode(entry.first.GetEnv());
-    }
+    loadedEnvSlots_.ForEach([this](const EnvSlotKey &key, ValueVertex *) { UpdateEnvSlotAliasMode(key.GetEnv()); });
 }
 
 bool CompileInfoFacts::EnvMayAlias(ValueVertex *lhs, ValueVertex *rhs) const

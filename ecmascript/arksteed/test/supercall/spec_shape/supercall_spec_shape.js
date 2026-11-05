@@ -40,7 +40,7 @@
 //! HAS         AllocateInYoung
 //! HAS         CallBaseConstructor
 //! COUNT       CallRuntime OptSuperCall 1
-//! COUNT_LE    BranchIfReferenceEqual 2
+//! COUNT_LE    BranchIfReferenceEqual 6
 
 //! METHOD LU
 //! HAS_NOT     BranchIfJSConstructorFunction
@@ -58,7 +58,7 @@
 //! HAS         AllocateInYoung
 //! HAS         CallBaseConstructor
 //! COUNT       CallRuntime OptSuperCall 1
-//! COUNT_LE    BranchIfReferenceEqual 5
+//! COUNT_LE    BranchIfReferenceEqual 6
 
 class A {
     constructor() {

@@ -17,6 +17,7 @@
 #define ECMASCRIPT_ARKSTEED_ASSEMBLER_H
 
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -181,7 +182,15 @@ public:
     void LoadHClassFromObject(ArkSteedRegister dst, ArkSteedRegister object);
     void LoadInt32Field(ArkSteedRegister dst, ArkSteedRegister base, int32_t offset);
     void LoadUint8Field(ArkSteedRegister dst, ArkSteedRegister base, int32_t offset);
+    // Return the full TaggedArray byte offset only when one direct memory access can encode it.
+    static std::optional<int32_t> TryGetTaggedElementOffset(int32_t index);
     void LoadTaggedElement(ArkSteedRegister dst, ArkSteedRegister elements, ArkSteedRegister index);
+#if defined(PANDA_TARGET_AMD64)
+    void StoreTaggedElement(ArkSteedRegister elements, ArkSteedRegister index, ArkSteedRegister value);
+    void StoreTaggedElement(ArkSteedRegister elements, ArkSteedRegister index, int32_t value);
+#else
+    void StoreTaggedElement(ArkSteedRegister elements, ArkSteedRegister index, int32_t value, ArkSteedRegister scratch);
+#endif
     void StoreTaggedElement(ArkSteedRegister elements, ArkSteedRegister index, ArkSteedRegister value,
                             ArkSteedRegister scratch);
     void LoadLineStringCharCode(ArkSteedRegister dst, ArkSteedRegister string, ArkSteedRegister index,
@@ -194,10 +203,16 @@ public:
                                      ArkSteedRegister scratch, JSType elementType);
     void StoreTypedArrayIntElement(ArkSteedRegister value, ArkSteedRegister data, ArkSteedRegister index,
                                    JSType elementType);
+    // Full-width direct constant data is encoded as signed imm32 or the target zero register.
+    static bool CanStoreConstant(uint64_t bits);
+    void StoreField(int32_t value, ArkSteedRegister base, int32_t offset);
     void StoreField(ArkSteedRegister src, ArkSteedRegister base, int32_t offset);
     void StoreField(ArkSteedRegister src, ArkSteedRegister base, ArkSteedRegister offset);
     void StoreInt8Field(ArkSteedRegister src, ArkSteedRegister base, int32_t offset);
     void StoreInt16Field(ArkSteedRegister src, ArkSteedRegister base, int32_t offset);
+    // Direct constant data requires no ordinary value register; the operation writes four bytes.
+    static bool CanStoreConstant(int32_t value);
+    void StoreInt32Field(int32_t value, ArkSteedRegister base, int32_t offset);
     void StoreInt32Field(ArkSteedRegister src, ArkSteedRegister base, int32_t offset);
     void StoreInt32FieldRelease(ArkSteedRegister src, ArkSteedRegister base, int32_t offset);
     // Store a full-width HClass word at the zero-offset object header with
@@ -226,12 +241,18 @@ public:
     void Sub(ArkSteedRegister dst, ArkSteedRegister src);
     void Sub(ArkSteedRegister dst, int32_t immediate);
     void SignExtendInt32ToInt64(ArkSteedRegister dst, ArkSteedRegister src);
+    static bool CanUseAddSubImmediate(int32_t value);
+    // Immediate forms allow a separate result; the checked forms set signed-overflow flags.
+    void Int32Add(ArkSteedRegister dst, ArkSteedRegister src, int32_t immediate, bool setFlags);
+    void Int32Sub(ArkSteedRegister dst, ArkSteedRegister src, int32_t immediate, bool setFlags);
     void Int32Add(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
     void Int32Add(ArkSteedRegister dst, ArkSteedRegister left, int32_t immediate);
     void Int32Sub(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
     void Int32Sub(ArkSteedRegister dst, ArkSteedRegister left, int32_t immediate);
     void Int32Mul(ArkSteedRegister dst, ArkSteedRegister src);
     void Int32Mul(ArkSteedRegister dst, int32_t immediate);
+    void Int32Mul(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
+    void Int32Mul(ArkSteedRegister dst, ArkSteedRegister left, int32_t immediate);
     void Int32MulWide(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
     void Int32MulHigh(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
     void Int32Div(ArkSteedRegister dst, ArkSteedRegister dividend, ArkSteedRegister divisor);
@@ -241,18 +262,34 @@ public:
     void Int32ToFloat64(ArkSteedDoubleRegister dst, ArkSteedRegister src);
     void Uint32ToFloat64(ArkSteedDoubleRegister dst, ArkSteedRegister src);
     void Float64Add(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister src);
+    void Float64Add(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister left, ArkSteedDoubleRegister right);
     void Float64Sub(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister src);
+    void Float64Sub(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister left, ArkSteedDoubleRegister right);
     void Float64Mul(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister src);
+    void Float64Mul(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister left, ArkSteedDoubleRegister right);
     void Float64Div(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister src);
+    void Float64Div(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister left, ArkSteedDoubleRegister right);
     void Float64Neg(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister src);
     void CompareFloat64(ArkSteedDoubleRegister left, ArkSteedDoubleRegister right);
     void TruncateFloat64ToInt32(ArkSteedRegister dst, ArkSteedDoubleRegister src);
+    bool TryConvertFloat64ToInt32(ArkSteedRegister dst, ArkSteedDoubleRegister src);
+    void TruncateFloat64ToInt32OrSlow(ArkSteedRegister dst, ArkSteedDoubleRegister src, Label *slow);
+#if defined(PANDA_TARGET_ARM64)
+    void RoundFloat64ToNearestInt32(ArkSteedRegister dst, ArkSteedDoubleRegister src, ArkSteedDoubleRegister scratch);
+#endif
     void Word64And(ArkSteedRegister dst, ArkSteedRegister src);
 
     // =========================================================================
     // Bitwise Operations
     // =========================================================================
 
+    static bool CanUseLogicalImmediate(uint64_t bits);
+    // Three-operand forms support result aliasing with either register input.
+    void And(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
+    void Or(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
+    // Immediate forms require CanUseLogicalImmediate and preserve the full 64-bit mask.
+    void And(ArkSteedRegister dst, ArkSteedRegister src, int64_t immediate);
+    void Or(ArkSteedRegister dst, ArkSteedRegister src, int64_t immediate);
     void Or(ArkSteedRegister dst, int32_t immediate);
     void Or(ArkSteedRegister dst, int64_t immediate);
     void Or(ArkSteedRegister dst, ArkSteedRegister src);
@@ -280,10 +317,30 @@ public:
     void Int32ShiftRightLogicalByRegister(ArkSteedRegister dst, ArkSteedRegister shift);
     void Int32ShiftRightArithmetic(ArkSteedRegister dst, uint32_t shift);
     void Int32ShiftRightArithmeticByRegister(ArkSteedRegister dst, ArkSteedRegister shift);
+#if defined(PANDA_TARGET_ARM64)
+    void Int32And(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
+    void Int32And(ArkSteedRegister dst, ArkSteedRegister left, int32_t immediate);
+    void Int32Or(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
+    void Int32Or(ArkSteedRegister dst, ArkSteedRegister left, int32_t immediate);
+    void Int32Xor(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
+    void Int32Xor(ArkSteedRegister dst, ArkSteedRegister left, int32_t immediate);
+    void Int32ShiftLeft(ArkSteedRegister dst, ArkSteedRegister left, uint32_t shift);
+    void Int32ShiftLeftByRegister(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister shift);
+    void Int32ShiftRightLogical(ArkSteedRegister dst, ArkSteedRegister left, uint32_t shift);
+    void Int32ShiftRightLogicalByRegister(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister shift);
+    void Int32ShiftRightArithmetic(ArkSteedRegister dst, ArkSteedRegister left, uint32_t shift);
+    void Int32ShiftRightArithmeticByRegister(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister shift);
+    void SetTaggedBoolean(ArkSteedRegister dst, Condition condition);
+#endif
 
     // =========================================================================
     // Comparison Operations
     // =========================================================================
+
+    // True guarantees a direct immediate comparison with the specified operand width.
+    static bool CanUseCompareImmediate(int32_t value);
+    static bool CanUseCompareImmediate(int64_t value);
+    static bool CanUseCompareImmediate(uint64_t bits);
 
     void Compare(ArkSteedRegister lhs, ArkSteedRegister rhs);
     void CompareInt32(ArkSteedRegister lhs, ArkSteedRegister rhs);
@@ -330,6 +387,11 @@ public:
     void JumpIfFunctionNotCompiled(ArkSteedRegister jsFunc, Label *target);
     void Bind(Label *label);
 #if defined(PANDA_TARGET_ARM64)
+    // Zero branches preserve flags and participate in label and veneer management.
+    void JumpIfZero(ArkSteedRegister value, Label *target);
+    void JumpIfNotZero(ArkSteedRegister value, Label *target);
+    void TestAndBranchIfZero(ArkSteedRegister value, int32_t bit, Label *target);
+    void TestAndBranchIfNotZero(ArkSteedRegister value, int32_t bit, Label *target);
     void CheckCodePools(bool precedingCodeCanFallThrough, size_t protectedCodeSize = 0U);
     void FinalizeVeneers();
 #endif
@@ -448,6 +510,7 @@ private:
     enum class AddSubImmediateOp : uint8_t {
         ADD,
         SUB,
+        ADDS,
         SUBS,
     };
 
@@ -481,8 +544,6 @@ private:
     void UpdateEmbeddedLiteralPoolCheck(uint32_t loadOffset, size_t literalIndex);
     uint64_t GetEmbeddedLiteralPoolMaxSize() const;
     void EmitEmbeddedLiteralPool(bool precedingCodeCanFallThrough);
-    void TestAndBranchIfZero(ArkSteedRegister value, int32_t bit, Label *target);
-    void TestAndBranchIfNotZero(ArkSteedRegister value, int32_t bit, Label *target);
 #endif
 
     PlatformAssembler assembler_;

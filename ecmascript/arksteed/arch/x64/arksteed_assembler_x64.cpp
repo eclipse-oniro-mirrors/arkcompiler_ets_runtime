@@ -37,6 +37,15 @@
 
 namespace panda::ecmascript::arksteed {
 #if defined(PANDA_TARGET_AMD64)
+namespace {
+bool FitsSignedInt32Immediate(uint64_t bits)
+{
+    uint32_t lowBits = static_cast<uint32_t>(bits);
+    int32_t immediate = base::bit_cast<int32_t>(lowBits);
+    return bits == static_cast<uint64_t>(static_cast<int64_t>(immediate));
+}
+}  // namespace
+
 // =============================================================================
 // Register Move Operations
 // =============================================================================
@@ -140,10 +149,35 @@ void ArkSteedAssembler::LoadInt32Field(ArkSteedRegister dst, ArkSteedRegister ba
     assembler_.Movl(operand, dst);
 }
 
+std::optional<int32_t> ArkSteedAssembler::TryGetTaggedElementOffset(int32_t index)
+{
+    if (index < 0) {
+        return std::nullopt;
+    }
+    int64_t offset = static_cast<int64_t>(TaggedArray::DATA_OFFSET) +
+                     static_cast<int64_t>(index) * static_cast<int64_t>(sizeof(JSTaggedType));
+    if (offset > std::numeric_limits<int32_t>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<int32_t>(offset);
+}
+
 void ArkSteedAssembler::LoadTaggedElement(ArkSteedRegister dst, ArkSteedRegister elements, ArkSteedRegister index)
 {
     x64::Operand operand(elements, index, x64::Scale::Times8, static_cast<int32_t>(TaggedArray::DATA_OFFSET));
     assembler_.Movq(operand, dst);
+}
+
+void ArkSteedAssembler::StoreTaggedElement(ArkSteedRegister elements, ArkSteedRegister index, ArkSteedRegister value)
+{
+    x64::Operand operand(elements, index, x64::Scale::Times8, static_cast<int32_t>(TaggedArray::DATA_OFFSET));
+    assembler_.Movq(value, operand);
+}
+
+void ArkSteedAssembler::StoreTaggedElement(ArkSteedRegister elements, ArkSteedRegister index, int32_t value)
+{
+    x64::Operand operand(elements, index, x64::Scale::Times8, static_cast<int32_t>(TaggedArray::DATA_OFFSET));
+    assembler_.Movq(x64::Immediate(value), operand);
 }
 
 void ArkSteedAssembler::StoreTaggedElement(ArkSteedRegister elements, ArkSteedRegister index,
@@ -255,6 +289,16 @@ void ArkSteedAssembler::StoreTypedArrayIntElement(ArkSteedRegister value, ArkSte
     }
 }
 
+bool ArkSteedAssembler::CanStoreConstant(uint64_t bits)
+{
+    return FitsSignedInt32Immediate(bits);
+}
+
+void ArkSteedAssembler::StoreField(int32_t value, ArkSteedRegister base, int32_t offset)
+{
+    assembler_.Movq(x64::Immediate(value), x64::Operand(base, offset));
+}
+
 void ArkSteedAssembler::StoreField(ArkSteedRegister src, ArkSteedRegister base, int32_t offset)
 {
     x64::Operand operand(base, offset);
@@ -274,6 +318,16 @@ void ArkSteedAssembler::StoreInt8Field(ArkSteedRegister src, ArkSteedRegister ba
 void ArkSteedAssembler::StoreInt16Field(ArkSteedRegister src, ArkSteedRegister base, int32_t offset)
 {
     assembler_.Movw(src, x64::Operand(base, offset));
+}
+
+bool ArkSteedAssembler::CanStoreConstant(int32_t)
+{
+    return true;
+}
+
+void ArkSteedAssembler::StoreInt32Field(int32_t value, ArkSteedRegister base, int32_t offset)
+{
+    assembler_.Movl(x64::Immediate(value), x64::Operand(base, offset));
 }
 
 void ArkSteedAssembler::StoreInt32Field(ArkSteedRegister src, ArkSteedRegister base, int32_t offset)
@@ -407,6 +461,29 @@ void ArkSteedAssembler::SignExtendInt32ToInt64(ArkSteedRegister dst, ArkSteedReg
     assembler_.Movsxd(src, dst);
 }
 
+bool ArkSteedAssembler::CanUseAddSubImmediate(int32_t value)
+{
+    return CanUseCompareImmediate(value);
+}
+
+void ArkSteedAssembler::Int32Add(ArkSteedRegister dst, ArkSteedRegister src, int32_t immediate, bool)
+{
+    ASSERT(CanUseAddSubImmediate(immediate));
+    if (dst != src) {
+        Move(dst, src);
+    }
+    assembler_.Addl(x64::Immediate(immediate), dst);
+}
+
+void ArkSteedAssembler::Int32Sub(ArkSteedRegister dst, ArkSteedRegister src, int32_t immediate, bool)
+{
+    ASSERT(CanUseAddSubImmediate(immediate));
+    if (dst != src) {
+        Move(dst, src);
+    }
+    assembler_.Subl(x64::Immediate(immediate), dst);
+}
+
 void ArkSteedAssembler::Int32Add(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right)
 {
     ASSERT(dst == left);
@@ -442,6 +519,18 @@ void ArkSteedAssembler::Int32Mul(ArkSteedRegister dst, int32_t immediate)
     ArkSteedRegister scratch = scope.AcquireScratch();
     Move(scratch, immediate);
     Int32Mul(dst, scratch);
+}
+
+void ArkSteedAssembler::Int32Mul(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right)
+{
+    ASSERT(dst == left);
+    Int32Mul(dst, right);
+}
+
+void ArkSteedAssembler::Int32Mul(ArkSteedRegister dst, ArkSteedRegister left, int32_t immediate)
+{
+    ASSERT(dst == left);
+    Int32Mul(dst, immediate);
 }
 
 void ArkSteedAssembler::Int32MulWide([[maybe_unused]] ArkSteedRegister dst,
@@ -522,6 +611,20 @@ void ArkSteedAssembler::Float64Div(ArkSteedDoubleRegister dst, ArkSteedDoubleReg
     assembler_.Divsd(src, dst);
 }
 
+#define DEFINE_X64_F64_THREE_OPERANDS(Name)                                                              \
+    void ArkSteedAssembler::Float64##Name(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister left,           \
+                                          ArkSteedDoubleRegister right)                                    \
+    {                                                                                                     \
+        ASSERT(dst == left);                                                                               \
+        Float64##Name(dst, right);                                                                         \
+    }
+
+DEFINE_X64_F64_THREE_OPERANDS(Add)
+DEFINE_X64_F64_THREE_OPERANDS(Sub)
+DEFINE_X64_F64_THREE_OPERANDS(Mul)
+DEFINE_X64_F64_THREE_OPERANDS(Div)
+#undef DEFINE_X64_F64_THREE_OPERANDS
+
 void ArkSteedAssembler::Float64Neg(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister src)
 {
     if (dst != src) {
@@ -543,7 +646,21 @@ void ArkSteedAssembler::CompareFloat64(ArkSteedDoubleRegister left, ArkSteedDoub
 void ArkSteedAssembler::TruncateFloat64ToInt32(ArkSteedRegister dst, ArkSteedDoubleRegister src)
 {
     assembler_.Cvttsd2si64(src, dst);
-    assembler_.Andq(x64::Immediate(0xFFFFFFFF), dst);
+    assembler_.Movl(dst, dst);
+}
+
+bool ArkSteedAssembler::TryConvertFloat64ToInt32([[maybe_unused]] ArkSteedRegister dst,
+                                                 [[maybe_unused]] ArkSteedDoubleRegister src)
+{
+    return false;
+}
+
+void ArkSteedAssembler::TruncateFloat64ToInt32OrSlow(ArkSteedRegister dst, ArkSteedDoubleRegister src, Label *slow)
+{
+    assembler_.Cvttsd2si64(src, dst);
+    Compare(dst, std::numeric_limits<int64_t>::min());
+    JumpIf(Condition::EQUAL, slow);
+    assembler_.Movl(dst, dst);
 }
 
 void ArkSteedAssembler::Word64And(ArkSteedRegister dst, ArkSteedRegister src)
@@ -576,6 +693,53 @@ void ArkSteedAssembler::Int32Dec(ArkSteedRegister dst, ArkSteedRegister src)
 void ArkSteedAssembler::Int32BNot(ArkSteedRegister dst)
 {
     assembler_.Notl(dst);
+}
+
+bool ArkSteedAssembler::CanUseLogicalImmediate(uint64_t bits)
+{
+    return FitsSignedInt32Immediate(bits);
+}
+
+void ArkSteedAssembler::And(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right)
+{
+    if (dst == right) {
+        And(dst, left);
+    } else {
+        if (dst != left) {
+            Move(dst, left);
+        }
+        And(dst, right);
+    }
+}
+
+void ArkSteedAssembler::And(ArkSteedRegister dst, ArkSteedRegister src, int64_t immediate)
+{
+    ASSERT(CanUseLogicalImmediate(static_cast<uint64_t>(immediate)));
+    if (dst != src) {
+        Move(dst, src);
+    }
+    And(dst, static_cast<int32_t>(immediate));
+}
+
+void ArkSteedAssembler::Or(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right)
+{
+    if (dst == right) {
+        Or(dst, left);
+    } else {
+        if (dst != left) {
+            Move(dst, left);
+        }
+        Or(dst, right);
+    }
+}
+
+void ArkSteedAssembler::Or(ArkSteedRegister dst, ArkSteedRegister src, int64_t immediate)
+{
+    ASSERT(CanUseLogicalImmediate(static_cast<uint64_t>(immediate)));
+    if (dst != src) {
+        Move(dst, src);
+    }
+    Or(dst, static_cast<int32_t>(immediate));
 }
 
 void ArkSteedAssembler::Or(ArkSteedRegister dst, int32_t immediate)
@@ -707,6 +871,22 @@ void ArkSteedAssembler::Int32ShiftRightArithmeticByRegister(ArkSteedRegister dst
 // Comparison Operations
 // =============================================================================
 
+
+bool ArkSteedAssembler::CanUseCompareImmediate(int32_t)
+{
+    return true;
+}
+
+bool ArkSteedAssembler::CanUseCompareImmediate(int64_t value)
+{
+    return FitsSignedInt32Immediate(static_cast<uint64_t>(value));
+}
+
+bool ArkSteedAssembler::CanUseCompareImmediate(uint64_t bits)
+{
+    return FitsSignedInt32Immediate(bits);
+}
+
 void ArkSteedAssembler::Compare(ArkSteedRegister lhs, ArkSteedRegister rhs)
 {
     assembler_.Cmpq(rhs, lhs);
@@ -724,6 +904,10 @@ void ArkSteedAssembler::Compare(ArkSteedRegister lhs, int32_t immediate)
 
 void ArkSteedAssembler::Compare(ArkSteedRegister lhs, int64_t immediate)
 {
+    if (CanUseCompareImmediate(immediate)) {
+        Compare(lhs, static_cast<int32_t>(immediate));
+        return;
+    }
     TemporaryRegisterScope scope(this);
     auto scratch = scope.AcquireScratch();
     assembler_.Movabs(static_cast<uint64_t>(immediate), scratch);

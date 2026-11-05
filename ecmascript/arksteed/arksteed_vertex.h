@@ -18,11 +18,13 @@
 
 #include <array>
 #include <cstdint>
+#include <iterator>
 #include <string>
 #include <type_traits>
 
 #include "common_interfaces/base/bit_field.h"
 #include "ecmascript/arksteed/arksteed_node_type.h"
+#include "ecmascript/arksteed/arksteed_cse_types.h"
 #include "ecmascript/arksteed/arksteed_opcode_list.h"
 #include "ecmascript/arksteed/arksteed_regalloc_types.h"
 #include "ecmascript/arksteed/arksteed_regalloc_vertex_info.h"
@@ -95,8 +97,8 @@ enum class SideEffectKind : uint8_t {
     MAP_TRANSITION,
     ELEMENTS_KIND_TRANSITION,
     UNKNOWN_CALL,
-    // Internal work may write memory or allocate, but preserves JS property,
-    // HClass and environment-slot facts. Memory-read CSE still needs a new epoch.
+    // Internal work preserves JS property, HClass and environment-slot facts.
+    // The classifier decides separately whether cached memory reads expire.
     SAFE_CALL,
 };
 
@@ -617,6 +619,13 @@ public:
         return static_cast<RegallocValueVertexInfo *>(Vertex::GetRegallocInfo());
     }
 
+    bool IsUnusedPureValue() const
+    {
+        return IsElidableWhenUnused(*this) && GetOpcode() != VertexOpcode::Phi &&
+               GetOpcode() != VertexOpcode::GapMove && GetOpcode() != VertexOpcode::ConstantGapMove &&
+               !GetRegallocInfo()->HasValidLiveRange();
+    }
+
     void SetHint(InstructionOperand hint);
 
     void OverwriteWithIdentity(ValueVertex *value);
@@ -728,6 +737,13 @@ constexpr bool Vertex::Is<BranchControlVertex>() const
 }
 
 // Factory method implementation
+// NUM_INPUTS denotes the exact arity; vertices without it retain dynamic input counts.
+template <class T, class = void>
+struct HasFixedInputCount : std::false_type {};
+
+template <class T>
+struct HasFixedInputCount<T, std::void_t<decltype(T::NUM_INPUTS)>> : std::true_type {};
+
 template <class Derived, typename... Args>
 Derived *Vertex::New(Chunk *chunk, size_t inputCount, Args &&...args)
 {
@@ -766,12 +782,23 @@ template <class Derived, typename Container, typename... Args,
           typename std::enable_if<!std::is_integral<Container>::value, int>::type>
 Derived *Vertex::New(Chunk *chunk, const Container &inputs, Args &&...args)
 {
-    Derived *vertex = New<Derived>(chunk, inputs.size(), std::forward<Args>(args)...);
-    uint32_t i = 0;
-    for (ValueVertex *input : inputs) {
-        vertex->SetInput(i++, input);
+    if constexpr (HasFixedInputCount<Derived>::value) {
+        constexpr uint32_t N = Derived::NUM_INPUTS;
+        ASSERT(inputs.size() == N);
+        Derived *vertex = New<Derived>(chunk, N, std::forward<Args>(args)...);
+        auto it = std::begin(inputs);
+        for (uint32_t i = 0; i < N; ++i, ++it) {
+            vertex->SetInput(i, *it);
+        }
+        return vertex;
+    } else {
+        Derived *vertex = New<Derived>(chunk, inputs.size(), std::forward<Args>(args)...);
+        uint32_t i = 0;
+        for (ValueVertex *input : inputs) {
+            vertex->SetInput(i++, input);
+        }
+        return vertex;
     }
-    return vertex;
 }
 
 // Inline implementations

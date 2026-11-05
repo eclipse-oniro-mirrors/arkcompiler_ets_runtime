@@ -19,11 +19,12 @@
 #include <array>
 #include <cstdint>
 #include <functional>
-#include <limits>
+#include <memory>
 #include <optional>
 #include <tuple>
 #include <vector>
 
+#include "ecmascript/arksteed/arksteed_cse_types.h"
 #include "ecmascript/arksteed/arksteed_vertex.h"
 #include "ecmascript/arksteed/arksteed_heap_ref.h"
 #include "ecmascript/base_env.h"
@@ -60,6 +61,11 @@ public:
     bool Empty() const;
     void MergeWith(const AlternativeNodes &other);
 
+    bool operator==(const AlternativeNodes &other) const
+    {
+        return store_ == other.store_;
+    }
+
 private:
     static constexpr size_t STORE_SIZE = static_cast<size_t>(Kind::COUNT);
     std::array<ValueVertex *, STORE_SIZE> store_;
@@ -80,22 +86,11 @@ public:
     using NodeType = arksteed::NodeType;
 
     explicit NodeInfo(Chunk *chunk) : chunk_(chunk), possibleHClasses_(chunk) {}
-
+    NodeInfo(Chunk *chunk, const NodeInfo &other);
     ~NodeInfo() = default;
 
-    // ChunkVector is non-copyable, so the copy members are hand-written: they re-create
-    // `possibleHClasses_` from the target's chunk and rely on both objects sharing the
-    // compilation chunk.
-    NodeInfo(const NodeInfo &other)
-        : type_(other.type_),
-          nonHole_(other.nonHole_),
-          possibleHClassesAreStale_(other.possibleHClassesAreStale_),
-          alternatives_(other.alternatives_),
-          chunk_(other.chunk_),
-          possibleHClasses_(other.chunk_)
-    {
-        possibleHClasses_.assign(other.possibleHClasses_.begin(), other.possibleHClasses_.end());
-    }
+    // Preserve borrowed immutable HClass storage; copy only an owned list.
+    NodeInfo(const NodeInfo &other) : NodeInfo(other.chunk_, other) {}
 
     NodeInfo &operator=(const NodeInfo &other)
     {
@@ -105,7 +100,16 @@ public:
             nonHole_ = other.nonHole_;
             possibleHClassesAreStale_ = other.possibleHClassesAreStale_;
             alternatives_ = other.alternatives_;
-            possibleHClasses_.assign(other.possibleHClasses_.begin(), other.possibleHClasses_.end());
+            truthinessResults_ = other.truthinessResults_;
+            if (other.sharedHClasses_ == &possibleHClasses_) {
+                sharedHClasses_ = nullptr;
+            } else if (other.sharedHClasses_ != nullptr) {
+                possibleHClasses_.clear();
+                sharedHClasses_ = other.sharedHClasses_;
+            } else {
+                possibleHClasses_.assign(other.possibleHClasses_.begin(), other.possibleHClasses_.end());
+                sharedHClasses_ = nullptr;
+            }
         }
         return *this;
     }
@@ -192,17 +196,17 @@ public:
 
     bool HasFreshKnownHClass() const
     {
-        return possibleHClasses_.size() == 1 && !possibleHClassesAreStale_;
+        return GetHClassStorage().size() == 1 && !possibleHClassesAreStale_;
     }
 
     ArkSteedHClassRef GetFreshKnownHClass() const
     {
-        return HasFreshKnownHClass() ? possibleHClasses_.front().hclass : ArkSteedHClassRef {};
+        return HasFreshKnownHClass() ? GetHClassStorage().front().hclass : ArkSteedHClassRef {};
     }
 
     bool HasFreshPossibleHClasses() const
     {
-        return !possibleHClasses_.empty() && !possibleHClassesAreStale_;
+        return !GetHClassStorage().empty() && !possibleHClassesAreStale_;
     }
 
     PossibleHClasses GetFreshPossibleHClasses() const;
@@ -218,12 +222,12 @@ public:
 
     size_t PossibleHClassCount() const
     {
-        return possibleHClasses_.size();
+        return GetHClassStorage().size();
     }
 
     bool HClassIsStable() const
     {
-        return HasFreshKnownHClass() && possibleHClasses_.front().isStable;
+        return HasFreshKnownHClass() && GetHClassStorage().front().isStable;
     }
 
     void RecordHClass(ArkSteedHClassRef hclass, bool isStable);
@@ -248,12 +252,34 @@ public:
         return alternatives_;
     }
 
+    ValueVertex *GetTruthinessResult(bool trueIfTruthy) const
+    {
+        return truthinessResults_[trueIfTruthy ? 1 : 0];
+    }
+
+    void SetTruthinessResult(bool trueIfTruthy, ValueVertex *result)
+    {
+        truthinessResults_[trueIfTruthy ? 1 : 0] = result;
+    }
+
     bool NoInfoAvailable() const
     {
-        return type_ == NodeType::UNKNOWN && !nonHole_ && alternatives_.Empty() && possibleHClasses_.empty();
+        return type_ == NodeType::UNKNOWN && !nonHole_ && alternatives_.Empty() && GetHClassStorage().empty() &&
+               truthinessResults_[0] == nullptr && truthinessResults_[1] == nullptr;
     }
 
 private:
+    friend class NodeInfoView;
+    using HClassStorage = ChunkVector<PossibleHClassInfo>;
+
+    // Only immutable Chunk-stored values may lend their payload to an update.
+    static NodeInfo CopyForUpdate(const NodeInfo &stored);
+    bool IsSameAs(const NodeInfo &other, bool effectiveStale) const;
+    const HClassStorage &GetHClassStorage() const
+    {
+        return sharedHClasses_ == nullptr ? possibleHClasses_ : *sharedHClasses_;
+    }
+    void EnsureWritableHClasses();
     void AddPossibleHClass(ArkSteedHClassRef hclass, bool isStable);
     void IntersectTypeWithPossibleHClasses();
     void UnionPossibleHClasses(const NodeInfo &other);
@@ -263,9 +289,134 @@ private:
     bool nonHole_ {false};
     bool possibleHClassesAreStale_ {false};
     AlternativeNodes alternatives_;
+    std::array<ValueVertex *, 2> truthinessResults_ {nullptr, nullptr};  // 2: false and true result polarities.
     Chunk *chunk_ {nullptr};
-    // Chunk-backed storage object should keep chunk-backed storage member.
-    ChunkVector<PossibleHClassInfo> possibleHClasses_;
+    HClassStorage possibleHClasses_;
+    const HClassStorage *sharedHClasses_ {nullptr};
+};
+
+struct HClassGeneration {
+    uint8_t unused {0};
+};
+
+struct StoredNodeInfo {
+    StoredNodeInfo(Chunk *chunk, const NodeInfo &value, const HClassGeneration *generation)
+        : info(chunk, value), hclassGeneration(generation)
+    {}
+
+    NodeInfo info;
+    const HClassGeneration *hclassGeneration;
+};
+
+struct NodeInfoHamtTraits {
+    static uint32_t MinEpoch([[maybe_unused]] const StoredNodeInfo *value)
+    {
+        return std::numeric_limits<uint32_t>::max();
+    }
+
+    static bool HasEmptyInfo(const StoredNodeInfo *value)
+    {
+        return value->info.NoInfoAvailable();
+    }
+};
+
+// The same immutable value can be fresh in one path and stale in another.
+class NodeInfoView {
+public:
+    NodeInfoView(const StoredNodeInfo *stored, const HClassGeneration *generation)
+        : stored_(stored), generation_(generation)
+    {}
+
+    bool operator==(std::nullptr_t) const
+    {
+        return stored_ == nullptr;
+    }
+    bool operator!=(std::nullptr_t) const
+    {
+        return stored_ != nullptr;
+    }
+    const NodeInfoView *operator->() const
+    {
+        ASSERT(stored_ != nullptr);
+        return this;
+    }
+
+    NodeInfo::NodeType GetType() const
+    {
+        return stored_->info.GetType();
+    }
+    bool NoInfoAvailable() const
+    {
+        return stored_->info.NoInfoAvailable();
+    }
+    bool IsNonHole() const
+    {
+        return stored_->info.IsNonHole();
+    }
+    const AlternativeNodes &GetAlternatives() const
+    {
+        return stored_->info.GetAlternatives();
+    }
+    ValueVertex *GetTruthinessResult(bool trueIfTruthy) const
+    {
+        return stored_->info.GetTruthinessResult(trueIfTruthy);
+    }
+    bool HasUnstablePossibleHClass() const
+    {
+        return stored_->info.HasUnstablePossibleHClass();
+    }
+    bool ContainsPossibleHClass(ArkSteedHClassRef hclass) const
+    {
+        return stored_->info.ContainsPossibleHClass(hclass);
+    }
+    size_t PossibleHClassCount() const
+    {
+        return stored_->info.PossibleHClassCount();
+    }
+    bool PossibleHClassesAreStale() const
+    {
+        return stored_->info.PossibleHClassesAreStale() ||
+               (stored_->hclassGeneration != generation_ && stored_->info.HasUnstablePossibleHClass());
+    }
+    bool HasFreshPossibleHClasses() const
+    {
+        return PossibleHClassCount() != 0 && !PossibleHClassesAreStale();
+    }
+    bool HasFreshKnownHClass() const
+    {
+        return PossibleHClassCount() == 1 && !PossibleHClassesAreStale();
+    }
+    ArkSteedHClassRef GetFreshKnownHClass() const
+    {
+        return HasFreshKnownHClass() ? stored_->info.GetFreshKnownHClass() : ArkSteedHClassRef {};
+    }
+    NodeInfo::PossibleHClasses GetFreshPossibleHClasses() const
+    {
+        return HasFreshPossibleHClasses() ? stored_->info.GetPossibleHClassesForRevalidation()
+                                          : NodeInfo::PossibleHClasses {};
+    }
+    NodeInfo::PossibleHClasses GetPossibleHClassesForRevalidation() const
+    {
+        return stored_->info.GetPossibleHClassesForRevalidation();
+    }
+    NodeInfo Materialize() const
+    {
+        NodeInfo info = NodeInfo::CopyForUpdate(stored_->info);
+        if (PossibleHClassesAreStale()) {
+            info.MarkUnstableHClassesStale();
+        }
+        return info;
+    }
+
+    bool IsSameAs(const NodeInfo &info) const
+    {
+        ASSERT(stored_ != nullptr);
+        return stored_->info.IsSameAs(info, PossibleHClassesAreStale());
+    }
+
+private:
+    const StoredNodeInfo *stored_;
+    const HClassGeneration *generation_;
 };
 
 NodeInfo::NodeType NodeTypeFromJSTaggedValue(JSTaggedValue value);
@@ -330,9 +481,18 @@ public:
         return PropertyKey(Kind::EXTERNAL_MODULE_INDEX, index);
     }
 
-    static PropertyKey ConstDataId(uint32_t constDataId)
+    static PropertyKey ConstDataId(uint32_t constDataId, uint32_t constantPoolScope = 0)
     {
-        return PropertyKey(Kind::CONST_DATA_ID, constDataId);
+        return PropertyKey(Kind::CONST_DATA_ID,
+                           (static_cast<uint64_t>(constantPoolScope) << CONST_DATA_SCOPE_SHIFT) | constDataId);
+    }
+
+    bool MayAliasConstDataId(PropertyKey other) const
+    {
+        // Indices are unique within a pool scope. Different scopes may use different indices for the same name.
+        return kind_ == Kind::CONST_DATA_ID && other.kind_ == Kind::CONST_DATA_ID &&
+               (payload_ == other.payload_ ||
+                (payload_ >> CONST_DATA_SCOPE_SHIFT) != (other.payload_ >> CONST_DATA_SCOPE_SHIFT));
     }
 
     static PropertyKey HeapConstant(uint32_t handleIndex)
@@ -366,6 +526,8 @@ public:
     }
 
 private:
+    static constexpr uint32_t CONST_DATA_SCOPE_SHIFT = 32;
+
     PropertyKey(Kind kind, uint64_t payload) : kind_(kind), payload_(payload) {}
 
     Kind kind_;
@@ -379,9 +541,10 @@ public:
         return LoadedPropertyKey(receiver, propertyKey, 0);
     }
 
-    static LoadedPropertyKey ConstDataId(ValueVertex *receiver, uint32_t constDataId, PropertyLookupResult plr)
+    static LoadedPropertyKey ConstDataId(ValueVertex *receiver, uint32_t constDataId, PropertyLookupResult plr,
+                                         uint32_t constantPoolScope = 0)
     {
-        return LoadedPropertyKey(receiver, PropertyKey::ConstDataId(constDataId), plr.GetData());
+        return LoadedPropertyKey(receiver, PropertyKey::ConstDataId(constDataId, constantPoolScope), plr.GetData());
     }
 
     static LoadedPropertyKey HeapConstant(ValueVertex *receiver, uint32_t handleIndex, PropertyLookupResult plr)
@@ -422,12 +585,24 @@ private:
     ValueVertex *receiver_ {nullptr};
     PropertyKey propertyKey_ {PropertyKey::Unknown()};
     uint32_t propertyLookupResult_ {0};
-
-    friend struct LoadedPropertyKeyCompare;
 };
 
-struct LoadedPropertyKeyCompare {
-    bool operator()(const LoadedPropertyKey &lhs, const LoadedPropertyKey &rhs) const;
+struct LoadedPropertyKeyHash {
+    uint64_t operator()(const LoadedPropertyKey &key) const
+    {
+        uint64_t hash = MixFactsHash(reinterpret_cast<uintptr_t>(key.GetReceiver()));
+        hash = MixFactsHash(hash ^ static_cast<uint64_t>(key.GetPropertyKey().GetKind()));
+        hash = MixFactsHash(hash ^ key.GetPropertyKey().GetPayload());
+        return MixFactsHash(hash ^ key.GetPropertyLookupResult());
+    }
+};
+
+struct LoadedPropertyKeyEqual {
+    bool operator()(const LoadedPropertyKey &lhs, const LoadedPropertyKey &rhs) const
+    {
+        return lhs.GetReceiver() == rhs.GetReceiver() && lhs.GetPropertyKey() == rhs.GetPropertyKey() &&
+               lhs.GetPropertyLookupResult() == rhs.GetPropertyLookupResult();
+    }
 };
 
 class EnvSlotKey {
@@ -460,6 +635,21 @@ private:
     int32_t slot_;
 };
 
+struct EnvSlotKeyHash {
+    uint64_t operator()(const EnvSlotKey &key) const
+    {
+        return MixFactsHash(MixFactsHash(reinterpret_cast<uintptr_t>(key.GetEnv())) ^
+                            static_cast<uint32_t>(key.GetSlot()));
+    }
+};
+
+struct EnvSlotKeyEqual {
+    bool operator()(const EnvSlotKey &lhs, const EnvSlotKey &rhs) const
+    {
+        return lhs.GetEnv() == rhs.GetEnv() && lhs.GetSlot() == rhs.GetSlot();
+    }
+};
+
 inline bool IsEnvConstantFieldOffset(int32_t offset)
 {
     constexpr int32_t taggedSize = static_cast<int32_t>(JSTaggedValue::TaggedTypeSize());
@@ -477,6 +667,7 @@ enum class EnvSlotAliasMode : uint8_t {
 
 struct SideEffectDescriptor {
     SideEffectKind kind {SideEffectKind::NO_SIDE_EFFECT};
+    bool advancesEffectEpoch {true};
     ValueVertex *receiver {nullptr};
     PropertyKey propertyKey {PropertyKey::Unknown()};
     ValueVertex *env {nullptr};
@@ -488,8 +679,6 @@ struct SideEffectDescriptor {
 
 class CompileInfoFacts {
 public:
-    using ExpressionInputs = ChunkVector<ValueVertex *>;
-    using ExpressionOptions = ChunkVector<uint64_t>;
     using ClearedEnvSlotKeys = ChunkVector<EnvSlotKey>;
 
     explicit CompileInfoFacts(Chunk *chunk);
@@ -503,9 +692,20 @@ public:
     bool IsCompatibleWithLoopHeader(const CompileInfoFacts &headerFacts, const BB *loopHeader) const;
     void Merge(const CompileInfoFacts &other);
 
-    NodeInfo *GetOrCreateInfoFor(ValueVertex *node);
-    NodeInfo *TryGetInfoFor(ValueVertex *node);
-    const NodeInfo *TryGetInfoFor(ValueVertex *node) const;
+    NodeInfoView TryGetInfoFor(ValueVertex *node) const
+    {
+        return NodeInfoView(nodeInfos_.Find(node), hclassGeneration_);
+    }
+
+    // The callback operates on a private temporary; no writable stored value escapes.
+    template <class Callback>
+    void UpdateInfoFor(ValueVertex *node, Callback callback)
+    {
+        ASSERT(node != nullptr);
+        // Keep the recursive HAMT updater out of vertex-specific instantiations.
+        UpdateInfoForImpl(node, &callback,
+                          [](void *context, NodeInfo &info) { (*static_cast<Callback *>(context))(info); });
+    }
 
     NodeInfo::NodeType GetKnownType(ValueVertex *node) const;
     bool MayBeNullOrUndefined(ValueVertex *node) const;
@@ -545,6 +745,8 @@ public:
     bool MarkPossibleHClassStable(ValueVertex *node, ArkSteedHClassRef hclass);
     void SetAlternative(ValueVertex *node, AlternativeNodes::Kind kind, ValueVertex *alternative);
     ValueVertex *TryGetAlternative(ValueVertex *node, AlternativeNodes::Kind kind) const;
+    ValueVertex *LookupTruthinessResult(ValueVertex *node, bool trueIfTruthy) const;
+    void RecordTruthinessResult(ValueVertex *node, bool trueIfTruthy, ValueVertex *result);
 
     void RecordLoadedProperty(const LoadedPropertyKey &key, ValueVertex *value);
     ValueVertex *LookupLoadedProperty(const LoadedPropertyKey &key) const;
@@ -565,11 +767,15 @@ public:
     ClearedEnvSlotKeys ClearAliasedEnvSlotsFor(ValueVertex *env, int32_t slot, ValueVertex *newValue);
     void ClearEnvSlotsFor(ValueVertex *env);
 
-    void AddExpression(uint32_t hash, ValueVertex *node, const ExpressionInputs &inputs,
-                       const ExpressionOptions &options, bool needsEpochCheck);
-    ValueVertex *FindExpression(uint32_t hash, VertexOpcode opcode, const ExpressionInputs &inputs,
-                                const ExpressionOptions &options, bool needsEpochCheck);
-    void ClearAvailableExpressions();
+    CseAvailableExpressions &GetCse()
+    {
+        return cse_;
+    }
+
+    const CseAvailableExpressions &GetCse() const
+    {
+        return cse_;
+    }
 
     void MarkPossibleSideEffect(const SideEffectDescriptor &effect, LoopEffects *loopEffects = nullptr);
     void MarkHClassesStaleForElementsKindTransition(const NodeInfo::PossibleHClasses &sourceHClasses);
@@ -594,44 +800,48 @@ public:
 
     bool Empty() const
     {
-        return nodeInfos_.empty() && loadedProperties_.empty() && loadedConstantProperties_.empty() &&
-               loadedEnvSlots_.empty() && loadedEnvConstants_.empty() && availableExpressions_.empty();
+        return nodeInfos_.Empty() && loadedProperties_.Empty() && loadedConstantProperties_.Empty() &&
+               loadedEnvSlots_.Empty() && loadedEnvConstants_.Empty() && cse_.Empty();
     }
 
 private:
-    static constexpr uint32_t EFFECT_EPOCH_FOR_PURE_INSTRUCTIONS = std::numeric_limits<uint32_t>::max();
-    static constexpr uint32_t EFFECT_EPOCH_OVERFLOW = EFFECT_EPOCH_FOR_PURE_INSTRUCTIONS - 1;
+    static constexpr uint32_t EFFECT_EPOCH_OVERFLOW = CSE_EPOCH_OVERFLOW;
 
-    using NodeInfos = ChunkMap<ValueVertex *, NodeInfo>;
-    using LoadedPropertyMap = ChunkMap<LoadedPropertyKey, ValueVertex *, LoadedPropertyKeyCompare>;
-    using LoadedEnvSlots = ChunkMap<EnvSlotKey, ValueVertex *>;
+    using NodeInfos = FactsHamt<ValueVertex *, const StoredNodeInfo *, FactsHamtHash<ValueVertex *>,
+                                std::equal_to<ValueVertex *>, NodeInfoHamtTraits>;
+    using LoadedPropertyMap =
+        FactsHamt<LoadedPropertyKey, ValueVertex *, LoadedPropertyKeyHash, LoadedPropertyKeyEqual>;
+    using LoadedEnvSlots = FactsHamt<EnvSlotKey, ValueVertex *, EnvSlotKeyHash, EnvSlotKeyEqual>;
 
-    struct AvailableExpression {
-        ValueVertex *node {nullptr};
-        VertexOpcode opcode {};
-        ExpressionInputs *inputs {nullptr};
-        ExpressionOptions *options {nullptr};
-        uint32_t effectEpoch {0};
-    };
+    // A guarded update may reuse its lookup only while the facts and generation are unchanged.
+    template <class Callback>
+    void UpdateInfoFromView(ValueVertex *node, NodeInfoView existing, Callback &&callback)
+    {
+        ASSERT(node != nullptr);
+        NodeInfo info = existing == nullptr ? NodeInfo(chunk_) : existing.Materialize();
+        callback(info);
+        if (existing != nullptr && existing.IsSameAs(info)) {
+            return;
+        }
+        StoreNodeInfo(node, info);
+        mayHaveFreshUnstableHClasses_ |= info.HasFreshPossibleHClasses() && info.HasUnstablePossibleHClass();
+    }
 
+    void UpdateInfoForImpl(ValueVertex *node, void *context, void (*callback)(void *, NodeInfo &));
+
+    void StoreNodeInfo(ValueVertex *node, const NodeInfo &info)
+    {
+        nodeInfos_.InsertOrAssign(node, chunk_->New<StoredNodeInfo>(chunk_, info, hclassGeneration_));
+    }
     void AdvanceEpochAfterMerge(uint32_t otherEpoch);
-    ExpressionInputs *CopyExpressionInputs(const ExpressionInputs &inputs);
-    ExpressionOptions *CopyExpressionOptions(const ExpressionOptions &options);
-    bool ExpressionMatches(const AvailableExpression &expression, VertexOpcode opcode, const ExpressionInputs &inputs,
-                           const ExpressionOptions &options, bool needsEpochCheck) const;
     ValueVertex *LookupLoadedProperty(const LoadedPropertyMap &map, const LoadedPropertyKey &key) const;
     void RecordLoadedProperty(LoadedPropertyMap &map, const LoadedPropertyKey &key, ValueVertex *value);
     void MergeLoadedProperties(LoadedPropertyMap &target, const LoadedPropertyMap &other);
     void MergeEnvSlots(LoadedEnvSlots &target, const LoadedEnvSlots &other);
-    void MergeAvailableExpressions(const CompileInfoFacts &other);
-    void CopyAvailableExpressionsForLoopHeader(const CompileInfoFacts &source);
-    void CopyLoadedProperties(LoadedPropertyMap &target, const LoadedPropertyMap &source) const;
-    void CopyEnvSlots(LoadedEnvSlots &target, const LoadedEnvSlots &source) const;
     void UpdateEnvSlotAliasMode(ValueVertex *env);
     void RecomputeEnvSlotAliasMode();
     void MarkAllFreshUnstableHClassesStale();
     void MarkHClassesStaleForTransition(ValueVertex *receiver);
-    void RecomputeFreshUnstableHClassesRequireInvalidation();
     bool EnvMayAlias(ValueVertex *lhs, ValueVertex *rhs) const;
 
     static EnvSlotAliasMode MergeEnvSlotAliasMode(EnvSlotAliasMode lhs, EnvSlotAliasMode rhs);
@@ -642,10 +852,12 @@ private:
     LoadedPropertyMap loadedConstantProperties_;
     LoadedEnvSlots loadedEnvSlots_;
     LoadedEnvSlots loadedEnvConstants_;
-    ChunkMap<uint32_t, AvailableExpression> availableExpressions_;
+    CseAvailableExpressions cse_;
     uint32_t effectEpoch_ {0};
     EnvSlotAliasMode envSlotAliasMode_ {EnvSlotAliasMode::NONE};
-    bool freshUnstableHClassesRequireInvalidation_ {false};
+    const HClassGeneration *hclassGeneration_ {nullptr};
+    // Conservative: true can outlive individual entries; false guarantees none are fresh.
+    bool mayHaveFreshUnstableHClasses_ {false};
 };
 
 }  // namespace panda::ecmascript::arksteed

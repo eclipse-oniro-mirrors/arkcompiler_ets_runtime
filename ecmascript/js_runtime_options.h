@@ -154,6 +154,7 @@ enum CommandValues {
     OPTION_COMPILER_ARKSTEED_MAX_GRAPH_NODES_BEFORE_INLINE,
     OPTION_COMPILER_ARKSTEED_MAX_INLINE_ACTUAL_ARGS,
     OPTION_COMPILER_ARKSTEED_SMALL_INLINE_BYTECODE_SIZE,
+    OPTION_COMPILER_ARKSTEED_ENABLE_CSE,
     OPTION_COMPILER_TYPE_THRESHOLD,
     OPTION_ENABLE_RUNTIME_STAT,
     OPTION_COMPILER_LOG_SNAPSHOT,
@@ -1216,6 +1217,16 @@ public:
     uint32_t GetCompilerArkSteedSmallInlineBytecodeSize() const
     {
         return compilerArkSteedSmallInlineBytecodeSize_;
+    }
+
+    void SetCompilerArkSteedEnableCse(bool value)
+    {
+        compilerArkSteedEnableCse_ = value;
+    }
+
+    bool GetCompilerArkSteedEnableCse() const
+    {
+        return compilerArkSteedEnableCse_;
     }
 
     void SetCompilerLogSnapshot(bool value)
@@ -3040,6 +3051,7 @@ private:
     uint32_t compilerArkSteedMaxGraphNodesBeforeInline_ {1000};
     uint32_t compilerArkSteedMaxInlineActualArgs_ {16};
     uint32_t compilerArkSteedSmallInlineBytecodeSize_ {30};
+    bool compilerArkSteedEnableCse_ {true};
     bool compilerLogSnapshot_ {false};
     bool compilerLogTime_ {false};
     bool enableCompilerLogAllMethodsTime_ {false};

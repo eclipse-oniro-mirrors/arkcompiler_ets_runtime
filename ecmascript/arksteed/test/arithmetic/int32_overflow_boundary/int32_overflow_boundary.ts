@@ -15,9 +15,10 @@
 
 // G10.1 (P0): overflow boundary of the checked int32 arithmetic. Every probe
 // method is warmed with dynamic int32 operands, then installed through
-// `ArkTools.arkSteedCompileSync`, so its checked `I32*WithOverflow` /
-// `CheckedI32Mod` vertices are compiled (and addressed by the method-scoped
-// `HAS` annotations) before the first overflowing input reaches it. The
+// `ArkTools.arkSteedCompileSync`. Probes that consume the updated value
+// retain checked `I32*WithOverflow` / `CheckedI32Mod` vertices before the
+// first overflowing input reaches them. Postfix expression-only probes
+// discard the unused update and retain the required numeric check. The
 // overflowing probes leave the generated code through the eager overflow exit
 // (`DEOPT_COUNT_GE *Deoptimize* 1`), and the interpreter supplies the
 // specified Number result. The exact results follow ECMA-262 2021 6.1.6.1
@@ -55,13 +56,15 @@
 //! HAS CheckedI32Mod
 
 //! METHOD boundary_post_inc_expr
-//! HAS I32IncWithOverflow
+//! COUNT DeoptIfNotNumber 1
+//! HAS_NOT I32IncWithOverflow
 
 //! METHOD boundary_post_inc_slot
 //! HAS I32IncWithOverflow
 
 //! METHOD boundary_post_dec_expr
-//! HAS I32DecWithOverflow
+//! COUNT DeoptIfNotNumber 1
+//! HAS_NOT I32DecWithOverflow
 
 //! METHOD boundary_post_dec_slot
 //! HAS I32DecWithOverflow

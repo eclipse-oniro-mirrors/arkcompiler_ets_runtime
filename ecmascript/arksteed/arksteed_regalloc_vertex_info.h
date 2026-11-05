@@ -391,6 +391,16 @@ public:
         return representation_ == MachineRepresentation::Float64;
     }
 
+    void SetCanReuseInputRegisters()
+    {
+        canReuseInputRegisters_ = true;
+    }
+
+    bool CanReuseInputRegisters() const
+    {
+        return canReuseInputRegisters_;
+    }
+
 private:
     VertexId endId_ = INVALID_VERTEX_ID;
     VertexId nextUse_ = INVALID_VERTEX_ID;
@@ -399,6 +409,7 @@ private:
     // initialized to this vertex's nextUse_ to track the first use.
     VertexId *lastUsesNextUseId_;
     MachineRepresentation representation_;
+    bool canReuseInputRegisters_ = false;
     ValueLocation result_;
     InstructionOperand spillSlot_;
     union {

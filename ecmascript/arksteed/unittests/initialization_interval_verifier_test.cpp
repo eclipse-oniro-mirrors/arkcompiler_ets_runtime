@@ -726,12 +726,12 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsInvalidSnapshotAtConst
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsWrongFixedInputCountAtConstruction)
 {
     Fixture f;
-    EXPECT_DEATH(f.New<AllocateInYoungVertex>({}), "GetInputCount");
-    EXPECT_DEATH(f.New<InitializeEmptyObjectVertex>({f.phi, f.hclass}, f.objectSize), "GetInputCount");
+    EXPECT_DEATH(f.New<AllocateInYoungVertex>({}), "inputs\\.size\\(\\) == N");
+    EXPECT_DEATH(f.New<InitializeEmptyObjectVertex>({f.phi, f.hclass}, f.objectSize), "inputs\\.size\\(\\) == N");
     auto info = f.Snapshot();
-    EXPECT_DEATH(f.New<InitializeObjectWithBufferVertex>({f.phi, f.hclass}, info), "GetInputCount");
-    EXPECT_DEATH(f.New<InitializeEmptyArrayVertex>({f.phi, f.hclass}, f.objectSize), "GetInputCount");
-    EXPECT_DEATH(f.New<InitializeArrayWithBufferVertex>({f.phi, f.hclass}, f.objectSize), "GetInputCount");
+    EXPECT_DEATH(f.New<InitializeObjectWithBufferVertex>({f.phi, f.hclass}, info), "inputs\\.size\\(\\) == N");
+    EXPECT_DEATH(f.New<InitializeEmptyArrayVertex>({f.phi, f.hclass}, f.objectSize), "inputs\\.size\\(\\) == N");
+    EXPECT_DEATH(f.New<InitializeArrayWithBufferVertex>({f.phi, f.hclass}, f.objectSize), "inputs\\.size\\(\\) == N");
 }
 
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsDynamicLiteralAllocationSize)

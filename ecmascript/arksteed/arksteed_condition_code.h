@@ -17,6 +17,7 @@
 #define ECMASCRIPT_ARKSTEED_CONDITION_CODE_H
 
 #include <cstdint>
+#include <optional>
 #include <type_traits>
 #include "libpandabase/macros.h"
 
@@ -130,6 +131,36 @@ constexpr Condition NegateCondition(Condition cond)
 #undef CASES
         default:
             UNREACHABLE();
+    }
+}
+
+// Swap comparison operands while preserving the relation. Flag-only conditions cannot be swapped.
+constexpr std::optional<Condition> SwapCompareCondition(Condition condition)
+{
+    switch (condition) {
+        case Condition::EQUAL:
+        case Condition::NOT_EQUAL:
+        case Condition::ZERO:
+        case Condition::NOT_ZERO:
+            return condition;
+        case Condition::LESS_THAN:
+            return Condition::GREATER_THAN;
+        case Condition::GREATER_THAN:
+            return Condition::LESS_THAN;
+        case Condition::LESS_THAN_OR_EQUAL:
+            return Condition::GREATER_THAN_OR_EQUAL;
+        case Condition::GREATER_THAN_OR_EQUAL:
+            return Condition::LESS_THAN_OR_EQUAL;
+        case Condition::BELOW:
+            return Condition::ABOVE;
+        case Condition::ABOVE:
+            return Condition::BELOW;
+        case Condition::BELOW_OR_EQUAL:
+            return Condition::ABOVE_OR_EQUAL;
+        case Condition::ABOVE_OR_EQUAL:
+            return Condition::BELOW_OR_EQUAL;
+        default:
+            return std::nullopt;
     }
 }
 

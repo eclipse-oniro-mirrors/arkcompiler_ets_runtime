@@ -24,12 +24,12 @@
 #include "ecmascript/arksteed/arksteed_bc_frame_state.h"
 #include "ecmascript/arksteed/arksteed_bytecode_analysis.h"
 #include "ecmascript/arksteed/arksteed_bytecode_preprocessor.h"
+#include "ecmascript/arksteed/arksteed_compile_info_facts.h"
 #include "ecmascript/arksteed/arksteed_inline_frame_state.h"
 #include "ecmascript/arksteed/arksteed_pgo_context.h"
 #include "ecmascript/compiler/common_stub_csigns.h"
 
 namespace panda::ecmascript::arksteed {
-class CompileInfoFacts;
 class Graph;
 class ArkSteedCompilationUnit;
 class LoopEffects;
@@ -70,6 +70,21 @@ private:
     struct LocalClosureInfo;
     struct BytecodeVisitor;
     friend class ArkSteedGraphBuilderTestAccess;
+
+    struct VertexBuildContext {
+        CompileInfoFacts *facts;
+        BB *owner;
+    };
+
+    struct MissingVertexFactory;
+    struct NoVertexAction;
+    struct DefaultVertexEffect;
+    struct VertexAccStore;
+
+    template <class VertexT, class Factory = MissingVertexFactory, class Eager = NoVertexAction,
+              class Effect = DefaultVertexEffect, class Catch = NoVertexAction, class Lazy = NoVertexAction,
+              class Facts = NoVertexAction, class Acc = NoVertexAction>
+    class VertexBuilder;
 
     enum class LoopPeelingStage : uint8_t {
         NONE,
@@ -173,7 +188,13 @@ private:
     VertexT *NewVertex(BB *owner, const InputRange &inputs, Args &&...args);
 
     template <class VertexT, class InputRange = std::initializer_list<ValueVertex *>, class... Args>
+    VertexT *NewBootstrapVertex(BB *owner, const InputRange &inputs, Args &&...args);
+
+    template <class VertexT, class InputRange = std::initializer_list<ValueVertex *>, class... Args>
     VertexT *NewVertex(CompileInfoFacts *compileInfoFacts, BB *owner, const InputRange &inputs, Args &&...args);
+
+    template <class VertexT, class InputRange = std::initializer_list<ValueVertex *>, class... Args>
+    VertexT *NewUncachedVertex(CompileInfoFacts *compileInfoFacts, BB *owner, const InputRange &inputs, Args &&...args);
 
     template <class VertexT, class InputRange = std::initializer_list<ValueVertex *>, class... Args>
     VertexT *NewVertexImpl(BB *owner, const InputRange &inputs, Args &&...args);
@@ -216,6 +237,7 @@ private:
     uint32_t numLocal_;   // Equivalent to preproc_->GetNumLocalRegs()
     uint32_t numParams_;  // Equivalent to preproc_->GetNumParamRegs()
     bool isOsr_;
+    const bool enableCse_;  // Read once when constructing the graph builder.
     Chunk *chunk_;        // Equivalent to preproc_->GetChunk()
 
     // Constants frequently used

@@ -215,6 +215,8 @@ public:
     void Ldr(const VRegister &vt, const MemoryOperand &operand);  // Load SIMD&FP from memory
     void Ldrh(const Register &rt, const MemoryOperand &operand);
     void Ldrb(const Register &rt, const MemoryOperand &operand);
+    void Ldrsb(const Register &rt, const MemoryOperand &operand);
+    void Ldrsh(const Register &rt, const MemoryOperand &operand);
     void Str(const Register &rt, const MemoryOperand &operand);
     void Stlr(const Register &rt, const MemoryOperand &operand);
     void Str(const VRegister &vt, const MemoryOperand &operand);  // Store SIMD&FP to memory
@@ -262,6 +264,7 @@ public:
     void Sdiv(const Register &rd, const Register &rn, const Register &rm);
     void Msub(const Register &rd, const Register &rn, const Register &rm, const Register &ra);
     void Scvtf(const VRegister &vd, const Register &rn);
+    void Ucvtf(const VRegister &vd, const Register &rn);
     void Fcvt(const VRegister &vd, const VRegister &vn);
     void Fadd(const VRegister &vd, const VRegister &vn, const VRegister &vm);
     void Fsub(const VRegister &vd, const VRegister &vn, const VRegister &vm);
@@ -270,8 +273,12 @@ public:
     void Fneg(const VRegister &vd, const VRegister &vn);
     void Fcmp(const VRegister &vn, const VRegister &vm);
     void Fcvtzs(const Register &rd, const VRegister &vn);
+    void Fjcvtzs(const Register &rd, const VRegister &vn);
+    void Frintn(const VRegister &vd, const VRegister &vn);
     void FcvtFloat32(const VRegister &vd, const VRegister &vn);
     void Cmp(const Register &rd, const Operand &operand);
+    void Ccmn(const Register &rn, uint32_t immediate, uint32_t nzcv, Condition cond);
+    void Cset(const Register &rd, Condition cond);
     void CMov(const Register &rd, const Register &rn, const Operand &operand, Condition cond);
     void B(Label *label);
     void B(int32_t imm);
@@ -366,6 +373,7 @@ private:
     int32_t ImmBranch(uint32_t branchCode);
     void SetRealOffsetToBranchInst(uint32_t linkPos, int32_t disp);
     void Ldr(const Register &rt, const MemoryOperand &operand, Scale scale);
+    void EmitLoadRegisterOffset(uint32_t opcode, uint32_t rt, const MemoryOperand &operand, uint32_t scale);
     void StrRegisterOffset(const Register &rt, const MemoryOperand &operand, Scale scale);
     void EmitLoadStoreD(const VRegister &vt, const MemoryOperand &operand, uint32_t offsetOpcode,
                         uint32_t preIndexOpcode, uint32_t postIndexOpcode);

@@ -649,10 +649,13 @@ bool DecodeInputs(const DecodedBodyHeader &header, const uint8_t *end, std::vect
 DeoptId DeoptTranslationBuilder::AddTranslation(uint32_t bytecodeOffset, kungfu::DeoptType type,
                                                 std::vector<DeoptTranslationInput> inputs)
 {
-    CHECK(headers_.size() < std::numeric_limits<uint32_t>::max());
+    return AddTranslationForBody(GetOrAddBody(bytecodeOffset, std::move(inputs)), type);
+}
+
+uint32_t DeoptTranslationBuilder::GetOrAddBody(uint32_t bytecodeOffset, std::vector<DeoptTranslationInput> inputs)
+{
     CHECK(bodies_.size() < std::numeric_limits<uint32_t>::max());
     CHECK(inputs.size() <= std::numeric_limits<uint32_t>::max());
-    CHECK(IsValidDeoptType(static_cast<uint8_t>(type)));
     for (size_t index = 0; index < inputs.size(); ++index) {
         ValidateTranslationInput(inputs[index]);
         CHECK(index == 0 || inputs[index - 1U].vreg < inputs[index].vreg);
@@ -680,7 +683,14 @@ DeoptId DeoptTranslationBuilder::AddTranslation(uint32_t bytecodeOffset, kungfu:
         bodies_.push_back(std::move(candidate));
         bodyIndex_.emplace(bodyHash, bodyId);
     }
+    return bodyId;
+}
 
+DeoptId DeoptTranslationBuilder::AddTranslationForBody(uint32_t bodyId, kungfu::DeoptType type)
+{
+    CHECK(bodyId < bodies_.size());
+    CHECK(headers_.size() < std::numeric_limits<uint32_t>::max());
+    CHECK(IsValidDeoptType(static_cast<uint8_t>(type)));
     uint64_t headerKey = GetTranslationHeaderKey(bodyId, type);
     auto headerIterator = headerIndex_.find(headerKey);
     if (headerIterator != headerIndex_.end()) {

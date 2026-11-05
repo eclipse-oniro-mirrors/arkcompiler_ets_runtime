@@ -13,18 +13,20 @@
  * limitations under the License.
  */
 
+//! PARAMS --compiler-jit-hotness-threshold=60000
 //! METHOD      compute
-//! COUNT_LE    BranchIfReferenceEqual  2   # at most 2: one per branch; post-merge read elided by frontend
-//! METHOD compute
+//! COUNT Throw 2
+//! COUNT CallCommonStub GetStringFromConstPool 2
+//! HAS Phi
+//! HAS_NOT CallCommonStub Add
 //! HAS LoadTaggedField
 //! COMPILE_COUNT_GE *compute* 1
 //! EXEC_COUNT_GE *compute* 1
 //! DEOPT_COUNT *Deoptimize* 0
-// Test: non-hole fact survives a control-flow merge (NodeInfo::MergeWith intersection).
-// Each branch reads x (guard fires per branch). The post-merge read's hole-check is
-// eliminated by the frontend's var-id store-dominance analysis (ets_frontend f0bcbe524b),
-// since x is provably non-hole after the merge; the JIT therefore sees at most 2 guards
-// (asserted via COUNT_LE so further elimination won't break the test).
+// Each arm checks the same lexical binding before the merge. The bytecode
+// optimizer removes the redundant check on the post-merge load, leaving
+// two throw paths for ArkSteed to lower.
+// Warm the additions to avoid generic Add invalidating lexical-load facts.
 
 declare function print(arg: number): string;
 
@@ -42,8 +44,9 @@ function tdz_repeat_read_after_merge(): number {
         } else {
             a = x + 2;  // guard on branch 2
         }
-        return a + x;   // guard after merge
+        return a + x;   // reload after merge
     }
+    for (let i = 0; i < 100; i++) { compute(true); compute(false); }
     ArkTools.arkSteedCompileSync(compute);
 
     return compute(true) + compute(false);

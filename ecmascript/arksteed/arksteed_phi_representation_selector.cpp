@@ -36,6 +36,7 @@ constexpr bool IsUntagging(VertexOpcode opcode)
         case VertexOpcode::TaggedIntToI32:
         case VertexOpcode::CheckedTaggedIntToI32:
         case VertexOpcode::CheckedNumberToF64:
+        case VertexOpcode::TaggedDoubleToF64:
         case VertexOpcode::TaggedNumberToF64:
             return true;
         default:
@@ -50,6 +51,7 @@ constexpr bool CanTraceDeoptUse(VertexOpcode opcode)
         case VertexOpcode::TaggedIntToI32:
         case VertexOpcode::CheckedTaggedIntToI32:
         case VertexOpcode::CheckedNumberToF64:
+        case VertexOpcode::TaggedDoubleToF64:
         case VertexOpcode::TaggedNumberToF64:
         case VertexOpcode::I32ToF64:
         case VertexOpcode::U32ToF64:
@@ -117,6 +119,49 @@ EagerDeoptimizableMixin::EagerDeoptFrameState CloneEagerDeoptFrame(
         copy.emplace_back(value.vreg, value.value, value.valueKind);
     }
     return copy;
+}
+
+using EagerFrame = EagerDeoptimizableMixin::EagerDeoptFrameState;
+using EagerFrameRewrites = std::unordered_map<const EagerFrame *, const EagerFrame *>;
+
+template <class Rewrite>
+void RewriteDeoptFrameValues(Chunk *chunk, Vertex *vertex, Rewrite rewrite, EagerFrameRewrites *shared = nullptr)
+{
+    if (auto *eager = EagerDeoptimizableMixinOf(vertex); eager != nullptr && eager->GetDeoptFrameValueCount() != 0) {
+        const auto &source = eager->GetEagerDeoptFrameState();
+        auto rewriteEager = [&]() -> const EagerFrame* {
+            EagerFrame *copy = nullptr;
+            for (size_t index = 0; index < source.size(); ++index) {
+                auto slot = source[index];
+                rewrite(slot.value, slot.valueKind);
+                if (slot.value == source[index].value && slot.valueKind == source[index].valueKind) {
+                    continue;
+                }
+                if (copy == nullptr) {
+                    copy = chunk->New<EagerFrame>(CloneEagerDeoptFrame(chunk, source));
+                }
+                (*copy)[index] = slot;
+            }
+            return copy == nullptr ? &source : copy;
+        };
+        if (shared == nullptr) {
+            eager->ReplaceEagerDeoptFrameValues(*rewriteEager());
+        } else {
+            auto [it, inserted] = shared->try_emplace(&source, nullptr);
+            if (inserted) {
+                it->second = rewriteEager();
+            }
+            eager->ReplaceEagerDeoptFrameValues(*it->second);
+        }
+    }
+    if (auto *lazy = LazyDeoptimizableMixinOf(vertex); lazy != nullptr && lazy->HasLazyDeoptFrameState()) {
+        for (uint32_t i = 0; i < lazy->GetDeoptFrameValueCount(); ++i) {
+            auto *value = lazy->GetDeoptFrameValue(i);
+            auto kind = lazy->GetDeoptValueKind(i);
+            rewrite(value, kind);
+            lazy->SetDeoptFrameValue(i, value, kind);
+        }
+    }
 }
 
 }  // namespace
@@ -807,20 +852,20 @@ void PhiRepresentationSelector::UpdateExceptionPhiInputs(Vertex *throwable)
 
 void PhiRepresentationSelector::MaterializeDeoptPhiTags(Vertex *vertex)
 {
-    DispatchDeoptFrameValues(vertex, [&](auto *deopt, uint32_t i) {
+    RewriteDeoptFrameValues(chunk_, vertex, [&](ValueVertex *&value, DeoptTranslationKind &valueKind) {
         // An explicit numeric recovery describes a converted value, not the
         // original tagged Phi. Preserve that conversion's recovery contract.
-        if (deopt->GetDeoptValueKind(i) != DeoptTranslationKind::TAGGED) {
+        if (valueKind != DeoptTranslationKind::TAGGED) {
             return;
         }
-        auto *phi = deopt->GetDeoptFrameValue(i)->UnwrapIdentities()->template TryCast<PhiVertex>();
+        auto *phi = value->UnwrapIdentities()->TryCast<PhiVertex>();
         if (phi == nullptr || phi->IsTagged()) {
             return;
         }
         auto kind = GetTaggingKind(phi);
         if ((phi->IsFloat64() && kind != NumberTaggingKind::DOUBLE) ||
             (phi->IsInt32() && kind == NumberTaggingKind::DOUBLE)) {
-            deopt->SetDeoptFrameValue(i, EnsurePhiTagged(phi, currentBlock_), DeoptTranslationKind::TAGGED);
+            value = EnsurePhiTagged(phi, currentBlock_);
         }
     });
 }
@@ -1061,12 +1106,13 @@ void PhiRepresentationSelector::UnwrapIdentitiesAndDeoptFrames()
 {
     // The common cleanup also reaches earlier loop headers and conversions
     // inserted into already-visited predecessors. No replacement maps are used.
+    EagerFrameRewrites shared;
     ForEachGraphVertex(graph_, [&](Vertex *vertex) {
         for (uint32_t i = 0; i < vertex->GetInputCount(); ++i) {
             vertex->SetInput(i, vertex->GetInput(i)->UnwrapIdentities());
         }
-        DispatchDeoptFrameValues(vertex, [&](auto *deopt, uint32_t i) {
-            ValueVertex *value = deopt->GetDeoptFrameValue(i)->UnwrapIdentities();
+        RewriteDeoptFrameValues(chunk_, vertex, [](ValueVertex *&value, DeoptTranslationKind &kind) {
+            value = value->UnwrapIdentities();
             // Uint32 recovery has no Ark translation kind; retain its tagging.
             while (value->Is<I32ToTaggedIntVertex>() || value->Is<F64ToTaggedDoubleVertex>()) {
                 ValueVertex *input = value->GetInput(0)->UnwrapIdentities();
@@ -1077,7 +1123,6 @@ void PhiRepresentationSelector::UnwrapIdentitiesAndDeoptFrames()
                 }
                 value = input;
             }
-            DeoptTranslationKind kind = deopt->GetDeoptValueKind(i);
             if (kind != DeoptTranslationKind::RAW_INT32) {
                 if (value->IsInt32()) {
                     kind = DeoptTranslationKind::INT32_TO_TAGGED;
@@ -1085,8 +1130,7 @@ void PhiRepresentationSelector::UnwrapIdentitiesAndDeoptFrames()
                     kind = DeoptTranslationKind::FLOAT64_TO_TAGGED_DOUBLE;
                 }
             }
-            deopt->SetDeoptFrameValue(i, value, kind);
-        });
+        }, &shared);
     });
     for (BB *block : *graph_) {
         auto &phis = block->GetPhis();

@@ -39,10 +39,7 @@ public:
         return invalidatesAllLoadedProperties_;
     }
 
-    bool InvalidatesPropertyKey(PropertyKey key) const
-    {
-        return invalidatesAllLoadedProperties_ || invalidatedPropertyKeys_.find(key) != invalidatedPropertyKeys_.end();
-    }
+    bool InvalidatesPropertyKey(PropertyKey key) const;
 
     bool WritesReceiver(const ValueVertex *receiver) const
     {

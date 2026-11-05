@@ -477,6 +477,8 @@ private:
     AllocatedState AllocateRegister(ValueVertex *vertex);
     AllocatedState AllocateRegister(ValueVertex *vertex, const InstructionOperand &hint);
     AllocatedState AllocateRegisterAtEnd(ValueVertex *vertex);
+    template <typename RegisterT>
+    AllocatedState AllocateRegisterAtEnd(RegisterSnapshot<RegisterT> &registers, ValueVertex *vertex);
 
     friend class ArkSteedRegisterAllocatorTest;
 

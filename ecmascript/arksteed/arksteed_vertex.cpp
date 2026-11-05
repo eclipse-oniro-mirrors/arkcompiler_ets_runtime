@@ -53,7 +53,7 @@ NodeType ValueVertex::GetStaticType()
     if (auto *constant = value->TryCast<HeapConstantVertex>()) {
         return static_cast<NodeType>(constant->GetStaticNodeType());
     }
-    if (value->IsInt32() || value->Is<I32ToTaggedIntVertex>()) {
+    if (value->IsInt32() || value->Is<I32ToTaggedIntVertex>() || value->Is<CheckedNonNegativeI32ToTaggedIntVertex>()) {
         return NodeType::INT;
     }
     if (value->IsFloat64() || value->Is<F64ToTaggedDoubleVertex>()) {
@@ -71,6 +71,16 @@ NodeType ValueVertex::GetStaticType()
             case NumberTaggingKind::NUMBER:
                 return NodeType::NUMBER;
         }
+    }
+    if (value->Is<I32ConditionCheckVertex>() || value->Is<F64ConditionCheckVertex>() ||
+        value->Is<TaggedEqualVertex>() || value->Is<TaggedNotEqualVertex>() || value->Is<StringEqualVertex>() ||
+        value->Is<Float64ToBooleanVertex>() || value->Is<TaggedNumberToBooleanVertex>() ||
+        value->Is<TaggedDoubleToBooleanVertex>() || value->Is<NumberToBooleanVertex>() ||
+        value->Is<DoubleToBooleanVertex>() || value->Is<StringToBooleanVertex>()) {
+        return NodeType::BOOLEAN;
+    }
+    if (value->Is<CheckedTaggedStringVertex>() || value->Is<LoadSingleCharTableElementVertex>()) {
+        return NodeType::STRING;
     }
     return NodeType::UNKNOWN;
 }

@@ -129,7 +129,7 @@ private:
         }
 
         // Process Float64Constants
-        for (const auto &[value, vertex] : graph->GetFloat64Constants()) {
+        for (const auto &[key, vertex] : graph->GetFloat64Constants()) {
             derivedProcessor_.ProcessVertex(vertex, state);
         }
 

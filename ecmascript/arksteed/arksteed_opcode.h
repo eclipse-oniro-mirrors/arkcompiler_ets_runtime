@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <new>
 #include <optional>
 #include <type_traits>
 #include <utility>
@@ -42,6 +43,12 @@
 namespace panda::ecmascript::arksteed {
 using CommonStubID = kungfu::CommonStubCSigns::ID;
 using RuntimeStubID = kungfu::RuntimeStubCSigns::ID;
+
+// Read a matching constant node. Null and other representations return nullopt.
+std::optional<int32_t> TryGetInt32Constant(const ValueVertex *value);
+std::optional<int64_t> TryGetInt64Constant(const ValueVertex *value);
+// Return full tagged bits only for non-heap constants; heap references require relocation.
+std::optional<uint64_t> TryGetTaggedConstant(const ValueVertex *value);
 
 class BB;
 class ArkSteedState;
@@ -410,7 +417,6 @@ public:
         DeoptVRegId vreg;
         ValueVertex *value;
         DeoptTranslationKind valueKind;
-        InputLocation sourceLocation;
 
         EagerDeoptFrameValue(DeoptVRegId vregId, ValueVertex *frameValue, DeoptTranslationKind kind)
             : vreg(vregId), value(frameValue), valueKind(kind)
@@ -419,60 +425,74 @@ public:
 
     using EagerDeoptFrameState = ChunkVector<EagerDeoptFrameValue>;
 
-    EagerDeoptimizableMixin(Chunk *chunk, uint32_t bytecodeOffset)
-        : eagerDeoptFrameState_(chunk), bytecodeOffset_(bytecodeOffset)
-    {}
+    EagerDeoptimizableMixin(Chunk *chunk, uint32_t bytecodeOffset) : chunk_(chunk), bytecodeOffset_(bytecodeOffset) {}
 
     void SetEagerDeoptFrameState(EagerDeoptFrameState frameState)
     {
-        eagerDeoptFrameState_ = std::move(frameState);
+        auto *stored = chunk_->New<EagerDeoptFrameState>(chunk_);
+        *stored = std::move(frameState);
+        SetEagerDeoptFrameState(stored);
+    }
+
+    // The shared logical frame is immutable and lives in the compilation Chunk.
+    void SetEagerDeoptFrameState(const EagerDeoptFrameState *frameState)
+    {
+        ASSERT(frameState != nullptr);
+        eagerDeoptFrameState_ = frameState;
+        uint32_t count = GetDeoptFrameValueCount();
+        eagerDeoptSourceLocations_ = count == 0 ? nullptr : chunk_->NewArray<InputLocation>(count);
+        // Locations carry mutable next-use links as well as physical operands.
+        // Chunk::NewArray supplies raw storage, so initialize every location.
+        for (uint32_t index = 0; index < count; ++index) {
+            new (static_cast<void *>(eagerDeoptSourceLocations_ + index)) InputLocation();
+        }
     }
 
     DeoptVRegId GetDeoptVReg(uint32_t index) const
     {
-        ASSERT(index < eagerDeoptFrameState_.size());
-        return eagerDeoptFrameState_[index].vreg;
+        ASSERT(index < GetDeoptFrameValueCount());
+        return (*eagerDeoptFrameState_)[index].vreg;
     }
 
     uint32_t GetDeoptFrameValueCount() const
     {
-        return static_cast<uint32_t>(eagerDeoptFrameState_.size());
+        return eagerDeoptFrameState_ == nullptr ? 0 : static_cast<uint32_t>(eagerDeoptFrameState_->size());
     }
 
     ValueVertex *GetDeoptFrameValue(uint32_t index) const
     {
         ASSERT(index < GetDeoptFrameValueCount());
-        return eagerDeoptFrameState_[index].value;
+        return (*eagerDeoptFrameState_)[index].value;
     }
 
     DeoptTranslationKind GetDeoptValueKind(uint32_t index) const
     {
         ASSERT(index < GetDeoptFrameValueCount());
-        return eagerDeoptFrameState_[index].valueKind;
+        return (*eagerDeoptFrameState_)[index].valueKind;
     }
 
     InputLocation *GetDeoptSourceLocation(uint32_t index)
     {
         ASSERT(index < GetDeoptFrameValueCount());
-        return &eagerDeoptFrameState_[index].sourceLocation;
+        return &eagerDeoptSourceLocations_[index];
     }
 
     const InputLocation *GetDeoptSourceLocation(uint32_t index) const
     {
         ASSERT(index < GetDeoptFrameValueCount());
-        return &eagerDeoptFrameState_[index].sourceLocation;
+        return &eagerDeoptSourceLocations_[index];
     }
 
     const EagerDeoptFrameState &GetEagerDeoptFrameState() const
     {
-        return eagerDeoptFrameState_;
+        ASSERT(eagerDeoptFrameState_ != nullptr);
+        return *eagerDeoptFrameState_;
     }
 
-    void SetDeoptFrameValue(uint32_t index, ValueVertex *value, DeoptTranslationKind valueKind)
+    void ReplaceEagerDeoptFrameValues(const EagerDeoptFrameState &frameState)
     {
-        ASSERT(index < eagerDeoptFrameState_.size());
-        eagerDeoptFrameState_[index].value = value;
-        eagerDeoptFrameState_[index].valueKind = valueKind;
+        ASSERT(frameState.size() == GetDeoptFrameValueCount());
+        eagerDeoptFrameState_ = &frameState;
     }
 
     uint32_t GetBytecodeOffset() const
@@ -481,7 +501,9 @@ public:
     }
 
 private:
-    EagerDeoptFrameState eagerDeoptFrameState_;
+    Chunk *chunk_;
+    const EagerDeoptFrameState *eagerDeoptFrameState_ {nullptr};
+    InputLocation *eagerDeoptSourceLocations_ {nullptr};
     uint32_t bytecodeOffset_;
 };
 
@@ -3203,6 +3225,84 @@ private:
     bool trueIfNonZero_;
 };
 
+// The input type must be proved before constructing this vertex.
+class NumberToBooleanVertex : public FixedInputVertexMixin<ValueVertex, NumberToBooleanVertex> {
+public:
+    enum Indices : uint32_t {
+        INPUT_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    explicit NumberToBooleanVertex(bool trueIfNonZero) : FixedInputVertexMixin(), trueIfNonZero_(trueIfNonZero) {}
+
+    void SetValueLocationConstraints();
+
+    bool IsTrueIfNonZero() const
+    {
+        return trueIfNonZero_;
+    }
+
+private:
+    bool trueIfNonZero_;
+};
+
+// The input type must be proved before constructing this vertex.
+class DoubleToBooleanVertex : public FixedInputVertexMixin<ValueVertex, DoubleToBooleanVertex> {
+public:
+    enum Indices : uint32_t {
+        INPUT_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    explicit DoubleToBooleanVertex(bool trueIfNonZero) : FixedInputVertexMixin(), trueIfNonZero_(trueIfNonZero) {}
+
+    void SetValueLocationConstraints();
+
+    bool IsTrueIfNonZero() const
+    {
+        return trueIfNonZero_;
+    }
+
+private:
+    bool trueIfNonZero_;
+};
+
+// The input type must be proved before constructing this vertex.
+class StringToBooleanVertex : public FixedInputVertexMixin<ValueVertex, StringToBooleanVertex> {
+public:
+    enum Indices : uint32_t {
+        INPUT_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_READ;
+
+    explicit StringToBooleanVertex(bool trueIfNonZero) : FixedInputVertexMixin(), trueIfNonZero_(trueIfNonZero) {}
+
+    void SetValueLocationConstraints();
+
+    bool IsTrueIfNonZero() const
+    {
+        return trueIfNonZero_;
+    }
+
+private:
+    bool trueIfNonZero_;
+};
+
 class TaggedNumberToBooleanVertex : public VertexMixin<ValueVertex, TaggedNumberToBooleanVertex>,
                                     public EagerDeoptimizableMixin {
 public:
@@ -3759,6 +3859,24 @@ public:
     }
 };
 
+// JS increment lowering may use this node only after proving that the input is below INT32_MAX.
+class I32IncVertex : public FixedInputVertexMixin<ValueVertex, I32IncVertex> {
+public:
+    enum Indices : uint32_t {
+        VALUE_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::INT32;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT32,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    explicit I32IncVertex() : FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
 class I32IncWithOverflowVertex : public VertexMixin<ValueVertex, I32IncWithOverflowVertex>,
                                  public EagerDeoptimizableMixin {
 public:
@@ -3856,6 +3974,24 @@ public:
     static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::IS_CONVERSION;
 
     explicit I32ToI64Vertex() : FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
+// The builder must prove that the tagged input is a Double before creating this node.
+class TaggedDoubleToF64Vertex : public FixedInputVertexMixin<ValueVertex, TaggedDoubleToF64Vertex> {
+public:
+    enum Indices : uint32_t {
+        INPUT_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::FLOAT64;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::IS_CONVERSION;
+
+    explicit TaggedDoubleToF64Vertex() : FixedInputVertexMixin() {}
 
     void SetValueLocationConstraints();
 };
@@ -4294,6 +4430,11 @@ public:
     {
         ASSERT(index < expectedHClassHandleIndices_.size());
         return expectedHClassHandleIndices_[index];
+    }
+
+    const ChunkVector<uint32_t> &GetExpectedHClassHandleIndices() const
+    {
+        return expectedHClassHandleIndices_;
     }
 
     void SetValueLocationConstraints();
@@ -5935,6 +6076,12 @@ constexpr int NO_VREG = -1;
 inline void DefineAsRegister(ValueVertex *vertex)
 {
     vertex->Result().SetUnallocated(UnallocatedState::ExtendedPolicy::MUST_HAVE_REGISTER, NO_VREG);
+}
+
+inline void DefineAsRegisterReusingInputs(ValueVertex *vertex)
+{
+    DefineAsRegister(vertex);
+    vertex->GetRegallocInfo()->SetCanReuseInputRegisters();
 }
 
 inline void DefineAsConstant(ValueVertex *vertex)

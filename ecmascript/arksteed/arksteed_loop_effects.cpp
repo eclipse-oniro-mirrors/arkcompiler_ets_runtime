@@ -87,6 +87,18 @@ void LoopEffects::RecordPropertyWrite(PropertyKey key)
     }
 }
 
+bool LoopEffects::InvalidatesPropertyKey(PropertyKey key) const
+{
+    if (invalidatesAllLoadedProperties_ || invalidatedPropertyKeys_.find(key) != invalidatedPropertyKeys_.end()) {
+        return true;
+    }
+    if (key.GetKind() != PropertyKey::Kind::CONST_DATA_ID) {
+        return false;
+    }
+    return std::any_of(invalidatedPropertyKeys_.begin(), invalidatedPropertyKeys_.end(),
+                       [key](PropertyKey written) { return key.MayAliasConstDataId(written); });
+}
+
 void LoopEffects::RecordReceiverWrite(ValueVertex *receiver)
 {
     writtenReceivers_.insert(receiver);
