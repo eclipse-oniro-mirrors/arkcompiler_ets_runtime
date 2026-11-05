@@ -2957,7 +2957,11 @@ private:
     uint32_t gcThreadNum_ {7}; // 7: default thread num
     uint32_t longPauseTime_ {40}; // 40: default pause time
     std::string aotOutputFile_ {""};
+#if defined(PANDA_TARGET_ARM64) && !defined(PANDA_TARGET_MACOS)
+    std::string targetTriple_ {TARGET_AARCH64};
+#else
     std::string targetTriple_ {TARGET_X64};
+#endif
     uint32_t asmOptLevel_ {2};
     uint32_t relocationMode_ {2}; // 2: default relocation mode
     uint32_t maxNonmovableSpaceCapacity_ {4_MB};
