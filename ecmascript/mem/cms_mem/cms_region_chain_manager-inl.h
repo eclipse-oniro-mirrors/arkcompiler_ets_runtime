@@ -74,6 +74,7 @@ void CMSRegionChainManager::RetrieveSweptSlotFreeLists()
         // fixme: move outside lock
         Region *region = Region::ObjectAddressToRange(ToUintPtr(freeList.firstFreeSegment_));
         region->ResetSwept();
+        region->MergeOldToNewRSetForCS();
         region->MergeLocalToShareRSetForCS();
         usableSlotFreeList_.emplace_back(freeList);
     }

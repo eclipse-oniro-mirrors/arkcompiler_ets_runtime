@@ -28,6 +28,7 @@
 #include "ecmascript/mem/cms_mem/sticky_sweep_gc.h"
 #include "ecmascript/mem/cms_mem/sweep_gc.h"
 #include "ecmascript/mem/idle_gc_trigger.h"
+#include "ecmascript/mem/module_space.h"
 #include "ecmascript/mem/local_cmc/cc_evacuator-inl.h"
 #include "ecmascript/mem/native_area_allocator.h"
 #include "ecmascript/mem/local_cmc/concurrent_copy_gc.h"
@@ -1351,6 +1352,7 @@ void Heap::InitializeSpaces()
     }
     size_t snapshotSpaceCapacity = config_.GetDefaultSnapshotSpaceSize();
     snapshotSpace_ = new SnapshotSpace(this, snapshotSpaceCapacity, snapshotSpaceCapacity);
+    moduleSpace_ = new ModuleSpace(this);
     size_t machineCodeSpaceCapacity = config_.GetDefaultMachineCodeSpaceSize();
     machineCodeSpace_ = new MachineCodeSpace(this, machineCodeSpaceCapacity, machineCodeSpaceCapacity);
 
@@ -1593,6 +1595,11 @@ void Heap::Destroy()
         delete slotSpace_;
         slotSpace_ = nullptr;
     }
+    if (moduleSpace_ != nullptr) {
+        moduleSpace_->Destroy();
+        delete moduleSpace_;
+        moduleSpace_ = nullptr;
+    }
     if (toSpace_ != nullptr) {
         toSpace_->Destroy();
         delete toSpace_;
@@ -1771,6 +1778,7 @@ void Heap::ResumeForAppSpawn()
     if constexpr (G_USE_CMS_GC) {
         slotSpace_->ReclaimFromRegions(false);
     } else {
+        moduleSpace_->ReclaimFromRegions();
         inactiveSemiSpace_->ReclaimRegions();
         oldSpace_->Reset();
     }
@@ -2383,6 +2391,10 @@ size_t Heap::VerifyHeapObjects(VerifyKind verifyKind) const
         VerifyObjectVisitor verifier(this, &failCount, verifyKind);
         snapshotSpace_->IterateOverObjects(verifier);
     }
+    {
+        VerifyObjectVisitor verifier(this, &failCount, verifyKind);
+        moduleSpace_->IterateOverObjects(verifier);
+    }
     return failCount;
 }
 
@@ -2394,6 +2406,7 @@ size_t Heap::VerifyOldToNewRSet(VerifyKind verifyKind) const
     appSpawnSpace_->IterateOldToNewOverObjects(verifier);
     nonMovableSpace_->IterateOldToNewOverObjects(verifier);
     machineCodeSpace_->IterateOldToNewOverObjects(verifier);
+    moduleSpace_->IterateOldToNewOverObjects(verifier);
     return failCount;
 }
 
@@ -2536,6 +2549,7 @@ void Heap::AddAllocationInspectorToAllSpaces(AllocationInspector *inspector)
     machineCodeSpace_->AddAllocationInspector(inspector);
     hugeObjectSpace_->AddAllocationInspector(inspector);
     hugeMachineCodeSpace_->AddAllocationInspector(inspector);
+    moduleSpace_->AddAllocationInspector(inspector);
 }
 
 void Heap::ClearAllocationInspectorFromAllSpaces()
@@ -2551,6 +2565,7 @@ void Heap::ClearAllocationInspectorFromAllSpaces()
     machineCodeSpace_->ClearAllocationInspector();
     hugeObjectSpace_->ClearAllocationInspector();
     hugeMachineCodeSpace_->ClearAllocationInspector();
+    moduleSpace_->ClearAllocationInspector();
 }
 
 void Heap::RecomputeLimits()
@@ -2991,6 +3006,8 @@ void Heap::PrepareRecordRegionsForReclaim()
     } else {
         activeSemiSpace_->SetRecordRegion();
         oldSpace_->SetRecordRegion();
+        // ReclaimRegions clears bits only up to recordRegion_: stale dangles, null never clears.
+        moduleSpace_->SetRecordRegion();
     }
     snapshotSpace_->SetRecordRegion();
     nonMovableSpace_->SetRecordRegion();
@@ -3007,6 +3024,7 @@ void Heap::PrepareRecordNonmovableRegions()
     hugeObjectSpace_->SetRecordRegion();
     machineCodeSpace_->SetRecordRegion();
     hugeMachineCodeSpace_->SetRecordRegion();
+    moduleSpace_->SetRecordRegion();
 }
 
 void Heap::TriggerConcurrentMarking(MarkReason markReason)
@@ -4053,6 +4071,8 @@ void Heap::PrintHeapInfo(TriggerGCType gcType) const
                 << "/" << oldSpace_->GetCommittedSize() << "/" << oldSpace_->GetInitialCapacity()
             << "), HugeObject(" << hugeObjectSpace_->GetHeapObjectSize()
                 << "/" << hugeObjectSpace_->GetCommittedSize() << "/" << hugeObjectSpace_->GetInitialCapacity()
+            << "), Module(" << moduleSpace_->GetHeapObjectSize()
+                << "/" << moduleSpace_->GetCommittedSize()
             << "), ReadOnlySpace(" << readOnlySpace_->GetCommittedSize()
                 << "/" << readOnlySpace_->GetInitialCapacity()
             << "), AppspawnSpace(" << appSpawnSpace_->GetHeapObjectSize()
@@ -4105,6 +4125,11 @@ void Heap::StatisticHeapDetail()
         CheckAndLog();
 
         activeSemiSpace_->IterateOverObjects([&typeCount] (TaggedObject *object) {
+            typeCount[static_cast<int>(object->GetClass()->GetObjectType())]++;
+        });
+        CheckAndLog();
+
+        moduleSpace_->IterateOverObjects([&typeCount] (TaggedObject *object) {
             typeCount[static_cast<int>(object->GetClass()->GetObjectType())]++;
         });
         CheckAndLog();

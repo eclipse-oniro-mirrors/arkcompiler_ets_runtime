@@ -38,6 +38,7 @@ private:
 
     SpecializedSlotSpace *space_ {nullptr};
     size_t slotSize_ {0};
+    size_t allocatedBytes_ {0};
     uintptr_t top_ {0};
     uintptr_t end_ {0};
 };
@@ -71,6 +72,8 @@ private:
     inline uintptr_t AllocateInOldSpace(size_t size);
     inline uintptr_t AllocateInCompressSpace(size_t size);
     inline uintptr_t AllocateInNonMovableSpace(size_t size);
+    inline uintptr_t AllocateInModuleSpace(size_t size);
+    inline void DrainBumpAllocator(BumpPointerAllocator &allocator);
 
     inline bool ExpandYoung();
     inline bool ExpandCompressFromOld(size_t size);
@@ -82,6 +85,8 @@ private:
     bool enableStealOldRegion_;
     BumpPointerAllocator youngAllocator_;
     BumpPointerAllocator nonMovableAllocator_ {};
+
+    SpecializedSlotTlabAllocator moduleTlab_;
 
     LocalSpace *localSpace_;
     NonMovableSpace *nonMovableSpace_ {nullptr};

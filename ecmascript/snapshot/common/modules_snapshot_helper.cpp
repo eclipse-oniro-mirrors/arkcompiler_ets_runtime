@@ -358,6 +358,7 @@ bool ModulesSnapshotHelper::WriteDataInfo(FileMemMapWriter& writer, const std::u
         .oldSpaceSize_ = data->oldSpaceSize_,
         .nonMovableSpaceSize_ = data->nonMovableSpaceSize_,
         .machineCodeSpaceSize_ = data->machineCodeSpaceSize_,
+        .moduleSpaceSize_ = data->moduleSpaceSize_,
         .sharedOldSpaceSize_ = data->sharedOldSpaceSize_,
         .sharedNonMovableSpaceSize_ = data->sharedNonMovableSpaceSize_,
         .incompleteData_ = data->incompleteData_,
@@ -381,6 +382,7 @@ bool ModulesSnapshotHelper::ReadDataInfo(FileMemMapReader& reader, const std::un
     data->oldSpaceSize_ = info->oldSpaceSize_;
     data->nonMovableSpaceSize_ = info->nonMovableSpaceSize_;
     data->machineCodeSpaceSize_ = info->machineCodeSpaceSize_;
+    data->moduleSpaceSize_ = info->moduleSpaceSize_;
     data->sharedOldSpaceSize_ = info->sharedOldSpaceSize_;
     data->sharedNonMovableSpaceSize_ = info->sharedNonMovableSpaceSize_;
     data->incompleteData_ = info->incompleteData_;

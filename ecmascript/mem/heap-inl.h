@@ -130,6 +130,7 @@ void Heap::EnumerateOldSpaceRegions(const Callback &cb, Region *region) const
     hugeObjectSpace_->EnumerateRegions(cb);
     machineCodeSpace_->EnumerateRegions(cb);
     hugeMachineCodeSpace_->EnumerateRegions(cb);
+    moduleSpace_->EnumerateRegions(cb);
 }
 
 template<class Callback>
@@ -156,6 +157,7 @@ void Heap::EnumerateNonNewSpaceRegions(const Callback &cb) const
     hugeObjectSpace_->EnumerateRegions(cb);
     machineCodeSpace_->EnumerateRegions(cb);
     hugeMachineCodeSpace_->EnumerateRegions(cb);
+    moduleSpace_->EnumerateRegions(cb);
 }
 
 template<class Callback>
@@ -175,6 +177,7 @@ void Heap::EnumerateNonNewSpaceRegionsWithRecord(const Callback &cb) const
     hugeObjectSpace_->EnumerateRegionsWithRecord(cb);
     machineCodeSpace_->EnumerateRegionsWithRecord(cb);
     hugeMachineCodeSpace_->EnumerateRegionsWithRecord(cb);
+    moduleSpace_->EnumerateRegionsWithRecord(cb);
 }
 
 template<class Callback>
@@ -186,6 +189,7 @@ void Heap::EnumerateNonmovableRegionsWithRecord(const Callback &cb) const
     hugeObjectSpace_->EnumerateRegionsWithRecord(cb);
     machineCodeSpace_->EnumerateRegionsWithRecord(cb);
     hugeMachineCodeSpace_->EnumerateRegionsWithRecord(cb);
+    moduleSpace_->EnumerateRegionsWithRecord(cb);
 }
 
 template<class Callback>
@@ -197,6 +201,7 @@ void Heap::EnumerateNonMovableRegions(const Callback &cb) const
     hugeObjectSpace_->EnumerateRegions(cb);
     machineCodeSpace_->EnumerateRegions(cb);
     hugeMachineCodeSpace_->EnumerateRegions(cb);
+    moduleSpace_->EnumerateRegions(cb);
 }
 
 template<class Callback>
@@ -218,6 +223,7 @@ void Heap::EnumerateRegions(const Callback &cb) const
     hugeObjectSpace_->EnumerateRegions(cb);
     machineCodeSpace_->EnumerateRegions(cb);
     hugeMachineCodeSpace_->EnumerateRegions(cb);
+    moduleSpace_->EnumerateRegions(cb);
 }
 
 template<class Callback>
@@ -236,6 +242,7 @@ void Heap::IterateOverObjects(const Callback &cb, bool isSimplify) const
     machineCodeSpace_->IterateOverObjects(cb);
     hugeMachineCodeSpace_->IterateOverObjects(cb);
     snapshotSpace_->IterateOverObjects(cb);
+    moduleSpace_->IterateOverObjects(cb);
     if (!isSimplify) {
         readOnlySpace_->IterateOverObjects(cb);
         appSpawnSpace_->IterateOverMarkedObjects(cb);
@@ -285,6 +292,54 @@ TaggedObject *Heap::AllocateInSlotSpace(size_t size)
     ASSERT(!g_isEnableCMCGC);
     ASSERT(G_USE_CMS_GC);
     return reinterpret_cast<TaggedObject *>(slotSpace_->Allocate<true>(size));
+}
+
+template <typename SpaceT>
+TaggedObject *Heap::AllocateInSpecializedSlotSpace(SpaceT *space, size_t size, const char *caller)
+{
+    auto allocate = [space]() {
+        return reinterpret_cast<TaggedObject *>(space->Allocate());
+    };
+    auto object = allocate();
+    if (UNLIKELY(object == nullptr)) {
+        CheckAndTriggerOldGC();
+        object = allocate();
+    }
+    if (UNLIKELY(object == nullptr)) {
+        CollectGarbage(TriggerGCType::OLD_GC, GCReason::ALLOCATION_FAILED);
+        object = allocate();
+    }
+    if (UNLIKELY(object == nullptr)) {
+        CollectGarbage(TriggerGCType::FULL_GC, GCReason::ALLOCATION_FAILED);
+        object = allocate();
+    }
+    if (UNLIKELY(object == nullptr)) {
+        size_t oomOvershootSize = GetEcmaVM()->GetEcmaParamConfiguration().GetOutOfMemoryOvershootSize();
+        // The retry budget reads oldSpace_'s overshoot counter (shared budget).
+        oldSpace_->IncreaseOutOfMemoryOvershootSize(oomOvershootSize);
+        if (space->IsOOMDumpSpace()) {
+            DumpHeapSnapshotBeforeOOM(false, ToSpaceTypeName(space->GetSpaceType()), size, LOCAL_HEAP_STR);
+        }
+        StatisticHeapDetail();
+        ThrowOutOfMemoryError(GetJSThread(), size,
+            std::string(caller) + ", local heap oom, used size: " + std::to_string(GetHeapObjectSize()) +
+            " bytes, committed size: " + std::to_string(GetCommittedSize()) + " bytes");
+    }
+    return object;
+}
+
+TaggedObject *Heap::AllocateInModuleSpace(JSHandle<JSHClass> hclass)
+{
+    // ModuleSpace is a fixed-slot space: walk/sweep step by slotSize_, so the
+    // instance size described by the hclass must match it exactly.
+    size_t size = hclass->GetObjectSize();
+    ASSERT(size == moduleSpace_->GetSlotSize());
+    auto object = AllocateInSpecializedSlotSpace(moduleSpace_, size, "Heap::AllocateInModuleSpace");
+    object->SetClass(GetJSThread(), *hclass);
+#if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER)
+    OnAllocateEvent(GetEcmaVM(), object, size);
+#endif
+    return object;
 }
 
 TaggedObject *Heap::AllocateInYoungSpace(size_t size)
@@ -970,6 +1025,7 @@ void Heap::ReclaimRegions(TriggerGCType gcType, bool cmsGC)
             nonMovableSpace_->ReclaimCSet();
             isCSetClearing_.store(false, std::memory_order_release);
         }
+        moduleSpace_->ReclaimFromRegions();
         inactiveSemiSpace_->ReclaimRegions(cachedSize);
     }
     hugeObjectSpace_->ReclaimHugeRegion();
@@ -1034,7 +1090,8 @@ size_t Heap::GetCommittedSize() const
                     hugeMachineCodeSpace_->GetCommittedSize() +
                     readOnlySpace_->GetCommittedSize() +
                     appSpawnSpace_->GetCommittedSize() +
-                    snapshotSpace_->GetCommittedSize();
+                    snapshotSpace_->GetCommittedSize() +
+                    moduleSpace_->GetCommittedSize();
     if constexpr (G_USE_CMS_GC) {
         result += slotSpace_->GetCommittedSize();
     } else {
@@ -1053,7 +1110,8 @@ size_t Heap::GetHeapObjectSize() const
                     hugeMachineCodeSpace_->GetCommittedSize() +
                     readOnlySpace_->GetCommittedSize() +
                     appSpawnSpace_->GetHeapObjectSize() +
-                    snapshotSpace_->GetHeapObjectSize();
+                    snapshotSpace_->GetHeapObjectSize() +
+                    moduleSpace_->GetHeapObjectSize();
     if constexpr (G_USE_CMS_GC) {
         result += slotSpace_->GetHeapObjectSize();
     } else {
@@ -1082,7 +1140,8 @@ size_t Heap::GetRegionCount() const
             nonMovableSpace_->GetRegionCount() +
             hugeObjectSpace_->GetRegionCount() +
             machineCodeSpace_->GetRegionCount() +
-            hugeMachineCodeSpace_->GetRegionCount();
+            hugeMachineCodeSpace_->GetRegionCount() +
+            moduleSpace_->GetRegionCount();
         return result;
     }
     size_t result = activeSemiSpace_->GetRegionCount() +
@@ -1093,7 +1152,8 @@ size_t Heap::GetRegionCount() const
         nonMovableSpace_->GetRegionCount() +
         hugeObjectSpace_->GetRegionCount() +
         machineCodeSpace_->GetRegionCount() +
-        hugeMachineCodeSpace_->GetRegionCount();
+        hugeMachineCodeSpace_->GetRegionCount() +
+        moduleSpace_->GetRegionCount();
     return result;
 }
 

@@ -690,6 +690,12 @@ config("ark_jsruntime_gc_config") {
     defines += [ "USE_STICKY_CMS_GC=0" ]
   }
 
+  if (ets_runtime_enable_module_space) {
+    defines += [ "ENABLE_MODULE_SPACE=1" ]
+  } else {
+    defines += [ "ENABLE_MODULE_SPACE=0" ]
+  }
+
   print("############ ets_runtime enable compressed pointer = ${ets_runtime_enable_compressed_pointer} #############")
   if (ets_runtime_enable_compressed_pointer) {
     defines += [ "USE_COMPRESSED_POINTER" ]
@@ -1264,6 +1270,7 @@ ecma_source = [
   "ecmascript/mem/linear_space.cpp",
   "ecmascript/mem/machine_code.cpp",
   "ecmascript/mem/mem_controller.cpp",
+  "ecmascript/mem/module_space.cpp",
   "ecmascript/mem/shared_mem_controller.cpp",
   "ecmascript/mem/mem_controller_utils.cpp",
   "ecmascript/mem/common_mem_map_allocator.cpp",

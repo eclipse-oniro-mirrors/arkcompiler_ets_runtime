@@ -5314,8 +5314,19 @@ JSHandle<StarExportEntry> ObjectFactory::NewStarExportEntry(const uint32_t modul
 JSHandle<SourceTextModule> ObjectFactory::NewSourceTextModule()
 {
     NewObjectHook();
-    TaggedObject *header = heap_->AllocateYoungOrHugeObject(
+    TaggedObject *header = nullptr;
+#if ENABLE_MODULE_SPACE
+    if (G_USE_CMS_GC || UNLIKELY(g_isEnableCMCGC)) {
+        header = heap_->AllocateYoungOrHugeObject(
+            JSHandle<JSHClass>(thread_->GlobalConstants()->GetHandledSourceTextModuleClass()));
+    } else {
+        header = heap_->AllocateInModuleSpace(
+            JSHandle<JSHClass>(thread_->GlobalConstants()->GetHandledSourceTextModuleClass()));
+    }
+#else
+    header = heap_->AllocateYoungOrHugeObject(
         JSHandle<JSHClass>(thread_->GlobalConstants()->GetHandledSourceTextModuleClass()));
+#endif
     JSHandle<SourceTextModule> obj(thread_, header);
     JSTaggedValue undefinedValue = thread_->GlobalConstants()->GetUndefined();
     obj->SetEnvironment(thread_, undefinedValue);

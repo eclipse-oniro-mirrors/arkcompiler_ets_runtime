@@ -30,7 +30,6 @@ namespace panda::ecmascript {
 constexpr size_t INITIAL_CAPACITY = 64;
 constexpr int CAPACITY_INCREASE_RATE = 2;
 constexpr uint32_t RESERVED_INDEX = 0;
-static constexpr int SERIALIZE_SPACE_NUM = 12;
 
 typedef void* (*DetachFunc)(void *enginePointer, void *objPointer, void *hint, void *detachData);
 typedef Local<JSValueRef> (*AttachFunc)(void *enginePointer, void *buffer, void *hint, void *attachData);
@@ -97,7 +96,15 @@ enum class SerializedObjectSpace : uint8_t {
     SHARED_OLD_SPACE,
     SHARED_NON_MOVABLE_SPACE,
     SHARED_HUGE_SPACE,
+    MODULE_SPACE,
+    TOTAL_SPACE_NUM,
 };
+
+// One bucket per SerializedObjectSpace value: regionRemainSizeVectors_ is indexed
+// by the raw enum value.
+static constexpr int SERIALIZE_SPACE_NUM = static_cast<int>(SerializedObjectSpace::TOTAL_SPACE_NUM);
+static_assert(static_cast<uint8_t>(SerializedObjectSpace::TOTAL_SPACE_NUM) <= 0x10,
+              "DecodeSpace keeps only the low 4 bits of the space type");
 using common::SerializedBaseObjectSpace;
 
 enum class SerializeErrorInfo : uint8_t {
@@ -389,6 +396,11 @@ public:
         return machineCodeSpaceSize_;
     }
 
+    size_t GetModuleSpaceSize() const
+    {
+        return moduleSpaceSize_;
+    }
+
     size_t GetSharedOldSpaceSize() const
     {
         return sharedOldSpaceSize_;
@@ -425,6 +437,9 @@ public:
                     break;
                 case SerializedObjectSpace::MACHINE_CODE_SPACE:
                     AlignSpaceObjectSize(machineCodeSpaceSize_, objectSize, SerializedObjectSpace::MACHINE_CODE_SPACE);
+                    break;
+                case SerializedObjectSpace::MODULE_SPACE:
+                    AlignSpaceObjectSize(moduleSpaceSize_, objectSize, SerializedObjectSpace::MODULE_SPACE);
                     break;
                 case SerializedObjectSpace::HUGE_SPACE:
                     AlignHugeSpaceObjectSize(objectSize);
@@ -552,6 +567,7 @@ private:
     size_t hugeSpaceSize_ {0};
     size_t nonMovableSpaceSize_ {0};
     size_t machineCodeSpaceSize_ {0};
+    size_t moduleSpaceSize_ {0};
     size_t sharedOldSpaceSize_ {0};
     size_t sharedNonMovableSpaceSize_ {0};
     bool incompleteData_ {false};

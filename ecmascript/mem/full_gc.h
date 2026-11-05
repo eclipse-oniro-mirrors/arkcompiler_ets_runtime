@@ -36,6 +36,8 @@ public:
     void RunPhases() override;
     void RunPhasesForAppSpawn();
     void SetForAppSpawn(bool flag);
+
+    static MemSpaceType GetEvacuateTargetSpace(Region *region);
 protected:
     void Initialize() override;
     void Mark() override;

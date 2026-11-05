@@ -32,6 +32,12 @@ SpecializedSlotSpace::SpecializedSlotSpace(Heap *heap, MemSpaceType spaceType, s
     gcAllocator_.Initialize(slotSize_, &gcRegionChainManager_);
     regionChainManager_.Initialize(localHeap_, slotSize_, this);
     gcRegionChainManager_.Initialize(localHeap_, slotSize_, this);
+    auto sweptChainManagerCallback = [](Space *ownerSpace,
+                                        CMSRegionChainManager *sweptRegionChainManager) {
+        static_cast<SpecializedSlotSpace *>(ownerSpace)->AddSweptRegionChainManager(sweptRegionChainManager);
+    };
+    regionChainManager_.SetSweptChainManagerCallback(sweptChainManagerCallback);
+    gcRegionChainManager_.SetSweptChainManagerCallback(sweptChainManagerCallback);
 }
 
 SpecializedSlotSpace::~SpecializedSlotSpace()
@@ -86,7 +92,6 @@ void SpecializedSlotSpace::ExpandAllocator(size_t expandSize)
 {
     Region *region = heapRegionAllocator_->AllocateAlignedRegion(
         this, expandSize, localHeap_->GetJSThread(), localHeap_, false, slotSize_);
-    InitializeRegion(region);
     allocator_.Expand(region);
     IncreaseCommitted(region->GetCapacity());
 }
@@ -95,11 +100,9 @@ void SpecializedSlotSpace::ExpandInGC()
 {
     Region *region = heapRegionAllocator_->AllocateAlignedRegion(
         this, DEFAULT_REGION_SIZE, localHeap_->GetJSThread(), localHeap_, false, slotSize_);
-    InitializeRegion(region);
     gcAllocator_.Expand(region);
     region->SetRegionTypeFlag(RegionTypeFlag::TO);
     region->CreateLocalToShareRememberedSet();
-    region->CreateCompressedLocalToShareRememberedSet();
     region->SwapLocalToShareRSetForCS();
 }
 
@@ -126,12 +129,6 @@ void SpecializedSlotSpace::PrepareEvacuation()
     allocateAfterLastGC_ = 0;
 }
 
-void SpecializedSlotSpace::FinishEvacuation()
-{
-    MergeToGCRegions();
-    ReclaimFromRegions();
-}
-
 void SpecializedSlotSpace::MergeToGCRegions()
 {
     gcRegionChainManager_.EnumerateRegions([this](Region *toRegion) {
@@ -146,9 +143,58 @@ void SpecializedSlotSpace::MergeToGCRegions()
     gcAllocator_.Discard();
 }
 
-void SpecializedSlotSpace::IncreaseSurvivalObjectSize(size_t size)
+void SpecializedSlotSpace::SetSurvivalObjectSize(size_t size)
 {
-    survivalObjectSize_.fetch_add(size, std::memory_order_relaxed);
+    survivalObjectSize_.store(size, std::memory_order_relaxed);
+}
+
+void SpecializedSlotSpace::AddSweptRegionChainManager(CMSRegionChainManager *sweptRegionChainManager)
+{
+    LockHolder holder(sweptChainManagerMutex_);
+    sweptChainManagers_.emplace_back(sweptRegionChainManager);
+}
+
+void SpecializedSlotSpace::DrainSweptChainManagers()
+{
+    std::vector<CMSRegionChainManager *> sweptChainManagers;
+    {
+        LockHolder holder(sweptChainManagerMutex_);
+        std::swap(sweptChainManagers_, sweptChainManagers);
+    }
+    for (CMSRegionChainManager *sweptRegionChainManager : sweptChainManagers) {
+        sweptRegionChainManager->FinishSweeping();
+    }
+}
+
+void SpecializedSlotSpace::PrepareSweeping()
+{
+    allocator_.Discard();
+    survivalObjectSize_ = regionChainManager_.PrepareSweeping<false>(pendingReclaimFromRegions_);
+    allocateAfterLastGC_ = 0;
+}
+
+void SpecializedSlotSpace::Sweep()
+{
+    allocator_.Discard();
+    survivalObjectSize_ = regionChainManager_.Sweep<false>(pendingReclaimFromRegions_);
+    allocateAfterLastGC_ = 0;
+}
+
+void SpecializedSlotSpace::AsyncSweep([[maybe_unused]] bool isMain, [[maybe_unused]] bool releaseMemory)
+{
+    regionChainManager_.ConcurrentSweep(CMSRegionChainManager::SweepMode::SWEEP_ALL);
+}
+
+bool SpecializedSlotSpace::TryFillSweptRegion()
+{
+    DrainSweptChainManagers();
+    return true;
+}
+
+bool SpecializedSlotSpace::FinishFillSweptRegion()
+{
+    DrainSweptChainManagers();
+    return true;
 }
 
 uint32_t SpecializedSlotSpace::GetRegionCount() const

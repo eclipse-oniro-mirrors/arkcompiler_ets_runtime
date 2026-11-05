@@ -169,6 +169,7 @@ void GCStats::PrintGCStatistic()
                 << "BundleName: " << heap_->GetEcmaVM()->GetBundleName()
                 << "; Young: " << std::to_string(heap_->GetNewSpace()->GetCommittedSize())
                 << "; Old: " << std::to_string(heap_->GetOldSpace()->GetCommittedSize())
+                << "; ModuleSpace: " << std::to_string(heap_->GetModuleSpace()->GetCommittedSize())
                 << "; TotalCommit" << std::to_string(heap_->GetCommittedSize());
         }
         // print verbose gc statsistics
@@ -328,6 +329,10 @@ void GCStats::PrintGCMemoryStatistic()
                     << STATS_DATA_FORMAT(sizeToKB(heap_->GetHugeObjectSpace()->GetHeapObjectSize())) << "KB"
                     << "     committed:"
                     << STATS_DATA_FORMAT(sizeToKB(heap_->GetHugeObjectSpace()->GetCommittedSize())) << "KB\n"
+                    << "ModuleSpace      used:"
+                    << STATS_DATA_FORMAT(sizeToKB(heap_->GetModuleSpace()->GetHeapObjectSize())) << "KB"
+                    << "     committed:"
+                    << STATS_DATA_FORMAT(sizeToKB(heap_->GetModuleSpace()->GetCommittedSize())) << "KB\n"
                     << "NonMovableSpace  used:"
                     << STATS_DATA_FORMAT(sizeToKB(heap_->GetNonMovableSpace()->GetHeapObjectSize())) << "KB"
                     << "     committed:"

@@ -189,6 +189,7 @@ private:
         size_t oldSpaceSize_;
         size_t nonMovableSpaceSize_;
         size_t machineCodeSpaceSize_;
+        size_t moduleSpaceSize_;
         size_t sharedOldSpaceSize_;
         size_t sharedNonMovableSpaceSize_;
         bool incompleteData_;

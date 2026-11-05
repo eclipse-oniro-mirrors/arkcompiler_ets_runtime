@@ -264,7 +264,11 @@ void ConcurrentCopyGC::UpdateRoot()
     heap_->GetEcmaVM()->GetJSThread()->UpdateJitCodeMapReference(weakVisitor);
     heap_->GetEcmaVM()->IterateWeakGlobalEnvList(weakVisitor);
     CCUpdateRootVisitor updateRoot(mainEvacuator);
-    ObjectXRay::VisitVMRoots(heap_->GetEcmaVM(), updateRoot);
+    if constexpr (G_USE_CMS_GC || !ENABLE_MODULE_SPACE) {
+        ObjectXRay::VisitVMRoots(heap_->GetEcmaVM(), updateRoot);
+    } else {
+        ObjectXRay::VisitSTWVMRoots(heap_->GetEcmaVM(), updateRoot);
+    }
     heap_->GetEcmaVM()->IterateGlobalEnvField(updateRoot);
 }
 #endif
@@ -559,12 +563,15 @@ void ConcurrentCopyGC::RunUpdatePhase()
 {
     ASSERT(thread_->NeedReadBarrier());
     CCUpdateVisitor<true> updatorWithBarrier(thread_);
-    auto toSpaceUpdator = [&](Region *region) {
+    auto updateMarkedRegion = [](Region *region, auto &updator) {
         region->IterateAllMarkedBits([&](void *mem) {
             TaggedObject *object = reinterpret_cast<TaggedObject *>(mem);
-            JSHClass *jsHclass = object->SynchronizedGetClass();
-            ObjectXRay::VisitObjectBody<VisitType::OLD_GC_VISIT>(object, jsHclass, updatorWithBarrier);
+            JSHClass *jsHClass = object->SynchronizedGetClass();
+            ObjectXRay::VisitObjectBody<VisitType::OLD_GC_VISIT>(object, jsHClass, updator);
         });
+    };
+    auto toSpaceUpdator = [&](Region *region) {
+        updateMarkedRegion(region, updatorWithBarrier);
         region->SetSwept();
     };
     if constexpr (!G_USE_CMS_GC) {
@@ -574,11 +581,7 @@ void ConcurrentCopyGC::RunUpdatePhase()
     }
     CCUpdateVisitor<false> updatorWithoutBarrier(thread_);
     heap_->EnumerateNonmovableRegionsWithRecord([&](Region *region) {
-        region->IterateAllMarkedBits([&](void *mem) {
-            TaggedObject *object = reinterpret_cast<TaggedObject *>(mem);
-            JSHClass *jsHclass = object->SynchronizedGetClass();
-            ObjectXRay::VisitObjectBody<VisitType::OLD_GC_VISIT>(object, jsHclass, updatorWithoutBarrier);
-        });
+        updateMarkedRegion(region, updatorWithoutBarrier);
     });
     std::atomic_thread_fence(std::memory_order_seq_cst);
     {

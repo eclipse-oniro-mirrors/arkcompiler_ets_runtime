@@ -47,6 +47,11 @@ public:
         return survivalObjectSize_.load(std::memory_order_relaxed) + allocateAfterLastGC_;
     }
 
+    void AddSurvivalObjectSize(size_t size)
+    {
+        survivalObjectSize_.fetch_add(size, std::memory_order_relaxed);
+    }
+
     uintptr_t Allocate();
     std::pair<uintptr_t, size_t> AllocateBufferSync();
 
@@ -62,18 +67,33 @@ public:
     template <typename Callback>
     void IterateSlotObjectsInRegion(Region *region, const Callback &objectCallback) const;
 
+    template <typename Visitor>
+    inline void IterateOldToNewOverObjects(Visitor &visitor) const;
+
     void SetRecordRegion();
     void IterateOverObjects(const std::function<void(TaggedObject *object)> &objectVisitor);
     void PrepareEvacuation();
-    void FinishEvacuation();
-    void IncreaseSurvivalObjectSize(size_t size);
+    // Merges the gc regions (evacuation targets) back into the main chain without
+    // releasing the from-regions parked by PrepareEvacuation: Heap::ReclaimRegions
+    // (via Resume) releases them after a normal full GC, and Heap::ResumeForAppSpawn
+    // does it in appspawn mode — the same split SlotSpace uses for CMS full GCs.
+    void MergeToGCRegions();
+    void SetSurvivalObjectSize(size_t size);
 
+    // Called only via the SweptChainManagerCallback registered in the constructor.
+    void AddSweptRegionChainManager(CMSRegionChainManager *sweptRegionChainManager);
+
+    void PrepareSweeping() override;
+    void Sweep() override;
+    void AsyncSweep(bool isMain, bool releaseMemory = false) override;
+    bool TryFillSweptRegion() override;
+    bool FinishFillSweptRegion() override;
     uint32_t GetRegionCount() const override;
     void ReclaimRegions(size_t cachedSize = 0) override;
+    void ReclaimFromRegions();
 
 protected:
     virtual bool CheckExpandBudget(size_t expandSize) = 0;
-    virtual void InitializeRegion(Region *region) = 0;
 
     Heap *localHeap_ {nullptr};
 
@@ -81,8 +101,7 @@ private:
     bool TryExpandAllocator(size_t expandSize);
     void ExpandAllocator(size_t expandSize);
     void ExpandInGC();
-    void MergeToGCRegions();
-    void ReclaimFromRegions();
+    void DrainSweptChainManagers();
     void InvokeAllocationInspector(Address object, size_t size, size_t alignedSize);
 
     size_t slotSize_ {0};
@@ -95,6 +114,8 @@ private:
     mutable Mutex pendingReclaimMutex_ {};
     std::atomic<size_t> survivalObjectSize_ {0};
     size_t allocateAfterLastGC_ {0};
+    std::vector<CMSRegionChainManager *> sweptChainManagers_ {};
+    Mutex sweptChainManagerMutex_ {};
 };
 }  // namespace panda::ecmascript
 

@@ -24,10 +24,13 @@
 #include "ecmascript/mem/cms_mem/slot_space_config.h"
 #include "ecmascript/mem/clock_scope.h"
 #include "ecmascript/mem/concurrent_marker.h"
+#include "ecmascript/mem/concurrent_sweeper.h"
 #include "ecmascript/mem/idle_gc_trigger.h"
 #include "ecmascript/mem/local_cmc/cc_evacuator-inl.h"
 #include "ecmascript/mem/specialized_slot_space-inl.h"
+#include "ecmascript/mem/module_space.h"
 #include "ecmascript/mem/tlab_allocator-inl.h"
+#include "ecmascript/module/module_data_extractor.h"
 #include "ecmascript/mem/verification.h"
 #include "ecmascript/stubs/runtime_stubs.h"
 
@@ -116,10 +119,23 @@ protected:
         return allowExpand_;
     }
 
-    void InitializeRegion([[maybe_unused]] Region* region) override {}
-
 private:
     bool allowExpand_ {true};
+};
+
+class ModuleSpaceTestHelper {
+public:
+    static JSHandle<SourceTextModule> CreateModule(JSThread *thread, const CString &name)
+    {
+        JSHandle<JSTaggedValue> result = ModuleDataExtractor::ParseNativeModule(thread, name, name,
+            ModuleTypes::NATIVE_MODULE);
+        return JSHandle<SourceTextModule>(thread, SourceTextModule::Cast(result->GetTaggedObject()));
+    }
+
+    static bool InModuleSpace(TaggedObject *obj)
+    {
+        return Region::ObjectAddressToRange(obj)->InModuleSpace();
+    }
 };
 
 #ifdef PANDA_TARGET_64
@@ -657,7 +673,8 @@ HWTEST_F_L0(LocalCCTest, SpecializedSlotSpacePrepareEvacuateWithPendingRegionTes
     EXPECT_EQ(space.GetRegionCount(), 1U);
 
     space.PrepareEvacuation();
-    space.FinishEvacuation();
+    space.MergeToGCRegions();
+    space.ReclaimFromRegions();
     EXPECT_EQ(space.GetRegionCount(), 0U);
 }
 
@@ -671,7 +688,8 @@ HWTEST_F_L0(LocalCCTest, SpecializedSlotSpaceGCObjectTest)
     EXPECT_NE(bufferSize, 0U);
     EXPECT_EQ(bufferSize % SLOT_SIZE, 0U);
 
-    space.FinishEvacuation();
+    space.MergeToGCRegions();
+    space.ReclaimFromRegions();
     EXPECT_EQ(space.GetRegionCount(), 1U);
 }
 
@@ -690,7 +708,8 @@ HWTEST_F_L0(LocalCCTest, SpecializedSlotSpaceGCBufferAllocationTest)
     EXPECT_EQ(firstBufferSize % SLOT_SIZE, 0U);
     EXPECT_EQ(secondBufferSize % SLOT_SIZE, 0U);
 
-    space.FinishEvacuation();
+    space.MergeToGCRegions();
+    space.ReclaimFromRegions();
     EXPECT_EQ(space.GetRegionCount(), 1U);
 }
 
@@ -715,9 +734,769 @@ HWTEST_F_L0(LocalCCTest, SpecializedSlotTlabAllocatorTest)
     EXPECT_EQ(thirdAddress - secondAddress, OTHER_SLOT_SIZE);
 
     allocator.Finalize();
-    space.FinishEvacuation();
-    otherSpace.FinishEvacuation();
+    space.MergeToGCRegions();
+    space.ReclaimFromRegions();
+    otherSpace.MergeToGCRegions();
+    otherSpace.ReclaimFromRegions();
     EXPECT_EQ(space.GetRegionCount(), 1U);
     EXPECT_EQ(otherSpace.GetRegionCount(), 1U);
 }
+
+// The module TLAB is bound to module space once per work node, filled during evacuation and
+// finalized when that work node finishes; production never re-binds it to another space.
+HWTEST_F_L0(LocalCCTest, SpecializedSlotTlabAllocatorAccountingTest)
+{
+    constexpr size_t SLOT_SIZE = SlotSpaceConfig::SLOT_STEP_SIZE * 2;
+    constexpr size_t WORK_NODE_COUNT = 3;
+    constexpr size_t SLOT_PER_NODE = 4;
+    TestSpecializedSlotSpace space(heap_, SLOT_SIZE, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
+    space.PrepareEvacuation();
+    EXPECT_EQ(space.GetHeapObjectSize(), 0U);
+
+    for (size_t node = 0; node < WORK_NODE_COUNT; node++) {
+        // One TLAB per work node, like WorkNodeHolder owns one per GC thread.
+        SpecializedSlotTlabAllocator allocator(&space);
+        uintptr_t previous = allocator.Allocate();
+        ASSERT_NE(previous, 0U);
+        for (size_t i = 1; i < SLOT_PER_NODE; i++) {
+            uintptr_t current = allocator.Allocate();
+            EXPECT_EQ(current - previous, SLOT_SIZE);
+            previous = current;
+        }
+        // Slots handed out by a work node are published only when that node finalizes.
+        EXPECT_EQ(space.GetHeapObjectSize(), node * SLOT_PER_NODE * SLOT_SIZE);
+        allocator.Finalize();
+        EXPECT_EQ(space.GetHeapObjectSize(), (node + 1) * SLOT_PER_NODE * SLOT_SIZE);
+    }
+
+    space.MergeToGCRegions();
+    space.ReclaimFromRegions();
+    EXPECT_GE(space.GetRegionCount(), 1U);
+}
+// ModuleSpace tests
+
+#ifdef PANDA_TARGET_64
+#if ENABLE_MODULE_SPACE
+// A1: allocation goes to moduleSpace; slot size matches; module not in young/old.
+HWTEST_F_L0(LocalCCTest, ModuleSpaceAllocTest)
+{
+    constexpr int MODULE_COUNT = 10;
+    std::vector<JSHandle<SourceTextModule>> modules;
+    modules.reserve(MODULE_COUNT);
+    for (int i = 0; i < MODULE_COUNT; i++) {
+        CString name = CString(std::to_string(i).c_str()).insert(0, "test_module_");
+        modules.emplace_back(ModuleSpaceTestHelper::CreateModule(thread, name));
+        ASSERT_TRUE(!modules[i].IsEmpty());
+    }
+    ModuleSpace *moduleSpace = heap_->GetModuleSpace();
+    EXPECT_EQ(moduleSpace->GetRegionCount(), 1U); // all fit in one region
+    EXPECT_EQ(moduleSpace->GetSlotSize(), static_cast<size_t>(SourceTextModule::SIZE));
+    for (int i = 0; i < MODULE_COUNT; i++) {
+        EXPECT_TRUE(ModuleSpaceTestHelper::InModuleSpace(modules[i].GetTaggedValue().GetTaggedObject()));
+    }
+    EXPECT_GT(moduleSpace->GetCommittedSize(), 0U);
+}
+
+// A4: module root address stays put across a LocalCC cycle (never FROM).
+HWTEST_F_L0(LocalCCTest, ModuleAddressStableAcrossLocalCC)
+{
+    constexpr int MODULE_COUNT = 5;
+    std::vector<JSTaggedType> addresses;
+    addresses.reserve(MODULE_COUNT);
+    {
+        std::vector<JSHandle<SourceTextModule>> handles;
+        for (int i = 0; i < MODULE_COUNT; i++) {
+            CString name = CString(std::to_string(i).c_str()).insert(0, "stable_module_");
+            handles.emplace_back(ModuleSpaceTestHelper::CreateModule(thread, name));
+            addresses.push_back(handles[i].GetTaggedValue().GetRawData());
+        }
+    }
+    // Full LocalCC cycle: mark → copy → finish.
+    bool succ = heap_->TryTriggerCCMarking(MarkReason::OTHER);
+    ASSERT_TRUE(succ);
+    heap_->CollectGarbageFromCCMark(GCReason::OTHER);
+    ASSERT_TRUE(thread->IsConcurrentCopying());
+    heap_->SetNearGCInSensitive(true);
+    heap_->WaitAndHandleCCFinished();
+    EXPECT_FALSE(thread->IsConcurrentCopying());
+
+    // Re-fetch from module space: all addresses must be identical.
+    ModuleSpace *moduleSpace = heap_->GetModuleSpace();
+    std::set<JSTaggedType> currentAddresses;
+    moduleSpace->IterateOverObjects([&](TaggedObject *obj) {
+        currentAddresses.insert(reinterpret_cast<uintptr_t>(obj));
+    });
+    for (JSTaggedType addr : addresses) {
+        EXPECT_NE(currentAddresses.find(addr), currentAddresses.end())
+            << "module address changed after LocalCC";
+    }
+    EXPECT_EQ(currentAddresses.size(), static_cast<size_t>(MODULE_COUNT));
+}
+
+// A3: dead module survives LocalCC via the R2 region scan (floating garbage).
+HWTEST_F_L0(LocalCCTest, DeadModuleReclaimedByLocalCC)
+{
+    {
+        EcmaHandleScope deadScope(thread);
+        CString name = "dead_module_lc";
+        JSHandle<SourceTextModule> dead = ModuleSpaceTestHelper::CreateModule(thread, name);
+        (void)dead;
+    }
+    ModuleSpace *moduleSpace = heap_->GetModuleSpace();
+    size_t beforeCount = 0;
+    moduleSpace->IterateOverObjects([&](TaggedObject *obj) {
+        (void)obj;
+        beforeCount++;
+    });
+    ASSERT_EQ(beforeCount, 1U);
+
+    // Full LocalCC cycle: moduleSpace is swept in place like nonMovable, so a
+    // dead module never floats past the cycle that frees its young targets.
+    bool succ = heap_->TryTriggerCCMarking(MarkReason::OTHER);
+    ASSERT_TRUE(succ);
+    heap_->CollectGarbageFromCCMark(GCReason::OTHER);
+    ASSERT_TRUE(thread->IsConcurrentCopying());
+    heap_->SetNearGCInSensitive(true);
+    heap_->WaitAndHandleCCFinished();
+    heap_->Prepare();
+
+    size_t afterCount = 0;
+    moduleSpace->IterateOverObjects([&](TaggedObject *obj) {
+        (void)obj;
+        afterCount++;
+    });
+    EXPECT_EQ(afterCount, 0U) << "dead module must be reclaimed by the LocalCC itself";
+}
+
+// A5: full GC compaction — surviving modules get valid addresses, dead freed.
+HWTEST_F_L0(LocalCCTest, ModuleSpaceFullGCCompaction)
+{
+    constexpr int TOTAL = 20;
+    constexpr int LIVE = 5;
+    // Dead modules: created in a nested scope, unreachable after it exits.
+    {
+        EcmaHandleScope deadScope(thread);
+        for (int i = LIVE; i < TOTAL; i++) {
+            CString name = CString(std::to_string(i).c_str()).insert(0, "compact_module_");
+            JSHandle<SourceTextModule> dead = ModuleSpaceTestHelper::CreateModule(thread, name);
+            (void)dead;
+        }
+    }
+    // Live modules: handles outlive the GC in the test's own scope.
+    std::vector<JSTaggedType> oldAddresses;
+    std::vector<JSHandle<SourceTextModule>> keepAlive;
+    for (int i = 0; i < LIVE; i++) {
+        CString name = CString(std::to_string(i).c_str()).insert(0, "compact_module_");
+        keepAlive.emplace_back(ModuleSpaceTestHelper::CreateModule(thread, name));
+        oldAddresses.push_back(keepAlive[i].GetTaggedValue().GetRawData());
+    }
+
+    ModuleSpace *moduleSpace = heap_->GetModuleSpace();
+    size_t beforeRegionCount = moduleSpace->GetRegionCount();
+    EXPECT_GE(beforeRegionCount, 1U);
+
+    heap_->CollectGarbage(TriggerGCType::FULL_GC, GCReason::OTHER);
+
+    // After compaction: exactly the live modules remain, all in moduleSpace.
+    size_t afterCount = 0;
+    std::set<JSTaggedType> current;
+    moduleSpace->IterateOverObjects([&](TaggedObject *obj) {
+        current.insert(reinterpret_cast<uintptr_t>(obj));
+        afterCount++;
+    });
+    EXPECT_EQ(afterCount, static_cast<size_t>(LIVE));
+    EXPECT_EQ(current.size(), static_cast<size_t>(LIVE));
+    for (int i = 0; i < LIVE; i++) {
+        JSTaggedType moved = keepAlive[i].GetTaggedValue().GetRawData();
+        EXPECT_NE(current.find(moved), current.end()) << "live module lost by compaction";
+        EXPECT_TRUE(ModuleSpaceTestHelper::InModuleSpace(
+            keepAlive[i].GetTaggedValue().GetTaggedObject()));
+        // Source regions are reclaimed, so survivors must have moved.
+        EXPECT_NE(moved, oldAddresses[i]);
+    }
+    // All survivors compacted into a single region.
+    EXPECT_LE(moduleSpace->GetRegionCount(), 1U);
+    // Accounting regression: the used size used to read 0 until the next sweep.
+    EXPECT_EQ(moduleSpace->GetHeapObjectSize(), LIVE * SourceTextModule::SIZE);
+}
+
+// A6: K1 — module allocation can trigger GC but never independent OOM.
+HWTEST_F_L0(LocalCCTest, ModuleSpaceNoIndependentOOM)
+{
+    ModuleSpace *moduleSpace = heap_->GetModuleSpace();
+    constexpr int BATCH = 100;
+    {
+        std::vector<JSHandle<SourceTextModule>> modules;
+        modules.reserve(BATCH);
+        for (int i = 0; i < BATCH; i++) {
+            CString name = CString(std::to_string(i).c_str()).insert(0, "oom_test_module_");
+            modules.emplace_back(ModuleSpaceTestHelper::CreateModule(thread, name));
+            ASSERT_TRUE(!modules[i].IsEmpty());
+        }
+    }
+    EXPECT_GT(moduleSpace->GetCommittedSize(), 0U);
+    // Committed size is bounded by the shared budget (oldSpace capacity), not a module cap.
+    EXPECT_LT(moduleSpace->GetCommittedSize(), heap_->GetOldSpace()->GetMaximumCapacity());
+}
+
+// Regression: LocalCC then FullGC — a stale/null recordRegion_ dangles or
+// never clears mark bits.
+HWTEST_F_L0(LocalCCTest, ModuleMixedGCTest)
+{
+    constexpr int LIVE = 3;
+    std::vector<JSHandle<SourceTextModule>> keepAlive;
+    keepAlive.reserve(LIVE);
+    for (int i = 0; i < LIVE; i++) {
+        CString name = CString(std::to_string(i).c_str()).insert(0, "mixed_live_");
+        keepAlive.emplace_back(ModuleSpaceTestHelper::CreateModule(thread, name));
+    }
+    {
+        EcmaHandleScope deadScope(thread);
+        CString name = "mixed_dead_";
+        JSHandle<SourceTextModule> dead = ModuleSpaceTestHelper::CreateModule(thread, name);
+        (void)dead;
+    }
+    bool succ = heap_->TryTriggerCCMarking(MarkReason::OTHER);
+    ASSERT_TRUE(succ);
+    heap_->CollectGarbageFromCCMark(GCReason::OTHER);
+    ASSERT_TRUE(thread->IsConcurrentCopying());
+    heap_->SetNearGCInSensitive(true);
+    heap_->WaitAndHandleCCFinished();
+    EXPECT_FALSE(thread->IsConcurrentCopying());
+    heap_->CollectGarbage(TriggerGCType::FULL_GC, GCReason::OTHER);
+
+    ModuleSpace *moduleSpace = heap_->GetModuleSpace();
+    std::set<uintptr_t> current;
+    moduleSpace->IterateOverObjects([&](TaggedObject *obj) {
+        current.insert(reinterpret_cast<uintptr_t>(obj));
+    });
+    EXPECT_EQ(current.size(), static_cast<size_t>(LIVE));
+    for (int i = 0; i < LIVE; i++) {
+        JSTaggedType moved = keepAlive[i].GetTaggedValue().GetRawData();
+        EXPECT_NE(current.find(moved), current.end()) << "live module lost across CC then FullGC";
+        EXPECT_TRUE(ModuleSpaceTestHelper::InModuleSpace(keepAlive[i].GetTaggedValue().GetTaggedObject()));
+    }
+}
+
+// Old GCs sweep moduleSpace in place, concurrently, exactly like oldSpace:
+// a module that dies before the OLD_GC's full mark is reclaimed by that same
+// GC (Prepare() lets the concurrent sweeper finish before the walk), live
+// modules keep their addresses across consecutive OLD_GCs (moduleSpace is
+// never evacuated there), and a full GC afterwards still compacts the
+// survivors. The sweep setup itself surviving the promotion join is covered
+// by ModuleOldGcWithPromotionsDoesNotOrphanSweepTest.
+HWTEST_F_L0(LocalCCTest, ModuleConsecutiveOldGCTest)
+{
+    constexpr int LIVE = 2;
+    std::vector<JSHandle<SourceTextModule>> keepAlive;
+    keepAlive.reserve(LIVE);
+    for (int i = 0; i < LIVE; i++) {
+        CString name = CString(std::to_string(i).c_str()).insert(0, "oldchain_live_");
+        keepAlive.emplace_back(ModuleSpaceTestHelper::CreateModule(thread, name));
+    }
+    std::set<uintptr_t> liveAddrsBefore;
+    for (int i = 0; i < LIVE; i++) {
+        liveAddrsBefore.insert(keepAlive[i].GetTaggedValue().GetRawData());
+    }
+    uintptr_t shortLivedAddr = 0;
+    {
+        EcmaHandleScope liveScope(thread);
+        CString name = "oldchain_shortlived_";
+        JSHandle<SourceTextModule> shortLived = ModuleSpaceTestHelper::CreateModule(thread, name);
+        heap_->CollectGarbage(TriggerGCType::OLD_GC, GCReason::OTHER);
+        shortLivedAddr = shortLived.GetTaggedValue().GetRawData();
+        ASSERT_TRUE(ModuleSpaceTestHelper::InModuleSpace(reinterpret_cast<TaggedObject *>(shortLivedAddr)));
+    }
+    heap_->CollectGarbage(TriggerGCType::OLD_GC, GCReason::OTHER);
+    // Let the concurrent sweeper settle before walking moduleSpace.
+    heap_->Prepare();
+
+    ModuleSpace *moduleSpace = heap_->GetModuleSpace();
+    std::set<uintptr_t> current;
+    auto snapshotModules = [&]() {
+        current.clear();
+        moduleSpace->IterateOverObjects([&](TaggedObject *obj) {
+            current.insert(reinterpret_cast<uintptr_t>(obj));
+        });
+    };
+    snapshotModules();
+    EXPECT_EQ(current.find(shortLivedAddr), current.end())
+        << "dead module must be reclaimed by the first OLD_GC after its death";
+    EXPECT_EQ(current.size(), static_cast<size_t>(LIVE));
+    for (int i = 0; i < LIVE; i++) {
+        EXPECT_NE(current.find(keepAlive[i].GetTaggedValue().GetRawData()), current.end())
+            << "live module lost across consecutive old GCs";
+        // In-place sweep: live module addresses are stable across OLD_GCs.
+        EXPECT_NE(liveAddrsBefore.find(keepAlive[i].GetTaggedValue().GetRawData()), liveAddrsBefore.end())
+            << "live module moved during an old GC";
+        EXPECT_TRUE(ModuleSpaceTestHelper::InModuleSpace(keepAlive[i].GetTaggedValue().GetTaggedObject()));
+    }
+    heap_->CollectGarbage(TriggerGCType::FULL_GC, GCReason::OTHER);
+    snapshotModules();
+    EXPECT_EQ(current.size(), static_cast<size_t>(LIVE));
+    for (int i = 0; i < LIVE; i++) {
+        EXPECT_NE(current.find(keepAlive[i].GetTaggedValue().GetRawData()), current.end());
+        EXPECT_TRUE(ModuleSpaceTestHelper::InModuleSpace(keepAlive[i].GetTaggedValue().GetTaggedObject()));
+    }
+}
+
+// Newborns created after the R2 region scan survive via handle roots + ReMark.
+HWTEST_F_L0(LocalCCTest, ModuleNewbornDuringCCMarkingTest)
+{
+    constexpr int PRE = 150;
+    constexpr int NEWBORN = 200;
+    std::vector<JSTaggedType> expected;
+    expected.reserve(PRE + NEWBORN);
+    for (int i = 0; i < PRE; i++) {
+        CString name = CString(std::to_string(i).c_str()).insert(0, "newborn_pre_");
+        JSHandle<SourceTextModule> module = ModuleSpaceTestHelper::CreateModule(thread, name);
+        expected.push_back(module.GetTaggedValue().GetRawData());
+    }
+    bool succ = heap_->TryTriggerCCMarking(MarkReason::OTHER);
+    ASSERT_TRUE(succ);
+    for (int i = 0; i < NEWBORN; i++) {
+        CString name = CString(std::to_string(i).c_str()).insert(0, "newborn_during_");
+        JSHandle<SourceTextModule> module = ModuleSpaceTestHelper::CreateModule(thread, name);
+        expected.push_back(module.GetTaggedValue().GetRawData());
+    }
+    heap_->CollectGarbageFromCCMark(GCReason::OTHER);
+    ASSERT_TRUE(thread->IsConcurrentCopying());
+    heap_->SetNearGCInSensitive(true);
+    heap_->WaitAndHandleCCFinished();
+    EXPECT_FALSE(thread->IsConcurrentCopying());
+
+    ModuleSpace *moduleSpace = heap_->GetModuleSpace();
+    std::set<JSTaggedType> current;
+    moduleSpace->IterateOverObjects([&](TaggedObject *obj) {
+        current.insert(reinterpret_cast<uintptr_t>(obj));
+    });
+    EXPECT_EQ(current.size(), static_cast<size_t>(PRE + NEWBORN));
+    for (JSTaggedType addr : expected) {
+        // Modules are never FROM: addresses are stable across the whole cycle.
+        EXPECT_NE(current.find(addr), current.end()) << "module lost across CC marking window";
+        // The published body is walkable: the class reads back as a module.
+        TaggedObject *obj = reinterpret_cast<TaggedObject *>(addr);
+        EXPECT_TRUE(obj->GetClass()->IsSourceTextModule());
+    }
+}
+
+// Modules born during a concurrent old-gen mark survive via handle roots + ReMark.
+HWTEST_F_L0(LocalCCTest, ModuleNewbornDuringOldMarkingTest)
+{
+    constexpr int COUNT = 20;
+    heap_->SetMarkType(MarkType::MARK_FULL);
+    heap_->TriggerConcurrentMarking(MarkReason::OTHER);
+    std::vector<JSHandle<SourceTextModule>> keepAlive;
+    keepAlive.reserve(COUNT);
+    for (int i = 0; i < COUNT; i++) {
+        CString name = CString(std::to_string(i).c_str()).insert(0, "oldmark_newborn_");
+        keepAlive.emplace_back(ModuleSpaceTestHelper::CreateModule(thread, name));
+    }
+    // Finishes the concurrent mark (ReMark) and sweeps moduleSpace in place:
+    // handle-rooted modules are marked by ReMark (the publish write barrier
+    // plus the remark root scan — the same mechanism that keeps newborn
+    // old-space objects alive) and survive the sweep.
+    heap_->CollectGarbage(TriggerGCType::OLD_GC, GCReason::OTHER);
+    // Let the concurrent sweeper settle before walking moduleSpace.
+    heap_->Prepare();
+
+    ModuleSpace *moduleSpace = heap_->GetModuleSpace();
+    std::set<JSTaggedType> current;
+    moduleSpace->IterateOverObjects([&](TaggedObject *obj) {
+        current.insert(reinterpret_cast<uintptr_t>(obj));
+    });
+    EXPECT_EQ(current.size(), static_cast<size_t>(COUNT));
+    for (int i = 0; i < COUNT; i++) {
+        EXPECT_NE(current.find(keepAlive[i].GetTaggedValue().GetRawData()), current.end())
+            << "module born inside the old-mark window lost";
+        EXPECT_TRUE(ModuleSpaceTestHelper::InModuleSpace(keepAlive[i].GetTaggedValue().GetTaggedObject()));
+    }
+}
+
+// An OLD_GC during a young concurrent mark abandons it (CollectGarbage resets
+// the marker) and re-marks from roots; handle-rooted modules born in that
+// window must survive.
+HWTEST_F_L0(LocalCCTest, ModuleYoungMarkThenOldGCTest)
+{
+    constexpr int COUNT = 20;
+    heap_->TriggerConcurrentMarking(MarkReason::OTHER);  // markType_ defaults to MARK_YOUNG
+    std::vector<JSHandle<SourceTextModule>> keepAlive;
+    keepAlive.reserve(COUNT);
+    for (int i = 0; i < COUNT; i++) {
+        CString name = CString(std::to_string(i).c_str()).insert(0, "ym_then_old_");
+        keepAlive.emplace_back(ModuleSpaceTestHelper::CreateModule(thread, name));
+    }
+    heap_->CollectGarbage(TriggerGCType::OLD_GC, GCReason::OTHER);
+    // Let the concurrent sweeper settle before walking moduleSpace.
+    heap_->Prepare();
+
+    ModuleSpace *moduleSpace = heap_->GetModuleSpace();
+    std::set<JSTaggedType> current;
+    moduleSpace->IterateOverObjects([&](TaggedObject *obj) {
+        current.insert(reinterpret_cast<uintptr_t>(obj));
+    });
+    EXPECT_EQ(current.size(), static_cast<size_t>(COUNT));
+    for (int i = 0; i < COUNT; i++) {
+        EXPECT_NE(current.find(keepAlive[i].GetTaggedValue().GetRawData()), current.end())
+            << "module born inside the young-mark window destroyed by OLD_GC";
+        EXPECT_TRUE(ModuleSpaceTestHelper::InModuleSpace(keepAlive[i].GetTaggedValue().GetTaggedObject()));
+    }
+}
+
+// Born-and-abandoned module in a CC window: the concurrent marker captures it
+// via the creation handle before the scope pops, so the update-phase
+// moduleSpace walk (marked bits only) rewrites its young-referencing field in
+// place; the next cycle's R2 scan then walks valid pointers.
+HWTEST_F_L0(LocalCCTest, ModuleBornAbandonedInCCWindowTest)
+{
+    JSTaggedType youngAddr = 0;
+    bool succ = heap_->TryTriggerCCMarking(MarkReason::OTHER);
+    ASSERT_TRUE(succ);
+    {
+        EcmaHandleScope deadScope(thread);
+        JSHandle<SourceTextModule> dead = ModuleSpaceTestHelper::CreateModule(thread, "cc_abandoned_");
+        ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+        JSHandle<TaggedArray> youngArr = factory->NewTaggedArray(4);
+        youngAddr = youngArr.GetTaggedValue().GetRawData();
+        dead->SetRequestedModules(thread, youngArr.GetTaggedValue());
+    }
+    heap_->CollectGarbageFromCCMark(GCReason::OTHER);
+    ASSERT_TRUE(thread->IsConcurrentCopying());
+    heap_->SetNearGCInSensitive(true);
+    heap_->WaitAndHandleCCFinished();
+    EXPECT_FALSE(thread->IsConcurrentCopying());
+
+    ModuleSpace *ms = heap_->GetModuleSpace();
+    JSTaggedType fieldAfter = 0;
+    ms->IterateOverObjects([&](TaggedObject *obj) {
+        SourceTextModule *m = SourceTextModule::Cast(obj);
+        if (m->GetEcmaModuleRecordNameString() == "cc_abandoned_") {
+            fieldAfter = m->GetRequestedModules(thread).GetRawData();
+        }
+    });
+    EXPECT_NE(fieldAfter, youngAddr) << "abandoned module field not updated — dangling into FROM";
+
+    // Cycle 2 churns young and re-scans every module: must walk valid fields.
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    for (int i = 0; i < 300; i++) {
+        (void)factory->NewTaggedArray(8);
+    }
+    succ = heap_->TryTriggerCCMarking(MarkReason::OTHER);
+    ASSERT_TRUE(succ);
+    heap_->CollectGarbageFromCCMark(GCReason::OTHER);
+    ASSERT_TRUE(thread->IsConcurrentCopying());
+    heap_->SetNearGCInSensitive(true);
+    heap_->WaitAndHandleCCFinished();
+}
+
+// Regression (orphaned sweep setup): with promotions, an old GC's Evacuate ran
+// SweepNewToOldRegions between PartialGC::Sweep() and PostTask(OLD_GC),
+// rewriting the sweeper range to exclude MODULE_SPACE — the module sweeper
+// task was never posted, the parked sweepingRegionList_ was orphaned, and the
+// clear task zeroed its regions' mark bits. The next module allocation then
+// swept those regions inline with all-zero bits and freed live modules,
+// handing their slots to new allocations (module cache corruption, GC crashes
+// on illegal RSet references). The MemSpaceType reorder (MODULE_SPACE now
+// lies inside [OLD_SPACE..MACHINE_CODE_SPACE]) makes the promotion-path
+// range rewrite idempotent, so the module sweeper task is always posted; the
+// promotion join must not corrupt the sweep, and fresh allocations must never
+// alias live modules.
+HWTEST_F_L0(LocalCCTest, ModuleOldGcWithPromotionsDoesNotOrphanSweepTest)
+{
+    constexpr int LIVE = 8;
+    constexpr int NEWBORN = 32;
+    std::vector<JSHandle<SourceTextModule>> keepAlive;
+    keepAlive.reserve(LIVE);
+    for (int i = 0; i < LIVE; i++) {
+        CString name = CString(std::to_string(i).c_str()).insert(0, "orphan_live_");
+        keepAlive.emplace_back(ModuleSpaceTestHelper::CreateModule(thread, name));
+    }
+    std::set<uintptr_t> liveAddresses;
+    for (int i = 0; i < LIVE; i++) {
+        liveAddresses.insert(keepAlive[i].GetTaggedValue().GetRawData());
+    }
+
+    // Surviving young arrays force new-to-old promotion (hasNewToOldRegions_)
+    // in the old GC that finishes the concurrent full mark.
+    constexpr size_t OBJ_SIZE = 3_KB;
+    std::vector<JSHandle<TaggedArray>> youngSurvivors;
+    for (int i = 0; i < 16; i++) {
+        youngSurvivors.emplace_back(AllocateWithoutGC(OBJ_SIZE));
+    }
+    heap_->SetMarkType(MarkType::MARK_FULL);
+    heap_->TriggerConcurrentMarking(MarkReason::OTHER);
+    heap_->CollectGarbage(TriggerGCType::OLD_GC, GCReason::OTHER);
+    heap_->CollectGarbage(TriggerGCType::OLD_GC, GCReason::OTHER);
+    // Drain the async clear task: its mark-bit clearing must happen before the
+    // allocations below (the buggy path swept lazily on first allocation).
+    heap_->Prepare();
+
+    for (int i = 0; i < LIVE; i++) {
+        TaggedObject *obj = keepAlive[i].GetTaggedValue().GetTaggedObject();
+        ASSERT_TRUE(ModuleSpaceTestHelper::InModuleSpace(obj));
+        EXPECT_TRUE(obj->GetClass()->IsSourceTextModule()) << "live module corrupted by old GC";
+    }
+    for (int i = 0; i < NEWBORN; i++) {
+        CString name = CString(std::to_string(i).c_str()).insert(0, "orphan_new_");
+        JSHandle<SourceTextModule> fresh = ModuleSpaceTestHelper::CreateModule(thread, name);
+        EXPECT_EQ(liveAddresses.find(fresh.GetTaggedValue().GetRawData()), liveAddresses.end())
+            << "new module aliased a live module's slot";
+    }
+}
+
+// C2: the store barrier records module->young fields in the old-to-new RSet
+// (IN_MODULE_SPACE rides the GENERAL_OLD range); a young GC must keep the
+// referent alive and rewrite the slot. The array handle dies before the GC,
+// so the RSet is its only channel.
+HWTEST_F_L0(LocalCCTest, ModuleToYoungReferenceSurvivesYoungGC)
+{
+    JSHandle<SourceTextModule> module = ModuleSpaceTestHelper::CreateModule(thread, "young_ref_");
+    JSTaggedType youngAddrBefore = 0;
+    {
+        EcmaHandleScope scope(thread);
+        ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+        JSHandle<TaggedArray> youngArr = factory->NewTaggedArray(4);
+        youngArr->Set(thread, 0, JSTaggedValue(123));
+        youngArr->Set(thread, 3, JSTaggedValue(456));
+        youngAddrBefore = youngArr.GetTaggedValue().GetRawData();
+        module->SetRequestedModules(thread, youngArr.GetTaggedValue());
+    }
+    JSTaggedType moduleAddrBefore = module.GetTaggedValue().GetRawData();
+    ASSERT_TRUE(ModuleSpaceTestHelper::InModuleSpace(module.GetTaggedValue().GetTaggedObject()));
+    ASSERT_TRUE(Region::ObjectAddressToRange(reinterpret_cast<TaggedObject *>(youngAddrBefore))->InYoungSpace());
+
+    heap_->CollectGarbage(TriggerGCType::YOUNG_GC, GCReason::OTHER);
+
+    // The module never moves in a young GC.
+    EXPECT_EQ(module.GetTaggedValue().GetRawData(), moduleAddrBefore);
+    // The RSet channel relocated the referent; ASSERT keeps a broken run from
+    // reading through the stale slot below.
+    JSTaggedValue field = module->GetRequestedModules(thread);
+    ASSERT_TRUE(field.IsHeapObject());
+    ASSERT_NE(field.GetRawData(), youngAddrBefore);
+    JSHandle<TaggedArray> survivor(thread, field);
+    EXPECT_EQ(survivor->Get(thread, 0).GetRawData(), JSTaggedValue(123).GetRawData());
+    EXPECT_EQ(survivor->Get(thread, 3).GetRawData(), JSTaggedValue(456).GetRawData());
+}
+// ===== moduleSpace accounting invariants =====
+// These cases do not depend on how a GC is triggered; they only assert that
+// GetHeapObjectSize() equals live slots * slot size once a collection ended.
+
+static size_t CountModuleSlots(ModuleSpace *moduleSpace)
+{
+    size_t count = 0;
+    moduleSpace->IterateOverObjects([&count](TaggedObject *) { count++; });
+    return count;
+}
+
+static JSHandle<SourceTextModule> CreateModuleForGC(JSThread *thread, int index, const char *tag)
+{
+    CString name = CString(std::to_string(index).c_str()).insert(0, tag);
+    return ModuleSpaceTestHelper::CreateModule(thread, name);
+}
+
+static void CheckModuleAccounting(ModuleSpace *moduleSpace, const char *stage)
+{
+    size_t slots = CountModuleSlots(moduleSpace);
+    EXPECT_EQ(moduleSpace->GetHeapObjectSize(), slots * moduleSpace->GetSlotSize())
+        << "used size must equal live slots * slot size (" << stage << ")";
+    EXPECT_LE(moduleSpace->GetHeapObjectSize(), moduleSpace->GetCommittedSize()) << stage;
+}
+
+// LOCAL_CC -> OLD_GC -> FULL_GC, checking the invariant after every kind of GC.
+HWTEST_F_L0(LocalCCTest, ModuleSpaceAccountingAcrossGCs)
+{
+    ModuleSpace *moduleSpace = heap_->GetModuleSpace();
+    ASSERT_TRUE(moduleSpace != nullptr);
+    {
+        EcmaHandleScope deadScope(thread);
+        for (int i = 0; i < 6; i++) {
+            JSHandle<SourceTextModule> dead = CreateModuleForGC(thread, i, "module_dead_");
+            (void)dead;
+        }
+    }
+    std::vector<JSHandle<SourceTextModule>> live;
+    for (int i = 0; i < 4; i++) {
+        live.emplace_back(CreateModuleForGC(thread, i, "module_live_"));
+        ASSERT_FALSE(live.back().IsEmpty());
+    }
+
+    bool succ = heap_->TryTriggerCCMarking(MarkReason::OTHER);
+    ASSERT_TRUE(succ);
+    heap_->CollectGarbageFromCCMark(GCReason::OTHER);
+    ASSERT_TRUE(thread->IsConcurrentCopying());
+    heap_->SetNearGCInSensitive(true);
+    heap_->WaitAndHandleCCFinished();
+    heap_->Prepare();
+    CheckModuleAccounting(moduleSpace, "after LOCAL_CC");
+
+    heap_->CollectGarbage(TriggerGCType::OLD_GC, GCReason::OTHER);
+    CheckModuleAccounting(moduleSpace, "after OLD_GC");
+
+    heap_->CollectGarbage(TriggerGCType::FULL_GC, GCReason::OTHER);
+    CheckModuleAccounting(moduleSpace, "after FULL_GC");
+}
+
+// Each FULL_GC resets the counter instead of adding to it: three consecutive
+// full GCs must all report the same used size.
+HWTEST_F_L0(LocalCCTest, ModuleSpaceFullGCAccountingReset)
+{
+    ModuleSpace *moduleSpace = heap_->GetModuleSpace();
+    constexpr int LIVE = 5;
+    std::vector<JSHandle<SourceTextModule>> live;
+    for (int i = 0; i < LIVE; i++) {
+        live.emplace_back(CreateModuleForGC(thread, i, "module_fullgc_"));
+        ASSERT_FALSE(live.back().IsEmpty());
+    }
+    for (int round = 0; round < 3; round++) {
+        heap_->CollectGarbage(TriggerGCType::FULL_GC, GCReason::OTHER);
+        EXPECT_EQ(CountModuleSlots(moduleSpace), static_cast<size_t>(LIVE)) << "round " << round;
+        EXPECT_EQ(moduleSpace->GetHeapObjectSize(), LIVE * moduleSpace->GetSlotSize())
+            << "round " << round << ": counter must be a per-GC snapshot, not a running sum";
+    }
+}
+
+// Nothing survives: the counter and the committed size must both return to 0.
+HWTEST_F_L0(LocalCCTest, DeadModuleReclaimedByFullGC)
+{
+    ModuleSpace *moduleSpace = heap_->GetModuleSpace();
+    {
+        EcmaHandleScope deadScope(thread);
+        for (int i = 0; i < 8; i++) {
+            JSHandle<SourceTextModule> dead = CreateModuleForGC(thread, i, "module_all_dead_");
+            (void)dead;
+        }
+    }
+    ASSERT_GT(moduleSpace->GetRegionCount(), 0U);
+    heap_->CollectGarbage(TriggerGCType::FULL_GC, GCReason::OTHER);
+    EXPECT_EQ(CountModuleSlots(moduleSpace), 0U);
+    EXPECT_EQ(moduleSpace->GetHeapObjectSize(), 0U);
+    EXPECT_EQ(moduleSpace->GetRegionCount(), 0U);
+    EXPECT_EQ(moduleSpace->GetCommittedSize(), 0U);
+}
+
+// Evacuation spanning more than one module region: the per-work-node counters
+// must be summed exactly once, so used size equals the survivor count.
+HWTEST_F_L0(LocalCCTest, ModuleSpaceMultiRegionEvacuation)
+{
+    ModuleSpace *moduleSpace = heap_->GetModuleSpace();
+    constexpr size_t MAX_MODULES = 4000;
+    std::vector<JSHandle<SourceTextModule>> live;
+    while (moduleSpace->GetRegionCount() < 2 && live.size() < MAX_MODULES) {
+        live.emplace_back(CreateModuleForGC(thread, static_cast<int>(live.size()), "module_multi_"));
+        ASSERT_FALSE(live.back().IsEmpty());
+    }
+    // A 256KB region holds ~1560 slots, so the budget above reliably reaches two regions;
+    // make that a precondition instead of silently skipping the multi-region evacuation path.
+    ASSERT_GE(moduleSpace->GetRegionCount(), 2U);
+    heap_->CollectGarbage(TriggerGCType::FULL_GC, GCReason::OTHER);
+    EXPECT_EQ(CountModuleSlots(moduleSpace), live.size());
+    EXPECT_EQ(moduleSpace->GetHeapObjectSize(), live.size() * moduleSpace->GetSlotSize());
+}
+
+// Bytes allocated after the last sweep must be added on top of the snapshot.
+HWTEST_F_L0(LocalCCTest, ModuleSpaceOldGCSizeAccounting)
+{
+    ModuleSpace *moduleSpace = heap_->GetModuleSpace();
+    constexpr int FIRST = 3;
+    constexpr int SECOND = 4;
+    std::vector<JSHandle<SourceTextModule>> live;
+    for (int i = 0; i < FIRST; i++) {
+        live.emplace_back(CreateModuleForGC(thread, i, "module_after_sweep_"));
+        ASSERT_FALSE(live.back().IsEmpty());
+    }
+    heap_->CollectGarbage(TriggerGCType::OLD_GC, GCReason::OTHER);
+    EXPECT_EQ(moduleSpace->GetHeapObjectSize(), FIRST * moduleSpace->GetSlotSize());
+
+    for (int i = 0; i < SECOND; i++) {
+        live.emplace_back(CreateModuleForGC(thread, FIRST + i, "module_after_sweep_"));
+        ASSERT_FALSE(live.back().IsEmpty());
+    }
+    // Consumed bytes are settled in batches (when the current free list runs out), so between
+    // two GCs the reported size may lag behind the real usage, but it never exceeds it.
+    const size_t usedAfterSweep = moduleSpace->GetHeapObjectSize();
+    EXPECT_GE(usedAfterSweep, FIRST * moduleSpace->GetSlotSize());
+    EXPECT_LE(usedAfterSweep, (FIRST + SECOND) * moduleSpace->GetSlotSize());
+
+    heap_->CollectGarbage(TriggerGCType::OLD_GC, GCReason::OTHER);
+    EXPECT_EQ(moduleSpace->GetHeapObjectSize(), (FIRST + SECOND) * moduleSpace->GetSlotSize());
+}
+
+// The object walker used by the heap verifier must report exactly the live modules, step over the
+// free slots left by the dead ones, and agree with the region count the space reports.
+HWTEST_F_L0(LocalCCTest, ModuleSpaceIterateObjectsTest)
+{
+    ModuleSpace *moduleSpace = heap_->GetModuleSpace();
+    constexpr int LIVE_COUNT = 4;
+    std::vector<JSHandle<SourceTextModule>> live;
+    live.reserve(LIVE_COUNT);
+    for (int i = 0; i < LIVE_COUNT; i++) {
+        live.emplace_back(CreateModuleForGC(thread, i, "module_iter_live_"));
+        ASSERT_FALSE(live.back().IsEmpty());
+    }
+    {
+        EcmaHandleScope deadScope(thread);
+        for (int i = 0; i < 3; i++) {
+            JSHandle<SourceTextModule> dead = CreateModuleForGC(thread, 10 + i, "module_iter_dead_");
+            ASSERT_FALSE(dead.IsEmpty());
+        }
+    }
+    heap_->CollectGarbage(TriggerGCType::OLD_GC, GCReason::OTHER);
+
+    size_t directCount = 0;
+    moduleSpace->IterateOverObjects([&directCount](TaggedObject *object) {
+        EXPECT_TRUE(ModuleSpaceTestHelper::InModuleSpace(object));
+        directCount++;
+    });
+    EXPECT_EQ(directCount, static_cast<size_t>(LIVE_COUNT));
+    EXPECT_GT(moduleSpace->GetRegionCount(), 0U);
+}
+
+// Sweeping also runs inline on the mutator thread when concurrent sweeping is disabled. The dead
+// modules must be reclaimed and the accounting must stay exact on that path too.
+HWTEST_F_L0(LocalCCTest, ModuleSpaceSyncSweepAccountingTest)
+{
+    ModuleSpace *moduleSpace = heap_->GetModuleSpace();
+    constexpr int LIVE_COUNT = 3;
+    constexpr int DEAD_COUNT = 3;
+    std::vector<JSHandle<SourceTextModule>> live;
+    live.reserve(LIVE_COUNT);
+    for (int i = 0; i < LIVE_COUNT; i++) {
+        live.emplace_back(CreateModuleForGC(thread, i, "module_sync_live_"));
+        ASSERT_FALSE(live.back().IsEmpty());
+    }
+    {
+        EcmaHandleScope deadScope(thread);
+        for (int i = 0; i < DEAD_COUNT; i++) {
+            JSHandle<SourceTextModule> dead = CreateModuleForGC(thread, 10 + i, "module_sync_dead_");
+            ASSERT_FALSE(dead.IsEmpty());
+        }
+    }
+    ConcurrentSweeper *sweeper = heap_->GetSweeper();
+    sweeper->ConfigConcurrentSweep(false);
+    heap_->CollectGarbage(TriggerGCType::OLD_GC, GCReason::OTHER);
+    EXPECT_EQ(moduleSpace->GetHeapObjectSize(), LIVE_COUNT * moduleSpace->GetSlotSize());
+    EXPECT_EQ(CountModuleSlots(moduleSpace), static_cast<size_t>(LIVE_COUNT));
+    sweeper->ConfigConcurrentSweep(true);
+}
+#endif  // ENABLE_MODULE_SPACE
+
+#if !ENABLE_MODULE_SPACE
+// Feature-disabled fallback: modules must go through the legacy young/old path
+// and leave moduleSpace empty.
+HWTEST_F_L0(LocalCCTest, ModuleSpaceDisabledFallbackTest)
+{
+    JSHandle<SourceTextModule> module = ModuleSpaceTestHelper::CreateModule(thread, "legacy_module_");
+    ASSERT_FALSE(module.IsEmpty());
+    EXPECT_FALSE(ModuleSpaceTestHelper::InModuleSpace(module.GetTaggedValue().GetTaggedObject()));
+    EXPECT_EQ(heap_->GetModuleSpace()->GetRegionCount(), 0U);
+
+    heap_->CollectGarbage(TriggerGCType::OLD_GC, GCReason::OTHER);
+    EXPECT_FALSE(ModuleSpaceTestHelper::InModuleSpace(module.GetTaggedValue().GetTaggedObject()));
+    EXPECT_EQ(heap_->GetModuleSpace()->GetRegionCount(), 0U);
+}
+#endif  // !ENABLE_MODULE_SPACE
+
+#endif  // PANDA_TARGET_64
+
 }  // namespace panda::test

@@ -50,17 +50,18 @@ enum RegionSpaceFlag {
     IN_READ_ONLY_SPACE = 0X0E,
     IN_APPSPAWN_SPACE = 0x0F,
     IN_HUGE_MACHINE_CODE_SPACE = 0x10,
-    IN_SLOT_SPACE = 0x11,
-    IN_SHARED_NON_MOVABLE = 0x12,
-    IN_SHARED_OLD_SPACE = 0x13,
-    IN_SHARED_APPSPAWN_SPACE = 0X14,
-    IN_SHARED_HUGE_OBJECT_SPACE = 0x15,
-    IN_SHARED_READ_ONLY_SPACE = 0x16,
+    IN_MODULE_SPACE = 0x11,
+    IN_SLOT_SPACE = 0x12,
+    IN_SHARED_NON_MOVABLE = 0x13,
+    IN_SHARED_OLD_SPACE = 0x14,
+    IN_SHARED_APPSPAWN_SPACE = 0X15,
+    IN_SHARED_HUGE_OBJECT_SPACE = 0x16,
+    IN_SHARED_READ_ONLY_SPACE = 0x17,
 
     VALID_SPACE_MASK = 0xFF,
 
     GENERAL_OLD_BEGIN = IN_SNAPSHOT_SPACE,
-    GENERAL_OLD_END = IN_HUGE_MACHINE_CODE_SPACE,
+    GENERAL_OLD_END = IN_MODULE_SPACE,
     SHARED_SPACE_BEGIN = IN_SHARED_NON_MOVABLE,
     SHARED_SPACE_END = IN_SHARED_READ_ONLY_SPACE,
     SHARED_SWEEPABLE_SPACE_BEGIN = IN_SHARED_NON_MOVABLE,
@@ -148,6 +149,8 @@ static inline std::string ToSpaceTypeName(uint8_t space)
             return "appspawn space";
         case RegionSpaceFlag::IN_HUGE_MACHINE_CODE_SPACE:
             return "huge machine code space";
+        case RegionSpaceFlag::IN_MODULE_SPACE:
+            return "module space";
         case RegionSpaceFlag::IN_SHARED_NON_MOVABLE:
             return "shared non movable space";
         case RegionSpaceFlag::IN_SHARED_OLD_SPACE:
@@ -463,7 +466,8 @@ public:
 
     bool InYoungOrOldSpace() const
     {
-        return InYoungSpace() || InOldSpace();
+        // Module regions are non-moving for LOCAL_CC but evacuable by FULL_GC, same as old regions.
+        return InYoungSpace() || InOldSpace() || InModuleSpace();
     }
 
     bool InGeneralOldSpace() const
@@ -506,6 +510,11 @@ public:
     bool InSlotSpace() const
     {
         return packedData_.flags_.spaceFlag_ == RegionSpaceFlag::IN_SLOT_SPACE;
+    }
+
+    bool InModuleSpace() const
+    {
+        return packedData_.flags_.spaceFlag_ == RegionSpaceFlag::IN_MODULE_SPACE;
     }
 
     bool InSharedOldSpace() const

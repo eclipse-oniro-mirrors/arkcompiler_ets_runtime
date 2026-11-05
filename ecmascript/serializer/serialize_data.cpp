@@ -33,8 +33,9 @@ static constexpr int NONMOVABLE_SPACE_SIZE_INDEX = 6;
 static constexpr int MACHINECODE_SPACE_SIZE_INDEX = 7;
 static constexpr int SHARED_OLD_SPACE_SIZE_INDEX = 8;
 static constexpr int SHARED_NONMOVABLE_SPACE_SIZE_INDEX = 9;
-static constexpr int INCOMPLETE_DATA_INDEX = 10;
-static constexpr int GROUP_SIZE = 11;
+static constexpr int MODULE_SPACE_SIZE_INDEX = 10;
+static constexpr int INCOMPLETE_DATA_INDEX = 11;
+static constexpr int GROUP_SIZE = 12;
 static constexpr int CMC_GC_REGION_SIZE = 2;
 
 static size_t GetAlignUpPadding(const uint8_t *curPtr, void *originAddr, const size_t alignment)
@@ -165,6 +166,7 @@ bool SerializeData::WriteFlatSizeGroup(uint8_t *&ptr, uint8_t *buffer, size_t to
         data->machineCodeSpaceSize_,
         data->sharedOldSpaceSize_,
         data->sharedNonMovableSpaceSize_,
+        data->moduleSpaceSize_,
         static_cast<size_t>(data->incompleteData_)
     };
     size_t groupBytes = GROUP_SIZE * sizeof(size_t);
@@ -274,6 +276,7 @@ bool SerializeData::ReadFlatSizeGroup(const uint8_t *&ptr)
     machineCodeSpaceSize_ = sizeGroup[MACHINECODE_SPACE_SIZE_INDEX];
     sharedOldSpaceSize_ = sizeGroup[SHARED_OLD_SPACE_SIZE_INDEX];
     sharedNonMovableSpaceSize_ = sizeGroup[SHARED_NONMOVABLE_SPACE_SIZE_INDEX];
+    moduleSpaceSize_ = sizeGroup[MODULE_SPACE_SIZE_INDEX];
     incompleteData_ = sizeGroup[INCOMPLETE_DATA_INDEX] != 0;
     return true;
 }

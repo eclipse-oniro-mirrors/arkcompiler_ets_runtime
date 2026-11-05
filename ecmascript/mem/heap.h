@@ -35,6 +35,7 @@
 #include "ecmascript/mem/machine_code.h"
 #include "ecmascript/mem/mark_stack.h"
 #include "ecmascript/mem/local_cmc/local_cc_native_pointer_callback.h"
+#include "ecmascript/mem/module_space.h"
 #include "ecmascript/mem/shared_heap/shared_memory_reallocator.h"
 #include "ecmascript/mem/shared_heap/shared_space.h"
 #include "ecmascript/mem/sparse_space.h"
@@ -1318,6 +1319,11 @@ public:
         return slotSpace_;
     }
 
+    ModuleSpace *GetModuleSpace() const
+    {
+        return moduleSpace_;
+    }
+
     OldSpace *GetCompressSpace() const
     {
         return compressSpace_;
@@ -1383,6 +1389,8 @@ public:
                 return nonMovableSpace_;
             case MemSpaceType::MACHINE_CODE_SPACE:
                 return machineCodeSpace_;
+            case MemSpaceType::MODULE_SPACE:
+                return moduleSpace_;
             default:
                 LOG_ECMA(FATAL) << "this branch is unreachable";
                 UNREACHABLE();
@@ -1532,6 +1540,14 @@ public:
     inline uintptr_t AllocateSnapshotSpace(size_t size);
     // SlotSpace
     inline TaggedObject *AllocateInSlotSpace(size_t size);
+
+    // ModuleSpace
+    inline TaggedObject *AllocateInModuleSpace(JSHandle<JSHClass> hclass);
+
+    // Shared ladder for specialized slot spaces: expand, then let the heap decide whether an old
+    // GC is warranted (AllocateOld semantics), then force OLD_GC / FULL_GC before reporting OOM.
+    template <typename SpaceT>
+    inline TaggedObject *AllocateInSpecializedSlotSpace(SpaceT *space, size_t size, const char *caller);
 
     // shared non movable space tlab
     inline TaggedObject *AllocateSharedNonMovableSpaceFromTlab(JSThread *thread, size_t size);
@@ -1866,7 +1882,8 @@ public:
         if constexpr (G_USE_CMS_GC) {
             return SlotSpaceExceedCapacity(size);
         }
-        size_t totalSize = oldSpace_->GetCommittedSize() + hugeObjectSpace_->GetCommittedSize() + size;
+        size_t totalSize = oldSpace_->GetCommittedSize() + hugeObjectSpace_->GetCommittedSize() +
+                           moduleSpace_->GetCommittedSize() + size;
         return totalSize >= oldSpace_->GetMaximumCapacity() + oldSpace_->GetOvershootSize() +
                oldSpace_->GetOutOfMemoryOvershootSize();
     }
@@ -1877,7 +1894,8 @@ public:
         if constexpr (G_USE_CMS_GC) {
             return SlotSpaceExceedLimit();
         }
-        size_t totalSize = oldSpace_->GetHeapObjectSize() + hugeObjectSpace_->GetHeapObjectSize();
+        size_t totalSize = oldSpace_->GetHeapObjectSize() + hugeObjectSpace_->GetHeapObjectSize() +
+                           moduleSpace_->GetHeapObjectSize();
         return totalSize >= oldSpace_->GetInitialCapacity() + oldSpace_->GetOvershootSize();
     }
 
@@ -2252,6 +2270,7 @@ private:
     OldSpace *oldSpace_ {nullptr};
     OldSpace *compressSpace_ {nullptr};
     SlotSpace *slotSpace_ {nullptr};
+    ModuleSpace *moduleSpace_ {nullptr};
     ToSpace *toSpace_ {nullptr};
     ReadOnlySpace *readOnlySpace_ {nullptr};
     AppSpawnSpace *appSpawnSpace_ {nullptr};
