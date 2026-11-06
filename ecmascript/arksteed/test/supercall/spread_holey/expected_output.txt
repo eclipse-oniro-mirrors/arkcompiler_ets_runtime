@@ -1,0 +1,4 @@
+holey: 1 true 3 true
+holey-len: 4 true
+empty-holes: true true true true
+gap: 1 true true 4

@@ -346,7 +346,7 @@ class SpreadConstructor {
 
 //! METHOD testSpreadConstructor
 //! COUNT CallNewObjRangeBase 1
-//! COUNT CallNewObjRangeDerived 1
+//! HAS_NOT CallNewObjRangeDerived
 //! HAS_NOT CallRuntime OptNewObjRange
 //! HAS CallKnownJSFunction
 function testSpreadConstructor(): string {

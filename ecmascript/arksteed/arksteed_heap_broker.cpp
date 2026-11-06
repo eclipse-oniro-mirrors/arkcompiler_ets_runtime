@@ -344,6 +344,22 @@ bool ArkSteedHeapBroker::TryGetKnownConstructInfo(const ArkSteedFunctionRef &ref
     });
 }
 
+std::optional<bool> ArkSteedHeapBroker::TryGetIsBaseConstructor(const ArkSteedFunctionRef &ref) const
+{
+    bool isBase = false;
+    bool isConstructor = TryReadRef(ref, [this, &isBase](JSTaggedValue target) {
+        if (!target.IsJSFunction() || !target.IsConstructor()) {
+            return false;
+        }
+        isBase = JSFunction::Cast(target.GetTaggedObject())->IsBase(compilerThread_);
+        return true;
+    });
+    if (!isConstructor) {
+        return std::nullopt;
+    }
+    return isBase;
+}
+
 uint32_t ArkSteedHeapBroker::GetArgumentsObjectSize() const
 {
     NoGCScope scope(this);

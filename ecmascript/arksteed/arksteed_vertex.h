@@ -227,7 +227,7 @@ public:
     using InputCountField = OpcodeField::NextField<uint32_t, 16>;                 // 16: input count field bit width
     using PropertyFlagsField = InputCountField::NextField<uint32_t, 16>;          // 16: properties field bit width
     using ValueRepresentationField = PropertyFlagsField::NextField<uint32_t, 3>;  // 3 : Value repr field width
-    using NumTempField = ValueRepresentationField::NextField<uint32_t, 2>;        // 2: NumTemp bit width
+    using NumTempField = ValueRepresentationField::NextField<uint32_t, 3>;        // 3: NumTemp bit width
     using NumDoubleTempField = NumTempField::NextField<uint32_t, 1>;
     // Transient, compilation-local liveness mark owned exclusively by
     // `ArkSteedDce` (see `arksteed_dce.h`). It lives in a spare high bit of the

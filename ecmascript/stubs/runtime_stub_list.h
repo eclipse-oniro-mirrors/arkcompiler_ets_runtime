@@ -470,7 +470,8 @@ namespace panda::ecmascript {
 
 #if ECMASCRIPT_ENABLE_ARK_STEED
 #define ARKSTEED_RUNTIME_STUB_LIST(V)                          \
-    V(ArkSteedCompile)
+    V(ArkSteedCompile)                                        \
+    V(SuperCallSpreadWithNewTarget)
 #else
 #define ARKSTEED_RUNTIME_STUB_LIST(V)
 #endif

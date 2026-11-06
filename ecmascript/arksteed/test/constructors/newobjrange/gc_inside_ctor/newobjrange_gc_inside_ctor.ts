@@ -31,8 +31,8 @@
 //! METHOD callGC
 //! HAS InitializeEmptyObject
 //! HAS CallNewObjRangeBase
-//! HAS CallNewObjRangeDerived
-//! HAS     CallRuntime AllocateInYoung
+//! HAS_NOT    CallNewObjRangeDerived
+//! HAS CallRuntime AllocateInYoung
 
 let lastReceiver: any = null;
 let ctorRuns = 0;

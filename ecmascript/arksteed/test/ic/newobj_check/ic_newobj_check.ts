@@ -15,7 +15,7 @@
 //! PARAMS --compiler-jit-hotness-threshold=60000
 //! METHOD Test
 //! COUNT CallNewObjRangeBase 1
-//! COUNT CallNewObjRangeDerived 1
+//! HAS_NOT CallNewObjRangeDerived
 //! HAS_NOT CallRuntime OptNewObjRange
 //! COMPILE_COUNT_GE *Test* 1
 //! EXEC_COUNT *Test* 2

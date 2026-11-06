@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -1603,6 +1604,7 @@ private:
 };
 
 // The result aliases allocation and is the first complete, publishable object value.
+// The fill is an unroll bounded by the compile-time literal objectSize.
 class InitializeEmptyObjectVertex : public FixedInputVertexMixin<ValueVertex, InitializeEmptyObjectVertex> {
 public:
     enum Indices : uint32_t {
@@ -1633,6 +1635,84 @@ public:
 
 private:
     uint32_t objectSize_ {0};
+};
+
+// Decodes the instance size in bytes from an hclass: ObjectSizeInWordsBits of
+// BIT_FIELD1 holds words, so the byte size is the field shifted left by
+// TAGGED_TYPE_SIZE_LOG. The emitter refolds the word-to-byte scaling into the
+// field extraction as one shift and one mask.
+class GetObjectSizeFromHClassVertex
+    : public FixedInputVertexMixin<ValueVertex, GetObjectSizeFromHClassVertex> {
+public:
+    enum Indices : uint32_t {
+        HCLASS_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::INT64;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_READ;
+
+    GetObjectSizeFromHClassVertex() = default;
+
+    void SetValueLocationConstraints();
+};
+
+// Decodes the slack-tracking admission from an hclass: ConstructionCounterBits
+// of BIT_FIELD holds the count, and any nonzero field means the layout is
+// still being shaped — the Boolean BranchIfTrue input of the allocation
+// sites' fill ladder.
+class IsObjSizeTrackingInProgressVertex
+    : public FixedInputVertexMixin<ValueVertex, IsObjSizeTrackingInProgressVertex> {
+public:
+    enum Indices : uint32_t {
+        HCLASS_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_READ;
+
+    IsObjSizeTrackingInProgressVertex() = default;
+
+    void SetValueLocationConstraints();
+};
+
+// The runtime-sized counterpart of InitializeEmptyObjectVertex, for allocations whose
+// size is decoded at runtime: the fill is a top-tested loop over [JSObject::SIZE, SIZE)
+// driven by the SIZE input, storing the INIT_VALUE input — the interpreter fill
+// ladder's value: the free-object hclass while slack tracking shapes the layout,
+// undefined once settled.
+class InitializeEmptyObjectWithSizeVertex
+    : public FixedInputVertexMixin<ValueVertex, InitializeEmptyObjectWithSizeVertex> {
+public:
+    enum Indices : uint32_t {
+        ALLOCATION_INDEX = 0,
+        GLUE_INDEX = 1,
+        HCLASS_INDEX = 2,
+        SIZE_INDEX = 3,
+        INIT_VALUE_INDEX = 4,
+        NUM_INPUTS = 5,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::INT_PTR,
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::INT64,
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::CAN_READ |
+        VertexPropertyFlag::CAN_WRITE |
+        VertexPropertyFlag::IS_NOT_IDEMPOTENT;
+
+    InitializeEmptyObjectWithSizeVertex() = default;
+
+    void SetValueLocationConstraints();
 };
 
 // Only non-reference field bits survive serialization; the literal itself is a heap-constant input.
@@ -1963,6 +2043,40 @@ public:
 
 private:
     SideEffectKind sideEffectKind_;
+};
+
+/**
+ * One construction step of an hclass's slack tracking, run under the
+ * IsObjSizeTrackingInProgress admission: the BIT_FIELD counter decrement, and
+ * — when this construction retires the layout — the deferred call of the
+ * typed No-GC runtime stub FinishObjSizeTracking. That stub is declared with
+ * typed parameters, so its arguments go straight into the C parameter
+ * registers, the CallNGCRuntime convention the write barriers use. No JS
+ * runs and nothing allocates or throws in either arm, so the vertex carries
+ * no catch or lazy-deopt state; keeping the call deferred leaves the main
+ * path free of call-driven spills, the deferred block preserving the live
+ * registers around itself.
+ */
+class ObjSizeTrackingStepVertex : public FixedInputVertexMixin<NonControlVertex, ObjSizeTrackingStepVertex> {
+public:
+    enum Indices : uint32_t {
+        GLUE_INDEX = 0,
+        HCLASS_INDEX = 1,
+        NUM_INPUTS = 2,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT_PTR,
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::IS_DEFERRED_CALL |
+                                                     VertexPropertyFlag::CAN_READ |
+                                                     VertexPropertyFlag::CAN_WRITE |
+                                                     VertexPropertyFlag::IS_NOT_IDEMPOTENT;
+
+    ObjSizeTrackingStepVertex() = default;
+
+    void SetValueLocationConstraints();
 };
 
 template <class Derived>
@@ -2459,6 +2573,46 @@ public:
 };
 
 /**
+ * The STARRAYSPREAD fast arm after its allocation: initializes the freshly
+ * allocated elements backing (TaggedArray header from the LENGTH/HCLASS
+ * inputs), copies the source elements in a safepoint-free loop, and publishes
+ * the backing and the new length into the destination array. The result is
+ * the new length as a tagged int. The ALLOCATION input is the raw backing from
+ * the shared AllocateInYoung pipeline; the deferred write barrier publishing
+ * it into the destination is the vertex's only deferred call.
+ */
+class StoreArraySpreadFastVertex : public FixedInputVertexMixin<ValueVertex, StoreArraySpreadFastVertex> {
+public:
+    enum Indices : uint32_t {
+        ARRAY_INDEX = 0,
+        VALUE_INDEX = 1,
+        ALLOCATION_INDEX = 2,
+        LENGTH_INDEX = 3,
+        HCLASS_INDEX = 4,
+        GLUE_INDEX = 5,
+        NUM_INPUTS = 6,
+    };
+
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::INT32,
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::INT_PTR,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_READ |
+                                                     VertexPropertyFlag::CAN_WRITE |
+                                                     VertexPropertyFlag::IS_NOT_IDEMPOTENT |
+                                                     VertexPropertyFlag::IS_DEFERRED_CALL;
+
+    explicit StoreArraySpreadFastVertex() : FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
+/**
  * Installs the HClass and initializes a separately allocated JSArguments
  * object. Fixed reference fields are stored through write barriers emitted by
  * this node; deferred barrier calls are non-GC calls and preserve the node's
@@ -2499,7 +2653,7 @@ public:
 /**
  * CallBaseConstructor vertex - a [[Construct]] call to a BASE super constructor,
  * carrying the caller's real newTarget. The graph builder emits it on the
- * BranchIfBase true-arm (the same arm whose FastSuperAllocateThis produced the
+ * BranchIfBase true-arm (the same arm whose inline this allocation produced the
  * bound this) and guarantees the target is a constructible JSFunction (the
  * BranchIfJSConstructorFunction guard, or the speculation identity deopt in the
  * monomorphic shape); the codegen enters compiled supers directly with the steed
@@ -2534,11 +2688,23 @@ public:
         VertexPropertyFlag::CAN_LAZY_DEOPT |
         VertexPropertyFlag::CAN_THROW;
 
-    explicit CallBaseConstructorVertex(uint32_t actualArgc) : VertexMixin(), actualArgc_(actualArgc) {}
+    CallBaseConstructorVertex(uint32_t actualArgc, std::optional<uint32_t> expectedParameterCount)
+        : VertexMixin(), actualArgc_(actualArgc), expectedParameterCount_(expectedParameterCount) {}
 
     uint32_t GetActualArgc() const
     {
         return actualArgc_;
+    }
+
+    bool HasKnownExpectedParameterCount() const
+    {
+        return expectedParameterCount_.has_value();
+    }
+
+    uint32_t GetExpectedParameterCount() const
+    {
+        ASSERT(expectedParameterCount_.has_value());
+        return expectedParameterCount_.value();
     }
 
     void SetValueLocationConstraints();
@@ -2550,6 +2716,7 @@ public:
 
 private:
     uint32_t actualArgc_;
+    std::optional<uint32_t> expectedParameterCount_;
 };
 
 /**
@@ -2587,11 +2754,23 @@ public:
         VertexPropertyFlag::CAN_LAZY_DEOPT |
         VertexPropertyFlag::CAN_THROW;
 
-    explicit CallDerivedConstructorVertex(uint32_t actualArgc) : VertexMixin(), actualArgc_(actualArgc) {}
+    CallDerivedConstructorVertex(uint32_t actualArgc, std::optional<uint32_t> expectedParameterCount)
+        : VertexMixin(), actualArgc_(actualArgc), expectedParameterCount_(expectedParameterCount) {}
 
     uint32_t GetActualArgc() const
     {
         return actualArgc_;
+    }
+
+    bool HasKnownExpectedParameterCount() const
+    {
+        return expectedParameterCount_.has_value();
+    }
+
+    uint32_t GetExpectedParameterCount() const
+    {
+        ASSERT(expectedParameterCount_.has_value());
+        return expectedParameterCount_.value();
     }
 
     void SetValueLocationConstraints();
@@ -2603,6 +2782,179 @@ public:
 
 private:
     uint32_t actualArgc_;
+    std::optional<uint32_t> expectedParameterCount_;
+};
+
+/**
+ * CallBaseConstructorSpread vertex - the SUPERCALLSPREAD variant of
+ * CallBaseConstructor: a [[Construct]] call to a BASE super constructor whose
+ * argument list is a runtime array (the spread operand), so the user argc is a
+ * runtime value (the JSArray length) instead of the vertex input count. The
+ * graph builder emits it behind the same guard chain as the non-spread variant
+ * (super-ctor checks, BranchIfBase, newTarget admission, the inline this allocation)
+ * plus the BranchIfFastSpreadArray admission, so the codegen may read the
+ * array's elements directly: a tagged-elements backing (mutant kinds rejected
+ * by the admission) whose iteration equals a slot copy, with holes mapped to
+ * undefined (sound under the ArrayElementsGuardians admission bit). FUNC has
+ * no codegen consumer (the slow-path runtime call in the graph builder reads
+ * the func vreg directly); the input is retained to keep the input layout
+ * aligned with the non-spread variant. The this input
+ * doubles as the deopt pseudo-vreg BASE_CONSTRUCTOR_THIS_INDEX exactly like
+ * the non-spread variant, so it is slot-constrained.
+ */
+class CallBaseConstructorSpreadVertex : public VertexMixin<ValueVertex, CallBaseConstructorSpreadVertex>,
+                                        public ThrowableMixin,
+                                        public LazyDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        FUNC_INDEX = 0,
+        TARGET_INDEX = 1,
+        NEW_TARGET_INDEX = 2,
+        THIS_INDEX = 3,
+        ARRAY_INDEX = 4,
+        NUM_INPUTS = 5,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::IS_CALL |
+        VertexPropertyFlag::CAN_READ |
+        VertexPropertyFlag::CAN_WRITE |
+        VertexPropertyFlag::CAN_ALLOCATE |
+        VertexPropertyFlag::CAN_LAZY_DEOPT |
+        VertexPropertyFlag::CAN_THROW;
+
+    CallBaseConstructorSpreadVertex() : VertexMixin() {}
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+    }
+};
+
+/**
+ * CallDerivedConstructorSpread vertex - the SUPERCALLSPREAD variant of
+ * CallDerivedConstructor: a [[Construct]] call to a DERIVED (or builtin) super
+ * constructor with a runtime-argc array argument list and an undefined
+ * placeholder this. Same admission contract as CallBaseConstructorSpread; the
+ * inline result tail is the same single object-or-throw check as the
+ * non-spread variant (the frontend's no-undefined-across-the-boundary
+ * guarantee is argument-delivery agnostic).
+ */
+class CallDerivedConstructorSpreadVertex : public VertexMixin<ValueVertex, CallDerivedConstructorSpreadVertex>,
+                                           public ThrowableMixin,
+                                           public LazyDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        FUNC_INDEX = 0,
+        TARGET_INDEX = 1,
+        NEW_TARGET_INDEX = 2,
+        THIS_INDEX = 3,
+        ARRAY_INDEX = 4,
+        NUM_INPUTS = 5,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::IS_CALL |
+        VertexPropertyFlag::CAN_READ |
+        VertexPropertyFlag::CAN_WRITE |
+        VertexPropertyFlag::CAN_ALLOCATE |
+        VertexPropertyFlag::CAN_LAZY_DEOPT |
+        VertexPropertyFlag::CAN_THROW;
+
+    CallDerivedConstructorSpreadVertex() : VertexMixin() {}
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+    }
+};
+
+/**
+ * CallBaseConstructorForwardAllArgs vertex - the SUPERCALLFORWARDALLARGS variant
+ * of CallBaseConstructor: a [[Construct]] call to a BASE super constructor whose
+ * argument list is the current frame's own incoming actual arguments (the
+ * default derived constructor's super(...arguments) specialization), so the
+ * user argc is the runtime frame argc minus the mandatory arguments, not the
+ * vertex input count. The graph builder emits it behind the same guard chain
+ * as the spread variant (super-ctor checks, BranchIfBase, newTarget admission,
+ * FastSuperAllocateThis); no array admission exists because the argument
+ * source is the frame itself. The this input doubles as the deopt pseudo-vreg
+ * BASE_CONSTRUCTOR_THIS_INDEX exactly like the other variants, so it is
+ * slot-constrained.
+ */
+class CallBaseConstructorForwardAllArgsVertex
+    : public VertexMixin<ValueVertex, CallBaseConstructorForwardAllArgsVertex>,
+      public ThrowableMixin,
+      public LazyDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        TARGET_INDEX = 0,
+        NEW_TARGET_INDEX = 1,
+        THIS_INDEX = 2,
+        ARGC_INDEX = 3,
+        NUM_INPUTS = 4,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::IS_CALL |
+        VertexPropertyFlag::CAN_READ |
+        VertexPropertyFlag::CAN_WRITE |
+        VertexPropertyFlag::CAN_ALLOCATE |
+        VertexPropertyFlag::CAN_LAZY_DEOPT |
+        VertexPropertyFlag::CAN_THROW;
+
+    CallBaseConstructorForwardAllArgsVertex() : VertexMixin() {}
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+    }
+};
+
+/**
+ * CallDerivedConstructorForwardAllArgs vertex - the SUPERCALLFORWARDALLARGS
+ * variant of CallDerivedConstructor: a [[Construct]] call to a DERIVED (or
+ * builtin) super constructor with the frame's incoming actual arguments and an
+ * undefined placeholder this. Same admission contract as
+ * CallBaseConstructorForwardAllArgs; the inline result tail is the same single
+ * object-or-throw check as the other variants (the frontend's
+ * no-undefined-across-the-boundary guarantee is argument-delivery agnostic).
+ */
+class CallDerivedConstructorForwardAllArgsVertex
+    : public VertexMixin<ValueVertex, CallDerivedConstructorForwardAllArgsVertex>,
+      public ThrowableMixin,
+      public LazyDeoptimizableMixin {
+public:
+    enum Indices : uint32_t {
+        TARGET_INDEX = 0,
+        NEW_TARGET_INDEX = 1,
+        THIS_INDEX = 2,
+        ARGC_INDEX = 3,
+        NUM_INPUTS = 4,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES =
+        VertexPropertyFlag::IS_CALL |
+        VertexPropertyFlag::CAN_READ |
+        VertexPropertyFlag::CAN_WRITE |
+        VertexPropertyFlag::CAN_ALLOCATE |
+        VertexPropertyFlag::CAN_LAZY_DEOPT |
+        VertexPropertyFlag::CAN_THROW;
+
+    CallDerivedConstructorForwardAllArgsVertex() : VertexMixin() {}
+
+    void SetValueLocationConstraints();
+
+    void VerifyInputs() const
+    {
+        ASSERT(GetInputCount() == NUM_INPUTS);
+    }
 };
 
 /**
@@ -2650,49 +3002,6 @@ public:
 
 private:
     SideEffectKind sideEffectKind_;
-};
-
-/**
- * FastSuperAllocateThis vertex - allocates the this object for a super call whose super
- * constructor is a base constructor (graph-builder-guarded by BranchIfNewTargetHClassReady
- * on newTarget and BranchIfTaggedHeapObject / BranchIfJSConstructorFunction / BranchIfBase
- * on the super constructor before reaching this vertex; a monomorphic call slot
- * replaces the middle two with one identity eager deopt, the profiled slot value
- * being constructor-checked by the interpreter before it was recorded).
- * TODO: A dedicated vertex instead of a generic CallCommonStubVertex: the current codegen is a
- * plain call to the FastSuperAllocateThis common stub, but the allocation can be lowered
- * inline inside this vertex without touching the graph builder again.
- */
-class FastSuperAllocateThisVertex : public VertexMixin<ValueVertex, FastSuperAllocateThisVertex> {
-public:
-    enum Indices : uint32_t {
-        GLUE_INDEX = 0,
-        SUPER_CTOR_INDEX = 1,
-        NEW_TARGET_INDEX = 2,
-        NUM_INPUTS = 3,
-    };
-    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
-    // The common stub falls back to NewThisObject, which throws when newTarget is not a constructor.
-    static constexpr VertexPropertyFlag PROPERTIES =
-        VertexPropertyFlag::IS_CALL |
-        VertexPropertyFlag::CAN_READ |
-        VertexPropertyFlag::CAN_WRITE |
-        VertexPropertyFlag::CAN_ALLOCATE |
-        VertexPropertyFlag::CAN_THROW;
-
-    FastSuperAllocateThisVertex() : VertexMixin() {}
-
-    size_t GetArgCount() const
-    {
-        return GetInputCount();
-    }
-
-    void SetValueLocationConstraints();
-
-    void VerifyInputs() const
-    {
-        ASSERT(GetInputCount() == NUM_INPUTS);
-    }
 };
 
 class LineStringLoadElementVertex : public FixedInputVertexMixin<ValueVertex, LineStringLoadElementVertex> {
@@ -3505,6 +3814,25 @@ public:
     static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
 
     explicit I32ToF64Vertex() : FixedInputVertexMixin() {}
+
+    void SetValueLocationConstraints();
+};
+
+// Sign-extends an INT32 into the raw INT64 domain (the integer sibling of I32ToF64;
+// the first client is the super-this allocation size decode from an hclass bitfield).
+class I32ToI64Vertex : public FixedInputVertexMixin<ValueVertex, I32ToI64Vertex> {
+public:
+    enum Indices : uint32_t {
+        INPUT_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::INT64;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT32,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    explicit I32ToI64Vertex() : FixedInputVertexMixin() {}
 
     void SetValueLocationConstraints();
 };
@@ -4747,9 +5075,9 @@ public:
 
 /**
  * BranchIfNewTargetHClassReady vertex - jumps to if_true when the value is a JSFunction
- * whose proto-or-hclass slot holds a JSHClass describing JS_OBJECT instances: exactly
- * the inline-path condition set of the FastSuperAllocateThis stub, so on the arksteed
- * super-call path the stub's reentrant CallRuntime fallback is unreachable. An undefined
+ * whose proto-or-hclass slot holds a JSHClass describing JS_OBJECT instances: the
+ * condition set the super-call path's inline allocation relies on, matching the
+ * FastSuperAllocateThis stub's inline-path admission. An undefined
  * newTarget never reaches the guard's dereference: class constructor frames are only
  * entered through [[Construct]].
  */
@@ -4794,6 +5122,85 @@ public:
     BranchIfBaseVertex(BB *ifTrue, BB *ifFalse)
         : BranchControlVertexT(ifTrue, ifFalse)
     {}
+
+    void SetValueLocationConstraints();
+};
+
+/**
+ * BranchIfFastSpreadArray vertex - jumps to if_true when the value is a JSArray
+ * whose spread-argument materialization is a pure slot copy: stable tagged
+ * elements (non-dictionary, non-mutant kinds), an unmodified per-instance array
+ * prototype, and a clean global Array.prototype context (iterator detector +
+ * elements guardians valid), with the GENERIC kind disambiguated by the
+ * canonical holey-tagged array hclass (see GetCallSpreadArgs
+ * fast-path condition set, checked naked on the array instead of through a
+ * witness iterator object). Holey backings are admitted only with
+ * checkHoles=false: the SUPERCALLSPREAD operand is frontend-materialized and
+ * hole-free. With checkHoles=true (the STARRAYSPREAD arm) any hole in the
+ * copied range (the array length) is rejected to the runtime slow path, which
+ * resolves it through the prototype chain instead of the copy's
+ * hole-to-undefined mapping. The backing is also length-capped
+ * (ArkSteedAssembler::MAX_FAST_SPREAD_ELEMENTS): the spread arms size their
+ * call-slot reservation from the backing's length with no sp check at the
+ * call site, so longer arrays take the runtime slow path. The global env
+ * input supplies the detector/guardian bits and the canonical hclass.
+ */
+class BranchIfFastSpreadArrayVertex : public BranchControlVertexT<BranchIfFastSpreadArrayVertex> {
+public:
+    enum Indices : uint32_t {
+        VALUE_INDEX = 0,
+        GLOBAL_ENV_INDEX = 1,
+        NUM_INPUTS = 2,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    BranchIfFastSpreadArrayVertex(BB *ifTrue, BB *ifFalse, bool checkHoles)
+        : BranchControlVertexT(ifTrue, ifFalse), checkHoles_(checkHoles)
+    {
+    }
+
+    bool CheckHoles() const
+    {
+        return checkHoles_;
+    }
+
+    void SetValueLocationConstraints();
+
+private:
+    bool checkHoles_ {false};
+};
+
+/**
+ * The STARRAYSPREAD admission in one branch: the destination is a heap object
+ * of JSType JS_ARRAY and the source passes the fast-spread admission (with the
+ * hole scan). Lowering reuses JumpIfNotFastSpreadArray for the source checks.
+ */
+class BranchIfStoreArraySpreadAdmittedVertex
+    : public BranchControlVertexT<BranchIfStoreArraySpreadAdmittedVertex> {
+public:
+    enum Indices : uint32_t {
+        ARRAY_INDEX = 0,
+        VALUE_INDEX = 1,
+        GLOBAL_ENV_INDEX = 2,
+        NUM_INPUTS = 3,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::TAGGED,
+        ValueRepresentation::TAGGED,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    BranchIfStoreArraySpreadAdmittedVertex(BB *ifTrue, BB *ifFalse)
+        : BranchControlVertexT(ifTrue, ifFalse)
+    {
+    }
 
     void SetValueLocationConstraints();
 };

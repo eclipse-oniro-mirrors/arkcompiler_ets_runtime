@@ -16,7 +16,7 @@
 //! PARAMS --compiler-jit-hotness-threshold=60000
 
 //! METHOD newDerived
-//! HAS CallNewObjRangeBase
+//! HAS_NOT CallNewObjRangeBase
 //! HAS CallNewObjRangeDerived
 //! HAS_NOT InitializeEmptyObject
 //! METHOD dynamicDerived

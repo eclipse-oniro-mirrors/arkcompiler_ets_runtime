@@ -32,8 +32,8 @@
 //! METHOD callWithThis
 //! HAS InitializeEmptyObject
 //! HAS CallNewObjRangeBase
-//! HAS CallNewObjRangeDerived
-//! HAS     CallRuntime AllocateInYoung
+//! HAS_NOT    CallNewObjRangeDerived
+//! HAS CallRuntime AllocateInYoung
 
 class DepRoot {}
 class DepMid extends DepRoot {}

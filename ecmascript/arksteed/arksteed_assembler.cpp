@@ -16,6 +16,9 @@
 #include "ecmascript/arksteed/arksteed_assembler.h"
 
 #include "ecmascript/arksteed/arksteed_disassembler.h"
+#include "ecmascript/js_array.h"
+#include "ecmascript/js_object.h"
+#include "ecmascript/tagged_array.h"
 
 namespace panda::ecmascript::arksteed {
 
@@ -47,17 +50,50 @@ void ArkSteedAssembler::JumpIfNotStrongHeapObject(ArkSteedRegister value, Label 
     JumpIf(Condition::NOT_EQUAL, target);
 }
 
+void ArkSteedAssembler::LoadHClassFromObject(ArkSteedRegister dst, ArkSteedRegister object)
+{
+    // The object-header word packs the GC state into the high bits; every hclass
+    // read from an object header goes through here so the mask is never skipped.
+    // Tagged-field hclass references (proto-or-hclass, global-env slots, embedded
+    // constants) are clean pointers and must NOT be masked.
+    LoadField(dst, object, TaggedObject::HCLASS_OFFSET);
+    And(dst, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+}
+
 void ArkSteedAssembler::JumpIfNotECMAObject(ArkSteedRegister value, Label *target)
 {
     JumpIfNotStrongHeapObject(value, target);
     TemporaryRegisterScope scope(this);
     ArkSteedRegister type = scope.Acquire();
-    LoadField(type, value, TaggedObject::HCLASS_OFFSET);
-    And(type, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    LoadHClassFromObject(type, value);
     LoadUint8Field(type, type, JSHClass::BIT_FIELD_OFFSET);
     Sub(type, static_cast<int32_t>(JSType::ECMA_OBJECT_FIRST));
     Compare(type, static_cast<int32_t>(JSType::ECMA_OBJECT_LAST) - static_cast<int32_t>(JSType::ECMA_OBJECT_FIRST));
     JumpIf(Condition::ABOVE, target);
+}
+
+void ArkSteedAssembler::JumpIfStoreArraySpreadNotAdmitted(ArkSteedRegister array, ArkSteedRegister value,
+                                                          ArkSteedRegister globalEnv, Label *target)
+{
+    // Destination admission: a heap object of JSType JS_ARRAY, mirroring the
+    // BranchIfObjectType lowering.
+    JumpIfNotTaggedHeapObject(array, target);
+    {
+        TemporaryRegisterScope scope(this);
+        ArkSteedRegister hclass = scope.Acquire();
+        ArkSteedRegister bitField = scope.Acquire();
+        LoadHClassFromObject(hclass, array);
+        LoadField(bitField, hclass, JSHClass::BIT_FIELD_OFFSET);
+        static_assert(JSHClass::ObjectTypeBits::START_BIT == 0);
+        And(bitField, static_cast<int32_t>((1U << JSHClass::ObjectTypeBits::SIZE) - 1));
+        Compare(bitField, static_cast<int32_t>(JSType::JS_ARRAY));
+        JumpIf(Condition::NOT_EQUAL, target);
+    }
+    // Source admission: the full fast-spread check set including the hole scan.
+    // The scan and the copy loop walk [0, array length), trusting the fast-mode
+    // invariant JSArray::SetCapacity maintains: the elements backing is at least
+    // the array length, the same invariant the runtime arm relies on.
+    JumpIfNotFastSpreadArray(value, globalEnv, target, true);
 }
 
 void ArkSteedAssembler::LoadTaggedValue(ArkSteedRegister dst, uint64_t taggedValue)

@@ -33,14 +33,14 @@
  */
 
 //! METHOD Mid
-//! HAS         FastSuperAllocateThis
-//! HAS         CallBaseConstructor
-//! COUNT       CallRuntime OptSuperCall 1
+//! HAS_NOT     AllocateInYoung
+//! HAS_NOT     CallBaseConstructor
+//! COUNT       CallRuntime OptSuperCall 0
 
 //! METHOD Leaf
-//! HAS         FastSuperAllocateThis
+//! HAS_NOT     AllocateInYoung
 //! HAS         CallDerivedConstructor
-//! COUNT       CallRuntime OptSuperCall 1
+//! COUNT       CallRuntime OptSuperCall 0
 
 class Base {
     constructor() {

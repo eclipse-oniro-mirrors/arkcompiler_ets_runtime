@@ -16,7 +16,7 @@
 //! PARAMS --compiler-jit-hotness-threshold=60000
 //! METHOD makePlain
 //! COUNT CallNewObjRangeBase 1
-//! COUNT CallNewObjRangeDerived 1
+//! HAS_NOT CallNewObjRangeDerived
 //! CODEGEN_COUNT *CallNewObjRange*commonStub = ArkSteedCallConstructorBody* 0
 //! COUNT InitializeEmptyObject 1
 //! HAS CallRuntime AllocateInYoung

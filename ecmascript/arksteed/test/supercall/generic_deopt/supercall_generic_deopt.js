@@ -23,7 +23,7 @@
 
 //! METHOD FInt
 //! HAS         CallBaseConstructor
-//! HAS         CallDerivedConstructor
+//! HAS_NOT     CallDerivedConstructor
 
 class Root {
 }

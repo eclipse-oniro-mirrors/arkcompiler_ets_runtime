@@ -33,17 +33,17 @@
 //! COUNT   InitializeEmptyObject 1
 //! COUNT   CallRuntime AllocateInYoung 1
 //! COUNT   CallNewObjRangeBase 1
-//! COUNT   CallNewObjRangeDerived 1
+//! HAS_NOT    CallNewObjRangeDerived
 //! METHOD callZero
 //! COUNT   InitializeEmptyObject 1
 //! COUNT   CallRuntime AllocateInYoung 1
 //! COUNT   CallNewObjRangeBase 1
-//! COUNT   CallNewObjRangeDerived 1
+//! HAS_NOT    CallNewObjRangeDerived
 //! METHOD callMulti
 //! COUNT   InitializeEmptyObject 1
 //! COUNT   CallRuntime AllocateInYoung 1
 //! COUNT   CallNewObjRangeBase 1
-//! COUNT   CallNewObjRangeDerived 1
+//! HAS_NOT    CallNewObjRangeDerived
 
 let lastThis: any = null;
 let lastNewTarget: any = null;

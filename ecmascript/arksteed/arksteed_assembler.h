@@ -103,6 +103,28 @@ public:
     void FreeCallArgSlots(ArkSteedRegister slotCount);
     void RestoreStackPointerToFrameBottom(Graph *graph);
     void PushUndefinedForSteedCall(ArkSteedRegister fillSlotCount, uint32_t userArgc);
+    // Runtime-argc variant: fills the `fillSlotCount` call-arg slots ending at
+    // slot `lastIndex` (inclusive, pre-summed by the caller as
+    // firstOptionalSlot - 1 + fillSlotCount — x86 addressing allows a single
+    // index register) with undefined, so a callee expecting more arguments
+    // than the spread provided reads well-formed values. Both registers are
+    // decremented in the loop and left at (base-1, 0) on exit.
+    void PushUndefinedForSteedSpreadCall(ArkSteedRegister fillSlotCount, ArkSteedRegister lastIndex);
+    // Copies `length` tagged elements from the TaggedArray backing `elements`
+    // into consecutive call-arg slots starting at slot `firstUserArgSlot` (the
+    // steed layout passes argc + NUM_MANDATORY_JSFUNC_ARGS = 4, the trampoline
+    // layout passes argc + argv + NUM_MANDATORY = 5), mapping holes to undefined
+    // (sound under the BranchIfFastSpreadArray guardians bit). `length` is
+    // preserved; `elements` may be clobbered (it is advanced past the TaggedArray
+    // header on arm64 and is dead after the copy).
+    void CopySpreadElementsToCallArgSlots(ArkSteedRegister elements, ArkSteedRegister length,
+                                          int32_t firstUserArgSlot);
+    // Copies `length` tagged values from the current frame's incoming user
+    // arguments (the LoadActualArgument source area, fp-relative) into
+    // consecutive call-arg slots starting at slot `firstUserArgSlot`. Frame
+    // slots hold no holes, so no undefined mapping is needed. `length` is
+    // preserved; no inputs are clobbered.
+    void CopyCallerArgsToCallArgSlots(ArkSteedRegister length, int32_t firstUserArgSlot);
     void PrepareSteedCalleeContext(ArkSteedRegister target, ArkSteedRegister codeEntry);
 
     inline int32_t GetFramePointerOffsetForStackSlot(int32_t slotIndex, MachineRepresentation rep) const
@@ -145,6 +167,7 @@ public:
     // =========================================================================
 
     void LoadField(ArkSteedRegister dst, ArkSteedRegister base, int32_t offset);
+    void LoadHClassFromObject(ArkSteedRegister dst, ArkSteedRegister object);
     void LoadInt32Field(ArkSteedRegister dst, ArkSteedRegister base, int32_t offset);
     void LoadUint8Field(ArkSteedRegister dst, ArkSteedRegister base, int32_t offset);
     void LoadTaggedElement(ArkSteedRegister dst, ArkSteedRegister elements, ArkSteedRegister index);
@@ -275,6 +298,23 @@ public:
     void JumpIfNotJSConstructorFunction(ArkSteedRegister value, Label *target);
     void JumpIfNewTargetHClassNotReady(ArkSteedRegister value, Label *target);
     void JumpIfConstructorIsBase(ArkSteedRegister jsFunc, Label *target);
+    // The spread fast path is length-capped: both spread call arms size their
+    // machine-stack slot reservation from the elements backing's length with
+    // no sp check at the call site (the cross-tier call convention), so the
+    // admission rejects longer arrays to the runtime slow path, which
+    // materializes the argv buffer on the heap under its own stack checks.
+    static constexpr int32_t MAX_FAST_SPREAD_ELEMENTS = 100;
+    // Precondition: `value` and `globalEnv` must be valid tagged pointers (the
+    // first check only rejects non-heap-object `value`s before the hclass load).
+    // Admits exactly the arrays whose spread materialization is a tagged-slot
+    // copy and whose elements backing holds at most MAX_FAST_SPREAD_ELEMENTS
+    // slots; the consumers must map holes to undefined (sound under the
+    // ArrayElementsGuardians bit checked here). With checkHoles, any hole in
+    // the copied range (the array length) is additionally rejected to the
+    // runtime slow path, which resolves it through the prototype chain instead.
+    void JumpIfNotFastSpreadArray(ArkSteedRegister value, ArkSteedRegister globalEnv, Label *target, bool checkHoles);
+    void JumpIfStoreArraySpreadNotAdmitted(ArkSteedRegister array, ArkSteedRegister value,
+                                           ArkSteedRegister globalEnv, Label *target);
     void JumpIfClassConstructor(ArkSteedRegister jsFunc, Label *target);
     void JumpIfFunctionNotCompiled(ArkSteedRegister jsFunc, Label *target);
     void Bind(Label *label);

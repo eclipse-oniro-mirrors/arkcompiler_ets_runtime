@@ -1,0 +1,5 @@
+zero: undefined undefined undefined true
+one: 11 undefined undefined
+full: 1 2 3
+extra: 10 20 30
+chain: 7 8 9 true true

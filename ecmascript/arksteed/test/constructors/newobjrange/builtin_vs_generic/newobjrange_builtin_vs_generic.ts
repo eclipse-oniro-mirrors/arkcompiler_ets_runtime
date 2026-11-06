@@ -40,12 +40,12 @@
 //! METHOD callBase
 //! HAS     InitializeEmptyObject
 //! HAS     CallNewObjRangeBase
-//! HAS     CallNewObjRangeDerived
+//! HAS_NOT CallNewObjRangeDerived
 //! HAS     CallRuntime AllocateInYoung
 //! METHOD callDerived
 //! HAS_NOT InitializeEmptyObject
-//! HAS CallNewObjRangeBase
-//! HAS CallNewObjRangeDerived
+//! HAS_NOT CallNewObjRangeBase
+//! HAS     CallNewObjRangeDerived
 //! HAS_NOT CallRuntime OptNewObjRange
 
 class GenericBase {

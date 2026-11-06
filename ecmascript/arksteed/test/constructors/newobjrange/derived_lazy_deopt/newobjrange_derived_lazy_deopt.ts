@@ -16,11 +16,11 @@
 //! PARAMS --compiler-jit-hotness-threshold=60000 --enable-force-gc=true
 
 //! METHOD constructDerived
-//! HAS CallNewObjRangeBase
+//! HAS_NOT CallNewObjRangeBase
 //! HAS CallNewObjRangeDerived
 //! HAS_NOT InitializeEmptyObject
 //! METHOD constructCold
-//! HAS CallNewObjRangeBase
+//! HAS_NOT CallNewObjRangeBase
 //! HAS CallNewObjRangeDerived
 //! HAS_NOT InitializeEmptyObject
 

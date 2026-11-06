@@ -1,0 +1,5 @@
+last: 7 8 true
+ctor: 1
+proto: true
+compiled: true
+sink: true

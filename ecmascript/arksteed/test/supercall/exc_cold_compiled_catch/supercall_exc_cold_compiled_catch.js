@@ -24,7 +24,7 @@
 //! PARAMS --compiler-jit-hotness-threshold=60000
 
 //! METHOD Leaf
-//! HAS         CallBaseConstructor
+//! HAS_NOT     CallBaseConstructor
 //! HAS         CallDerivedConstructor
 
 class Root {

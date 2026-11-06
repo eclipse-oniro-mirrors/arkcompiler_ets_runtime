@@ -1,0 +1,4 @@
+base-prim: true
+base-obj: false obj
+derived-prim: true
+derived-obj: false obj

@@ -32,18 +32,18 @@
 //! METHOD callObject
 //! HAS InitializeEmptyObject
 //! HAS CallNewObjRangeBase
-//! HAS CallNewObjRangeDerived
-//! HAS     CallRuntime AllocateInYoung
+//! HAS_NOT    CallNewObjRangeDerived
+//! HAS CallRuntime AllocateInYoung
 //! METHOD callArray
 //! HAS InitializeEmptyObject
 //! HAS CallNewObjRangeBase
-//! HAS CallNewObjRangeDerived
-//! HAS     CallRuntime AllocateInYoung
+//! HAS_NOT    CallNewObjRangeDerived
+//! HAS CallRuntime AllocateInYoung
 //! METHOD callFunction
 //! HAS InitializeEmptyObject
 //! HAS CallNewObjRangeBase
-//! HAS CallNewObjRangeDerived
-//! HAS     CallRuntime AllocateInYoung
+//! HAS_NOT    CallNewObjRangeDerived
+//! HAS CallRuntime AllocateInYoung
 
 let runs = 0;
 let lastReceiver: any = null;

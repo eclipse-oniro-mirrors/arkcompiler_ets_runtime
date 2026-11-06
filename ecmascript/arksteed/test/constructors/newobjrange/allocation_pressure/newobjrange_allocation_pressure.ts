@@ -40,7 +40,7 @@
 //! HAS InitializeEmptyObject
 //! HAS CallRuntime AllocateInYoung
 //! HAS CallNewObjRangeBase
-//! HAS CallNewObjRangeDerived
+//! HAS_NOT    CallNewObjRangeDerived
 
 let ctorRuns = 0;
 

@@ -18,11 +18,11 @@
  * emits both arms unconditionally: the guard chain (newTarget admission ->
  * heap object -> constructor JSFunction; a monomorphic call slot instead folds
  * the super-ctor guards into one identity deopt) selects between the fast arm
- * (FastSuperAllocateThis on the base branch, undefined this on the derived
+ * (inline this allocation on the base branch, undefined this on the derived
  * branch, then CallConstructor, whose codegen inlines the [[Construct]] result
  * normalization after the embedded call) and the deferred slow arm (exactly one
  * OptSuperCall fallback). Runtime behaviour covered:
- *   - super of a base class allocates this in-frame (FastSuperAllocateThis)
+ *   - super of a base class allocates this in-frame (inline young allocation)
  *   - super of a derived class forwards newTarget + undefined this
  *   - deep chain: both roles in one chain
  *   - argument forwarding (argc > 0) and argument adaptation (missing args -> undefined)
@@ -32,7 +32,7 @@
  */
 
 //! METHOD Mid
-//! HAS         FastSuperAllocateThis
+//! HAS         AllocateInYoung
 //! HAS         CallBaseConstructor
 //! HAS         CallDerivedConstructor
 //! HAS         LoadPrototypeFromNonJSProxyObject
@@ -43,7 +43,7 @@
 //! COUNT       CallRuntime OptSuperCall 1
 
 //! METHOD Leaf
-//! HAS         FastSuperAllocateThis
+//! HAS         AllocateInYoung
 //! HAS         CallBaseConstructor
 //! HAS         CallDerivedConstructor
 //! COUNT       CallRuntime OptSuperCall 1

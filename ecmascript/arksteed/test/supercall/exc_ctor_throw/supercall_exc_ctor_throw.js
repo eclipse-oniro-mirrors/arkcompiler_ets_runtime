@@ -24,15 +24,18 @@
  */
 
 //! METHOD D
-//! HAS         FastSuperAllocateThis
+//! HAS         AllocateInYoung
 //! HAS         CallBaseConstructor
 //! HAS         CallDerivedConstructor
+//! HAS_NOT     CallCommonStub FastSuperAllocateThis
 //! COUNT       CallRuntime OptSuperCall 1
 
 //! METHOD Retry
 //! COUNT       CallBaseConstructor 2
 //! COUNT       CallDerivedConstructor 2
-//! COUNT       FastSuperAllocateThis 2
+//! COUNT       GetObjectSizeFromHClass 2
+//! COUNT       ObjSizeTrackingStep 2
+//! HAS_NOT     CallCommonStub FastSuperAllocateThis
 //! COUNT       CallRuntime OptSuperCall 2
 
 class Boom {

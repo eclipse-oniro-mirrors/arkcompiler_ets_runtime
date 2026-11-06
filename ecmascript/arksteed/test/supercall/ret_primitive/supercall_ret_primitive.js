@@ -38,14 +38,14 @@
 //! HAS         CallBaseConstructor
 //! HAS         CallDerivedConstructor
 //! HAS_NOT     CallCommonStub ConstructorCheck
-//! HAS         FastSuperAllocateThis
+//! HAS         AllocateInYoung
 //! COUNT       CallRuntime OptSuperCall 1
 
 //! METHOD D7
-//! HAS         CallBaseConstructor
+//! HAS_NOT     CallBaseConstructor
 //! HAS         CallDerivedConstructor
 //! HAS_NOT     CallCommonStub ConstructorCheck
-//! COUNT       CallRuntime OptSuperCall 1
+//! COUNT       CallRuntime OptSuperCall 0
 
 // base supers returning primitives: the result is replaced by the allocated this
 class Num { constructor() { return 5; } }

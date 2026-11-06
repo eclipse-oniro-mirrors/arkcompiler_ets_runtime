@@ -18,7 +18,7 @@
  * the site on the OptSuperCall fallback: their instance hclass is not
  * JS_OBJECT, so the newTarget admission rejects every call and the
  * [[Construct]] semantics must come from the runtime (the in-frame
- * FastSuperAllocateThis allocation only covers plain objects):
+ * inline base-super allocation only covers plain objects):
  *   - Array: elements written in the derived frame survive
  *   - Error: message set by the builtin is visible through this.message-less
  *     accessors (error.message comes from the prototype getter)

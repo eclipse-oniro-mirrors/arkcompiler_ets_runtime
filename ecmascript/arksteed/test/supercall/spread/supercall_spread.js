@@ -16,26 +16,33 @@
 /*
  * Argument-delivery variants of the super call. Spreading a runtime array
  * (super(...args)) and forwarding the caller's arguments
- * (super(...arguments)) have no fast path: the whole site lowers to a
- * single runtime call with no FastSuperAllocateThis / CallConstructor. The
- * direct form with 17 arguments selects the WIDE_SUPERCALLTHISRANGE opcode
- * and lowers through the ordinary fast/slow structure:
+ * (super(...arguments)) both lower through the spread fast path
+ * (BranchIfFastSpreadArray admission + CallBase/CallDerivedConstructorSpread
+ * with a runtime argc); the direct form with 17 arguments selects the
+ * WIDE_SUPERCALLTHISRANGE opcode and lowers through the ordinary fast/slow
+ * structure:
  *   - spread / forward: argument contents reach the rest-parameter base
  *   - wide: all 17 arguments arrive in order (sum 153)
  */
 
 //! METHOD Sp
-//! HAS_NOT     FastSuperAllocateThis
+//! HAS         AllocateInYoung
+//! HAS         CallBaseConstructorSpread
+//! HAS         CallDerivedConstructorSpread
+//! HAS         BranchIfFastSpreadArray
 //! HAS_NOT     CallBaseConstructor
 //! HAS_NOT     CallDerivedConstructor
+//! COUNT       CallRuntime SuperCallSpreadWithNewTarget 1
 
 //! METHOD Fwd
-//! HAS_NOT     FastSuperAllocateThis
-//! HAS_NOT     CallBaseConstructor
-//! HAS_NOT     CallDerivedConstructor
+//! HAS         AllocateInYoung
+//! HAS         CallBaseConstructorSpread
+//! HAS         CallDerivedConstructorSpread
+//! HAS         BranchIfFastSpreadArray
+//! COUNT       CallRuntime SuperCallSpreadWithNewTarget 1
 
 //! METHOD Many
-//! HAS         FastSuperAllocateThis
+//! HAS         AllocateInYoung
 //! HAS         CallBaseConstructor
 //! HAS         CallDerivedConstructor
 //! COUNT       CallRuntime OptSuperCall 1

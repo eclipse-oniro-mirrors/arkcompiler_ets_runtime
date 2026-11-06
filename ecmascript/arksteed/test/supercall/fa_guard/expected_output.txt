@@ -1,0 +1,5 @@
+plain: 3
+reflect: 42 true undefined
+mut1: true
+mut2: true
+still: 4

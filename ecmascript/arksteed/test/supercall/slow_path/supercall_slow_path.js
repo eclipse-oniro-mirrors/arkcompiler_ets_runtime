@@ -28,13 +28,13 @@
  */
 
 //! METHOD B
-//! HAS         FastSuperAllocateThis
+//! HAS         AllocateInYoung
 //! HAS         CallBaseConstructor
 //! HAS         CallDerivedConstructor
 //! COUNT       CallRuntime OptSuperCall 1
 
 //! METHOD S
-//! HAS         FastSuperAllocateThis
+//! HAS         AllocateInYoung
 //! COUNT       CallBaseConstructor 2
 //! COUNT       CallDerivedConstructor 2
 //! COUNT       CallRuntime OptSuperCall 2

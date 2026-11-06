@@ -33,11 +33,11 @@
 //! METHOD callTargetChange
 //! HAS InitializeEmptyObject
 //! HAS CallNewObjRangeBase
-//! HAS CallNewObjRangeDerived
+//! HAS_NOT    CallNewObjRangeDerived
 //! METHOD callHClassChange
 //! HAS InitializeEmptyObject
 //! HAS CallNewObjRangeBase
-//! HAS CallNewObjRangeDerived
+//! HAS_NOT    CallNewObjRangeDerived
 
 class TargetA {
     tag: string;

@@ -31,38 +31,38 @@
 //! METHOD callUndefined
 //! HAS InitializeEmptyObject
 //! HAS CallNewObjRangeBase
-//! HAS CallNewObjRangeDerived
-//! HAS     CallRuntime AllocateInYoung
+//! HAS_NOT    CallNewObjRangeDerived
+//! HAS CallRuntime AllocateInYoung
 //! METHOD callInt
 //! HAS InitializeEmptyObject
 //! HAS CallNewObjRangeBase
-//! HAS CallNewObjRangeDerived
-//! HAS     CallRuntime AllocateInYoung
+//! HAS_NOT    CallNewObjRangeDerived
+//! HAS CallRuntime AllocateInYoung
 //! METHOD callString
 //! HAS InitializeEmptyObject
 //! HAS CallNewObjRangeBase
-//! HAS CallNewObjRangeDerived
-//! HAS     CallRuntime AllocateInYoung
+//! HAS_NOT    CallNewObjRangeDerived
+//! HAS CallRuntime AllocateInYoung
 //! METHOD callNull
 //! HAS InitializeEmptyObject
 //! HAS CallNewObjRangeBase
-//! HAS CallNewObjRangeDerived
-//! HAS     CallRuntime AllocateInYoung
+//! HAS_NOT    CallNewObjRangeDerived
+//! HAS CallRuntime AllocateInYoung
 //! METHOD callBoolean
 //! HAS InitializeEmptyObject
 //! HAS CallNewObjRangeBase
-//! HAS CallNewObjRangeDerived
-//! HAS     CallRuntime AllocateInYoung
+//! HAS_NOT    CallNewObjRangeDerived
+//! HAS CallRuntime AllocateInYoung
 //! METHOD callSymbol
 //! HAS InitializeEmptyObject
 //! HAS CallNewObjRangeBase
-//! HAS CallNewObjRangeDerived
-//! HAS     CallRuntime AllocateInYoung
+//! HAS_NOT    CallNewObjRangeDerived
+//! HAS CallRuntime AllocateInYoung
 //! METHOD callBigInt
 //! HAS InitializeEmptyObject
 //! HAS CallNewObjRangeBase
-//! HAS CallNewObjRangeDerived
-//! HAS     CallRuntime AllocateInYoung
+//! HAS_NOT    CallNewObjRangeDerived
+//! HAS CallRuntime AllocateInYoung
 
 let runs = 0;
 let lastReceiver: any = null;

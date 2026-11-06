@@ -23,15 +23,15 @@
  */
 
 //! METHOD DU
-//! HAS         FastSuperAllocateThis
+//! HAS         AllocateInYoung
 //! HAS         CallBaseConstructor
-//! HAS         CallDerivedConstructor
+//! HAS_NOT     CallDerivedConstructor
 //! COUNT       CallRuntime OptSuperCall 1
 
 //! METHOD DN
-//! HAS         FastSuperAllocateThis
+//! HAS         AllocateInYoung
 //! HAS         CallBaseConstructor
-//! HAS         CallDerivedConstructor
+//! HAS_NOT     CallDerivedConstructor
 //! COUNT       CallRuntime OptSuperCall 1
 
 class PUndef { constructor() { return undefined; } }

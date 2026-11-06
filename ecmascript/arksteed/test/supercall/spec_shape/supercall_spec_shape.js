@@ -17,7 +17,10 @@
  * Sites compiled after a warm construction take the speculation form: the
  * profiled super ctor is embedded as an identity constant and one eager
  * deopt (NOTCALLTGT1) replaces the heap-object / JS-constructor guards, so
- * the graph carries no BranchIfJSConstructorFunction:
+ * the graph carries no BranchIfJSConstructorFunction; the profiled kind
+ * additionally folds the base/derived split into its single live arm (no
+ * BranchIfBase, no dead arm, no fast phi; a derived fold keeps no slow arm
+ * because no guard remains to fail into it):
  *   - WP: identity holds; the base super returns a primitive, so the result
  *     must normalize to the allocated this (the super stays uncompiled, so
  *     this runs through the pre-normalizing generic arm; the raw-call
@@ -32,24 +35,30 @@
 
 //! METHOD WP
 //! HAS_NOT     BranchIfJSConstructorFunction
-//! HAS         FastSuperAllocateThis
+//! HAS_NOT     BranchIfBase
+//! HAS_NOT     CallDerivedConstructor
+//! HAS         AllocateInYoung
 //! HAS         CallBaseConstructor
-//! HAS         CallDerivedConstructor
 //! COUNT       CallRuntime OptSuperCall 1
+//! COUNT_LE    BranchIfReferenceEqual 2
 
 //! METHOD LU
 //! HAS_NOT     BranchIfJSConstructorFunction
-//! HAS         FastSuperAllocateThis
-//! HAS         CallBaseConstructor
+//! HAS_NOT     BranchIfBase
+//! HAS_NOT     BranchIfNewTargetHClassReady
+//! HAS_NOT     AllocateInYoung
+//! HAS_NOT     CallBaseConstructor
 //! HAS         CallDerivedConstructor
-//! COUNT       CallRuntime OptSuperCall 1
+//! COUNT       CallRuntime OptSuperCall 0
 
 //! METHOD W
 //! HAS_NOT     BranchIfJSConstructorFunction
-//! HAS         FastSuperAllocateThis
+//! HAS_NOT     BranchIfBase
+//! HAS_NOT     CallDerivedConstructor
+//! HAS         AllocateInYoung
 //! HAS         CallBaseConstructor
-//! HAS         CallDerivedConstructor
 //! COUNT       CallRuntime OptSuperCall 1
+//! COUNT_LE    BranchIfReferenceEqual 5
 
 class A {
     constructor() {

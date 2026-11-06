@@ -25,7 +25,7 @@
  */
 
 //! METHOD BS
-//! HAS         FastSuperAllocateThis
+//! HAS         AllocateInYoung
 //! HAS         CallBaseConstructor
 //! HAS         CallDerivedConstructor
 //! COUNT       CallRuntime OptSuperCall 1

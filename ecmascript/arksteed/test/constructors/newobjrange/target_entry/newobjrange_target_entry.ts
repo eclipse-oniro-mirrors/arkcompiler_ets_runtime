@@ -32,13 +32,13 @@
 //! METHOD callInterp
 //! HAS InitializeEmptyObject
 //! HAS CallNewObjRangeBase
-//! HAS CallNewObjRangeDerived
-//! HAS     CallRuntime AllocateInYoung
+//! HAS_NOT    CallNewObjRangeDerived
+//! HAS CallRuntime AllocateInYoung
 //! METHOD callSteed
 //! HAS InitializeEmptyObject
 //! HAS CallNewObjRangeBase
-//! HAS CallNewObjRangeDerived
-//! HAS     CallRuntime AllocateInYoung
+//! HAS_NOT    CallNewObjRangeDerived
+//! HAS CallRuntime AllocateInYoung
 
 class InterpTarget {
     z: number;
