@@ -49,17 +49,24 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(CallSelf)                                 \
     V(InitializeUnmappedArgumentsElements)      \
     V(InitializeUnmappedArguments)              \
+    V(StoreArraySpreadFast)                     \
     V(CanAllocateInYoung)                       \
     V(AllocateInYoung)                          \
     V(InitializeEmptyArray)                     \
     V(InitializeArrayWithBuffer)                \
     V(CallBaseConstructor)                      \
     V(CallDerivedConstructor)                   \
+    V(CallBaseConstructorSpread)                \
+    V(CallDerivedConstructorSpread)             \
+    V(CallBaseConstructorForwardAllArgs)        \
+    V(CallDerivedConstructorForwardAllArgs)     \
     V(CallRuntime)                              \
     V(CallCommonStub)                           \
     V(InitializeEmptyObject)                    \
+    V(GetObjectSizeFromHClass)                  \
+    V(IsObjSizeTrackingInProgress)              \
+    V(InitializeEmptyObjectWithSize)            \
     V(InitializeObjectWithBuffer)               \
-    V(FastSuperAllocateThis)                    \
     V(LineStringLoadElement)                    \
     V(Phi)                                      \
     V(LoadTaggedFromAddress)                    \
@@ -117,6 +124,7 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(I32IncWithOverflow)                       \
     V(I32DecWithOverflow)                       \
     V(I32ToF64)                                 \
+    V(I32ToI64)                                 \
     V(CheckedNumberToF64)                       \
     V(F64ToI32Trunc)                            \
     V(I32ToUint8Clamped)                        \
@@ -165,6 +173,7 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(StoreTaggedFieldByHClass)         \
     V(StoreEnvSlot)                     \
     V(SetValueWithBarrier)              \
+    V(ObjSizeTrackingStep)              \
     V(GapMove)                          \
     V(ConstantGapMove)
 
@@ -186,6 +195,8 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(BranchIfJSConstructorFunction)         \
     V(BranchIfNewTargetHClassReady)          \
     V(BranchIfBase)                          \
+    V(BranchIfFastSpreadArray)               \
+    V(BranchIfStoreArraySpreadAdmitted)      \
     V(BranchIfTaggedNumber)                  \
     V(BranchIfTaggedBoolean)                 \
     V(BranchIfECMAObject)

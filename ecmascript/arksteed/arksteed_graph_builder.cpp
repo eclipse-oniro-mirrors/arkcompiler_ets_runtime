@@ -253,12 +253,13 @@ private:
 class KnownConstructPlan {
 public:
     KnownConstructPlan(uint32_t expectedArgc, ValueVertex *target, ValueVertex *hclass, uint32_t size,
-                       bool canAllocateDirectly)
+                       bool canAllocateDirectly, std::optional<bool> knownIsBase)
         : expectedArgc_(expectedArgc),
           target_(target),
           hclass_(hclass),
           size_(size),
-          canAllocateDirectly_(canAllocateDirectly)
+          canAllocateDirectly_(canAllocateDirectly),
+          knownIsBase_(knownIsBase)
     {}
     uint32_t GetExpectedParameterCount() const
     {
@@ -280,6 +281,10 @@ public:
     {
         return canAllocateDirectly_;
     }
+    const std::optional<bool> &GetKnownIsBase() const
+    {
+        return knownIsBase_;
+    }
 
 private:
     uint32_t expectedArgc_;
@@ -287,6 +292,7 @@ private:
     ValueVertex *hclass_;
     uint32_t size_;
     bool canAllocateDirectly_;
+    std::optional<bool> knownIsBase_;
 };
 
 bool IsTaggedCallType(kungfu::VariableType type)
@@ -3262,7 +3268,7 @@ struct GraphBuilder::BytecodeVisitor {
             }
         }
         return KnownConstructPlan(info.formalArgc, targetConstant, hclassConstant, info.objectSize,
-                                  info.canAllocateDirectly);
+                                  info.canAllocateDirectly, broker->TryGetIsBaseConstructor(feedback.target));
     }
     std::optional<KnownCallPlan> TryCreateProfiledKnownCallPlan(const CallFeedback &feedback, uint32_t actualArgc)
     {
@@ -3952,6 +3958,36 @@ struct GraphBuilder::BytecodeVisitor {
             BuildEagerDeoptIfReferenceNotEqual(actualHClass, hclass);
         }
 
+        // Receiver establishment + call for one arm. Entered with `currentBlock`
+        // = the block the body lands in.
+        auto buildBaseBody = [&]() -> ValueVertex * {
+            ValueVertex *receiver;
+            if (hclass != nullptr && plan.CanAllocateDirectly()) {
+                const uint32_t objectSize = plan.GetObjectSize();
+                auto *size = self->graph_->GetInt64Constant(static_cast<int64_t>(objectSize));
+                auto *allocation = AllocateInYoung(size, hclass);
+                receiver = self->NewVertex<InitializeEmptyObjectVertex>(compileInfoFacts_, currentBlock,
+                                                                        {allocation, glue, hclass, size}, objectSize);
+            } else {
+                receiver = CommonStubCallWithLazyDeopt({glue, target}, CommonStubID::FastNewThisObject);
+            }
+            return BuildNewObjRangeCall<CallNewObjRangeBaseVertex>(
+                inputs, newTarget, receiver, plan.GetExpectedParameterCount(),
+                NewObjRangeCallInfo::CallStrategy::INLINE_DISPATCH);
+        };
+        auto buildDerivedBody = [&]() -> ValueVertex * {
+            return BuildNewObjRangeCall<CallNewObjRangeDerivedVertex>(
+                inputs, newTarget, self->undefinedValue_, plan.GetExpectedParameterCount(),
+                NewObjRangeCallInfo::CallStrategy::INLINE_DISPATCH);
+        };
+
+        if (plan.GetKnownIsBase().has_value()) {
+            // The identity deopt above pins the kind with the target, so only the
+            // profiled kind's arm is built — the call result is the bytecode
+            // result and the block stays open.
+            return *plan.GetKnownIsBase() ? buildBaseBody() : buildDerivedBody();
+        }
+
         BB *baseBlock = self->NewBlock();
         BB *derivedBlock = self->NewBlock();
         BB *doneBlock = self->NewBlock();
@@ -3961,27 +3997,13 @@ struct GraphBuilder::BytecodeVisitor {
 
         currentBlock = baseBlock;
         compileInfoFacts_ = entryFacts->Clone();
-        ValueVertex *receiver;
-        if (hclass != nullptr && plan.CanAllocateDirectly()) {
-            const uint32_t objectSize = plan.GetObjectSize();
-            auto *size = self->graph_->GetInt64Constant(static_cast<int64_t>(objectSize));
-            auto *allocation = AllocateInYoung(size, hclass);
-            receiver = self->NewVertex<InitializeEmptyObjectVertex>(compileInfoFacts_, currentBlock,
-                                                                    {allocation, glue, hclass, size}, objectSize);
-        } else {
-            receiver = CommonStubCallWithLazyDeopt({glue, target}, CommonStubID::FastNewThisObject);
-        }
-        auto *baseCall = BuildNewObjRangeCall<CallNewObjRangeBaseVertex>(
-            inputs, newTarget, receiver, plan.GetExpectedParameterCount(),
-            NewObjRangeCallInfo::CallStrategy::INLINE_DISPATCH);
+        auto *baseCall = buildBaseBody();
         CompileInfoFacts *mergedFacts = compileInfoFacts_;
         self->FinishBlockWithJump(currentBlock, doneBlock);
 
         currentBlock = derivedBlock;
         compileInfoFacts_ = entryFacts->Clone();
-        auto *derivedCall = BuildNewObjRangeCall<CallNewObjRangeDerivedVertex>(
-            inputs, newTarget, self->undefinedValue_, plan.GetExpectedParameterCount(),
-            NewObjRangeCallInfo::CallStrategy::INLINE_DISPATCH);
+        auto *derivedCall = buildDerivedBody();
         mergedFacts->Merge(*compileInfoFacts_);
         self->FinishBlockWithJump(currentBlock, doneBlock);
 
@@ -4717,23 +4739,22 @@ struct GraphBuilder::BytecodeVisitor {
 
     // Fast/slow path structure for SUPERCALLTHISRANGE, mirroring the
     // interpreter fast path: the super-constructor checks admit exactly a
-    // constructor JSFunction as the super, BranchIfBase splits the fast path,
+    // constructor JSFunction as the super, BranchIfBase splits the fast path
+    // (a monomorphic slot folds the split into the profiled kind's single arm),
     // and the newTarget admission runs only on the base arm — its conditions
-    // are FastSuperAllocateThis's prerequisites, while the derived arm forwards
+    // are the FastSuperAllocateThis stub's inline-path prerequisites, while the derived arm forwards
     // newTarget to the callee as an opaque value it never dereferences (the
     // interpreter's derived arm likewise admits any non-undefined newTarget).
     // Guard-shape failures branch directly into the slow block — no stub call
     // before the guards and no sentinel result inspection; a monomorphic call
-    // slot folds the super-ctor checks into one identity eager deopt instead. thisObj for
-    // the fast path is produced per arm: a base super
-    // constructor allocates via a FastSuperAllocateThis vertex (currently a stub call, a dedicated
-    // vertex so the allocation can be lowered inline later), a derived or builtin one gets
-    // undefined (no allocation, callee re-initializes this). The fast path enters the super through
-    // a CallConstructor vertex (steed frame convention with the caller's newTarget), never through
-    // the AOT-era trampolines, which enter steed code with the wrong calling convention. Whether
-    // the super has compiled code is left to the codegen (JumpIfFunctionNotCompiled), which routes
-    // uncompiled supers to a generic [[Construct]] fallback instead of a second IR guard. The
-    // tagged argument array is only built on the slow path.
+    // slot folds the super-ctor checks into one identity eager deopt instead. thisObj for the fast path is produced per
+    // arm: a base super constructor allocates through the shared inline young-allocation pipeline (AllocateSuperThis,
+    // with the interpreter fill ladder inlined), a derived or builtin one gets undefined (no
+    // allocation, callee re-initializes this). The fast path enters the super through a CallConstructor vertex (steed
+    // frame convention with the caller's newTarget), never through the AOT-era trampolines, which enter steed code with
+    // the wrong calling convention. Whether the super has compiled code is left to the codegen
+    // (JumpIfFunctionNotCompiled), which routes uncompiled supers to a generic [[Construct]] fallback instead of a
+    // second IR guard. The tagged argument array is only built on the slow path.
     ValueVertex *BuildSuperCallWithFastPath(const BytecodeInfo *bcInfo, ValueVertex *func,
                                             ValueVertex *newTarget, uint32_t argc)
     {
@@ -4758,10 +4779,125 @@ struct GraphBuilder::BytecodeVisitor {
         if (feedback.IsMonomorphicJSFunction()) {
             expectedSuperCtor = GetHeapConstant(feedback.target);
         }
+        // The identity deopt below pins the runtime super ctor to feedback.target, whose
+        // Method's formal argc and constructor kind are immutable, so the steed frame
+        // contract (slot reservation, argc, undefined fill) folds to compile-time constants
+        // and the base/derived split folds to its one live arm.
+        std::optional<uint32_t> knownExpectedArgc;
+        std::optional<bool> knownIsBase;
+        if (expectedSuperCtor != nullptr) {
+            ArkSteedHeapBroker::KnownConstructInfo constructInfo;
+            if (self->pgoContext_.GetBroker()->TryGetKnownConstructInfo(feedback.target, &constructInfo)) {
+                knownExpectedArgc = constructInfo.formalArgc;
+            }
+            knownIsBase = self->pgoContext_.GetBroker()->TryGetIsBaseConstructor(feedback.target);
+        }
+
+        // Base call body: inline this allocation, steed call. Entered with
+        // `currentBlock` = the block the body lands in.
+        auto buildBaseCall = [&](BB *successor) -> ValueVertex * {
+            auto *allocatedThis = AllocateSuperThis(newTarget);
+            // The base arm owns the only live undefined path (a base super's explicit
+            // `return undefined`), so its result check falls back to allocatedThis and
+            // the deopt bundle carries the bound-this spill slot as a pseudo vreg.
+            ChunkVector<ValueVertex *> baseCallInputs(self->chunk_);
+            baseCallInputs.push_back(superCtor);
+            baseCallInputs.push_back(newTarget);
+            baseCallInputs.push_back(allocatedThis);
+            for (uint32_t idx = 0; idx < argc; idx++) {
+                baseCallInputs.push_back(LoadRegister(bcInfo, static_cast<int>(idx)));
+            }
+            auto *baseCall = self->NewVertex<CallBaseConstructorVertex>(
+                compileInfoFacts_, currentBlock, baseCallInputs, argc, knownExpectedArgc);
+            UpdateCatchBlockData(baseCall);
+            LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, baseCall);
+            self->FinishBlockWithJump(currentBlock, successor);
+            return baseCall;
+        };
+
+        // Base arm: newTarget admission, inline this allocation, steed call.
+        // Entered with `currentBlock` = the arm's entry block.
+        auto buildBaseArm = [&](BB *slowBlock, BB *successor) -> ValueVertex * {
+            BB *baseBlock = self->NewBlock();
+            BB *slowNotReadyBlock = self->NewBlock();
+            // Base-arm-only newTarget admission: newTarget must be a JSFunction whose
+            // proto-or-hclass slot holds a JSHClass describing JS_OBJECT instances —
+            // the conditions the inline allocation path below relies on, matching
+            // the FastSuperAllocateThis stub's inline-path admission. The derived arm skips this guard:
+            // it forwards newTarget to the callee untouched. An undefined newTarget (derived
+            // constructor invoked without new) never reaches the guard's dereference: class
+            // constructor frames are only entered through [[Construct]].
+            self->FinishBlockWithBranch<BranchIfNewTargetHClassReadyVertex>(
+                currentBlock, {newTarget}, baseBlock, slowNotReadyBlock);
+
+            currentBlock = slowNotReadyBlock;
+            slowNotReadyBlock->SetDeferred(true);
+            self->FinishBlockWithJump(slowNotReadyBlock, slowBlock);
+
+            currentBlock = baseBlock;
+            return buildBaseCall(successor);
+        };
+
+        // Derived arm: undefined placeholder this, steed call. Entered with
+        // `currentBlock` = the arm's entry block; no successor leaves the block open.
+        auto buildDerivedArm = [&](std::optional<BB *> successor) -> ValueVertex * {
+            // The derived arm passes an undefined placeholder this (the callee's own
+            // super chain re-initializes it) and its result check only tests for an
+            // object: the frontend guarantees a derived constructor never returns
+            // undefined across the call boundary, so non-objects can only be raw
+            // primitives and throw.
+            ChunkVector<ValueVertex *> derivedCallInputs(self->chunk_);
+            derivedCallInputs.push_back(superCtor);
+            derivedCallInputs.push_back(newTarget);
+            derivedCallInputs.push_back(undefined);
+            for (uint32_t idx = 0; idx < argc; idx++) {
+                derivedCallInputs.push_back(LoadRegister(bcInfo, static_cast<int>(idx)));
+            }
+            auto *derivedCall = self->NewVertex<CallDerivedConstructorVertex>(
+                compileInfoFacts_, currentBlock, derivedCallInputs, argc, knownExpectedArgc);
+            UpdateCatchBlockData(derivedCall);
+            LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, derivedCall);
+            if (successor.has_value()) {
+                self->FinishBlockWithJump(currentBlock, *successor);
+            }
+            return derivedCall;
+        };
+
+        // Deferred OptSuperCall fallback: re-derives everything from `func`.
+        auto buildSlowArm = [&](BB *slowBlock, BB *mergeBlock) -> ValueVertex * {
+            currentBlock = slowBlock;
+            slowBlock->SetDeferred(true);
+            ValueVertex *taggedArgc = TaggedConstantFromInt32(static_cast<int>(argc));
+            ValueVertex *taggedArray = TaggedArrayFromValueIn(bcInfo, taggedArgc, argc);
+            ValueVertex *slowResult = RuntimeCallWithLazyDeopt(
+                {func, newTarget, taggedArray, taggedArgc}, RTSTUB_ID(OptSuperCall));
+            self->FinishBlockWithJump(slowBlock, mergeBlock);
+            return slowResult;
+        };
+
+        if (knownIsBase.has_value()) {
+            // The speculation form also folds the base/derived split: the identity
+            // deopt pins the kind, so only the profiled kind's arm is built.
+            BuildEagerDeoptIfReferenceNotEqual(superCtor, expectedSuperCtor);
+            if (*knownIsBase) {
+                // Admission failures still run the OptSuperCall fallback, so the
+                // fast result merges with the slow arm.
+                BB *slowBlock = self->NewBlock();
+                BB *mergeBlock = self->NewBlock();
+                ValueVertex *fastResult = buildBaseArm(slowBlock, mergeBlock);
+                ValueVertex *slowResult = buildSlowArm(slowBlock, mergeBlock);
+
+                currentBlock = mergeBlock;
+                return self->NewPhiVertexWith(currentBlock, {fastResult, slowResult}, self->AccIndex());
+            }
+            // No guard remains after the identity deopt (the derived arm forwards
+            // newTarget untouched), so the slow arm would be unreachable — the call
+            // result is the bytecode result and the block stays open.
+            return buildDerivedArm(std::nullopt);
+        }
 
         BB *baseSplitBlock = self->NewBlock();
         BB *baseAdmissionBlock = self->NewBlock();
-        BB *baseBlock = self->NewBlock();
         BB *derivedBlock = self->NewBlock();
         BB *fastBlock = self->NewBlock();
         BB *slowBlock = self->NewBlock();
@@ -4800,15 +4936,84 @@ struct GraphBuilder::BytecodeVisitor {
         self->FinishBlockWithBranch<BranchIfBaseVertex>(
             currentBlock, {superCtor}, baseAdmissionBlock, derivedBlock);
 
-        // Base-arm-only newTarget admission: newTarget must be a JSFunction whose
-        // proto-or-hclass slot holds a JSHClass describing JS_OBJECT instances — exactly
-        // the FastSuperAllocateThis stub's inline-path conditions, so the stub's
-        // reentrant CallRuntime fallback (NewThisObject reads newTarget.prototype and
-        // can run a proxy trap) is unreachable here. The derived arm skips this guard:
-        // it forwards newTarget to the callee untouched. An undefined newTarget (derived
-        // constructor invoked without new) never reaches the guard's dereference: class
-        // constructor frames are only entered through [[Construct]].
+        currentBlock = baseAdmissionBlock;
+        ValueVertex *baseCall = buildBaseArm(slowBlock, fastBlock);
+
+        currentBlock = derivedBlock;
+        ValueVertex *derivedCall = buildDerivedArm(fastBlock);
+
+        currentBlock = fastBlock;
+        ValueVertex *fastResult = self->NewPhiVertexWith(currentBlock, {baseCall, derivedCall},
+                                                         self->AccIndex());
+        self->FinishBlockWithJump(fastBlock, mergeBlock);
+
+        ValueVertex *slowResult = buildSlowArm(slowBlock, mergeBlock);
+
+        currentBlock = mergeBlock;
+        return self->NewPhiVertexWith(currentBlock, {fastResult, slowResult}, self->AccIndex());
+    }
+
+    // The SUPERCALLSPREAD variant of the fast path: same super-ctor guard chain
+    // and base/derived split, plus a BranchIfFastSpreadArray admission on the
+    // spread operand so the codegen can turn the array into call arguments by a
+    // pure slot copy (holes mapped to undefined) with a runtime argc. The array
+    // admission sits before the base/derived split: it gates only the argument
+    // delivery, not the this-establishment, so one guard serves both arms. Unlike
+    // SUPERCALLTHISRANGE there is no call feedback slot on the bytecode, so no
+    // monomorphic shape exists. The slow block is a single SuperCallSpread
+    // runtime call that re-derives everything from `func` and runs the full
+    // iterator protocol when the array admission fails — replacing the current
+    // GetCallSpreadArgs + OptSuperCallSpread pair (which left a dependency-unsafe
+    // stub call without a lazy-deopt bundle: a custom iterator could invalidate
+    // the method mid-materialization).
+    ValueVertex *BuildSuperCallSpreadWithFastPath(const BytecodeInfo *bcInfo, ValueVertex *func,
+                                                  ValueVertex *newTarget)
+    {
+        ValueVertex *array = LoadRegister(bcInfo, 0);
+        ValueVertex *undefined = self->undefinedValue_;
+        ValueVertex *superCtor = self->NewVertex<LoadPrototypeFromNonJSProxyObjectVertex>(currentBlock, {func});
+
+        BB *arrayAdmissionBlock = self->NewBlock();
+        BB *baseSplitBlock = self->NewBlock();
+        BB *baseAdmissionBlock = self->NewBlock();
+        BB *baseBlock = self->NewBlock();
+        BB *derivedBlock = self->NewBlock();
+        BB *fastBlock = self->NewBlock();
+        BB *slowBlock = self->NewBlock();
+        BB *mergeBlock = self->NewBlock();
+        // Critical-edge discipline: each guard failure edge gets its own
+        // trampoline block (see BuildSuperCallWithFastPath).
+        BB *slowNotHeapObjectBlock = self->NewBlock();
+        BB *slowNotJSConstructorBlock = self->NewBlock();
+        BB *slowNotFastArrayBlock = self->NewBlock();
         BB *slowNotReadyBlock = self->NewBlock();
+
+        BB *checkCtorBlock = self->NewBlock();
+        self->FinishBlockWithBranch<BranchIfTaggedHeapObjectVertex>(
+            currentBlock, {superCtor}, checkCtorBlock, slowNotHeapObjectBlock);
+
+        currentBlock = checkCtorBlock;
+        self->FinishBlockWithBranch<BranchIfJSConstructorFunctionVertex>(
+            currentBlock, {superCtor}, arrayAdmissionBlock, slowNotJSConstructorBlock);
+
+        for (BB *slowEntry : {slowNotHeapObjectBlock, slowNotJSConstructorBlock}) {
+            currentBlock = slowEntry;
+            slowEntry->SetDeferred(true);
+            self->FinishBlockWithJump(slowEntry, slowBlock);
+        }
+
+        currentBlock = arrayAdmissionBlock;
+        self->FinishBlockWithBranch<BranchIfFastSpreadArrayVertex>(
+            currentBlock, {array, GlobalEnv()}, baseSplitBlock, slowNotFastArrayBlock, false);
+
+        currentBlock = slowNotFastArrayBlock;
+        slowNotFastArrayBlock->SetDeferred(true);
+        self->FinishBlockWithJump(slowNotFastArrayBlock, slowBlock);
+
+        currentBlock = baseSplitBlock;
+        self->FinishBlockWithBranch<BranchIfBaseVertex>(
+            currentBlock, {superCtor}, baseAdmissionBlock, derivedBlock);
+
         currentBlock = baseAdmissionBlock;
         self->FinishBlockWithBranch<BranchIfNewTargetHClassReadyVertex>(
             currentBlock, {newTarget}, baseBlock, slowNotReadyBlock);
@@ -4818,39 +5023,130 @@ struct GraphBuilder::BytecodeVisitor {
         self->FinishBlockWithJump(slowNotReadyBlock, slowBlock);
 
         currentBlock = baseBlock;
-        auto *allocatedThis = self->NewVertex<FastSuperAllocateThisVertex>(
-            compileInfoFacts_, currentBlock, {glue, superCtor, newTarget});
-        // The base arm owns the only live undefined path (a base super's explicit
-        // `return undefined`), so its result check falls back to allocatedThis and
-        // the deopt bundle carries the bound-this spill slot as a pseudo vreg.
+        auto *allocatedThis = AllocateSuperThis(newTarget);
+        // The base arm keeps its allocated this (the same result-tail
+        // and BASE_CTOR_THIS pseudo-vreg contract as the non-spread variant); the
+        // derived arm forwards an undefined placeholder.
+        ChunkVector<ValueVertex *> baseCallInputs(self->chunk_);
+        baseCallInputs.push_back(func);
+        baseCallInputs.push_back(superCtor);
+        baseCallInputs.push_back(newTarget);
+        baseCallInputs.push_back(allocatedThis);
+        baseCallInputs.push_back(array);
+        auto *baseCall = self->NewVertex<CallBaseConstructorSpreadVertex>(
+            compileInfoFacts_, currentBlock, baseCallInputs);
+        UpdateCatchBlockData(baseCall);
+        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, baseCall);
+        self->FinishBlockWithJump(currentBlock, fastBlock);
+
+        currentBlock = derivedBlock;
+        ChunkVector<ValueVertex *> derivedCallInputs(self->chunk_);
+        derivedCallInputs.push_back(func);
+        derivedCallInputs.push_back(superCtor);
+        derivedCallInputs.push_back(newTarget);
+        derivedCallInputs.push_back(undefined);
+        derivedCallInputs.push_back(array);
+        auto *derivedCall = self->NewVertex<CallDerivedConstructorSpreadVertex>(
+            compileInfoFacts_, currentBlock, derivedCallInputs);
+        UpdateCatchBlockData(derivedCall);
+        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, derivedCall);
+        self->FinishBlockWithJump(derivedBlock, fastBlock);
+
+        currentBlock = fastBlock;
+        ValueVertex *fastResult = self->NewPhiVertexWith(
+            currentBlock, {baseCall, derivedCall}, self->AccIndex());
+        self->FinishBlockWithJump(fastBlock, mergeBlock);
+
+        currentBlock = slowBlock;
+        slowBlock->SetDeferred(true);
+        ValueVertex *slowResult = RuntimeCallWithLazyDeopt(
+            {func, newTarget, array}, RTSTUB_ID(SuperCallSpreadWithNewTarget));
+        self->FinishBlockWithJump(slowBlock, mergeBlock);
+
+        currentBlock = mergeBlock;
+        return self->NewPhiVertexWith(currentBlock, {fastResult, slowResult}, self->AccIndex());
+    }
+
+    // The SUPERCALLFORWARDALLARGS variant of the fast path: the same super-ctor
+    // guard chain and base/derived split as the spread variant, with no operand
+    // admission — the argument source is the frame itself, so the codegen copies
+    // the caller's incoming user arguments by a pure slot copy bounded by the
+    // runtime frame argc (the ARGC input). Like SUPERCALLSPREAD there is no call
+    // feedback slot on the CALLRUNTIME bytecode, so no monomorphic shape exists.
+    // The slow block reuses the OptSuperCallForwardAllArgs runtime with the
+    // inline-loaded super ctor — the exact stub result the pre-fast-path
+    // lowering passed — so guard-shape failures keep the generic [[Construct]]
+    // semantics (including the iterator-free re-derivation of everything).
+    ValueVertex *BuildSuperCallForwardAllArgsWithFastPath(const BytecodeInfo *bcInfo, ValueVertex *func,
+                                                          ValueVertex *newTarget)
+    {
+        ValueVertex *undefined = self->undefinedValue_;
+        ValueVertex *superCtor = self->NewVertex<LoadPrototypeFromNonJSProxyObjectVertex>(currentBlock, {func});
+
+        BB *baseSplitBlock = self->NewBlock();
+        BB *baseAdmissionBlock = self->NewBlock();
+        BB *baseBlock = self->NewBlock();
+        BB *derivedBlock = self->NewBlock();
+        BB *fastBlock = self->NewBlock();
+        BB *slowBlock = self->NewBlock();
+        BB *mergeBlock = self->NewBlock();
+        // Critical-edge discipline: each guard failure edge gets its own
+        // trampoline block (see BuildSuperCallWithFastPath).
+        BB *slowNotHeapObjectBlock = self->NewBlock();
+        BB *slowNotJSConstructorBlock = self->NewBlock();
+        BB *slowNotReadyBlock = self->NewBlock();
+
+        BB *checkCtorBlock = self->NewBlock();
+        self->FinishBlockWithBranch<BranchIfTaggedHeapObjectVertex>(
+            currentBlock, {superCtor}, checkCtorBlock, slowNotHeapObjectBlock);
+
+        currentBlock = checkCtorBlock;
+        self->FinishBlockWithBranch<BranchIfJSConstructorFunctionVertex>(
+            currentBlock, {superCtor}, baseSplitBlock, slowNotJSConstructorBlock);
+
+        for (BB *slowEntry : {slowNotHeapObjectBlock, slowNotJSConstructorBlock}) {
+            currentBlock = slowEntry;
+            slowEntry->SetDeferred(true);
+            self->FinishBlockWithJump(slowEntry, slowBlock);
+        }
+
+        currentBlock = baseSplitBlock;
+        self->FinishBlockWithBranch<BranchIfBaseVertex>(
+            currentBlock, {superCtor}, baseAdmissionBlock, derivedBlock);
+
+        currentBlock = baseAdmissionBlock;
+        self->FinishBlockWithBranch<BranchIfNewTargetHClassReadyVertex>(
+            currentBlock, {newTarget}, baseBlock, slowNotReadyBlock);
+
+        currentBlock = slowNotReadyBlock;
+        slowNotReadyBlock->SetDeferred(true);
+        self->FinishBlockWithJump(slowNotReadyBlock, slowBlock);
+
+        currentBlock = baseBlock;
+        auto *allocatedThis = AllocateSuperThis(newTarget);
+        // The base arm keeps its allocated this (the same result-tail
+        // and BASE_CTOR_THIS pseudo-vreg contract as the other variants); the
+        // derived arm forwards an undefined placeholder. The frame argc rides the
+        // ARGC input; the user count it implies drives the codegen copy.
         ChunkVector<ValueVertex *> baseCallInputs(self->chunk_);
         baseCallInputs.push_back(superCtor);
         baseCallInputs.push_back(newTarget);
         baseCallInputs.push_back(allocatedThis);
-        for (uint32_t idx = 0; idx < argc; idx++) {
-            baseCallInputs.push_back(LoadRegister(bcInfo, static_cast<int>(idx)));
-        }
-        auto *baseCall = self->NewVertex<CallBaseConstructorVertex>(
-            compileInfoFacts_, currentBlock, baseCallInputs, argc);
+        baseCallInputs.push_back(ActualArgc());
+        auto *baseCall = self->NewVertex<CallBaseConstructorForwardAllArgsVertex>(
+            compileInfoFacts_, currentBlock, baseCallInputs);
         UpdateCatchBlockData(baseCall);
         LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, baseCall);
-        self->FinishBlockWithJump(baseBlock, fastBlock);
+        self->FinishBlockWithJump(currentBlock, fastBlock);
 
         currentBlock = derivedBlock;
-        // The derived arm passes an undefined placeholder this (the callee's own
-        // super chain re-initializes it) and its result check only tests for an
-        // object: the frontend guarantees a derived constructor never returns
-        // undefined across the call boundary, so non-objects can only be raw
-        // primitives and throw.
         ChunkVector<ValueVertex *> derivedCallInputs(self->chunk_);
         derivedCallInputs.push_back(superCtor);
         derivedCallInputs.push_back(newTarget);
         derivedCallInputs.push_back(undefined);
-        for (uint32_t idx = 0; idx < argc; idx++) {
-            derivedCallInputs.push_back(LoadRegister(bcInfo, static_cast<int>(idx)));
-        }
-        auto *derivedCall = self->NewVertex<CallDerivedConstructorVertex>(
-            compileInfoFacts_, currentBlock, derivedCallInputs, argc);
+        derivedCallInputs.push_back(ActualArgc());
+        auto *derivedCall = self->NewVertex<CallDerivedConstructorForwardAllArgsVertex>(
+            compileInfoFacts_, currentBlock, derivedCallInputs);
         UpdateCatchBlockData(derivedCall);
         LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, derivedCall);
         self->FinishBlockWithJump(derivedBlock, fastBlock);
@@ -4862,10 +5158,8 @@ struct GraphBuilder::BytecodeVisitor {
 
         currentBlock = slowBlock;
         slowBlock->SetDeferred(true);
-        ValueVertex *taggedArgc = TaggedConstantFromInt32(static_cast<int>(argc));
-        ValueVertex *taggedArray = TaggedArrayFromValueIn(bcInfo, taggedArgc, argc);
         ValueVertex *slowResult = RuntimeCallWithLazyDeopt(
-            {func, newTarget, taggedArray, taggedArgc}, RTSTUB_ID(OptSuperCall));
+            {superCtor, newTarget, TaggedActualArgc()}, RTSTUB_ID(OptSuperCallForwardAllArgs));
         self->FinishBlockWithJump(slowBlock, mergeBlock);
 
         currentBlock = mergeBlock;
@@ -4895,22 +5189,18 @@ struct GraphBuilder::BytecodeVisitor {
 
     void LowerSuperCallSpread(const BytecodeInfo *bcInfo)
     {
-        ValueVertex *array = LoadRegister(bcInfo, 0);
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *newTarget = LoadParam(NEW_TARGET_PARAM_INDEX);
 
-        ValueVertex *argsArray = CommonStubCall({glue, array, GlobalEnv()}, CommonStubID::GetCallSpreadArgs);
-        RuntimeCallToAccWithLazyDeopt({func, newTarget, argsArray}, RTSTUB_ID(OptSuperCallSpread));
+        frameState.SetAcc(BuildSuperCallSpreadWithFastPath(bcInfo, func, newTarget));
     }
 
     void LowerSuperCallForwardAllArgs(const BytecodeInfo *bcInfo)
     {
         ValueVertex *func = LoadRegister(bcInfo, 0);
-        ValueVertex *superFunc = CommonStubCall({glue, func}, CommonStubID::GetPrototype);
         ValueVertex *newTarget = LoadParam(NEW_TARGET_PARAM_INDEX);
-        ValueVertex *taggedActualArgc = TaggedActualArgc();
 
-        RuntimeCallToAccWithLazyDeopt({superFunc, newTarget, taggedActualArgc}, RTSTUB_ID(OptSuperCallForwardAllArgs));
+        frameState.SetAcc(BuildSuperCallForwardAllArgsWithFastPath(bcInfo, func, newTarget));
     }
 
     void LowerNewObjApply(const BytecodeInfo *bcInfo)
@@ -4998,6 +5288,79 @@ struct GraphBuilder::BytecodeVisitor {
         currentBlock = doneBlock;
         compileInfoFacts_->Merge(*fastFacts);
         return self->NewPhiVertexWith(currentBlock, {fastAllocation, slowAllocation}, self->AccIndex());
+    }
+
+    // Allocates the bound this for a super call whose super constructor is a base
+    // constructor, one branch past the BranchIfNewTargetHClassReady admission.
+    ValueVertex *AllocateSuperThis(ValueVertex *newTarget)
+    {
+        // The admission just proved this slot holds a JSHClass describing JS_OBJECT
+        // instances; the reload is one L1-hot tagged load.
+        auto *hclass = self->NewVertex<LoadTaggedFieldVertex>(
+            compileInfoFacts_, currentBlock, {newTarget}, static_cast<int32_t>(JSFunction::PROTO_OR_DYNCLASS_OFFSET));
+        return AllocateJSObjectWithHClass(hclass);
+    }
+
+    // Allocates and initializes a JSObject from a runtime hclass: the shared
+    // young-allocation pipeline with the interpreter's fill ladder inlined.
+    // A live slack-tracking counter decodes the pre-finalization size, fills
+    // the slack tail with the free-object hclass, and runs the counter
+    // protocol — the ObjSizeTrackingStep decrement plus its deferred
+    // FinishObjSizeTracking retirement; a settled hclass fills undefined.
+    ValueVertex *AllocateJSObjectWithHClass(ValueVertex *hclass)
+    {
+        // Decode the size before any protocol step: FinishObjSizeTracking
+        // shrinks the hclass size in place, and this allocation must reserve
+        // the pre-finalization slack. The hclass pointer itself stays valid.
+        auto *size = self->NewVertex<GetObjectSizeFromHClassVertex>(compileInfoFacts_, currentBlock, {hclass});
+        // A live construction counter means slack tracking is still shaping this
+        // hclass: the tracking arm fills the slack tail with the free-object
+        // hclass and runs the counter protocol. The AOT speculative bit is not
+        // filtered: AOT is disabled, so no live hclass carries it. Should AOT
+        // ever return, the bit must rejoin this check — the ladder's AOT arm
+        // fills hole, which neither fill below reproduces.
+        auto *tracking = self->NewVertex<IsObjSizeTrackingInProgressVertex>(compileInfoFacts_, currentBlock,
+                                                                            {hclass});
+
+        BB *trackingBlock = self->NewBlock();
+        BB *notTrackingBlock = self->NewBlock();
+        BB *fillMergeBlock = self->NewBlock();
+        CompileInfoFacts *entryFacts = compileInfoFacts_;
+        self->FinishBlockWithBranch<BranchIfTrueVertex>(currentBlock, {tracking}, trackingBlock, notTrackingBlock);
+
+        currentBlock = trackingBlock;
+        compileInfoFacts_ = entryFacts->Clone();
+        // The interpreter ladder's tracking fill: the free-object hclass keeps
+        // the not-yet-stored slack walkable after the layout settles.
+        const size_t globalConstantsOffset = JSThread::GlueData::GetGlobalConstOffset(false);
+        constexpr size_t freeObjectClassOffset =
+            static_cast<size_t>(ConstantIndex::FREE_OBJECT_WITH_NONE_FIELD_CLASS_INDEX) * JSTaggedValue::TaggedTypeSize();
+        static_assert(freeObjectClassOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+        auto *globalConstants = self->NewVertex<LoadTaggedFromAddressVertex>(
+            compileInfoFacts_, currentBlock, {glue}, static_cast<int32_t>(globalConstantsOffset));
+        auto *freeObjectFill = self->NewVertex<LoadTaggedFieldVertex>(
+            compileInfoFacts_, currentBlock, {globalConstants}, static_cast<int32_t>(freeObjectClassOffset));
+        // The counter protocol runs unconditionally here: CMC GC — the one
+        // mode whose generated stubs skip it — is not enabled, and the
+        // interpreter's runtime factory path steps the counter under every
+        // collector anyway.
+        self->NewVertex<ObjSizeTrackingStepVertex>(compileInfoFacts_, currentBlock, {glue, hclass});
+        self->FinishBlockWithJump(currentBlock, fillMergeBlock);
+        CompileInfoFacts *trackingFacts = compileInfoFacts_;
+
+        currentBlock = notTrackingBlock;
+        compileInfoFacts_ = entryFacts->Clone();
+        auto *undefinedFill = self->graph_->GetTaggedConstant(JSTaggedValue::VALUE_UNDEFINED);
+        self->FinishBlockWithJump(currentBlock, fillMergeBlock);
+        CompileInfoFacts *notTrackingFacts = compileInfoFacts_;
+
+        currentBlock = fillMergeBlock;
+        compileInfoFacts_ = trackingFacts->Clone();
+        compileInfoFacts_->Merge(*notTrackingFacts);
+        auto *fill = self->NewPhiVertexWith(currentBlock, {freeObjectFill, undefinedFill}, self->AccIndex());
+        auto *allocation = AllocateInYoung(size, hclass);
+        return self->NewVertex<InitializeEmptyObjectWithSizeVertex>(
+            compileInfoFacts_, currentBlock, {allocation, glue, hclass, size, fill});
     }
 
     ValueVertex *BuildEmptyObject()
@@ -6146,12 +6509,66 @@ struct GraphBuilder::BytecodeVisitor {
         RuntimeCallToAccWithLazyDeopt({target, source}, RTSTUB_ID(CopyDataProperties));
     }
 
+    ValueVertex *BuildStoreArraySpreadWithFastPath(ValueVertex *array, ValueVertex *index, ValueVertex *value)
+    {
+        BB *fastBlock = self->NewBlock();
+        BB *slowBlock = self->NewBlock();
+        BB *mergeBlock = self->NewBlock();
+
+        self->FinishBlockWithBranch<BranchIfStoreArraySpreadAdmittedVertex>(
+            currentBlock, {array, value, GlobalEnv()}, fastBlock, slowBlock);
+
+        currentBlock = fastBlock;
+        // The elements backing, sized from the source length and allocated by
+        // the shared pipeline: the spread counterpart of the literal arrays'
+        // CreateEmptyArray allocation, one branch before the initializing
+        // store. The length bounds every consumer — the admission's hole scan,
+        // the copy loop and the published header.
+        ValueVertex *length = self->NewVertex<LoadInt32FieldVertex>(
+            compileInfoFacts_, currentBlock, {value}, static_cast<int32_t>(JSArray::LENGTH_OFFSET));
+        const size_t globalConstantsOffset = JSThread::GlueData::GetGlobalConstOffset(false);
+        constexpr size_t elementsClassOffset =
+            static_cast<size_t>(ConstantIndex::TAGGED_ARRAY_CLASS_INDEX) * JSTaggedValue::TaggedTypeSize();
+        static_assert(elementsClassOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+        ValueVertex *globalConstants = self->NewVertex<LoadTaggedFromAddressVertex>(
+            compileInfoFacts_, currentBlock, {glue}, static_cast<int32_t>(globalConstantsOffset));
+        ValueVertex *elementsHClass = self->NewVertex<LoadTaggedFieldVertex>(
+            compileInfoFacts_, currentBlock, {globalConstants}, static_cast<int32_t>(elementsClassOffset));
+        ValueVertex *lengthBytes = self->NewVertex<I32ToI64Vertex>(compileInfoFacts_, currentBlock, {length});
+        ValueVertex *elementsDataSize = self->NewVertex<I64ShiftLeftVertex>(
+            compileInfoFacts_, currentBlock, {lengthBytes}, TAGGED_TYPE_SIZE_LOG);
+        ValueVertex *elementsSize = self->NewVertex<I64AddVertex>(
+            compileInfoFacts_, currentBlock,
+            {elementsDataSize, self->graph_->GetInt64Constant(static_cast<int64_t>(TaggedArray::DATA_OFFSET))});
+        ValueVertex *allocation = AllocateInYoung(elementsSize, elementsHClass);
+        ValueVertex *fastResult = self->NewVertex<StoreArraySpreadFastVertex>(
+            compileInfoFacts_, currentBlock, {array, value, allocation, length, elementsHClass, glue});
+        // The vertex's own FIELD_WRITE classification (Unknown key) already
+        // clears every loaded property; a manual OnSideEffect here would also
+        // drop hclass and env facts the store cannot touch.
+        self->FinishBlockWithJump(currentBlock, mergeBlock);
+
+        currentBlock = slowBlock;
+        slowBlock->SetDeferred(true);
+        ValueVertex *slowResult = RuntimeCallWithLazyDeopt(
+            {array, index, value}, RTSTUB_ID(StArraySpread));
+        self->FinishBlockWithJump(slowBlock, mergeBlock);
+
+        currentBlock = mergeBlock;
+        return self->NewPhiVertexWith(currentBlock, {fastResult, slowResult}, self->AccIndex());
+    }
+
     void LowerStoreArraySpread(const BytecodeInfo *bcInfo)
     {
         ValueVertex *array = LoadRegister(bcInfo, 0);
         ValueVertex *index = LoadRegister(bcInfo, 1);
         ValueVertex *value = frameState.GetAcc();
-        RuntimeCallToAccWithLazyDeopt({array, index, value}, RTSTUB_ID(StArraySpread));
+        std::optional<int32_t> indexValue = TryGetInt32Value(index);
+        if (!indexValue.has_value() || *indexValue != 0) {
+            RuntimeCallToAccWithLazyDeopt({array, index, value}, RTSTUB_ID(StArraySpread));
+            return;
+        }
+        frameState.SetAcc(BuildStoreArraySpreadWithFastPath(array, index, value));
     }
 
     void LowerGetTemplateObject()
@@ -6272,16 +6689,9 @@ struct GraphBuilder::BytecodeVisitor {
         // Hot path: value is a heap object → check HClass type range inline.
         currentBlock = isHeapObjectBlock;
 
-        ValueVertex *hclass = self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {value},
-                                                                     static_cast<int32_t>(TaggedObject::HCLASS_OFFSET));
-        ValueVertex *hclassRaw = self->NewVertex<TaggedToRawI64Vertex>(compileInfoFacts_, currentBlock, {hclass});
-
-        ValueVertex *addrMask = self->graph_->GetInt64Constant(static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
-        ValueVertex *hclassMasked = self->NewVertex<I64BitwiseBinaryVertex>(
-            compileInfoFacts_, currentBlock, {hclassRaw, addrMask}, IntBitwiseKind::BITWISE_AND);
-
+        ValueVertex *hclass = self->NewVertex<LoadHClassAddressVertex>(compileInfoFacts_, currentBlock, {value});
         ValueVertex *bitField = self->NewVertex<LoadTaggedFromAddressVertex>(
-            compileInfoFacts_, currentBlock, {hclassMasked}, static_cast<int32_t>(JSHClass::BIT_FIELD_OFFSET));
+            compileInfoFacts_, currentBlock, {hclass}, static_cast<int32_t>(JSHClass::BIT_FIELD_OFFSET));
         ValueVertex *bitFieldRaw = self->NewVertex<TaggedToRawI64Vertex>(compileInfoFacts_, currentBlock, {bitField});
 
         // Type is encoded to the first 8 bits of JSHClass::bitfield
@@ -6995,7 +7405,11 @@ struct GraphBuilder::BytecodeVisitor {
         bool needsD = vertex->Is<CallVertex>() || vertex->Is<CallKnownJSFunctionVertex>() ||
                       vertex->Is<CallKnownBuiltinVertex>() || vertex->Is<CallSelfVertex>() ||
                       vertex->Is<CallBaseConstructorVertex>() || vertex->Is<CallDerivedConstructorVertex>() ||
-                      vertex->Is<CallNewObjRangeBaseVertex>() || vertex->Is<CallNewObjRangeDerivedVertex>();
+                      vertex->Is<CallNewObjRangeBaseVertex>() || vertex->Is<CallNewObjRangeDerivedVertex>() ||
+                      vertex->Is<CallBaseConstructorSpreadVertex>() ||
+                      vertex->Is<CallDerivedConstructorSpreadVertex>() ||
+                      vertex->Is<CallBaseConstructorForwardAllArgsVertex>() ||
+                      vertex->Is<CallDerivedConstructorForwardAllArgsVertex>();
         if (auto *call = vertex->TryCast<CallCommonStubVertex>()) {
             needsD = !IsDependencySafeCommonStubCall(call);
         } else if (auto *call = vertex->TryCast<CallRuntimeVertex>()) {

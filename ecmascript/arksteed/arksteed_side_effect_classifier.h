@@ -105,6 +105,12 @@ public:
         return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
     }
 
+    static SideEffectDescriptor Classify(InitializeEmptyObjectWithSizeVertex* vertex)
+    {
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+    }
+
     static SideEffectDescriptor Classify(InitializeObjectWithBufferVertex* vertex)
     {
         (void)vertex;
@@ -133,6 +139,19 @@ public:
     {
         (void)vertex;
         return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+    }
+
+    static SideEffectDescriptor Classify(StoreArraySpreadFastVertex *vertex)
+    {
+        // The store overwrites the destination array's elements and length —
+        // both recorded loaded properties. The Unknown key clears every
+        // loaded property (ClearLoadedPropertiesForKey's catch-all), while
+        // the write touches no hclass and no env slot, so those facts stay.
+        SideEffectDescriptor descriptor;
+        descriptor.kind = SideEffectKind::FIELD_WRITE;
+        descriptor.receiver = vertex->GetInput(StoreArraySpreadFastVertex::ARRAY_INDEX);
+        descriptor.propertyKey = PropertyKey::Unknown();
+        return descriptor;
     }
 
     static SideEffectDescriptor Classify(StoreInt32FieldVertex *vertex)
@@ -232,6 +251,16 @@ public:
         return SideEffectDescriptor {vertex->GetSideEffectKind()};
     }
 
+    static SideEffectDescriptor Classify(ObjSizeTrackingStepVertex *vertex)
+    {
+        // The decrement rewrites the tracked hclass's BIT_FIELD, and the
+        // retiring arm's FinishObjSizeTracking call rewrites its size and its
+        // transition tree in place: no JS runs and nothing allocates, but
+        // every hclass-layout fact the graph holds is stale afterwards.
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
+    }
+
     static SideEffectDescriptor Classify(CallCommonStubVertex *vertex)
     {
         return SideEffectDescriptor {vertex->GetSideEffectKind()};
@@ -279,7 +308,25 @@ public:
         return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
     }
 
-    static SideEffectDescriptor Classify(FastSuperAllocateThisVertex *vertex)
+    static SideEffectDescriptor Classify(CallBaseConstructorSpreadVertex *vertex)
+    {
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
+    }
+
+    static SideEffectDescriptor Classify(CallDerivedConstructorSpreadVertex *vertex)
+    {
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
+    }
+
+    static SideEffectDescriptor Classify(CallBaseConstructorForwardAllArgsVertex *vertex)
+    {
+        (void)vertex;
+        return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
+    }
+
+    static SideEffectDescriptor Classify(CallDerivedConstructorForwardAllArgsVertex *vertex)
     {
         (void)vertex;
         return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};

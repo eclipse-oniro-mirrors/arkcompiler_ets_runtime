@@ -1,0 +1,6 @@
+few-0: true true 0
+few-2: 1 2 true true 2
+exact-5: 1 5 5
+more-7: 1 5 7
+narrow-0: 0 true
+narrow-3: 3 p r

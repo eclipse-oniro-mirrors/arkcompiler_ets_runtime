@@ -359,6 +359,9 @@ class ArkSteedHeapBroker {
     // a safepoint; callers receive copied data or rooted refs.
     bool CanCallFunction(const ArkSteedFunctionRef &ref, uint32_t actualArgc) const;
     bool TryGetKnownConstructInfo(const ArkSteedFunctionRef &ref, KnownConstructInfo *info) const;
+    // Kind-only constructor query (the predicate JumpIfConstructorIsBase tests at
+    // runtime); safe to fold on whenever the identity deopt pins the callee to `ref`.
+    std::optional<bool> TryGetIsBaseConstructor(const ArkSteedFunctionRef &ref) const;
     uint32_t GetArgumentsObjectSize() const;
     bool CanLoadExternalModuleVar(int32_t index, bool installDependency) const;
     bool CanLoadLocalModuleVar() const;

@@ -1188,6 +1188,20 @@ DEF_RUNTIME_STUBS(SuperCallSpread)
     return RuntimeSuperCallSpread(thread, func, JSHandle<JSTaggedValue>(thread, function), array).GetRawData();
 }
 
+#if ECMASCRIPT_ENABLE_ARK_STEED
+DEF_RUNTIME_STUBS(SuperCallSpreadWithNewTarget)
+{
+    RUNTIME_STUBS_HEADER(SuperCallSpreadWithNewTarget);
+    // ArkSteed variant: compiled frames are not AsmInterpretedFrames, so the
+    // newTarget cannot be read off the frame like SuperCallSpread does — it is
+    // passed explicitly next to func and the raw iterable.
+    JSHandle<JSTaggedValue> func = GetHArg<JSTaggedValue>(argv, argc, 0);       // 0: means the zeroth parameter
+    JSHandle<JSTaggedValue> newTarget = GetHArg<JSTaggedValue>(argv, argc, 1);  // 1: means the first parameter
+    JSHandle<JSTaggedValue> array = GetHArg<JSTaggedValue>(argv, argc, 2);      // 2: means the second parameter
+    return RuntimeSuperCallSpread(thread, func, newTarget, array).GetRawData();
+}
+#endif
+
 DEF_RUNTIME_STUBS(OptSuperCallSpread)
 {
     RUNTIME_STUBS_HEADER(OptSuperCallSpread);

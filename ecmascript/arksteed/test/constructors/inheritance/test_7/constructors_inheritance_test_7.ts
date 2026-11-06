@@ -57,9 +57,9 @@ class Leaf extends Middle {
 //! METHOD Base
 //! HAS CallRuntime OptCopyRestArgs
 //! METHOD Middle
-//! HAS CallRuntime OptSuperCallSpread
+//! HAS CallRuntime SuperCallSpreadWithNewTarget
 //! METHOD Leaf
-//! HAS CallRuntime OptSuperCallSpread
+//! HAS CallRuntime SuperCallSpreadWithNewTarget
 //! METHOD probeInheritanceConstruction
 //! HAS CallRuntime OptNewObjRange
 

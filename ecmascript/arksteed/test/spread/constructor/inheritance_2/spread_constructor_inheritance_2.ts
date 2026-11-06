@@ -38,7 +38,7 @@ class Parent {
 }
 
 //! METHOD Child
-//! HAS CallRuntime OptSuperCallSpread
+//! HAS CallRuntime SuperCallSpreadWithNewTarget
 //! HAS CallRuntime StArraySpread
 //! HAS CallRuntime OptCopyRestArgs
 class Child extends Parent {

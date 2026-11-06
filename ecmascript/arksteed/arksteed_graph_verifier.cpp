@@ -19,6 +19,7 @@
 #include "ecmascript/arksteed/arksteed_register_merge_state.h"
 #include "ecmascript/arksteed/arksteed_vertex.h"
 #include "ecmascript/frames.h"
+#include "ecmascript/global_env_constants.h"
 #include "ecmascript/js_arguments.h"
 #include "ecmascript/js_array.h"
 #include "ecmascript/mem/chunk_containers.h"
@@ -766,11 +767,13 @@ template<typename VertexT>
 constexpr bool ArkSteedGraphVerifier::IsInitializer()
 {
     return std::is_same_v<VertexT, InitializeEmptyObjectVertex> ||
+           std::is_same_v<VertexT, InitializeEmptyObjectWithSizeVertex> ||
            std::is_same_v<VertexT, InitializeObjectWithBufferVertex> ||
            std::is_same_v<VertexT, InitializeEmptyArrayVertex> ||
            std::is_same_v<VertexT, InitializeArrayWithBufferVertex> ||
            std::is_same_v<VertexT, InitializeUnmappedArgumentsElementsVertex> ||
-           std::is_same_v<VertexT, InitializeUnmappedArgumentsVertex>;
+           std::is_same_v<VertexT, InitializeUnmappedArgumentsVertex> ||
+           std::is_same_v<VertexT, StoreArraySpreadFastVertex>;
 }
 
 void ArkSteedGraphVerifier::VerifyStaticSize(uint64_t size, uint32_t minimumSize)
@@ -881,16 +884,32 @@ void ArkSteedGraphVerifier::TryRegisterAllocationPhi(PhiVertex* phi, const ArkSt
     scratch_->pendingAllocation = phi;
 }
 
+bool ArkSteedGraphVerifier::IsLadderFillValue(ValueVertex* fill)
+{
+    constexpr size_t freeObjectClassOffset =
+        static_cast<size_t>(ConstantIndex::FREE_OBJECT_WITH_NONE_FIELD_CLASS_INDEX)
+        * JSTaggedValue::TaggedTypeSize();
+    if (auto* constant = fill->TryCast<TaggedConstantVertex>()) {
+        return constant->GetValue() == JSTaggedValue::VALUE_UNDEFINED;
+    }
+    auto* field = fill->TryCast<LoadTaggedFieldVertex>();
+    return field != nullptr && field->GetOffset() == static_cast<int32_t>(freeObjectClassOffset)
+        && field->GetInput(LoadTaggedFieldVertex::OBJECT_INDEX)->Is<LoadTaggedFromAddressVertex>();
+}
+
 template<typename VertexT>
 void ArkSteedGraphVerifier::VerifyInitializer(VertexT* vertex)
 {
     static_assert(!IsCall(VertexT::PROPERTIES) && !CanAllocate(VertexT::PROPERTIES) &&
                   !CanDeopt(VertexT::PROPERTIES) && !CanThrow(VertexT::PROPERTIES));
-    // The arguments object uses only non-GC write-barrier calls. Its emitter
-    // preserves the working registers and has no safepoint or recovery exit.
-    // This exception is local to that initializer, not all deferred calls.
+    // The arguments object and the spread store publish into an existing
+    // object through a deferred write barrier. Their emitters use only
+    // non-GC barrier calls that preserve the working registers, with no
+    // safepoint or recovery exit. The exception is local to these
+    // initializers, not all deferred calls.
     static_assert(!IsDeferredCall(VertexT::PROPERTIES) ||
-                  std::is_same_v<VertexT, InitializeUnmappedArgumentsVertex>);
+                  std::is_same_v<VertexT, InitializeUnmappedArgumentsVertex> ||
+                  std::is_same_v<VertexT, StoreArraySpreadFastVertex>);
     ASSERT(scratch_->pendingAllocation != nullptr && "Initializer without allocation in this block");
     ASSERT(vertex->GetInput(VertexT::ALLOCATION_INDEX) == scratch_->pendingAllocation);
     // The pending Phi has already passed TryRegisterAllocationPhi.
@@ -919,6 +938,46 @@ void ArkSteedGraphVerifier::VerifyInitializer(VertexT* vertex)
             = JSArguments::GetInlinedPropertyOffset(JSArguments::LENGTH_OF_INLINE_PROPERTIES);
         static_assert(JSHClass::DEFAULT_CAPACITY_OF_IN_OBJECTS == JSArguments::LENGTH_OF_INLINE_PROPERTIES);
         ASSERT(IsInt64Constant(size, objectSize) && "Arguments object requires its static layout size");
+    } else if constexpr (std::is_same_v<VertexT, InitializeEmptyObjectWithSizeVertex>) {
+        // The super-this allocation: the size is decoded from the hclass at
+        // runtime, so no static size exists to bound. What stays checkable is
+        // the wiring: the initializer's SIZE input is the allocation size,
+        // its HCLASS input is the same layout the allocation's slow arm
+        // handed to the runtime allocator (the runtime counterpart of the
+        // rooted heap-constant the literal initializers require), and its
+        // fill is the interpreter ladder's — undefined, or the free-object
+        // global constant behind the glue's constants table.
+        ASSERT(vertex->GetInput(VertexT::SIZE_INDEX) == size);
+        auto *slowAllocation = phi->GetInput(0)->Is<CallRuntimeVertex>()
+                                   ? phi->GetInput(0)->template Cast<CallRuntimeVertex>()
+                                   : phi->GetInput(1)->template Cast<CallRuntimeVertex>();
+        ASSERT(vertex->GetInput(VertexT::HCLASS_INDEX) == slowAllocation->GetInput(1));
+        auto* fill = vertex->GetInput(VertexT::INIT_VALUE_INDEX);
+        if (auto* fillPhi = fill->template TryCast<PhiVertex>()) {
+            for (uint32_t i = 0; i < fillPhi->GetInputCount(); ++i) {
+                ASSERT(IsLadderFillValue(fillPhi->GetInput(i))
+                       && "Fill ladder Phi inputs must be ladder values");
+            }
+        } else {
+            ASSERT(IsLadderFillValue(fill) && "Fill must be a ladder value");
+        }
+    } else if constexpr (std::is_same_v<VertexT, StoreArraySpreadFastVertex>) {
+        // The spread elements allocation: the size must encode the copy
+        // bound — (signExtend(length) << TAGGED_TYPE_SIZE_LOG) + DATA_OFFSET
+        // with length the vertex's own loop bound — and the hclass is the
+        // same canonical TaggedArray class the allocation's slow arm handed
+        // to the runtime allocator.
+        auto* add = size->template Cast<I64AddVertex>();
+        ASSERT(IsInt64Constant(add->GetInput(I64AddVertex::RIGHT_INDEX), TaggedArray::DATA_OFFSET));
+        auto* shift = add->GetInput(I64AddVertex::LEFT_INDEX)->template Cast<I64ShiftLeftVertex>();
+        ASSERT(shift->GetShift() == TAGGED_TYPE_SIZE_LOG);
+        ASSERT(shift->GetInput(I64ShiftLeftVertex::INPUT_INDEX)->template Cast<I32ToI64Vertex>()
+                   ->GetInput(I32ToI64Vertex::INPUT_INDEX) == vertex->GetInput(VertexT::LENGTH_INDEX)
+               && "Spread elements size must encode the copy bound");
+        auto* spreadSlow = phi->GetInput(0)->Is<CallRuntimeVertex>()
+                               ? phi->GetInput(0)->template Cast<CallRuntimeVertex>()
+                               : phi->GetInput(1)->template Cast<CallRuntimeVertex>();
+        ASSERT(vertex->GetInput(VertexT::HCLASS_INDEX) == spreadSlow->GetInput(1));
     } else {
         VerifyLiteralInitializer(vertex, size);
     }

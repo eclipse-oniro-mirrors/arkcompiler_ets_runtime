@@ -1,0 +1,6 @@
+argc0: 0 ''
+argc1: 1 '9'
+argc2: 2 '1,2'
+argc5: 5 '1,2,3,4,5'
+spread: 2 '7,8'
+reflect: 3 '4,5,6' true

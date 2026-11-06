@@ -36,14 +36,14 @@
 //! COUNT CallCommonStub FastNewThisObject 1
 //! HAS_NOT InitializeEmptyObject
 //! COUNT CallNewObjRangeBase 1
-//! COUNT CallNewObjRangeDerived 1
-//! CODEGEN_COUNT *CallNewObjRange*argumentPreparation = fixed* 2
+//! HAS_NOT CallNewObjRangeDerived
+//! CODEGEN_COUNT *CallNewObjRange*argumentPreparation = fixed* 1
 //! CODEGEN_COUNT *CallNewObjRange*commonStub = ArkSteedCallConstructorBody* 0
 //! HAS_NOT CallRuntime OptNewObjRange
 //! METHOD callStable
 //! HAS     InitializeEmptyObject
 //! HAS     CallNewObjRangeBase
-//! HAS     CallNewObjRangeDerived
+//! HAS_NOT CallNewObjRangeDerived
 //! HAS     CallRuntime AllocateInYoung
 
 class Tracking {

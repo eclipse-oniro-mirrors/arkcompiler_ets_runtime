@@ -1,0 +1,6 @@
+first: true neg
+first-after: 5
+warm: true neg
+warm-after: 6
+generic: true neg2
+generic-after: 7

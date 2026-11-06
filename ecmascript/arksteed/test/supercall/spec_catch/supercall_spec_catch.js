@@ -23,7 +23,7 @@
 //! METHOD W
 //! HAS_NOT     BranchIfJSConstructorFunction
 //! HAS         CallBaseConstructor
-//! HAS         CallDerivedConstructor
+//! HAS_NOT     CallDerivedConstructor
 
 class A {
 }

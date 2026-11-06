@@ -18,7 +18,7 @@
 // The existing installation of `CallSuperRestArgsBase` stays. The spread super call lives in
 // the derived constructor `CallSuperRestArgsDerived`, which is additionally compiled as
 // bounded, silent same-domain preparation, so the leaf's own dump carries the actually reached
-// super-call form `CallRuntime OptSuperCallSpread` instead of a borrowed one; a `Call`
+// super-call form `CallRuntime SuperCallSpreadWithNewTarget` instead of a borrowed one; a `Call`
 // substitution for that runtime form is not claimed. The `CallRuntime StArraySpread` form of
 // the forwarded rest array is annotated from that same dump.
 // `COMPILE_COUNT_GE`/`EXEC_COUNT_GE` attribute compilation and entry of the claimed
@@ -35,7 +35,7 @@
 //! EXEC_COUNT_GE *CallSuperRestArgsDerived 1
 //! DEOPT_COUNT *Deoptimize* 0
 //! METHOD CallSuperRestArgsDerived
-//! HAS CallRuntime OptSuperCallSpread
+//! HAS CallRuntime SuperCallSpreadWithNewTarget
 //! HAS CallRuntime StArraySpread
 
 class CallSuperRestArgsBase {

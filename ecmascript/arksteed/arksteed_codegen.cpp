@@ -46,7 +46,6 @@
 #include "ecmascript/js_native_pointer.h"
 #include "ecmascript/js_object.h"
 #include "ecmascript/js_tagged_value.h"
-#include "ecmascript/js_tagged_value_internals.h"
 #include "ecmascript/js_typed_array.h"
 #include "ecmascript/layout_info.h"
 #include "ecmascript/mem/machine_code.h"
@@ -58,8 +57,6 @@
 
 namespace panda::ecmascript::arksteed {
 #define __ assembler_->
-
-constexpr JSTaggedType HCLASS_ADDRESS_MASK = ~JSTaggedValueInternals::TAG_MARK;
 
 namespace {
 
@@ -138,6 +135,50 @@ private:
     ArkSteedRegister result_;
     DeferredRegisterSnapshot snapshot_;
     ArkSteedSafepointTableBuilder *safepointBuilder_;
+    Label returnLabel_;
+};
+
+// The retiring arm of ObjSizeTrackingStep: the typed No-GC stub rewrites the
+// hclass in place and cannot GC, throw, or deopt, so no safepoint or
+// lazy-deopt state accompanies the call; only the caller-saved registers it
+// clobbers need preserving.
+class DeferredFinishObjSizeTracking final : public ArkSteedDeferredCode {
+public:
+    DeferredFinishObjSizeTracking(ArkSteedRegister glue, ArkSteedRegister hclass,
+                                  const DeferredRegisterSnapshot &snapshot)
+        : glue_(glue), hclass_(hclass), snapshot_(snapshot)
+    {}
+
+    Label *GetReturnLabel()
+    {
+        return &returnLabel_;
+    }
+
+    void Generate(ArkSteedAssembler *assembler) override
+    {
+        ArkSteedRegList liveRegisters = snapshot_.liveRegisters & GetNGCRuntimeCallerSavedGeneralRegisters();
+        assembler->PushAll(liveRegisters);
+        // Route both arguments through call-arg slots so loading the C
+        // parameter registers cannot clobber an input that shares one.
+        constexpr int32_t GLUE_SLOT = 0;
+        constexpr int32_t HCLASS_SLOT = 1;
+        assembler->ReserveCallArgSlots(2);
+        assembler->MoveRepr(MachineRepresentation::Word64, assembler->GetCallArgSlot(GLUE_SLOT), glue_);
+        assembler->MoveRepr(MachineRepresentation::Tagged, assembler->GetCallArgSlot(HCLASS_SLOT), hclass_);
+        assembler->MoveRepr(MachineRepresentation::Word64, ArkSteedAssembler::GetParameterRegister(0),
+                            assembler->GetCallArgSlot(GLUE_SLOT));
+        assembler->MoveRepr(MachineRepresentation::Tagged, ArkSteedAssembler::GetParameterRegister(1),
+                            assembler->GetCallArgSlot(HCLASS_SLOT));
+        assembler->CallNGCRuntime(RTSTUB_ID(FinishObjSizeTracking));
+        assembler->FreeCallArgSlots(2);
+        assembler->PopAll(liveRegisters);
+        assembler->Jump(&returnLabel_);
+    }
+
+private:
+    ArkSteedRegister glue_;
+    ArkSteedRegister hclass_;
+    DeferredRegisterSnapshot snapshot_;
     Label returnLabel_;
 };
 
@@ -559,16 +600,14 @@ bool TryGetIntPtrConstant(const ValueVertex *vertex, intptr_t *value)
 
 void LoadObjectType(ArkSteedAssembler *assembler, ArkSteedRegister dst, ArkSteedRegister value)
 {
-    assembler->LoadField(dst, value, static_cast<int32_t>(TaggedObject::HCLASS_OFFSET));
-    assembler->And(dst, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    assembler->LoadHClassFromObject(dst, value);
     assembler->LoadField(dst, dst, static_cast<int32_t>(JSHClass::BIT_FIELD_OFFSET));
     assembler->And(dst, static_cast<int64_t>(0xFF));
 }
 
 void LoadHClassBitField(ArkSteedAssembler *assembler, ArkSteedRegister dst, ArkSteedRegister value)
 {
-    assembler->LoadField(dst, value, static_cast<int32_t>(TaggedObject::HCLASS_OFFSET));
-    assembler->And(dst, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    assembler->LoadHClassFromObject(dst, value);
     assembler->LoadField(dst, dst, static_cast<int32_t>(JSHClass::BIT_FIELD_OFFSET));
 }
 
@@ -774,13 +813,19 @@ void AppendDeoptSources(std::vector<ArkSteedDeoptValue> *deopts,
     }
 }
 
+// Works for CallBaseConstructorVertex and CallBaseConstructorSpreadVertex alike:
+// the BASE_CTOR kind marker plus the bound-this spill slot is argument-delivery
+// agnostic, and the only vertex-specific bit — the THIS input's index, which
+// differs because the spread vertex carries a FUNC prefix — resolves through
+// the template parameter.
+template <typename VertexT>
 void AppendBaseConstructorSources(std::vector<ArkSteedDeoptValue> *deopts,
-                                  const CallBaseConstructorVertex *call, ArkSteedAssembler *assembler)
+                                  const VertexT *call, ArkSteedAssembler *assembler)
 {
     deopts->push_back(MakeConstantDeopt(
         static_cast<int32_t>(SpecVregIndex::DEOPT_CONTINUATION_KIND_INDEX),
         static_cast<int64_t>(EncodeDeoptContinuationKind(DeoptContinuationKind::BASE_CTOR))));
-    const InstructionOperand &thisOperand = call->GetInputLocation(CallBaseConstructorVertex::THIS_INDEX)->GetOperand();
+    const InstructionOperand &thisOperand = call->GetInputLocation(VertexT::THIS_INDEX)->GetOperand();
     ASSERT(thisOperand.IsAnyStackSlot());
     auto thisSlot = AllocatedState::Cast(thisOperand);
     deopts->push_back({
@@ -793,8 +838,9 @@ void AppendBaseConstructorSources(std::vector<ArkSteedDeoptValue> *deopts,
     });
 }
 
-void AppendDerivedConstructorSources(std::vector<ArkSteedDeoptValue> *deopts,
-                                     const CallDerivedConstructorVertex *call)
+// Shared by the non-spread and spread derived variants: only the DERIVED_CTOR
+// kind marker, no vertex state.
+void AppendDerivedConstructorSources(std::vector<ArkSteedDeoptValue> *deopts, const Vertex *call)
 {
     (void)call;
     deopts->push_back(MakeConstantDeopt(
@@ -836,10 +882,14 @@ void EmitLazyDeoptSafepoint(ArkSteedAssembler *assembler,
 
     std::vector<ArkSteedDeoptValue> deopts;
     AppendDeoptSources(&deopts, lazy, assembler, literalTableBuilder);
-    if constexpr (std::is_same_v<NodeT, CallBaseConstructorVertex>) {
+    if constexpr (std::is_same_v<NodeT, CallBaseConstructorVertex> ||
+                  std::is_same_v<NodeT, CallBaseConstructorSpreadVertex> ||
+                  std::is_same_v<NodeT, CallBaseConstructorForwardAllArgsVertex>) {
         AppendBaseConstructorSources(&deopts, vertex, assembler);
     }
-    if constexpr (std::is_same_v<NodeT, CallDerivedConstructorVertex>) {
+    if constexpr (std::is_same_v<NodeT, CallDerivedConstructorVertex> ||
+                  std::is_same_v<NodeT, CallDerivedConstructorSpreadVertex> ||
+                  std::is_same_v<NodeT, CallDerivedConstructorForwardAllArgsVertex>) {
         AppendDerivedConstructorSources(&deopts, vertex);
     }
 
@@ -1207,6 +1257,76 @@ void ArkSteedCodeGenerator::PrepareArkSteedSelfCall(CallSelfVertex *call)
                               CallSelfVertex::FIRST_ARG_INDEX);
 }
 
+template <typename CallVertexT>
+void ArkSteedCodeGenerator::PrepareArkSteedSpreadCall(CallVertexT *call, ArkSteedRegister target,
+                                                      ArkSteedRegister scratch, ArkSteedRegister elements,
+                                                      ArkSteedRegister elementsLength)
+{
+    // Slot layout mirrors PrepareArkSteedCall: [argc][target][newTarget][this][args...].
+    // The mandatory prefix comes from the vertex's input locations (the spread
+    // vertex's TARGET/NEW_TARGET/THIS indices — FUNC sits at index 0), the user
+    // args from the admitted array by a pure slot copy (holes mapped to undefined
+    // inside the helper), and the argc from the JSArray length field (reloaded
+    // at the argc-slot write — the x64 RA pool left for this visitor fits only
+    // three GPR temporaries). The copy, the
+    // reservation and the optional-arg fill run by the elements backing's own
+    // length — the interpreter's argv-buffer sizing (CopyJSArrayToTaggedArrayArgs
+    // loops by GetLengthOfTaggedArray); slots beyond the length field are
+    // holes, so the fill covers [mandatory+1+elementsLength, reserved) and the
+    // hole-mapped undefineds between the argc and the fill keep a callee
+    // expecting more arguments reading undefined.
+    LoadSteedExpectedArgc(target, scratch);
+    // scratch = max(expectedArgc, elementsLength) + NUM_MANDATORY_JSFUNC_ARGS + 2,
+    // aligned even (the same formula as ComputeSteedCallSlotCount with the
+    // user-argc immediate replaced by the runtime argv-buffer length).
+    Label countDone;
+    __ Compare(scratch, elementsLength);
+    __ JumpIf(Condition::GREATER_THAN, &countDone);
+    __ Move(scratch, elementsLength);
+    __ Bind(&countDone);
+    __ Add(scratch, static_cast<int32_t>(NUM_MANDATORY_JSFUNC_ARGS + 1));
+    __ Add(scratch, static_cast<int32_t>(1));
+    __ And(scratch, static_cast<int32_t>(~1));
+
+    __ ReserveCallArgSlots(scratch);
+
+    // Steed-layout mandatory slots: target at CallVertex::TARGET_INDEX(0)+CALL_ARG1,
+    // newTarget at 1+CALL_ARG1, this at 2+CALL_ARG1; the input indices come from
+    // CallVertexT (whose FUNC occupies index 0, shifting TARGET to 1).
+    StoreStubStackArgument(call, CallVertexT::TARGET_INDEX,
+                           __ GetCallArgSlot(CallVertex::TARGET_INDEX + CALL_ARG1));
+    StoreStubStackArgument(call, CallVertexT::NEW_TARGET_INDEX,
+                           __ GetCallArgSlot(CallVertex::NEW_TARGET_INDEX + CALL_ARG1));
+    StoreStubStackArgument(call, CallVertexT::THIS_INDEX,
+                           __ GetCallArgSlot(CallVertex::THIS_INDEX + CALL_ARG1));
+
+    // fillCount = reserved - (mandatory + 1 + elementsLength); the argc slot carries it
+    // temporarily (the same dance as the non-spread variant: the fill helper wants a
+    // counter register and the real argc overwrites the slot afterwards).
+    __ Sub(scratch, static_cast<int32_t>(NUM_MANDATORY_JSFUNC_ARGS + 1));
+    __ Sub(scratch, elementsLength);
+    __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0), scratch);
+
+    // The copy clobbers `elements` (advanced past the TaggedArray header on arm64).
+    // First user-arg slot in the steed layout: argc + NUM_MANDATORY_JSFUNC_ARGS.
+    __ CopySpreadElementsToCallArgSlots(elements, elementsLength, NUM_MANDATORY_JSFUNC_ARGS + 1);
+
+    // Optional-arg fill: lastIndex = elementsLength + mandatory + fillCount (the
+    // pre-summed slot index the fill helper counts down from).
+    __ Move(elements, elementsLength);
+    __ Add(elements, static_cast<int32_t>(NUM_MANDATORY_JSFUNC_ARGS));
+    __ Add(elements, scratch);
+    __ PushUndefinedForSteedSpreadCall(scratch, elements);
+
+    // The real argc: JSArray length field + mandatory, reloaded from the array
+    // input register (still live and untouched — the copy and the fill above
+    // run no code that can run JS or move the array).
+    ArkSteedRegister array = GetInputRegister(call, CallVertexT::ARRAY_INDEX);
+    __ LoadInt32Field(scratch, array, static_cast<int32_t>(JSArray::LENGTH_OFFSET));
+    __ Add(scratch, static_cast<int32_t>(NUM_MANDATORY_JSFUNC_ARGS));
+    __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0), scratch);
+}
+
 void ArkSteedCodeGenerator::PrepareKnownArkSteedCall(CallKnownJSFunctionVertex *call, ArkSteedRegister target)
 {
     const uint32_t userArgc = call->GetActualArgc();
@@ -1265,6 +1385,48 @@ void ArkSteedCodeGenerator::EmitPreparedArkSteedCall(CallT *call, ArkSteedRegist
 }
 
 template <typename CallVertexT>
+void ArkSteedCodeGenerator::EmitKnownArgsArkSteedCall(CallVertexT *call, Label *exit)
+{
+    ASSERT(call->HasKnownExpectedParameterCount());
+    ASSERT(call->GetExpectedParameterCount() == call->GetActualArgc());
+    ArkSteedRegister target = GetInputRegister(call, CallVertexT::TARGET_INDEX);
+    PrepareKnownCallArguments(call, call->GetActualArgc(), call->GetExpectedParameterCount(),
+                              CallVertexT::FIRST_ARG_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister codeEntry = scope.AcquireScratch();
+    __ PrepareSteedCalleeContext(target, codeEntry);
+    __ Call(codeEntry);
+    if (HasLazyDeoptSafepoint(call)) {
+        EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
+    } else {
+        safepointBuilder_->DefineSafepoint(__ GetPcOffset());
+    }
+    FreeArkSteedCallFrame(call);
+    __ Jump(exit);
+}
+
+template <typename CallVertexT>
+void ArkSteedCodeGenerator::EmitCallArkSteedSpread(ArkSteedRegister target, ArkSteedRegister scratch,
+                                                   ArkSteedRegister elements, ArkSteedRegister elementsLength,
+                                                   CallVertexT *call, Label *exit)
+{
+    PrepareArkSteedSpreadCall(call, target, scratch, elements, elementsLength);
+    {
+        TemporaryRegisterScope scope(assembler_);
+        ArkSteedRegister codeEntry = scope.AcquireScratch();
+        __ PrepareSteedCalleeContext(target, codeEntry);
+        __ Call(codeEntry);
+        if (HasLazyDeoptSafepoint(call)) {
+            EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
+        } else {
+            safepointBuilder_->DefineSafepoint(__ GetPcOffset());
+        }
+    }
+    __ RestoreStackPointerToFrameBottom(graph_);
+    __ Jump(exit);
+}
+
+template <typename CallVertexT>
 void ArkSteedCodeGenerator::EmitCallArkSteed(CallVertexT *call, ArkSteedRegister target, ArkSteedRegister scratch,
                                              Label *exit)
 {
@@ -1290,6 +1452,65 @@ void ArkSteedCodeGenerator::EmitCallGeneric(CallT *call, ArkSteedRegister scratc
         safepointBuilder_->DefineSafepoint(__ GetPcOffset());
     }
     __ FreeCallArgSlots(stackArgCount);
+}
+
+template <typename CallVertexT>
+void ArkSteedCodeGenerator::EmitCallConstructorSpreadGeneric(CallVertexT *call, ArkSteedRegister scratch,
+                                                             ArkSteedRegister elements,
+                                                             ArkSteedRegister elementsLength)
+{
+    // The JSCallNew trampoline layout: [argc][argv=0][target][newTarget][this][args...],
+    // mirroring PrepareTrampolineArguments with the compile-time user argc replaced by
+    // the runtime argc. Like the interpreter's SUPERCALL_SPREAD_WITH_ARGV (argvLen from
+    // the JSArray length field, argv buffer sized by the elements backing), the argc
+    // slot carries the length field while the copy fills the whole backing: slots past
+    // the length field are holes mapped to undefined — a dead argv tail the trampoline
+    // never pushes. No optional-arg undefined fill: the trampoline pushes exactly the
+    // given args and the callee-side convention handles the shortfall.
+    // scratch = elementsLength + mandatory + 2 (the argc and argv slots), rounded even.
+    __ Move(scratch, elementsLength);
+    __ Add(scratch, static_cast<int32_t>(NUM_MANDATORY_JSFUNC_ARGS + CALL_ARG2));
+    __ Add(scratch, static_cast<int32_t>(1));
+    __ And(scratch, static_cast<int32_t>(~1));
+    __ ReserveCallArgSlots(scratch);
+
+    // The argc slot: JSArray length field + mandatory, reloaded from the array
+    // input register (holding it live across the element copy would need a
+    // sixth temporary; nothing between the visitor's loads and here runs JS or
+    // moves the array, so the reload reads the same length).
+    ArkSteedRegister array = GetInputRegister(call, CallVertexT::ARRAY_INDEX);
+    __ LoadInt32Field(scratch, array, static_cast<int32_t>(JSArray::LENGTH_OFFSET));
+    __ Add(scratch, static_cast<int32_t>(NUM_MANDATORY_JSFUNC_ARGS));
+    __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0), scratch);
+    __ Move(scratch, 0);
+    __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG1), scratch);
+
+    // Input indices from CallVertexT (FUNC at 0 shifts TARGET to 1); trampoline
+    // layout slots: target at 0+CALL_ARG2, newTarget at 1+CALL_ARG2, this at 2+CALL_ARG2.
+    StoreStubStackArgument(call, CallVertexT::TARGET_INDEX,
+                           __ GetCallArgSlot(CallVertex::TARGET_INDEX + CALL_ARG2));
+    StoreStubStackArgument(call, CallVertexT::NEW_TARGET_INDEX,
+                           __ GetCallArgSlot(CallVertex::NEW_TARGET_INDEX + CALL_ARG2));
+    StoreStubStackArgument(call, CallVertexT::THIS_INDEX,
+                           __ GetCallArgSlot(CallVertex::THIS_INDEX + CALL_ARG2));
+
+    // Spread elements into the user-arg slots (first user slot in the trampoline
+    // layout: argc + argv + mandatory). The copy clobbers `elements` (arm64).
+    constexpr int32_t trampolineFirstUserArgSlot = NUM_MANDATORY_JSFUNC_ARGS + CALL_ARG2;
+    __ CopySpreadElementsToCallArgSlots(elements, elementsLength, trampolineFirstUserArgSlot);
+
+    __ CallTrampoline(RTSTUB_ID(JSCallNew));
+    if (HasLazyDeoptSafepoint(call)) {
+        EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
+    } else {
+        safepointBuilder_->DefineSafepoint(__ GetPcOffset());
+    }
+    // Free by recomputing sp from the frame pointer, like the steed arm above:
+    // the reservation count (and `elementsLength` itself) lived in RA temporaries drawn
+    // from a pool that is mostly caller-saved on both arches (x64:
+    // rax/rcx/rdx/rsi/rdi/r8/r9/r11; arm64: x0-x15), so no register may be
+    // trusted after the trampoline.
+    __ RestoreStackPointerToFrameBottom(graph_);
 }
 
 template <typename CallVertexT>
@@ -1474,6 +1695,43 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CallRuntimeVertex>(CallRuntime
 }
 
 template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<ObjSizeTrackingStepVertex>(ObjSizeTrackingStepVertex *step)
+{
+#ifndef NDEBUG
+    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << step->GetId() << ": ObjSizeTrackingStepVertex";
+#endif
+    ArkSteedRegister glue = GetInputRegister(step, ObjSizeTrackingStepVertex::GLUE_INDEX);
+    ArkSteedRegister hclass = GetInputRegister(step, ObjSizeTrackingStepVertex::HCLASS_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister bitField = scope.Acquire();
+
+    // The admission proved the counter nonzero, so subtracting its weight from
+    // BIT_FIELD is SetConstructionCounter(count - 1): the layout bits below
+    // the counter field can never borrow.
+    constexpr uint32_t counterMask = ((1U << JSHClass::ConstructionCounterBits::SIZE) - 1U)
+                                     << JSHClass::ConstructionCounterBits::START_BIT;
+    __ RecordComment("ObjSizeTrackingStep counter decrement");
+    __ LoadInt32Field(bitField, hclass, static_cast<int32_t>(JSHClass::BIT_FIELD_OFFSET));
+    __ Int32Sub(bitField, bitField,
+                static_cast<int32_t>(1U << JSHClass::ConstructionCounterBits::START_BIT));
+    __ StoreInt32Field(bitField, hclass, static_cast<int32_t>(JSHClass::BIT_FIELD_OFFSET));
+    // A counter field that the decrement zeroed means this construction
+    // retires the slack layout.
+    __ Int32And(bitField, static_cast<int32_t>(counterMask));
+    __ CompareInt32(bitField, 0);
+    // RA records liveness at the node boundary; the deferred call below still
+    // reads both inputs, so preserve their physical registers explicitly.
+    DeferredRegisterSnapshot snapshot = step->GetRegallocInfo()->GetDeferredRegisterSnapshot();
+    for (ArkSteedRegister reg : {glue, hclass}) {
+        snapshot.liveRegisters.Set(reg);
+    }
+    auto *deferred = graph_->GetChunk()->New<DeferredFinishObjSizeTracking>(glue, hclass, snapshot);
+    deferredCode_.push_back(deferred);
+    __ JumpIf(Condition::EQUAL, deferred->GetEntryLabel());
+    __ Bind(deferred->GetReturnLabel());
+}
+
+template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<CallVertex>(CallVertex *call)
 {
     Label callGeneric;
@@ -1577,6 +1835,86 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeEmptyObjectVertex>(I
 }
 
 template<>
+void ArkSteedCodeGenerator::VisitNonControlVertex<GetObjectSizeFromHClassVertex>(
+    GetObjectSizeFromHClassVertex* vertex)
+{
+    ArkSteedRegister hclass = GetInputRegister(vertex, GetObjectSizeFromHClassVertex::HCLASS_INDEX);
+    ArkSteedRegister result = GetResultRegister(vertex);
+    ASSERT(hclass != result);
+    // ObjectSizeInWordsBits holds words, so the byte size is
+    // ((bitField1 >> START) & ((1 << SIZE) - 1)) * TaggedTypeSize. The constant
+    // refold — the word-to-byte scaling migrating into the field extraction —
+    // expresses it as one shift and one mask.
+    static_assert(static_cast<size_t>(JSHClass::ObjectSizeInWordsBits::START_BIT) >=
+                  static_cast<size_t>(TAGGED_TYPE_SIZE_LOG));
+    constexpr uint32_t sizeShift =
+        static_cast<uint32_t>(JSHClass::ObjectSizeInWordsBits::START_BIT) - TAGGED_TYPE_SIZE_LOG;
+    constexpr int32_t sizeMask = static_cast<int32_t>(
+        ((1U << JSHClass::ObjectSizeInWordsBits::SIZE) - 1U) << TAGGED_TYPE_SIZE_LOG);
+    __ RecordComment("GetObjectSizeFromHClass");
+    __ LoadInt32Field(result, hclass, static_cast<int32_t>(JSHClass::BIT_FIELD1_OFFSET));
+    __ Int32ShiftRightLogical(result, sizeShift);
+    __ Int32And(result, sizeMask);
+    __ SignExtendInt32ToInt64(result, result);
+}
+
+template<>
+void ArkSteedCodeGenerator::VisitNonControlVertex<IsObjSizeTrackingInProgressVertex>(
+    IsObjSizeTrackingInProgressVertex* vertex)
+{
+    ArkSteedRegister hclass = GetInputRegister(vertex, IsObjSizeTrackingInProgressVertex::HCLASS_INDEX);
+    ArkSteedRegister result = GetResultRegister(vertex);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister bitField = scope.Acquire();
+    // ConstructionCounterBits of BIT_FIELD holds the slack-tracking count;
+    // any nonzero field means the layout is still being shaped.
+    constexpr int32_t counterMask = static_cast<int32_t>(
+        ((1U << JSHClass::ConstructionCounterBits::SIZE) - 1U)
+        << JSHClass::ConstructionCounterBits::START_BIT);
+    __ RecordComment("IsObjSizeTrackingInProgress");
+    __ LoadInt32Field(bitField, hclass, static_cast<int32_t>(JSHClass::BIT_FIELD_OFFSET));
+    __ Int32And(bitField, counterMask);
+    __ CompareInt32(bitField, 0);
+    EmitTaggedBooleanFromCondition(assembler_, result, Condition::NOT_EQUAL);
+}
+
+template<>
+void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeEmptyObjectWithSizeVertex>(
+    InitializeEmptyObjectWithSizeVertex* vertex)
+{
+    ArkSteedRegister glue = GetInputRegister(vertex, InitializeEmptyObjectWithSizeVertex::GLUE_INDEX);
+    ArkSteedRegister hclass = GetInputRegister(vertex, InitializeEmptyObjectWithSizeVertex::HCLASS_INDEX);
+    ArkSteedRegister fill = GetInputRegister(vertex, InitializeEmptyObjectWithSizeVertex::INIT_VALUE_INDEX);
+    ArkSteedRegister result = GetResultRegister(vertex);
+    ASSERT(result == GetInputRegister(vertex, InitializeEmptyObjectWithSizeVertex::ALLOCATION_INDEX));
+    ArkSteedRegister size = GetInputRegister(vertex, InitializeEmptyObjectWithSizeVertex::SIZE_INDEX);
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister work = scope.Acquire();
+    ArkSteedRegister end = scope.Acquire();
+    // A top-tested loop fills [JSObject::SIZE, size) from the SIZE input with
+    // the FILL_VALUE input, so a field-less hclass (size == JSObject::SIZE)
+    // writes nothing. The fill value is the interpreter fill ladder's
+    // selection: the free-object hclass while a slack-tracking counter shapes
+    // the layout — keeping the not-yet-stored slack walkable once the layout
+    // settles — and undefined after.
+    __ Move(work, result);
+    __ Add(work, static_cast<int32_t>(JSObject::SIZE));
+    __ Move(end, result);
+    __ Add(end, size);
+    Label fillLoop {};
+    Label fillLoopDone {};
+    __ Bind(&fillLoop);
+    __ Compare(work, end);
+    __ JumpIf(Condition::ABOVE_OR_EQUAL, &fillLoopDone);
+    __ StoreField(fill, work, 0);
+    __ Add(work, static_cast<int32_t>(JSTaggedValue::TaggedTypeSize()));
+    __ Jump(&fillLoop);
+    __ Bind(&fillLoopDone);
+    __ InitializeObjectHeader(glue, result, work);
+    __ StoreHeaderRelease(hclass, result);
+}
+
+template<>
 void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeObjectWithBufferVertex>(
     InitializeObjectWithBufferVertex* vertex)
 {
@@ -1672,6 +2010,82 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeUnmappedArgumentsEle
     // register allocator may safely reuse an input register for the result.
     __ Move(result, rawAddress);
     RecordComment("InitializeUnmappedArgumentsElements");
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<StoreArraySpreadFastVertex>(StoreArraySpreadFastVertex *store)
+{
+#ifndef NDEBUG
+    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << store->GetId() << ": StoreArraySpreadFastVertex";
+#endif
+    ArkSteedRegister array = GetInputRegister(store, StoreArraySpreadFastVertex::ARRAY_INDEX);
+    ArkSteedRegister value = GetInputRegister(store, StoreArraySpreadFastVertex::VALUE_INDEX);
+    ArkSteedRegister newElements = GetInputRegister(store, StoreArraySpreadFastVertex::ALLOCATION_INDEX);
+    ArkSteedRegister length = GetInputRegister(store, StoreArraySpreadFastVertex::LENGTH_INDEX);
+    ArkSteedRegister hclass = GetInputRegister(store, StoreArraySpreadFastVertex::HCLASS_INDEX);
+    ArkSteedRegister glue = GetInputRegister(store, StoreArraySpreadFastVertex::GLUE_INDEX);
+    auto result = GetResultRegister(store);
+
+    TemporaryRegisterScope scope(assembler_);
+    // temp0: the source elements. temp1: the copy index. temp2: the copy
+    // element, zero beforehand for the extra-length header store. arm64 only
+    // temp3: the StoreTaggedElement address scratch (x64 folds it into the
+    // addressing mode).
+    ArkSteedRegister temp0 = scope.Acquire();
+    ArkSteedRegister temp1 = scope.Acquire();
+    ArkSteedRegister temp2 = scope.Acquire();
+#if defined(PANDA_TARGET_ARM64)
+    ArkSteedRegister temp3 = scope.Acquire();
+#endif
+    Label copyDone;
+
+    // TaggedArray header on the freshly allocated backing: LENGTH from the
+    // input, EXTRA_LENGTH zero, the canonical hclass from the input.
+    __ Move(temp2, 0);
+    __ StoreInt32Field(temp2, newElements, static_cast<int32_t>(TaggedArray::EXTRA_LENGTH_OFFSET));
+    __ StoreInt32Field(length, newElements, static_cast<int32_t>(TaggedArray::LENGTH_OFFSET));
+    __ StoreHeaderRelease(hclass, newElements);
+
+    // Element copy loop. The admission's hole scan rejected every hole in this
+    // range, so the raw slot is stored as-is; the loop contains no safepoint,
+    // and every tagged slot is written before the backing is published.
+    __ LoadField(temp0, value, static_cast<int32_t>(JSObject::ELEMENTS_OFFSET));
+    __ Move(temp1, 0);
+    Label copyHead;
+    __ Bind(&copyHead);
+    __ Compare(temp1, length);
+    __ JumpIf(Condition::ABOVE_OR_EQUAL, &copyDone);
+    __ LoadTaggedElement(temp2, temp0, temp1);
+#if defined(PANDA_TARGET_ARM64)
+    __ StoreTaggedElement(newElements, temp1, temp2, temp3);
+#else
+    __ StoreTaggedElement(newElements, temp1, temp2, temp1);
+#endif
+    __ Add(temp1, 1);
+    __ Jump(&copyHead);
+    __ Bind(&copyDone);
+
+    // Publish: the backing and the new length become visible together. The
+    // dead loop temporaries leave the pool so the barrier can take its region
+    // scratches from this vertex.
+    scope.Include({temp0, temp1, temp2});
+#if defined(PANDA_TARGET_ARM64)
+    scope.Include({temp3});
+#endif
+    // RA records liveness at the node boundary, where the length input dies in
+    // this vertex; the publish below still reads the array and length inputs
+    // after the deferred barrier call, so preserve those registers explicitly.
+    DeferredRegisterSnapshot snapshot = store->GetRegallocInfo()->GetDeferredRegisterSnapshot();
+    for (ArkSteedRegister reg : {glue, array, length}) {
+        snapshot.liveRegisters.Set(reg);
+    }
+    EmitStoreTaggedFieldWithBarrier(snapshot, glue, array,
+                                    newElements, static_cast<int32_t>(JSObject::ELEMENTS_OFFSET),
+                                    ArkSteedWriteBarrierValueKind::Unknown);
+    __ StoreInt32Field(length, array, static_cast<int32_t>(JSArray::LENGTH_OFFSET));
+    __ SignExtendInt32ToInt64(result, length);
+    __ Or(result, static_cast<int64_t>(JSTaggedValue::TAG_INT));
+    RecordComment("StoreArraySpreadFast");
 }
 
 void ArkSteedCodeGenerator::EmitInitializeHClassWithBarrier(
@@ -2065,7 +2479,11 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CallBaseConstructorVertex>(Cal
     // (builtin constructors, interpreted callees) take the generic [[Construct]]
     // fallback, which already returns a normalized result.
     __ JumpIfFunctionNotCompiled(target, &callConstructor);
-    EmitCallArkSteed(call, target, scratch, &checkDone);
+    if (call->HasKnownExpectedParameterCount() && call->GetExpectedParameterCount() == call->GetActualArgc()) {
+        EmitKnownArgsArkSteedCall(call, &checkDone);
+    } else {
+        EmitCallArkSteed(call, target, scratch, &checkDone);
+    }
     __ Bind(&callConstructor);
     EmitCallConstructorGeneric(call, scratch);
     // Inline the base-variant result tail (what JSFunction::ConstructInternal and
@@ -2110,7 +2528,11 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CallDerivedConstructorVertex>(
     // only the compiled-code state stays runtime variable. Uncompiled supers take
     // the generic [[Construct]] fallback, which already returns a normalized result.
     __ JumpIfFunctionNotCompiled(target, &callConstructor);
-    EmitCallArkSteed(call, target, scratch, &checkDone);
+    if (call->HasKnownExpectedParameterCount() && call->GetExpectedParameterCount() == call->GetActualArgc()) {
+        EmitKnownArgsArkSteedCall(call, &checkDone);
+    } else {
+        EmitCallArkSteed(call, target, scratch, &checkDone);
+    }
     __ Bind(&callConstructor);
     EmitCallConstructorGeneric(call, scratch);
     // Inline the derived-variant result tail: an explicit EcmaObject return passes
@@ -2132,6 +2554,323 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CallDerivedConstructorVertex>(
     // exception dispatch matches the parked pc exactly, so this call site needs
     // its own lazy-deopt kind (an exception settlement skips the continuation
     // branch, and the derived variant carries no ctor/this sources anyway).
+    int stackArgCount = PrepareRuntimeStubStackArguments(
+        call, 0, static_cast<int>(RTSTUB_ID(ThrowNonConstructorException)));
+    __ CallRuntime(RTSTUB_ID(ThrowNonConstructorException));
+    if (HasLazyDeoptSafepoint(call)) {
+        EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
+    } else {
+        safepointBuilder_->DefineSafepoint(__ GetPcOffset());
+    }
+    __ FreeCallArgSlots(stackArgCount);
+    __ Bind(&exit);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<CallBaseConstructorSpreadVertex>(
+    CallBaseConstructorSpreadVertex *call)
+{
+    ArkSteedRegister target = GetInputRegister(call, CallBaseConstructorSpreadVertex::TARGET_INDEX);
+    ArkSteedRegister array = GetInputRegister(call, CallBaseConstructorSpreadVertex::ARRAY_INDEX);
+    Label callGeneric;
+    Label checkDone;
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister scratch = scope.Acquire();
+    ArkSteedRegister elements = scope.Acquire();
+    ArkSteedRegister elementsLength = scope.Acquire();
+    // Like the non-spread variants, the only branch-worthy callee state is the
+    // compiled-code bit; uncompiled supers take the generic [[Construct]]
+    // fallback below. The array passed BranchIfFastSpreadArray, so these two
+    // plain field reads (the elements backing and the backing's own length —
+    // the copy/fill/reservation source of both arms, like the interpreter's
+    // argv buffer) must precede the branch: the generic arm consumes them too.
+    // The JSArray length field (the argc source) is not kept live — the three
+    // held registers plus the element copy's index/element pair already peak
+    // at the five granted temporaries — so each arm reloads it at its argc-
+    // slot write (nothing in between runs JS or moves the array). The runtime-sized slot reservations in both arms stay
+    // unguarded (the other tiers' call sites check sp nowhere either), but are
+    // bounded up front: the BranchIfFastSpreadArray admission rejects arrays
+    // whose elements backing exceeds ArkSteedAssembler::MAX_FAST_SPREAD_ELEMENTS
+    // to the runtime slow path, so the reservation tops out around
+    // max(expectedArgc, cap) slots.
+    __ LoadField(elements, array, static_cast<int32_t>(JSObject::ELEMENTS_OFFSET));
+    __ LoadInt32Field(elementsLength, elements, static_cast<int32_t>(TaggedArray::LENGTH_OFFSET));
+    __ JumpIfFunctionNotCompiled(target, &callGeneric);
+    EmitCallArkSteedSpread(target, scratch, elements, elementsLength, call, &checkDone);
+    __ Bind(&callGeneric);
+    EmitCallConstructorSpreadGeneric(call, scratch, elements, elementsLength);
+    __ Jump(&checkDone);
+    // The base-variant result tail: identical to the non-spread variant (an
+    // explicit EcmaObject return replaces this, any other value keeps thisObj
+    // read from its spill slot).
+    __ Bind(&checkDone);
+    ArkSteedRegister result = GetResultRegister(call);
+    const InstructionOperand &thisOperand =
+        call->GetInputLocation(CallBaseConstructorSpreadVertex::THIS_INDEX)->GetOperand();
+    ASSERT(thisOperand.IsAnyStackSlot());
+    ArkSteedAssembler::MemoryOperand thisSlot = __ GetStackSlot(AllocatedState::Cast(thisOperand));
+    Label notObject;
+    Label exit;
+    __ JumpIfNotTaggedHeapObject(result, &notObject);
+    __ JumpIfNotEcmaObject(result, &notObject);
+    __ Jump(&exit);  // result already holds the value
+    __ Bind(&notObject);
+    __ MoveRepr(MachineRepresentation::Tagged, result, thisSlot);
+    __ Bind(&exit);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<CallDerivedConstructorSpreadVertex>(
+    CallDerivedConstructorSpreadVertex *call)
+{
+    ArkSteedRegister target = GetInputRegister(call, CallDerivedConstructorSpreadVertex::TARGET_INDEX);
+    ArkSteedRegister array = GetInputRegister(call, CallDerivedConstructorSpreadVertex::ARRAY_INDEX);
+    Label callGeneric;
+    Label checkDone;
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister scratch = scope.Acquire();
+    ArkSteedRegister elements = scope.Acquire();
+    ArkSteedRegister elementsLength = scope.Acquire();
+    // Like the non-spread variants, the only branch-worthy callee state is the
+    // compiled-code bit; uncompiled supers take the generic [[Construct]]
+    // fallback below. The array passed BranchIfFastSpreadArray, so these two
+    // plain field reads (the elements backing and the backing's own length —
+    // the copy/fill/reservation source of both arms, like the interpreter's
+    // argv buffer) must precede the branch: the generic arm consumes them too.
+    // The JSArray length field (the argc source) is not kept live — the three
+    // held registers plus the element copy's index/element pair already peak
+    // at the five granted temporaries — so each arm reloads it at its argc-
+    // slot write (nothing in between runs JS or moves the array). The runtime-sized slot reservations in both arms stay
+    // unguarded (the other tiers' call sites check sp nowhere either), but are
+    // bounded up front: the BranchIfFastSpreadArray admission rejects arrays
+    // whose elements backing exceeds ArkSteedAssembler::MAX_FAST_SPREAD_ELEMENTS
+    // to the runtime slow path, so the reservation tops out around
+    // max(expectedArgc, cap) slots.
+    __ LoadField(elements, array, static_cast<int32_t>(JSObject::ELEMENTS_OFFSET));
+    __ LoadInt32Field(elementsLength, elements, static_cast<int32_t>(TaggedArray::LENGTH_OFFSET));
+    __ JumpIfFunctionNotCompiled(target, &callGeneric);
+    EmitCallArkSteedSpread(target, scratch, elements, elementsLength, call, &checkDone);
+    __ Bind(&callGeneric);
+    EmitCallConstructorSpreadGeneric(call, scratch, elements, elementsLength);
+    __ Jump(&checkDone);
+    // The derived-variant result tail: identical to the non-spread variant (an
+    // explicit EcmaObject return passes through, anything else throws — the
+    // frontend's no-undefined-across-the-boundary guarantee is
+    // argument-delivery agnostic).
+    __ Bind(&checkDone);
+    ArkSteedRegister result = GetResultRegister(call);
+    Label notObject;
+    Label exit;
+    __ JumpIfNotTaggedHeapObject(result, &notObject);
+    __ JumpIfNotEcmaObject(result, &notObject);
+    __ Jump(&exit);  // result already holds the value
+    __ Bind(&notObject);
+    // Cold arm: throw TypeError (see the non-spread variant for the lazy-deopt
+    // kind rationale).
+    int stackArgCount =
+        PrepareRuntimeStubStackArguments(call, 0, static_cast<int>(RTSTUB_ID(ThrowNonConstructorException)));
+    __ CallRuntime(RTSTUB_ID(ThrowNonConstructorException));
+    if (HasLazyDeoptSafepoint(call)) {
+        EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
+    } else {
+        safepointBuilder_->DefineSafepoint(__ GetPcOffset());
+    }
+    __ FreeCallArgSlots(stackArgCount);
+    __ Bind(&exit);
+}
+
+// Fast arm of the forward-all-args delivery: slot layout and mandatory slots
+// mirror PrepareArkSteedSpreadCall, the user args come from the caller frame's
+// own argument area by a pure slot copy (no holes, no undefined mapping), and
+// the argc slot carries the full frame argc.
+template <typename CallVertexT>
+void ArkSteedCodeGenerator::PrepareArkSteedForwardAllArgsCall(CallVertexT *call, ArkSteedRegister target,
+                                                              ArkSteedRegister scratch, ArkSteedRegister userArgc)
+{
+    ArkSteedRegister argc = GetInputRegister(call, CallVertexT::ARGC_INDEX);
+    LoadSteedExpectedArgc(target, scratch);
+    Label countDone;
+    __ Compare(scratch, userArgc);
+    __ JumpIf(Condition::GREATER_THAN, &countDone);
+    __ Move(scratch, userArgc);
+    __ Bind(&countDone);
+    __ Add(scratch, static_cast<int32_t>(NUM_MANDATORY_JSFUNC_ARGS + 1));
+    __ Add(scratch, static_cast<int32_t>(1));
+    __ And(scratch, static_cast<int32_t>(~1));
+
+    __ ReserveCallArgSlots(scratch);
+
+    // Steed-layout mandatory slots: target at CallVertex::TARGET_INDEX(0)+CALL_ARG1,
+    // newTarget at 1+CALL_ARG1, this at 2+CALL_ARG1; input indices come from
+    // CallVertexT (whose ARGC sits at index 3, after the mandatory prefix).
+    StoreStubStackArgument(call, CallVertexT::TARGET_INDEX,
+                           __ GetCallArgSlot(CallVertex::TARGET_INDEX + CALL_ARG1));
+    StoreStubStackArgument(call, CallVertexT::NEW_TARGET_INDEX,
+                           __ GetCallArgSlot(CallVertex::NEW_TARGET_INDEX + CALL_ARG1));
+    StoreStubStackArgument(call, CallVertexT::THIS_INDEX,
+                           __ GetCallArgSlot(CallVertex::THIS_INDEX + CALL_ARG1));
+
+    // scratch = fillCount = reserved - (mandatory + 1) - userArgc; it stays live
+    // across the copy as the undefined-fill counter.
+    __ Sub(scratch, static_cast<int32_t>(NUM_MANDATORY_JSFUNC_ARGS + 1));
+    __ Sub(scratch, userArgc);
+
+    // First user-arg slot in the steed layout: argc + NUM_MANDATORY_JSFUNC_ARGS.
+    __ CopyCallerArgsToCallArgSlots(userArgc, NUM_MANDATORY_JSFUNC_ARGS + 1);
+
+    // Optional-arg fill: lastIndex = userArgc + mandatory + fillCount (the
+    // pre-summed slot index the fill helper counts down from).
+    __ Add(userArgc, static_cast<int32_t>(NUM_MANDATORY_JSFUNC_ARGS));
+    __ Add(userArgc, scratch);
+    __ PushUndefinedForSteedSpreadCall(scratch, userArgc);
+
+    // The real argc: the full frame argc (user args + mandatory).
+    __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0), argc);
+}
+
+template <typename CallVertexT>
+void ArkSteedCodeGenerator::EmitCallArkSteedForwardAllArgs(ArkSteedRegister target, ArkSteedRegister scratch,
+                                                           ArkSteedRegister userArgc, CallVertexT *call, Label *exit)
+{
+    PrepareArkSteedForwardAllArgsCall(call, target, scratch, userArgc);
+    {
+        TemporaryRegisterScope scope(assembler_);
+        ArkSteedRegister codeEntry = scope.AcquireScratch();
+        __ PrepareSteedCalleeContext(target, codeEntry);
+        __ Call(codeEntry);
+        if (HasLazyDeoptSafepoint(call)) {
+            EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
+        } else {
+            safepointBuilder_->DefineSafepoint(__ GetPcOffset());
+        }
+    }
+    __ RestoreStackPointerToFrameBottom(graph_);
+    __ Jump(exit);
+}
+
+// Runtime-argc variant of the generic [[Construct]] fallback: the JSCallNew
+// trampoline layout ([argc][argv][target][newTarget][this][args]) with the full
+// frame argc in the argc slot and the caller-frame arguments copied into the
+// user-arg slots. Mirrors EmitCallConstructorSpreadGeneric.
+template <typename CallVertexT>
+void ArkSteedCodeGenerator::EmitCallConstructorForwardAllArgsGeneric(CallVertexT *call, ArkSteedRegister scratch,
+                                                                     ArkSteedRegister userArgc)
+{
+    ArkSteedRegister argc = GetInputRegister(call, CallVertexT::ARGC_INDEX);
+    __ Move(scratch, userArgc);
+    __ Add(scratch, static_cast<int32_t>(NUM_MANDATORY_JSFUNC_ARGS + CALL_ARG2));
+    __ Add(scratch, static_cast<int32_t>(1));
+    __ And(scratch, static_cast<int32_t>(~1));
+    __ ReserveCallArgSlots(scratch);
+
+    __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG0), argc);
+    __ Move(scratch, 0);
+    __ MoveRepr(MachineRepresentation::Word64, __ GetCallArgSlot(CALL_ARG1), scratch);
+
+    StoreStubStackArgument(call, CallVertexT::TARGET_INDEX,
+                           __ GetCallArgSlot(CallVertex::TARGET_INDEX + CALL_ARG2));
+    StoreStubStackArgument(call, CallVertexT::NEW_TARGET_INDEX,
+                           __ GetCallArgSlot(CallVertex::NEW_TARGET_INDEX + CALL_ARG2));
+    StoreStubStackArgument(call, CallVertexT::THIS_INDEX,
+                           __ GetCallArgSlot(CallVertex::THIS_INDEX + CALL_ARG2));
+
+    // First user-arg slot in the trampoline layout: argc + argv + mandatory.
+    constexpr int32_t trampolineFirstUserArgSlot = NUM_MANDATORY_JSFUNC_ARGS + CALL_ARG2;
+    __ CopyCallerArgsToCallArgSlots(userArgc, trampolineFirstUserArgSlot);
+
+    __ CallTrampoline(RTSTUB_ID(JSCallNew));
+    if (HasLazyDeoptSafepoint(call)) {
+        EmitLazyDeoptSafepoint(assembler_, safepointBuilder_, deoptLiteralTableBuilder_, call);
+    } else {
+        safepointBuilder_->DefineSafepoint(__ GetPcOffset());
+    }
+    // The trampoline clobbers every caller-saved register, so the slot count
+    // cannot be re-derived from userArgc after the call; the reservation is
+    // dead here, restore the frame bottom instead (as the steed-call arm does).
+    __ RestoreStackPointerToFrameBottom(graph_);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<CallBaseConstructorForwardAllArgsVertex>(
+    CallBaseConstructorForwardAllArgsVertex *call)
+{
+    ArkSteedRegister target = GetInputRegister(call, CallBaseConstructorForwardAllArgsVertex::TARGET_INDEX);
+    Label callGeneric;
+    Label checkDone;
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister scratch = scope.Acquire();
+    ArkSteedRegister userArgc = scope.Acquire();
+    // The frame argc includes the mandatory arguments, so derive the user count
+    // before the branch — both arms consume it (reservation formula, copy loop,
+    // undefined fill). Like the spread variants, the only branch-worthy callee
+    // state is the compiled-code bit: uncompiled supers take the generic
+    // [[Construct]] fallback below, and the runtime-sized slot reservations in
+    // both arms stay unguarded, bounded up front by the caller frame's own argc.
+    ArkSteedRegister argc = GetInputRegister(call, CallBaseConstructorForwardAllArgsVertex::ARGC_INDEX);
+    __ Move(userArgc, argc);
+    __ Sub(userArgc, static_cast<int32_t>(NUM_MANDATORY_JSFUNC_ARGS));
+    __ JumpIfFunctionNotCompiled(target, &callGeneric);
+    EmitCallArkSteedForwardAllArgs(target, scratch, userArgc, call, &checkDone);
+    __ Bind(&callGeneric);
+    EmitCallConstructorForwardAllArgsGeneric(call, scratch, userArgc);
+    __ Jump(&checkDone);
+    // The base-variant result tail: identical to the non-spread and spread
+    // variants (an explicit EcmaObject return replaces this, any other value
+    // keeps thisObj read from its spill slot).
+    __ Bind(&checkDone);
+    ArkSteedRegister result = GetResultRegister(call);
+    const InstructionOperand &thisOperand =
+        call->GetInputLocation(CallBaseConstructorForwardAllArgsVertex::THIS_INDEX)->GetOperand();
+    ASSERT(thisOperand.IsAnyStackSlot());
+    ArkSteedAssembler::MemoryOperand thisSlot = __ GetStackSlot(AllocatedState::Cast(thisOperand));
+    Label notObject;
+    Label exit;
+    __ JumpIfNotTaggedHeapObject(result, &notObject);
+    __ JumpIfNotEcmaObject(result, &notObject);
+    __ Jump(&exit);  // result already holds the value
+    __ Bind(&notObject);
+    __ MoveRepr(MachineRepresentation::Tagged, result, thisSlot);
+    __ Bind(&exit);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<CallDerivedConstructorForwardAllArgsVertex>(
+    CallDerivedConstructorForwardAllArgsVertex *call)
+{
+    ArkSteedRegister target = GetInputRegister(call, CallDerivedConstructorForwardAllArgsVertex::TARGET_INDEX);
+    Label callGeneric;
+    Label checkDone;
+    TemporaryRegisterScope scope(assembler_);
+    ArkSteedRegister scratch = scope.Acquire();
+    ArkSteedRegister userArgc = scope.Acquire();
+    // The frame argc includes the mandatory arguments, so derive the user count
+    // before the branch — both arms consume it (reservation formula, copy loop,
+    // undefined fill). Like the spread variants, the only branch-worthy callee
+    // state is the compiled-code bit: uncompiled supers take the generic
+    // [[Construct]] fallback below, and the runtime-sized slot reservations in
+    // both arms stay unguarded, bounded up front by the caller frame's own argc.
+    ArkSteedRegister argc = GetInputRegister(call, CallDerivedConstructorForwardAllArgsVertex::ARGC_INDEX);
+    __ Move(userArgc, argc);
+    __ Sub(userArgc, static_cast<int32_t>(NUM_MANDATORY_JSFUNC_ARGS));
+    __ JumpIfFunctionNotCompiled(target, &callGeneric);
+    EmitCallArkSteedForwardAllArgs(target, scratch, userArgc, call, &checkDone);
+    __ Bind(&callGeneric);
+    EmitCallConstructorForwardAllArgsGeneric(call, scratch, userArgc);
+    __ Jump(&checkDone);
+    // The derived-variant result tail: identical to the non-spread and spread
+    // variants (an explicit EcmaObject return passes through, anything else
+    // throws — the frontend's no-undefined-across-the-boundary guarantee is
+    // argument-delivery agnostic).
+    __ Bind(&checkDone);
+    ArkSteedRegister result = GetResultRegister(call);
+    Label notObject;
+    Label exit;
+    __ JumpIfNotTaggedHeapObject(result, &notObject);
+    __ JumpIfNotEcmaObject(result, &notObject);
+    __ Jump(&exit);  // result already holds the value
+    __ Bind(&notObject);
+    // Cold arm: throw TypeError (the same lazy-deopt kind rationale as the
+    // other derived variants).
     int stackArgCount = PrepareRuntimeStubStackArguments(
         call, 0, static_cast<int>(RTSTUB_ID(ThrowNonConstructorException)));
     __ CallRuntime(RTSTUB_ID(ThrowNonConstructorException));
@@ -2181,9 +2920,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfHClassMismatchVertex>(D
     __ Compare(actualHClass, 0);
     __ JumpIf(Condition::NOT_EQUAL, deopt);
 
-    __ LoadField(actualHClass, receiver, TaggedObject::HCLASS_OFFSET);
-    __ Move(expectedHClass, TaggedStateWord::ADDRESS_MASK);
-    __ And(actualHClass, expectedHClass);
+    __ LoadHClassFromObject(actualHClass, receiver);
     __ MoveEmbeddedTagged(expectedHClass, checkHClass->GetExpectedHClassHandleIndex());
     __ Compare(actualHClass, expectedHClass);
 #if defined(PANDA_TARGET_AMD64)
@@ -2216,9 +2953,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfHClassNotInVertex>(Deop
     __ Compare(actualHClass, 0);
     __ JumpIf(Condition::NOT_EQUAL, &deopt);
 
-    __ LoadField(actualHClass, receiver, TaggedObject::HCLASS_OFFSET);
-    __ Move(expectedHClass, TaggedStateWord::ADDRESS_MASK);
-    __ And(actualHClass, expectedHClass);
+    __ LoadHClassFromObject(actualHClass, receiver);
     for (uint32_t i = 0; i < checkHClass->GetExpectedHClassCount(); ++i) {
         __ MoveEmbeddedTagged(expectedHClass, checkHClass->GetExpectedHClassHandleIndex(i));
         __ Compare(actualHClass, expectedHClass);
@@ -2247,10 +2982,8 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfPrototypeChangedVertex>
     Label prototypeHClassDeopt;
     Label pass;
 
-    auto loadHClassAddress = [this, scratch](ArkSteedRegister dst, ArkSteedRegister object) {
-        __ LoadField(dst, object, TaggedObject::HCLASS_OFFSET);
-        __ Move(scratch, TaggedStateWord::ADDRESS_MASK);
-        __ And(dst, scratch);
+    auto loadHClassAddress = [this](ArkSteedRegister dst, ArkSteedRegister object) {
+        __ LoadHClassFromObject(dst, object);
     };
 
     if (checkPrototype->ShouldCheckNotPrototype()) {
@@ -2503,8 +3236,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfNotJSHClassVertex>(Deop
     __ JumpIfNotStrongHeapObject(value, deopt);
     TemporaryRegisterScope scope(assembler_);
     auto hclass = scope.Acquire();
-    __ LoadField(hclass, value, TaggedObject::HCLASS_OFFSET);
-    __ And(hclass, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    __ LoadHClassFromObject(hclass, value);
     __ LoadUint8Field(hclass, hclass, JSHClass::BIT_FIELD_OFFSET);
     __ Compare(hclass, static_cast<int32_t>(JSType::HCLASS));
     __ JumpIf(Condition::NOT_EQUAL, deopt);
@@ -2712,8 +3444,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<LoadPrototypeFromNonJSProxyObj
 #endif
     auto dst = GetResultRegister(loadPrototype);
     auto obj = GetInputRegister(loadPrototype, LoadPrototypeFromNonJSProxyObjectVertex::OBJECT_INDEX);
-    __ LoadField(dst, obj, TaggedObject::HCLASS_OFFSET);
-    __ And(dst, static_cast<int64_t>(TaggedStateWord::ADDRESS_MASK));
+    __ LoadHClassFromObject(dst, obj);
     __ LoadField(dst, dst, JSHClass::PROTOTYPE_OFFSET);
 }
 
@@ -2826,15 +3557,13 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<LoadPrototypeHolderByHClassVer
     Label deopt;
     Label pass;
 
-    __ LoadField(currentHClass, receiver, TaggedObject::HCLASS_OFFSET);
-    __ And(currentHClass, static_cast<int64_t>(TaggedStateWord::ADDRESS_MASK));
+    __ LoadHClassFromObject(currentHClass, receiver);
     __ LoadField(holder, currentHClass, JSHClass::PROTOTYPE_OFFSET);
 
     __ Move(expectedHClass, static_cast<int64_t>(JSTaggedValue::VALUE_NULL));
     __ Compare(holder, expectedHClass);
     __ JumpIf(Condition::EQUAL, &deopt);
-    __ LoadField(currentHClass, holder, TaggedObject::HCLASS_OFFSET);
-    __ And(currentHClass, static_cast<int64_t>(TaggedStateWord::ADDRESS_MASK));
+    __ LoadHClassFromObject(currentHClass, holder);
     __ LoadField(expectedHClass, currentHClass, JSHClass::PROTO_CHANGE_MARKER_OFFSET);
     __ Move(currentHClass, static_cast<int64_t>(JSTaggedValue::VALUE_NULL));
     __ Compare(expectedHClass, currentHClass);
@@ -2849,8 +3578,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<LoadPrototypeHolderByHClassVer
         __ Move(expectedHClass, static_cast<int64_t>(JSTaggedValue::VALUE_NULL));
         __ Compare(holder, expectedHClass);
         __ JumpIf(Condition::EQUAL, &deopt);
-        __ LoadField(currentHClass, holder, TaggedObject::HCLASS_OFFSET);
-        __ And(currentHClass, static_cast<int64_t>(TaggedStateWord::ADDRESS_MASK));
+        __ LoadHClassFromObject(currentHClass, holder);
         __ MoveEmbeddedTagged(expectedHClass, loadHolder->GetExpectedHClassHandleIndex(i));
         __ Compare(currentHClass, expectedHClass);
         __ JumpIf(Condition::NOT_EQUAL, &protoChanged);
@@ -2893,12 +3621,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<LoadHClassAddressVertex>(LoadH
 #endif
     auto dst = GetResultRegister(loadHClass);
     auto object = GetInputRegister(loadHClass, LoadHClassAddressVertex::OBJECT_INDEX);
-    TemporaryRegisterScope scope(assembler_);
-    ArkSteedRegister mask = scope.Acquire();
-    ASSERT(dst != mask);
-    __ LoadField(dst, object, static_cast<int32_t>(TaggedObject::HCLASS_OFFSET));
-    __ Move(mask, TaggedStateWord::ADDRESS_MASK);
-    __ And(dst, mask);
+    __ LoadHClassFromObject(dst, object);
 }
 
 template <>
@@ -2932,8 +3655,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<EnsureWritableElementsVertex>(
 
     TemporaryRegisterScope scope(assembler_);
     ArkSteedRegister objectType = scope.Acquire();
-    __ LoadField(objectType, elements, static_cast<int32_t>(TaggedObject::HCLASS_OFFSET));
-    __ And(objectType, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    __ LoadHClassFromObject(objectType, elements);
     __ LoadField(objectType, objectType, static_cast<int32_t>(JSHClass::BIT_FIELD_OFFSET));
     static_assert(JSHClass::ObjectTypeBits::START_BIT == 0);
     __ And(objectType, static_cast<int32_t>((1U << JSHClass::ObjectTypeBits::SIZE) - 1));
@@ -3421,9 +4143,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<StoreTaggedFieldByHClassVertex
     __ Compare(actualHClass, 0);
     __ JumpIf(Condition::NOT_EQUAL, &deopt);
 
-    __ LoadField(actualHClass, object, static_cast<int32_t>(TaggedObject::HCLASS_OFFSET));
-    __ Move(expectedHClass, TaggedStateWord::ADDRESS_MASK);
-    __ And(actualHClass, expectedHClass);
+    __ LoadHClassFromObject(actualHClass, object);
     for (size_t i = 0; i < storeByHClass->GetCases().size(); ++i) {
         __ MoveEmbeddedTagged(expectedHClass, storeByHClass->GetCases()[i].expectedHClassHandleIndex);
         __ Compare(actualHClass, expectedHClass);
@@ -3647,8 +4367,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CheckedTaggedStringVertex>(Che
 #if defined(PANDA_TARGET_AMD64)
     Label *deopt = RecordEagerDeoptTarget(check, kungfu::DeoptType::NOTSTRING1);
     __ JumpIfNotTaggedHeapObject(value, deopt);
-    __ LoadField(scratch, value, TaggedObject::HCLASS_OFFSET);
-    __ And(scratch, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    __ LoadHClassFromObject(scratch, value);
     __ LoadField(scratch, scratch, JSHClass::BIT_FIELD_OFFSET);
     __ And(scratch, static_cast<int32_t>((1U << JSHClass::TYPE_BITFIELD_NUM) - 1));
     __ Compare(scratch, static_cast<int32_t>(JSType::STRING_FIRST));
@@ -3660,8 +4379,7 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CheckedTaggedStringVertex>(Che
     Label done;
 
     __ JumpIfNotTaggedHeapObject(value, &deopt);
-    __ LoadField(scratch, value, TaggedObject::HCLASS_OFFSET);
-    __ And(scratch, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    __ LoadHClassFromObject(scratch, value);
     __ LoadField(scratch, scratch, JSHClass::BIT_FIELD_OFFSET);
     __ And(scratch, static_cast<int32_t>((1U << JSHClass::TYPE_BITFIELD_NUM) - 1));
     __ Compare(scratch, static_cast<int32_t>(JSType::STRING_FIRST));
@@ -3715,8 +4433,7 @@ void ArkSteedCodeGenerator::VisitControlVertex<BranchIfTaggedStringVertex>(Branc
     BB *ifFalse = jumpIf->IfFalse();
 
     __ JumpIfNotTaggedHeapObject(value, ifFalse->GetLabel());
-    __ LoadField(scratch, value, TaggedObject::HCLASS_OFFSET);
-    __ And(scratch, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    __ LoadHClassFromObject(scratch, value);
     __ LoadField(scratch, scratch, JSHClass::BIT_FIELD_OFFSET);
     __ And(scratch, static_cast<int32_t>((1U << JSHClass::TYPE_BITFIELD_NUM) - 1));
     __ Compare(scratch, static_cast<int32_t>(JSType::STRING_FIRST));
@@ -3747,9 +4464,7 @@ void ArkSteedCodeGenerator::VisitControlVertex<BranchIfHClassInVertex>(BranchIfH
         __ And(actualHClass, expectedHClass);
         __ Compare(actualHClass, 0);
         __ JumpIf(Condition::NOT_EQUAL, ifFalse->GetLabel());
-        __ LoadField(actualHClass, value, TaggedObject::HCLASS_OFFSET);
-        __ Move(expectedHClass, TaggedStateWord::ADDRESS_MASK);
-        __ And(actualHClass, expectedHClass);
+        __ LoadHClassFromObject(actualHClass, value);
     }
     for (uint32_t i = 0; i < jumpIf->GetExpectedHClassCount(); ++i) {
         __ MoveEmbeddedTagged(expectedHClass, jumpIf->GetExpectedHClassHandleIndex(i));
@@ -4388,6 +5103,12 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<I32ToF64Vertex>(I32ToF64Vertex
 }
 
 template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<I32ToI64Vertex>(I32ToI64Vertex *convert)
+{
+    __ SignExtendInt32ToInt64(GetResultRegister(convert), GetInputRegister(convert, I32ToI64Vertex::INPUT_INDEX));
+}
+
+template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<CheckedNumberToF64Vertex>(CheckedNumberToF64Vertex *convert)
 {
     auto dst = GetResultDoubleRegister(convert);
@@ -4627,15 +5348,6 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CallCommonStubVertex>(CallComm
     } else {
         safepointBuilder_->DefineSafepoint(__ GetPcOffset());
     }
-    __ FreeCallArgSlots(stackArgCount);
-}
-
-template <>
-void ArkSteedCodeGenerator::VisitNonControlVertex<FastSuperAllocateThisVertex>(FastSuperAllocateThisVertex *call)
-{
-    int stackArgCount = PrepareCommonStubStackArguments(call, call->GetArgCount());
-    __ CallCommonStub(CommonStubID::FastSuperAllocateThis);
-    safepointBuilder_->DefineSafepoint(__ GetPcOffset());
     __ FreeCallArgSlots(stackArgCount);
 }
 
@@ -4909,6 +5621,34 @@ void ArkSteedCodeGenerator::VisitControlVertex<BranchIfBaseVertex>(BranchIfBaseV
 }
 
 template <>
+void ArkSteedCodeGenerator::VisitControlVertex<BranchIfFastSpreadArrayVertex>(BranchIfFastSpreadArrayVertex *jumpIf)
+{
+    BB *ifTrue = jumpIf->IfTrue();
+    BB *ifFalse = jumpIf->IfFalse();
+    auto value = GetInputRegister(jumpIf, BranchIfFastSpreadArrayVertex::VALUE_INDEX);
+    auto globalEnv = GetInputRegister(jumpIf, BranchIfFastSpreadArrayVertex::GLOBAL_ENV_INDEX);
+    __ JumpIfNotFastSpreadArray(value, globalEnv, ifFalse->GetLabel(), jumpIf->CheckHoles());
+    if (!IsNextBlockInLayout(ifTrue)) {
+        __ Jump(ifTrue->GetLabel());
+    }
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitControlVertex<BranchIfStoreArraySpreadAdmittedVertex>(
+    BranchIfStoreArraySpreadAdmittedVertex *jumpIf)
+{
+    BB *ifTrue = jumpIf->IfTrue();
+    BB *ifFalse = jumpIf->IfFalse();
+    auto array = GetInputRegister(jumpIf, BranchIfStoreArraySpreadAdmittedVertex::ARRAY_INDEX);
+    auto value = GetInputRegister(jumpIf, BranchIfStoreArraySpreadAdmittedVertex::VALUE_INDEX);
+    auto globalEnv = GetInputRegister(jumpIf, BranchIfStoreArraySpreadAdmittedVertex::GLOBAL_ENV_INDEX);
+    __ JumpIfStoreArraySpreadNotAdmitted(array, value, globalEnv, ifFalse->GetLabel());
+    if (!IsNextBlockInLayout(ifTrue)) {
+        __ Jump(ifTrue->GetLabel());
+    }
+}
+
+template <>
 void ArkSteedCodeGenerator::VisitControlVertex<BranchIfReferenceEqualVertex>(BranchIfReferenceEqualVertex *jumpIf)
 {
     BB *ifTrue = jumpIf->IfTrue();
@@ -4936,8 +5676,7 @@ void ArkSteedCodeGenerator::VisitControlVertex<BranchIfCallableVertex>(BranchIfC
     __ And(scratch, static_cast<int64_t>(JSTaggedValue::TAG_HEAPOBJECT_MASK));
     __ Compare(scratch, 0);
     __ JumpIf(Condition::NOT_EQUAL, ifFalse->GetLabel());
-    __ LoadField(scratch, value, static_cast<int32_t>(TaggedObject::HCLASS_OFFSET));
-    __ And(scratch, static_cast<int64_t>(HCLASS_ADDRESS_MASK));
+    __ LoadHClassFromObject(scratch, value);
     __ LoadInt32Field(scratch, scratch, static_cast<int32_t>(JSHClass::BIT_FIELD_OFFSET));
     __ And(scratch, static_cast<int32_t>(1U << JSHClass::CallableBit::START_BIT));
     __ Compare(scratch, 0);
@@ -4956,8 +5695,7 @@ void ArkSteedCodeGenerator::VisitControlVertex<BranchIfObjectTypeVertex>(BranchI
     ArkSteedRegister value = GetInputRegister(jumpIf, BranchIfObjectTypeVertex::VALUE_INDEX);
     TemporaryRegisterScope scope(assembler_);
     ArkSteedRegister objectType = scope.Acquire();
-    __ LoadField(objectType, value, static_cast<int32_t>(TaggedObject::HCLASS_OFFSET));
-    __ And(objectType, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    __ LoadHClassFromObject(objectType, value);
     __ LoadField(objectType, objectType, static_cast<int32_t>(JSHClass::BIT_FIELD_OFFSET));
     static_assert(JSHClass::ObjectTypeBits::START_BIT == 0);
     __ And(objectType, static_cast<int32_t>((1U << JSHClass::ObjectTypeBits::SIZE) - 1));

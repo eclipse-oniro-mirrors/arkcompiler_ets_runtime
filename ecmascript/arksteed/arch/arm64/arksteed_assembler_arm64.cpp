@@ -25,12 +25,15 @@
 #include "ecmascript/arksteed/arksteed_graph.h"
 #include "ecmascript/base/bit_helper.h"
 #include "ecmascript/byte_array.h"
+#include "ecmascript/global_env.h"
+#include "ecmascript/js_array.h"
 #include "ecmascript/js_function.h"
 #include "ecmascript/js_hclass.h"
 #include "ecmascript/js_native_pointer.h"
 #include "ecmascript/js_thread.h"
 #include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/js_typed_array.h"
+#include "ecmascript/mem/mem.h"
 #include "ecmascript/mem/tagged_object.h"
 #include "ecmascript/method.h"
 #include "ecmascript/string/line_string.h"
@@ -210,7 +213,7 @@ void ArkSteedAssembler::LoadInt32Field(ArkSteedRegister dst, ArkSteedRegister ba
 
 void ArkSteedAssembler::LoadTaggedElement(ArkSteedRegister dst, ArkSteedRegister elements, ArkSteedRegister index)
 {
-    constexpr uint8_t TAGGED_SIZE_SHIFT = 3;
+    constexpr uint8_t TAGGED_SIZE_SHIFT = static_cast<uint8_t>(TAGGED_TYPE_SIZE_LOG);
     assembler_.Add(dst, elements, aarch64::Operand(index, aarch64::UXTW, TAGGED_SIZE_SHIFT));
     LoadField(dst, dst, static_cast<int32_t>(TaggedArray::DATA_OFFSET));
 }
@@ -218,7 +221,7 @@ void ArkSteedAssembler::LoadTaggedElement(ArkSteedRegister dst, ArkSteedRegister
 void ArkSteedAssembler::StoreTaggedElement(ArkSteedRegister elements, ArkSteedRegister index,
                                            ArkSteedRegister value, ArkSteedRegister scratch)
 {
-    constexpr uint8_t TAGGED_SIZE_SHIFT = 3;
+    constexpr uint8_t TAGGED_SIZE_SHIFT = static_cast<uint8_t>(TAGGED_TYPE_SIZE_LOG);
     assembler_.Add(scratch, elements, aarch64::Operand(index, aarch64::UXTW, TAGGED_SIZE_SHIFT));
     StoreField(value, scratch, static_cast<int32_t>(TaggedArray::DATA_OFFSET));
 }
@@ -401,7 +404,7 @@ void ArkSteedAssembler::LoadActualArgument(ArkSteedRegister dst, ArkSteedRegiste
 {
     // 3: skip saved fp, return address, and argc; then skip mandatory JS-function arguments.
     constexpr int32_t FIRST_USER_ARG_SLOT = 3 + NUM_MANDATORY_JSFUNC_ARGS;
-    constexpr uint8_t TAGGED_SIZE_SHIFT = 3;
+    constexpr uint8_t TAGGED_SIZE_SHIFT = static_cast<uint8_t>(TAGGED_TYPE_SIZE_LOG);
     static_assert(JSTaggedValue::TaggedTypeSize() == (1U << TAGGED_SIZE_SHIFT));
     assembler_.Add(scratch, kFramePointerRegister,
                    aarch64::Operand(index, aarch64::UXTW, TAGGED_SIZE_SHIFT));
@@ -1326,8 +1329,7 @@ void ArkSteedAssembler::JumpIfNotJSFunction(ArkSteedRegister value, Label *targe
     TemporaryRegisterScope scope(this);
     ArkSteedRegister hclass = scope.Acquire();
     ArkSteedRegister objectType = scope.Acquire();
-    LoadField(hclass, value, TaggedObject::HCLASS_OFFSET);
-    And(hclass, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    LoadHClassFromObject(hclass, value);
     LoadField(objectType, hclass, JSHClass::BIT_FIELD_OFFSET);
     And(objectType, static_cast<int32_t>((1U << JSHClass::TYPE_BITFIELD_NUM) - 1));
     Compare(objectType, static_cast<int32_t>(JSType::JS_FUNCTION_FIRST));
@@ -1341,8 +1343,7 @@ void ArkSteedAssembler::JumpIfNotEcmaObject(ArkSteedRegister value, Label *targe
     TemporaryRegisterScope scope(this);
     ArkSteedRegister hclass = scope.Acquire();
     ArkSteedRegister objectType = scope.Acquire();
-    LoadField(hclass, value, TaggedObject::HCLASS_OFFSET);
-    And(hclass, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    LoadHClassFromObject(hclass, value);
     LoadField(objectType, hclass, JSHClass::BIT_FIELD_OFFSET);
     And(objectType, static_cast<int32_t>((1U << JSHClass::TYPE_BITFIELD_NUM) - 1));
     Compare(objectType, static_cast<int32_t>(JSType::ECMA_OBJECT_FIRST));
@@ -1357,8 +1358,7 @@ void ArkSteedAssembler::JumpIfClassConstructor(ArkSteedRegister jsFunc, Label *t
     ArkSteedRegister hclass = scope.Acquire();
     ArkSteedRegister bitfield = scope.Acquire();
     Label notClassConstructor;
-    LoadField(hclass, jsFunc, TaggedObject::HCLASS_OFFSET);
-    And(hclass, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    LoadHClassFromObject(hclass, jsFunc);
     LoadField(bitfield, hclass, JSHClass::BIT_FIELD_OFFSET);
     TestAndBranchIfZero(bitfield, JSHClass::IsClassConstructorOrPrototypeBit::START_BIT, &notClassConstructor);
     TestAndBranchIfNotZero(bitfield, JSHClass::ConstructorBit::START_BIT, target);
@@ -1369,8 +1369,7 @@ void ArkSteedAssembler::JumpIfNotJSConstructorFunction(ArkSteedRegister value, L
 {
     TemporaryRegisterScope scope(this);
     ArkSteedRegister bitfield = scope.Acquire();
-    LoadField(bitfield, value, TaggedObject::HCLASS_OFFSET);
-    And(bitfield, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    LoadHClassFromObject(bitfield, value);
     LoadField(bitfield, bitfield, JSHClass::BIT_FIELD_OFFSET);
     // Constructor bit first: the type mask below clears the rest of the bitfield.
     TestAndBranchIfZero(bitfield, JSHClass::ConstructorBit::START_BIT, target);
@@ -1389,8 +1388,7 @@ void ArkSteedAssembler::JumpIfNewTargetHClassNotReady(ArkSteedRegister value, La
     // Mirrors the FastSuperAllocateThis stub's inline conditions: JSFunction first (the
     // proto-or-hclass load dereferences newTarget), tag bits before the slot content is
     // dereferenced, then JSHClass, then a JS_OBJECT instance type.
-    LoadField(scratch, value, TaggedObject::HCLASS_OFFSET);
-    And(scratch, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    LoadHClassFromObject(scratch, value);
     LoadField(scratch, scratch, JSHClass::BIT_FIELD_OFFSET);
     And(scratch, static_cast<int32_t>((1U << JSHClass::TYPE_BITFIELD_NUM) - 1));
     Compare(scratch, static_cast<int32_t>(JSType::JS_FUNCTION_FIRST));
@@ -1402,8 +1400,7 @@ void ArkSteedAssembler::JumpIfNewTargetHClassNotReady(ArkSteedRegister value, La
     And(scratch, static_cast<int64_t>(JSTaggedValue::TAG_HEAPOBJECT_MASK));
     Compare(scratch, 0);
     JumpIf(Condition::NOT_EQUAL, target);
-    LoadField(scratch, protoOrHClass, TaggedObject::HCLASS_OFFSET);
-    And(scratch, static_cast<int64_t>(TaggedObject::GC_STATE_MASK));
+    LoadHClassFromObject(scratch, protoOrHClass);
     LoadField(scratch, scratch, JSHClass::BIT_FIELD_OFFSET);
     And(scratch, static_cast<int32_t>((1U << JSHClass::TYPE_BITFIELD_NUM) - 1));
     Compare(scratch, static_cast<int32_t>(JSType::HCLASS));
@@ -1412,6 +1409,117 @@ void ArkSteedAssembler::JumpIfNewTargetHClassNotReady(ArkSteedRegister value, La
     And(scratch, static_cast<int32_t>((1U << JSHClass::TYPE_BITFIELD_NUM) - 1));
     Compare(scratch, static_cast<int32_t>(JSType::JS_OBJECT));
     JumpIf(Condition::NOT_EQUAL, target);
+}
+
+void ArkSteedAssembler::JumpIfNotFastSpreadArray(ArkSteedRegister value, ArkSteedRegister globalEnv, Label *target,
+                                                 bool checkHoles)
+{
+    TemporaryRegisterScope scope(this);
+    // Three scratch registers recycled through the admission phases; each
+    // phase's comment names the value a temp currently holds. temp1 keeps one
+    // job the longest — the array's hclass bitfield through the type/stable/
+    // kind checks, then the elements object — while temp0 and temp2 rotate
+    // whatever the phase needs (hclass, kind, lengths, global env bits, and
+    // at the end the scan's element value and index).
+    ArkSteedRegister temp0 = scope.Acquire();
+    ArkSteedRegister temp1 = scope.Acquire();
+    ArkSteedRegister temp2 = scope.Acquire();
+    Label kindAdmitted;
+    // A heap object first: the hclass load dereferences the value.
+    JumpIfNotTaggedHeapObject(value, target);
+    // The whole admission set hangs off two loads: the array's hclass bitfield
+    // (JSType, elements kind, stable bit, prototype-modified bit) and the global
+    // env bitfield (iterator detector, elements guardians).
+    LoadHClassFromObject(temp0, value);
+    LoadField(temp1, temp0, JSHClass::BIT_FIELD_OFFSET);
+    // JSType == JS_ARRAY (low TYPE_BITFIELD_NUM bits of the bitfield).
+    And(temp1, static_cast<int32_t>((1U << JSHClass::TYPE_BITFIELD_NUM) - 1));
+    Compare(temp1, static_cast<int32_t>(JSType::JS_ARRAY));
+    JumpIf(Condition::NOT_EQUAL, target);
+    LoadField(temp1, temp0, JSHClass::BIT_FIELD_OFFSET);
+    // IsStableElements bit: rejects dictionary-mode elements.
+    TestAndBranchIfZero(temp1, JSHClass::IsStableElementsBit::START_BIT, target);
+    // IsJSArrayPrototypeModified bit: rejects arrays created with a prototype
+    // other than the current Array.prototype.
+    TestAndBranchIfNotZero(temp1, JSHClass::IsJSArrayPrototypeModifiedBit::START_BIT, target);
+    // Elements kind (bits 13-17 of the bitfield), the interpreter ladder's
+    // ElementsKindHclassCompare: non-GENERIC kinds pass (the backing
+    // representation is decided by the elements object's JSType below),
+    // GENERIC is admitted only with the canonical pristine hclass (any own
+    // property, e.g. a shadowing @@iterator, transitions it away).
+    Move(temp2, temp1);
+    Lsr(temp2, JSHClass::ElementsKindBits::START_BIT);
+    And(temp2, static_cast<int32_t>((1U << JSHClass::ELEMENTS_KIND_BITFIELD_NUM) - 1));
+    Compare(temp2, static_cast<int32_t>(ElementsKind::GENERIC));
+    JumpIf(Condition::NOT_EQUAL, &kindAdmitted);
+    {
+        constexpr size_t canonicalHClassOffset =
+            GlobalEnv::HEADER_SIZE +
+            static_cast<size_t>(GlobalEnvField::ELEMENT_HOLE_TAGGED_HCLASS_INDEX) * JSTaggedValue::TaggedTypeSize();
+        LoadField(temp2, globalEnv, static_cast<int32_t>(canonicalHClassOffset));
+        Compare(temp2, temp0);
+        JumpIf(Condition::NOT_EQUAL, target);
+    }
+    Bind(&kindAdmitted);
+    // Tagged-backing admission on the elements object's own JSType (the same
+    // encoding CopyJSArrayToTaggedArrayArgs dispatches on): the mutant
+    // families hold unboxed int/double slots and take the runtime slow path.
+    LoadField(temp1, value, static_cast<int32_t>(JSObject::ELEMENTS_OFFSET));
+    // Length cap, for stack safety: both spread arms size their call-slot
+    // reservation from this backing's length with no sp check at the call
+    // site (the cross-tier call convention), so longer arrays must take the
+    // runtime slow path, which materializes argv on the heap under its own
+    // checks. Placed first after the elements load to short-circuit the
+    // backing-kind reads below.
+    LoadInt32Field(temp2, temp1, static_cast<int32_t>(TaggedArray::LENGTH_OFFSET));
+    Compare(temp2, MAX_FAST_SPREAD_ELEMENTS);
+    JumpIf(Condition::GREATER_THAN, target);
+    LoadHClassFromObject(temp2, temp1);
+    LoadField(temp1, temp2, JSHClass::BIT_FIELD_OFFSET);
+    And(temp1, static_cast<int32_t>((1U << JSHClass::TYPE_BITFIELD_NUM) - 1));
+    Compare(temp1, static_cast<int32_t>(JSType::MUTANT_TAGGED_ARRAY));
+    JumpIf(Condition::EQUAL, target);
+    Compare(temp1, static_cast<int32_t>(JSType::COW_MUTANT_TAGGED_ARRAY));
+    JumpIf(Condition::EQUAL, target);
+    // Global Array.prototype context: the iterator detector (Array.prototype
+    // [Symbol.iterator] unmodified — otherwise the custom iterator must run)
+    // and the elements guardians (Array.prototype carries no elements).
+    LoadField(temp2, globalEnv, static_cast<int32_t>(GlobalEnv::BIT_FIELD_OFFSET));
+    TestAndBranchIfNotZero(temp2, GlobalEnv::ArrayIteratorDetectorBits::START_BIT, target);
+    TestAndBranchIfZero(temp2, GlobalEnv::ArrayPrototypeChangedGuardiansBits::START_BIT, target);
+    if (checkHoles) {
+        // STARRAYSPREAD-only tail: a hole resolves through the prototype chain
+        // in the runtime slow path, not through the copy's undefined mapping.
+        // The scan walks exactly the copy range [0, array length), mirroring
+        // the runtime arm: RuntimeStArraySpread's stable-array fast path
+        // copies GetArrayLength() elements without consulting the backing's
+        // own length — a stable admitted array's backing is at least the
+        // array length, the invariant CopyJSArrayObject asserts — so the
+        // grown tail between the two lengths is never copied and needs no
+        // scan. A negative array length is a uint32 length above INT32_MAX;
+        // an array that long can only take the runtime slow path. The scan
+        // index lives in temp2 and the loaded element in temp0, with the
+        // backing in temp1: the index must survive the element load, or the
+        // loaded tagged word becomes the next index and the scan turns into
+        // an out-of-bounds walk (a trailing raw 0 even ends it after a single
+        // slot).
+        LoadField(temp1, value, static_cast<int32_t>(JSObject::ELEMENTS_OFFSET));
+        LoadInt32Field(temp0, value, static_cast<int32_t>(JSArray::LENGTH_OFFSET));
+        CompareInt32(temp0, 0);
+        JumpIf(Condition::LESS_THAN, target);
+        Move(temp2, temp0);
+        Label scanLoop;
+        Label scanDone;
+        Bind(&scanLoop);
+        CompareInt32(temp2, 0);
+        JumpIf(Condition::ZERO, &scanDone);
+        Add(temp2, -1);
+        LoadTaggedElement(temp0, temp1, temp2);
+        Compare(temp0, static_cast<int64_t>(JSTaggedValue::Hole().GetRawData()));
+        JumpIf(Condition::EQUAL, target);
+        Jump(&scanLoop);
+        Bind(&scanDone);
+    }
 }
 
 void ArkSteedAssembler::JumpIfConstructorIsBase(ArkSteedRegister jsFunc, Label *target)
@@ -1664,6 +1772,98 @@ void ArkSteedAssembler::PushUndefinedForSteedCall(ArkSteedRegister fillSlotCount
     Compare(fillSlotCount, firstUndefinedArgBaseSlot);
     JumpIf(Condition::GREATER_THAN, &fillUndefined);
     Bind(&fillDone);
+}
+
+void ArkSteedAssembler::PushUndefinedForSteedSpreadCall(ArkSteedRegister fillSlotCount, ArkSteedRegister lastIndex)
+{
+    Label fillUndefined;
+    Label fillDone;
+    Compare(fillSlotCount, 0);
+    JumpIf(Condition::LESS_THAN_OR_EQUAL, &fillDone);
+
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister scratch = scope.AcquireScratch();
+    constexpr int32_t SLOT_INDEX_SHIFT = 3;
+    Move(scratch, static_cast<int64_t>(JSTaggedValue::VALUE_UNDEFINED));
+    // lastIndex is the pre-summed slot index (mandatory prefix + spread length +
+    // fill offset); the loop counts it down to the first optional slot - 1.
+    Bind(&fillUndefined);
+    assembler_.Str(scratch, MemoryOperand(aarch64::sp, lastIndex, aarch64::UXTW, SLOT_INDEX_SHIFT));
+    Sub(lastIndex, 1);
+    Sub(fillSlotCount, 1);
+    Compare(fillSlotCount, 0);
+    JumpIf(Condition::GREATER_THAN, &fillUndefined);
+    Bind(&fillDone);
+}
+
+void ArkSteedAssembler::CopySpreadElementsToCallArgSlots(ArkSteedRegister elements, ArkSteedRegister length,
+                                                         int32_t firstUserArgSlot)
+{
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister index = scope.Acquire();
+    ArkSteedRegister elem = scope.Acquire();
+    constexpr int32_t SLOT_INDEX_SHIFT = 3;
+    Label loop;
+    Label notHole;
+    Label done;
+    Compare(length, 0);
+    JumpIf(Condition::LESS_THAN_OR_EQUAL, &done);
+    // arm64 register-offset addressing has no displacement slot: advance the base
+    // to the TaggedArray data area first (elements is dead after the copy).
+    Add(elements, static_cast<int32_t>(TaggedArray::DATA_OFFSET));
+    Move(index, 0);
+    Bind(&loop);
+    // elem = [elements + index*8]
+    assembler_.Ldr(elem, MemoryOperand(elements, index, aarch64::UXTW, SLOT_INDEX_SHIFT));
+    // Hole -> undefined (VALUE_HOLE = 0x05 fits an imm compare). Defensive:
+    // the SUPERCALLSPREAD operand is the frontend-materialized spread result,
+    // which the starrayspread admission (or its runtime arm) keeps hole-free.
+    Compare(elem, static_cast<int64_t>(JSTaggedValue::VALUE_HOLE));
+    JumpIf(Condition::NOT_EQUAL, &notHole);
+    Move(elem, static_cast<uint64_t>(JSTaggedValue::VALUE_UNDEFINED));
+    Bind(&notHole);
+    // [sp + index*8 + firstUserArgSlot*8] = elem — same addressing constraint:
+    // fold the base slot offset into the index instead.
+    Add(index, firstUserArgSlot);
+    assembler_.Str(elem, MemoryOperand(aarch64::sp, index, aarch64::UXTW, SLOT_INDEX_SHIFT));
+    Sub(index, firstUserArgSlot);
+    Add(index, 1);
+    Compare(index, length);
+    JumpIf(Condition::LESS_THAN, &loop);
+    Bind(&done);
+}
+
+void ArkSteedAssembler::CopyCallerArgsToCallArgSlots(ArkSteedRegister length, int32_t firstUserArgSlot)
+{
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister index = scope.Acquire();
+    ArkSteedRegister elem = scope.Acquire();
+    ArkSteedRegister srcBase = scope.Acquire();
+    // Same source slot as LoadActualArgument: skip saved fp, return address,
+    // argc, and the mandatory JS-function arguments.
+    constexpr int32_t FIRST_USER_ARG_SLOT = 3 + NUM_MANDATORY_JSFUNC_ARGS;
+    constexpr uint8_t TAGGED_SIZE_SHIFT = static_cast<uint8_t>(TAGGED_TYPE_SIZE_LOG);
+    Label loop;
+    Label done;
+    Compare(length, 0);
+    JumpIf(Condition::LESS_THAN_OR_EQUAL, &done);
+    Move(index, 0);
+    Bind(&loop);
+    // elem = [fp + index*8 + FIRST_USER_ARG_SLOT*8] — register-offset
+    // addressing has no displacement slot, so the index-scaled fp goes through
+    // srcBase first (the LoadActualArgument idiom).
+    assembler_.Add(srcBase, kFramePointerRegister,
+                   aarch64::Operand(index, aarch64::UXTW, TAGGED_SIZE_SHIFT));
+    LoadField(elem, srcBase, FIRST_USER_ARG_SLOT * FRAME_SLOT_SIZE);
+    // [sp + index*8 + firstUserArgSlot*8] = elem — same addressing constraint:
+    // fold the base slot offset into the index instead.
+    Add(index, firstUserArgSlot);
+    assembler_.Str(elem, MemoryOperand(aarch64::sp, index, aarch64::UXTW, TAGGED_SIZE_SHIFT));
+    Sub(index, firstUserArgSlot);
+    Add(index, 1);
+    Compare(index, length);
+    JumpIf(Condition::LESS_THAN, &loop);
+    Bind(&done);
 }
 
 void ArkSteedAssembler::PrepareSteedCalleeContext(ArkSteedRegister target, ArkSteedRegister codeEntry)

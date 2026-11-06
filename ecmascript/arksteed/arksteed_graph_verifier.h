@@ -154,6 +154,10 @@ private:
 
     void TryRegisterAllocationPhi(PhiVertex* phi, const ArkSteedState& state);
 
+    // The super-this fill ladder's values: undefined, or the free-object
+    // global constant behind the glue's constants table slot.
+    static bool IsLadderFillValue(ValueVertex* fill);
+
     template<typename VertexT>
     void VerifyInitializer(VertexT* vertex);
 

@@ -155,6 +155,15 @@ void CallRuntimeVertex::SetValueLocationConstraints()
     UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
 }
 
+void ObjSizeTrackingStepVertex::SetValueLocationConstraints()
+{
+    // The read-modify-write runs in one scratch; the deferred FinishObjSizeTracking
+    // call materializes its own C arguments after preserving live registers.
+    SetTemporariesNeeded(1);
+    UseRegister(Arg(GLUE_INDEX));
+    UseRegister(Arg(HCLASS_INDEX));
+}
+
 void CallVertex::SetValueLocationConstraints()
 {
     DefineAsFixed(this, 0);
@@ -342,6 +351,37 @@ void InitializeUnmappedArgumentsElementsVertex::SetValueLocationConstraints()
     UseRegister(Arg(HCLASS_INDEX));
 }
 
+void StoreArraySpreadFastVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    // Phase concurrency: the copy loop holds the source elements plus the
+    // index/element pair; the publish barrier reuses the released loop
+    // temporaries for its region scratches. arm64 needs one more for the
+    // StoreTaggedElement address scratch.
+#if defined(PANDA_TARGET_ARM64)
+    SetTemporariesNeeded(4);
+#else
+    SetTemporariesNeeded(3);
+#endif
+    UseRegister(Arg(ARRAY_INDEX));
+    UseRegister(Arg(VALUE_INDEX));
+    UseRegister(Arg(ALLOCATION_INDEX));
+    UseRegister(Arg(LENGTH_INDEX));
+    UseRegister(Arg(HCLASS_INDEX));
+    UseRegister(Arg(GLUE_INDEX));
+}
+
+void BranchIfStoreArraySpreadAdmittedVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(ARRAY_INDEX));
+    UseRegister(Arg(VALUE_INDEX));
+    UseRegister(Arg(GLOBAL_ENV_INDEX));
+    // JumpIfNotFastSpreadArray holds hclass/bitfield/scratch three RA
+    // temporaries across its checks and JumpIfNotTaggedHeapObject takes one
+    // more on top; the destination checks fit inside those four.
+    SetTemporariesNeeded(4);
+}
+
 void InitializeUnmappedArgumentsVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
@@ -413,12 +453,87 @@ void CallCommonStubVertex::SetValueLocationConstraints()
     UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
 }
 
-void FastSuperAllocateThisVertex::SetValueLocationConstraints()
+void CallBaseConstructorSpreadVertex::SetValueLocationConstraints()
 {
-    // Define return value in x0/rax (C calling convention), like CallCommonStubVertex
     DefineAsFixed(this, 0);
+    // Runtime-argc variant of CallBaseConstructor. Concurrency: the vertex keeps
+    // scratch/length/elements three RA temporaries live through the call
+    // preparation, and the element copy loop acquires index/elem two more on top
+    // (the count register is still live as the undefined-fill counter), peaking
+    // at five. Post-call the JumpIfNotEcmaObject tail needs the same
+    // two-on-arm64/one-on-x64 as the non-spread variant, on top of the
+    // vertex-level scratch held across the call for the slot-loaded select.
+    SetTemporariesNeeded(5);
+    UseRegister(Arg(TARGET_INDEX));
+    UseAny(Arg(NEW_TARGET_INDEX));
+    // this must live in a spill slot, same contract as CallBaseConstructor: the
+    // not-object arm of the inline result select reads it after the embedded call
+    // and the deopt bundle references the same slot as BASE_CONSTRUCTOR_THIS_INDEX.
+    UseSlot(Arg(THIS_INDEX));
+    UseAny(Arg(FUNC_INDEX));
+    // The array feeds the length/elements loads and the copy loop; a register keeps
+    // the loop setup to two loads.
+    UseRegister(Arg(ARRAY_INDEX));
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
 
-    SetStubValueLocationConstraints(this, GetArgCount());
+void CallDerivedConstructorSpreadVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+    // Same pre-call concurrency as the base spread variant (three vertex
+    // temporaries plus the copy loop's two); post-call JumpIfNotEcmaObject as
+    // the non-spread variant.
+    SetTemporariesNeeded(5);
+    UseRegister(Arg(TARGET_INDEX));
+    UseAny(Arg(NEW_TARGET_INDEX));
+    // this is the undefined placeholder, pure call-argument forwarding.
+    UseAny(Arg(THIS_INDEX));
+    UseAny(Arg(FUNC_INDEX));
+    UseRegister(Arg(ARRAY_INDEX));
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
+
+void CallBaseConstructorForwardAllArgsVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+    // Runtime-argc variant of CallBaseConstructor with the frame as the
+    // argument source. Concurrency mirrors the spread variant with one fewer
+    // live pre-call register (no elements pointer): scratch (the undefined-fill
+    // counter) and the user-argc temporary stay live through the frame-copy
+    // loop, which acquires index/elem two more on top (srcBase a third on
+    // arm64); the full frame argc rides the ARGC input register, not a
+    // temporary. Post-call JumpIfNotEcmaObject needs two-on-arm64/one-on-x64.
+#if defined(PANDA_TARGET_ARM64)
+    SetTemporariesNeeded(5);
+#else
+    SetTemporariesNeeded(4);
+#endif
+    UseRegister(Arg(TARGET_INDEX));
+    UseAny(Arg(NEW_TARGET_INDEX));
+    // this must live in a spill slot, same contract as CallBaseConstructor: the
+    // not-object arm of the inline result select reads it after the embedded call
+    // and the deopt bundle references the same slot as BASE_CONSTRUCTOR_THIS_INDEX.
+    UseSlot(Arg(THIS_INDEX));
+    UseRegister(Arg(ARGC_INDEX));
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
+}
+
+void CallDerivedConstructorForwardAllArgsVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+    // Same pre-call concurrency as the base forward-all-args variant; post-call
+    // JumpIfNotEcmaObject as the non-spread variant.
+#if defined(PANDA_TARGET_ARM64)
+    SetTemporariesNeeded(5);
+#else
+    SetTemporariesNeeded(4);
+#endif
+    UseRegister(Arg(TARGET_INDEX));
+    UseAny(Arg(NEW_TARGET_INDEX));
+    // this is the undefined placeholder, pure call-argument forwarding.
+    UseAny(Arg(THIS_INDEX));
+    UseRegister(Arg(ARGC_INDEX));
+    UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
 }
 
 void LineStringLoadElementVertex::SetValueLocationConstraints()
@@ -780,6 +895,30 @@ void InitializeEmptyObjectVertex::SetValueLocationConstraints()
     SetTemporariesNeeded(1);
 }
 
+void GetObjectSizeFromHClassVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(HCLASS_INDEX));
+}
+
+void IsObjSizeTrackingInProgressVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(HCLASS_INDEX));
+    SetTemporariesNeeded(1);
+}
+
+void InitializeEmptyObjectWithSizeVertex::SetValueLocationConstraints()
+{
+    DefineSameAsFirst(this);
+    for (uint32_t index = 0; index < NUM_INPUTS; ++index) {
+        UseRegister(Arg(index));
+    }
+    // The fill loop walks [JSObject::SIZE, size) with a work/end pointer pair;
+    // the fill value arrives in a register.
+    SetTemporariesNeeded(2);
+}
+
 void InitializeObjectWithBufferVertex::SetValueLocationConstraints()
 {
     DefineSameAsFirst(this);
@@ -1096,6 +1235,12 @@ void I32ToF64Vertex::SetValueLocationConstraints()
     UseRegister(Arg(INPUT_INDEX));
 }
 
+void I32ToI64Vertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+}
+
 void CheckedNumberToF64Vertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
@@ -1272,6 +1417,15 @@ void BranchIfBaseVertex::SetValueLocationConstraints()
     UseRegister(Arg(VALUE_INDEX));
     // 2 : JumpIfConstructorIsBase acquires two RA temporaries (method pointer + function kind).
     SetTemporariesNeeded(2);
+}
+
+void BranchIfFastSpreadArrayVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+    UseRegister(Arg(GLOBAL_ENV_INDEX));
+    // JumpIfNotFastSpreadArray holds hclass/bitfield/scratch three RA temporaries
+    // across its checks and JumpIfNotTaggedHeapObject takes one more on top.
+    SetTemporariesNeeded(4);
 }
 
 void GapMoveVertex::SetValueLocationConstraints()

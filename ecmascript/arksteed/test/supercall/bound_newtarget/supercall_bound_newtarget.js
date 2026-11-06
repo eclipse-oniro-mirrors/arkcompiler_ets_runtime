@@ -24,9 +24,10 @@
  */
 
 //! METHOD D
-//! HAS         FastSuperAllocateThis
+//! HAS_NOT     BranchIfBase
+//! HAS         AllocateInYoung
 //! HAS         CallBaseConstructor
-//! HAS         CallDerivedConstructor
+//! HAS_NOT     CallDerivedConstructor
 //! COUNT       CallRuntime OptSuperCall 1
 
 class Base {

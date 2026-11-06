@@ -18,7 +18,7 @@
 //! EXEC_COUNT_GE *VaArgsConstructor* 1
 //! METHOD      constructTargetObject
 //! COUNT       CallNewObjRangeBase 1
-//! COUNT       CallNewObjRangeDerived 1
+//! HAS_NOT     CallNewObjRangeDerived
 //! HAS_NOT     CallRuntime OptNewObjRange
 //! COMPILE_COUNT_GE *constructTargetObject* 1
 //! EXEC_COUNT_GE *constructTargetObject* 1

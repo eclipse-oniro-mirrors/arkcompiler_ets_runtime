@@ -26,9 +26,9 @@
 //! PARAMS --compiler-jit-hotness-threshold=60000
 
 //! METHOD F
-//! HAS         FastSuperAllocateThis
+//! HAS         AllocateInYoung
 //! HAS         CallBaseConstructor
-//! HAS         CallDerivedConstructor
+//! HAS_NOT     CallDerivedConstructor
 //! COUNT       CallRuntime OptSuperCall 1
 
 let mode = 0;

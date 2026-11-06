@@ -1,0 +1,4 @@
+warm.keys=a,b,c
+skip.keys=a,b
+skip.hasC=false
+c=PC

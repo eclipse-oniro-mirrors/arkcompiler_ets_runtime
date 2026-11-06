@@ -23,10 +23,10 @@
  */
 
 //! METHOD FD
-//! HAS         FastSuperAllocateThis
-//! HAS         CallBaseConstructor
+//! HAS_NOT     AllocateInYoung
+//! HAS_NOT     CallBaseConstructor
 //! HAS         CallDerivedConstructor
-//! COUNT       CallRuntime OptSuperCall 1
+//! COUNT       CallRuntime OptSuperCall 0
 
 class Root {}
 

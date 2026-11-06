@@ -15,11 +15,13 @@
 
 /*
  * Slow-arm entries of the newTarget admission guard. It runs only on the base
- * arm (after BranchIfBase, behind the identity deopt in the speculation form);
- * its failure edges branch to the deferred OptSuperCall fallback, never deopt.
- * The proto-or-hclass slot holds the prototype object until the first
- * allocation through that newTarget caches the instance hclass, so a site
- * compiled before its first construction runs the slow arm once and
+ * arm (behind the identity deopt in the speculation form, which also folds
+ * the base/derived split into the profiled kind's single arm); its failure
+ * edges branch to the deferred OptSuperCall fallback, never deopt. A derived
+ * fold carries no admission and no slow arm at all - newTarget is forwarded
+ * untouched. The proto-or-hclass slot holds the prototype object until the
+ * first allocation through that newTarget caches the instance hclass, so a
+ * site compiled before its first construction runs the slow arm once and
  * self-heals:
  *   - Cold: compiled before any construction; the first new allocates via
  *     OptSuperCall (caching the hclass into the slot), the second takes the
@@ -27,9 +29,9 @@
  *   - NT: a Proxy newTarget from Reflect.construct is a constructor but not a
  *     JSFunction, so the base-arm admission rejects it on every call; the
  *     runtime allocation must honour the newTarget's "prototype" get trap
- *   - NTD: the same proxy newTarget through a derived super - the derived arm
- *     has no admission and forwards it untouched; the chain bottom's base
- *     constructor runs the trap through its own slow path
+ *   - NTD: the same proxy newTarget through a derived super - the derived fold
+ *     forwards it untouched; the chain bottom's base constructor runs the
+ *     trap through its own slow path
  * (An undefined newTarget - a derived constructor entered without new - and a
  * non-heap proto-or-hclass slot are defensive backstops: a class constructor
  * cannot be invoked without new, and the slot always holds a heap object.)
@@ -37,7 +39,7 @@
 
 //! METHOD Cold
 //! HAS         BranchIfNewTargetHClassReady
-//! HAS         FastSuperAllocateThis
+//! HAS         AllocateInYoung
 //! HAS         CallBaseConstructor
 //! HAS         CallDerivedConstructor
 //! COUNT       CallRuntime OptSuperCall 1
@@ -45,26 +47,29 @@
 //! METHOD NT
 //! HAS         BranchIfNewTargetHClassReady
 //! HAS_NOT     BranchIfJSConstructorFunction
-//! HAS         FastSuperAllocateThis
+//! HAS_NOT     BranchIfBase
+//! HAS_NOT     CallDerivedConstructor
+//! HAS         AllocateInYoung
 //! HAS         CallBaseConstructor
-//! HAS         CallDerivedConstructor
 //! COUNT       CallRuntime OptSuperCall 1
 
 //! METHOD MidNT
 //! HAS         BranchIfNewTargetHClassReady
 //! HAS_NOT     BranchIfJSConstructorFunction
-//! HAS         FastSuperAllocateThis
+//! HAS_NOT     BranchIfBase
+//! HAS_NOT     CallDerivedConstructor
+//! HAS         AllocateInYoung
 //! HAS         CallBaseConstructor
-//! HAS         CallDerivedConstructor
 //! COUNT       CallRuntime OptSuperCall 1
 
 //! METHOD NTD
-//! HAS         BranchIfNewTargetHClassReady
 //! HAS_NOT     BranchIfJSConstructorFunction
-//! HAS         FastSuperAllocateThis
-//! HAS         CallBaseConstructor
+//! HAS_NOT     BranchIfBase
+//! HAS_NOT     BranchIfNewTargetHClassReady
+//! HAS_NOT     AllocateInYoung
+//! HAS_NOT     CallBaseConstructor
 //! HAS         CallDerivedConstructor
-//! COUNT       CallRuntime OptSuperCall 1
+//! COUNT       CallRuntime OptSuperCall 0
 
 class Base {
     constructor() {

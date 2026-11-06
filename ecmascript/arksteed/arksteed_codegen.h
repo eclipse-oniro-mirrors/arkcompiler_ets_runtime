@@ -102,6 +102,21 @@ private:
     void ComputeSteedCallSlotCount(CallVertexT *call, ArkSteedRegister slotCount);
     template <typename CallVertexT>
     void PrepareArkSteedCall(CallVertexT *call, ArkSteedRegister target, ArkSteedRegister scratch);
+    // Runtime-argc spread variant of PrepareArkSteedCall: runtime-sized
+    // reservation, argc slot from length + mandatory, mandatory argument placement
+    // from the vertex's input locations, spread element copy loop and the
+    // optional-arg undefined fill. `target` mirrors the non-spread contract;
+    // `scratch`, `elements` and `elementsLength` are RA temporaries owned by
+    // the caller and all three are clobbered. `elementsLength` is the elements
+    // backing's own length (the copy/fill/reservation source, like the
+    // interpreter's argv buffer); the argc comes from the JSArray length field
+    // reloaded at the argc-slot write. The steed slot layout
+    // [argc][target][newTarget][this][args...] matches the non-spread variant;
+    // input indices come from CallVertexT (whose FUNC sits at index 0), slot
+    // indices from the layout constants.
+    template <typename CallVertexT>
+    void PrepareArkSteedSpreadCall(CallVertexT *call, ArkSteedRegister target, ArkSteedRegister scratch,
+                                   ArkSteedRegister elements, ArkSteedRegister elementsLength);
     void PrepareKnownArkSteedCall(CallKnownJSFunctionVertex *call, ArkSteedRegister target);
     void PrepareArkSteedSelfCall(CallSelfVertex *call);
     template <typename CallVertexT>
@@ -110,11 +125,46 @@ private:
     void EmitPreparedArkSteedCall(CallT *call, ArkSteedRegister target, Label *exit);
     template <typename CallVertexT>
     void EmitCallArkSteed(CallVertexT *call, ArkSteedRegister target, ArkSteedRegister scratch, Label *exit);
+    // Compile-time frame-contract variant of EmitCallArkSteed: the steed frame
+    // (slot reservation, argc, undefined fill) is materialized from the vertex's
+    // known expected parameter count instead of runtime Method loads.
+    template <typename CallVertexT>
+    void EmitKnownArgsArkSteedCall(CallVertexT *call, Label *exit);
+    // Runtime-argc spread variant: the shared steed-call tail (callee context,
+    // call, lazy-deopt safepoint, frame free, jump to exit) around
+    // PrepareArkSteedSpreadCall.
+    template <typename CallVertexT>
+    void EmitCallArkSteedSpread(ArkSteedRegister target, ArkSteedRegister scratch, ArkSteedRegister elements,
+                                ArkSteedRegister elementsLength, CallVertexT *call, Label *exit);
     void EmitCallKnownArkSteed(CallKnownJSFunctionVertex *call, ArkSteedRegister target, Label *exit);
     template <class CallT>
     void EmitCallGeneric(CallT *call, ArkSteedRegister scratch);
     template <typename CallVertexT>
     void EmitCallConstructorGeneric(CallVertexT *call, ArkSteedRegister scratch);
+    // Runtime-argc spread variant of the generic [[Construct]] fallback: the
+    // JSCallNew trampoline layout ([argc][argv][target][newTarget][this][args])
+    // with the JSArray length field in the argc slot and the spread elements
+    // copied into the user-arg slots by the elements backing's own length
+    // (holes mapped to undefined; the tail past the argc is dead, like the
+    // interpreter's argv buffer). Input indices come
+    // from CallVertexT, slot indices from the layout constants.
+    template <typename CallVertexT>
+    void EmitCallConstructorSpreadGeneric(CallVertexT *call, ArkSteedRegister scratch, ArkSteedRegister elements,
+                                          ArkSteedRegister elementsLength);
+    // Forward-all-args (SUPERCALLFORWARDALLARGS) variants of the spread call
+    // pieces: the argument source is the caller frame's own incoming arguments
+    // (count = frame argc - mandatory, carried by the ARGC input register and
+    // derived into `userArgc` by the visitors), so no length/elements pair
+    // exists; everything else mirrors the spread counterparts.
+    template <typename CallVertexT>
+    void PrepareArkSteedForwardAllArgsCall(CallVertexT *call, ArkSteedRegister target,
+                                           ArkSteedRegister scratch, ArkSteedRegister userArgc);
+    template <typename CallVertexT>
+    void EmitCallArkSteedForwardAllArgs(ArkSteedRegister target, ArkSteedRegister scratch,
+                                        ArkSteedRegister userArgc, CallVertexT *call, Label *exit);
+    template <typename CallVertexT>
+    void EmitCallConstructorForwardAllArgsGeneric(CallVertexT *call, ArkSteedRegister scratch,
+                                                  ArkSteedRegister userArgc);
     void EmitReturnWithPendingException();
     void EmitReturnIfPendingException();
     Label *GetReturnWithPendingExceptionVeneer();
