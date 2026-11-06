@@ -263,6 +263,7 @@ private:
     bool IsSlowAotCallWithBridge() const;
     bool IsFastAotCallWithBridge() const;
     bool CheckResultValueChangedWithReturn(GateRef prevResRef) const;
+    void CheckDeferredCompilation();
     void HandleProfileCall();
     void HandleProfileNativeCall();
     bool IsCallModeGetterSetter();

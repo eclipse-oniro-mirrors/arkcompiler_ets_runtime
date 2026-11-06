@@ -1,0 +1,4 @@
+false
+{"value":4999}
+10000
+true

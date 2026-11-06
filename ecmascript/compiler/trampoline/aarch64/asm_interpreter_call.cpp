@@ -94,6 +94,7 @@ void AsmInterpreterCall::AsmInterpEntryDispatch(ExtendedAssembler *assembler)
     __ Bind(&callJSFunctionEntry);
     {
         __ Tbnz(callFieldRegister, Method::IsNativeBit::START_BIT, &callNativeEntry);
+        CheckDeferredCompilationForCallEntry(assembler);
         // fast path
         __ Add(argvRegister, argvRegister, Immediate(NUM_MANDATORY_JSFUNC_ARGS * JSTaggedValue::TaggedTypeSize()));
         JSCallCommonEntry(assembler, JSCallMode::CALL_ENTRY, FrameTransitionType::OTHER_TO_BASELINE_CHECK);
@@ -113,6 +114,38 @@ void AsmInterpreterCall::AsmInterpEntryDispatch(ExtendedAssembler *assembler)
         __ UpdateGlueAndReadBarrier();
         __ Ret();
     }
+}
+
+void AsmInterpreterCall::CheckDeferredCompilationForCallEntry(ExtendedAssembler *assembler)
+{
+    Label noSubmit;
+    Register method = x2;
+    Register extraLiteralInfo = x16;
+    // Reuse the entry Method and the HClass bitfield register after the type check.
+    // Do not spill registers on the no-submit path.
+    __ Ldr(extraLiteralInfo.W(), MemoryOperand(method, Method::EXTRA_LITERAL_INFO_OFFSET));
+    __ Lsr(extraLiteralInfo.W(), extraLiteralInfo.W(), Method::DeoptCountBits::START_BIT);
+    __ And(extraLiteralInfo.W(), extraLiteralInfo.W(),
+        LogicalImmediate::Create((1LU << Method::DeoptCountBits::SIZE) - 1, W_REG_SIZE));
+    __ Cmp(extraLiteralInfo.W(), Immediate(static_cast<int32_t>(TieringDecision::ARKSTEED_REQUESTED)));
+    __ B(Condition::NE, &noSubmit);
+    {
+        // The existing entry frame anchors the leave frame. Preserve only native values here.
+        __ Stp(x0, lr, MemoryOperand(sp, -DOUBLE_SLOT_SIZE, AddrMode::PREINDEX));
+        __ Stp(x4, x5, MemoryOperand(sp, -DOUBLE_SLOT_SIZE, AddrMode::PREINDEX));
+        __ Mov(x1, Immediate(RTSTUB_ID(SubmitJitTask)));
+        // Include target, newTarget and this so GC updates the complete original argument area.
+        __ Add(x2, x4, Immediate(NUM_MANDATORY_JSFUNC_ARGS));
+        __ Mov(x3, x5);
+        __ CallAssemblerStub(RTSTUB_ID(CallRuntimeWithArgv), false);
+        __ Ldp(x4, x5, MemoryOperand(sp, DOUBLE_SLOT_SIZE, AddrMode::POSTINDEX));
+        __ Ldp(x0, lr, MemoryOperand(sp, DOUBLE_SLOT_SIZE, AddrMode::POSTINDEX));
+        // Submission may collect; reload the target and its Method from GC-updated arguments.
+        __ Ldr(x1, MemoryOperand(x5, 0));
+        __ Ldr(method, MemoryOperand(x1, JSFunction::METHOD_OFFSET));
+        __ Ldr(x3, MemoryOperand(method, Method::CALL_FIELD_OFFSET));
+    }
+    __ Bind(&noSubmit);
 }
 
 void AsmInterpreterCall::JSCallCommonEntry(ExtendedAssembler *assembler,

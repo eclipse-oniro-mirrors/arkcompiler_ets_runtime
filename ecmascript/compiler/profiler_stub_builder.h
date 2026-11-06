@@ -115,6 +115,7 @@ public:
     GateRef IsProfileTypeInfoDumped(GateRef profileTypeInfo, ProfileOperation callback);
 
     GateRef GetTieringDecisionFromFunction(GateRef glue, GateRef func);
+    GateRef GetTieringDecisionFromMethod(GateRef method);
     void SetTieringDecisionFromFunction(GateRef glue, GateRef func, GateRef decision);
     void ResetTieringForRecompile(GateRef glue, GateRef func, GateRef profileTypeInfoCell);
     GateRef IsCompiledOrTryCompile(GateRef glue, GateRef func, GateRef profileTypeInfo, ProfileOperation callback,

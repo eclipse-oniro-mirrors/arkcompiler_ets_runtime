@@ -21,6 +21,7 @@
 #include "ecmascript/compiler/bytecodes.h"
 #include "ecmascript/compiler/circuit.h"
 #include "ecmascript/compiler/circuit_builder.h"
+#include "ecmascript/compiler/profiler_stub_builder.h"
 #include "ecmascript/compiler/slowpath_lowering.h"
 #include "ecmascript/compiler/stub_builder-inl.h"
 
@@ -2193,8 +2194,52 @@ bool CallStubBuilder::IsSlowAotCallWithBridge() const
 bool CallStubBuilder::IsFastAotCallWithBridge() const
 { return isFast_ && isBridge_; }
 
+void CallStubBuilder::CheckDeferredCompilation()
+{
+    // Check deferred compilation for WITH_RETURN call modes.
+    bool isCallWithReturn = callArgs_.mode == JSCallMode::CALL_THIS_ARG2_WITH_RETURN ||
+                            callArgs_.mode == JSCallMode::CALL_THIS_ARG3_WITH_RETURN ||
+                            callArgs_.mode == JSCallMode::CALL_THIS_ARGV_WITH_RETURN;
+    if (!isCallWithReturn) {
+        // Check deferred compilation for accessor calls from builtin stubs.
+        // Builtin accessor calls use CALL_GETTER/CALL_SETTER with an empty PGO callback.
+        // Example: Object.assign -> CallGetterHelper -> CallStubBuilder (CALL_GETTER, empty callback).
+        auto *signature = GetCallSignature();
+        if (signature == nullptr) {
+            return;
+        }
+        auto targetKind = signature->GetTargetKind();
+        bool isBuiltinStub = targetKind == CallSignature::TargetKind::BUILTINS_STUB ||
+                             targetKind == CallSignature::TargetKind::BUILTINS_WITH_ARGV_STUB ||
+                             targetKind == CallSignature::TargetKind::BUILTINS_STW_COPY_STUB;
+        if (!isBuiltinStub || !IsCallModeGetterSetter()) {
+            return;
+        }
+    }
+    auto env = GetEnvironment();
+    Label requested(env);
+    Label submit(env);
+    Label done(env);
+    // JSCallInit already loaded a valid Method, including for proxy targets.
+    ProfilerStubBuilder profiler(this);
+    GateRef decision = profiler.GetTieringDecisionFromMethod(method_);
+    BRANCH_UNLIKELY(Int32Equal(decision, Int32(static_cast<int32_t>(TieringDecision::ARKSTEED_REQUESTED))),
+                    &requested, &done);
+    Bind(&requested);
+    {
+        BRANCH(IsJSFunction(glue_, func_), &submit, &done);
+    }
+    Bind(&submit);
+    {
+        CallRuntime(glue_, RTSTUB_ID(SubmitJitTask), {func_});
+        Jump(&done);
+    }
+    Bind(&done);
+}
+
 void CallStubBuilder::HandleProfileCall()
 {
+    CheckDeferredCompilation();
     if (!callback_.IsEmpty()) {
         if (!IsCallModeSupportPGO()) {
             return;

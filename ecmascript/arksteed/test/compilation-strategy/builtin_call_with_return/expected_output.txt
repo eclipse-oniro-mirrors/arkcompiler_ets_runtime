@@ -1,0 +1,9 @@
+false
+false
+false
+12512500
+12497500
+12542500
+true
+true
+true

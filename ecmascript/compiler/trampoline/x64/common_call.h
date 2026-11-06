@@ -130,6 +130,8 @@ public:
 
     static void AsmInterpEntryDispatch(ExtendedAssembler *assembler);
 
+    static void CheckDeferredCompilationForCallEntry(ExtendedAssembler *assembler);
+
     static void AsmInterpreterEntry(ExtendedAssembler *assembler);
 
     static void PushCallThisRangeAndDispatch(ExtendedAssembler *assembler);
