@@ -140,6 +140,12 @@ public:
         return cpu_profiler.generator_;
     }
 
+    // For liveness handshakes with an externally owned profiler (e.g. via DFXJSNApi).
+    static SamplesRecord *GetGeneratorOfProfiler(CpuProfiler *profiler)
+    {
+        return profiler == nullptr ? nullptr : profiler->generator_;
+    }
+
     CpuProfilerSignalContext *GetSignalCtx()
     {
         return &cpu_profiler.signalCtx_;
@@ -353,8 +359,32 @@ HWTEST_F_L0(CpuProfilerTest, TestTimeDeltasMonotonic)
     std::string entryPoint = "cpuprofiler_1";
     res = JSNApi::Execute(instance, fileName, entryPoint);
     ASSERT_TRUE(res);
+    // Only the sampling thread drains the legacy queue, so it becoming empty
+    // again after the post proves AddSample ran (timeDeltas non-empty).
+    SamplesRecord *generator = CpuProfilerFriendTest::GetGeneratorOfProfiler(instance->GetProfiler());
+    ASSERT_NE(generator, nullptr);
+    ASSERT_TRUE(generator->samplesQueue_->IsEmpty());
+    struct MethodKey key;
+    key.methodIdentifier = reinterpret_cast<void *>(0x22220000);
+    key.state = RunningState::NAPI;
+    struct FrameInfoTemp info;
+    strcpy_s(info.functionName, sizeof(info.functionName), "napi_monotonic_heartbeat");
+    info.methodKey = key;
+    ASSERT_TRUE(generator->PushNapiFrameStack(key));
+    ASSERT_TRUE(generator->PushNapiStackInfo(info));
+    generator->PostNapiFrame();
+    constexpr uint64_t heartbeatDeadlineUs = 5000000; // 5s
+    uint64_t deadline = SamplingProcessor::GetMicrosecondsTimeStamp() + heartbeatDeadlineUs;
+    while (!generator->samplesQueue_->IsEmpty()) {
+        if (SamplingProcessor::GetMicrosecondsTimeStamp() >= deadline) {
+            break;
+        }
+        usleep(1000); // 1ms: yield so the sampling thread can run
+    }
+    bool heartbeatFolded = generator->samplesQueue_->IsEmpty();
     std::unique_ptr<ProfileInfo> profileInfo = DFXJSNApi::StopCpuProfilerForInfo(instance);
     ASSERT_NE(profileInfo, nullptr);
+    ASSERT_TRUE(heartbeatFolded) << "sampling thread never folded the heartbeat frame";
     ASSERT_FALSE(profileInfo->timeDeltas.empty());
     // Fire-and-forget consumption must never emit non-monotonic timestamps:
     // negative deltas would poison the uint64 state-time statistics.
@@ -942,6 +972,17 @@ HWTEST_F_L0(CpuProfilerTest, TestProcessRawSampleAllRunningStates)
 #endif // !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
 
 #if !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
+// The VM-tag suffix AddRunningState appends to interpreted frames.
+static bool HasAintClassifiedFrame(const ProfileInfo &profileInfo)
+{
+    for (int i = 0; i < profileInfo.nodeCount; ++i) {
+        if (profileInfo.nodes[i].codeEntry.functionName.find("(AINT)") != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // With the VM-tag option enabled the handler classifies interpreted frames as
 // AINT; files loaded before Start are seeded into the symbolizer session.
 HWTEST_F_L0(CpuProfilerTest, TestVmTagSamplingClassifiesAint)
@@ -954,16 +995,34 @@ HWTEST_F_L0(CpuProfilerTest, TestVmTagSamplingClassifiesAint)
     std::string entryPoint = "cpuprofiler_1";
     ASSERT_TRUE(JSNApi::Execute(instance, fileName, entryPoint));
 
-    CpuProfilerFriendTest cpuProfilerFriend(instance, 500);
-    ASSERT_TRUE(cpuProfilerFriend.StartProfilerForInfoTest());
-    ASSERT_TRUE(JSNApi::Execute(instance, fileName, entryPoint));
-    CpuProfilerFriendTest::SleepThroughSignalInterruptions(30000); // 30ms of ticks
+    // A SIGPROF tick must land while the interpreter runs the entry; on a
+    // loaded machine one fast execution can slip between ticks, so use a
+    // wall-clock window with bounded session retries.
+    constexpr uint64_t executeWindowUs = 300000; // 300ms
+    constexpr int maxRounds = 3;
+    bool classifiedAsAint = false;
+    int lastNodeCount = 0;
+    size_t lastSampleCount = 0;
+    for (int round = 0; round < maxRounds && !classifiedAsAint; round++) {
+        CpuProfilerFriendTest cpuProfilerFriend(instance, 500);
+        ASSERT_TRUE(cpuProfilerFriend.StartProfilerForInfoTest());
+        uint64_t deadline = SamplingProcessor::GetMicrosecondsTimeStamp() + executeWindowUs;
+        while (SamplingProcessor::GetMicrosecondsTimeStamp() < deadline) {
+            ASSERT_TRUE(JSNApi::Execute(instance, fileName, entryPoint));
+        }
+        CpuProfilerFriendTest::SleepThroughSignalInterruptions(30000); // 30ms: fold in-flight samples
 
-    std::unique_ptr<ProfileInfo> profileInfo;
-    ASSERT_TRUE(cpuProfilerFriend.StopCpuProfilerForInfoTest(profileInfo));
-    ASSERT_NE(profileInfo, nullptr);
-    EXPECT_GT(profileInfo->nodeCount, 3); // 3: root/program/idle plus real frames
-    EXPECT_FALSE(profileInfo->samples.empty());
+        std::unique_ptr<ProfileInfo> profileInfo;
+        ASSERT_TRUE(cpuProfilerFriend.StopCpuProfilerForInfoTest(profileInfo));
+        ASSERT_NE(profileInfo, nullptr);
+        lastNodeCount = profileInfo->nodeCount;
+        lastSampleCount = profileInfo->samples.size();
+        classifiedAsAint = !profileInfo->samples.empty() &&
+            profileInfo->nodeCount > 3 && // 3: root/program/idle plus real frames
+            HasAintClassifiedFrame(*profileInfo);
+    }
+    ASSERT_TRUE(classifiedAsAint) << "VM-tag sampling never classified an interpreted frame as " <<
+        "(AINT): nodeCount=" << lastNodeCount << ", samples=" << lastSampleCount;
 }
 #endif // !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
 
