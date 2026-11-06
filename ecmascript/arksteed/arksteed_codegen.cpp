@@ -1313,10 +1313,10 @@ void ArkSteedCodeGenerator::EmitReturnWithPendingException()
 void ArkSteedCodeGenerator::EmitReturnIfPendingException()
 {
     RecordComment("Exception check: return if pending");
-    Label noPendingException;
-    __ BranchIfNoPendingException(&noPendingException);
-    __ Jump(GetReturnWithPendingExceptionVeneer());
-    __ Bind(&noPendingException);
+    // Inverted branch (jne): the common (no-exception) case falls through
+    // instead of taking a jump; only the rare exception path branches to
+    // the shared method-tail exit.
+    __ BranchIfPendingException(GetReturnWithPendingExceptionVeneer());
 }
 
 Label *ArkSteedCodeGenerator::GetReturnWithPendingExceptionVeneer()
@@ -4988,7 +4988,9 @@ void ArkSteedCodeGenerator::VisitControlVertex<ThrowVertex>(ThrowVertex *throws)
         DeconstructPhisInSuccessor(catchBlock, catchPredId);
         __ Jump(catchBlock->GetLabel());
     } else {
-        EmitReturnWithPendingException();
+        // The pending exception is guaranteed after a throw; jump to the
+        // shared method-tail exit instead of inlining it.
+        __ Jump(GetReturnWithPendingExceptionVeneer());
     }
 }
 
