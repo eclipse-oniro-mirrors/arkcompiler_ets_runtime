@@ -59,6 +59,7 @@ module_test_list = [
   "compareobjecthclass",
   "concurrent",
   "container",
+  "container_consistency",
   "createarray",
   "createobject",
   "custompromise",

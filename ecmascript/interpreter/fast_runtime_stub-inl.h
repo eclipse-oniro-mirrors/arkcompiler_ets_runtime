@@ -38,6 +38,18 @@ namespace panda::ecmascript {
 
 JSTaggedValue FastRuntimeStub::FastMul(JSTaggedValue left, JSTaggedValue right)
 {
+    if (left.IsInt() && right.IsInt()) {
+        int64_t leftInt = left.GetInt();
+        int64_t rightInt = right.GetInt();
+        int64_t product = leftInt * rightInt;
+        // Match ASM integer multiplication, including its negative-zero result.
+        if (product == 0 && (leftInt < 0 || rightInt < 0)) {
+            return JSTaggedValue(-0.0);
+        }
+        if (product >= INT32_MIN && product <= INT32_MAX) {
+            return JSTaggedValue(static_cast<int32_t>(product));
+        }
+    }
     if (left.IsNumber() && right.IsNumber()) {
         return JSTaggedValue(left.GetNumber() * right.GetNumber());
     }
@@ -174,13 +186,15 @@ JSTaggedValue FastRuntimeStub::CallSetter(JSThread *thread, JSTaggedValue receiv
 template<ObjectFastOperator::Status status>
 JSTaggedValue FastRuntimeStub::GetPropertyByIndex(JSThread *thread, JSTaggedValue receiver, uint32_t index)
 {
-    return ObjectFastOperator::GetPropertyByIndex<status>(thread, receiver, index);
+    constexpr auto fastStatus = ObjectFastOperator::WithAsmContainerSemantics(status);
+    return ObjectFastOperator::GetPropertyByIndex<fastStatus>(thread, receiver, index);
 }
 
 template<ObjectFastOperator::Status status>
 JSTaggedValue FastRuntimeStub::GetPropertyByValue(JSThread *thread, JSTaggedValue receiver, JSTaggedValue key)
 {
-    return ObjectFastOperator::GetPropertyByValue<status>(thread, receiver, key);
+    constexpr auto fastStatus = ObjectFastOperator::WithAsmContainerSemantics(status);
+    return ObjectFastOperator::GetPropertyByValue<fastStatus>(thread, receiver, key);
 }
 
 template<ObjectFastOperator::Status status>
@@ -202,7 +216,8 @@ JSTaggedValue FastRuntimeStub::SetPropertyByIndex(JSThread *thread, JSTaggedValu
                                                   JSTaggedValue value)
 {
     [[maybe_unused]] EcmaHandleScope handleScope(thread);
-    return ObjectFastOperator::SetPropertyByIndex<status>(thread, receiver, index, value);
+    constexpr auto fastStatus = ObjectFastOperator::WithAsmContainerSemantics(status);
+    return ObjectFastOperator::SetPropertyByIndex<fastStatus>(thread, receiver, index, value);
 }
 
 template<ObjectFastOperator::Status status>
@@ -210,7 +225,8 @@ JSTaggedValue FastRuntimeStub::SetPropertyByValue(JSThread *thread, JSTaggedValu
                                                   JSTaggedValue value)
 {
     [[maybe_unused]] EcmaHandleScope handleScope(thread);
-    return ObjectFastOperator::SetPropertyByValue<status>(thread, receiver, key, value);
+    constexpr auto fastStatus = ObjectFastOperator::WithAsmContainerSemantics(status);
+    return ObjectFastOperator::SetPropertyByValue<fastStatus>(thread, receiver, key, value);
 }
 
 JSTaggedValue FastRuntimeStub::GetGlobalOwnProperty(JSThread *thread, JSTaggedValue receiver, JSTaggedValue key)

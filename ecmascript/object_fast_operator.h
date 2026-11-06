@@ -31,6 +31,7 @@ public:
         UseOwn = 0x01UL,
         GetInternal = 0x1UL << 1,
         DefineSemantics = 0x1UL << 2,
+        UseAsmContainerSemantics = 0x1UL << 3,
     };
 
     static inline bool UseOwn(Status status)
@@ -46,6 +47,17 @@ public:
     static inline bool DefineSemantics(Status status)
     {
         return (static_cast<uint32_t>(status) & static_cast<int32_t>(Status::DefineSemantics)) > 0;
+    }
+
+    static constexpr Status WithAsmContainerSemantics(Status status)
+    {
+        return static_cast<Status>(static_cast<uint8_t>(status) |
+                                   static_cast<uint8_t>(Status::UseAsmContainerSemantics));
+    }
+
+    static constexpr bool UseAsmContainerSemantics(Status status)
+    {
+        return (static_cast<uint8_t>(status) & static_cast<uint8_t>(Status::UseAsmContainerSemantics)) != 0;
     }
 
     static inline std::pair<JSTaggedValue, bool> HasOwnProperty(JSThread *thread,
@@ -154,6 +166,9 @@ private:
 
     static inline JSTaggedValue GetContainerProperty(JSThread *thread, JSTaggedValue receiver, uint32_t index,
                                                      JSType jsType);
+
+    static inline JSTaggedValue GetContainerPropertyForInterpreter(JSThread *thread, JSTaggedValue receiver,
+                                                                   uint32_t index, JSType jsType);
 
     static inline JSTaggedValue SetContainerProperty(JSThread *thread, JSTaggedValue receiver, uint32_t index,
                                                      JSTaggedValue value, JSType jsType);

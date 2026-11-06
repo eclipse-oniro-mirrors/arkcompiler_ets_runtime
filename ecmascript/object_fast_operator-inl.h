@@ -695,36 +695,35 @@ JSTaggedValue ObjectFastOperator::GetPropertyByIndex(JSThread *thread, JSTaggedV
                 return JSTypedArray::FastGetPropertyByIndex(thread, holder, index, jsType);
             }
             if (IsSpecialContainer(jsType)) {
-                return GetContainerProperty(thread, holder, index, jsType);
+                constexpr bool useAsm = UseAsmContainerSemantics(status);
+                return useAsm ? GetContainerPropertyForInterpreter(thread, holder, index, jsType)
+                              : GetContainerProperty(thread, holder, index, jsType);
             }
-            if (IsString(jsType)) {
-                if (index < EcmaStringAccessor(holder).GetLength()) {
-                    EcmaString *subStr = EcmaStringAccessor::FastSubString(thread->GetEcmaVM(),
-                        JSHandle<EcmaString>(thread, holder), index, 1);
-                    return JSTaggedValue(subStr);
-                }
+            if (IsString(jsType) && index < EcmaStringAccessor(holder).GetLength()) {
+                EcmaString *subStr = EcmaStringAccessor::FastSubString(thread->GetEcmaVM(),
+                    JSHandle<EcmaString>(thread, holder), index, 1);
+                return JSTaggedValue(subStr);
             }
             return JSTaggedValue::Hole();
         }
         JSHandle<JSObject> currentHolder(thread, holder);
         if (!hclass->IsDictionaryElement()) {
             ASSERT(!ElementAccessor::IsDictionaryMode(thread, currentHolder));
-            if (index < ElementAccessor::GetElementsLength(thread, currentHolder)) {
-                JSTaggedValue value = ElementAccessor::Get(thread, currentHolder, index);
-                if (!value.IsHole()) {
-                    return value;
-                }
+            JSTaggedValue value = index < ElementAccessor::GetElementsLength(thread, currentHolder)
+                ? ElementAccessor::Get(thread, currentHolder, index) : JSTaggedValue::Hole();
+            if (!value.IsHole()) {
+                return value;
             }
         } else {
             TaggedArray *elements = TaggedArray::Cast(currentHolder->GetElements(thread).GetTaggedObject());
             NumberDictionary *dict = NumberDictionary::Cast(elements);
             int entry = dict->FindEntry(thread, JSTaggedValue(static_cast<int>(index)));
+            bool isAccessor = entry != -1 && UNLIKELY(dict->GetAttributes(thread, entry).IsAccessor());
+            auto value = entry != -1 ? dict->GetValue(thread, entry) : JSTaggedValue::Undefined();
+            if (isAccessor) {
+                return CallGetter(thread, receiver, holder, value);
+            }
             if (entry != -1) {
-                auto attr = dict->GetAttributes(thread, entry);
-                auto value = dict->GetValue(thread, entry);
-                if (UNLIKELY(attr.IsAccessor())) {
-                    return CallGetter(thread, receiver, holder, value);
-                }
                 ASSERT(!value.IsAccessor());
                 return value;
             }
@@ -757,10 +756,8 @@ JSTaggedValue ObjectFastOperator::SetPropertyByIndex(JSThread *thread, JSTaggedV
                 return JSTypedArray::FastSetPropertyByIndex(thread, receiver, index, value, jsType);
             }
             if (IsSpecialContainer(jsType)) {
-                if (DefineSemantics(status)) {
-                    return JSTaggedValue::Hole();
-                }
-                return SetContainerProperty(thread, holder, index, value, jsType);
+                return (DefineSemantics(status) || UseAsmContainerSemantics(status)) ? JSTaggedValue::Hole()
+                    : SetContainerProperty(thread, holder, index, value, jsType);
             }
             return JSTaggedValue::Hole();
         }
@@ -771,48 +768,46 @@ JSTaggedValue ObjectFastOperator::SetPropertyByIndex(JSThread *thread, JSTaggedV
             if (UNLIKELY(holder != receiver)) {
                 break;
             }
-            if (index < elements->GetLength()) {
-                JSTaggedValue oldValue = ElementAccessor::Get(thread, arrayHandler, index);
-                if (!oldValue.IsHole()) {
-                    if (holder.IsJSCOWArray(thread)) {
-                        [[maybe_unused]] EcmaHandleScope handleScope(thread);
-                        JSHandle<JSArray> holderHandler(thread, holder);
-                        JSHandle<JSObject> obj(thread, holder);
-                        JSHandle<JSTaggedValue> valueHandle(thread, value);
-                        // CheckAndCopyArray may cause gc.
-                        JSArray::CheckAndCopyArray(thread, holderHandler);
-                        ElementAccessor::Set(thread, obj, index, valueHandle, true);
-                        return JSTaggedValue::Undefined();
-                    }
-                    JSHandle<JSTaggedValue> valueHandle(thread, value);
-                    ElementAccessor::Set(thread, arrayHandler, index, valueHandle, true);
-                    return JSTaggedValue::Undefined();
-                }
+            bool hasElement = index < elements->GetLength() &&
+                !ElementAccessor::Get(thread, arrayHandler, index).IsHole();
+            if (hasElement && holder.IsJSCOWArray(thread)) {
+                [[maybe_unused]] EcmaHandleScope handleScope(thread);
+                JSHandle<JSArray> holderHandler(thread, holder);
+                JSHandle<JSObject> obj(thread, holder);
+                JSHandle<JSTaggedValue> valueHandle(thread, value);
+                // CheckAndCopyArray may cause gc.
+                JSArray::CheckAndCopyArray(thread, holderHandler);
+                ElementAccessor::Set(thread, obj, index, valueHandle, true);
+                return JSTaggedValue::Undefined();
+            }
+            if (hasElement) {
+                JSHandle<JSTaggedValue> valueHandle(thread, value);
+                ElementAccessor::Set(thread, arrayHandler, index, valueHandle, true);
+                return JSTaggedValue::Undefined();
             }
         } else {
             NumberDictionary *dict = NumberDictionary::Cast(elements);
             int entry = dict->FindEntry(thread, JSTaggedValue(static_cast<int>(index)));
-            if (entry != -1) {
-                auto attr = dict->GetAttributes(thread, entry);
-                if (UNLIKELY((!attr.IsWritable() || !attr.IsConfigurable()) && !hclass->IsJSShared())) {
-                    return JSTaggedValue::Hole();
-                }
-                if (UNLIKELY(attr.IsAccessor())) {
-                    if (DefineSemantics(status)) {
-                        return JSTaggedValue::Hole();
-                    }
-                    auto accessor = dict->GetValue(thread, entry);
-                    if (ShouldCallSetter(receiver, holder, accessor, attr)) {
-                        return CallSetter(thread, receiver, value, accessor);
-                    }
-                }
-                if (UNLIKELY(holder != receiver)) {
-                    break;
-                }
-                dict->UpdateValue(thread, entry, value);
-                return JSTaggedValue::Undefined();
+            if (entry == -1) {
+                return JSTaggedValue::Hole();
             }
-            return JSTaggedValue::Hole();
+            auto attr = dict->GetAttributes(thread, entry);
+            if (UNLIKELY((!attr.IsWritable() || !attr.IsConfigurable()) && !hclass->IsJSShared())) {
+                return JSTaggedValue::Hole();
+            }
+            bool isAccessor = UNLIKELY(attr.IsAccessor());
+            if (isAccessor && DefineSemantics(status)) {
+                return JSTaggedValue::Hole();
+            }
+            auto accessor = isAccessor ? dict->GetValue(thread, entry) : JSTaggedValue::Undefined();
+            if (isAccessor && ShouldCallSetter(receiver, holder, accessor, attr)) {
+                return CallSetter(thread, receiver, value, accessor);
+            }
+            if (UNLIKELY(holder != receiver)) {
+                break;
+            }
+            dict->UpdateValue(thread, entry, value);
+            return JSTaggedValue::Undefined();
         }
         if (UseOwn(status) || DefineSemantics(status)) {
             break;
@@ -832,6 +827,10 @@ JSTaggedValue ObjectFastOperator::GetPropertyByValue(JSThread *thread, JSTaggedV
     }
     // fast path
     auto index = TryToElementsIndex(thread, key);
+    // StubBuilder::GetPropertyByValue sends these container keys to the slow path.
+    if (UseAsmContainerSemantics(status) && UNLIKELY(index >= INT32_MAX) && receiver.IsSpecialContainer()) {
+        return JSTaggedValue::Hole();
+    }
     if (LIKELY(index >= 0)) {
         return GetPropertyByIndex<status>(thread, receiver, index);
     }
@@ -1295,6 +1294,26 @@ JSTaggedValue ObjectFastOperator::SetContainerProperty(JSThread *thread, JSTagge
             break;
     }
     return res;
+}
+
+JSTaggedValue ObjectFastOperator::GetContainerPropertyForInterpreter(JSThread *thread, JSTaggedValue receiver,
+                                                                     uint32_t index, JSType jsType)
+{
+    // Match StubBuilder::JSAPIContainerGet; other containers use the property slow path.
+    uint32_t length;
+    if (jsType == JSType::JS_API_ARRAY_LIST) {
+        length = JSAPIArrayList::Cast(receiver.GetTaggedObject())->GetSize(thread);
+    } else if (jsType == JSType::JS_API_VECTOR) {
+        length = JSAPIVector::Cast(receiver.GetTaggedObject())->GetSize();
+    } else {
+        return JSTaggedValue::Hole();
+    }
+    if (index >= length) {
+        THROW_TYPE_ERROR_AND_RETURN(thread, GET_MESSAGE_STRING(GetPropertyOutOfBounds), JSTaggedValue::Exception());
+    }
+    auto elements =
+        TaggedArray::Cast(JSObject::Cast(receiver.GetTaggedObject())->GetElements(thread).GetTaggedObject());
+    return elements->Get(thread, index);
 }
 
 JSTaggedValue ObjectFastOperator::AddPropertyByIndex(JSThread *thread, JSTaggedValue receiver, uint32_t index,
