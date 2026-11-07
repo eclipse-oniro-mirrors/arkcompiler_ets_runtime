@@ -14,6 +14,10 @@
  */
 
 #include "ecmascript/object_operator.h"
+#include "ecmascript/object_fast_operator-inl.h"
+#include "ecmascript/interpreter/fast_runtime_stub-inl.h"
+#include "ecmascript/interpreter/slow_runtime_stub.h"
+#include "ecmascript/tests/ecma_container_common.h"
 #include "ecmascript/ecma_string.h"
 #include "ecmascript/global_env.h"
 #include "ecmascript/global_dictionary-inl.h"
@@ -28,6 +32,136 @@ using namespace panda::ecmascript;
 namespace panda::test {
 class ObjectOperatorTest : public BaseTestWithScope<false> {
 };
+
+HWTEST_F_L0(ObjectOperatorTest, ContainerFastReadBounds)
+{
+    auto factory = thread->GetEcmaVM()->GetFactory();
+    TestCommon::CreateContainerTaggedValue(thread, containers::ContainerTag::ArrayList);
+    TestCommon::CreateContainerTaggedValue(thread, containers::ContainerTag::Vector);
+    auto arrayList = factory->NewJSAPIArrayList(8);
+    auto vector = factory->NewJSAPIVector(8);
+    JSHandle<JSTaggedValue> value(thread, JSTaggedValue(42));
+    auto checkBounds = [this, &factory](const JSHandle<JSTaggedValue> &container, uint32_t length) {
+        for (uint32_t index : {length, length + 1, static_cast<uint32_t>(INT32_MAX)}) {
+            auto result = FastRuntimeStub::GetPropertyByIndex(thread, container.GetTaggedValue(), index);
+            EXPECT_TRUE(result.IsException());
+            ASSERT_TRUE(thread->HasPendingException());
+            JSHandle<JSTaggedValue> error(thread, thread->GetException());
+            thread->ClearException();
+            auto name = JSTaggedValue::GetProperty(thread, error,
+                JSHandle<JSTaggedValue>(factory->NewFromASCII("name"))).GetValue();
+            auto message = JSTaggedValue::GetProperty(thread, error,
+                JSHandle<JSTaggedValue>(factory->NewFromASCII("message"))).GetValue();
+            EXPECT_TRUE(EcmaStringAccessor::StringsAreEqual(thread->GetEcmaVM(), JSHandle<EcmaString>::Cast(name),
+                factory->NewFromASCII("TypeError")));
+            EXPECT_TRUE(EcmaStringAccessor::StringsAreEqual(thread->GetEcmaVM(), JSHandle<EcmaString>::Cast(message),
+                factory->NewFromASCII("Get Property index out-of-bounds")));
+        }
+    };
+    checkBounds(JSHandle<JSTaggedValue>(arrayList), 0);
+    checkBounds(JSHandle<JSTaggedValue>(vector), 0);
+    JSAPIArrayList::Add(thread, arrayList, value);
+    JSAPIVector::Add(thread, vector, value);
+    for (auto container : {JSHandle<JSTaggedValue>(arrayList), JSHandle<JSTaggedValue>(vector)}) {
+        EXPECT_EQ(FastRuntimeStub::GetPropertyByIndex(thread, container.GetTaggedValue(), 0),
+            value.GetTaggedValue());
+        EXPECT_EQ(FastRuntimeStub::GetPropertyByValue(thread, container.GetTaggedValue(), JSTaggedValue(0.0)),
+            value.GetTaggedValue());
+        auto zeroKey = factory->NewFromASCII("0");
+        EXPECT_EQ(FastRuntimeStub::GetPropertyByValue(thread, container.GetTaggedValue(),
+            zeroKey.GetTaggedValue()), value.GetTaggedValue());
+        checkBounds(container, 1);
+        EXPECT_TRUE(FastRuntimeStub::GetPropertyByValue(thread, container.GetTaggedValue(),
+            JSTaggedValue(INT32_MAX)).IsHole());
+        EXPECT_FALSE(thread->HasPendingException());
+    }
+}
+
+HWTEST_F_L0(ObjectOperatorTest, ContainerPropertySlowPath)
+{
+    auto list = JSHandle<JSAPIList>(thread, EcmaContainerCommon::CreateList(thread));
+    auto queue = EcmaContainerCommon::CreateQueue(thread, 8);
+    auto linkedList = JSHandle<JSAPILinkedList>(thread, EcmaContainerCommon::CreateLinkedList(thread));
+    auto plainArray = JSHandle<JSAPIPlainArray>(thread, EcmaContainerCommon::CreatePlainArray(thread));
+    auto deque = JSHandle<JSAPIDeque>(thread, EcmaContainerCommon::CreateJSApiDeque(thread));
+    auto stack = EcmaContainerCommon::CreateJSApiStack(thread);
+    for (auto container : {JSHandle<JSTaggedValue>(list), JSHandle<JSTaggedValue>(queue),
+        JSHandle<JSTaggedValue>(linkedList), JSHandle<JSTaggedValue>(plainArray),
+        JSHandle<JSTaggedValue>(deque), JSHandle<JSTaggedValue>(stack)}) {
+        EXPECT_TRUE(FastRuntimeStub::GetPropertyByIndex(thread, container.GetTaggedValue(), 0).IsHole());
+        EXPECT_TRUE(FastRuntimeStub::GetPropertyByValue(thread, container.GetTaggedValue(),
+            JSTaggedValue(0)).IsHole());
+        EXPECT_FALSE(thread->HasPendingException());
+        auto result = SlowRuntimeStub::LdObjByIndex(thread, container.GetTaggedValue(), 0, false,
+            JSTaggedValue::Undefined());
+        EXPECT_TRUE(result.IsException());
+        EXPECT_TRUE(thread->HasPendingException());
+        thread->ClearException();
+    }
+    JSHandle<JSTaggedValue> value(thread, JSTaggedValue(42));
+    JSAPIList::Add(thread, list, value);
+    EXPECT_EQ(SlowRuntimeStub::LdObjByIndex(thread, list.GetTaggedValue(), 0, false,
+        JSTaggedValue::Undefined()), value.GetTaggedValue());
+    EXPECT_TRUE(SlowRuntimeStub::LdObjByIndex(thread, list.GetTaggedValue(), 1, false,
+        JSTaggedValue::Undefined()).IsException());
+    EXPECT_TRUE(thread->HasPendingException());
+    thread->ClearException();
+    EXPECT_TRUE(list->Get(thread, 1).IsUndefined());
+    EXPECT_TRUE(ObjectFastOperator::GetPropertyByIndex(thread, list.GetTaggedValue(), 1).IsUndefined());
+    EXPECT_TRUE(FastRuntimeStub::GetPropertyByIndex(thread, list.GetTaggedValue(), 1).IsHole());
+    EXPECT_FALSE(JSTaggedValue::SetProperty(thread, JSHandle<JSTaggedValue>(list), 1,
+        JSHandle<JSTaggedValue>(thread, JSTaggedValue(99)), true));
+    EXPECT_FALSE(thread->HasPendingException());
+    EXPECT_EQ(list->Get(thread, 0), value.GetTaggedValue());
+    EXPECT_TRUE(JSTaggedValue::SetProperty(thread, JSHandle<JSTaggedValue>(list), 0,
+        JSHandle<JSTaggedValue>(thread, JSTaggedValue(99)), true));
+    EXPECT_EQ(list->Get(thread, 0), JSTaggedValue(99));
+    EXPECT_FALSE(ObjectFastOperator::SetPropertyByIndex(thread, list.GetTaggedValue(), 0,
+        value.GetTaggedValue()).IsHole());
+    EXPECT_EQ(list->Get(thread, 0), value.GetTaggedValue());
+    EXPECT_TRUE(FastRuntimeStub::SetPropertyByIndex(thread, list.GetTaggedValue(), 0, JSTaggedValue(99)).IsHole());
+    EXPECT_EQ(list->Get(thread, 0), value.GetTaggedValue());
+    EXPECT_FALSE(thread->HasPendingException());
+}
+
+HWTEST_F_L0(ObjectOperatorTest, ContainerFastWriteFallback)
+{
+    auto factory = thread->GetEcmaVM()->GetFactory();
+    for (auto tag : {containers::ContainerTag::ArrayList, containers::ContainerTag::Vector,
+        containers::ContainerTag::List, containers::ContainerTag::LinkedList, containers::ContainerTag::PlainArray,
+        containers::ContainerTag::Queue, containers::ContainerTag::Deque, containers::ContainerTag::Stack,
+        containers::ContainerTag::BitVector, containers::ContainerTag::FastBuffer}) {
+        JSHandle<JSTaggedValue> constructor(thread, TestCommon::CreateContainerTaggedValue(thread, tag));
+        auto container = factory->NewJSObjectByConstructor(JSHandle<JSFunction>(constructor), constructor);
+        if (tag != containers::ContainerTag::ArrayList && tag != containers::ContainerTag::Vector) {
+            EXPECT_TRUE(FastRuntimeStub::GetPropertyByIndex(thread, container.GetTaggedValue(), 0).IsHole());
+            EXPECT_FALSE(thread->HasPendingException());
+        }
+        for (uint32_t index : {0U, 1U, static_cast<uint32_t>(INT32_MAX)}) {
+            EXPECT_TRUE(FastRuntimeStub::SetPropertyByIndex(thread, container.GetTaggedValue(), index,
+                JSTaggedValue(99)).IsHole());
+            EXPECT_TRUE(FastRuntimeStub::SetPropertyByValue(thread, container.GetTaggedValue(), JSTaggedValue(index),
+                JSTaggedValue(99)).IsHole());
+            EXPECT_FALSE(thread->HasPendingException());
+        }
+    }
+}
+
+HWTEST_F_L0(ObjectOperatorTest, InterpreterIntegerMultiplication)
+{
+    EXPECT_EQ(FastRuntimeStub::FastMul(JSTaggedValue(2), JSTaggedValue(3)), JSTaggedValue(6));
+    EXPECT_EQ(FastRuntimeStub::FastMul(JSTaggedValue(-2), JSTaggedValue(3)), JSTaggedValue(-6));
+    EXPECT_EQ(FastRuntimeStub::FastMul(JSTaggedValue(0), JSTaggedValue(2)), JSTaggedValue(0));
+    EXPECT_EQ(FastRuntimeStub::FastMul(JSTaggedValue(INT32_MAX), JSTaggedValue(1)), JSTaggedValue(INT32_MAX));
+    EXPECT_EQ(FastRuntimeStub::FastMul(JSTaggedValue(INT32_MIN), JSTaggedValue(1)), JSTaggedValue(INT32_MIN));
+    EXPECT_EQ(FastRuntimeStub::FastMul(JSTaggedValue(INT32_MIN), JSTaggedValue(-1)), JSTaggedValue(2147483648.0));
+    EXPECT_EQ(FastRuntimeStub::FastMul(JSTaggedValue(INT32_MAX), JSTaggedValue(2)), JSTaggedValue(4294967294.0));
+    EXPECT_EQ(FastRuntimeStub::FastMul(JSTaggedValue(-1), JSTaggedValue(0)), JSTaggedValue(-0.0));
+    EXPECT_EQ(FastRuntimeStub::FastMul(JSTaggedValue(0), JSTaggedValue(-1)), JSTaggedValue(-0.0));
+    EXPECT_EQ(FastRuntimeStub::FastMul(JSTaggedValue(2.0), JSTaggedValue(3)), JSTaggedValue(6.0));
+    EXPECT_EQ(FastRuntimeStub::FastMul(JSTaggedValue(0.0), JSTaggedValue(-1)), JSTaggedValue(-0.0));
+    EXPECT_TRUE(FastRuntimeStub::FastMul(JSTaggedValue::Undefined(), JSTaggedValue(2)).IsHole());
+}
 
 HWTEST_F_L0(ObjectOperatorTest, SetAttr)
 {
