@@ -68,6 +68,22 @@ void SpecializedSlotSpace::IterateSlotObjectsInRegion(Region *region, const Call
     }
     CHECK_REGION_END(current, end);
 }
+// Mirrors SparseSpace::IterateOldToNewOverObjects so heap verification covers
+// module regions' old-to-new RSets like every other old-generation space.
+template <typename Visitor>
+void SpecializedSlotSpace::IterateOldToNewOverObjects(Visitor &visitor) const
+{
+    auto cb = [&visitor](void *mem, auto referenceTypeWrapper) -> bool {
+        constexpr ReferenceType refType = decltype(referenceTypeWrapper)::value;
+        ObjectSlotBase<refType> slot(ToUintPtr(mem));
+        visitor(reinterpret_cast<TaggedObject *>(mem), slot);
+        return true;
+    };
+    EnumerateRegions([&cb](Region *region) {
+        region->IterateAllSweepingOldToNewRSetBits(cb);
+        region->IterateAllOldToNewBits(cb);
+    });
+}
 }  // namespace panda::ecmascript
 
 #endif  // ECMASCRIPT_MEM_SPECIALIZED_SLOT_SPACE_INL_H

@@ -40,6 +40,9 @@ RegionSpaceFlag Space::GetRegionFlag() const
         case MemSpaceType::HUGE_MACHINE_CODE_SPACE:
             flags = RegionSpaceFlag::IN_HUGE_MACHINE_CODE_SPACE;
             break;
+        case MemSpaceType::MODULE_SPACE:
+            flags = RegionSpaceFlag::IN_MODULE_SPACE;
+            break;
         case MemSpaceType::NON_MOVABLE:
             flags = RegionSpaceFlag::IN_NON_MOVABLE_SPACE;
             break;

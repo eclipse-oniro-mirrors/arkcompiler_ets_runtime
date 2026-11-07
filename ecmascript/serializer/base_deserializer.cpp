@@ -356,6 +356,7 @@ size_t BaseDeserializer::ReadSingleEncodeData(uint8_t encodeFlag, uintptr_t objA
         case (uint8_t)SerializedObjectSpace::LARGE_SPACE:
         case (uint8_t)SerializedObjectSpace::OLD_SPACE:
         case (uint8_t)SerializedObjectSpace::SLOT_SPACE:
+        case (uint8_t)SerializedObjectSpace::MODULE_SPACE:
         case (uint8_t)SerializedObjectSpace::NON_MOVABLE_SPACE:
         case (uint8_t)SerializedObjectSpace::MACHINE_CODE_SPACE:
         case (uint8_t)SerializedObjectSpace::HUGE_SPACE:
@@ -600,6 +601,14 @@ uintptr_t BaseDeserializer::RelocateObjectAddr(SerializedObjectSpace space, size
             res = heap_->GetSlotSpace()->Allocate<false>(objSize);
             break;
         }
+        case SerializedObjectSpace::MODULE_SPACE: {
+            res = heap_->GetModuleSpace()->Allocate();
+            if (res == 0) {
+                DeserializeFatalOutOfMemory(ToSpaceTypeName(heap_->GetModuleSpace()->GetSpaceType()),
+                                            objSize, false, false);
+            }
+            break;
+        }
         case SerializedObjectSpace::NON_MOVABLE_SPACE: {
             if (nonMovableSpaceBeginAddr_ + objSize > AlignUp(nonMovableSpaceBeginAddr_, DEFAULT_REGION_SIZE)) {
                 ASSERT(nonMovableRegionIndex_ < regionVector_.size());
@@ -788,7 +797,7 @@ void BaseDeserializer::AllocateToDifferentSpaces()
         AllocateToDifferentCMCSpaces();
     } else {
         // Check whether it's needed to trigger old gc
-        size_t oldOrHugeSize = data_->GetOldSpaceSize() + data_->GetHugeSpaceSize();
+        size_t oldOrHugeSize = data_->GetOldSpaceSize() + data_->GetHugeSpaceSize() + data_->GetModuleSpaceSize();
         if (heap_->OldSpaceExceedCapacity(oldOrHugeSize)) {
             heap_->CollectGarbage(TriggerGCType::OLD_GC, GCReason::ALLOCATION_FAILED);
         }

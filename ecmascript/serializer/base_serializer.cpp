@@ -36,6 +36,8 @@ SerializedObjectSpace BaseSerializer::GetSerializedObjectSpace(TaggedObject *obj
             case RegionSpaceFlag::IN_YOUNG_SPACE:
                 ASSERT(!G_USE_CMS_GC);
                 return SerializedObjectSpace::OLD_SPACE;
+            case RegionSpaceFlag::IN_MODULE_SPACE:
+                return SerializedObjectSpace::MODULE_SPACE;
             case RegionSpaceFlag::IN_APPSPAWN_SPACE:
                 if constexpr (G_USE_CMS_GC) {
                     return SerializedObjectSpace::SLOT_SPACE;

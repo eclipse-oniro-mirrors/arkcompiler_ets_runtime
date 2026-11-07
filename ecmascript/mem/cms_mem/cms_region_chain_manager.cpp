@@ -89,6 +89,8 @@ size_t CMSRegionChainManager::PrepareSweeping(std::vector<Region *> &pendingRecl
             ownerSpace_->DecreaseCommitted(region->GetCapacity());
         } else {
             // fixme: Full alived region do not need to sweep
+            // SwapOldToNewRSetForCS is for module regions
+            region->SwapOldToNewRSetForCS();
             region->SwapLocalToShareRSetForCS();
             sweepingRegionList_.emplace_back(region);
         }
@@ -207,6 +209,7 @@ void CMSRegionChainManager::FinishSweeping()
     RetrieveSweptSlotFreeLists();
     for (Region *region : sweptFullRegionList_) {
         region->ResetSwept();
+        region->MergeOldToNewRSetForCS();
         region->MergeLocalToShareRSetForCS();
     }
     sweptFullRegionList_.clear();
@@ -225,6 +228,7 @@ void CMSRegionChainManager::PrepareCompact(std::vector<Region *> &pendingReclaim
         region->ResetGCAliveSize();
     });
     regionList_.Clear();
+    recordRegion_ = nullptr;
     usableSlotFreeList_.clear();
 }
 }  // namespace panda::ecmascript

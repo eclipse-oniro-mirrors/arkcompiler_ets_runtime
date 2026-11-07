@@ -101,6 +101,7 @@ public:
     void ClearRegionList()
     {
         regionList_.Clear();
+        recordRegion_ = nullptr;
     }
 
 private:

@@ -31,6 +31,7 @@ namespace panda::ecmascript {
 enum MemSpaceType {
     SEMI_SPACE = 0,
     OLD_SPACE,
+    MODULE_SPACE,
     NON_MOVABLE,
     MACHINE_CODE_SPACE,
     SLOT_SPACE,
@@ -98,6 +99,8 @@ static inline std::string ToSpaceTypeName(MemSpaceType type)
             return "appspawn space";
         case HUGE_MACHINE_CODE_SPACE:
             return "huge machine code space";
+        case MODULE_SPACE:
+            return "module space";
         case SLOT_SPACE:
             return "slot space";
         case SHARED_NON_MOVABLE:
@@ -209,7 +212,7 @@ public:
     bool IsOOMDumpSpace()
     {
         return spaceType_ == SEMI_SPACE || spaceType_ == OLD_SPACE || spaceType_ == NON_MOVABLE ||
-            spaceType_ == HUGE_OBJECT_SPACE;
+            spaceType_ == HUGE_OBJECT_SPACE || spaceType_ == MODULE_SPACE;
     }
 
     // methods for allocation inspector

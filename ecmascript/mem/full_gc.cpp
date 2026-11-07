@@ -108,6 +108,7 @@ void FullGC::Initialize()
         }
     } else {
         heap_->SwapNewSpace();
+        heap_->GetModuleSpace()->PrepareEvacuation();
     }
 #if ENABLE_MEMORY_OPTIMIZATION
     if (!forAppSpawn_) {
@@ -309,6 +310,7 @@ void FullGC::Finish()
         if (!forAppSpawn_) {
             heap_->SwapOldSpace();
         }
+        heap_->GetModuleSpace()->MergeToGCRegions();
     } else {
         heap_->GetSlotSpace()->MergeToRegions();
     }

@@ -33,6 +33,7 @@
 #include "ecmascript/jspandafile/js_pandafile_manager.h"
 #include "ecmascript/linked_hash_table.h"
 #include "ecmascript/mem/c_containers.h"
+#include "ecmascript/mem/region.h"
 #include "ecmascript/module/js_module_source_text.h"
 #include "ecmascript/object_factory.h"
 #include "ecmascript/tests/test_helper.h"
@@ -1424,6 +1425,11 @@ public:
         EXPECT_FALSE(res.IsEmpty());
         EXPECT_TRUE(res->IsSourceTextModule());
         JSHandle<SourceTextModule> module = JSHandle<SourceTextModule>::Cast(res);
+#if ENABLE_MODULE_SPACE
+        EXPECT_TRUE(Region::ObjectAddressToRange(module.GetTaggedValue().GetTaggedObject())->InModuleSpace());
+#else
+        EXPECT_FALSE(Region::ObjectAddressToRange(module.GetTaggedValue().GetTaggedObject())->InModuleSpace());
+#endif
         EXPECT_EQ(module->GetEcmaModuleFilenameString(), "modules.abc");
         EXPECT_EQ(module->GetEcmaModuleRecordNameString(), "a");
         EXPECT_EQ(module->GetTypes(), ModuleTypes::ECMA_MODULE);
@@ -1431,6 +1437,11 @@ public:
         // check request module
         JSHandle<TaggedArray> requestedModules(thread, module->GetRequestedModules(thread));
         EXPECT_TRUE(requestedModules->Get(thread, 0).IsSourceTextModule());
+#if ENABLE_MODULE_SPACE
+        EXPECT_TRUE(Region::ObjectAddressToRange(requestedModules->Get(thread, 0).GetTaggedObject())->InModuleSpace());
+#else
+        EXPECT_FALSE(Region::ObjectAddressToRange(requestedModules->Get(thread, 0).GetTaggedObject())->InModuleSpace());
+#endif
         // check import entry
         ObjectFactory *factory = ecmaVm->GetFactory();
         JSHandle<JSTaggedValue> val = JSHandle<JSTaggedValue>::Cast(factory->NewFromUtf8("val"));
@@ -1453,6 +1464,38 @@ public:
         EXPECT_EQ(indirectExportEntry->GetImportName(thread), val.GetTaggedValue());
         // check empty lazy array
         EXPECT_FALSE(module->IsLazyImportModule(0));
+
+        Destroy();
+    }
+
+    // Mutual imports: the B->A reference resolves while A's record is still open.
+    void ModuleDeserialierCyclicTest(SerializeData* data)
+    {
+        Init();
+        FileDeserializer deserializer(thread, data);
+        JSHandle<JSTaggedValue> res = deserializer.ReadValue();
+        ecmaVm->CollectGarbage(TriggerGCType::YOUNG_GC);
+        ecmaVm->CollectGarbage(TriggerGCType::OLD_GC);
+
+        EXPECT_FALSE(res.IsEmpty());
+        EXPECT_TRUE(res->IsSourceTextModule());
+        JSHandle<SourceTextModule> moduleA = JSHandle<SourceTextModule>::Cast(res);
+#if ENABLE_MODULE_SPACE
+        EXPECT_TRUE(Region::ObjectAddressToRange(moduleA.GetTaggedValue().GetTaggedObject())->InModuleSpace());
+#else
+        EXPECT_FALSE(Region::ObjectAddressToRange(moduleA.GetTaggedValue().GetTaggedObject())->InModuleSpace());
+#endif
+        JSHandle<TaggedArray> requestedA(thread, moduleA->GetRequestedModules(thread));
+        JSHandle<SourceTextModule> moduleB(thread, requestedA->Get(thread, 0));
+        EXPECT_TRUE(requestedA->Get(thread, 0).IsSourceTextModule());
+#if ENABLE_MODULE_SPACE
+        EXPECT_TRUE(Region::ObjectAddressToRange(moduleB.GetTaggedValue().GetTaggedObject())->InModuleSpace());
+#else
+        EXPECT_FALSE(Region::ObjectAddressToRange(moduleB.GetTaggedValue().GetTaggedObject())->InModuleSpace());
+#endif
+        // The back-reference must resolve to the same A.
+        JSHandle<TaggedArray> requestedB(thread, moduleB->GetRequestedModules(thread));
+        EXPECT_EQ(requestedB->Get(thread, 0).GetRawData(), moduleA.GetTaggedValue().GetRawData());
 
         Destroy();
     }
@@ -3652,6 +3695,38 @@ HWTEST_F_L0(JSSerializerTest, SerializeSourceTextModule)
     std::unique_ptr<SerializeData> data = serializer->Release();
     JSDeserializerTest jsDeserializerTest;
     std::thread t1(&JSDeserializerTest::ModuleDeserialierTest1, jsDeserializerTest, data.release());
+    {
+        ThreadSuspensionScope suspensionScope(thread);
+        t1.join();
+    }
+};
+
+HWTEST_F_L0(JSSerializerTest, SerializeSourceTextModuleCyclic)
+{
+    auto vm = thread->GetEcmaVM();
+    ObjectFactory *objectFactory = vm->GetFactory();
+    JSHandle<SourceTextModule> moduleA = objectFactory->NewSourceTextModule();
+    JSHandle<SourceTextModule> moduleB = objectFactory->NewSourceTextModule();
+    // The module serializer requires a non-empty filename or recordName.
+    moduleA->SetEcmaModuleFilenameString(thread, "modules.abc");
+    moduleA->SetEcmaModuleRecordNameString("a");
+    moduleB->SetEcmaModuleFilenameString(thread, "modules.abc");
+    moduleB->SetEcmaModuleRecordNameString("b");
+    JSHandle<TaggedArray> requestedA = objectFactory->NewTaggedArray(1);
+    JSHandle<TaggedArray> requestedB = objectFactory->NewTaggedArray(1);
+    requestedA->Set(thread, 0, moduleB);
+    requestedB->Set(thread, 0, moduleA);
+    moduleA->SetRequestedModules(thread, requestedA.GetTaggedValue());
+    moduleB->SetRequestedModules(thread, requestedB.GetTaggedValue());
+
+    auto serializer = CreateModuleSerializer();
+    bool res = serializer->WriteValue(thread, JSHandle<JSTaggedValue>(moduleA),
+                                      JSHandle<JSTaggedValue>(thread, JSTaggedValue::Undefined()),
+                                      JSHandle<JSTaggedValue>(thread, JSTaggedValue::Undefined()));
+    EXPECT_TRUE(res);
+    std::unique_ptr<SerializeData> data = serializer->Release();
+    JSDeserializerTest jsDeserializerTest;
+    std::thread t1(&JSDeserializerTest::ModuleDeserialierCyclicTest, jsDeserializerTest, data.release());
     {
         ThreadSuspensionScope suspensionScope(thread);
         t1.join();

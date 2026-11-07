@@ -28,6 +28,14 @@
 
 namespace panda::ecmascript {
 
+inline MemSpaceType FullGC::GetEvacuateTargetSpace(Region *region)
+{
+    // NonMovable objects must be evacuated into NonMovableSpace (e.g. HClasses), never into
+    // CompressSpace/AppSpawnSpace. Module objects likewise stay in ModuleSpace.
+    return region->InNonMovableSpace() ? NON_MOVABLE
+        : (region->InModuleSpace() ? MODULE_SPACE : COMPRESS_SPACE);
+}
+
 template <bool evacuateNonMovableSpace>
 FullGCRunner<evacuateNonMovableSpace>::FullGCRunner(Heap *heap, WorkNodeHolder *workNodeHolder, bool isAppSpawn)
     : heap_(heap), workNodeHolder_(workNodeHolder), isAppSpawn_(isAppSpawn), markRootVisitor_(this),
@@ -159,7 +167,7 @@ bool FullGCRunner<evacuateNonMovableSpace>::NeedEvacuate(Region *region)
         return region->InYoungOrOldSpace() || region->InNonMovableSpace();
     }
     if (isAppSpawn_) {
-        return !region->InHugeObjectSpace()  && !region->InReadOnlySpace() && !region->InNonMovableSpace();
+        return !region->InHugeObjectSpace() && !region->InReadOnlySpace() && !region->InNonMovableSpace();
     }
     // fixme: refactor?
     if constexpr (G_USE_CMS_GC) {
@@ -191,9 +199,7 @@ void FullGCRunner<evacuateNonMovableSpace>::EvacuateObject(ObjectSlotBase<refTyp
     JSHClass *klass = markWord.GetJSHClass();
     size_t size = klass->SizeFromJSHClass(object);
     Region *objectRegion = Region::ObjectAddressToRange(object);
-    // NonMovable objects must be evacuated into NonMovableSpace (e.g. HClasses), never into
-    // CompressSpace/AppSpawnSpace.
-    MemSpaceType space = objectRegion->InNonMovableSpace() ? NON_MOVABLE : COMPRESS_SPACE;
+    MemSpaceType space = FullGC::GetEvacuateTargetSpace(objectRegion);
     uintptr_t forwardAddress = AllocateForwardAddress(size, space);
     RawCopyObject(ToUintPtr(object), forwardAddress, size, markWord);
 
@@ -226,7 +232,9 @@ uintptr_t FullGCRunner<evacuateNonMovableSpace>::AllocateForwardAddress(size_t s
         ASSERT(!isAppSpawn_);
         return AllocateDstSpace(size, space);
     } else {
-        if (!isAppSpawn_) {
+        // Module slots go back to their own space even in appspawn mode: the
+        // appspawn target is the shared appspawn space, which modules never enter.
+        if (!isAppSpawn_ || space == MemSpaceType::MODULE_SPACE) {
             return AllocateDstSpace(size, space);
         }
         return AllocateAppSpawnSpace(size);

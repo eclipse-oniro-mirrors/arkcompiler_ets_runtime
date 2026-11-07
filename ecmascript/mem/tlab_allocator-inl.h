@@ -40,6 +40,7 @@ uintptr_t SpecializedSlotTlabAllocator::Allocate()
     if (LIKELY(top_ < end_)) {
         uintptr_t result = top_;
         top_ += slotSize_;
+        allocatedBytes_ += slotSize_;
         return result;
     }
     return Refill();
@@ -56,6 +57,12 @@ void SpecializedSlotTlabAllocator::Reset(SpecializedSlotSpace *space)
 void SpecializedSlotTlabAllocator::Finalize()
 {
     Discard();
+    if (allocatedBytes_ != 0) {
+        // The slots handed out here are module objects copied into module space during a full
+        // GC evacuation, so they are exactly the space's surviving bytes for this work node.
+        space_->AddSurvivalObjectSize(allocatedBytes_);
+        allocatedBytes_ = 0;
+    }
     space_ = nullptr;
     slotSize_ = 0;
 }
@@ -72,14 +79,15 @@ void SpecializedSlotTlabAllocator::Discard()
 uintptr_t SpecializedSlotTlabAllocator::Refill()
 {
     auto [bufferBegin, bufferSize] = space_->AllocateBufferSync();
-    ASSERT(bufferBegin != 0 && bufferSize >= slotSize_);
+    ASSERT(bufferSize >= slotSize_);
     top_ = bufferBegin;
     end_ = bufferBegin + bufferSize;
     return Allocate();
 }
 
 TlabAllocator::TlabAllocator(Heap *heap)
-    : heap_(heap), enableExpandYoung_(true), enableStealOldRegion_(true), nonMovableSpace_(heap_->GetNonMovableSpace())
+    : heap_(heap), enableExpandYoung_(true), enableStealOldRegion_(true),
+      moduleTlab_(heap->GetModuleSpace()), nonMovableSpace_(heap_->GetNonMovableSpace())
 {
     size_t maxOldSpaceCapacity = heap->GetOldSpace()->GetMaximumCapacity();
     localSpace_ = new LocalSpace(heap, maxOldSpaceCapacity, maxOldSpaceCapacity);
@@ -87,17 +95,19 @@ TlabAllocator::TlabAllocator(Heap *heap)
     nonMovableAllocator_.Reset();
 }
 
+inline void TlabAllocator::DrainBumpAllocator(BumpPointerAllocator &allocator)
+{
+    if (allocator.Available() != 0) {
+        FreeObject::FillFreeObject(heap_, allocator.GetTop(), allocator.Available());
+        allocator.Reset();
+    }
+}
+
 inline void TlabAllocator::Finalize()
 {
-    if (youngAllocator_.Available() != 0) {
-        FreeObject::FillFreeObject(heap_, youngAllocator_.GetTop(), youngAllocator_.Available());
-        youngAllocator_.Reset();
-    }
-    if (nonMovableAllocator_.Available() != 0) {
-        FreeObject::FillFreeObject(heap_, nonMovableAllocator_.GetTop(), nonMovableAllocator_.Available());
-        nonMovableAllocator_.Reset();
-    }
-
+    DrainBumpAllocator(youngAllocator_);
+    DrainBumpAllocator(nonMovableAllocator_);
+    moduleTlab_.Finalize();
     heap_->MergeToOldSpaceSync(localSpace_);
 }
 
@@ -116,6 +126,9 @@ uintptr_t TlabAllocator::Allocate(size_t size, MemSpaceType space)
             break;
         case NON_MOVABLE:
             result = AllocateInNonMovableSpace(size);
+            break;
+        case MODULE_SPACE:
+            result = AllocateInModuleSpace(size);
             break;
         default:
             LOG_ECMA(FATAL) << "this branch is unreachable";
@@ -167,6 +180,12 @@ uintptr_t TlabAllocator::AllocateInNonMovableSpace(size_t size)
     result = nonMovableAllocator_.Allocate(size);
     ASSERT(result != 0);
     return result;
+}
+
+uintptr_t TlabAllocator::AllocateInModuleSpace(size_t size)
+{
+    ASSERT(size == heap_->GetModuleSpace()->GetSlotSize());
+    return moduleTlab_.Allocate();
 }
 
 uintptr_t TlabAllocator::AllocateInOldSpace(size_t size)
