@@ -82,6 +82,10 @@ declare_args() {
   # coverage flag reaches the ArkSteed sources.
   arksteed_coverage = false
 
+  # Runtime switch to enable JIT (ArkSteed) at runtime. Default false: JIT is
+  # disabled at runtime unless a product overrides it to true.
+  ets_runtime_enable_jit_runtime = false
+
   # Defaults for fort
   ets_runtime_support_jit_code_sign = false
   enable_jit_code_sign = false
