@@ -24,6 +24,9 @@
 
 #include "ecmascript/checkpoint/thread_state_transition.h"
 #include "ecmascript/global_env.h"
+#include "ecmascript/ic/profile_type_info.h"
+#include "ecmascript/interpreter/slow_runtime_stub.h"
+#include "ecmascript/napi/include/jsnapi.h"
 #include "ecmascript/object_factory-inl.h"
 #include "ecmascript/tests/test_helper.h"
 #include "ecmascript/jit/jit_task.h"
@@ -234,6 +237,60 @@ HWTEST_F(JitTest, SetEnableOrDisable_BaselineStubBuildGate, TestSize.Level1)
     EXPECT_TRUE(jit_->IsEnableFastJit());
     EXPECT_FALSE(jit_->IsEnableBaselineJit());
 }
+
+/**
+ * @tc.name: WorkerTieringGate
+ * @tc.desc: main-VM-only tiering affinity: worker runtimes skip the jit profile
+ *           stub switch and stay on the baseline interpreter stubs, so no
+ *           profiling or hotness instrumentation runs on them, while
+ *           ProfileTypeInfo is still allocated to keep ic feedback working.
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(JitTest, WorkerTieringGate)
+{
+    EXPECT_TRUE(thread_->IsMainThreadFast());
+    // The fixture main VM went through the normal profile stub switch.
+    EXPECT_EQ(thread_->GetBCStubStatus(), BCStubStatus::PROFILE_BC_STUB);
+
+    ObjectFactory *mainFactory = instance_->GetFactory();
+    JSHandle<ProfileTypeInfo> mainProfileTypeInfo = mainFactory->NewProfileTypeInfo(4);  // 4: ic slot size
+    EXPECT_EQ(mainProfileTypeInfo->GetPeriodIndex(), ProfileTypeInfo::INITIAL_PERIOD_INDEX);
+
+    RuntimeOption workerOption;
+    workerOption.SetIsWorker();
+    std::thread workerThread([&workerOption]() {
+        EcmaVM *workerVm = JSNApi::CreateJSVM(workerOption);
+        ASSERT_TRUE(workerVm != nullptr);
+        JSThread *workerThread = workerVm->GetJSThread();
+        {
+            ThreadManagedScope managedScope(workerThread);
+            EcmaHandleScope handleScope(workerThread);
+            EXPECT_FALSE(workerThread->IsMainThreadFast());
+            // Worker runtimes skip the jit profile stub switch: they stay on the
+            // non-profiling baseline stub set (NORMAL or its STW-copy running
+            // set), so profiling data collection and hotness tier-up never
+            // trigger on them.
+            EXPECT_NE(workerThread->GetBCStubStatus(), BCStubStatus::PROFILE_BC_STUB);
+            EXPECT_NE(workerThread->GetBCStubStatus(), BCStubStatus::JIT_PROFILE_BC_STUB);
+
+            // ProfileTypeInfo is still allocated on worker runtimes for ic feedback;
+            // hotness thresholds now live in Method::HotnessCounterField and are
+            // managed by TieringManager, so worker compile is gated in
+            // Jit::CompileArkSteed instead. PGO profiler is forced off on workers.
+            EXPECT_FALSE(workerThread->IsPGOProfilerEnable());
+            JSHandle<JSTaggedValue> objFun = workerVm->GetGlobalEnv()->GetObjectFunction();
+            JSFunction *function = JSFunction::Cast(objFun->GetTaggedObject());
+            JSTaggedValue profileTypeInfoValue = SlowRuntimeStub::NotifyInlineCache(workerThread, function);
+            ASSERT_TRUE(profileTypeInfoValue.IsProfileTypeInfo());
+            JSHandle<ProfileTypeInfo> workerProfileTypeInfo(workerThread, profileTypeInfoValue);
+            EXPECT_EQ(workerProfileTypeInfo->GetPeriodIndex(), ProfileTypeInfo::INITIAL_PERIOD_INDEX);
+        }
+        JSNApi::DestroyJSVM(workerVm);
+    });
+    workerThread.join();
+}
+
 // This fixture explicitly requests the production default. The older JitTest
 // fixture pins one worker because it deliberately borrows that worker's VM.
 class ParallelJitTest : public testing::Test {
@@ -718,5 +775,4 @@ HWTEST_F_L0(ParallelJitTest, DetachedOutputDoesNotBorrowCompilerBuffers)
     }
 }
 #endif
-
 }  // namespace panda::test

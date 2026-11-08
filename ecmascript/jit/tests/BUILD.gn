@@ -101,6 +101,30 @@ host_unittest_action("JitCompatUtilTest") {
   deps += hiviewdfx_deps
 }
 
+host_unittest_action("WorkerContentionTest") {
+  module_out_path = module_output_path
+
+  sources = [
+    # test file
+    "worker_contention_test.cpp",
+  ]
+
+  configs = [
+    "../../../:asm_interp_enable_config",
+    "../../../:ecma_test_config",
+  ]
+
+  deps = [ "../../../:libark_jsruntime_test" ]
+
+  # hiviewdfx libraries
+  external_deps = hiviewdfx_ext_deps
+  external_deps += [
+    "icu:shared_icui18n",
+    "icu:shared_icuuc",
+  ]
+  deps += hiviewdfx_deps
+}
+
 group("unittest") {
   testonly = true
 
@@ -109,6 +133,7 @@ group("unittest") {
     ":JIT_001_Test",
     ":JitTimeScopeTest",
     ":JitCompatUtilTest",
+    ":WorkerContentionTest",
   ]
 }
 
@@ -121,6 +146,7 @@ group("host_unittest") {
       ":JIT_001_TestAction",
       ":JitTimeScopeTestAction",
       ":JitCompatUtilTestAction",
+      ":WorkerContentionTestAction",
     ]
   }
 
@@ -129,6 +155,7 @@ group("host_unittest") {
       ":JIT_001_TestAction",
       ":JitTimeScopeTestAction",
       ":JitCompatUtilTestAction",
+      ":WorkerContentionTestAction",
     ]
   }
 }
