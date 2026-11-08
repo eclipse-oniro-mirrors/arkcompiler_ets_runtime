@@ -242,7 +242,9 @@ JSTaggedValue RuntimeStubs::RuntimeCloseIterator(JSThread *thread, const JSHandl
         JSHandle<JSTaggedValue> undefinedVal = globalConst->GetHandledUndefined();
         record = JSHandle<JSTaggedValue>(factory->NewCompletionRecord(CompletionRecordType::NORMAL, undefinedVal));
     }
-    JSHandle<JSTaggedValue> result = JSIterator::IteratorClose(thread, iter, record);
+    // Pass callGetter = true: the iterator's "return" property may be defined as an
+    // accessor, so its getter must be invoked to obtain the real return method.
+    JSHandle<JSTaggedValue> result = JSIterator::IteratorClose(thread, iter, record, true);
     RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread);
     if (result->IsCompletionRecord()) {
         return CompletionRecord::Cast(result->GetTaggedObject())->GetValue(thread);

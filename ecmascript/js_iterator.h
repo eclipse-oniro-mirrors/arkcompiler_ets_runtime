@@ -80,8 +80,12 @@ public:
     // 7.4.5
     static JSHandle<JSTaggedValue> IteratorStep(JSThread *thread, const JSHandle<JSTaggedValue> &iter);
     // 7.4.6
+    // callGetter: when true, if the "return" property of the iterator is an accessor,
+    // invoke its getter to obtain the actual return method instead of treating the
+    // AccessorData itself as the property value. Defaults to false to keep the
+    // existing fast path unchanged for other callers.
     static JSHandle<JSTaggedValue> IteratorClose(JSThread *thread, const JSHandle<JSTaggedValue> &iter,
-                                                 const JSHandle<JSTaggedValue> &completion);
+                                                 const JSHandle<JSTaggedValue> &completion, bool callGetter = false);
     // 7.4.7
     static JSHandle<JSObject> CreateIterResultObject(JSThread *thread, const JSHandle<JSTaggedValue> &value, bool done);
 };

@@ -384,6 +384,7 @@ void BytecodeMetaData::InitSupportDeoptFlag(EcmaOpcode &opcode, uint32_t &flags)
 void BytecodeMetaData::InitReadThisObjectFlag(EcmaOpcode &opcode, uint32_t &flags)
 {
     switch (opcode) {
+        case EcmaOpcode::LDTHIS:
         case EcmaOpcode::LDTHISBYVALUE_IMM8:
         case EcmaOpcode::LDTHISBYVALUE_IMM16:
         case EcmaOpcode::STTHISBYVALUE_IMM8_V8:
@@ -758,6 +759,7 @@ bool BytecodeMetaData::InitSetConstantKind(EcmaOpcode &opcode, BytecodeKind &kin
         case EcmaOpcode::LDAI_IMM32:
         case EcmaOpcode::FLDAI_IMM64:
         case EcmaOpcode::LDFUNCTION:
+        case EcmaOpcode::LDTHIS:
             kind = BytecodeKind::SET_CONSTANT;
             return true;
         default:

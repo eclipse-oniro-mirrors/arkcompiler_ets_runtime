@@ -231,8 +231,9 @@ JSHandle<JSTaggedValue> JSIterator::IteratorStep(JSThread *thread, const JSHandl
     return result;
 }
 // 7.4.6
+// callGetter: whether to invoke the getter when the "return" property is an accessor.
 JSHandle<JSTaggedValue> JSIterator::IteratorClose(JSThread *thread, const JSHandle<JSTaggedValue> &iter,
-                                                  const JSHandle<JSTaggedValue> &completion)
+                                                  const JSHandle<JSTaggedValue> &completion, bool callGetter)
 {
     // 1.Assert: Type(iterator) is Object.
     ASSERT_PRINT(iter->IsECMAObject(), "iter must be JSObject");
@@ -245,6 +246,15 @@ JSHandle<JSTaggedValue> JSIterator::IteratorClose(JSThread *thread, const JSHand
     JSTaggedValue returnStr = globalConst->GetReturnString();
     // 3.Let return be GetMethod(iterator, "return").
     JSTaggedValue func = ObjectFastOperator::FastGetPropertyByName(thread, iter.GetTaggedValue(), returnStr);
+    // FastGetPropertyByName returns the raw AccessorData without invoking the getter.
+    // When callGetter is required (e.g. from the CloseIterator stub), call the getter here
+    // to resolve the actual "return" method, so an accessor-defined "return" property
+    // behaves the same as a normal data property.
+    if (callGetter && UNLIKELY(func.IsAccessor())) {
+        func = JSObject::CallGetter(thread, AccessorData::Cast(func.GetTaggedObject()), iter);
+        // The getter invocation may throw; propagate the abrupt completion to the caller.
+        RETURN_HANDLE_IF_ABRUPT_COMPLETION(JSTaggedValue, thread);
+    }
     // 4.ReturnIfAbrupt(return).
     JSHandle<JSTaggedValue> returnFunc(thread, func);
     RETURN_VALUE_IF_ABRUPT_COMPLETION(thread, returnFunc);
@@ -286,7 +296,7 @@ JSHandle<JSTaggedValue> JSIterator::IteratorClose(JSThread *thread, const JSHand
     }
     // 9.If Type(innerResult.[[value]]) is not Object, throw a TypeError exception.
     if (!innerResult->IsECMAObject()) {
-        THROW_TYPE_ERROR_AND_RETURN(thread, "Is not object", undefined);
+        THROW_TYPE_ERROR_AND_RETURN(thread, "Inner return result is not object", undefined);
     }
     if (!exceptionOnThread.IsEmpty()) {
         thread->SetException(exceptionOnThread.GetTaggedValue());

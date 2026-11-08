@@ -812,6 +812,13 @@ LoadObjPropertyTypeInfoAccessor::LoadObjPropertyTypeInfoAccessor(const Compilati
         receiver_ = acc_.GetValueIn(gate, 1); // 1: receiver
         key_ = acc_.GetValueIn(gate, 2);      // 2: key
         ASSERT(!IsAot());
+    } else if (acc_.GetByteCodeOpcode(gate) == EcmaOpcode::LDTHISBYNAME_IMM8_ID16 ||
+               acc_.GetByteCodeOpcode(gate) == EcmaOpcode::LDTHISBYNAME_IMM16_ID16) {
+        // LDTHISBYNAME has no explicit receiver vreg input: [slotId, key].
+        // Reading value input 2 as the receiver would run past the value input
+        // range and pick up the frame state input instead.
+        key_ = acc_.GetValueIn(gate, 1);      // 1: key
+        receiver_ = circuit->GetArgumentAccessor()->GetFrameArgsIn(gate, FrameArgIdx::THIS_OBJECT);
     } else {
         key_ = acc_.GetValueIn(gate, 1);      // 1: key
         receiver_ = acc_.GetValueIn(gate, 2); // 2: receiver
