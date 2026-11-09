@@ -67,6 +67,9 @@ JSTaggedValue JSAPIBitVector::Pop(JSThread* thread, const JSHandle<JSAPIBitVecto
 
 JSTaggedValue JSAPIBitVector::Set(JSThread* thread, const uint32_t index, JSTaggedValue value)
 {
+    [[maybe_unused]] ConcurrentApiScope<JSAPIBitVector, ModType::WRITE> scope(thread,
+        JSHandle<JSTaggedValue>(thread, JSTaggedValue(this)));
+    RETURN_VALUE_IF_ABRUPT_COMPLETION(thread, JSTaggedValue::Exception());
     uint32_t length = static_cast<uint32_t>(GetLength());
     if (index >= length) {
         std::ostringstream oss;
@@ -83,6 +86,9 @@ JSTaggedValue JSAPIBitVector::Set(JSThread* thread, const uint32_t index, JSTagg
 
 JSTaggedValue JSAPIBitVector::Get(JSThread* thread, const uint32_t index)
 {
+    [[maybe_unused]] ConcurrentApiScope<JSAPIBitVector, ModType::READ> scope(thread,
+        JSHandle<JSTaggedValue>(thread, JSTaggedValue(this)));
+    RETURN_VALUE_IF_ABRUPT_COMPLETION(thread, JSTaggedValue::Exception());
     uint32_t length = static_cast<uint32_t>(GetLength());
     if (index >= length) {
         std::ostringstream oss;
@@ -99,6 +105,9 @@ JSTaggedValue JSAPIBitVector::Get(JSThread* thread, const uint32_t index)
 bool JSAPIBitVector::Has(JSThread* thread, const JSHandle<JSAPIBitVector>& bitVector,
     const JSHandle<JSTaggedValue>& value, const JSHandle<JSTaggedValue>& start, const JSHandle<JSTaggedValue>& end)
 {
+    [[maybe_unused]] ConcurrentApiScope<JSAPIBitVector, ModType::READ> scope(thread,
+        JSHandle<JSTaggedValue>::Cast(bitVector));
+    RETURN_VALUE_IF_ABRUPT_COMPLETION(thread, false);
     int32_t startIndex = JSTaggedValue::ToInt32(thread, start);
     int32_t endIndex = JSTaggedValue::ToInt32(thread, end);
     int32_t length = bitVector->GetLength();
@@ -136,6 +145,9 @@ bool JSAPIBitVector::Has(JSThread* thread, const JSHandle<JSAPIBitVector>& bitVe
 
 bool JSAPIBitVector::Has(JSThread* thread, const JSTaggedValue& value) const
 {
+    [[maybe_unused]] ConcurrentApiScope<JSAPIBitVector, ModType::READ> scope(thread,
+        JSHandle<JSTaggedValue>(thread, JSTaggedValue(this)));
+    RETURN_VALUE_IF_ABRUPT_COMPLETION(thread, false);
     uint32_t length = GetSize();
     if (length == 0) {
         return false;
