@@ -564,7 +564,8 @@ JSHandle<JSArray> ObjectFactory::CloneArrayLiteral(JSHandle<JSArray> object)
 
     if (type == MemSpaceType::NON_MOVABLE && !object->GetElements(thread_).IsCOWArray()) {
         ASSERT(g_isEnableCMCGC ||
-            !Region::ObjectAddressToRange(object->GetElements(thread_).GetTaggedObject())->InNonMovableSpace());
+            !Region::ObjectAddressToRange(object->GetElements(thread_).GetTaggedObject())->InNonMovableSpace() ||
+            Region::ObjectAddressToRange(object->GetElements(thread_).GetTaggedObject())->IsPinned());
         // Set the first shared elements into the old object.
         object->SetElements(thread_, cloneObject->GetElements(thread_));
     }
@@ -588,7 +589,8 @@ JSHandle<JSArray> ObjectFactory::CloneArrayLiteral(JSHandle<JSArray> object)
 
     if (type == MemSpaceType::NON_MOVABLE && !object->GetProperties(thread_).IsCOWArray()) {
         ASSERT(g_isEnableCMCGC ||
-            !Region::ObjectAddressToRange(object->GetProperties(thread_).GetTaggedObject())->InNonMovableSpace());
+            !Region::ObjectAddressToRange(object->GetProperties(thread_).GetTaggedObject())->InNonMovableSpace() ||
+            Region::ObjectAddressToRange(object->GetProperties(thread_).GetTaggedObject())->IsPinned());
         // Set the first shared properties into the old object.
         object->SetProperties(thread_, cloneObject->GetProperties(thread_));
     }

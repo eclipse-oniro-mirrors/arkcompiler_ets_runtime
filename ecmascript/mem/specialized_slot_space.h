@@ -73,6 +73,7 @@ public:
     void SetRecordRegion();
     void IterateOverObjects(const std::function<void(TaggedObject *object)> &objectVisitor);
     void PrepareEvacuation();
+    void Reset();
     // Merges the gc regions (evacuation targets) back into the main chain without
     // releasing the from-regions parked by PrepareEvacuation: Heap::ReclaimRegions
     // (via Resume) releases them after a normal full GC, and Heap::ResumeForAppSpawn

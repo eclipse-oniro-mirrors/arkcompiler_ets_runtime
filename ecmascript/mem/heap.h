@@ -1333,6 +1333,7 @@ public:
     void ResumeCC();
     void ClearGCBitSetForCMS();
     void CompactHeapBeforeFork();
+    void AttachRegionsToAppSpawnSpace();
     void DisableParallelGC();
     void EnableParallelGC();
 #if defined(ECMASCRIPT_SUPPORT_SNAPSHOT) && defined(PANDA_TARGET_OHOS) && defined(ENABLE_HISYSEVENT)
@@ -1977,8 +1978,6 @@ public:
         size_t totalSize = slotSpace_->GetCommittedSize() + hugeObjectSpace_->GetCommittedSize();
         return totalSize >= slotSpace_->GetInitialCapacity();
     }
-
-    void AdjustSpaceSizeForAppSpawn();
 
     bool IsFullMarkRequested() const
     {

@@ -94,7 +94,8 @@ void GlobalGC::Finish()
     Runtime::GetInstance()->GCIterateThreadList([](JSThread *iteratedThread) {
         Heap *heap = iteratedThread->GetEcmaVM()->GetHeap();
         heap->EnumerateRegions([](Region *region) {
-            if (!region->InAppSpawnSpace()) {
+            // Pinned regions keep their mark bits across GlobalGC for heap-dump iteration.
+            if (!region->IsPinned()) {
                 region->ClearMarkGCBitset();
             }
         });

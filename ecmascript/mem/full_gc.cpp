@@ -112,14 +112,12 @@ void FullGC::Initialize()
         heap_->GetNativePointerSpace()->PrepareEvacuation();
     }
 #if ENABLE_MEMORY_OPTIMIZATION
-    if (!forAppSpawn_) {
-        bool evacuateNonMovableSpace = Runtime::GetInstance()->IsEnableEvacuateNonMovableSpace();
-        heap_->SetEvacuateNonMovableSpace(evacuateNonMovableSpace);
-        if (evacuateNonMovableSpace) {
-            NonMovableSpace *nonMovableSpace = heap_->GetNonMovableSpace();
-            nonMovableSpace->SelectCSet();
-            nonMovableSpace->PrepareCompact();
-        }
+    bool evacuateNonMovableSpace = Runtime::GetInstance()->IsEnableEvacuateNonMovableSpace();
+    heap_->SetEvacuateNonMovableSpace(evacuateNonMovableSpace);
+    if (evacuateNonMovableSpace) {
+        NonMovableSpace *nonMovableSpace = heap_->GetNonMovableSpace();
+        nonMovableSpace->SelectCSet();
+        nonMovableSpace->PrepareCompact();
     }
 #endif
     workManager_->Initialize(TriggerGCType::FULL_GC, ParallelGCTaskPhase::COMPRESS_HANDLE_GLOBAL_POOL_TASK);
@@ -311,9 +309,7 @@ void FullGC::Finish()
     TRACE_GC(GCStats::Scope::ScopeId::Finish, heap_->GetEcmaVM()->GetEcmaGCStats());
     // fixme: refactor?
     if constexpr (!G_USE_CMS_GC) {
-        if (!forAppSpawn_) {
-            heap_->SwapOldSpace();
-        }
+        heap_->SwapOldSpace();
         heap_->ProcessNativePointerCallbacks();
         heap_->GetModuleSpace()->MergeToGCRegions();
         heap_->GetNativePointerSpace()->MergeToGCRegions();
@@ -334,9 +330,12 @@ void FullGC::Finish()
 template <bool evacuateNonMovableSpace>
 bool FullGC::HasEvacuated(Region *region)
 {
+    // Pinned regions (AppSpawnSpace stable regions) are never evacuated: preserve fork COW.
+    if (region->IsPinned()) {
+        return false;
+    }
     if constexpr (evacuateNonMovableSpace) {
         static_assert(!G_USE_CMS_GC);
-        ASSERT(!forAppSpawn_);
         return region->InYoungOrOldSpace() || region->InNonMovableSpace();
     }
     if (forAppSpawn_) {

@@ -1250,10 +1250,10 @@ void SharedHeap::MoveOldSpaceToAppspawn()
         region->ResetRegionTypeFlag();
         // Region in SharedHeap do not need PageTag threadId.
         PageTag(region, region->GetCapacity(), PageTagType::HEAP, region->GetSpaceTypeName());
+        sOldSpace_->RemoveRegion(region);
         sAppSpawnSpace_->AddRegion(region);
         sAppSpawnSpace_->IncreaseLiveObjectSize(region->AliveObject());
     });
-    sOldSpace_->GetRegionList().Clear();
     sOldSpace_->Reset();
 }
 
@@ -1853,9 +1853,12 @@ void Heap::ResumeCC()
 
 void Heap::ResumeForAppSpawn()
 {
-    sweeper_->WaitAllTaskFinished();
+    sweeper_->EnsureAllTaskFinished();
     hugeObjectSpace_->ReclaimHugeRegion();
     hugeMachineCodeSpace_->ReclaimHugeRegion();
+    if (GetEvacuateNonMovableSpace()) {
+        nonMovableSpace_->ReclaimCSet();
+    }
     // fixme: reafactor?
     if constexpr (G_USE_CMS_GC) {
         slotSpace_->ReclaimFromRegions(false);
@@ -1863,8 +1866,9 @@ void Heap::ResumeForAppSpawn()
         moduleSpace_->ReclaimFromRegions();
         inactiveSemiSpace_->ReclaimRegions();
         nativePointerSpace_->ReclaimFromRegions();
-        oldSpace_->Reset();
+        compressSpace_->Reset();
     }
+    AttachRegionsToAppSpawnSpace();
     auto cb = [] (Region *region) {
         if constexpr (!G_USE_STICKY_CMS_GC) {
             region->ClearMarkGCBitset();
@@ -1893,6 +1897,47 @@ void Heap::ClearGCBitSetForCMS()
 void Heap::CompactHeapBeforeFork()
 {
     CollectGarbage(TriggerGCType::APPSPAWN_FULL_GC);
+}
+
+void Heap::AttachRegionsToAppSpawnSpace()
+{
+    SetHeapMode(HeapMode::SPAWN);
+    auto attach = [this](auto *space) {
+        space->EnumerateRegions([this](Region *region) {
+            PageTag(region, region->GetCapacity(), PageTagType::HEAP,
+                    ToSpaceTypeName(MemSpaceType::APPSPAWN_SPACE));
+            appSpawnSpace_->AddRegion(region);
+            // AppSpawn regions are never evacuated.
+            region->SetPinned();
+        });
+        using SpaceT = std::remove_pointer_t<decltype(space)>;
+        appSpawnSpace_->IncreaseLiveObjectSize(space->GetHeapObjectSize());
+        if constexpr (std::is_base_of_v<SparseSpace, SpaceT>) {
+            space->GetRegionList().Clear();
+        }
+        space->Reset();
+    };
+    if constexpr (!G_USE_CMS_GC) {
+        // Module and native-pointer regions share the old-space budget.
+        size_t oldCommittedSize = GetOldSpaceCommittedSize();
+        oldSpace_->SetInitialCapacity(oldSpace_->GetInitialCapacity() - oldCommittedSize);
+        oldSpace_->SetMaximumCapacity(oldSpace_->GetMaximumCapacity() - oldCommittedSize);
+        compressSpace_->SetInitialCapacity(oldSpace_->GetInitialCapacity());
+        compressSpace_->SetMaximumCapacity(oldSpace_->GetMaximumCapacity());
+        nativePointerSpace_->SetInitialCapacity(oldSpace_->GetInitialCapacity());
+        nativePointerSpace_->SetMaximumCapacity(oldSpace_->GetMaximumCapacity());
+        activeSemiSpace_->SetInitialCapacity(config_.GetMinSemiSpaceSize());
+        attach(oldSpace_);
+        attach(moduleSpace_);
+        attach(nativePointerSpace_);
+    }
+    size_t nonMovSize = nonMovableSpace_->GetCommittedSize();
+    nonMovableSpace_->SetInitialCapacity(nonMovableSpace_->GetInitialCapacity() - nonMovSize);
+    nonMovableSpace_->SetMaximumCapacity(nonMovableSpace_->GetMaximumCapacity() - nonMovSize);
+    attach(nonMovableSpace_);
+    auto committedSize = appSpawnSpace_->GetCommittedSize();
+    appSpawnSpace_->SetInitialCapacity(committedSize);
+    appSpawnSpace_->SetMaximumCapacity(committedSize);
 }
 
 void Heap::DisableParallelGC()
@@ -2617,23 +2662,6 @@ void Heap::DumpHeapSnapshotBeforeOOM(bool isProcDump, [[maybe_unused]] const std
     HeapProfilerInterface::Destroy(ecmaVm_);
 #endif // ENABLE_DUMP_IN_FAULTLOG
 #endif // ECMASCRIPT_SUPPORT_SNAPSHOT
-}
-
-void Heap::AdjustSpaceSizeForAppSpawn()
-{
-    SetHeapMode(HeapMode::SPAWN);
-    auto committedSize = appSpawnSpace_->GetCommittedSize();
-    appSpawnSpace_->SetInitialCapacity(committedSize);
-    appSpawnSpace_->SetMaximumCapacity(committedSize);
-    // fixme: refactor?
-    if constexpr (G_USE_CMS_GC) {
-        // fixme: add impl
-    } else {
-        size_t minSemiSpaceCapacity = config_.GetMinSemiSpaceSize();
-        activeSemiSpace_->SetInitialCapacity(minSemiSpaceCapacity);
-        oldSpace_->SetInitialCapacity(oldSpace_->GetInitialCapacity() - committedSize);
-        oldSpace_->SetMaximumCapacity(oldSpace_->GetMaximumCapacity() - committedSize);
-    }
 }
 
 void Heap::AddAllocationInspectorToAllSpaces(AllocationInspector *inspector)

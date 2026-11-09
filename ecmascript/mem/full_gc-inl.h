@@ -169,9 +169,12 @@ template <bool evacuateNonMovableSpace>
 bool FullGCRunner<evacuateNonMovableSpace>::NeedEvacuate(Region *region)
 {
     ASSERT(!region->InSharedHeap());
+    // Pinned regions (AppSpawnSpace stable regions) are never evacuated: preserve fork COW.
+    if (region->IsPinned()) {
+        return false;
+    }
     if constexpr (evacuateNonMovableSpace) {
         static_assert(!G_USE_CMS_GC);
-        ASSERT(!isAppSpawn_);
         return region->InYoungOrOldSpace() || region->InNonMovableSpace();
     }
     if (isAppSpawn_) {
@@ -208,7 +211,7 @@ void FullGCRunner<evacuateNonMovableSpace>::EvacuateObject(ObjectSlotBase<refTyp
     size_t size = klass->SizeFromJSHClass(object);
     Region *objectRegion = Region::ObjectAddressToRange(object);
     MemSpaceType space = FullGC::GetEvacuateTargetSpace(objectRegion);
-    uintptr_t forwardAddress = AllocateForwardAddress(size, space);
+    uintptr_t forwardAddress = AllocateDstSpace(size, space);
     RawCopyObject(ToUintPtr(object), forwardAddress, size, markWord);
     MarkWordType oldValue = markWord.GetValue();
     MarkWordType result = Barriers::AtomicSetPrimitive(object, 0, oldValue,
@@ -237,22 +240,6 @@ void FullGCRunner<evacuateNonMovableSpace>::EvacuateObject(ObjectSlotBase<refTyp
 }
 
 template <bool evacuateNonMovableSpace>
-uintptr_t FullGCRunner<evacuateNonMovableSpace>::AllocateForwardAddress(size_t size, MemSpaceType space)
-{
-    if constexpr (evacuateNonMovableSpace) {
-        ASSERT(!isAppSpawn_);
-        return AllocateDstSpace(size, space);
-    } else {
-        // Module and native-pointer slots go back to their own spaces even in appspawn mode.
-        if (!isAppSpawn_ || space == MemSpaceType::MODULE_SPACE ||
-            space == MemSpaceType::NATIVE_POINTER_SPACE) {
-            return AllocateDstSpace(size, space);
-        }
-        return AllocateAppSpawnSpace(size);
-    }
-}
-
-template <bool evacuateNonMovableSpace>
 uintptr_t FullGCRunner<evacuateNonMovableSpace>::AllocateDstSpace(size_t size, MemSpaceType space)
 {
     uintptr_t forwardAddress;
@@ -265,18 +252,6 @@ uintptr_t FullGCRunner<evacuateNonMovableSpace>::AllocateDstSpace(size_t size, M
     }
     if (UNLIKELY(forwardAddress == 0)) {
         LOG_ECMA_MEM(FATAL) << "EvacuateObject alloc failed: " << " size: " << size;
-        UNREACHABLE();
-    }
-    return forwardAddress;
-}
-
-template <bool evacuateNonMovableSpace>
-uintptr_t FullGCRunner<evacuateNonMovableSpace>::AllocateAppSpawnSpace(size_t size)
-{
-    uintptr_t forwardAddress = heap_->GetAppSpawnSpace()->AllocateSync(size);
-    if (UNLIKELY(forwardAddress == 0)) {
-        LOG_ECMA_MEM(FATAL) << "Evacuate AppSpawn Object: alloc failed: "
-                            << " size: " << size;
         UNREACHABLE();
     }
     return forwardAddress;

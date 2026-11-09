@@ -267,19 +267,20 @@ void VerifyObjectVisitor::VerifyMarkYoung(TaggedObject *object, ObjectSlotBase<r
         }
     }
     if (objectRegion->Test(object)) {
-        if (!objectRegion->InYoungSpace() && !objectRegion->InAppSpawnSpace() &&
+        if (!objectRegion->InYoungSpace() && !objectRegion->IsPinned() &&
             !objectRegion->InReadOnlySpace()) {
-            LogErrorForObj(heap_, "Verify MarkYoung: Marked object, NOT in Young/AppSpawn/ReadOnly Space", object);
+            LogErrorForObj(heap_, "Verify MarkYoung: Marked object, NOT in Young/Pinned/ReadOnly Space",
+                           object);
         }
         if (valueRegion->InYoungSpace() && !valueRegion->Test(value)) {
             LogErrorForObjSlot(heap_, "Verify MarkYoung: Marked object, slot in YoungSpace, miss gc_mark bit.",
                 object, slot, value);
         }
         if (valueRegion->Test(value) &&
-            !(valueRegion->InYoungSpace() || valueRegion->InAppSpawnSpace() || valueRegion->InReadOnlySpace() ||
+            !(valueRegion->InYoungSpace() || valueRegion->IsPinned() || valueRegion->InReadOnlySpace() ||
               valueRegion->InSharedHeap())) {
             LogErrorForObjSlot(heap_, "Verify MarkYoung: Marked object, slot marked, but NOT in "
-                "Young/AppSpawn/ReadOnly Space.", object, slot, value);
+                "Young/Pinned/ReadOnly Space.", object, slot, value);
         }
     } // LCOV_EXCL_STOP
 }
