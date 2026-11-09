@@ -13,10 +13,12 @@
  * limitations under the License.
  */
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <functional>
 #include <future>
+#include <limits>
 #include <thread>
 
 #include "builtin_test_util.h"
@@ -1358,6 +1360,70 @@ HWTEST_F_L0(BuiltinsAtomicsTest, CollectionsAtomicsBusinessErrorParameters)
         args[1] = JSTaggedValue(2);
         EXPECT_TRUE(CallAtomicBuiltin(thread, entry.GetEntrypoint(), args).IsException());
         AtomicsTestHelper::ExpectBusinessError(thread, Errors::RANGE_ERROR);
+    }
+}
+
+HWTEST_F_L0(BuiltinsAtomicsTest, CollectionsAtomicsIndexErrorsHaveBusinessCodes)
+{
+    auto array = AtomicsTestHelper::CreateArray(thread, DataViewType::INT32, true);
+    const double infinity = std::numeric_limits<double>::infinity();
+    const std::array invalidIndices = {JSTaggedValue(-1), JSTaggedValue(-1.9), JSTaggedValue(-infinity),
+        JSTaggedValue(infinity), JSTaggedValue(SAFE_NUMBER), JSTaggedValue(SAFE_NUMBER + 1)};
+    for (const auto &entry : collections::CollectionsAtomics::GetAtomicsFunctions()) {
+        if (entry.GetName() == "isLockFree") {
+            continue;
+        }
+        SCOPED_TRACE(entry.GetName().data());
+        for (JSTaggedValue index : invalidIndices) {
+            SCOPED_TRACE(index.GetNumber());
+            std::vector<JSTaggedValue> args(entry.GetLength(), JSTaggedValue(0));
+            args[0] = array.GetTaggedValue();
+            args[1] = index;
+            EXPECT_TRUE(CallAtomicBuiltin(thread, entry.GetEntrypoint(), args).IsException());
+            AtomicsTestHelper::ExpectBusinessError(thread, containers::ErrorFlag::RANGE_ERROR);
+        }
+    }
+    EXPECT_EQ(CallAtomicBuiltin(thread, collections::CollectionsAtomics::Load,
+        {array.GetTaggedValue(), JSTaggedValue(0)}), JSTaggedValue(0));
+}
+
+HWTEST_F_L0(BuiltinsAtomicsTest, CollectionsAtomicsPreserveIndexNormalization)
+{
+    auto array = AtomicsTestHelper::CreateArray(thread, DataViewType::INT32, true);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const std::array firstIndices = {nan, -0.0, 0.0, -0.9, 0.9};
+    for (double index : firstIndices) {
+        auto stored = CallAtomicBuiltin(thread, collections::CollectionsAtomics::Store,
+            {array.GetTaggedValue(), JSTaggedValue(index), JSTaggedValue(1)});
+        ASSERT_TRUE(stored.IsNumber());
+        EXPECT_EQ(stored.GetNumber(), 1);
+        EXPECT_EQ(CallAtomicBuiltin(thread, collections::CollectionsAtomics::Load,
+            {array.GetTaggedValue(), JSTaggedValue(0)}), JSTaggedValue(1));
+    }
+    auto stored = CallAtomicBuiltin(thread, collections::CollectionsAtomics::Store,
+        {array.GetTaggedValue(), JSTaggedValue(1.9), JSTaggedValue(1)});
+    ASSERT_TRUE(stored.IsNumber());
+    EXPECT_EQ(stored.GetNumber(), 1);
+    EXPECT_EQ(CallAtomicBuiltin(thread, collections::CollectionsAtomics::Load,
+        {array.GetTaggedValue(), JSTaggedValue(1)}), JSTaggedValue(1));
+    EXPECT_FALSE(thread->HasPendingException());
+}
+
+HWTEST_F_L0(BuiltinsAtomicsTest, OrdinaryAtomicsIndexErrorsRemainRangeErrors)
+{
+    auto array = AtomicsTestHelper::CreateArray(thread, DataViewType::INT32, false);
+    const double infinity = std::numeric_limits<double>::infinity();
+    const std::array invalidIndices = {-1.0, -1.9, -infinity, infinity, SAFE_NUMBER + 1};
+    for (double index : invalidIndices) {
+        EXPECT_TRUE(CallAtomicBuiltin(thread, BuiltinsAtomics::Load,
+            {array.GetTaggedValue(), JSTaggedValue(index)}).IsException());
+        ASSERT_TRUE(thread->HasPendingException());
+        JSHandle<JSTaggedValue> error(thread, thread->GetException());
+        thread->ClearException();
+        auto name = AtomicsTestHelper::GetProperty(thread, error, "name");
+        ASSERT_TRUE(name->IsString());
+        EXPECT_EQ(EcmaStringAccessor(JSHandle<EcmaString>::Cast(name)).ToStdString(thread), "RangeError");
+        EXPECT_TRUE(AtomicsTestHelper::GetProperty(thread, error, "code")->IsUndefined());
     }
 }
 

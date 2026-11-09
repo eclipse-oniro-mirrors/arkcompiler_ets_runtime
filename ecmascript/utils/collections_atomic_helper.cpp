@@ -237,17 +237,20 @@ uint32_t CollectionsAtomicHelper::ValidateAtomicAccess(JSThread *thread, const J
 uint32_t CollectionsAtomicHelper::ValidateAtomicAccess(JSThread *thread, const AtomicTypedArrayWitness &witness,
     JSHandle<JSTaggedValue> requestIndex)
 {
-    // Convert requestIndex to an access index.
-    JSTaggedNumber accessIndex = JSTaggedValue::ToIndex(thread, requestIndex);
+    // Normalize before checking bounds so index errors use the collections error code.
+    JSTaggedNumber accessIndex = requestIndex->IsInt() ? JSTaggedNumber(requestIndex.GetTaggedValue()) :
+        JSTaggedValue::ToInteger(thread, requestIndex);
     RETURN_VALUE_IF_ABRUPT_COMPLETION(thread, 0);
-    uint64_t index = base::NumberHelper::DoubleToUInt64(accessIndex.GetNumber());
+    double numericIndex = accessIndex.GetNumber();
     // Throw a BusinessError when the access index is outside the array.
-    if (index >= witness.length) {
+    if (numericIndex < 0 || numericIndex >= witness.length) {
         auto error = ContainerError::BusinessError(thread, containers::ErrorFlag::RANGE_ERROR,
             "Parameter error. Index is overflow.");
         THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, 0);
     }
 
+    // The range check also excludes infinities and values above the maximum safe integer.
+    uint64_t index = base::NumberHelper::DoubleToUInt64(numericIndex);
     // Resolve the element size and byte offset from the witness.
     uint32_t elementSize = TypedArrayHelper::GetSizeFromType(witness.type);
     // Return (accessIndex × elementSize) + offset.
