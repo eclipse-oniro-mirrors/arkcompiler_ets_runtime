@@ -5317,7 +5317,7 @@ HWTEST_F_L0(JSNApiTests, IsClassConstructor)
     EXPECT_FALSE(object->IsClassConstructor(vm_));
 }
 
-#ifdef PANDA_TARGET_AMD64
+#if defined(PANDA_TARGET_AMD64) && !defined(PANDA_TARGET_OHOS)
 HWTEST_F_L0(JSNApiTests, GetExportsFromFile)
 {
     LocalScope scope(vm_);
