@@ -12,3 +12,9 @@ obj/arkcompiler/ets_runtime/ecmascript/arksteed/unittests/ArkSteedInitialization
 obj/arkcompiler/ets_runtime/ecmascript/arksteed/unittests/ArkSteedDeoptTranslationTest
 obj/arkcompiler/ets_runtime/ecmascript/arksteed/unittests/ArkSteedGraphVerifierTest
 obj/arkcompiler/ets_runtime/ecmascript/arksteed/unittests/ArkSteedHeapRefTest
+
+#workitem 48
+obj/arkcompiler/ets_runtime/ecmascript/tests/JS_Function_Test
+
+#workitem 50
+obj/arkcompiler/ets_runtime/ecmascript/containers/tests/Containers_003_Test
