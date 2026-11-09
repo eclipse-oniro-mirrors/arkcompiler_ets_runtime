@@ -8124,4 +8124,109 @@ HWTEST_F_L0(EcmaModuleTest, ModuleManager_TryGetImportedModuleTaggedValue)
     EXPECT_EQ(outValue, module.GetTaggedValue());
 }
 
+namespace {
+// Build a minimal in-memory JSPandaFile from assembly text, used by the
+// ModuleDataExtractor tests that require a panda file handle.
+std::shared_ptr<JSPandaFile> MakeMinimalPandaFile(const CString &baseFilename)
+{
+    const char *data = R"(
+        .language ECMAScript
+        .function any func_main_0(any a0, any a1, any a2) {
+            ldai 1
+            return
+        }
+    )";
+    JSPandaFileManager *pfManager = JSPandaFileManager::GetInstance();
+    Parser parser;
+    auto res = parser.Parse(data);
+    std::unique_ptr<const File> pfPtr = pandasm::AsmEmitter::Emit(res.Value());
+    return pfManager->NewJSPandaFile(pfPtr.release(), baseFilename);
+}
+}  // namespace
+
+/**
+ * @tc.name: ModuleDataExtractor_ParseNativeModule
+ * @tc.desc: ParseNativeModule builds an instantiated record carrying the request/base names and module type.
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(EcmaModuleTest, ModuleDataExtractor_ParseNativeModule)
+{
+    struct Case {
+        const char *requestName;
+        const char *baseName;
+        ModuleTypes type;
+    };
+    const Case cases[] = {
+        { "@ohos:hilog", "hilog.abc", ModuleTypes::NATIVE_MODULE },
+        { "@ohos:bundle", "bundle.abc", ModuleTypes::OHOS_MODULE },
+        { "app.module", "app.abc", ModuleTypes::APP_MODULE },
+        { "internal.module", "internal.abc", ModuleTypes::INTERNAL_MODULE },
+    };
+    for (const auto &item : cases) {
+        CString requestName(item.requestName);
+        CString baseName(item.baseName);
+        JSHandle<JSTaggedValue> ret = ModuleDataExtractor::ParseNativeModule(thread, requestName, baseName, item.type);
+        JSHandle<SourceTextModule> record(ret);
+        EXPECT_EQ(record->GetTypes(), item.type);
+        EXPECT_TRUE(record->GetStatus() == ModuleStatus::INSTANTIATED);
+        EXPECT_TRUE(record->GetIsNewBcVersion());
+        EXPECT_EQ(record->GetEcmaModuleRecordNameString(), requestName);
+        EXPECT_EQ(record->GetEcmaModuleFilenameString(), baseName);
+    }
+}
+
+/**
+ * @tc.name: ModuleDataExtractor_ParseNativeModuleEmptyNames
+ * @tc.desc: ParseNativeModule still sets type/status and an empty filename when names are empty.
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(EcmaModuleTest, ModuleDataExtractor_ParseNativeModuleEmptyNames)
+{
+    CString emptyName;
+    JSHandle<JSTaggedValue> ret =
+        ModuleDataExtractor::ParseNativeModule(thread, emptyName, emptyName, ModuleTypes::NATIVE_MODULE);
+    JSHandle<SourceTextModule> record(ret);
+    EXPECT_EQ(record->GetTypes(), ModuleTypes::NATIVE_MODULE);
+    EXPECT_TRUE(record->GetStatus() == ModuleStatus::INSTANTIATED);
+    EXPECT_TRUE(record->GetIsNewBcVersion());
+    EXPECT_TRUE(record->GetEcmaModuleFilenameString().empty());
+}
+
+/**
+ * @tc.name: ModuleDataExtractor_ParseCjsModule
+ * @tc.desc: ParseCjsModule creates an uninstantiated CJS record whose filename is the panda file descriptor.
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(EcmaModuleTest, ModuleDataExtractor_ParseCjsModule)
+{
+    CString baseFilename = "parse_cjs.abc";
+    std::shared_ptr<JSPandaFile> pf = MakeMinimalPandaFile(baseFilename);
+    ASSERT_TRUE(pf != nullptr);
+    JSHandle<JSTaggedValue> ret = ModuleDataExtractor::ParseCjsModule(thread, pf.get());
+    JSHandle<SourceTextModule> record(ret);
+    EXPECT_EQ(record->GetTypes(), ModuleTypes::CJS_MODULE);
+    EXPECT_TRUE(record->GetStatus() == ModuleStatus::UNINSTANTIATED);
+    EXPECT_EQ(record->GetIsNewBcVersion(), pf->IsNewVersion());
+    EXPECT_EQ(record->GetEcmaModuleFilenameString(), pf->GetJSPandaFileDesc());
+}
+
+/**
+ * @tc.name: ModuleDataExtractor_ParseJsonModule
+ * @tc.desc: ParseJsonModule creates an instantiated JSON record with the supplied module filename.
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(EcmaModuleTest, ModuleDataExtractor_ParseJsonModule)
+{
+    CString baseFilename = "parse_json.abc";
+    std::shared_ptr<JSPandaFile> pf = MakeMinimalPandaFile(baseFilename);
+    ASSERT_TRUE(pf != nullptr);
+    CString moduleFilename = "data.json";
+    JSHandle<JSTaggedValue> ret = ModuleDataExtractor::ParseJsonModule(thread, pf.get(), moduleFilename);
+    JSHandle<SourceTextModule> record(ret);
+    EXPECT_EQ(record->GetTypes(), ModuleTypes::JSON_MODULE);
+    EXPECT_TRUE(record->GetStatus() == ModuleStatus::INSTANTIATED);
+    EXPECT_EQ(record->GetIsNewBcVersion(), pf->IsNewVersion());
+    EXPECT_EQ(record->GetEcmaModuleFilenameString(), moduleFilename);
+}
+
 }  // namespace panda::test
