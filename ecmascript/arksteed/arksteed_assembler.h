@@ -68,7 +68,7 @@ static_assert(!GetAllocatableDoubleRegisters().Has(kScratchDoubleRegister2));
 
 class ArkSteedAssembler {
 public:
-    ArkSteedAssembler(Chunk *chunk, JSThread *compilerThread, JSThread *entryThread);
+    ArkSteedAssembler(Chunk *chunk, JSThread *compilerThread);
     ~ArkSteedAssembler();
 
     // =========================================================================
@@ -80,14 +80,25 @@ public:
     static constexpr int NUM_ARG_REGISTERS = 6;
     static constexpr ArkSteedRegister CALLEE_TARGET_REGISTER = x64::r12;
     static constexpr ArkSteedRegister CALLEE_CONTEXT_REGISTER = x64::rbx;
+    // Holds glue_addr for the whole execution of ArkSteed code: loaded by the
+    // SteedCall* trampolines, excluded from allocation, preserved across calls
+    // (SysV callee-saved). Matches the GHC interpreter and eager-deopt glue
+    // registers, so entering deopt needs no reload.
+    static constexpr ArkSteedRegister GLUE_ROOT_REGISTER = x64::r13;
 #elif defined(PANDA_TARGET_ARM64)
     using MemoryOperand = aarch64::MemoryOperand;
     static constexpr int NUM_ARG_REGISTERS = 8;
     static constexpr ArkSteedRegister CALLEE_TARGET_REGISTER = aarch64::x20;
     static constexpr ArkSteedRegister CALLEE_CONTEXT_REGISTER = aarch64::x19;
+    // Same contract as the x64 glue root register. x28 is AAPCS64 callee-saved;
+    // x18 is caller-saved and therefore unusable for this purpose.
+    static constexpr ArkSteedRegister GLUE_ROOT_REGISTER = aarch64::x28;
 #endif
+    static_assert(!GetAllocatableGeneralRegisters().Has(GLUE_ROOT_REGISTER));
     static constexpr ArkSteedRegister GetParameterRegister(int i);
     inline void LoadGlue(ArkSteedRegister dst);
+    inline void LoadStubEntry(ArkSteedRegister dst, kungfu::RuntimeStubCSigns::ID stubId);
+    inline void LoadStubEntry(ArkSteedRegister dst, kungfu::CommonStubCSigns::ID stubId);
 
     static constexpr int FRAME_SLOT_SIZE = 8;
 
@@ -348,7 +359,7 @@ public:
     inline void CallTrampoline(kungfu::RuntimeStubCSigns::ID stubId);
     inline void CallNativeBuiltinTrampoline(ArkSteedRegister nativeCode);
     inline void CallNGCRuntime(kungfu::RuntimeStubCSigns::ID runtimeId);
-    inline void CallCommonStub(uint32_t stubId);
+    inline void CallCommonStub(kungfu::CommonStubCSigns::ID stubId);
     inline void LoadBuiltinStubEntry(ArkSteedRegister dst, ArkSteedRegister glue, uint32_t builtinId);
     void ReturnWithPendingException();
     // Branch to target if no pending exception exists in JSThread.
@@ -498,7 +509,6 @@ private:
     TemporaryRegisterScope *temporaryRegisterScope_ = nullptr;
     CommentList comments_;
     [[maybe_unused]] JSThread *compilerThread_;
-    JSThread *entryThread_;
 
     NO_COPY_SEMANTIC(ArkSteedAssembler);
     NO_MOVE_SEMANTIC(ArkSteedAssembler);

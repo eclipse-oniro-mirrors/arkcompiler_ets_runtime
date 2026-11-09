@@ -97,8 +97,16 @@ static void PrepareSteedCallFrame(ExtendedAssembler *assembler, Register glue, R
     __ Leaq(Operand(rsp, CommonCall::FRAME_SLOT_SIZE), rbp);
     __ PushCppCalleeSaveRegisters();  // saves r12, r13, r14, r15, rbx
 
-    // Keep newTarget in a local bridge slot. r13 is reserved for user argc in
-    // the bridge path, so it cannot be used to preserve newTarget.
+    // Install the glue root register expected by the generated callee. The
+    // callee-saves push above has preserved the caller's r13, and rdi (the
+    // entry glue argument, C arg0) is trivially untouched at this point.
+    // Nothing in the remainder of this bridge writes r13, so the value
+    // survives until the call. Mirrors the arm64 trampoline, which loads x28
+    // directly after CalleeSave().
+    __ Movq(rdi, r13);
+
+    // Keep newTarget in a local bridge slot. r13 carries the glue root register
+    // into the generated callee, so it cannot be used to preserve newTarget.
     __ Subq(CommonCall::FRAME_SLOT_SIZE, rsp);
     __ Movq(newTarget, Operand(rsp, 0));
 
@@ -113,7 +121,6 @@ static void PrepareSteedCallFrame(ExtendedAssembler *assembler, Register glue, R
 
     __ Movq(actualNumArgs, actualArgc);
     __ Subq(NUM_MANDATORY_JSFUNC_ARGS, actualArgc);
-    __ Movq(actualArgc, r13);
 
     // reservedSlots = max(expectedNumArgs, actualArgc)
     Label slotCountDone;
@@ -201,7 +208,8 @@ void ArkSteedCall::EmitSteedCall(ExtendedAssembler *assembler, Register glue, Re
                                  Register expectedNumArgs, CopyUserArgs copyUserArgs)
 {
     // Persistent assignment after PushCppCalleeSaveRegisters:
-    // r12=jsfunc, r13=actual user argc, r14=thisObj, r15=codeAddr, rbx=reservedSlots.
+    // r12=jsfunc, r13=glue root register (installed right after the callee-saves
+    // push), r14=thisObj, r15=codeAddr, rbx=reservedSlots.
     Register currentSp = r10;
     Register reservedSlots = rbx;
     Register actualArgc = r8;

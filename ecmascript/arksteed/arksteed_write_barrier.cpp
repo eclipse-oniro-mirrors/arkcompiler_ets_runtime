@@ -32,11 +32,10 @@ ArkSteedRegList GetBarrierCallArgumentRegisters()
 
 class DeferredBarrierCall final : public ArkSteedDeferredCode {
 public:
-    DeferredBarrierCall(kungfu::RuntimeStubCSigns::ID runtimeId, ArkSteedRegister glue, ArkSteedRegister object,
+    DeferredBarrierCall(kungfu::RuntimeStubCSigns::ID runtimeId, ArkSteedRegister object,
                         int32_t offset, ArkSteedRegister value, const DeferredRegisterSnapshot &registerSnapshot,
                         bool preserveInputs)
         : runtimeId_(runtimeId),
-          glue_(glue),
           object_(object),
           offset_(offset),
           value_(value),
@@ -74,7 +73,6 @@ public:
 
         ArkSteedRegList liveRegisters = registerSnapshot_.liveRegisters;
         if (preserveInputs_) {
-            liveRegisters.Set(glue_);
             liveRegisters.Set(object_);
             liveRegisters.Set(value_);
         }
@@ -91,7 +89,10 @@ public:
         constexpr int32_t VALUE_SLOT = 3;
         constexpr int32_t ABI_ARG_SLOT_COUNT = 4;
         assembler->ReserveCallArgSlots(ABI_ARG_SLOT_COUNT);
-        assembler->MoveRepr(MachineRepresentation::Word64, assembler->GetCallArgSlot(GLUE_SLOT), glue_);
+        // Glue comes from the root register; it is callee-saved so it survives
+        // across the runtime call without being part of the live set.
+        assembler->MoveRepr(MachineRepresentation::Word64, assembler->GetCallArgSlot(GLUE_SLOT),
+                            ArkSteedAssembler::GLUE_ROOT_REGISTER);
         assembler->MoveRepr(MachineRepresentation::Tagged, assembler->GetCallArgSlot(OBJECT_SLOT), object_);
         assembler->MoveRepr(MachineRepresentation::Tagged, assembler->GetCallArgSlot(VALUE_SLOT), value_);
 
@@ -116,7 +117,6 @@ public:
 
 private:
     kungfu::RuntimeStubCSigns::ID runtimeId_;
-    ArkSteedRegister glue_;
     ArkSteedRegister object_;
     int32_t offset_;
     ArkSteedRegister value_;
@@ -129,26 +129,26 @@ private:
 
 #define __ assembler_->
 
-void ArkSteedWriteBarrierEmitter::CallBarrierRuntime(kungfu::RuntimeStubCSigns::ID runtimeId, ArkSteedRegister glue,
-                                                     ArkSteedRegister object, int32_t offset, ArkSteedRegister value,
-                                                     bool preserveInputs)
+void ArkSteedWriteBarrierEmitter::CallBarrierRuntime(kungfu::RuntimeStubCSigns::ID runtimeId,
+                                                     ArkSteedRegister object, int32_t offset,
+                                                     ArkSteedRegister value, bool preserveInputs)
 {
     ASSERT(chunk_ != nullptr);
     ASSERT(deferredCode_ != nullptr);
     auto *deferredCall =
-        chunk_->New<DeferredBarrierCall>(runtimeId, glue, object, offset, value, registerSnapshot_, preserveInputs);
+        chunk_->New<DeferredBarrierCall>(runtimeId, object, offset, value, registerSnapshot_, preserveInputs);
     deferredCode_->push_back(deferredCall);
     __ Jump(deferredCall->GetEntryLabel());
     __ Bind(deferredCall->GetReturnLabel());
 }
 
-void ArkSteedWriteBarrierEmitter::EmitFastWriteBarrier(ArkSteedRegister glue, ArkSteedRegister object,
+void ArkSteedWriteBarrierEmitter::EmitFastWriteBarrier(ArkSteedRegister object,
                                                        ArkSteedRegister value, int32_t offset, bool preserveInputs)
 {
-    CallBarrierRuntime(RTSTUB_ID(ASMFastWriteBarrier), glue, object, offset, value, preserveInputs);
+    CallBarrierRuntime(RTSTUB_ID(ASMFastWriteBarrier), object, offset, value, preserveInputs);
 }
 
-void ArkSteedWriteBarrierEmitter::EmitWriteBarrier(ArkSteedRegister glue, ArkSteedRegister object,
+void ArkSteedWriteBarrierEmitter::EmitWriteBarrier(ArkSteedRegister object,
                                                    ArkSteedRegister value, int32_t offset,
                                                    ArkSteedWriteBarrierKind barrierKind,
                                                    ArkSteedRegister objectRegionScratch,
@@ -160,7 +160,7 @@ void ArkSteedWriteBarrierEmitter::EmitWriteBarrier(ArkSteedRegister glue, ArkSte
 
 #if USE_STICKY_CMS_GC
     if (barrierKind == ArkSteedWriteBarrierKind::GENERIC_BARRIER) {
-        EmitFastWriteBarrier(glue, object, value, offset, preserveInputs);
+        EmitFastWriteBarrier(object, value, offset, preserveInputs);
         return;
     }
 #endif
@@ -184,7 +184,8 @@ void ArkSteedWriteBarrierEmitter::EmitWriteBarrier(ArkSteedRegister glue, ArkSte
     __ JumpIf(Condition::LESS_THAN, &callBarrier);
     __ Compare(valueRegionScratch, static_cast<int32_t>(RegionSpaceFlag::SHARED_SPACE_BEGIN));
     __ JumpIf(Condition::GREATER_THAN_OR_EQUAL, &callBarrier);
-    __ LoadField(objectRegionScratch, glue, static_cast<int32_t>(JSThread::GlueData::GetGCStateBitFieldOffset(false)));
+    __ LoadField(objectRegionScratch, ArkSteedAssembler::GLUE_ROOT_REGISTER,
+                 static_cast<int32_t>(JSThread::GlueData::GetGCStateBitFieldOffset(false)));
     __ And(objectRegionScratch, static_cast<int64_t>(JSThread::CONCURRENT_MARKING_BITFIELD_MASK));
     __ Compare(objectRegionScratch, static_cast<int32_t>(MarkStatus::READY_TO_MARK));
     __ JumpIf(Condition::EQUAL, &done);
@@ -192,11 +193,11 @@ void ArkSteedWriteBarrierEmitter::EmitWriteBarrier(ArkSteedRegister glue, ArkSte
     __ Bind(&callBarrier);
     // Keep region-pair dispatch, remembered sets and marking in shared machine
     // code instead of emitting all their paths and call adapters at every store.
-    EmitFastWriteBarrier(glue, object, value, offset, preserveInputs);
+    EmitFastWriteBarrier(object, value, offset, preserveInputs);
     __ Bind(&done);
 }
 
-void ArkSteedWriteBarrierEmitter::StoreTaggedField(ArkSteedRegister glue, ArkSteedRegister object,
+void ArkSteedWriteBarrierEmitter::StoreTaggedField(ArkSteedRegister object,
                                                    ArkSteedRegister value, int32_t offset,
                                                    ArkSteedWriteBarrierKind barrierKind,
                                                    ArkSteedRegister objectRegionScratch,
@@ -210,7 +211,7 @@ void ArkSteedWriteBarrierEmitter::StoreTaggedField(ArkSteedRegister glue, ArkSte
 
     if (valueKind == ArkSteedWriteBarrierValueKind::HeapObject) {
         __ StoreField(value, object, offset);
-        EmitWriteBarrier(glue, object, value, offset, barrierKind, objectRegionScratch, valueRegionScratch);
+        EmitWriteBarrier(object, value, offset, barrierKind, objectRegionScratch, valueRegionScratch);
         return;
     }
 
@@ -220,11 +221,11 @@ void ArkSteedWriteBarrierEmitter::StoreTaggedField(ArkSteedRegister glue, ArkSte
     __ And(objectRegionScratch, static_cast<int64_t>(JSTaggedValue::TAG_HEAPOBJECT_MASK));
     __ Compare(objectRegionScratch, 0);
     __ JumpIf(Condition::NOT_EQUAL, &done);
-    EmitWriteBarrier(glue, object, value, offset, barrierKind, objectRegionScratch, valueRegionScratch);
+    EmitWriteBarrier(object, value, offset, barrierKind, objectRegionScratch, valueRegionScratch);
     __ Bind(&done);
 }
 
-void ArkSteedWriteBarrierEmitter::TransitionHClass(ArkSteedRegister glue, ArkSteedRegister object,
+void ArkSteedWriteBarrierEmitter::TransitionHClass(ArkSteedRegister object,
                                                    ArkSteedRegister hclass, ArkSteedRegister objectRegionScratch,
                                                    ArkSteedRegister hclassRegionScratch)
 {
@@ -232,31 +233,30 @@ void ArkSteedWriteBarrierEmitter::TransitionHClass(ArkSteedRegister glue, ArkSte
     constexpr int32_t offset = static_cast<int32_t>(TaggedObject::HCLASS_OFFSET);
 #ifndef ARK_USE_SATB_BARRIER
     __ StoreInt32FieldRelease(hclass, object, offset);
-    EmitWriteBarrier(glue, object, hclass, offset, ArkSteedWriteBarrierKind::GENERIC_BARRIER, objectRegionScratch,
+    EmitWriteBarrier(object, hclass, offset, ArkSteedWriteBarrierKind::GENERIC_BARRIER, objectRegionScratch,
                      hclassRegionScratch);
 #else
-    CallBarrierRuntime(RTSTUB_ID(ASMFastWriteBarrier), glue, object, offset, hclass, true);
+    CallBarrierRuntime(RTSTUB_ID(ASMFastWriteBarrier), object, offset, hclass, true);
     __ StoreInt32FieldRelease(hclass, object, offset);
 #endif
 }
 
-void ArkSteedWriteBarrierEmitter::InitializeHClass(ArkSteedRegister glue, ArkSteedRegister object,
+void ArkSteedWriteBarrierEmitter::InitializeHClass(ArkSteedRegister object,
                                                    ArkSteedRegister hclass, ArkSteedRegister objectRegionScratch,
                                                    ArkSteedRegister hclassRegionScratch)
 {
     static_assert(TaggedObject::HCLASS_OFFSET == 0);
     constexpr int32_t offset = static_cast<int32_t>(TaggedObject::HCLASS_OFFSET);
     // The header store after the deferred call still needs object and hclass.
-    EmitWriteBarrier(glue, object, hclass, offset, ArkSteedWriteBarrierKind::GENERIC_BARRIER, objectRegionScratch,
+    EmitWriteBarrier(object, hclass, offset, ArkSteedWriteBarrierKind::GENERIC_BARRIER, objectRegionScratch,
                      hclassRegionScratch, true);
     __ StoreHeaderRelease(hclass, object);
 }
 
-void ArkSteedWriteBarrierEmitter::StoreTaggedElement(ArkSteedRegister glue, ArkSteedRegister object,
+void ArkSteedWriteBarrierEmitter::StoreTaggedElement(ArkSteedRegister object,
                                                      ArkSteedRegister byteOffset, ArkSteedRegister value,
                                                      ArkSteedRegister scratch, ArkSteedWriteBarrierValueKind valueKind)
 {
-    ASSERT(glue == ArkSteedAssembler::GetParameterRegister(0));
     ASSERT(object == ArkSteedAssembler::GetParameterRegister(1));
     ASSERT(byteOffset == ArkSteedAssembler::GetParameterRegister(2));
     ASSERT(value == ArkSteedAssembler::GetParameterRegister(3));
@@ -267,6 +267,8 @@ void ArkSteedWriteBarrierEmitter::StoreTaggedElement(ArkSteedRegister glue, ArkS
     }
     if (valueKind == ArkSteedWriteBarrierValueKind::HeapObject) {
         __ StoreField(value, object, byteOffset);
+        __ MoveRepr(MachineRepresentation::Word64, ArkSteedAssembler::GetParameterRegister(0),
+                    ArkSteedAssembler::GLUE_ROOT_REGISTER);
         __ CallNGCRuntime(RTSTUB_ID(ASMFastWriteBarrier));
         return;
     }
@@ -282,6 +284,8 @@ void ArkSteedWriteBarrierEmitter::StoreTaggedElement(ArkSteedRegister glue, ArkS
 
     __ Bind(&needsBarrier);
     __ StoreField(value, object, byteOffset);
+    __ MoveRepr(MachineRepresentation::Word64, ArkSteedAssembler::GetParameterRegister(0),
+                ArkSteedAssembler::GLUE_ROOT_REGISTER);
     __ CallNGCRuntime(RTSTUB_ID(ASMFastWriteBarrier));
     __ Bind(&done);
 }

@@ -122,11 +122,18 @@ arm64（`[fp+8]` 即 lr，标准帧链布局；callee-save 在帧头之下）：
 注意：**glue 的跨调用保存，两架构策略不同**。入口 glue（x64 rdi / arm64 x0）是 caller-saved 寄存器，内层转调 `SteedCallWithArgVAndPushArgv` 后即失效，而弹帧时仍需 glue 写 `glue->leaveFrame`：
 
 - **x64 压栈**：glue 存入帧内 `[fp+8]` 栈槽，`PopJSFunctionEntryFrame` 直接 `Popq` 该槽恢复。原因是 SysV 仅 5 个 callee-save GPR 且各有用途——共享此帧的 AOT `JSFunctionEntry` 已把 rbx/r12 挪作 argv/needPushArgv 停泊位，两个调用方无统一的 glue 停靠寄存器约定，栈槽才是共享的恢复源（Steed 入口虽也在 r12 放了一份，弹帧实际消费的是栈槽）。
-- **arm64 停泊 x20**：无 glue 栈槽，stub 在内层 call 前 `Mov(x20, glue)`，x20 为 AAPCS64 callee-save，内层桥自身的 `CalleeSave`/`CalleeRestore`（桥内甚至会把 x20 重用作 jsFunc 传参，返回前又恢复）保证其跨调用保值；弹帧前 `Mov(x2, x20)` 取回。AAPCS64 有 x19–x28 共 10 个 callee-save GPR，有余量。x20 并非全局 glue 专用寄存器——仅是这族入口 stub 的停靠约定（全局固定 glue 寄存器只出现在 `ENABLE_CMC_IR_FIX_REGISTER` 的 x28，及 eager deopt 入口的 x17）。
+- **arm64 停泊 x20**：无 glue 栈槽，stub 在内层 call 前 `Mov(x20, glue)`，x20 为 AAPCS64 callee-save，内层桥自身的 `CalleeSave`/`CalleeRestore`（桥内甚至会把 x20 重用作 jsFunc 传参，返回前又恢复）保证其跨调用保值；弹帧前 `Mov(x2, x20)` 取回。AAPCS64 有 x19–x28 共 10 个 callee-save GPR，有余量。x20 并非全局 glue 专用寄存器——仅是这族入口 stub 的停靠约定（全局固定 glue 寄存器另见 3.1.5：ArkSteed 生成代码的根寄存器 x64=r13 / arm64=x28，及 eager deopt 入口的 x17）。
 
 #### 3.1.3 callee-save 寄存器
 
 **有**。x64：r12、r13、r14、r15、rbx（`ExtendedAssembler::PushCppCalleeSaveRegisters`）；arm64：x19–x28 + d8–d15（`CalleeSave`）。目的是让跳板自身满足 C ABI——调用方 C++ 期望这些寄存器跨调用保持，弹帧时由对应 Pop 原语恢复。
+
+#### 3.1.5 glue 根寄存器（ArkSteed 生成代码）
+
+ArkSteed 生成代码运行期间，**根寄存器恒持有 glue_addr**（`ArkSteedAssembler::GLUE_ROOT_REGISTER`）：x64 = r13，arm64 = x28。所有 glue 获取与 stub 入口装载都相对该寄存器进行（`mov off(%root)` / `ldr [x28, #off]`），不再 `movabsq`/`movz+movk` 物化绝对地址。
+
+- **装载点**：仅 `SteedCallAndPushArgv` / `SteedCallWithArgVAndPushArgv` 跳板，两架构位置对称——均在 callee-saves 压栈之后立刻装载（x64：`PushCppCalleeSaveRegisters()` 后 `Movq(rdi, r13)`；arm64：`CalleeSave()` 后 `Mov(x28, glue)`）。ArkSteed→ArkSteed 直接调用天然继承；eager deopt 入口 x64 本就要求 r13=glue，arm64 入口仍用 x17（固定出口处 `Mov(x17, x28)` 转发）。
+- **保值机制**：根寄存器被排除出 RA 可分配集合（arm64 的 x28 同时从 eager deopt 快照表移除），且两 ABI 下均为 callee-saved——函数内任何 runtime/stub/C++ 调用都替它保活，无需重载。
 
 #### 3.1.4 回栈：如何得到上一帧
 

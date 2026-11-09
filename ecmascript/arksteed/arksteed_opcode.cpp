@@ -58,16 +58,40 @@ void UseLazyDeoptFrameSlots(LazyDeoptimizableMixin *deopt)
 
 #define __ masm->
 
-// Helper function for stub calls (CallRuntime, CallCommonStub)
-// Uses C calling convention (CCallConv) in arksteed
-void SetStubValueLocationConstraints(Vertex *vertex, size_t inputCount)
+// Pins the inputs of a stub call that follows the glue-first stub C ABI
+// (CCallConv): parameter 0 is the glue slot, installed out of band instead
+// of from an IR input, so vertex input i is the i-th non-glue stub argument
+// and is pinned to C parameter i + 1 (the +1 skips the glue slot). Used by
+// the common-stub line (glue installed by ArkSteedAssembler::CallCommonStub)
+// and by the write-barrier line (glue installed by the write-barrier
+// emitter). Inputs beyond the last argument register fall back to stack
+// slots, marshalled by PrepareCommonStubStackArguments.
+void SetCommonStubArgConstraints(Vertex *vertex, size_t inputCount)
 {
-    for (size_t paramIdx = 0; paramIdx < inputCount; paramIdx++) {
-        if (paramIdx < static_cast<size_t>(ArkSteedAssembler::NUM_ARG_REGISTERS)) {
-            ArkSteedRegister paramReg = ArkSteedAssembler::GetParameterRegister(static_cast<int>(paramIdx));
-            UseAndClobberFixed(vertex->Arg(paramIdx), paramReg);
+    for (size_t inputIdx = 0; inputIdx < inputCount; inputIdx++) {
+        if (inputIdx + 1 < static_cast<size_t>(ArkSteedAssembler::NUM_ARG_REGISTERS)) {
+            ArkSteedRegister paramReg =
+                ArkSteedAssembler::GetParameterRegister(static_cast<int>(inputIdx) + 1);
+            UseAndClobberFixed(vertex->Arg(inputIdx), paramReg);
         } else {
-            UseAny(vertex->Arg(paramIdx));
+            UseAny(vertex->Arg(inputIdx));
+        }
+    }
+}
+
+// Pins the inputs of a runtime-stub call: input i is pinned to C parameter i
+// and later spilled to the runtime argv area by
+// PrepareRuntimeStubStackArguments. Parameter 0 carries a real argument on
+// this line because glue travels out of band, in the return register
+// (installed by ArkSteedAssembler::CallRuntime after the spill).
+void SetRuntimeStubArgConstraints(Vertex *vertex, size_t inputCount)
+{
+    for (size_t inputIdx = 0; inputIdx < inputCount; inputIdx++) {
+        if (inputIdx < static_cast<size_t>(ArkSteedAssembler::NUM_ARG_REGISTERS)) {
+            ArkSteedRegister paramReg = ArkSteedAssembler::GetParameterRegister(static_cast<int>(inputIdx));
+            UseAndClobberFixed(vertex->Arg(inputIdx), paramReg);
+        } else {
+            UseAny(vertex->Arg(inputIdx));
         }
     }
 }
@@ -150,8 +174,7 @@ void CallRuntimeVertex::SetValueLocationConstraints()
     // Define return value in x0/rax (C calling convention)
     DefineAsFixed(this, 0);
 
-    // Set parameter location constraints using helper function
-    SetStubValueLocationConstraints(this, GetArgCount());
+    SetRuntimeStubArgConstraints(this, GetArgCount());
     UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
 }
 
@@ -160,7 +183,6 @@ void ObjSizeTrackingStepVertex::SetValueLocationConstraints()
     // The read-modify-write runs in one scratch; the deferred FinishObjSizeTracking
     // call materializes its own C arguments after preserving live registers.
     SetTemporariesNeeded(1);
-    UseRegister(Arg(GLUE_INDEX));
     UseRegister(Arg(HCLASS_INDEX));
 }
 
@@ -234,7 +256,6 @@ void CallNewObjRangeDerivedVertex::SetValueLocationConstraints()
 void LoadBuiltinObjectVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
-    UseRegister(Arg(GLUE_INDEX));
 }
 
 void BranchIfECMAObjectVertex::SetValueLocationConstraints()
@@ -309,7 +330,6 @@ void CallSelfVertex::SetValueLocationConstraints()
 
 void CanAllocateInYoungVertex::SetValueLocationConstraints()
 {
-    UseRegister(Arg(GLUE_INDEX));
     UseRegister(Arg(SIZE_INDEX));
     DefineAsRegister(this);
     SetTemporariesNeeded(2);  // 2: scratch registers for young-space top and end bounds
@@ -319,7 +339,6 @@ void AllocateInYoungVertex::SetValueLocationConstraints()
 {
     // The fast path uses ordinary result allocation, preserving all input registers.
     DefineAsRegister(this);
-    UseRegister(Arg(GLUE_INDEX));
     UseRegister(Arg(SIZE_INDEX));
     SetTemporariesNeeded(1);
 }
@@ -368,7 +387,6 @@ void StoreArraySpreadFastVertex::SetValueLocationConstraints()
     UseRegister(Arg(ALLOCATION_INDEX));
     UseRegister(Arg(LENGTH_INDEX));
     UseRegister(Arg(HCLASS_INDEX));
-    UseRegister(Arg(GLUE_INDEX));
 }
 
 void BranchIfStoreArraySpreadAdmittedVertex::SetValueLocationConstraints()
@@ -386,7 +404,6 @@ void InitializeUnmappedArgumentsVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
     SetTemporariesNeeded(3);  // 3 : value and two internally acquired write-barrier region scratches
-    UseRegister(Arg(GLUE_INDEX));
     UseRegister(Arg(NUM_ARGS_INDEX));
     UseRegister(Arg(ALLOCATION_INDEX));
     UseRegister(Arg(ELEMENTS_INDEX));
@@ -448,8 +465,7 @@ void CallCommonStubVertex::SetValueLocationConstraints()
     // Define return value in x0/rax (C calling convention)
     DefineAsFixed(this, 0);
 
-    // Set parameter location constraints using helper function
-    SetStubValueLocationConstraints(this, GetArgCount());
+    SetCommonStubArgConstraints(this, GetArgCount());
     UseLazyDeoptFrameSlots(static_cast<LazyDeoptimizableMixin *>(this));
 }
 
@@ -687,7 +703,16 @@ void LoadF64FromAddressVertex::SetValueLocationConstraints()
 void LoadExceptionVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
-    UseRegister(Arg(GLUE_INDEX));
+}
+
+void LoadGlueTaggedFieldVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+}
+
+void LoadGlueI32FieldVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
 }
 
 void LoadTaggedFieldVertex::SetValueLocationConstraints()
@@ -712,7 +737,6 @@ void LoadTaggedElementVertex::SetValueLocationConstraints()
 void LoadSingleCharTableElementVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
-    UseRegister(Arg(GLUE_INDEX));
     UseRegister(Arg(CHAR_CODE_INDEX));
     SetTemporariesNeeded(1);
 }
@@ -803,7 +827,6 @@ void StoreTaggedFieldVertex::SetValueLocationConstraints()
 void StoreTaggedFieldWithBarrierVertex::SetValueLocationConstraints()
 {
     SetTemporariesNeeded(2);  // 2: object and value region scratch registers
-    UseRegister(Arg(GLUE_INDEX));
     UseRegister(Arg(OBJECT_INDEX));
     UseRegister(Arg(VALUE_INDEX));
 }
@@ -818,7 +841,8 @@ void StoreTaggedElementVertex::SetValueLocationConstraints()
 
 void StoreTaggedElementWithBarrierVertex::SetValueLocationConstraints()
 {
-    UseFixed(Arg(GLUE_INDEX), static_cast<uint32_t>(ArkSteedAssembler::GetParameterRegister(0).Code()));
+    // Write-barrier stub ABI (glue-first, glue installed by the write-barrier
+    // emitter): object lands on C parameter 1 and value on C parameter 3
     UseFixed(Arg(OBJECT_INDEX), static_cast<uint32_t>(ArkSteedAssembler::GetParameterRegister(1).Code()));
     UseRegister(Arg(INDEX_INDEX));
     // 3: value parameter slot of the write-barrier stub
@@ -849,7 +873,6 @@ void StoreFloatTypedArrayElementVertex::SetValueLocationConstraints()
 void StoreSharedFieldWithBarrierVertex::SetValueLocationConstraints()
 {
     SetTemporariesNeeded(2);  // 2: object and value region scratch registers
-    UseRegister(Arg(GLUE_INDEX));
     UseRegister(Arg(OBJECT_INDEX));
     UseRegister(Arg(VALUE_INDEX));
 }
@@ -857,7 +880,6 @@ void StoreSharedFieldWithBarrierVertex::SetValueLocationConstraints()
 void TransitionHClassWithBarrierVertex::SetValueLocationConstraints()
 {
     SetTemporariesNeeded(2);  // 2: object and HClass region scratch registers
-    UseRegister(Arg(GLUE_INDEX));
     UseRegister(Arg(OBJECT_INDEX));
     UseRegister(Arg(HCLASS_INDEX));
 }
@@ -874,7 +896,7 @@ void PrepareSharedStoreFieldVertex::SetValueLocationConstraints()
 {
     DefineAsFixed(this, 0);
     SetTemporariesNeeded(1);
-    SetStubValueLocationConstraints(this, GetArgCount());
+    SetRuntimeStubArgConstraints(this, GetArgCount());
     UseLazyDeoptFrameSlots(this);
 }
 
@@ -882,7 +904,7 @@ void EnsurePropertiesCapacityVertex::SetValueLocationConstraints()
 {
     DefineAsFixed(this, 0);
     SetTemporariesNeeded(2);  // 2: properties and length
-    SetStubValueLocationConstraints(this, GetArgCount());
+    SetCommonStubArgConstraints(this, GetArgCount());
     UseLazyDeoptFrameSlots(this);
 }
 
@@ -959,7 +981,6 @@ void StoreDoubleFieldWithRepVertex::SetValueLocationConstraints()
 void StoreTaggedFieldByHClassVertex::SetValueLocationConstraints()
 {
     SetTemporariesNeeded(3);  // 3: HClass dispatch and write-barrier scratch registers
-    UseRegister(Arg(GLUE_INDEX));
     UseRegister(Arg(OBJECT_INDEX));
     UseRegister(Arg(VALUE_INDEX));
     UseEagerDeoptFrameSlots(this);
@@ -973,7 +994,8 @@ void StoreEnvSlotVertex::SetValueLocationConstraints()
 
 void SetValueWithBarrierVertex::SetValueLocationConstraints()
 {
-    UseFixed(Arg(GLUE_INDEX), static_cast<uint32_t>(ArkSteedAssembler::GetParameterRegister(0).Code()));
+    // Write-barrier stub ABI (glue-first, glue installed by the write-barrier
+    // emitter): object lands on C parameter 1 and value on C parameter 3
     UseFixed(Arg(OBJECT_INDEX), static_cast<uint32_t>(ArkSteedAssembler::GetParameterRegister(1).Code()));
     // 3: value parameter slot of the write-barrier stub
     UseFixed(Arg(VALUE_INDEX), static_cast<uint32_t>(ArkSteedAssembler::GetParameterRegister(3).Code()));
@@ -1053,7 +1075,7 @@ void TaggedNotEqualVertex::SetValueLocationConstraints()
 void StringEqualVertex::SetValueLocationConstraints()
 {
     DefineAsFixed(this, 0);
-    SetStubValueLocationConstraints(this, GetInputCount());
+    SetCommonStubArgConstraints(this, GetInputCount());
 }
 
 #if defined(PANDA_TARGET_AMD64)
@@ -1386,7 +1408,7 @@ void ReturnVertex::SetValueLocationConstraints()
 
 void ThrowVertex::SetValueLocationConstraints()
 {
-    SetStubValueLocationConstraints(this, GetArgCount());
+    SetRuntimeStubArgConstraints(this, GetArgCount());
 }
 
 // ========================================= Non-Value Opcode =========================================

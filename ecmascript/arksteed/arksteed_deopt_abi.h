@@ -82,8 +82,9 @@ constexpr uint16_t EXIT_SIZE = sizeof(uint32_t);  // 4 bytes: one BL instruction
 constexpr ArkSteedEagerDeoptReturnPcSource RETURN_PC_SOURCE = ArkSteedEagerDeoptReturnPcSource::LINK_REGISTER;
 constexpr size_t FIXED_EXIT_LINK_SIZE = 0U;  // 0: BL keeps the fixed-exit return PC in LR.
 
-constexpr std::array<uint8_t, 26U> GENERAL_REGISTER_CODES = {
-    // 26: all allocatable AArch64 GPRs.
+constexpr std::array<uint8_t, 25U> GENERAL_REGISTER_CODES = {
+    // 25: all allocatable AArch64 GPRs; x28 is the ArkSteed glue root register
+    // and therefore is neither allocatable nor snapshotted.
     0U,   // x0
     1U,   // x1
     2U,   // x2
@@ -109,7 +110,6 @@ constexpr std::array<uint8_t, 26U> GENERAL_REGISTER_CODES = {
     25U,  // x25
     26U,  // x26
     27U,  // x27
-    28U,  // x28
 };
 constexpr uint32_t FLOATING_REGISTER_COUNT = 30U;       // d0-d29
 constexpr uint32_t GENERAL_REGISTER_CODE_COUNT = 32U;   // 32: architectural GPR codes x0-x31.

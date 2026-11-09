@@ -108,11 +108,6 @@ protected:
         return graph_.GetHeapConstant(1, 0);
     }
 
-    ValueVertex *Glue()
-    {
-        return graph_.GetInt64Constant(0);
-    }
-
     ValueVertex *Int32Constant()
     {
         return graph_.GetInt32Constant(3);
@@ -146,7 +141,7 @@ protected:
     // rewritten store carries the same owner block as the original barrier store.
     StoreTaggedFieldWithBarrierVertex *NewFieldStore(BB *owner, ValueVertex *value, int32_t offset)
     {
-        std::initializer_list<ValueVertex *> inputs {Glue(), Receiver(), value};
+        std::initializer_list<ValueVertex *> inputs {Receiver(), value};
         auto *store = Vertex::New<StoreTaggedFieldWithBarrierVertex>(&chunk_, inputs, offset);
         store->SetOwner(owner);
         return store;
@@ -154,8 +149,7 @@ protected:
 
     StoreTaggedElementWithBarrierVertex *NewElementStore(BB *owner, ValueVertex *value)
     {
-        std::initializer_list<ValueVertex *> inputs {
-            Glue(), Receiver(), graph_.GetInt32Constant(0), value};
+        std::initializer_list<ValueVertex *> inputs {Receiver(), graph_.GetInt32Constant(0), value};
         auto *store = Vertex::New<StoreTaggedElementWithBarrierVertex>(&chunk_, inputs);
         store->SetOwner(owner);
         return store;
@@ -163,7 +157,7 @@ protected:
 
     SetValueWithBarrierVertex *NewSetValueWithBarrier(BB *owner, ValueVertex *value, int32_t offset)
     {
-        std::initializer_list<ValueVertex *> inputs {Glue(), Receiver(), value};
+        std::initializer_list<ValueVertex *> inputs {Receiver(), value};
         auto *store = Vertex::New<SetValueWithBarrierVertex>(&chunk_, inputs, offset);
         store->SetOwner(owner);
         return store;

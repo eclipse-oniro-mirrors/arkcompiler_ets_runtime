@@ -414,16 +414,15 @@ void ArkSteedDceTestBase::RunPreRegallocConsumers(Graph *graph)
 void ArkSteedDceTestBase::InitializeAllocationValues(AllocationFixture &fixture)
 {
     constexpr uint32_t objectSize = JSArray::SIZE + JSTaggedValue::TaggedTypeSize();
-    auto *glue = fixture.graph->GetIntPtrConstant(0);
     auto *size = fixture.graph->GetInt64Constant(objectSize);
     auto *root = fixture.graph->GetHeapConstant(0, 0);
     fixture.taggedConstant = fixture.graph->GetTaggedConstant(JSTaggedValue::Undefined().GetRawData());
-    fixture.check = NewVertex<CanAllocateInYoungVertex>({glue, size});
-    fixture.allocation = NewVertex<AllocateInYoungVertex>({glue, size});
+    fixture.check = NewVertex<CanAllocateInYoungVertex>({size});
+    fixture.allocation = NewVertex<AllocateInYoungVertex>({size});
     auto *taggedSize = fixture.graph->GetTaggedConstant(JSTaggedValue(objectSize).GetRawData());
     fixture.slowAllocation = NewVertex<CallRuntimeVertex>({taggedSize}, RTSTUB_ID(AllocateInYoung));
     fixture.phi = NewVertex<PhiVertex>({fixture.allocation, fixture.slowAllocation}, VirtualRegister(0));
-    fixture.initializer = NewVertex<InitializeEmptyArrayVertex>({fixture.phi, glue, root, root}, objectSize);
+    fixture.initializer = NewVertex<InitializeEmptyArrayVertex>({fixture.phi, root, root}, objectSize);
     fixture.check->SetOwner(fixture.entry);
     fixture.entry->AddVertex(fixture.check);
     fixture.allocation->SetOwner(fixture.fastBlock);
@@ -1077,14 +1076,15 @@ void ArkSteedDceTest::CheckWritesAndAllocationsRemainRequired(ValueVertex *addre
 {
     const std::vector<ValueVertex *> taggedInputs {tagged, tagged};
     const std::vector<ValueVertex *> storeInputs {address, tagged, tagged};
+    const std::vector<ValueVertex *> barrierInputs {address, tagged};
     ExpectRequiredControls({
         NewVertex<StoreTaggedFieldVertex>(taggedInputs, SAMPLE_FIELD_OFFSET),
         NewVertex<StoreTaggedElementVertex>(storeInputs),
-        NewVertex<SetValueWithBarrierVertex>(storeInputs, SAMPLE_ADDRESS_OFFSET),
-        NewVertex<TransitionHClassWithBarrierVertex>(storeInputs),
+        NewVertex<SetValueWithBarrierVertex>(barrierInputs, SAMPLE_ADDRESS_OFFSET),
+        NewVertex<TransitionHClassWithBarrierVertex>(barrierInputs),
         NewVertex<EnsureWritableElementsVertex>(taggedInputs),
-        NewVertex<AllocateInYoungVertex>({address, address}),
-        NewVertex<InitializeEmptyArrayVertex>({tagged, address, tagged, tagged},
+        NewVertex<AllocateInYoungVertex>({address}),
+        NewVertex<InitializeEmptyArrayVertex>({tagged, tagged, tagged},
                                               JSArray::SIZE + JSTaggedValue::TaggedTypeSize())});
 }
 
@@ -1097,7 +1097,7 @@ void ArkSteedDceTest::CheckExceptionalAndMemoryOperationsRemainRequired(ValueVer
         NewVertex<LoadI32FromAddressVertex>({address}, SAMPLE_ADDRESS_OFFSET),
         NewVertex<LoadI64FromAddressVertex>({address}, SAMPLE_ADDRESS_OFFSET),
         NewVertex<LoadF64FromAddressVertex>({address}, SAMPLE_ADDRESS_OFFSET),
-        NewVertex<StringEqualVertex>({tagged, tagged, tagged, tagged}),
+        NewVertex<StringEqualVertex>({tagged, tagged, tagged}),
         NewVertex<DoubleToInt32CallVertex>({address}), NewVertex<I32DivVertex>({address, address})});
 }
 

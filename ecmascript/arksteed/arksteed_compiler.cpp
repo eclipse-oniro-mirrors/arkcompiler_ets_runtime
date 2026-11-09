@@ -172,7 +172,7 @@ bool ArkSteedCompilerTask::ShouldEnablePipelineStatistics(ArkSteedTask *arkSteed
     return MatchMethodName(filter, ParseMethodNameFromEnv(env));
 }
 
-bool ArkSteedCompilerTask::BuildGraph(JSThread *compilerThread, uintptr_t hostGlueAddr)
+bool ArkSteedCompilerTask::BuildGraph(JSThread *compilerThread)
 {
     JitCompilationEnv *env = jitCompilationEnv_.get();
 
@@ -206,7 +206,7 @@ bool ArkSteedCompilerTask::BuildGraph(JSThread *compilerThread, uintptr_t hostGl
     {
         ArkSteedPipelineStatistics stats(pipelineStatistics_, "GraphBuilder");
         bool isOSR = arkSteedTask_->IsOsrTask();
-        GraphBuilder graphBuilder(compilerThread, graph_, hostGlueAddr, &preproc, &analysis, isOSR);
+        GraphBuilder graphBuilder(compilerThread, graph_, &preproc, &analysis, isOSR);
         if (!graphBuilder.Run()) {
             LOG_COMPILER(WARN) << "JIT compilation halts due to graph building error.";
             return false;
@@ -248,12 +248,10 @@ bool ArkSteedCompilerTask::Compile()
 
     // Graph building phase
     auto *compilerThread = arkSteedTask_->GetCompilerThread();
-    auto *hostThread = arkSteedTask_->GetHostThread();
-    uintptr_t hostGlueAddr = hostThread->GetGlueAddr();
 
     ArkSteedPGOContext pgoContext(compilerThread, jitCompilationEnv_.get());
 
-    if (!BuildGraph(compilerThread, hostGlueAddr)) {
+    if (!BuildGraph(compilerThread)) {
         return false;
     }
 
@@ -307,7 +305,7 @@ bool ArkSteedCompilerTask::Compile()
     // Code generation
     {
         ArkSteedPipelineStatistics stats(pipelineStatistics_, "CodeGeneration");
-        assembler_ = new ArkSteedAssembler(chunk_.get(), compilerThread, hostThread);
+        assembler_ = new ArkSteedAssembler(chunk_.get(), compilerThread);
         if (arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedEnableCodeComment()) {
             assembler_->EnableComments(true);
         }

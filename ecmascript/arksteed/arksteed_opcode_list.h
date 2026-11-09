@@ -69,6 +69,8 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(InitializeObjectWithBuffer)               \
     V(LineStringLoadElement)                    \
     V(Phi)                                      \
+    V(LoadGlueTaggedField)                     \
+    V(LoadGlueI32Field)                        \
     V(LoadTaggedFromAddress)                    \
     V(LoadI32FromAddress)                       \
     V(LoadI64FromAddress)                       \

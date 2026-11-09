@@ -333,10 +333,13 @@ void ValidateCommonStubCallArgs(Span<ValueVertex *const> inputs, CommonStubID id
 #ifndef NDEBUG
     const kungfu::CallSignature *signature = kungfu::CommonStubCSigns::Get(id);
     size_t actualCount = inputs.size();
-    size_t expectedCount = signature->GetParametersCount();
+    // Signature parameter 0 is glue, installed by the assembler from the glue
+    // root register; the IR inputs map to signature parameters 1..N.
+    size_t expectedCount = signature->GetParametersCount() - 1;
     if (actualCount != expectedCount) {
         LOG_ECMA(FATAL) << "ArkSteed CommonStub argument count mismatch, stub: " << signature->GetName()
-                        << ", expected: " << expectedCount << ", actual: " << actualCount;
+                        << ", expected: " << expectedCount << " (signature " << signature->GetParametersCount()
+                        << " minus glue), actual: " << actualCount;
         UNREACHABLE();
     }
     kungfu::VariableType *params = signature->GetParametersType();
@@ -345,13 +348,13 @@ void ValidateCommonStubCallArgs(Span<ValueVertex *const> inputs, CommonStubID id
     }
     const auto *inputArr = inputs.begin();
     for (size_t i = 0; i < expectedCount; ++i) {
-        if (MatchesCallSignatureType(inputArr[i], params[i])) {
+        if (MatchesCallSignatureType(inputArr[i], params[i + 1])) {
             continue;
         }
         const char *reprName = ValueRepresentationName(inputArr[i]->GetValueRepresentation());
         LOG_ECMA(FATAL) << "ArkSteed CommonStub argument type mismatch, stub: " << signature->GetName()
                         << ", index: " << i
-                        << ", expected machine type: " << MachineTypeToStr(params[i].GetMachineType())
+                        << ", expected machine type: " << MachineTypeToStr(params[i + 1].GetMachineType())
                         << ", actual representation: " << reprName;
         UNREACHABLE();
     }
@@ -620,14 +623,12 @@ struct GraphBuilder::LocalClosureInfo {
 
 GraphBuilder::GraphBuilder(JSThread *compilerThread,
                            Graph *destGraph,
-                           uintptr_t glueAddr,
                            BytecodePreprocessor *preproc,
                            BytecodeAnalysis *analysis,
                            bool isOsr,
                            const ArkSteedInlinedCallerFrame *parentDeoptFrame)
     : graph_(destGraph),
       compilerThread_(compilerThread),
-      glueAddr_(glueAddr),
       preproc_(preproc),
       analysis_(analysis),
       parentDeoptFrame_(parentDeoptFrame),
@@ -1029,7 +1030,6 @@ void GraphBuilder::DebugLog()
 
 void GraphBuilder::InitializeStartBlock(SharedBCFrameState frameState)
 {
-    glue_ = graph_->GetIntPtrConstant(glueAddr_);
     undefinedValue_ = graph_->GetTaggedConstant(JSTaggedValue::VALUE_UNDEFINED);
 
     compileInfoFacts_[0] = chunk_->New<CompileInfoFacts>(chunk_);
@@ -1074,7 +1074,6 @@ void GraphBuilder::InitializeInlineStartBlock(SharedBCFrameState frameState,
                                               const ChunkVector<ValueVertex *> &arguments,
                                               uint32_t actualArgc)
 {
-    glue_ = graph_->GetIntPtrConstant(glueAddr_);
     undefinedValue_ = graph_->GetTaggedConstant(JSTaggedValue::VALUE_UNDEFINED);
 
     blocks_[0] = callerBlock;
@@ -1282,7 +1281,7 @@ void GraphBuilder::InitFrameStateForCatchBlockHeader(SharedBCFrameState frameSta
 {
     const BasicBlockInfo *bcBlock = preproc_->GetBasicBlockByRPO(rpoIndex);
     // For catch blocks, acc is always initialized as the exception object
-    frameState.SetAcc(NewVertex<LoadExceptionVertex>(BlockAt(rpoIndex), {glue_}));
+    frameState.SetAcc(NewVertex<LoadExceptionVertex>(BlockAt(rpoIndex), std::initializer_list<ValueVertex*>{}));
 
     CatchBlockInputData *data = CatchBlockInputsAt(rpoIndex);
     ASSERT(data != nullptr);
@@ -2692,7 +2691,7 @@ struct GraphBuilder::BytecodeVisitor {
                     }
                     break;
                 default:
-                    result = CommonStubCall({glue, value},
+                    result = CommonStubCall({value},
                                             trueIfTruthy ? CommonStubID::ToBooleanTrue : CommonStubID::ToBooleanFalse,
                                             SideEffectKind::SAFE_CALL);
                     break;
@@ -2929,7 +2928,7 @@ struct GraphBuilder::BytecodeVisitor {
     {
         ValueVertex *receiver = LoadRegister(bcInfo, 1);
         ValueVertex *index = self->graph_->GetInt32Constant(GetImmediate<int>(bcInfo, 0));
-        CommonStubCallToAccWithLazyDeopt({glue, receiver, index, GlobalEnv()}, CommonStubID::LdObjByIndex);
+        CommonStubCallToAccWithLazyDeopt({receiver, index, GlobalEnv()}, CommonStubID::LdObjByIndex);
     }
 
     void LowerStObjByIndex(const BytecodeInfo *bcInfo)
@@ -2937,7 +2936,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *receiver = LoadRegister(bcInfo, 0);
         ValueVertex *index = self->graph_->GetInt32Constant(GetImmediate<int>(bcInfo, 1));
         ValueVertex *value = frameState.GetAcc();
-        CommonStubCallWithLazyDeopt({glue, receiver, index, value, GlobalEnv()}, CommonStubID::StObjByIndex);
+        CommonStubCallWithLazyDeopt({receiver, index, value, GlobalEnv()}, CommonStubID::StObjByIndex);
     }
 
     void LowerLdThisByValue(const BytecodeInfo *bcInfo, uint32_t bcIndex)
@@ -3020,7 +3019,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *receiver = LoadRegister(bcInfo, 0);
         ValueVertex *key = LoadRegister(bcInfo, 1);
         ValueVertex *value = frameState.GetAcc();
-        CommonStubCallWithLazyDeopt({glue, receiver, key, value, GlobalEnv()}, CommonStubID::StOwnByValue);
+        CommonStubCallWithLazyDeopt({receiver, key, value, GlobalEnv()}, CommonStubID::StOwnByValue);
     }
 
     void LowerStOwnByIndex(const BytecodeInfo *bcInfo, uint32_t bcIndex)
@@ -3036,7 +3035,7 @@ struct GraphBuilder::BytecodeVisitor {
             return;
         }
         ValueVertex *index = self->graph_->GetInt32Constant(indexValue);
-        CommonStubCallWithLazyDeopt({glue, receiver, index, value, GlobalEnv()}, CommonStubID::StOwnByIndex);
+        CommonStubCallWithLazyDeopt({receiver, index, value, GlobalEnv()}, CommonStubID::StOwnByIndex);
     }
 
     void LowerWideStOwnByIndex(const BytecodeInfo *bcInfo)
@@ -3044,7 +3043,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *receiver = LoadRegister(bcInfo, 0);
         ValueVertex *index = self->graph_->GetInt32Constant(GetImmediate<int>(bcInfo, 1));
         ValueVertex *value = frameState.GetAcc();
-        CommonStubCallWithLazyDeopt({glue, receiver, index, value, GlobalEnv()}, CommonStubID::StOwnByIndex);
+        CommonStubCallWithLazyDeopt({receiver, index, value, GlobalEnv()}, CommonStubID::StOwnByIndex);
     }
 
     void LowerStOwnByName(const BytecodeInfo *bcInfo)
@@ -3053,7 +3052,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *propKey = StringFromConstPool(stringId);
         ValueVertex *receiver = LoadRegister(bcInfo, 1);
         ValueVertex *accValue = frameState.GetAcc();
-        CommonStubCallWithLazyDeopt({glue, receiver, propKey, accValue, GlobalEnv()}, CommonStubID::StOwnByName);
+        CommonStubCallWithLazyDeopt({receiver, propKey, accValue, GlobalEnv()}, CommonStubID::StOwnByName);
     }
 
     void LowerStOwnByValueWithNameSet(const BytecodeInfo *bcInfo)
@@ -3061,7 +3060,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *receiver = LoadRegister(bcInfo, 0);
         ValueVertex *propKey = LoadRegister(bcInfo, 1);
         ValueVertex *accValue = frameState.GetAcc();
-        CommonStubCallWithLazyDeopt({glue, receiver, propKey, accValue, GlobalEnv()},
+        CommonStubCallWithLazyDeopt({receiver, propKey, accValue, GlobalEnv()},
                                     CommonStubID::StOwnByValueWithNameSet);
     }
 
@@ -3071,7 +3070,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *propKey = StringFromConstPool(stringId);
         ValueVertex *receiver = LoadRegister(bcInfo, 1);
         ValueVertex *accValue = frameState.GetAcc();
-        CommonStubCallWithLazyDeopt({glue, receiver, propKey, accValue, GlobalEnv()},
+        CommonStubCallWithLazyDeopt({receiver, propKey, accValue, GlobalEnv()},
                                     CommonStubID::StOwnByNameWithNameSet);
     }
 
@@ -3100,7 +3099,7 @@ struct GraphBuilder::BytecodeVisitor {
             return false;
         }
         ValueVertex *result =
-            self->NewVertex<LoadBuiltinObjectVertex>(compileInfoFacts_, currentBlock, {glue}, builtinIndex);
+            self->NewVertex<LoadBuiltinObjectVertex>(compileInfoFacts_, currentBlock, {}, builtinIndex);
         ValueVertex *hole = self->graph_->GetTaggedConstant(JSTaggedValue::VALUE_HOLE);
         BuildCheckTaggedCondition(bcIndex, result, hole, Condition::EQUAL, kungfu::DeoptType::BUILTINISHOLE1);
         frameState.SetAcc(result);
@@ -3893,7 +3892,7 @@ struct GraphBuilder::BytecodeVisitor {
             self->parentDeoptFrame_, self->chunk_);
         EmitInlineTraceIfEnabled(*inputs.begin());
         InheritedCatchContext *catchContext = BuildInlineCatchContext();
-        GraphBuilder childBuilder(self->compilerThread_, self->graph_, self->glueAddr_,
+        GraphBuilder childBuilder(self->compilerThread_, self->graph_,
                                   prepared.preprocessor, prepared.analysis, false, callerFrame);
         childBuilder.inheritedCatchContext_ = catchContext;
         childBuilder.inlineBytecodeBudgetUsed_ = self->inlineBytecodeBudgetUsed_;
@@ -3967,9 +3966,9 @@ struct GraphBuilder::BytecodeVisitor {
                 auto *size = self->graph_->GetInt64Constant(static_cast<int64_t>(objectSize));
                 auto *allocation = AllocateInYoung(size, hclass);
                 receiver = self->NewVertex<InitializeEmptyObjectVertex>(compileInfoFacts_, currentBlock,
-                                                                        {allocation, glue, hclass, size}, objectSize);
+                                                                        {allocation, hclass, size}, objectSize);
             } else {
-                receiver = CommonStubCallWithLazyDeopt({glue, target}, CommonStubID::FastNewThisObject);
+                receiver = CommonStubCallWithLazyDeopt({target}, CommonStubID::FastNewThisObject);
             }
             return BuildNewObjRangeCall<CallNewObjRangeBaseVertex>(
                 inputs, newTarget, receiver, plan.GetExpectedParameterCount(),
@@ -4016,7 +4015,7 @@ struct GraphBuilder::BytecodeVisitor {
     ValueVertex *BuildDynamicNewObjRange(const InputRange &inputs, ValueVertex *newTarget)
     {
         ValueVertex *target = *std::begin(inputs);
-        ValueVertex *receiver = CommonStubCallWithLazyDeopt({glue, target}, CommonStubID::NewThisObjectChecked);
+        ValueVertex *receiver = CommonStubCallWithLazyDeopt({target}, CommonStubID::NewThisObjectChecked);
         BB *constructBlock = self->NewBlock();
         BB *fallbackBlock = self->NewBlock();
         BB *doneBlock = self->NewBlock();
@@ -4166,7 +4165,7 @@ struct GraphBuilder::BytecodeVisitor {
     ValueVertex *BuildObjectFromPrimitive(ValueVertex *value)
     {
         auto *result = CommonStubCallWithLazyDeopt(
-            {glue, value, GlobalEnv()}, CommonStubID::ArkSteedNewObjectFromPrimitive);
+            {value, GlobalEnv()}, CommonStubID::ArkSteedNewObjectFromPrimitive);
         compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::JS_RECEIVER);
         return result;
     }
@@ -4297,7 +4296,7 @@ struct GraphBuilder::BytecodeVisitor {
     ValueVertex *BuildNumberStringValue(ValueVertex *argument)
     {
         compileInfoFacts_->EnsureType(argument, NodeInfo::NodeType::STRING);
-        ValueVertex *number = CommonStubCallWithLazyDeopt({glue, argument}, CommonStubID::ArkSteedStringToNumber,
+        ValueVertex *number = CommonStubCallWithLazyDeopt({argument}, CommonStubID::ArkSteedStringToNumber,
                                                           SideEffectKind::SAFE_CALL);
         compileInfoFacts_->EnsureType(number, NodeInfo::NodeType::NUMBER);
         return number;
@@ -4380,10 +4379,10 @@ struct GraphBuilder::BytecodeVisitor {
     {
         ValueVertex *result;
         if (plan.GetActualArgc() == 0) {
-            result = CommonStubCallWithLazyDeopt({glue, GlobalEnv()}, CommonStubID::NewFloat32ArrayWithNoArgs);
+            result = CommonStubCallWithLazyDeopt({GlobalEnv()}, CommonStubID::NewFloat32ArrayWithNoArgs);
         } else if (plan.GetActualArgc() == 1) {
             ValueVertex *argument = *std::next(std::begin(callInputs), CallKnownBuiltinVertex::FIRST_ARG_INDEX);
-            result = CommonStubCallWithLazyDeopt({glue, canonicalTarget, argument, GlobalEnv()},
+            result = CommonStubCallWithLazyDeopt({canonicalTarget, argument, GlobalEnv()},
                                                  CommonStubID::NewFloat32Array);
         } else {
             result = BuildKnownBuiltinNativeConstruct(callInputs, plan, canonicalTarget);
@@ -5268,13 +5267,13 @@ struct GraphBuilder::BytecodeVisitor {
         BB* doneBlock = self->NewBlock();
         slowBlock->SetDeferred(true);
         auto* canAllocate
-            = self->NewVertex<CanAllocateInYoungVertex>(compileInfoFacts_, currentBlock, {glue, size});
+            = self->NewVertex<CanAllocateInYoungVertex>(compileInfoFacts_, currentBlock, {size});
         self->FinishBlockWithBranch<BranchIfTrueVertex>(currentBlock, {canAllocate}, fastBlock, slowBlock);
 
         currentBlock = fastBlock;
         compileInfoFacts_ = entryFacts->Clone();
         auto* fastAllocation
-            = self->NewVertex<AllocateInYoungVertex>(compileInfoFacts_, currentBlock, {glue, size});
+            = self->NewVertex<AllocateInYoungVertex>(compileInfoFacts_, currentBlock, {size});
         self->FinishBlockWithJump(currentBlock, doneBlock);
         CompileInfoFacts* fastFacts = compileInfoFacts_;
 
@@ -5336,15 +5335,15 @@ struct GraphBuilder::BytecodeVisitor {
         constexpr size_t freeObjectClassOffset =
             static_cast<size_t>(ConstantIndex::FREE_OBJECT_WITH_NONE_FIELD_CLASS_INDEX) * JSTaggedValue::TaggedTypeSize();
         static_assert(freeObjectClassOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
-        auto *globalConstants = self->NewVertex<LoadTaggedFromAddressVertex>(
-            compileInfoFacts_, currentBlock, {glue}, static_cast<int32_t>(globalConstantsOffset));
+        auto *globalConstants = self->NewVertex<LoadGlueTaggedFieldVertex>(
+            compileInfoFacts_, currentBlock, {}, static_cast<int32_t>(globalConstantsOffset));
         auto *freeObjectFill = self->NewVertex<LoadTaggedFieldVertex>(
             compileInfoFacts_, currentBlock, {globalConstants}, static_cast<int32_t>(freeObjectClassOffset));
         // The counter protocol runs unconditionally here: CMC GC — the one
         // mode whose generated stubs skip it — is not enabled, and the
         // interpreter's runtime factory path steps the counter under every
         // collector anyway.
-        self->NewVertex<ObjSizeTrackingStepVertex>(compileInfoFacts_, currentBlock, {glue, hclass});
+        self->NewVertex<ObjSizeTrackingStepVertex>(compileInfoFacts_, currentBlock, {hclass});
         self->FinishBlockWithJump(currentBlock, fillMergeBlock);
         CompileInfoFacts *trackingFacts = compileInfoFacts_;
 
@@ -5360,7 +5359,7 @@ struct GraphBuilder::BytecodeVisitor {
         auto *fill = self->NewPhiVertexWith(currentBlock, {freeObjectFill, undefinedFill}, self->AccIndex());
         auto *allocation = AllocateInYoung(size, hclass);
         return self->NewVertex<InitializeEmptyObjectWithSizeVertex>(
-            compileInfoFacts_, currentBlock, {allocation, glue, hclass, size, fill});
+            compileInfoFacts_, currentBlock, {allocation, hclass, size, fill});
     }
 
     ValueVertex *BuildEmptyObject()
@@ -5382,7 +5381,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex* size = self->graph_->GetInt64Constant(static_cast<int64_t>(objectSize));
         auto* allocation = AllocateInYoung(size, hclass);
         auto* object = self->NewVertex<InitializeEmptyObjectVertex>(
-            compileInfoFacts_, currentBlock, {allocation, glue, hclass, size}, objectSize);
+            compileInfoFacts_, currentBlock, {allocation, hclass, size}, objectSize);
         compileInfoFacts_->EnsureType(object, NodeInfo::NodeType::OTHER_JS_RECEIVER);
         return object;
     }
@@ -5404,7 +5403,7 @@ struct GraphBuilder::BytecodeVisitor {
         if (!TryResolveHClassRef(hclassRef, &hclass) || !hclass->IsJSArray() || constant == nullptr) {
             return;
         }
-        self->NewVertex<TransitionHClassWithBarrierVertex>(compileInfoFacts_, currentBlock, {glue, array, constant});
+        self->NewVertex<TransitionHClassWithBarrierVertex>(compileInfoFacts_, currentBlock, {array, constant});
         compileInfoFacts_->RecordHClass(array, hclassRef, false);
     }
 
@@ -5421,7 +5420,7 @@ struct GraphBuilder::BytecodeVisitor {
         }
         ValueVertex* array;
         if (globalEnv == nullptr) {
-            array = CommonStubCallToAccWithLazyDeopt({glue, GlobalEnv()}, CommonStubID::CreateEmptyArray);
+            array = CommonStubCallToAccWithLazyDeopt({GlobalEnv()}, CommonStubID::CreateEmptyArray);
         } else {
             constexpr int32_t arrayFunctionOffset
                 = GlobalEnv::HEADER_SIZE + GlobalEnv::ARRAY_FUNCTION_INDEX * JSTaggedValue::TaggedTypeSize();
@@ -5432,7 +5431,7 @@ struct GraphBuilder::BytecodeVisitor {
             ValueVertex* size = self->graph_->GetInt64Constant(static_cast<int64_t>(objectSize));
             auto* allocation = AllocateInYoung(size, hclass);
             array = self->NewVertex<InitializeEmptyArrayVertex>(
-                compileInfoFacts_, currentBlock, {allocation, glue, globalEnv, hclass}, objectSize);
+                compileInfoFacts_, currentBlock, {allocation, globalEnv, hclass}, objectSize);
         }
         frameState.SetAcc(array);
         compileInfoFacts_->EnsureType(array, NodeInfo::NodeType::JS_ARRAY);
@@ -5458,7 +5457,7 @@ struct GraphBuilder::BytecodeVisitor {
             ValueVertex* obj = ObjectFromConstPool(index);
             ValueVertex* lexEnv = LoadRegister(bcInfo, 1);
             ValueVertex* object = CommonStubCallToAccWithLazyDeopt(
-                {glue, obj, lexEnv}, CommonStubID::CreateObjectHavingMethod, SideEffectKind::SAFE_CALL);
+                {obj, lexEnv}, CommonStubID::CreateObjectHavingMethod, SideEffectKind::SAFE_CALL);
             compileInfoFacts_->EnsureType(object, NodeInfo::NodeType::OTHER_JS_RECEIVER);
             return;
         }
@@ -5468,7 +5467,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex* size = self->graph_->GetInt64Constant(static_cast<int64_t>(info.objectSize));
         auto* allocation = AllocateInYoung(size, hclass);
         auto* object = self->NewVertex<InitializeObjectWithBufferVertex>(
-            compileInfoFacts_, currentBlock, {allocation, glue, literal, hclass}, info);
+            compileInfoFacts_, currentBlock, {allocation, literal, hclass}, info);
         frameState.SetAcc(object);
         compileInfoFacts_->EnsureType(object, NodeInfo::NodeType::OTHER_JS_RECEIVER);
     }
@@ -5502,7 +5501,7 @@ struct GraphBuilder::BytecodeVisitor {
             ValueVertex* index = self->graph_->GetInt32Constant(cpIdx);
             ValueVertex* jsFunc = LoadParam(CALL_TARGET_PARAM_INDEX);
             ValueVertex* slotId = self->graph_->GetInt32Constant(static_cast<int32_t>(rawSlotId));
-            array = CommonStubCallToAccWithLazyDeopt({glue, index, jsFunc, slotId, GlobalEnv()},
+            array = CommonStubCallToAccWithLazyDeopt({index, jsFunc, slotId, GlobalEnv()},
                                                      CommonStubID::CreateArrayWithBuffer);
         } else {
             auto* hclass = self->NewVertex<LoadTaggedFieldVertex>(
@@ -5510,7 +5509,7 @@ struct GraphBuilder::BytecodeVisitor {
             ValueVertex* size = self->graph_->GetInt64Constant(static_cast<int64_t>(objectSize));
             auto* allocation = AllocateInYoung(size, hclass);
             array = self->NewVertex<InitializeArrayWithBufferVertex>(
-                compileInfoFacts_, currentBlock, {allocation, glue, literal, hclass}, objectSize);
+                compileInfoFacts_, currentBlock, {allocation, literal, hclass}, objectSize);
             frameState.SetAcc(array);
             compileInfoFacts_->EnsureType(array, NodeInfo::NodeType::JS_ARRAY);
         }
@@ -5532,7 +5531,7 @@ struct GraphBuilder::BytecodeVisitor {
             return;
         }
         self->NewVertex<TransitionHClassWithBarrierVertex>(
-            compileInfoFacts_, currentBlock, {glue, array, creatorHClassConstant});
+            compileInfoFacts_, currentBlock, {array, creatorHClassConstant});
         compileInfoFacts_->RecordHClass(array, creatorHClassRef, false);
     }
 
@@ -5587,7 +5586,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *lexicalEnv = LoadRegister(bcInfo, 3);
 
         CallCommonStubVertex *closure = CommonStubCallToAccWithLazyDeopt(
-            {glue, jsFunc, methodId, length, lexicalEnv, slotId, GlobalEnv()}, CommonStubID::Definefunc);
+            {jsFunc, methodId, length, lexicalEnv, slotId, GlobalEnv()}, CommonStubID::Definefunc);
         self->localClosureInfos_.emplace(
             closure, self->chunk_->New<LocalClosureInfo>(methodConstPoolIndex));
     }
@@ -5648,7 +5647,7 @@ struct GraphBuilder::BytecodeVisitor {
         }
         ValueVertex *stringId = self->graph_->GetInt32Constant(static_cast<int>(constDataId));
         ValueVertex *prop = StringFromConstPool(stringId);
-        CommonStubCallWithLazyDeopt({glue, receiver, prop, value, GlobalEnv()}, CommonStubID::DefineField);
+        CommonStubCallWithLazyDeopt({receiver, prop, value, GlobalEnv()}, CommonStubID::DefineField);
     }
 
     // Note: Legacy bytecode only. Zero production by current ArkTS frontend (es2abc).
@@ -5658,7 +5657,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *prop = StringFromConstPool(stringId);
         ValueVertex *obj = LoadRegister(bcInfo, 2);  // 2: obj register index
         ValueVertex *value = frameState.GetAcc();
-        CommonStubCallWithLazyDeopt({glue, obj, prop, value, GlobalEnv()}, CommonStubID::DefineField);
+        CommonStubCallWithLazyDeopt({obj, prop, value, GlobalEnv()}, CommonStubID::DefineField);
     }
 
     void LowerDefineFieldByValue(const BytecodeInfo *bcInfo)
@@ -5666,7 +5665,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *receiver = LoadRegister(bcInfo, 1);
         ValueVertex *propKey = LoadRegister(bcInfo, 0);
         ValueVertex *acc = frameState.GetAcc();
-        CommonStubCallWithLazyDeopt({glue, receiver, propKey, acc, GlobalEnv()}, CommonStubID::DefineField);
+        CommonStubCallWithLazyDeopt({receiver, propKey, acc, GlobalEnv()}, CommonStubID::DefineField);
     }
 
     void LowerDefineFieldByIndex(const BytecodeInfo *bcInfo)
@@ -5674,7 +5673,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *receiver = LoadRegister(bcInfo, 1);
         ValueVertex *propKey = TaggedConstantFromInt32(GetImmediate<int>(bcInfo, 0));
         ValueVertex *acc = frameState.GetAcc();
-        CommonStubCallWithLazyDeopt({glue, receiver, propKey, acc, GlobalEnv()}, CommonStubID::DefineField);
+        CommonStubCallWithLazyDeopt({receiver, propKey, acc, GlobalEnv()}, CommonStubID::DefineField);
     }
 
     void LowerCreatePrivateProperty(const BytecodeInfo *bcInfo)
@@ -5703,13 +5702,13 @@ struct GraphBuilder::BytecodeVisitor {
     void LowerGetIterator()
     {
         ValueVertex *obj = frameState.GetAcc();
-        CommonStubCallToAccWithLazyDeopt({glue, obj, GlobalEnv()}, CommonStubID::GetIterator);
+        CommonStubCallToAccWithLazyDeopt({obj, GlobalEnv()}, CommonStubID::GetIterator);
     }
 
     void LowerGetPropIterator()
     {
         ValueVertex *object = frameState.GetAcc();
-        CommonStubCallToAccWithLazyDeopt({glue, object, GlobalEnv()}, CommonStubID::Getpropiterator);
+        CommonStubCallToAccWithLazyDeopt({object, GlobalEnv()}, CommonStubID::Getpropiterator);
     }
 
     void LowerCloseIterator(const BytecodeInfo *bcInfo)
@@ -5775,7 +5774,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *parent = LoadRegister(bcInfo, 1);
         ValueVertex *numVars = self->graph_->GetInt32Constant(GetImmediate<int>(bcInfo, 0));
         ValueVertex *newEnv =
-            CommonStubCall({glue, parent, numVars}, CommonStubID::NewLexicalEnv, SideEffectKind::SAFE_CALL);
+            CommonStubCall({parent, numVars}, CommonStubID::NewLexicalEnv, SideEffectKind::SAFE_CALL);
 
         frameState.SetAcc(newEnv);
         frameState.SetLexicalEnv(newEnv);
@@ -5826,7 +5825,7 @@ struct GraphBuilder::BytecodeVisitor {
         int32_t offset = GetLexicalEnvSlotOffset(slot);
         self->NewVertex<StoreEnvSlotVertex>(compileInfoFacts_, currentBlock, {targetEnv, value}, offset);
         if (ClassifyDirectWriteBarrierValueKind(value) != ArkSteedWriteBarrierValueKind::NonHeap) {
-            self->NewVertex<SetValueWithBarrierVertex>(compileInfoFacts_, currentBlock, {glue, targetEnv, value},
+            self->NewVertex<SetValueWithBarrierVertex>(compileInfoFacts_, currentBlock, {targetEnv, value},
                                                        offset);
         }
         compileInfoFacts_->RecordEnvSlot(targetEnv, offset, value);
@@ -6088,7 +6087,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *obj = frameState.GetAcc();
         TypeOfKind kind = ClassifyTypeOf(obj);
         if (kind == TypeOfKind::UNKNOWN) {
-            frameState.SetAcc(CommonStubCall({glue, obj}, CommonStubID::TypeOf, SideEffectKind::SAFE_CALL));
+            frameState.SetAcc(CommonStubCall({obj}, CommonStubID::TypeOf, SideEffectKind::SAFE_CALL));
             return;
         }
         frameState.SetAcc(StringFromGlobalConstant(StringIndexOfTypeOfKind(kind)));
@@ -6103,7 +6102,7 @@ struct GraphBuilder::BytecodeVisitor {
             // which does not apply there. Keep the stub path for them.
             ValueVertex *argv = self->graph_->GetIntPtrConstant(0);
             ValueVertex *argvTaggedArray = BuildInlineActualArgumentsArray();
-            CommonStubCallToAccWithLazyDeopt({glue, argv, numArgs, argvTaggedArray, GlobalEnv()},
+            CommonStubCallToAccWithLazyDeopt({argv, numArgs, argvTaggedArray, GlobalEnv()},
                                              CommonStubID::GetUnmappedArgs);
             return;
         }
@@ -6135,8 +6134,8 @@ struct GraphBuilder::BytecodeVisitor {
 
         // The frame ABI guarantees that argc includes the mandatory arguments
         // and that the user argument count fits the INT32 frame representation.
-        ValueVertex *globalConstants = self->NewVertex<LoadTaggedFromAddressVertex>(
-            compileInfoFacts_, currentBlock, {glue}, static_cast<int32_t>(globalConstantsOffset));
+        ValueVertex *globalConstants = self->NewVertex<LoadGlueTaggedFieldVertex>(
+            compileInfoFacts_, currentBlock, {}, static_cast<int32_t>(globalConstantsOffset));
         ValueVertex *elementsHClass = self->NewVertex<LoadTaggedFieldVertex>(
             compileInfoFacts_, currentBlock, {globalConstants}, static_cast<int32_t>(elementsClassOffset));
         ValueVertex *elementsDataSize = self->NewVertex<I64ShiftLeftVertex>(
@@ -6173,7 +6172,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *argument = self->NewVertex<LoadActualArgumentVertex>(
             compileInfoFacts_, currentBlock, {index});
         self->NewVertex<StoreTaggedElementWithBarrierVertex>(
-            compileInfoFacts_, currentBlock, {glue, elements, index, argument},
+            compileInfoFacts_, currentBlock, {elements, index, argument},
             ArkSteedWriteBarrierValueKind::Unknown);
         compileInfoFacts_->OnSideEffect();
         ValueVertex *nextIndex = self->NewVertex<I32AddVertex>(
@@ -6199,7 +6198,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex* rawArguments = AllocateInYoung(argumentsSize, argumentsHClass);
         ValueVertex *arguments = self->NewVertex<InitializeUnmappedArgumentsVertex>(
             compileInfoFacts_, currentBlock,
-            {glue, numArgs, rawArguments, elements, globalEnv, argumentsHClass});
+            {numArgs, rawArguments, elements, globalEnv, argumentsHClass});
         compileInfoFacts_->OnSideEffect();
         compileInfoFacts_->EnsureType(arguments, NodeInfo::NodeType::OTHER_JS_RECEIVER);
         frameState.SetAcc(arguments);
@@ -6212,7 +6211,7 @@ struct GraphBuilder::BytecodeVisitor {
             ValueVertex *startIndex = self->graph_->GetInt32Constant(GetImmediate<int>(bcInfo, 0));
             ValueVertex *argvTaggedArray = BuildInlineActualArgumentsArray();
             CommonStubCallToAccWithLazyDeopt(
-                {glue, argv, startIndex, ActualArgc(), argvTaggedArray, GlobalEnv()}, CommonStubID::CopyRestArgs);
+                {argv, startIndex, ActualArgc(), argvTaggedArray, GlobalEnv()}, CommonStubID::CopyRestArgs);
             return;
         }
         ValueVertex *taggedArgc = TaggedActualArgc();
@@ -6224,14 +6223,14 @@ struct GraphBuilder::BytecodeVisitor {
     {
         ValueVertex *object = LoadRegister(bcInfo, 0);
         ValueVertex *prop = frameState.GetAcc();
-        CommonStubCallToAccWithLazyDeopt({glue, object, prop, GlobalEnv()}, CommonStubID::DeleteObjectProperty);
+        CommonStubCallToAccWithLazyDeopt({object, prop, GlobalEnv()}, CommonStubID::DeleteObjectProperty);
     }
 
     void LowerIsIn(const BytecodeInfo *bcInfo)
     {
         ValueVertex *prop = LoadRegister(bcInfo, 0);
         ValueVertex *obj = frameState.GetAcc();
-        CommonStubCallToAccWithLazyDeopt({glue, prop, obj, GlobalEnv()}, CommonStubID::IsIn);
+        CommonStubCallToAccWithLazyDeopt({prop, obj, GlobalEnv()}, CommonStubID::IsIn);
     }
 
     void LowerInstanceOf(const BytecodeInfo *bcInfo)
@@ -6540,8 +6539,8 @@ struct GraphBuilder::BytecodeVisitor {
         constexpr size_t elementsClassOffset =
             static_cast<size_t>(ConstantIndex::TAGGED_ARRAY_CLASS_INDEX) * JSTaggedValue::TaggedTypeSize();
         static_assert(elementsClassOffset <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
-        ValueVertex *globalConstants = self->NewVertex<LoadTaggedFromAddressVertex>(
-            compileInfoFacts_, currentBlock, {glue}, static_cast<int32_t>(globalConstantsOffset));
+        ValueVertex *globalConstants = self->NewVertex<LoadGlueTaggedFieldVertex>(
+            compileInfoFacts_, currentBlock, {}, static_cast<int32_t>(globalConstantsOffset));
         ValueVertex *elementsHClass = self->NewVertex<LoadTaggedFieldVertex>(
             compileInfoFacts_, currentBlock, {globalConstants}, static_cast<int32_t>(elementsClassOffset));
         ValueVertex *lengthBytes = self->NewVertex<I32ToI64Vertex>(compileInfoFacts_, currentBlock, {length});
@@ -6552,7 +6551,7 @@ struct GraphBuilder::BytecodeVisitor {
             {elementsDataSize, self->graph_->GetInt64Constant(static_cast<int64_t>(TaggedArray::DATA_OFFSET))});
         ValueVertex *allocation = AllocateInYoung(elementsSize, elementsHClass);
         ValueVertex *fastResult = self->NewVertex<StoreArraySpreadFastVertex>(
-            compileInfoFacts_, currentBlock, {array, value, allocation, length, elementsHClass, glue});
+            compileInfoFacts_, currentBlock, {array, value, allocation, length, elementsHClass});
         // The vertex's own FIELD_WRITE classification (Unknown key) already
         // clears every loaded property; a manual OnSideEffect here would also
         // drop hclass and env facts the store cannot touch.
@@ -7248,7 +7247,7 @@ struct GraphBuilder::BytecodeVisitor {
             // String-only conversion cannot run user hooks. It returns an intermediate
             // number before wrapper allocation, not the completed newobjrange result.
             case CommonStubID::ArkSteedStringToNumber:
-                return compileInfoFacts_->CheckType(call->GetInput(1), NodeInfo::NodeType::STRING);
+                return compileInfoFacts_->CheckType(call->GetInput(0), NodeInfo::NodeType::STRING);
             // typeof is observable only through the input value category and does not mutate dependencies.
             case CommonStubID::TypeOf:
                 return true;
@@ -7272,10 +7271,10 @@ struct GraphBuilder::BytecodeVisitor {
             // Unlike relational comparison, object-object equality is a reference check and skips ToPrimitive.
             case CommonStubID::Equal:
             case CommonStubID::NotEqual: {
-                // 1 : left operand, after glue.
-                ValueVertex *left = call->GetInput(1);
-                // 2 : right operand, after glue and left operand.
-                ValueVertex *right = call->GetInput(2);
+                // 0 : left operand.
+                ValueVertex *left = call->GetInput(0);
+                // 1 : right operand.
+                ValueVertex *right = call->GetInput(1);
                 if (!NodeInfo::NodeTypeCanBe(compileInfoFacts_->GetKnownType(left), JS_RECEIVER) &&
                     !NodeInfo::NodeTypeCanBe(compileInfoFacts_->GetKnownType(right), JS_RECEIVER)) {
                     // If neither side can be an object, abstract equality cannot run user-defined conversion.
@@ -7290,8 +7289,8 @@ struct GraphBuilder::BytecodeVisitor {
             case CommonStubID::Dec:
             case CommonStubID::Neg:
             case CommonStubID::Not:
-                // 1 : accumulator operand, after glue.
-                return !InputMayBeJSReceiver(call, 1);
+                // 0 : accumulator operand.
+                return !InputMayBeJSReceiver(call, 0);
             // Binary arithmetic and bitwise stubs may run ToPrimitive/ToNumeric/ToNumber on either operand.
             case CommonStubID::Add:
             case CommonStubID::Sub:
@@ -7305,27 +7304,27 @@ struct GraphBuilder::BytecodeVisitor {
             case CommonStubID::Shr:
             case CommonStubID::Ashr:
             case CommonStubID::StringAdd:
-                // 1 : left operand, after glue.
-                // 2 : right operand, after glue and left operand.
-                return !InputMayBeJSReceiver(call, 1) && !InputMayBeJSReceiver(call, 2);
+                // 0 : left operand.
+                // 1 : right operand.
+                return !InputMayBeJSReceiver(call, 0) && !InputMayBeJSReceiver(call, 1);
             // Relational comparison runs ToPrimitive even for object-object inputs, so it cannot use the
             // object-object equality fast rejection above.
             case CommonStubID::Less:
             case CommonStubID::LessEq:
             case CommonStubID::Greater:
             case CommonStubID::GreaterEq:
-                // 1 : left operand, after glue.
-                // 2 : right operand, after glue and left operand.
-                return !InputMayBeJSReceiver(call, 1) && !InputMayBeJSReceiver(call, 2);
+                // 0 : left operand.
+                // 1 : right operand.
+                return !InputMayBeJSReceiver(call, 0) && !InputMayBeJSReceiver(call, 1);
             // The `in` operator can consult receiver-side property lookup hooks.
             case CommonStubID::IsIn:
-                // 1 : property key operand, after glue.
-                // 2 : object operand, after glue and property key.
-                return !InputMayBeJSReceiver(call, 1) && !InputMayBeJSReceiver(call, 2);
+                // 0 : property key operand.
+                // 1 : object operand.
+                return !InputMayBeJSReceiver(call, 0) && !InputMayBeJSReceiver(call, 1);
             // `instanceof` may call @@hasInstance on the constructor operand.
             case CommonStubID::InstanceofJit:
-                // 2 : constructor operand, after glue and object operand.
-                return !InputMayBeJSReceiver(call, 2);
+                // 1 : constructor operand (the object operand is input 0).
+                return !InputMayBeJSReceiver(call, 1);
             // Define/st-own operations may run receiver/prototype/proxy paths or mutate object shapes.
             case CommonStubID::DefineField:
             case CommonStubID::StOwnByValue:
@@ -7333,14 +7332,14 @@ struct GraphBuilder::BytecodeVisitor {
             case CommonStubID::StOwnByName:
             case CommonStubID::StOwnByValueWithNameSet:
             case CommonStubID::StOwnByNameWithNameSet:
-                // 1 : receiver operand, after glue.
-                // 2 : property key operand, after glue and receiver.
-                return !InputMayBeJSReceiver(call, 1) && !InputMayBeJSReceiver(call, 2);
+                // 0 : receiver operand.
+                // 1 : property key operand.
+                return !InputMayBeJSReceiver(call, 0) && !InputMayBeJSReceiver(call, 1);
             // Delete can mutate the receiver shape; the key may also run conversion logic.
             case CommonStubID::DeleteObjectProperty:
-                // 1 : receiver operand, after glue.
-                // 2 : property key operand, after glue and receiver.
-                return !InputMayBeJSReceiver(call, 1) && !InputMayBeJSReceiver(call, 2);
+                // 0 : receiver operand.
+                // 1 : property key operand.
+                return !InputMayBeJSReceiver(call, 0) && !InputMayBeJSReceiver(call, 1);
             default:
                 return false;
         }
@@ -7663,7 +7662,7 @@ struct GraphBuilder::BytecodeVisitor {
             return false;
         }
 
-        auto *stringId = call->GetInput(2)->TryCast<Int32ConstantVertex>();
+        auto *stringId = call->GetInput(1)->TryCast<Int32ConstantVertex>();
         if (stringId == nullptr) {
             return false;
         }
@@ -8628,17 +8627,17 @@ struct GraphBuilder::BytecodeVisitor {
     {
         switch (kind) {
             case IntBitwiseKind::BITWISE_AND:
-                return CommonStubCall({glue, left, right, GlobalEnv()}, CommonStubID::And);
+                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::And);
             case IntBitwiseKind::BITWISE_OR:
-                return CommonStubCall({glue, left, right, GlobalEnv()}, CommonStubID::Or);
+                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::Or);
             case IntBitwiseKind::BITWISE_XOR:
-                return CommonStubCall({glue, left, right, GlobalEnv()}, CommonStubID::Xor);
+                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::Xor);
             case IntBitwiseKind::SHIFT_LEFT:
-                return CommonStubCall({glue, left, right, GlobalEnv()}, CommonStubID::Shl);
+                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::Shl);
             case IntBitwiseKind::SHIFT_RIGHT_LOGICAL:
-                return CommonStubCall({glue, left, right, GlobalEnv()}, CommonStubID::Shr);
+                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::Shr);
             case IntBitwiseKind::SHIFT_RIGHT_ARITHMETIC:
-                return CommonStubCall({glue, left, right, GlobalEnv()}, CommonStubID::Ashr);
+                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::Ashr);
         }
         UNREACHABLE();
     }
@@ -8905,7 +8904,7 @@ struct GraphBuilder::BytecodeVisitor {
     ValueVertex *BuildStringAdd(ValueVertex *left, ValueVertex *right)
     {
         ValueVertex *result = CommonStubCall(
-            {glue, left, right, self->graph_->GetInt32Constant(0), GlobalEnv()}, CommonStubID::StringAdd,
+            {left, right, self->graph_->GetInt32Constant(0), GlobalEnv()}, CommonStubID::StringAdd,
             SideEffectKind::SAFE_CALL);
         compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::STRING);
         return result;
@@ -9019,7 +9018,7 @@ struct GraphBuilder::BytecodeVisitor {
         }
         SideEffectKind sideEffectKind = IsStrictEqualityCompare(kind)
             ? SideEffectKind::SAFE_CALL : SideEffectKind::UNKNOWN_CALL;
-        ValueVertex *result = CommonStubCall({glue, left, right, GlobalEnv()}, stubId, sideEffectKind);
+        ValueVertex *result = CommonStubCall({left, right, GlobalEnv()}, stubId, sideEffectKind);
         compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
         return result;
     }
@@ -9153,8 +9152,9 @@ struct GraphBuilder::BytecodeVisitor {
     ValueVertex *BuildStringCompareOp(JSCondition kind, ValueVertex *left, ValueVertex *right)
     {
         if (kind == JSCondition::EQUAL || kind == JSCondition::STRICT_EQUAL) {
+            ValidateCommonStubCallArgs({left, right, GlobalEnv()}, CommonStubID::FastStringEqual);
             ValueVertex *result = self->NewVertex<StringEqualVertex>(
-                compileInfoFacts_, currentBlock, {glue, left, right, GlobalEnv()});
+                compileInfoFacts_, currentBlock, {left, right, GlobalEnv()});
             compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
             return result;
         }
@@ -9261,15 +9261,15 @@ struct GraphBuilder::BytecodeVisitor {
     {
         switch (kind) {
             case BinaryOpKind::ADD:
-                return CommonStubCall({glue, left, right, GlobalEnv()}, CommonStubID::Add);
+                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::Add);
             case BinaryOpKind::SUB:
-                return CommonStubCall({glue, left, right, GlobalEnv()}, CommonStubID::Sub);
+                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::Sub);
             case BinaryOpKind::MUL:
-                return CommonStubCall({glue, left, right, GlobalEnv()}, CommonStubID::Mul);
+                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::Mul);
             case BinaryOpKind::DIV:
-                return CommonStubCall({glue, left, right, GlobalEnv()}, CommonStubID::Div);
+                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::Div);
             case BinaryOpKind::MOD:
-                return CommonStubCall({glue, left, right, GlobalEnv()}, CommonStubID::Mod);
+                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::Mod);
             case BinaryOpKind::EXP:
                 return RuntimeCall({left, right}, RTSTUB_ID(Exp));
             default:
@@ -9327,7 +9327,7 @@ struct GraphBuilder::BytecodeVisitor {
 
     ValueVertex *BuildGenericUnaryOp(CommonStubID stubId, ValueVertex *value)
     {
-        return CommonStubCall({glue, value}, stubId);
+        return CommonStubCall({value}, stubId);
     }
 
     ValueVertex *BuildIntUnaryOp(CommonStubID stubId, ValueVertex *value, bool valueKnownInt)
@@ -10111,7 +10111,7 @@ struct GraphBuilder::BytecodeVisitor {
             return;
         }
         self->NewVertex<StoreTaggedElementWithBarrierVertex>(compileInfoFacts_, currentBlock,
-                                                             {glue, elements, index, value}, valueKind);
+                                                             {elements, index, value}, valueKind);
     }
 
     ValueVertex *BuildCheckedElementIndex(ValueVertex *key)
@@ -10272,7 +10272,7 @@ struct GraphBuilder::BytecodeVisitor {
         if (group.useExactHClassTransition) {
             ASSERT(group.targetHClassConstant != nullptr);
             NewElementsKindTransition<TransitionHClassWithBarrierVertex>(
-                sourceHClasses, {glue, receiver, group.targetHClassConstant});
+                sourceHClasses, {receiver, group.targetHClassConstant});
             compileInfoFacts_->RecordHClass(receiver, group.target.ref, false);
             return;
         }
@@ -10378,7 +10378,7 @@ struct GraphBuilder::BytecodeVisitor {
         compileInfoFacts_ = entryFacts->Clone();
         // Hand off the entire store process (grow + element store + length update) to the
         // runtime stub. The stub matches the slow-path signature of the owning bytecode.
-        CommonStubCallWithLazyDeopt({glue, receiver, index, value, GlobalEnv()}, fallbackStubID);
+        CommonStubCallWithLazyDeopt({receiver, index, value, GlobalEnv()}, fallbackStubID);
         self->FinishBlockWithJump(currentBlock, doneBlock);
         CompileInfoFacts *growExitFacts = compileInfoFacts_;
 
@@ -10748,7 +10748,7 @@ struct GraphBuilder::BytecodeVisitor {
             NewFieldStore<StoreTaggedFieldVertex>(key, {object, value}, offset);
             return;
         }
-        NewFieldStore<StoreTaggedFieldWithBarrierVertex>(key, {glue, object, value}, offset, valueKind);
+        NewFieldStore<StoreTaggedFieldWithBarrierVertex>(key, {object, value}, offset, valueKind);
     }
 
     void BuildStoreField(ValueVertex *object, ValueVertex *value, PropertyLookupResult plr, PropertyKey key)
@@ -10893,7 +10893,7 @@ struct GraphBuilder::BytecodeVisitor {
         UpdateCatchBlockData(prepareField);
         LoadLazyDeoptFrameStateForThrowableCall(bcIndex, prepareField);
         NewFieldStore<StoreSharedFieldWithBarrierVertex>(
-            key, std::initializer_list<ValueVertex *> {glue, storeTarget, prepareField}, access.fieldOffset);
+            key, std::initializer_list<ValueVertex *> {storeTarget, prepareField}, access.fieldOffset);
         return true;
     }
 
@@ -11065,11 +11065,12 @@ struct GraphBuilder::BytecodeVisitor {
         }
 
         self->NewVertex<TransitionHClassWithBarrierVertex>(compileInfoFacts_, currentBlock,
-                                                           {glue, receiver, transitionHClassValue});
+                                                           {receiver, transitionHClassValue});
 
         if (access.fieldStorage == AccessFieldStorage::PROPERTIES_ARRAY) {
+            ValidateCommonStubCallArgs({receiver}, CommonStubID::EnsurePropertiesCapacity);
             auto *properties = self->NewVertex<EnsurePropertiesCapacityVertex>(
-                compileInfoFacts_, currentBlock, std::initializer_list<ValueVertex *> {glue, receiver},
+                compileInfoFacts_, currentBlock, std::initializer_list<ValueVertex *> {receiver},
                 static_cast<int32_t>(access.fieldIndex));
             UpdateCatchBlockData(properties);
             LoadLazyDeoptFrameStateForThrowableCall(bcIndex, properties);
@@ -11330,7 +11331,6 @@ struct GraphBuilder::BytecodeVisitor {
         }
 
         ChunkVector<ValueVertex *> storeInputs(self->chunk_);
-        storeInputs.emplace_back(glue);
         storeInputs.emplace_back(receiver);
         storeInputs.emplace_back(value);
         auto *store = NewFieldStore<StoreTaggedFieldByHClassVertex>(
@@ -11937,7 +11937,7 @@ struct GraphBuilder::BytecodeVisitor {
         currentBlock = cachedCharBlock;
         compileInfoFacts_ = entryFacts->Clone();
         ValueVertex *cachedChar =
-            self->NewVertex<LoadSingleCharTableElementVertex>(compileInfoFacts_, currentBlock, {glue, charCode});
+            self->NewVertex<LoadSingleCharTableElementVertex>(compileInfoFacts_, currentBlock, {charCode});
         self->FinishBlockWithJump(currentBlock, doneBlock);
         CompileInfoFacts *cachedCharFacts = compileInfoFacts_;
 
@@ -11945,7 +11945,7 @@ struct GraphBuilder::BytecodeVisitor {
         compileInfoFacts_ = entryFacts->Clone();
         ValueVertex *createdChar =
             CommonStubCallToAccWithLazyDeopt(
-            {glue, charCode, GlobalEnv()}, CommonStubID::CreateStringBySingleCharCode, SideEffectKind::SAFE_CALL);
+            {charCode, GlobalEnv()}, CommonStubID::CreateStringBySingleCharCode, SideEffectKind::SAFE_CALL);
         self->FinishBlockWithJump(currentBlock, doneBlock);
 
         currentBlock = doneBlock;
@@ -11968,7 +11968,7 @@ struct GraphBuilder::BytecodeVisitor {
                 loadString->GetCommonStubID() != static_cast<uint32_t>(CommonStubID::GetStringFromConstPool)) {
                 return false;
             }
-            auto *stringId = loadString->GetInput(2)->TryCast<Int32ConstantVertex>();
+            auto *stringId = loadString->GetInput(1)->TryCast<Int32ConstantVertex>();
             if (stringId == nullptr || stringId->GetValue() < 0 ||
                 stringId->GetValue() > std::numeric_limits<uint16_t>::max()) {
                 return false;
@@ -11993,7 +11993,7 @@ struct GraphBuilder::BytecodeVisitor {
 
         ValueVertex *charCodeConstant = self->graph_->GetInt32Constant(static_cast<int32_t>(charCode));
         frameState.SetAcc(self->NewVertex<LoadSingleCharTableElementVertex>(compileInfoFacts_, currentBlock,
-                                                                            {glue, charCodeConstant}));
+                                                                            {charCodeConstant}));
         return true;
     }
 
@@ -12390,8 +12390,8 @@ struct GraphBuilder::BytecodeVisitor {
             return false;
         }
         if (!self->IsLazyDeoptEnabled()) {
-            ValueVertex *stage = self->NewVertex<LoadI32FromAddressVertex>(
-                compileInfoFacts_, currentBlock, {glue},
+            ValueVertex *stage = self->NewVertex<LoadGlueI32FieldVertex>(
+                compileInfoFacts_, currentBlock, {},
                 static_cast<int32_t>(JSThread::GlueData::GetStageOfHotReloadOffset(false)));
             ValueVertex *patchMain =
                 self->graph_->GetInt32Constant(static_cast<int32_t>(StageOfHotReload::LOAD_END_EXECUTE_PATCHMAIN));
@@ -12502,7 +12502,6 @@ struct GraphBuilder::BytecodeVisitor {
         ChunkVector<ValueVertex *> allArgs(self->chunk_);
         allArgs.reserve(inputs.size() + CallVertex::FIRST_ARG_INDEX);
 
-        allArgs.push_back(glue);
         allArgs.insert(allArgs.end(), inputs.begin(), inputs.end());
         allArgs.push_back(LoadParam(CALL_TARGET_PARAM_INDEX));
         allArgs.push_back(self->graph_->GetInt32Constant(GetICSlotId<int>(bcInfo, 0)));
@@ -12656,7 +12655,7 @@ struct GraphBuilder::BytecodeVisitor {
             }
         }
         ValueVertex *constpool = SharedConstPool();
-        return CommonStubCall({glue, constpool, stringId}, CommonStubID::GetStringFromConstPool,
+        return CommonStubCall({constpool, stringId}, CommonStubID::GetStringFromConstPool,
                               SideEffectKind::SAFE_CALL);
     }
 
@@ -12664,7 +12663,7 @@ struct GraphBuilder::BytecodeVisitor {
     {
         ValueVertex *constpool = SharedConstPool();
         ValueVertex *module = ModuleFromFunction();
-        return CommonStubCall({glue, constpool, index, module}, CommonStubID::GetObjectFromConstPool);
+        return CommonStubCall({constpool, index, module}, CommonStubID::GetObjectFromConstPool);
     }
 
     ValueVertex *MethodFromConstPool(ValueVertex *index)
@@ -12685,7 +12684,6 @@ struct GraphBuilder::BytecodeVisitor {
     }
 
     GraphBuilder *self;
-    ValueVertex *glue;           // Equivalent to self->glue_. Cached for performance.
     ValueVertex *lazyGlobalEnv;  // Equivalent to self->lazyGlobalEnv_. Cached for performance.
     const BasicBlockInfo *blockInfo;
     BB *currentBlock;    // Equivalent to self->blocks_[blockInfo->rpoIndex]. Cached for performance.
@@ -12715,7 +12713,6 @@ BB *GraphBuilder::VisitBytecodesOfBasicBlock(SharedBCFrameState frameState, uint
 
     BytecodeVisitor visitor {
         .self = this,
-        .glue = glue_,
         .lazyGlobalEnv = lazyGlobalEnv_,
         .blockInfo = blockInfo,
         .currentBlock = BlockAt(rpoIndex),  // visitor.currentBlock may be updated by subgraph creation
@@ -12754,7 +12751,6 @@ GraphBuilder::BytecodeVisitor ArkSteedGraphBuilderTestAccess::MakeInstanceofTest
     const auto *blockInfo = builder->preproc_->GetBasicBlockByRPO(1);
     return {
         .self = builder,
-        .glue = builder->glue_,
         .lazyGlobalEnv = builder->lazyGlobalEnv_,
         .blockInfo = blockInfo,
         .currentBlock = builder->BlockAt(1),

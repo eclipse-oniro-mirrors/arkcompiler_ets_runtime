@@ -74,7 +74,7 @@ public:
 
     bool Compile();
 
-    bool BuildGraph(JSThread *compilerThread, uintptr_t hostGlueAddr);
+    bool BuildGraph(JSThread *compilerThread);
     void RunPreRegallocProcessors();
     void FillCodeDesc(MachineCodeDesc &codeDesc);
 

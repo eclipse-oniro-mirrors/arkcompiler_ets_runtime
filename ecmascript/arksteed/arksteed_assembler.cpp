@@ -22,14 +22,13 @@
 
 namespace panda::ecmascript::arksteed {
 
-ArkSteedAssembler::ArkSteedAssembler(Chunk *chunk, JSThread *compilerThread, JSThread *entryThread)
+ArkSteedAssembler::ArkSteedAssembler(Chunk *chunk, JSThread *compilerThread)
     : assembler_(chunk),
 #if defined(PANDA_TARGET_ARM64)
       chunk_(chunk),
       veneerBranches_(chunk),
 #endif
-      compilerThread_(compilerThread),
-      entryThread_(entryThread)
+      compilerThread_(compilerThread)
 {}
 
 ArkSteedAssembler::~ArkSteedAssembler() = default;

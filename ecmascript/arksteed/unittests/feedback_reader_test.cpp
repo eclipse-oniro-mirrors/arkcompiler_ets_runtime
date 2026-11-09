@@ -1339,7 +1339,7 @@ protected:
         ASSERT_TRUE(preproc.Run());
         BytecodeAnalysis analysis(&preproc);
         ASSERT_TRUE(analysis.Run());
-        GraphBuilder builder(CompilerThread(), graph, HostThread()->GetGlueAddr(), &preproc, &analysis, false);
+        GraphBuilder builder(CompilerThread(), graph, &preproc, &analysis, false);
         const auto *site = method.FindBytecode(kungfu::EcmaOpcode::INSTANCEOF_IMM8_V8);
         ASSERT_NE(site, nullptr);
         EXPECT_TRUE(ArkSteedGraphBuilderTestAccess::TryBuildInlineInstanceofWithConstants(&builder, site, object,

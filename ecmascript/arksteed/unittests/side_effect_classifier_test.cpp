@@ -160,7 +160,6 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, StoreTaggedFieldWithBarrier)
     auto *vertex = Vertex::New<StoreTaggedFieldWithBarrierVertex>(
         &chunk_, static_cast<size_t>(StoreTaggedFieldWithBarrierVertex::NUM_INPUTS), static_cast<int32_t>(16),
         ArkSteedWriteBarrierValueKind::HeapObject);
-    vertex->SetInput(StoreTaggedFieldWithBarrierVertex::GLUE_INDEX, NewInt64());
     vertex->SetInput(StoreTaggedFieldWithBarrierVertex::OBJECT_INDEX, object);
     vertex->SetInput(StoreTaggedFieldWithBarrierVertex::VALUE_INDEX, value);
 
@@ -174,7 +173,6 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, StoreSharedFieldWithBarrier)
     auto *vertex = Vertex::New<StoreSharedFieldWithBarrierVertex>(
         &chunk_, static_cast<size_t>(StoreSharedFieldWithBarrierVertex::NUM_INPUTS), static_cast<int32_t>(16),
         ArkSteedWriteBarrierValueKind::HeapObject);
-    vertex->SetInput(StoreSharedFieldWithBarrierVertex::GLUE_INDEX, NewInt64());
     vertex->SetInput(StoreSharedFieldWithBarrierVertex::OBJECT_INDEX, object);
     vertex->SetInput(StoreSharedFieldWithBarrierVertex::VALUE_INDEX, value);
 
@@ -189,7 +187,6 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, StoreTaggedFieldByHClass)
     auto *vertex = Vertex::New<StoreTaggedFieldByHClassVertex>(
         &chunk_, static_cast<size_t>(StoreTaggedFieldByHClassVertex::NUM_INPUTS), &chunk_, cases,
         ArkSteedWriteBarrierValueKind::HeapObject, static_cast<uint32_t>(0));
-    vertex->SetInput(StoreTaggedFieldByHClassVertex::GLUE_INDEX, NewInt64());
     vertex->SetInput(StoreTaggedFieldByHClassVertex::OBJECT_INDEX, object);
     vertex->SetInput(StoreTaggedFieldByHClassVertex::VALUE_INDEX, value);
 
@@ -246,7 +243,6 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, SetValueWithBarrierIsMetadataOnly)
 {
     auto *vertex = Vertex::New<SetValueWithBarrierVertex>(
         &chunk_, static_cast<size_t>(SetValueWithBarrierVertex::NUM_INPUTS), static_cast<int32_t>(16));
-    vertex->SetInput(SetValueWithBarrierVertex::GLUE_INDEX, NewInt64());
     vertex->SetInput(SetValueWithBarrierVertex::OBJECT_INDEX, NewTagged());
     vertex->SetInput(SetValueWithBarrierVertex::VALUE_INDEX, NewTagged());
 
@@ -274,7 +270,6 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, StoreTaggedElementWithBarrier)
     auto *vertex = Vertex::New<StoreTaggedElementWithBarrierVertex>(
         &chunk_, static_cast<size_t>(StoreTaggedElementWithBarrierVertex::NUM_INPUTS),
         ArkSteedWriteBarrierValueKind::HeapObject);
-    vertex->SetInput(StoreTaggedElementWithBarrierVertex::GLUE_INDEX, NewInt64());
     vertex->SetInput(StoreTaggedElementWithBarrierVertex::OBJECT_INDEX, object);
     vertex->SetInput(StoreTaggedElementWithBarrierVertex::INDEX_INDEX, NewInt32());
     vertex->SetInput(StoreTaggedElementWithBarrierVertex::VALUE_INDEX, NewTagged());
@@ -297,7 +292,6 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, EnsurePropertiesCapacity)
 {
     auto *vertex = Vertex::New<EnsurePropertiesCapacityVertex>(
         &chunk_, static_cast<size_t>(EnsurePropertiesCapacityVertex::NUM_INPUTS), static_cast<int32_t>(0));
-    vertex->SetInput(EnsurePropertiesCapacityVertex::GLUE_INDEX, NewInt64());
     vertex->SetInput(EnsurePropertiesCapacityVertex::OBJECT_INDEX, NewTagged());
 
     // Growth copies values without changing the HClass; the property write is
@@ -312,7 +306,6 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, TransitionHClassWithBarrier)
     ValueVertex *object = NewTagged();
     auto *vertex = Vertex::New<TransitionHClassWithBarrierVertex>(
         &chunk_, static_cast<size_t>(TransitionHClassWithBarrierVertex::NUM_INPUTS));
-    vertex->SetInput(TransitionHClassWithBarrierVertex::GLUE_INDEX, NewInt64());
     vertex->SetInput(TransitionHClassWithBarrierVertex::OBJECT_INDEX, object);
     vertex->SetInput(TransitionHClassWithBarrierVertex::HCLASS_INDEX, NewTagged());
 
@@ -433,7 +426,6 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, AllocateInYoungHasNoSideEffect)
 {
     auto* vertex
         = Vertex::New<AllocateInYoungVertex>(&chunk_, static_cast<size_t>(AllocateInYoungVertex::NUM_INPUTS));
-    vertex->SetInput(AllocateInYoungVertex::GLUE_INDEX, NewInt64());
     vertex->SetInput(AllocateInYoungVertex::SIZE_INDEX, NewInt64());
 
     ExpectEffectWithoutLocation(Classifier::Classify(vertex), SideEffectKind::NO_SIDE_EFFECT);
@@ -474,7 +466,6 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, InitializeEmptyArrayIsSafe)
         static_cast<size_t>(InitializeEmptyArrayVertex::NUM_INPUTS),
         static_cast<uint32_t>(JSArray::SIZE + JSTaggedValue::TaggedTypeSize()));
     vertex->SetInput(InitializeEmptyArrayVertex::ALLOCATION_INDEX, NewTagged());
-    vertex->SetInput(InitializeEmptyArrayVertex::GLUE_INDEX, NewInt64());
     vertex->SetInput(InitializeEmptyArrayVertex::GLOBAL_ENV_INDEX, NewTagged());
     vertex->SetInput(InitializeEmptyArrayVertex::HCLASS_INDEX, NewTagged());
 
@@ -488,7 +479,6 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, InitializeEmptyObjectIsSafe)
                                                    static_cast<size_t>(InitializeEmptyObjectVertex::NUM_INPUTS),
                                                    static_cast<uint32_t>(JSObject::SIZE));
     vertex->SetInput(InitializeEmptyObjectVertex::ALLOCATION_INDEX, NewTagged());
-    vertex->SetInput(InitializeEmptyObjectVertex::GLUE_INDEX, NewInt64());
     vertex->SetInput(InitializeEmptyObjectVertex::HCLASS_INDEX, NewTagged());
     vertex->SetInput(InitializeEmptyObjectVertex::SIZE_INDEX, NewInt64());
 
@@ -507,7 +497,6 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, PrepareSharedStoreFieldIsSafe)
 HWTEST_F_L0(ArkSteedSideEffectClassifierTest, StringEqualIsSafe)
 {
     auto *vertex = Vertex::New<StringEqualVertex>(&chunk_, static_cast<size_t>(StringEqualVertex::NUM_INPUTS));
-    vertex->SetInput(StringEqualVertex::GLUE_INDEX, NewInt64());
     vertex->SetInput(StringEqualVertex::LEFT_INDEX, NewTagged());
     vertex->SetInput(StringEqualVertex::RIGHT_INDEX, NewTagged());
     vertex->SetInput(StringEqualVertex::GLOBAL_ENV_INDEX, NewTagged());
