@@ -67,12 +67,14 @@ if (ets_runtime_enable_ark_steed) {
       "$js_root/ecmascript/compiler:libark_jsoptimizer_set_with_maple",
       "$js_root/ecmascript/compiler/codegen/maple/maple_be:libcg",
     ]
+    deps += hiviewdfx_deps
 
     external_deps = [
       "runtime_core:libarkfile_static",
       "zlib:libz",
       "googletest:gtest",
     ]
+    external_deps += hiviewdfx_ext_deps
 
     public_configs = [
       "$js_root:ecma_test_config",
