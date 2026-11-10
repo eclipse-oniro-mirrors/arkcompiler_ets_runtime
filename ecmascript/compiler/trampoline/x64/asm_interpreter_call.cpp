@@ -157,6 +157,7 @@ void AsmInterpreterCall::AsmInterpEntryDispatch(ExtendedAssembler *assembler)
         Register callFieldRegister = __ CallDispatcherArgument(kungfu::CallDispatchInputs::CALL_FIELD);
         __ Btq(Method::IsNativeBit::START_BIT, callFieldRegister);
         __ Jb(&callNativeEntry);
+        CheckDeferredCompilationForCallEntry(assembler);
 
         __ Leaq(Operand(argvRegister, NUM_MANDATORY_JSFUNC_ARGS * JSTaggedValue::TaggedTypeSize()),
             argvRegister);
@@ -182,6 +183,39 @@ void AsmInterpreterCall::AsmInterpEntryDispatch(ExtendedAssembler *assembler)
         __ Addq(16, rsp);  // 16: skip argc and runtime_id
         __ Ret();
     }
+}
+
+void AsmInterpreterCall::CheckDeferredCompilationForCallEntry(ExtendedAssembler *assembler)
+{
+    Label noSubmit;
+    Register method = rdx;
+    Register extraLiteralInfo = r12;
+    // Reuse the entry Method and the HClass bitfield register after the type check.
+    // Do not spill registers on the no-submit path.
+    __ Movl(Operand(method, Method::EXTRA_LITERAL_INFO_OFFSET), extraLiteralInfo);
+    __ Shr(Method::DeoptCountBits::START_BIT, extraLiteralInfo);
+    __ Andl((1LU << Method::DeoptCountBits::SIZE) - 1, extraLiteralInfo);
+    __ Cmpl(static_cast<int32_t>(TieringDecision::ARKSTEED_REQUESTED), extraLiteralInfo);
+    __ Jne(&noSubmit);
+    {
+        // Three slots preserve native values and align the stack after the entry's Callq.
+        __ Pushq(rdi);
+        __ Pushq(r8);
+        __ Pushq(r9);
+        __ Movq(RTSTUB_ID(SubmitJitTask), rsi);
+        // Include target, newTarget and this so GC updates the complete original argument area.
+        __ Leaq(Operand(r8, NUM_MANDATORY_JSFUNC_ARGS), rdx);
+        __ Movq(r9, rcx);
+        __ CallAssemblerStub(RTSTUB_ID(CallRuntimeWithArgv), false);
+        __ Popq(r9);
+        __ Popq(r8);
+        __ Popq(rdi);
+        // Submission may collect; reload the target and its Method from GC-updated arguments.
+        __ Movq(Operand(r9, 0), rsi);
+        __ Movq(Operand(rsi, JSFunction::METHOD_OFFSET), method);
+        __ Movq(Operand(method, Method::CALL_FIELD_OFFSET), rcx);
+    }
+    __ Bind(&noSubmit);
 }
 
 void AsmInterpreterCall::PushFrameState(ExtendedAssembler *assembler, Register prevSpRegister, Register fpRegister,

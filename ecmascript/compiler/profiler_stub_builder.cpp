@@ -871,9 +871,13 @@ void ProfilerStubBuilder::SetPreDumpPeriodIndex(GateRef glue, GateRef profileTyp
 
 GateRef ProfilerStubBuilder::GetTieringDecisionFromFunction(GateRef glue, GateRef func)
 {
+    return GetTieringDecisionFromMethod(GetMethodFromJSFunctionOrProxy(glue, func));
+}
+
+GateRef ProfilerStubBuilder::GetTieringDecisionFromMethod(GateRef method)
+{
     // Matches Method::GetTieringDecision: the tiering state machine reuses the
     // deopt count field.
-    GateRef method = GetMethodFromJSFunctionOrProxy(glue, func);
     GateRef extraLiteralInfo = LoadPrimitive(VariableType::INT64(), method,
         IntPtr(Method::EXTRA_LITERAL_INFO_OFFSET));
     GateRef decision = Int64And(

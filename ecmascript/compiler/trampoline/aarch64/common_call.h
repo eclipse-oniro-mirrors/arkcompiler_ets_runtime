@@ -157,6 +157,8 @@ public:
 
     static void AsmInterpEntryDispatch(ExtendedAssembler *assembler);
 
+    static void CheckDeferredCompilationForCallEntry(ExtendedAssembler *assembler);
+
     static void GeneratorReEnterAsmInterp(ExtendedAssembler *assembler);
 
     static void GeneratorReEnterAsmInterpDispatch(ExtendedAssembler *assembler);
