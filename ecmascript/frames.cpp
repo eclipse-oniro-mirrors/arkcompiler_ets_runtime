@@ -1061,34 +1061,32 @@ void SteedFunctionFrame::IterateSafePointTable(const FrameIterator& it, RootVisi
     }
     // to do: refactor
     uintptr_t fp = reinterpret_cast<uintptr_t>(&GetFrameFromSp(it.GetSp())->prevFp);
-    constexpr int32_t kTaggedSlot0OffsetFromFp = -4 * static_cast<int32_t>(sizeof(uintptr_t));
+    constexpr int32_t TAGGED_SLOT_0_OFFSET_FROM_FP = -4 * static_cast<int32_t>(sizeof(uintptr_t));
     uint32_t numTaggedSlots = safepointTable.GetNumTaggedSlots();
     for (uint32_t i = 0; i < numTaggedSlots; ++i) {
-        intptr_t slotAddr = static_cast<intptr_t>(fp) + kTaggedSlot0OffsetFromFp -
+        intptr_t slotAddr = static_cast<intptr_t>(fp) + TAGGED_SLOT_0_OFFSET_FROM_FP -
                             static_cast<intptr_t>(i * sizeof(uintptr_t));
         ObjectSlot slot(static_cast<uintptr_t>(slotAddr));
         visitor.VisitRoot(Root::ROOT_FRAME, slot);
     }
-
-    uintptr_t returnAddr = it.GetOptimizedReturnAddr();
-    uintptr_t textStart = machineCode->GetText();
-    if (returnAddr < textStart) {
-        return;
-    }
-    uint32_t pcOffset = static_cast<uint32_t>(returnAddr - textStart);
+    // Note: FrameIterator::Advance<GCVisitedFlag> already normalizes the return address of a
+    // Steed frame to a PC offset inside this frame's own MachineCode.
+    uint32_t pcOffset = static_cast<uint32_t>(it.GetOptimizedReturnAddr());
     const auto *entry = safepointTable.FindEntry(pcOffset);
     if (entry == nullptr || entry->pcOffset != pcOffset) {
         return;
     }
-    uintptr_t start = it.GetCallSiteSp();
-    intptr_t end = static_cast<intptr_t>(fp) + kTaggedSlot0OffsetFromFp -
-                   static_cast<intptr_t>(safepointTable.GetNumTaggedSlots() + safepointTable.GetNumUntaggedSlots() +
-                                         entry->GetNumExtraSpillSlots()) *
-                   static_cast<intptr_t>(sizeof(uintptr_t));
-    if (start >= static_cast<uintptr_t>(end)) {
-        return;
+    // Visit extra spill tagged slots.
+    if (entry->GetNumExtraSpillSlots() > 0) {
+        uintptr_t numSlots = safepointTable.GetNumTaggedSlots() +
+                             safepointTable.GetNumUntaggedSlots() +
+                             entry->GetNumExtraSpillSlots();
+        uintptr_t start = it.GetCallSiteSp();
+        uintptr_t end = fp + TAGGED_SLOT_0_OFFSET_FROM_FP - numSlots * sizeof(uintptr_t);
+        if (start < end) {
+            visitor.VisitRangeRoot(Root::ROOT_FRAME, ObjectSlot(start), ObjectSlot(end));
+        }
     }
-    visitor.VisitRangeRoot(Root::ROOT_FRAME, ObjectSlot(start), ObjectSlot(static_cast<uintptr_t>(end)));
 }
 #endif
 
