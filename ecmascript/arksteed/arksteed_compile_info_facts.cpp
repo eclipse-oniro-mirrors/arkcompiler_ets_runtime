@@ -104,6 +104,12 @@ NodeInfo::NodeType NodeTypeFromHClass(const JSHClass *hclass)
     return NodeTypeFromJSType(hclass->GetObjectType());
 }
 
+NodeInfo::NodeType NodeTypeFromHClass(ArkSteedHClassRef hclass)
+{
+    return hclass.IsJSHClass() ? NodeTypeFromJSType(static_cast<JSType>(hclass.GetHClassObjectType()))
+                             : NodeInfo::NodeType::UNKNOWN;
+}
+
 AlternativeNodes::AlternativeNodes()
 {
     store_.fill(nullptr);
@@ -163,13 +169,13 @@ bool NodeInfo::HasUnstablePossibleHClass() const
                        [](const PossibleHClassInfo &info) { return !info.isStable; });
 }
 
-bool NodeInfo::ContainsPossibleHClass(JSHClass *hclass) const
+bool NodeInfo::ContainsPossibleHClass(ArkSteedHClassRef hclass) const
 {
     return std::any_of(possibleHClasses_.begin(), possibleHClasses_.end(),
-                       [hclass](const PossibleHClassInfo &info) { return info.hclass == hclass; });
+                       [hclass](const PossibleHClassInfo &info) { return info.hclass.Equals(hclass); });
 }
 
-void NodeInfo::RecordHClass(JSHClass *hclass, bool isStable)
+void NodeInfo::RecordHClass(ArkSteedHClassRef hclass, bool isStable)
 {
     possibleHClasses_.clear();
     possibleHClassesAreStale_ = false;
@@ -182,7 +188,7 @@ void NodeInfo::RecordPossibleHClasses(const PossibleHClasses &hclasses, bool isS
 {
     possibleHClasses_.clear();
     possibleHClassesAreStale_ = false;
-    for (JSHClass *hclass : hclasses) {
+    for (ArkSteedHClassRef hclass : hclasses) {
         AddPossibleHClass(hclass, isStable);
     }
     IntersectTypeWithPossibleHClasses();
@@ -203,12 +209,12 @@ void NodeInfo::RecordPossibleHClasses(const PossibleHClassInfos &hclasses)
 bool NodeInfo::NarrowPossibleHClasses(const PossibleHClasses &hclasses)
 {
     ASSERT(HasFreshPossibleHClasses());
-    possibleHClasses_.erase(std::remove_if(possibleHClasses_.begin(), possibleHClasses_.end(),
-                                           [&hclasses](const auto &info) {
-                                               return std::find(hclasses.begin(), hclasses.end(), info.hclass) ==
-                                                      hclasses.end();
-                                           }),
-                            possibleHClasses_.end());
+    possibleHClasses_.erase(
+        std::remove_if(possibleHClasses_.begin(), possibleHClasses_.end(), [&hclasses](const auto &info) {
+            return std::none_of(hclasses.begin(), hclasses.end(),
+                [&info](ArkSteedHClassRef hclass) { return info.hclass.Equals(hclass); });
+        }),
+        possibleHClasses_.end());
     if (possibleHClasses_.empty()) {
         possibleHClassesAreStale_ = false;
         CheckPossibleHClassInvariants();
@@ -241,7 +247,8 @@ void NodeInfo::MarkHClassesStaleForElementsKindTransition(const PossibleHClasses
     }
     bool containsMatchingHClass = false;
     for (PossibleHClassInfo &info : possibleHClasses_) {
-        if (std::find(sourceHClasses.begin(), sourceHClasses.end(), info.hclass) == sourceHClasses.end()) {
+        if (std::none_of(sourceHClasses.begin(), sourceHClasses.end(),
+                         [&info](ArkSteedHClassRef source) { return info.hclass.Equals(source); })) {
             continue;
         }
         info.isStable = false;
@@ -260,11 +267,11 @@ void NodeInfo::MarkPossibleHClassesFresh()
     CheckPossibleHClassInvariants();
 }
 
-bool NodeInfo::MarkPossibleHClassStable(JSHClass *hclass)
+bool NodeInfo::MarkPossibleHClassStable(ArkSteedHClassRef hclass)
 {
     ASSERT(!possibleHClassesAreStale_);
     auto it = std::find_if(possibleHClasses_.begin(), possibleHClasses_.end(),
-                           [hclass](const PossibleHClassInfo &info) { return info.hclass == hclass; });
+                           [hclass](const PossibleHClassInfo &info) { return info.hclass.Equals(hclass); });
     if (it == possibleHClasses_.end()) {
         return false;
     }
@@ -304,7 +311,7 @@ bool NodeInfo::IsCompatibleWith(const NodeInfo &expected) const
     }
     for (const PossibleHClassInfo &actual : possibleHClasses_) {
         auto expectedIt = std::find_if(expected.possibleHClasses_.begin(), expected.possibleHClasses_.end(),
-            [&actual](const PossibleHClassInfo &candidate) { return candidate.hclass == actual.hclass; });
+            [&actual](const PossibleHClassInfo &candidate) { return candidate.hclass.Equals(actual.hclass); });
         if (expectedIt == expected.possibleHClasses_.end() || (expectedIt->isStable && !actual.isStable)) {
             return false;
         }
@@ -312,13 +319,13 @@ bool NodeInfo::IsCompatibleWith(const NodeInfo &expected) const
     return true;
 }
 
-void NodeInfo::AddPossibleHClass(JSHClass *hclass, bool isStable)
+void NodeInfo::AddPossibleHClass(ArkSteedHClassRef hclass, bool isStable)
 {
-    if (hclass == nullptr) {
+    if (!hclass.IsJSHClass()) {
         return;
     }
     auto it = std::find_if(possibleHClasses_.begin(), possibleHClasses_.end(),
-                           [hclass](const PossibleHClassInfo &info) { return info.hclass == hclass; });
+                           [hclass](const PossibleHClassInfo &info) { return info.hclass.Equals(hclass); });
     if (it != possibleHClasses_.end()) {
         it->isStable = it->isStable && isStable;
         return;
@@ -599,7 +606,7 @@ bool CompileInfoFacts::IsKnownNonHole(ValueVertex *node) const
     return info != nullptr && info->IsNonHole();
 }
 
-void CompileInfoFacts::RecordHClass(ValueVertex *node, JSHClass *hclass, bool isStable)
+void CompileInfoFacts::RecordHClass(ValueVertex *node, ArkSteedHClassRef hclass, bool isStable)
 {
     NodeInfo *info = GetOrCreateInfoFor(node);
     info->RecordHClass(hclass, isStable);
@@ -608,11 +615,11 @@ void CompileInfoFacts::RecordHClass(ValueVertex *node, JSHClass *hclass, bool is
     }
 }
 
-JSHClass *CompileInfoFacts::TryGetHClass(ValueVertex *node) const
+ArkSteedHClassRef CompileInfoFacts::TryGetHClass(ValueVertex *node) const
 {
     const NodeInfo *info = TryGetInfoFor(node);
     if (info == nullptr || !info->HasFreshKnownHClass()) {
-        return nullptr;
+        return {};
     }
     return info->GetFreshKnownHClass();
 }
@@ -648,7 +655,7 @@ bool CompileInfoFacts::NarrowPossibleHClasses(ValueVertex *node, const NodeInfo:
     return true;
 }
 
-void CompileInfoFacts::SetPossibleHClasses(ValueVertex *node, const ChunkVector<JSHClass *> &hclasses,
+void CompileInfoFacts::SetPossibleHClasses(ValueVertex *node, const ChunkVector<ArkSteedHClassRef> &hclasses,
                                            NodeInfo::NodeType possibleType)
 {
     NodeInfo::PossibleHClasses copy;
@@ -694,7 +701,7 @@ void CompileInfoFacts::MarkPossibleHClassesFresh(ValueVertex *node)
     }
 }
 
-bool CompileInfoFacts::MarkPossibleHClassStable(ValueVertex *node, JSHClass *hclass)
+bool CompileInfoFacts::MarkPossibleHClassStable(ValueVertex *node, ArkSteedHClassRef hclass)
 {
     NodeInfo *info = TryGetInfoFor(node);
     return info != nullptr && info->MarkPossibleHClassStable(hclass);
@@ -991,8 +998,8 @@ void CompileInfoFacts::MarkHClassesStaleForTransition(ValueVertex *receiver)
         return;
     }
     const NodeInfo *receiverInfo = TryGetInfoFor(receiver);
-    JSHClass *oldHClass = receiverInfo == nullptr ? nullptr : receiverInfo->GetFreshKnownHClass();
-    if (oldHClass == nullptr) {
+    ArkSteedHClassRef oldHClass = receiverInfo == nullptr ? ArkSteedHClassRef {} : receiverInfo->GetFreshKnownHClass();
+    if (!oldHClass.IsJSHClass()) {
         MarkAllFreshUnstableHClassesStale();
         return;
     }
@@ -1022,7 +1029,7 @@ void CompileInfoFacts::MarkHClassesStaleForElementsKindTransition(const NodeInfo
         const NodeInfo *info = TryGetInfoFor(it->first.GetReceiver());
         bool mayAlias = info == nullptr || !info->HasFreshPossibleHClasses() ||
             std::any_of(sourceHClasses.begin(), sourceHClasses.end(),
-                [info](JSHClass *source) { return info->ContainsPossibleHClass(source); });
+                [info](ArkSteedHClassRef source) { return info->ContainsPossibleHClass(source); });
         if (mayAlias) {
             it = loadedProperties_.erase(it);
         } else {

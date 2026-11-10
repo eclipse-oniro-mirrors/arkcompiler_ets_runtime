@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "ecmascript/arksteed/arksteed_vertex.h"
+#include "ecmascript/arksteed/arksteed_heap_ref.h"
 #include "ecmascript/base_env.h"
 #include "ecmascript/js_hclass.h"
 #include "ecmascript/js_tagged_value.h"
@@ -67,11 +68,11 @@ private:
 class NodeInfo {
 public:
     struct PossibleHClassInfo {
-        JSHClass *hclass {nullptr};
+        ArkSteedHClassRef hclass {};
         bool isStable {false};
     };
 
-    using PossibleHClasses = std::vector<JSHClass *>;
+    using PossibleHClasses = std::vector<ArkSteedHClassRef>;
     using PossibleHClassInfos = std::vector<PossibleHClassInfo>;
 
     enum class NodeType : uint16_t {
@@ -186,9 +187,9 @@ public:
         return possibleHClasses_.size() == 1 && !possibleHClassesAreStale_;
     }
 
-    JSHClass *GetFreshKnownHClass() const
+    ArkSteedHClassRef GetFreshKnownHClass() const
     {
-        return HasFreshKnownHClass() ? possibleHClasses_.front().hclass : nullptr;
+        return HasFreshKnownHClass() ? possibleHClasses_.front().hclass : ArkSteedHClassRef {};
     }
 
     bool HasFreshPossibleHClasses() const
@@ -205,7 +206,7 @@ public:
     }
 
     bool HasUnstablePossibleHClass() const;
-    bool ContainsPossibleHClass(JSHClass *hclass) const;
+    bool ContainsPossibleHClass(ArkSteedHClassRef hclass) const;
 
     size_t PossibleHClassCount() const
     {
@@ -217,7 +218,7 @@ public:
         return HasFreshKnownHClass() && possibleHClasses_.front().isStable;
     }
 
-    void RecordHClass(JSHClass *hclass, bool isStable);
+    void RecordHClass(ArkSteedHClassRef hclass, bool isStable);
     void RecordPossibleHClasses(const PossibleHClasses &hclasses, bool isStable);
     void RecordPossibleHClasses(const PossibleHClassInfos &hclasses);
     bool NarrowPossibleHClasses(const PossibleHClasses &hclasses);
@@ -225,7 +226,7 @@ public:
     void MarkUnstableHClassesStale();
     void MarkHClassesStaleForElementsKindTransition(const PossibleHClasses &sourceHClasses);
     void MarkPossibleHClassesFresh();
-    bool MarkPossibleHClassStable(JSHClass *hclass);
+    bool MarkPossibleHClassStable(ArkSteedHClassRef hclass);
     bool MergeWith(const NodeInfo &other);
     bool IsCompatibleWith(const NodeInfo &expected) const;
 
@@ -245,7 +246,7 @@ public:
     }
 
 private:
-    void AddPossibleHClass(JSHClass *hclass, bool isStable);
+    void AddPossibleHClass(ArkSteedHClassRef hclass, bool isStable);
     void IntersectTypeWithPossibleHClasses();
     void UnionPossibleHClasses(const NodeInfo &other);
     void CheckPossibleHClassInvariants() const;
@@ -260,6 +261,7 @@ private:
 NodeInfo::NodeType NodeTypeFromJSTaggedValue(JSTaggedValue value);
 NodeInfo::NodeType NodeTypeFromJSType(JSType type);
 NodeInfo::NodeType NodeTypeFromHClass(const JSHClass *hclass);
+NodeInfo::NodeType NodeTypeFromHClass(ArkSteedHClassRef hclass);
 
 class PropertyKey {
 public:
@@ -501,18 +503,18 @@ public:
     NodeInfo::NodeType EnsureType(ValueVertex *node, NodeInfo::NodeType type);
     void RecordNonHole(ValueVertex *node);
     bool IsKnownNonHole(ValueVertex *node) const;
-    void RecordHClass(ValueVertex *node, JSHClass *hclass, bool isStable);
-    JSHClass *TryGetHClass(ValueVertex *node) const;
+    void RecordHClass(ValueVertex *node, ArkSteedHClassRef hclass, bool isStable);
+    ArkSteedHClassRef TryGetHClass(ValueVertex *node) const;
     void RecordPossibleHClasses(ValueVertex *node, const NodeInfo::PossibleHClasses &hclasses, bool isStable);
     void RecordPossibleHClasses(ValueVertex *node, const NodeInfo::PossibleHClassInfos &hclasses);
     bool NarrowPossibleHClasses(ValueVertex *node, const NodeInfo::PossibleHClasses &hclasses);
-    void SetPossibleHClasses(ValueVertex *node, const ChunkVector<JSHClass *> &hclasses,
+    void SetPossibleHClasses(ValueVertex *node, const ChunkVector<ArkSteedHClassRef> &hclasses,
                              NodeInfo::NodeType possibleType);
     std::optional<NodeInfo::PossibleHClasses> TryGetPossibleHClasses(ValueVertex *node) const;
     std::optional<NodeInfo::PossibleHClasses> TryGetPossibleHClassesForRevalidation(ValueVertex *node) const;
     bool PossibleHClassesAreStale(ValueVertex *node) const;
     void MarkPossibleHClassesFresh(ValueVertex *node);
-    bool MarkPossibleHClassStable(ValueVertex *node, JSHClass *hclass);
+    bool MarkPossibleHClassStable(ValueVertex *node, ArkSteedHClassRef hclass);
     void SetAlternative(ValueVertex *node, AlternativeNodes::Kind kind, ValueVertex *alternative);
     ValueVertex *TryGetAlternative(ValueVertex *node, AlternativeNodes::Kind kind) const;
 

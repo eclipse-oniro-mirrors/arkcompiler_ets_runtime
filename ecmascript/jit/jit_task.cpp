@@ -55,8 +55,8 @@ JitTask::JitTask(JSThread *hostThread, JSThread *compilerThread, Jit *jit, JSHan
 {
     LOG_JIT(DEBUG) << "JitTask compilerThread addr: " << compilerThread_;
     jit->IncJitTaskCnt(hostThread);
-    dependencies_ = new kungfu::LazyDeoptAllDependencies();
     sustainingJSHandle_ = std::make_unique<SustainingJSHandle>(hostThread->GetEcmaVM());
+    dependencies_ = new kungfu::LazyDeoptAllDependencies(sustainingJSHandle_.get());
 }
 
 void JitTask::PrepareCompile()
@@ -480,12 +480,12 @@ void JitTask::CloneProfileTypeInfo()
 
 JitTask::~JitTask()
 {
-    ReleaseSustainingJSHandle();
     jit_->DeleteJitCompilerTask(compilerTask_, compilerTier_.IsArkSteed());
-    jit_->DecJitTaskCnt(hostThread_);
     ASSERT(dependencies_ != nullptr);
     delete dependencies_;
     dependencies_ = nullptr;
+    ReleaseSustainingJSHandle();
+    jit_->DecJitTaskCnt(hostThread_);
 }
 
 void JitTask::WaitFinish()

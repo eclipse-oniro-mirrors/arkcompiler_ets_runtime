@@ -20,12 +20,20 @@
 #include <thread>
 
 #include "ecmascript/arksteed/arksteed_heap_broker.h"
+#include "ecmascript/arksteed/arksteed_compile_info_facts.h"
+#include "ecmascript/arksteed/arksteed_loop_effects.h"
+#include "ecmascript/arksteed/arksteed_opcode.h"
 #include "ecmascript/ic/ic_handler.h"
 #include "ecmascript/jit/jit_task.h"
+#include "ecmascript/mem/chunk.h"
+#include "ecmascript/mem/native_area_allocator.h"
 #include "ecmascript/tests/test_helper.h"
 
 namespace panda::ecmascript::arksteed
 {
+
+static_assert(sizeof(NodeInfo::PossibleHClassInfo) == 2 * sizeof(void *),
+              "Candidate facts must retain only a ref pointer and stability metadata");
 
 // Use a real compiler thread and sustaining handles. The host can collect between
 // requests while the compiler is native; no test-only ref constructors bypass the broker.
@@ -55,11 +63,13 @@ class ArkSteedHeapRefTest : public testing::Test
                 JitTask task(thread_, jitThread, Jit::GetInstance(), function_, CompilerTier(CompilerTier::Tier::FAST),
                              name, 0, JitCompileMode(JitCompileMode::Mode::SYNC));
                 jitThread->SetCurrentTask(&task);
+                Chunk constantChunk(jitVM->GetNativeAreaAllocator());
                 std::unique_ptr<JitCompilationEnv> env;
                 {
                     Jit::JitLockHolder lock(jitThread);
                     env = std::make_unique<JitCompilationEnv>(jitVM, vm_, function_, task.GetDependencies());
                 }
+                env->SetHeapConstantChunk(&constantChunk);
                 ArkSteedHeapBroker broker(jitThread, env.get());
                 broker_ = &broker;
                 env_ = env.get();
@@ -142,36 +152,49 @@ TEST(ArkSteedHeapRefImmediateTest, NoHeapAccess)
     DISALLOW_DEREF_HANDLE;
     for (auto value : {JSTaggedValue(42), JSTaggedValue(1.5), JSTaggedValue::True(), JSTaggedValue::False(),
                        JSTaggedValue::Null(), JSTaggedValue::Undefined(), JSTaggedValue::Hole()}) {
-        auto ref = ArkSteedHeapRef::FromImmediate(value);
+        auto ref = broker.MakeImmediateRef(value);
         EXPECT_TRUE(ref.IsImmediate());
         EXPECT_FALSE(ref.HasHandle());
-        EXPECT_TRUE(ref.Equals(ArkSteedHeapRef::FromImmediate(value)));
+        EXPECT_TRUE(ref.Equals(broker.MakeImmediateRef(value)));
         JSTaggedValue resolved;
         EXPECT_TRUE(broker.TryResolveRef(ref, &resolved));
         EXPECT_EQ(resolved, value);
         EXPECT_TRUE(broker.TryReadRef(ref, [value](JSTaggedValue read) { return value == read; }));
     }
     EXPECT_FALSE(ArkSteedHeapRef().Equals(ArkSteedHeapRef()));
-    EXPECT_FALSE(
-        ArkSteedHeapRef::FromImmediate(JSTaggedValue(1)).Equals(ArkSteedHeapRef::FromImmediate(JSTaggedValue(2))));
+    EXPECT_FALSE(broker.MakeImmediateRef(JSTaggedValue(1)).Equals(broker.MakeImmediateRef(JSTaggedValue(2))));
     JSTaggedValue output = JSTaggedValue::Hole();
     EXPECT_FALSE(broker.TryResolveRef({}, &output));
     EXPECT_TRUE(output.IsHole());
-    EXPECT_FALSE(broker.TryResolveRef(ArkSteedHeapRef::FromImmediate(JSTaggedValue(1)), nullptr));
+    EXPECT_FALSE(broker.TryResolveRef(broker.MakeImmediateRef(JSTaggedValue(1)), nullptr));
     EXPECT_FALSE(broker.TryReadRef({}, [](JSTaggedValue) {
         ADD_FAILURE();
         return true;
     }));
     ArkSteedHeapBroker::StoreHandlerData store;
     ArkSteedHeapBroker::LoadHandlerData load;
-    auto handler = ArkSteedHeapRef::FromImmediate(JSTaggedValue(42));
+    auto handler = broker.MakeImmediateRef(JSTaggedValue(42));
     EXPECT_TRUE(broker.TryReadStoreHandler(handler, &store));
     EXPECT_TRUE(broker.TryReadLoadHandler(handler, &load));
     EXPECT_EQ(store.handlerInfo, 42U);
     EXPECT_EQ(load.handlerInfo, 42U);
     EXPECT_FALSE(broker.TryReadStoreHandler({}, &store));
-    EXPECT_FALSE(broker.TryReadLoadHandler(ArkSteedHeapRef::FromImmediate(JSTaggedValue::Null()), &load));
+    EXPECT_FALSE(broker.TryReadLoadHandler(broker.MakeImmediateRef(JSTaggedValue::Null()), &load));
     EXPECT_EQ(broker.Mode(), ArkSteedBrokerMode::SERIALIZED);
+}
+
+TEST(ArkSteedHeapRefImmediateTest, SharedRecordsSurviveGrowthAndCompareByValue) {
+    ArkSteedHeapBroker broker(nullptr, nullptr);
+    ArkSteedHeapBroker otherBroker(nullptr, nullptr);
+    DISALLOW_DEREF_HANDLE;
+    auto original = broker.MakeImmediateRef(JSTaggedValue(42));
+    for (int32_t i = 0; i < 1024; ++i) {
+        EXPECT_TRUE(broker.MakeImmediateRef(JSTaggedValue(i)).IsInt());
+    }
+    EXPECT_EQ(original.Value(), JSTaggedValue(42));
+    EXPECT_TRUE(original.Equals(broker.MakeImmediateRef(JSTaggedValue(42))));
+    EXPECT_TRUE(original.Equals(otherBroker.MakeImmediateRef(JSTaggedValue(42))));
+    EXPECT_FALSE(original.Equals(otherBroker.MakeImmediateRef(JSTaggedValue(43))));
 }
 
 HWTEST_F_L0(ArkSteedHeapRefTest, CanonicalIdentityAndAutomaticScope)
@@ -227,6 +250,7 @@ HWTEST_F_L0(ArkSteedHeapRefTest, MovingGCAndTableGrowthPreserveIdentity)
 {
     ArkSteedHeapRef original;
     uint32_t originalIndex;
+    const HeapConstantEntry *originalEntry = nullptr;
     JSTaggedType oldAddress;
     // After this scope closes the broker's sustaining slot is the ONLY root of this array.
     {
@@ -236,11 +260,15 @@ HWTEST_F_L0(ArkSteedHeapRefTest, MovingGCAndTableGrowthPreserveIdentity)
         OnCompiler([&] {
             original = broker_->MakeObjectRef(array);
             ASSERT_TRUE(broker_->TryGetHeapConstantIndex(original, &originalIndex));
+            originalEntry = env_->GetHeapConstantEntry(originalIndex);
+            // Entries remain fixed while both the index array and chunk grow.
+            ASSERT_EQ(env_->GetHeapConstantTable().size(), 1U);
         });
     }
     vm_->GetHeap()->CollectGarbage(TriggerGCType::YOUNG_GC);
     std::vector<JSHandle<TaggedArray>> arrays;
-    for (size_t i = 0; i < 128; ++i) {
+    constexpr size_t additionalEntries = 1024;
+    for (size_t i = 0; i < additionalEntries; ++i) {
         arrays.push_back(vm_->GetFactory()->NewTaggedArray(1));
     }
     OnCompiler([&] {
@@ -251,13 +279,21 @@ HWTEST_F_L0(ArkSteedHeapRefTest, MovingGCAndTableGrowthPreserveIdentity)
             EXPECT_NE(value.GetRawData(), oldAddress);
             EXPECT_EQ(TaggedArray::Cast(value.GetTaggedObject())->GetLength(), 8U);
             EXPECT_TRUE(broker_->MakeObjectRef(value).Equals(original));
-            EXPECT_EQ(env_->GetHeapConstantTable().size(), 129U);
+            EXPECT_EQ(env_->GetHeapConstantCount(), additionalEntries + 1);
             return true;
         }));
         DISALLOW_DEREF_HANDLE;
         uint32_t index;
         EXPECT_TRUE(broker_->TryGetHeapConstantIndex(original, &index));
         EXPECT_EQ(index, originalIndex);
+        EXPECT_EQ(env_->GetHeapConstantEntry(index), originalEntry);
+        const auto &entries = env_->GetHeapConstantTable();
+        ASSERT_EQ(entries.size(), env_->GetHeapConstantCount());
+        for (size_t i = 0; i < entries.size(); ++i) {
+            EXPECT_EQ(entries[i], env_->GetHeapConstantEntry(static_cast<uint32_t>(i)));
+            EXPECT_EQ(entries[i]->GetHandle().GetAddress(),
+                      env_->GetHeapConstantHandle(static_cast<uint32_t>(i)).GetAddress());
+        }
         bool same = false;
         EXPECT_TRUE(broker_->TryIsSameObject(original, env_->GetHeapConstantHandle(index), &same));
         EXPECT_TRUE(same);
@@ -270,6 +306,127 @@ HWTEST_F_L0(ArkSteedHeapRefTest, MovingGCAndTableGrowthPreserveIdentity)
         EXPECT_FALSE(broker_->SerializingAllowed());
         EXPECT_EQ(AllowDeRefHandle::IsAllowed(), !IS_ALLOW_CHECK);
     });
+}
+
+HWTEST_F_L0(ArkSteedHeapRefTest, FactsMergeAndTransitionUseCanonicalHClassIdentity)
+{
+    auto object = vm_->GetFactory()->NewEmptyJSObject(vm_->GetGlobalEnv());
+    OnCompiler([&] {
+        auto objectRef = broker_->MakeObjectRef(object);
+        auto objectHClass = broker_->MakeHClassRef(broker_->TryGetObjectHClass(objectRef));
+        auto duplicate = broker_->MakeHClassRef(broker_->TryGetObjectHClass(objectRef));
+        auto functionHClass = broker_->MakeHClassRef(broker_->TryGetObjectHClass(broker_->MakeObjectRef(function_)));
+        ASSERT_TRUE(objectHClass.IsJSHClass());
+        ASSERT_TRUE(functionHClass.IsJSHClass());
+        DISALLOW_DEREF_HANDLE;
+        NodeInfo first;
+        first.RecordHClass(objectHClass, false);
+        NodeInfo other;
+        other.RecordHClass(duplicate, false);
+        first.MergeWith(other);
+        EXPECT_EQ(first.PossibleHClassCount(), 1U);
+        EXPECT_TRUE(first.GetFreshKnownHClass().Equals(objectHClass));
+        EXPECT_EQ(first.GetType(), NodeInfo::NodeType::OTHER_JS_RECEIVER);
+        other.RecordHClass(functionHClass, false);
+        first.MergeWith(other);
+        EXPECT_EQ(first.PossibleHClassCount(), 2U);
+        EXPECT_TRUE(first.ContainsPossibleHClass(functionHClass));
+        ASSERT_TRUE(first.NarrowPossibleHClasses({duplicate}));
+        EXPECT_TRUE(first.GetFreshKnownHClass().Equals(objectHClass));
+
+        NativeAreaAllocator native;
+        Chunk chunk(&native);
+        CompileInfoFacts facts(&chunk);
+        LoopEffects effects(&chunk);
+        auto *receiver = Vertex::New<InitialValueVertex>(&chunk, size_t(0), 0);
+        auto *alias = Vertex::New<InitialValueVertex>(&chunk, size_t(0), 1);
+        auto *unrelated = Vertex::New<InitialValueVertex>(&chunk, size_t(0), 2);
+        facts.RecordHClass(receiver, objectHClass, false);
+        facts.RecordHClass(alias, duplicate, false);
+        facts.RecordHClass(unrelated, functionHClass, false);
+        auto *copy = facts.Clone();
+        SideEffectDescriptor transition {SideEffectKind::MAP_TRANSITION};
+        transition.receiver = receiver;
+        copy->MarkPossibleSideEffect(transition);
+        EXPECT_TRUE(copy->PossibleHClassesAreStale(receiver));
+        EXPECT_TRUE(copy->PossibleHClassesAreStale(alias));
+        EXPECT_TRUE(copy->TryGetHClass(unrelated).Equals(functionHClass));
+        EXPECT_TRUE(facts.TryGetHClass(receiver).Equals(objectHClass));
+
+        NodeInfo::PossibleHClasses sources {duplicate, objectHClass};
+        transition = {SideEffectKind::ELEMENTS_KIND_TRANSITION};
+        transition.transitionSources = &sources;
+        facts.MarkPossibleSideEffect(transition, &effects);
+        EXPECT_EQ(effects.GetElementsKindTransitionSources().size(), 1U);
+        EXPECT_TRUE(facts.PossibleHClassesAreStale(alias));
+        EXPECT_TRUE(facts.TryGetHClass(unrelated).Equals(functionHClass));
+    });
+}
+
+HWTEST_F_L0(ArkSteedHeapRefTest, FactsKeepHClassAliveAcrossFullGC)
+{
+    NodeInfo facts;
+    ArkSteedHClassRef original;
+    {
+        EcmaHandleScope temporary(thread_);
+        auto hclass = vm_->GetFactory()->NewEcmaHClass(JSObject::SIZE, JSType::JS_OBJECT,
+            JSHandle<JSTaggedValue>(thread_, JSTaggedValue::Null()));
+        OnCompiler([&] {
+            original = broker_->MakeObjectRef(hclass);
+            facts.RecordHClass(original, false);
+        });
+    }
+    vm_->GetHeap()->CollectGarbage(TriggerGCType::FULL_GC);
+    OnCompiler([&] {
+        DISALLOW_DEREF_HANDLE;
+        EXPECT_TRUE(facts.GetFreshKnownHClass().Equals(original));
+        EXPECT_EQ(facts.GetType(), NodeInfo::NodeType::OTHER_JS_RECEIVER);
+        EXPECT_TRUE(broker_->TryReadRef(original, [&](JSTaggedValue value) {
+            EXPECT_TRUE(value.IsJSHClass());
+            EXPECT_TRUE(broker_->MakeHClassRef(value).Equals(original));
+            return true;
+        }));
+    });
+}
+
+HWTEST_F_L0(ArkSteedHeapRefTest, DependenciesOwnRootsUntilInstallAndRevalidateAfterGC)
+{
+    class Roots final : public RootVisitor {
+    public:
+        void VisitRoot(Root, ObjectSlot slot) override
+        {
+            slots.push_back(slot.SlotAddress());
+        }
+        void VisitRangeRoot(Root type, ObjectSlot start, ObjectSlot end) override
+        {
+            for (auto slot = start; slot < end; slot++) {
+                VisitRoot(type, slot);
+            }
+        }
+        void VisitBaseAndDerivedRoot(Root, ObjectSlot, ObjectSlot, uintptr_t) override {}
+        std::vector<uintptr_t> slots;
+    } roots;
+    SustainingJSHandle handles(vm_);
+    kungfu::LazyDeoptAllDependencies dependencies(&handles);
+    {
+        EcmaHandleScope temporary(thread_);
+        auto hclass = vm_->GetFactory()->NewEcmaHClass(JSObject::SIZE, JSType::JS_OBJECT,
+            JSHandle<JSTaggedValue>(thread_, JSTaggedValue::Null()));
+        ASSERT_TRUE(dependencies.DependOnStableHClass(*hclass));
+        ASSERT_TRUE(dependencies.DependOnNotPrototype(*hclass));
+        ASSERT_TRUE(dependencies.DependOnStableHClass(*hclass));
+    }
+    handles.Iterate(roots);
+    ASSERT_EQ(roots.slots.size(), 1U);
+    JSHandle<JSHClass> rooted(roots.slots.front());
+    vm_->GetHeap()->CollectGarbage(TriggerGCType::FULL_GC);
+    EXPECT_TRUE(dependencies.PreInstall(thread_));
+    rooted->SetIsPrototype(true);
+    EXPECT_FALSE(dependencies.PreInstall(thread_));
+    rooted->SetIsPrototype(false);
+    EXPECT_TRUE(dependencies.PreInstall(thread_));
+    rooted->SetIsStable(false);
+    EXPECT_FALSE(dependencies.PreInstall(thread_));
 }
 
 HWTEST_F_L0(ArkSteedHeapRefTest, TypesAndCompilationOwnership)
@@ -293,7 +450,7 @@ HWTEST_F_L0(ArkSteedHeapRefTest, TypesAndCompilationOwnership)
             EXPECT_FALSE(broker_->MakeHClassRef(string.GetTaggedValue()).IsSafeForCompile());
             EXPECT_FALSE(broker_->MakeNameRef(function_.GetTaggedValue()).IsSafeForCompile());
             EXPECT_FALSE(broker_->MakeProtoCellRef(symbol.GetTaggedValue()).IsSafeForCompile());
-            EXPECT_FALSE(ArkSteedHeapRef::FromImmediate(string.GetTaggedValue()).IsSafeForCompile());
+            EXPECT_FALSE(broker_->MakeImmediateRef(string.GetTaggedValue()).IsSafeForCompile());
             auto hclassRef = broker_->MakeHClassRef(JSTaggedValue(function_->GetClass()));
             EXPECT_TRUE(hclassRef.IsJSHClass());
             JitCompilationEnv otherEnv(env_->GetEcmaVM(), vm_, function_, nullptr);

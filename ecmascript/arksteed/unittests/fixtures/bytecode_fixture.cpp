@@ -642,7 +642,7 @@ bool ArkSteedBytecodeFixture::PrepareCompilationEnv(FixtureMethodKind kind, Fixt
     // fixture creates them lazily per requested kind and keeps them until
     // `TearDown`. The environment takes the host-side handle of the function,
     // as the production task does with its host-side `jsFunction_`.
-    method.dependencies = new kungfu::LazyDeoptAllDependencies();
+    method.dependencies = new kungfu::LazyDeoptAllDependencies(jitTask_->GetSustainingJSHandle());
     method.env = new JitCompilationEnv(compilerVm_, hostVm_, method.function, method.dependencies);
     if (method.env->GetHostThread() != hostThread_ || method.env->GetJSThread() != compilerThread_) {
         const std::string observedEnv = "JitCompilationEnv::GetHostThread()=" +

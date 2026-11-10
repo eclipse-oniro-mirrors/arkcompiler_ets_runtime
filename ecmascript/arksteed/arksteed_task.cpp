@@ -94,11 +94,11 @@ void ArkSteedTask::SetDeoptLiteralData(std::vector<JSHandle<JSTaggedValue>> lite
     codeDesc.heapConstantTableSize = deoptLiteralHandles_.size() * sizeof(uint64_t);
 }
 
-void ArkSteedTask::SetEmbeddedRefData(const std::vector<EmbeddedCodeRefReloc> &relocations,
-                                      const std::vector<JSHandle<JSTaggedValue>> &handles)
+void ArkSteedTask::SetEmbeddedRefData(std::vector<EmbeddedCodeRefReloc> relocations,
+                                      std::vector<JSHandle<JSTaggedValue>> handles)
 {
-    embeddedRefRelocations_ = relocations;
-    embeddedRefHandles_ = handles;
+    embeddedRefRelocations_ = std::move(relocations);
+    embeddedRefHandles_ = std::move(handles);
 }
 
 void ArkSteedTask::Compile()

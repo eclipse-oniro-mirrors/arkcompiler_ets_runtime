@@ -20,7 +20,12 @@
 #include "ecmascript/compiler/pgo_type/pgo_type_manager.h"
 #include "ecmascript/dependent_infos.h"
 #include "ecmascript/js_hclass.h"
+#include "ecmascript/js_handle.h"
 #include "ecmascript/js_thread.h"
+
+namespace panda::ecmascript {
+class SustainingJSHandle;
+}
 
 namespace panda::ecmascript::kungfu {
 
@@ -35,14 +40,20 @@ public:
     NO_COPY_SEMANTIC(CombinedDependencies);
     NO_MOVE_SEMANTIC(CombinedDependencies);
 
-    void Register(JSHClass *hclass, DependentState state);
+    void Register(JSHandle<JSHClass> hclass, DependentState state);
     void Register(uint32_t detectorID, DependentState state);
     void Register(DependentState state);
 
     void InstallAll(JSThread *thread, JSHandle<JSTaggedValue> jsFunc);
 
 private:
-    std::map<JSHClass *, DependentStateCollection> deps_;        // hclass, collection
+    struct HandleSlotLess {
+        bool operator()(const JSHandle<JSHClass> &lhs, const JSHandle<JSHClass> &rhs) const
+        {
+            return lhs.GetAddress() < rhs.GetAddress();
+        }
+    };
+    std::map<JSHandle<JSHClass>, DependentStateCollection, HandleSlotLess> deps_;
     std::map<uint32_t, DependentStateCollection> detectorDeps_;  // detectorID_, collection
     GlobalEnv *globalEnv_;
     DependentStateCollection threadDeps_ {0};
@@ -90,7 +101,7 @@ private:
 
 class NotPrototypeDependency final : public LazyDeoptDependency {
 public:
-    NotPrototypeDependency(JSHClass *hclass)
+    explicit NotPrototypeDependency(JSHandle<JSHClass> hclass)
         : LazyDeoptDependency(LazyDeoptDependencyKind::NOT_PROTOTYPE_HCLASS),
           hclass_(hclass) {}
 
@@ -106,12 +117,12 @@ public:
     }
 
 private:
-    JSHClass *hclass_ {nullptr};
+    JSHandle<JSHClass> hclass_;
 };
 
 class StableHClassDependency final : public LazyDeoptDependency {
 public:
-    StableHClassDependency(JSHClass *hclass)
+    explicit StableHClassDependency(JSHandle<JSHClass> hclass)
         : LazyDeoptDependency(LazyDeoptDependencyKind::STABLE_HCLASS),
           hclass_(hclass) {}
     
@@ -122,7 +133,7 @@ public:
 
     bool IsValid() const override
     {
-        return IsValid(hclass_);
+        return IsValid(hclass_.GetObject<JSHClass>());
     }
 
     void Install(CombinedDependencies *combinedDeps) const override
@@ -132,7 +143,7 @@ public:
     }
 
 private:
-    JSHClass *hclass_ {nullptr};
+    JSHandle<JSHClass> hclass_;
 };
 
 class NotHotReloadDependency final : public LazyDeoptDependency {
@@ -157,7 +168,10 @@ private:
 
 class PUBLIC_API LazyDeoptAllDependencies {
 public:
-    LazyDeoptAllDependencies() = default;
+    explicit LazyDeoptAllDependencies(SustainingJSHandle *handles) : handles_(handles)
+    {
+        ASSERT(handles_ != nullptr);
+    }
     ~LazyDeoptAllDependencies()
     {
         Clear();
@@ -190,6 +204,8 @@ public:
             delete dep;
         }
         dependencies_.clear();
+        hclassHandles_.clear();
+        globalEnv_ = nullptr;
     }
 
     void SetGlobalEnv(GlobalEnv *globalEnv)
@@ -203,8 +219,11 @@ public:
     }
 private:
     void RegisterDependency(const LazyDeoptDependency *dependency);
+    JSHandle<JSHClass> GetOrCreateHClassHandle(JSHClass *hclass);
     std::vector<const LazyDeoptDependency *> dependencies_;
-    GlobalEnv *globalEnv_;
+    std::vector<JSHandle<JSHClass>> hclassHandles_;
+    GlobalEnv *globalEnv_ {nullptr};
+    SustainingJSHandle *handles_;
 };
 }  // namespace panda::ecmascript::kungfu
 #endif  // ECMASCRIPT_COMPILER_LAZY_DEOPT_DEPENDENCY_H

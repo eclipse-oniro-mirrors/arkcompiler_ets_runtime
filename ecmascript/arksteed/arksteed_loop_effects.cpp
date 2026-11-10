@@ -52,7 +52,7 @@ void LoopEffects::Record(const SideEffectDescriptor &effect)
             return;
         case SideEffectKind::ELEMENTS_KIND_TRANSITION:
             ASSERT(effect.transitionSources != nullptr && !effect.transitionSources->empty());
-            for (JSHClass *source : *effect.transitionSources) {
+            for (ArkSteedHClassRef source : *effect.transitionSources) {
                 RecordElementsKindTransitionSource(source);
             }
             hasMapTransition_ = true;
@@ -70,10 +70,10 @@ void LoopEffects::Record(const SideEffectDescriptor &effect)
     }
 }
 
-void LoopEffects::RecordElementsKindTransitionSource(JSHClass *source)
+void LoopEffects::RecordElementsKindTransitionSource(ArkSteedHClassRef source)
 {
-    if (std::find(elementsKindTransitionSources_.begin(), elementsKindTransitionSources_.end(), source) ==
-        elementsKindTransitionSources_.end()) {
+    if (std::none_of(elementsKindTransitionSources_.begin(), elementsKindTransitionSources_.end(),
+                     [source](ArkSteedHClassRef candidate) { return candidate.Equals(source); })) {
         elementsKindTransitionSources_.push_back(source);
     }
 }
@@ -103,7 +103,7 @@ void LoopEffects::Merge(const LoopEffects &other)
     invalidatedPropertyKeys_.insert(other.invalidatedPropertyKeys_.begin(), other.invalidatedPropertyKeys_.end());
     writtenReceivers_.insert(other.writtenReceivers_.begin(), other.writtenReceivers_.end());
     writtenEnvSlots_.insert(other.writtenEnvSlots_.begin(), other.writtenEnvSlots_.end());
-    for (JSHClass *source : other.elementsKindTransitionSources_) {
+    for (ArkSteedHClassRef source : other.elementsKindTransitionSources_) {
         RecordElementsKindTransitionSource(source);
     }
     invalidatesAllLoadedProperties_ |= other.invalidatesAllLoadedProperties_;

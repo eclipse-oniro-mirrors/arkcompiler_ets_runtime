@@ -79,7 +79,7 @@ public:
         return hasMapTransition_;
     }
 
-    const ChunkVector<JSHClass *> &GetElementsKindTransitionSources() const
+    const ChunkVector<ArkSteedHClassRef> &GetElementsKindTransitionSources() const
     {
         return elementsKindTransitionSources_;
     }
@@ -100,12 +100,12 @@ public:
     }
 
 private:
-    void RecordElementsKindTransitionSource(JSHClass *source);
+    void RecordElementsKindTransitionSource(ArkSteedHClassRef source);
 
     ChunkSet<PropertyKey> invalidatedPropertyKeys_;
     ChunkSet<ValueVertex *> writtenReceivers_;
     ChunkSet<EnvSlotKey> writtenEnvSlots_;
-    ChunkVector<JSHClass *> elementsKindTransitionSources_;
+    ChunkVector<ArkSteedHClassRef> elementsKindTransitionSources_;
     bool invalidatesAllLoadedProperties_ {false};
     bool invalidatesAllEnvSlots_ {false};
     bool clearsUnstableNodeInfo_ {false};
