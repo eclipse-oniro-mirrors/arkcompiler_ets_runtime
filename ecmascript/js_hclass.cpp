@@ -870,10 +870,9 @@ bool JSHClass::TransitToElementsKind(const JSThread *thread, const JSHandle<JSOb
         return true;
     }
     JSTaggedValue trackInfoVal = JSHandle<JSArray>(object)->GetTrackInfo(thread);
-    if (trackInfoVal.IsHeapObject() && trackInfoVal.IsWeak()) {
-        TrackInfo *trackInfo = TrackInfo::Cast(trackInfoVal.GetWeakReferentUnChecked());
+    if (trackInfoVal.IsHeapObject()) {
 #ifndef EXCLUDE_PGO
-        thread->GetEcmaVM()->GetPGOProfiler()->UpdateTrackInfo(JSTaggedValue(trackInfo));
+        thread->GetEcmaVM()->GetPGOProfiler()->UpdateTrackInfo(trackInfoVal);
 #endif
     }
     return true;
