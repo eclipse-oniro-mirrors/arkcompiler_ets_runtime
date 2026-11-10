@@ -19,7 +19,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
-#if defined(PANDA_TARGET_MACOS)
+#if defined(PANDA_TARGET_MACOS) && defined(STANDALONE_MODE)
 #include <pthread.h>
 #endif
 #include <unistd.h>
@@ -28,7 +28,7 @@
 
 namespace panda::ecmascript {
 
-#if defined(PANDA_TARGET_MACOS)
+#if defined(PANDA_TARGET_MACOS) && defined(STANDALONE_MODE)
 // pthread_jit_write_protect_np() controls the calling thread. A nesting count
 // prevents an inner write scope from protecting pages still used by its caller.
 thread_local uint32_t g_jitWriteProtectDepth = 0;
@@ -84,7 +84,7 @@ MemMap PageMap(size_t size, int prot, size_t alignment, void *addr, int flags, b
     ASSERT(alignment == AlignUp(alignment, PageSize()));
     size_t allocSize = size + alignment;
     int newFlags = static_cast<int>(MAP_PRIVATE | MAP_ANONYMOUS | static_cast<unsigned int>(flags));
-#if defined(PANDA_TARGET_MACOS)
+#if defined(PANDA_TARGET_MACOS) && defined(STANDALONE_MODE)
     // macOS arm64 requires MAP_JIT for writable executable memory.
     if (prot == PAGE_PROT_EXEC_READWRITE) {
         newFlags |= MAP_JIT;
@@ -303,7 +303,7 @@ void PageClearTag(void *mem, size_t size)
 
 int PageProtect(void *mem, size_t size, int prot)
 {
-#if defined(PANDA_TARGET_MACOS)
+#if defined(PANDA_TARGET_MACOS) && defined(STANDALONE_MODE)
     if (prot == PAGE_PROT_EXEC_READWRITE) {
         return 0;
     }
@@ -317,7 +317,7 @@ int PageProtect(void *mem, size_t size, int prot)
     return 0;
 }
 
-#if defined(PANDA_TARGET_MACOS)
+#if defined(PANDA_TARGET_MACOS) && defined(STANDALONE_MODE)
 void JitWriteProtect(bool enable)
 {
     if (__builtin_available(macOS 11.0, *)) {  // 11.0: first macOS with pthread_jit_write_protect_np

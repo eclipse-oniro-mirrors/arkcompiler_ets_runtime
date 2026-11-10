@@ -137,7 +137,7 @@ void ArkSteedTask::InstallCode()
         return;
     }
 
-#if defined(PANDA_TARGET_MACOS)
+#if defined(PANDA_TARGET_MACOS) && defined(STANDALONE_MODE)
     std::optional<JitWriteScope> jitWriteScope;
     jitWriteScope.emplace();
 #endif
@@ -222,7 +222,7 @@ void ArkSteedTask::InstallCode()
 
     // Never publish an entry point while MAP_JIT write protection is disabled:
     // Apple silicon raises SIGBUS when executing a writable JIT page.
-#if defined(PANDA_TARGET_MACOS)
+#if defined(PANDA_TARGET_MACOS) && defined(STANDALONE_MODE)
     jitWriteScope.reset();
 #endif
     InstallCodeByCompilerTier(machineCodeObj, methodHandle);

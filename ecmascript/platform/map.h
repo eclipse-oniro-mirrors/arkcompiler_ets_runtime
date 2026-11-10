@@ -109,7 +109,7 @@ const std::string GetPageTagString(PageTagType type, const std::string &spaceNam
 const char *GetPageTagString(PageTagType type);
 int PageProtect(void *mem, size_t size, int prot);
 
-#if defined(PANDA_TARGET_MACOS)
+#if defined(PANDA_TARGET_MACOS) && defined(STANDALONE_MODE)
 void JitWriteProtect(bool enable);
 
 class JitWriteScope {

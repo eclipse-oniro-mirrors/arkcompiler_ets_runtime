@@ -46,7 +46,7 @@ static int PageProtectMem(bool machineCodeSpace, void *mem, size_t size, [[maybe
     }
 
     // MachineCode and HugeMachineCode space pages:
-#if defined(PANDA_TARGET_MACOS)
+#if defined(PANDA_TARGET_MACOS) && defined(STANDALONE_MODE)
     // MAP_JIT pages are already writable while their code is being installed.
     return 0;
 #elif defined(PANDA_TARGET_ARM64) && defined(PANDA_TARGET_OHOS)
