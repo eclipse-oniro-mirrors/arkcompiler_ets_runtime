@@ -90,10 +90,39 @@ HeapSnapshot::~HeapSnapshot()
 bool HeapSnapshot::BuildUp(bool isSimplify)
 {
     FillNodes(true, isSimplify);
+    DiscoverSnapshotNodes(isSimplify);
+    nodesFrozen_ = true;
     FillEdges(isSimplify);
     FillGlobalEdges();
     AddSyntheticRoot();
     return Verify();
+}
+
+void HeapSnapshot::DiscoverSnapshotNodes(bool isSimplify)
+{
+    LOG_ECMA(INFO) << "HeapSnapshot::DiscoverSnapshotNodes";
+    ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "HeapSnapshot::DiscoverSnapshotNodes", "");
+    for (size_t i = 0; i < nodes_.size(); ++i) {
+        JSTaggedValue valueFrom(nodes_[i]->GetAddress());
+        if (!valueFrom.IsHeapObject()) {
+            continue;
+        }
+        std::vector<Reference> references;
+        valueFrom.DumpForSnapshot(vm_->GetJSThreadNoCheck(), references, isVmMode_);
+        for (auto const &it : references) {
+            if (it.type_ == EdgeType::NATIVE || it.type_ == EdgeType::NATIVE_STRING) {
+                continue;
+            }
+            JSTaggedValue value = it.value_;
+            if (!value.IsHeapObject() || value.IsWeak()) {
+                continue;
+            }
+            if (entryMap_.FindEntry(value.GetRawData()) == nullptr) {
+                GenerateNode(value, 0, true, isSimplify, false, true);
+            }
+        }
+    }
+    const_cast<EcmaVM *>(vm_)->ClearWrappedNativePointerAddrsMap();
 }
 
 bool HeapSnapshot::Verify()
@@ -1112,6 +1141,15 @@ void HeapSnapshot::ProcessRegularEdge(const Reference &it, HprofNode *entryFrom,
         entryTo = entryMap_.FindEntry(HprofNode::NewAddress(to));
     }
     if (entryTo == nullptr) {
+        if (nodesFrozen_ && toValue.IsHeapObject() && !(isPrivate_ && toValue.IsString())) {
+            // A weak edge to an undiscovered target is the expected outcome; only a
+            // strong one means the discovery and emission passes disagreed.
+            if (type != EdgeType::WEAK) {
+                LOG_ECMA(ERROR) << "HeapSnapshot::ProcessRegularEdge: strong target was not discovered: "
+                                << toValue.GetRawData();
+            }
+            return;
+        }
         entryTo = GenerateNode(toValue, 0, true, isSimplify, false, true);
     }
     if (entryTo != nullptr) {

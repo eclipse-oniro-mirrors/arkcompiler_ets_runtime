@@ -584,6 +584,7 @@ protected:
 private:
     bool isPrivate_ {false};
     bool trackAllocations_ {false};
+    bool nodesFrozen_ {false};
 
 protected:
     uint32_t nodeCount_ {0};
@@ -611,6 +612,7 @@ private:
     HprofNode *GenerateObjectNode(JSTaggedValue entry, size_t size, bool isInFinish = false);
     void FillEdges(bool isSimplify = false);
     void FillGlobalEdges();
+    void DiscoverSnapshotNodes(bool isSimplify = false);
     void RenameFunction(const CString &edgeName, HprofNode *entryFrom, HprofNode *entryTo);
     CString ParseFunctionName(TaggedObject *obj, bool isRawHeap = false);
     const CString ParseObjectName(TaggedObject *obj);
