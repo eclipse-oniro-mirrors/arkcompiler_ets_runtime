@@ -27,6 +27,8 @@
 #include "ecmascript/compiler/aot_file/an_file_data_manager.h"
 #include "ecmascript/jspandafile/debug_info_extractor.h"
 #include "ecmascript/jspandafile/js_pandafile_manager.h"
+#include "ecmascript/mem/heap.h"
+#include "ecmascript/jit/jit.h"
 #include "ecmascript/platform/ffrt.h"
 #include "libpandabase/os/thread.h"
 #include "ecmascript/platform/profiler_signal_guard.h"
@@ -992,6 +994,9 @@ void CpuProfiler::CollectSampleInto(RawSample &sample, CpuProfilerSignalContext 
 {
     JSThread *thread = ctx->jsThread;
 
+    // Skip during NAPI stack building, STW GC (gcState_), or concurrent marking:
+    // gcState_ only covers STW scopes, but object headers may be forwarding pointers
+    // during concurrent evacuate, causing GetMethod() SEGV.
     if (ctx->profiler->GetBuildNapiStack() || thread->GetGcState()) {
         sample.status = SampleStatus::GC_SKIPPED;
         ctx->dropGcSkipped.fetch_add(1, std::memory_order_relaxed);
@@ -1028,7 +1033,11 @@ void CpuProfiler::CollectSampleInto(RawSample &sample, CpuProfilerSignalContext 
         }
         pc = GetPcFromContext(context);
     }
-    if (thread->IsAsmInterpreter() && IsAddrAtStubOrAot(ctx->anFileDataManager, pc) &&
+    // Use JIT-fort-aware safe variant: old IsAddrAtStubOrAot() missed JIT-fort range,
+    // routing PC-in-JIT samples to stale lastLeaveFrame. Do NOT gate on pcInJitFort —
+    // stub/AOT frames also need the fp walk; routing them to lastLeaveFrame causes SEGV.
+    bool pcInCode = IsAddrAtStubOrAotOrJitSafe(ctx->anFileDataManager, pc);
+    if (thread->IsAsmInterpreter() && pcInCode &&
         !IsEntryFrameHeaderOrTail(thread, pc)) {
         if (IfNeedSkipBarrierStubHeaderOrTail(thread, pc)) {
             return;
@@ -1268,11 +1277,33 @@ bool CpuProfiler::IsAddrAtStubOrAot(AnFileDataManager *manager, uint64_t pc) con
 #if defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
 bool CpuProfiler::IsAddrAtStubOrAot(uint64_t pc) const
 {
-    // Legacy form used by GetStackSignalHandler (blocking range query).
     AOTFileManager *loader = vm_->GetAOTFileManager();
     return loader->InsideStub(pc) || loader->InsideAOT(pc);
 }
 #endif
+
+// Lock-free JIT-fort range check (no locks, signal-safe).
+bool CpuProfiler::IsPcInJitFort(uint64_t pc) const
+{
+#ifndef EXCLUDE_JIT
+    if (pc == 0 || !Jit::GetInstance()->IsEnableJitFort()) {
+        return false;
+    }
+    const Heap *heap = vm_->GetHeap();
+    return heap != nullptr && heap->IsInJitFortRange(static_cast<uintptr_t>(pc));
+#else
+    return false;
+#endif
+}
+
+// Signal-safe variant: try-lock stub/AOT + lock-free JIT-fort check.
+bool CpuProfiler::IsAddrAtStubOrAotOrJitSafe(AnFileDataManager *manager, uint64_t pc) const
+{
+    if (manager->SafeTryInsideStubOrAOT(static_cast<uintptr_t>(pc))) {
+        return true;
+    }
+    return IsPcInJitFort(pc);
+}
 
 bool CpuProfiler::CheckFileName(const std::string &fileName, std::string &absoluteFilePath) const
 {
