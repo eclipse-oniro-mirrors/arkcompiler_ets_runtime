@@ -27,3 +27,6 @@ obj/arkcompiler/ets_runtime/ecmascript/tests/JS_Collator_TestWithQemu
 obj/arkcompiler/ets_runtime/ecmascript/tests/JS_DateTimeFormat_First_TestWithQemu
 obj/arkcompiler/ets_runtime/ecmascript/tests/JS_DateTimeFormat_Second_TestWithQemu
 obj/arkcompiler/ets_runtime/ecmascript/tests/JS_ListFormat_TestWithQemu
+
+# workitem 49
+obj/arkcompiler/ets_runtime/ecmascript/dfx/cpu_profiler/tests/CpuProfilerTestWithQemu
