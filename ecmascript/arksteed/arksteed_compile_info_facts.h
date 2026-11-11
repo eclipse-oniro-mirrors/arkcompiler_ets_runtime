@@ -271,6 +271,9 @@ public:
         ELEMENTS,
         LENGTH,
         TYPED_ARRAY_LENGTH,
+        MODULE_ENVIRONMENT,
+        EXTERNAL_MODULE_DICTIONARY,
+        EXTERNAL_MODULE_INDEX,
         CONST_DATA_ID,
         HEAP_CONSTANT,
         UNKNOWN,
@@ -300,6 +303,21 @@ public:
     static PropertyKey TypedArrayLength()
     {
         return PropertyKey(Kind::TYPED_ARRAY_LENGTH, 0);
+    }
+
+    static PropertyKey ModuleEnvironment()
+    {
+        return PropertyKey(Kind::MODULE_ENVIRONMENT, 0);
+    }
+
+    static PropertyKey ExternalModuleDictionary(uint32_t index)
+    {
+        return PropertyKey(Kind::EXTERNAL_MODULE_DICTIONARY, index);
+    }
+
+    static PropertyKey ExternalModuleIndex(uint32_t index)
+    {
+        return PropertyKey(Kind::EXTERNAL_MODULE_INDEX, index);
     }
 
     static PropertyKey ConstDataId(uint32_t constDataId)

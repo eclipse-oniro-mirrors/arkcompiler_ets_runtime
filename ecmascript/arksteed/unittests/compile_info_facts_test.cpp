@@ -840,6 +840,61 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, CompileInfoFactsEnvSlotFactsAndAliasin
     EXPECT_EQ(constantOnlyFacts.LookupEnvSlot(constantEnv, 5), currentValue);
 }
 
+// --- CompileInfoFacts: external module locations ---------------------------
+
+HWTEST_F_L0(ArkSteedCompileInfoFactsTest, ModuleLocationKeysSurviveCall)
+{
+    GraphFixture fixture;
+    ValueVertex *function = fixture.NewInitialValue();
+    ValueVertex *otherFunction = fixture.NewInitialValue();
+    ValueVertex *environment = fixture.NewInitialValue();
+    ValueVertex *dictionary = fixture.NewInitialValue();
+    ValueVertex *otherDictionary = fixture.NewInitialValue();
+    ValueVertex *index = fixture.Int32(3);
+    CompileInfoFacts facts(&fixture.chunk);
+    facts.RecordLoadedConstantProperty(function, PropertyKey::ModuleEnvironment(), environment);
+    facts.RecordLoadedConstantProperty(function, PropertyKey::ExternalModuleDictionary(0), dictionary);
+    facts.RecordLoadedConstantProperty(function, PropertyKey::ExternalModuleIndex(0), index);
+    facts.RecordLoadedConstantProperty(function, PropertyKey::ExternalModuleDictionary(1), otherDictionary);
+    facts.RecordLoadedProperty(dictionary, PropertyKey::Index(3), fixture.Tagged(JSTaggedValue(7)));
+
+    SideEffectDescriptor call;
+    call.kind = SideEffectKind::UNKNOWN_CALL;
+    facts.MarkPossibleSideEffect(call);
+
+    EXPECT_EQ(facts.LookupLoadedConstantProperty(function, PropertyKey::ModuleEnvironment()), environment);
+    EXPECT_EQ(facts.LookupLoadedConstantProperty(function, PropertyKey::ExternalModuleDictionary(0)), dictionary);
+    EXPECT_EQ(facts.LookupLoadedConstantProperty(function, PropertyKey::ExternalModuleIndex(0)), index);
+    EXPECT_EQ(facts.LookupLoadedConstantProperty(function, PropertyKey::ExternalModuleDictionary(1)), otherDictionary);
+    EXPECT_EQ(facts.LookupLoadedConstantProperty(function, PropertyKey::ExternalModuleIndex(1)), nullptr);
+    EXPECT_EQ(facts.LookupLoadedConstantProperty(otherFunction, PropertyKey::ModuleEnvironment()), nullptr);
+    EXPECT_EQ(facts.LookupLoadedConstantProperty(otherFunction, PropertyKey::ExternalModuleDictionary(0)), nullptr);
+    EXPECT_EQ(facts.LookupLoadedConstantProperty(otherFunction, PropertyKey::ExternalModuleIndex(0)), nullptr);
+    EXPECT_EQ(facts.LookupLoadedProperty(dictionary, PropertyKey::Index(3)), nullptr);
+}
+
+HWTEST_F_L0(ArkSteedCompileInfoFactsTest, ModuleLocationMergeRequiresBothPaths)
+{
+    GraphFixture fixture;
+    ValueVertex *function = fixture.NewInitialValue();
+    ValueVertex *environment = fixture.NewInitialValue();
+    ValueVertex *dictionary = fixture.NewInitialValue();
+    ValueVertex *index = fixture.Int32(3);
+    CompileInfoFacts entry(&fixture.chunk);
+    entry.RecordLoadedConstantProperty(function, PropertyKey::ModuleEnvironment(), environment);
+    CompileInfoFacts *taken = entry.Clone();
+    CompileInfoFacts *notTaken = entry.Clone();
+    taken->RecordLoadedConstantProperty(function, PropertyKey::ExternalModuleDictionary(0), dictionary);
+    taken->RecordLoadedConstantProperty(function, PropertyKey::ExternalModuleIndex(0), index);
+
+    taken->Merge(*notTaken);
+
+    EXPECT_EQ(taken->LookupLoadedConstantProperty(function, PropertyKey::ModuleEnvironment()), environment);
+    EXPECT_EQ(taken->LookupLoadedConstantProperty(function, PropertyKey::ExternalModuleDictionary(0)), nullptr);
+    EXPECT_EQ(taken->LookupLoadedConstantProperty(function, PropertyKey::ExternalModuleIndex(0)), nullptr);
+    EXPECT_EQ(entry.LookupLoadedConstantProperty(function, PropertyKey::ExternalModuleDictionary(0)), nullptr);
+}
+
 // --- CompileInfoFacts: clone variants --------------------------------------
 
 HWTEST_F_L0(ArkSteedCompileInfoFactsTest, CompileInfoFactsCloneVariants)
