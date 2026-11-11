@@ -5430,14 +5430,17 @@ JSHandle<CellRecord> ObjectFactory::NewCellRecord()
     return obj;
 }
 
+static constexpr auto ITERATOR_RESULT_FIELD_COUNT = 2;
+
 JSHandle<JSHClass> ObjectFactory::CreateIteratorResultInstanceClass(const JSHandle<GlobalEnv> &env)
 {
     auto globalConst = thread_->GlobalConstants();
     JSHandle<JSTaggedValue> proto = env->GetObjectFunctionPrototype();
-    JSHandle<JSHClass> iterResultClass = NewEcmaHClass(JSObject::SIZE, JSType::JS_OBJECT, proto);
+    JSHandle<JSHClass> iterResultClass =
+        NewEcmaHClass(JSObject::SIZE, ITERATOR_RESULT_FIELD_COUNT, JSType::JS_OBJECT, proto);
 
     uint32_t fieldOrder = 0;
-    JSHandle<LayoutInfo> layoutInfoHandle = CreateLayoutInfo(2); // 2 means two field
+    JSHandle<LayoutInfo> layoutInfoHandle = CreateLayoutInfo(ITERATOR_RESULT_FIELD_COUNT);
     {
         ASSERT(JSIterator::VALUE_INLINE_PROPERTY_INDEX == fieldOrder);
         PropertyAttributes attributes = PropertyAttributes::Default();
@@ -5457,6 +5460,7 @@ JSHandle<JSHClass> ObjectFactory::CreateIteratorResultInstanceClass(const JSHand
 
     {
         iterResultClass->SetLayout(thread_, layoutInfoHandle);
+        ASSERT(ITERATOR_RESULT_FIELD_COUNT == fieldOrder);
         iterResultClass->SetNumberOfProps(fieldOrder);
     }
     return iterResultClass;
