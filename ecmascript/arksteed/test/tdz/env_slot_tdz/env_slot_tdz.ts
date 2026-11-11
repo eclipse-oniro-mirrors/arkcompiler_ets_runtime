@@ -16,17 +16,21 @@
 // Lexical TDZ carrier of G11.7 (S12). The module-level lexical `let counter`
 // is read before its initialization from the compiled `readBeforeInit` and
 // from the nested closure `readFromClosure`. Both compiled graphs carry the
-// lexical hole comparison and the deferred `Throw` vertex whose stub is
-// `ThrowUndefinedIfHole`. The oracle is the caught `ReferenceError` at the
-// specified moment and the specified value after initialization; no deopt
-// counter is claimed and the compiled-entry counter is not the TDZ oracle.
-// The global-cell box guard is a different mechanism and is a separate leaf.
+// lexical hole comparison and, because the name string is still unmaterialized
+// at compile time, the deferred cold block is an unfired-throw `Deopt` vertex
+// instead of a `ThrowUndefinedIfHole` call. The oracle is the caught
+// `ReferenceError` at the specified moment and the specified value after
+// initialization; no deopt counter is claimed and the compiled-entry counter
+// is not the TDZ oracle. The global-cell box guard is a different mechanism
+// and is a separate leaf.
 //! METHOD readBeforeInit
 //! HAS LoadTaggedField
-//! HAS Throw
+//! COUNT_LE Deopt 1
+//! HAS_NOT CallCommonStub GetStringFromConstPool
 //! METHOD readFromClosure
 //! HAS LoadTaggedField
-//! HAS Throw
+//! COUNT_LE Deopt 1
+//! HAS_NOT CallCommonStub GetStringFromConstPool
 
 declare function print(arg: string): void;
 

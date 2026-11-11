@@ -15,7 +15,8 @@
 
 //! METHOD      compute
 //! COUNT_LE    BranchIfReferenceEqual  1
-//! COUNT_LE    CallCommonStub   GetStringFromConstPool  1
+//! HAS_NOT     CallCommonStub   GetStringFromConstPool
+//! COUNT_LE    Deopt  1
 //! METHOD compute
 //! HAS LoadTaggedField
 //! COMPILE_COUNT_GE *compute* 1
@@ -24,6 +25,8 @@
 // Note: the frontend (ets_frontend f0bcbe524b) eliminates the redundant hole-checks
 // for the repeated argument reads of the same non-hole lexical var, so at most one
 // throw.undefinedifholewithname reaches the JIT (COUNT_LE tolerates further elimination).
+// The never-fired hole leaves the name string unmaterialized, so the cold throw
+// block reaching the JIT lowers to an unfired-throw deopt, not a string fetch.
 
 declare function print(arg: number): string;
 

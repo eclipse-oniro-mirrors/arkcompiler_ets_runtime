@@ -16,15 +16,16 @@
 //! PARAMS --compiler-jit-hotness-threshold=60000
 //! METHOD      compute
 //! COUNT_LE    BranchIfReferenceEqual  1
-//! COUNT_LE    CallCommonStub   GetStringFromConstPool  1
+//! HAS_NOT     CallCommonStub   GetStringFromConstPool
+//! COUNT_LE    Deopt  1
 //! HAS_NOT CallCommonStub Add
 //! HAS LoadTaggedField
 //! COMPILE_COUNT_GE *compute* 1
 //! EXEC_COUNT_GE *compute* 1
 //! DEOPT_COUNT *Deoptimize* 0
 // Warm the arithmetic before synchronous compilation so additions use numeric
-// IR. A generic Add can invoke user code and must invalidate lexical-load facts;
-// this case checks redundant hole checks without that side effect.
+// IR. A generic Add can invoke user code and must invalidate lexical-load facts.
+// At most one TDZ check survives for x. Its cold throw path deopts on first use.
 
 declare function print(arg: number): string;
 

@@ -36,7 +36,7 @@ declare class ArkTools {
 //! METHOD reader
 //! COMPILE_COUNT_GE *reader* 1
 //! EXEC_COUNT_GE *reader* 1
-//! DEOPT_COUNT *Deoptimize* 0
+//! DEOPT_COUNT_GE *Deoptimize* 1
 
 import { late as l, early as e } from './ldextvar_hole.ts';
 
