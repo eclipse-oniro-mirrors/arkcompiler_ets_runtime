@@ -65,12 +65,12 @@ protected:
             for (BB* block: {entry, fastBlock, slowBlock, merge}) {
                 graph.Add(block);
             }
-            canAllocate = New<CanAllocateInYoungVertex>({glue, size});
+            canAllocate = New<CanAllocateInYoungVertex>({size});
             Fixture::AddVertex(entry, canAllocate);
             Fixture::SetControl(entry, New<BranchIfTrueVertex>({canAllocate}, fastBlock, slowBlock));
             fastBlock->AddPredecessor(entry);
             slowBlock->AddPredecessor(entry);
-            fastAllocation = New<AllocateInYoungVertex>({glue, size});
+            fastAllocation = New<AllocateInYoungVertex>({size});
             Fixture::AddVertex(fastBlock, fastAllocation);
             Fixture::SetControl(fastBlock, New<JumpVertex>({}, merge));
             merge->AddPredecessor(fastBlock);
@@ -169,16 +169,16 @@ protected:
             ValueVertex* result = nullptr;
             switch (kind) {
                 case EMPTY_OBJECT:
-                    result = New<InitializeEmptyObjectVertex>({phi, glue, hclass, size}, objectSize);
+                    result = New<InitializeEmptyObjectVertex>({phi, hclass, size}, objectSize);
                     break;
                 case OBJECT_WITH_BUFFER:
-                    result = New<InitializeObjectWithBufferVertex>({phi, glue, hclass, hclass}, Snapshot());
+                    result = New<InitializeObjectWithBufferVertex>({phi, hclass, hclass}, Snapshot());
                     break;
                 case EMPTY_ARRAY:
-                    result = New<InitializeEmptyArrayVertex>({phi, glue, hclass, hclass}, objectSize);
+                    result = New<InitializeEmptyArrayVertex>({phi, hclass, hclass}, objectSize);
                     break;
                 case ARRAY_WITH_BUFFER:
-                    result = New<InitializeArrayWithBufferVertex>({phi, glue, hclass, hclass}, objectSize);
+                    result = New<InitializeArrayWithBufferVertex>({phi, hclass, hclass}, objectSize);
                     break;
                 default:
                     UNREACHABLE();
@@ -260,7 +260,7 @@ protected:
             size = graph.GetInt64Constant(objectSize);
             Allocate();
             AddSlowAllocationHClass();
-            auto* result = New<InitializeUnmappedArgumentsVertex>({glue, argc, phi, elements, hclass, hclass});
+            auto* result = New<InitializeUnmappedArgumentsVertex>({argc, phi, elements, hclass, hclass});
             Fixture::AddVertex(merge, result);
             return result;
         }
@@ -518,15 +518,11 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsFrameEscapeInEarlierTr
     }
 }
 
-TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsMismatchedGlueAndSize)
+TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsMismatchedSlowAllocationSize)
 {
     for (auto kind: INITIALIZERS) {
         Fixture f;
-        auto* init = f.Initialize(kind);
-        constexpr uint32_t GLUE = InitializeEmptyObjectVertex::GLUE_INDEX;
-        init->SetInput(GLUE, f.graph.GetIntPtrConstant(1));
-        EXPECT_DEATH(f.Verify(), "");
-        init->SetInput(GLUE, f.glue);
+        f.Initialize(kind);
         f.slowAllocation->SetInput(
             0, f.graph.GetTaggedConstant(JSTaggedValue(static_cast<int32_t>(f.objectSize + 8)).GetRawData()));
         EXPECT_DEATH(f.Verify(), "");
@@ -538,10 +534,10 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsUnprotectedInitializer
     for (auto kind: INITIALIZERS) {
         Fixture f;
         auto* init = f.Initialize(kind);
-        // HClass, GlobalEnv and literal roots all occupy the third input.
+        // HClass, GlobalEnv and literal roots all occupy the second input.
         auto* unprotected = f.New<InitialValueVertex>({}, 0);
         Fixture::PrependVertex(f.entry, unprotected);
-        init->SetInput(2, unprotected);
+        init->SetInput(1, unprotected);
         f.ExpectRejectedInBothPhases("Initializer requires a rooted constant");
     }
 }
@@ -559,9 +555,9 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsWrongInputRepresentati
     for (auto kind: INITIALIZERS) {
         Fixture f;
         auto* init = f.Initialize(kind);
-        init->SetInput(InitializeEmptyObjectVertex::GLUE_INDEX, f.hclass);
+        init->SetInput(InitializeEmptyObjectVertex::HCLASS_INDEX, f.graph.GetIntPtrConstant(0));
         EXPECT_DEATH(f.Verify(), "GetValueRepresentation\\(\\) == expectedRepr");
-        init->SetInput(InitializeEmptyObjectVertex::GLUE_INDEX, f.glue);
+        init->SetInput(InitializeEmptyObjectVertex::HCLASS_INDEX, f.hclass);
         f.fastAllocation->SetInput(AllocateInYoungVertex::SIZE_INDEX, f.hclass);
         EXPECT_DEATH(f.Verify(), "GetValueRepresentation\\(\\) == expectedRepr");
     }
@@ -586,7 +582,7 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsCallsAndSecondAllocati
         Fixture::AddVertex(f.slowBlock, f.Call());
         f.ExpectRejectedInBothPhases("Illegal operation");
         f.slowBlock->GetVertices().pop_back();
-        Fixture::AddVertex(f.fastBlock, f.New<AllocateInYoungVertex>({f.glue, f.size}));
+        Fixture::AddVertex(f.fastBlock, f.New<AllocateInYoungVertex>({f.size}));
         EXPECT_DEATH(f.Verify(), "Second allocation");
     }
 }
@@ -715,27 +711,27 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsInvalidSnapshotAtConst
     Fixture f;
     auto info = f.Snapshot();
     info.fieldCount = 2;
-    EXPECT_DEATH(f.New<InitializeObjectWithBufferVertex>({f.phi, f.glue, f.hclass, f.hclass}, info),
+    EXPECT_DEATH(f.New<InitializeObjectWithBufferVertex>({f.phi, f.hclass, f.hclass}, info),
                  "fieldValues.size");
     info.fieldCount = 1;
     info.fieldValues = Span<const uint64_t>(nullptr, 1);
-    EXPECT_DEATH(f.New<InitializeObjectWithBufferVertex>({f.phi, f.glue, f.hclass, f.hclass}, info),
+    EXPECT_DEATH(f.New<InitializeObjectWithBufferVertex>({f.phi, f.hclass, f.hclass}, info),
                  "fieldValues.data");
     info.fieldValues = Span<const uint64_t>(&f.field, 1);
     info.objectSize = JSObject::SIZE;
-    EXPECT_DEATH(f.New<InitializeObjectWithBufferVertex>({f.phi, f.glue, f.hclass, f.hclass}, info),
+    EXPECT_DEATH(f.New<InitializeObjectWithBufferVertex>({f.phi, f.hclass, f.hclass}, info),
                  "fieldCount <=");
 }
 
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsWrongFixedInputCountAtConstruction)
 {
     Fixture f;
-    EXPECT_DEATH(f.New<AllocateInYoungVertex>({f.glue}), "GetInputCount");
-    EXPECT_DEATH(f.New<InitializeEmptyObjectVertex>({f.phi, f.glue, f.hclass}, f.objectSize), "GetInputCount");
+    EXPECT_DEATH(f.New<AllocateInYoungVertex>({}), "GetInputCount");
+    EXPECT_DEATH(f.New<InitializeEmptyObjectVertex>({f.phi, f.hclass}, f.objectSize), "GetInputCount");
     auto info = f.Snapshot();
-    EXPECT_DEATH(f.New<InitializeObjectWithBufferVertex>({f.phi, f.glue}, info), "GetInputCount");
-    EXPECT_DEATH(f.New<InitializeEmptyArrayVertex>({f.phi, f.glue}, f.objectSize), "GetInputCount");
-    EXPECT_DEATH(f.New<InitializeArrayWithBufferVertex>({f.phi, f.glue}, f.objectSize), "GetInputCount");
+    EXPECT_DEATH(f.New<InitializeObjectWithBufferVertex>({f.phi, f.hclass}, info), "GetInputCount");
+    EXPECT_DEATH(f.New<InitializeEmptyArrayVertex>({f.phi, f.hclass}, f.objectSize), "GetInputCount");
+    EXPECT_DEATH(f.New<InitializeArrayWithBufferVertex>({f.phi, f.hclass}, f.objectSize), "GetInputCount");
 }
 
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsDynamicLiteralAllocationSize)
@@ -1075,15 +1071,12 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsRepeatedPredicateSched
     EXPECT_DEATH(f.Verify(), "");
 }
 
-TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsChangedGlueAndSizeAfterCheck)
+TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsChangedSizeAfterCheck)
 {
     Fixture f(EMPTY_OBJECT);
-    f.canAllocate->SetInput(CanAllocateInYoungVertex::GLUE_INDEX, f.graph.GetIntPtrConstant(1));
-    EXPECT_DEATH(f.Verify(), "Allocation must match the checked glue and size");
-    f.canAllocate->SetInput(CanAllocateInYoungVertex::GLUE_INDEX, f.glue);
     // 8: deliberate size mismatch
     f.canAllocate->SetInput(CanAllocateInYoungVertex::SIZE_INDEX, f.graph.GetInt64Constant(f.objectSize + 8));
-    EXPECT_DEATH(f.Verify(), "Allocation must match the checked glue and size");
+    EXPECT_DEATH(f.Verify(), "Allocation must match the checked size");
 }
 
 TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsReversedCapacityEdges)

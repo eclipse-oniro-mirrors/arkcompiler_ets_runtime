@@ -125,74 +125,83 @@ inline void ArkSteedAssembler::JumpIfHeapSamplingActive(ArkSteedRegister glue, A
     JumpIf(Condition::EQUAL, target);
 }
 
+inline void ArkSteedAssembler::LoadStubEntry(ArkSteedRegister dst, kungfu::RuntimeStubCSigns::ID stubId)
+{
+    constexpr uint32_t SLOT_SIZE = sizeof(uintptr_t);
+    uint32_t offset = static_cast<uint32_t>(JSThread::GlueData::GetRTStubEntriesOffset(false)) +
+                      static_cast<uint32_t>(stubId) * SLOT_SIZE;
+    LoadField(dst, GLUE_ROOT_REGISTER, static_cast<int32_t>(offset));
+}
+
+inline void ArkSteedAssembler::LoadStubEntry(ArkSteedRegister dst, kungfu::CommonStubCSigns::ID stubId)
+{
+    constexpr uint32_t SLOT_SIZE = sizeof(uintptr_t);
+    uint32_t offset = static_cast<uint32_t>(JSThread::GlueData::GetCOStubEntriesOffset(false)) +
+                      static_cast<uint32_t>(stubId) * SLOT_SIZE;
+    LoadField(dst, GLUE_ROOT_REGISTER, static_cast<int32_t>(offset));
+}
+
 void ArkSteedAssembler::CallRuntime(kungfu::RuntimeStubCSigns::ID runtimeId)
 {
     TemporaryRegisterScope scope(this);
-    ASSERT(entryThread_ != nullptr);
-    Address address = entryThread_->GetRTInterface(static_cast<size_t>(kungfu::RuntimeStubCSigns::ID_CallRuntime));
     auto scratch = scope.AcquireScratch();
 #if defined(PANDA_TARGET_AMD64)
-    Move(x64::rax, static_cast<uint64_t>(entryThread_->GetGlueAddr()));
+    Move(x64::rax, GLUE_ROOT_REGISTER);
 #elif defined(PANDA_TARGET_ARM64)
-    Move(aarch64::x0, static_cast<uint64_t>(entryThread_->GetGlueAddr()));
+    Move(aarch64::x0, GLUE_ROOT_REGISTER);
 #endif
-    Move(scratch, static_cast<uint64_t>(address));
+    LoadStubEntry(scratch, kungfu::RuntimeStubCSigns::ID_CallRuntime);
     Call(scratch);
 }
 
 void ArkSteedAssembler::LoadGlue(ArkSteedRegister dst)
 {
-    ASSERT(entryThread_ != nullptr);
-    Move(dst, static_cast<uint64_t>(entryThread_->GetGlueAddr()));
+    Move(dst, GLUE_ROOT_REGISTER);
 }
 
 void ArkSteedAssembler::CallTrampoline(kungfu::RuntimeStubCSigns::ID stubId)
 {
     TemporaryRegisterScope scope(this);
-    ASSERT(entryThread_ != nullptr);
-    Address address = entryThread_->GetRTInterface(static_cast<size_t>(stubId));
     auto scratch = scope.AcquireScratch();
 #if defined(PANDA_TARGET_AMD64)
-    Move(x64::rax, static_cast<uint64_t>(entryThread_->GetGlueAddr()));
+    Move(x64::rax, GLUE_ROOT_REGISTER);
 #elif defined(PANDA_TARGET_ARM64)
-    Move(aarch64::x0, static_cast<uint64_t>(entryThread_->GetGlueAddr()));
+    Move(aarch64::x0, GLUE_ROOT_REGISTER);
 #endif
-    Move(scratch, static_cast<uint64_t>(address));
+    LoadStubEntry(scratch, stubId);
     Call(scratch);
 }
 
 void ArkSteedAssembler::CallNativeBuiltinTrampoline(ArkSteedRegister nativeCode)
 {
     TemporaryRegisterScope scope(this);
-    ASSERT(entryThread_ != nullptr);
-    Address address = entryThread_->GetRTInterface(RTSTUB_ID(PushCallArgsAndDispatchNative));
     ArkSteedRegister scratch = scope.AcquireScratch();
 #if defined(PANDA_TARGET_AMD64)
     Move(x64::rax, nativeCode);
 #elif defined(PANDA_TARGET_ARM64)
     Move(aarch64::x0, nativeCode);
 #endif
-    Move(scratch, static_cast<uint64_t>(address));
+    LoadStubEntry(scratch, RTSTUB_ID(PushCallArgsAndDispatchNative));
     Call(scratch);
 }
 
 void ArkSteedAssembler::CallNGCRuntime(kungfu::RuntimeStubCSigns::ID runtimeId)
 {
     TemporaryRegisterScope scope(this);
-    ASSERT(entryThread_ != nullptr);
-    Address address = entryThread_->GetRTInterface(static_cast<size_t>(runtimeId));
     auto scratch = scope.AcquireScratch();
-    Move(scratch, static_cast<uint64_t>(address));
+    LoadStubEntry(scratch, runtimeId);
     Call(scratch);
 }
 
-inline void ArkSteedAssembler::CallCommonStub(uint32_t stubId)
+inline void ArkSteedAssembler::CallCommonStub(kungfu::CommonStubCSigns::ID stubId)
 {
+    // Common-stub C ABI: parameter 0 is always glue. The install is
+    // centralized here so no vertex carries glue as an IR input; the code
+    // generator pins vertex inputs to parameters 1..N.
+    Move(GetParameterRegister(0), GLUE_ROOT_REGISTER);
     TemporaryRegisterScope scope(this);
-    ASSERT(entryThread_ != nullptr);
-    Address address = entryThread_->GetFastStubEntry(stubId);
     auto scratch = scope.AcquireScratch();
-    Move(scratch, static_cast<uint64_t>(address));
+    LoadStubEntry(scratch, stubId);
     Call(scratch);
 }
 
@@ -207,19 +216,17 @@ inline void ArkSteedAssembler::LoadBuiltinStubEntry(ArkSteedRegister dst, ArkSte
 inline void ArkSteedAssembler::CallDeoptHandler(kungfu::DeoptType deoptType)
 {
     TemporaryRegisterScope scope(this);
-    ASSERT(entryThread_ != nullptr);
-    Address address = entryThread_->GetRTInterface(RTSTUB_ID(DeoptHandlerAsm));
     auto scratch = scope.AcquireScratch();
 #if defined(PANDA_TARGET_AMD64)
-    Move(x64::rdi, static_cast<uint64_t>(entryThread_->GetGlueAddr()));
+    Move(x64::rdi, GLUE_ROOT_REGISTER);
     Move(x64::rsi, static_cast<uint64_t>(deoptType));
     Move(x64::rdx, JSTaggedValue::Undefined().GetRawData());
 #elif defined(PANDA_TARGET_ARM64)
-    Move(aarch64::x0, static_cast<uint64_t>(entryThread_->GetGlueAddr()));
+    Move(aarch64::x0, GLUE_ROOT_REGISTER);
     Move(aarch64::x1, static_cast<uint64_t>(deoptType));
     Move(aarch64::x2, JSTaggedValue::Undefined().GetRawData());
 #endif
-    Move(scratch, static_cast<uint64_t>(address));
+    LoadStubEntry(scratch, RTSTUB_ID(DeoptHandlerAsm));
     Call(scratch);
 }
 }  // namespace panda::ecmascript::arksteed

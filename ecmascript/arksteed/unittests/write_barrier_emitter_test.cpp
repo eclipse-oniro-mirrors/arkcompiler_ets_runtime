@@ -41,9 +41,10 @@ using panda::test::BaseTestWithScope;
 // deferred bodies. Execution tests check the conservative filter with synthetic
 // region metadata and sentinel deferred bodies; they never invoke a GC helper.
 //
-// Every barrier path reads the glue address and the runtime stub table from the
-// entry thread (arksteed_assembler-inl.h), so fixture C uses a real JSThread;
-// a null thread would trip the production ASSERT in Debug and make the case red.
+// Every barrier path reads the glue and the runtime stub table through the
+// glue root register at execution time (arksteed_assembler-inl.h), so the
+// fixture needs no entry thread; execution tests install the synthetic glue
+// into the root register via the BeginFilter trampoline.
 
 namespace {
 
@@ -65,6 +66,8 @@ protected:
     static constexpr int32_t FIELD_OFFSET = 8;
 
     // Inputs and scratch registers must stay out of each other's way.
+    // The execution filter receives glue as C arg0; the barrier itself reads
+    // it through the glue root register, which BeginFilter installs.
     static ArkSteedRegister Glue()
     {
         return ArkSteedAssembler::GetParameterRegister(0);
@@ -102,8 +105,8 @@ protected:
     // compared on equal footing.
     class ColdEmit {
     public:
-        explicit ColdEmit(JSThread *entryThread)
-            : assembler_(&chunk_, nullptr, entryThread),
+        explicit ColdEmit()
+            : assembler_(&chunk_, nullptr),
               emitter_(&assembler_, &chunk_, &deferred_, snapshot_)
         {
             assembler_.EnableComments(true);
@@ -129,6 +132,17 @@ protected:
             return {mainCodeSize, deferred_.size(), assembler_.GetCodeSize()};
         }
 
+        // The merged barrier reads GC state through the glue root register
+        // (x64 r13 / arm64 x28), which the production call trampoline
+        // installs. BeginFilter mirrors that contract: it saves the ambient
+        // root register and installs the incoming glue argument (C arg0);
+        // every return site emitted by RunFilter restores the saved value.
+        void BeginFilter()
+        {
+            assembler_.Push(ArkSteedAssembler::GLUE_ROOT_REGISTER);
+            assembler_.Move(ArkSteedAssembler::GLUE_ROOT_REGISTER, Glue());
+        }
+
         // Execute the actual filter, replacing each deferred body with a
         // sentinel return. No GC helper sees the synthetic region or object.
         uint64_t RunFilter(uintptr_t glue, uintptr_t object, uintptr_t value)
@@ -139,10 +153,12 @@ protected:
             ArkSteedRegister result = aarch64::x0;
 #endif
             assembler_.Move(result, static_cast<int64_t>(0));
+            assembler_.Pop(ArkSteedAssembler::GLUE_ROOT_REGISTER);
             assembler_.Return();
             for (auto *block : deferred_) {
                 assembler_.Bind(block->GetEntryLabel());
                 assembler_.Move(result, static_cast<int64_t>(1));
+                assembler_.Pop(ArkSteedAssembler::GLUE_ROOT_REGISTER);
                 assembler_.Return();
             }
             MemMap code = PageMap(PageSize(), PAGE_PROT_READWRITE);
@@ -184,15 +200,15 @@ protected:
     // NonHeap path: StoreField(value, object, byteOffset).
     Emission PlainElementStore()
     {
-        ColdEmit fixture(thread);
+        ColdEmit fixture;
         fixture.Asm().StoreField(ElementValue(), Object(), Value());
         return fixture.Finish();
     }
 
     Emission ElementStore(ValueKind valueKind)
     {
-        ColdEmit fixture(thread);
-        fixture.Emitter().StoreTaggedElement(Glue(), Object(), Value(), ElementValue(), ElementScratch(),
+        ColdEmit fixture;
+        fixture.Emitter().StoreTaggedElement(Object(), Value(), ElementValue(), ElementScratch(),
                                              valueKind);
         return fixture.Finish();
     }
@@ -201,7 +217,7 @@ protected:
     // NonHeap field paths: StoreField(value, object, offset).
     Emission PlainFieldStore(int32_t offset = FIELD_OFFSET)
     {
-        ColdEmit fixture(thread);
+        ColdEmit fixture;
         fixture.Asm().StoreField(Value(), Object(), offset);
         return fixture.Finish();
     }
@@ -210,23 +226,23 @@ protected:
     // post-store barrier: StoreInt32FieldRelease(hclass, object, HCLASS_OFFSET).
     Emission PlainHClassStore()
     {
-        ColdEmit fixture(thread);
+        ColdEmit fixture;
         fixture.Asm().StoreInt32FieldRelease(Value(), Object(), static_cast<int32_t>(TaggedObject::HCLASS_OFFSET));
         return fixture.Finish();
     }
 
     Emission FieldStore(Kind barrierKind, ValueKind valueKind)
     {
-        ColdEmit fixture(thread);
-        fixture.Emitter().StoreTaggedField(Glue(), Object(), Value(), FIELD_OFFSET, barrierKind, ObjectScratch(),
+        ColdEmit fixture;
+        fixture.Emitter().StoreTaggedField(Object(), Value(), FIELD_OFFSET, barrierKind, ObjectScratch(),
                                            ValueScratch(), valueKind);
         return fixture.Finish();
     }
 
     Emission TransitionHClassStore()
     {
-        ColdEmit fixture(thread);
-        fixture.Emitter().TransitionHClass(Glue(), Object(), Value(), ObjectScratch(), ValueScratch());
+        ColdEmit fixture;
+        fixture.Emitter().TransitionHClass(Object(), Value(), ObjectScratch(), ValueScratch());
         return fixture.Finish();
     }
 };
@@ -265,8 +281,9 @@ HWTEST_F_L0(ArkSteedWriteBarrierEmitterTest, FieldConservativeFilter)
             bool needsBarrier = space != RegionSpaceFlag::IN_SHARED_READ_ONLY_SPACE &&
                 (space == RegionSpaceFlag::IN_YOUNG_SPACE || space >= RegionSpaceFlag::SHARED_SPACE_BEGIN ||
                  marking != MarkStatus::READY_TO_MARK);
-            ColdEmit fixture(thread);
-            fixture.Emitter().StoreTaggedField(Glue(), Object(), Value(), FIELD_OFFSET, Kind::GENERIC_BARRIER,
+            ColdEmit fixture;
+            fixture.BeginFilter();
+            fixture.Emitter().StoreTaggedField(Object(), Value(), FIELD_OFFSET, Kind::GENERIC_BARRIER,
                                                ObjectScratch(), ValueScratch(), ValueKind::HeapObject);
             EXPECT_EQ(fixture.RunFilter(reinterpret_cast<uintptr_t>(glue.data()),
                                         reinterpret_cast<uintptr_t>(object), value), needsBarrier)
@@ -281,8 +298,9 @@ HWTEST_F_L0(ArkSteedWriteBarrierEmitterTest, UnknownScalarSkipsRegionAccess)
 {
     uint64_t object[2] = {0, 0};
     uintptr_t value = JSTaggedValue(17).GetRawData();
-    ColdEmit fixture(thread);
-    fixture.Emitter().StoreTaggedField(Glue(), Object(), Value(), FIELD_OFFSET, Kind::GENERIC_BARRIER,
+    ColdEmit fixture;
+    fixture.BeginFilter();
+    fixture.Emitter().StoreTaggedField(Object(), Value(), FIELD_OFFSET, Kind::GENERIC_BARRIER,
                                        ObjectScratch(), ValueScratch(), ValueKind::Unknown);
     EXPECT_EQ(fixture.RunFilter(0, reinterpret_cast<uintptr_t>(object), value), 0u);
     EXPECT_EQ(object[1], value);

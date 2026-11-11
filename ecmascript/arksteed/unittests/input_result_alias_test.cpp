@@ -314,9 +314,7 @@ protected:
         };
         initInfo(allocation);
         allocation->SetId(CURRENT_ID);
-        auto* glue = graph.GetIntPtrConstant(0);
         auto* size = graph.GetInt64Constant(JSObject::SIZE);
-        initInfo(glue);
         initInfo(size);
         ValueVertex* hclassInput = nullptr;
         if constexpr (std::is_same_v<Allocation, CallRuntimeVertex>) {
@@ -331,7 +329,6 @@ protected:
             }
             allocation->VerifyInputs();
         } else {
-            allocation->SetInput(Allocation::GLUE_INDEX, glue);
             allocation->SetInput(Allocation::SIZE_INDEX, size);
         }
         ValueVertex* dynamicInput = nullptr;
@@ -440,8 +437,7 @@ protected:
         EXPECT_FALSE(vertex->CanEagerDeopt());
         EXPECT_FALSE(vertex->CanLazyDeopt());
         EXPECT_EQ(VertexT::INPUT_TYPES[VertexT::ALLOCATION_INDEX], ValueRepresentation::TAGGED);
-        EXPECT_EQ(VertexT::INPUT_TYPES[VertexT::GLUE_INDEX], ValueRepresentation::INT_PTR);
-        EXPECT_EQ(VertexT::INPUT_TYPES[2], ValueRepresentation::TAGGED);
+        EXPECT_EQ(VertexT::INPUT_TYPES[1], ValueRepresentation::TAGGED);
         EXPECT_EQ(VertexT::INPUT_TYPES[VertexT::HCLASS_INDEX], ValueRepresentation::TAGGED);
         if constexpr (std::is_same_v<VertexT, InitializeEmptyObjectVertex>) {
             EXPECT_EQ(VertexT::INPUT_TYPES[VertexT::SIZE_INDEX], ValueRepresentation::INT64);
@@ -462,9 +458,7 @@ protected:
         unsigned index = 0;
         for (auto reg: GetAllocatableList<ArkSteedRegister>()) {
             ValueVertex* value;
-            if (index == VertexT::GLUE_INDEX) {
-                value = Vertex::New<IntPtrConstantVertex>(&chunk, static_cast<size_t>(0), 0);
-            } else if (index < VertexT::NUM_INPUTS && VertexT::INPUT_TYPES[index] == ValueRepresentation::INT64) {
+            if (index < VertexT::NUM_INPUTS && VertexT::INPUT_TYPES[index] == ValueRepresentation::INT64) {
                 value = Vertex::New<Int64ConstantVertex>(&chunk, static_cast<size_t>(0), 64);
             } else {
                 value = Vertex::New<InitialValueVertex>(&chunk, static_cast<size_t>(0), 0);
@@ -879,7 +873,6 @@ HWTEST_F_L0(ArkSteedRegisterAllocatorTest, YoungAllocationConstraints)
     Graph graph {&chunk};
     auto* allocation
         = Vertex::New<AllocateInYoungVertex>(&chunk, static_cast<size_t>(AllocateInYoungVertex::NUM_INPUTS));
-    allocation->SetInput(AllocateInYoungVertex::GLUE_INDEX, graph.GetIntPtrConstant(0));
     allocation->SetInput(AllocateInYoungVertex::SIZE_INDEX, graph.GetInt64Constant(JSObject::SIZE));
     allocation->SetRegallocInfo(chunk.New<RegallocValueVertexInfo>(
         &chunk, allocation->GetInputCount(), allocation->GetMachineRepresentation()));
@@ -897,7 +890,6 @@ HWTEST_F_L0(ArkSteedRegisterAllocatorTest, YoungAllocationConstraints)
         EXPECT_FALSE(input.IsUsedAtStart());
         EXPECT_EQ(allocation->GetInput(i)->GetValueRepresentation(), AllocateInYoungVertex::INPUT_TYPES[i]);
     }
-    EXPECT_EQ(AllocateInYoungVertex::INPUT_TYPES[AllocateInYoungVertex::GLUE_INDEX], ValueRepresentation::INT_PTR);
     EXPECT_EQ(AllocateInYoungVertex::INPUT_TYPES[AllocateInYoungVertex::SIZE_INDEX], ValueRepresentation::INT64);
     EXPECT_EQ(allocation->GetValueRepresentation(), ValueRepresentation::TAGGED);
     EXPECT_EQ(allocation->GetNumTemporariesNeeded<ArkSteedRegister>(), 1U);
@@ -947,7 +939,7 @@ HWTEST_F_L0(ArkSteedRegisterAllocatorTest, YoungAllocationRuntimeSlots)
     EXPECT_EQ(graph.GetMaxCallStackArgs(), 0U);
     processor.ProcessVertex(allocation, state);
     processor.PostProcessGraph(&graph);
-    EXPECT_EQ(allocation->GetInputCount(), 2U);
+    EXPECT_EQ(allocation->GetInputCount(), 1U);
     EXPECT_EQ(graph.GetMaxCallStackArgs(), 0U);
     auto* slow
         = Vertex::New<CallRuntimeVertex>(&chunk,
@@ -1073,7 +1065,7 @@ HWTEST_F_L0(ArkSteedRegisterAllocatorTest, BufferedArrayConstraints)
     CheckInitializationConstraints(array, chunk, 1);
     EXPECT_EQ(InitializeArrayWithBufferVertex::INPUT_TYPES[InitializeArrayWithBufferVertex::LITERAL_INDEX],
               ValueRepresentation::TAGGED);
-    EXPECT_EQ(array->GetInputCount(), 4U);
+    EXPECT_EQ(array->GetInputCount(), 3U);
     EXPECT_EQ(array->GetObjectSize(), JSArray::SIZE + JSTaggedValue::TaggedTypeSize());
 }
 

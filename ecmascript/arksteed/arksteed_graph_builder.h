@@ -47,7 +47,6 @@ public:
 
     GraphBuilder(JSThread *compilerThread,
                  Graph *destGraph,
-                 uintptr_t glueAddr,
                  BytecodePreprocessor *preproc,
                  BytecodeAnalysis *analysis,
                  bool isOsr,
@@ -204,7 +203,6 @@ private:
 
     Graph *graph_;
     JSThread *compilerThread_;
-    uintptr_t glueAddr_;
     BytecodePreprocessor *preproc_;
     BytecodeAnalysis *analysis_;
     const ArkSteedInlinedCallerFrame *parentDeoptFrame_ {nullptr};
@@ -218,7 +216,6 @@ private:
     Chunk *chunk_;        // Equivalent to preproc_->GetChunk()
 
     // Constants frequently used
-    ValueVertex *glue_ = nullptr;
     ValueVertex *undefinedValue_ = nullptr;
     ValueVertex *initialActualArgc_ = nullptr;
     ValueVertex *actualArgc_ = nullptr;

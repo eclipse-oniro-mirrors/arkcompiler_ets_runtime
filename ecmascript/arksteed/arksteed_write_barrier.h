@@ -22,6 +22,9 @@
 
 namespace panda::ecmascript::arksteed {
 
+// The write barrier emitter reads the glue root register directly for GC state
+// checks and delivers glue to barrier runtime calls; callers do not pass glue
+// as a parameter or hold it in an allocated register.
 class ArkSteedWriteBarrierEmitter {
 public:
     ArkSteedWriteBarrierEmitter(ArkSteedAssembler *assembler, Chunk *chunk, ArkSteedDeferredCodeList *deferredCode,
@@ -29,27 +32,28 @@ public:
         : assembler_(assembler), chunk_(chunk), deferredCode_(deferredCode), registerSnapshot_(registerSnapshot)
     {}
 
-    void StoreTaggedField(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister value, int32_t offset,
+    void StoreTaggedField(ArkSteedRegister object, ArkSteedRegister value, int32_t offset,
                           ArkSteedWriteBarrierKind barrierKind, ArkSteedRegister objectRegionScratch,
                           ArkSteedRegister valueRegionScratch,
                           ArkSteedWriteBarrierValueKind valueKind = ArkSteedWriteBarrierValueKind::Unknown);
     // Installs a complete HClass header and emits the default post-write barrier.
     // SATB and CMS/CMC header-state handling are intentionally not supported here.
-    void InitializeHClass(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister hclass,
+    void InitializeHClass(ArkSteedRegister object, ArkSteedRegister hclass,
                           ArkSteedRegister objectRegionScratch, ArkSteedRegister hclassRegionScratch);
-    void TransitionHClass(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister hclass,
+    void TransitionHClass(ArkSteedRegister object, ArkSteedRegister hclass,
                           ArkSteedRegister objectRegionScratch, ArkSteedRegister hclassRegionScratch);
 
-    void StoreTaggedElement(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister byteOffset,
-                            ArkSteedRegister value, ArkSteedRegister scratch, ArkSteedWriteBarrierValueKind valueKind);
+    void StoreTaggedElement(ArkSteedRegister object, ArkSteedRegister byteOffset,
+                            ArkSteedRegister value, ArkSteedRegister scratch,
+                            ArkSteedWriteBarrierValueKind valueKind);
 
 private:
-    void EmitFastWriteBarrier(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister value,
+    void EmitFastWriteBarrier(ArkSteedRegister object, ArkSteedRegister value,
                               int32_t offset, bool preserveInputs = false);
-    void EmitWriteBarrier(ArkSteedRegister glue, ArkSteedRegister object, ArkSteedRegister value, int32_t offset,
+    void EmitWriteBarrier(ArkSteedRegister object, ArkSteedRegister value, int32_t offset,
                           ArkSteedWriteBarrierKind barrierKind, ArkSteedRegister objectRegionScratch,
                           ArkSteedRegister valueRegionScratch, bool preserveInputs = false);
-    void CallBarrierRuntime(kungfu::RuntimeStubCSigns::ID runtimeId, ArkSteedRegister glue,
+    void CallBarrierRuntime(kungfu::RuntimeStubCSigns::ID runtimeId,
                             ArkSteedRegister object, int32_t offset, ArkSteedRegister value,
                             bool preserveInputs);
 

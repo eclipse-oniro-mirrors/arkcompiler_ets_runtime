@@ -95,7 +95,7 @@ private:
     void EmitQueuedEagerDeoptExits();
     void EmitEagerDeoptStackOverflow();
 
-    int PrepareCommonStubStackArguments(const Vertex *callVertex, int argCount);
+    int PrepareCommonStubStackArguments(const Vertex *callVertex);
     int PrepareRuntimeStubStackArguments(const Vertex *callVertex, int argCount, int runtimeId);
     void LoadSteedExpectedArgc(ArkSteedRegister target, ArkSteedRegister expectedArgc);
     template <typename CallVertexT>
@@ -182,9 +182,9 @@ private:
     int PrepareKnownBuiltinStubArguments(CallKnownBuiltinVertex *call);
     int PrepareKnownBuiltinNativeArguments(CallKnownBuiltinVertex *call);
 
-    void EmitInitializeHClassWithBarrier(const DeferredRegisterSnapshot &snapshot, ArkSteedRegister glue,
+    void EmitInitializeHClassWithBarrier(const DeferredRegisterSnapshot &snapshot,
                                          ArkSteedRegister object, ArkSteedRegister hclass);
-    void EmitStoreTaggedFieldWithBarrier(const DeferredRegisterSnapshot &snapshot, ArkSteedRegister glue,
+    void EmitStoreTaggedFieldWithBarrier(const DeferredRegisterSnapshot &snapshot,
                                          ArkSteedRegister object, ArkSteedRegister value, int32_t offset,
                                          ArkSteedWriteBarrierValueKind valueKind);
 

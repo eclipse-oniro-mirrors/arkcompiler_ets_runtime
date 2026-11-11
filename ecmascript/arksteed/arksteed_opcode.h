@@ -713,6 +713,34 @@ public:
     void SetValueLocationConstraints();
 };
 
+// Loads a TaggedValue from a fixed GlueData offset, root-register relative.
+// The glue pointer is never an IR input: the code generator addresses the
+// field directly through GLUE_ROOT_REGISTER (the Maglev LoadRoot pattern).
+class LoadGlueTaggedFieldVertex : public FixedInputVertexMixin<ValueVertex, LoadGlueTaggedFieldVertex>,
+                                  public OffsetMixin {
+public:
+    static constexpr uint32_t NUM_INPUTS = 0;
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_READ;
+
+    explicit LoadGlueTaggedFieldVertex(int32_t offset) : FixedInputVertexMixin(), OffsetMixin(offset) {}
+
+    void SetValueLocationConstraints();
+};
+
+// Loads an Int32 from a fixed GlueData offset, root-register relative.
+class LoadGlueI32FieldVertex : public FixedInputVertexMixin<ValueVertex, LoadGlueI32FieldVertex>,
+                               public OffsetMixin {
+public:
+    static constexpr uint32_t NUM_INPUTS = 0;
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::INT32;
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_READ;
+
+    explicit LoadGlueI32FieldVertex(int32_t offset) : FixedInputVertexMixin(), OffsetMixin(offset) {}
+
+    void SetValueLocationConstraints();
+};
+
 // Loads TaggedValue from raw pointer
 class LoadTaggedFromAddressVertex : public FixedInputVertexMixin<ValueVertex, LoadTaggedFromAddressVertex>,
                                     public OffsetMixin {
@@ -735,14 +763,8 @@ public:
 // Loads exception from glue pointer (with fixed offset)
 class LoadExceptionVertex : public FixedInputVertexMixin<ValueVertex, LoadExceptionVertex> {
 public:
-    enum Indices : uint32_t {
-        GLUE_INDEX = 0,
-        NUM_INPUTS = 1,
-    };
+    static constexpr uint32_t NUM_INPUTS = 0;
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
-    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
-        ValueRepresentation::INT_PTR,
-    };
     static constexpr VertexPropertyFlag PROPERTIES =
         VertexPropertyFlag::CAN_READ | VertexPropertyFlag::IS_NOT_IDEMPOTENT;
 
@@ -951,13 +973,11 @@ public:
 class LoadSingleCharTableElementVertex : public FixedInputVertexMixin<ValueVertex, LoadSingleCharTableElementVertex> {
 public:
     enum Indices : uint32_t {
-        GLUE_INDEX = 0,
-        CHAR_CODE_INDEX = 1,
-        NUM_INPUTS = 2,
+        CHAR_CODE_INDEX = 0,
+        NUM_INPUTS = 1,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
-        ValueRepresentation::INT_PTR,
         ValueRepresentation::INT32,
     };
     static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_READ;
@@ -1253,14 +1273,12 @@ class StoreTaggedFieldWithBarrierVertex
       public OffsetMixin {
 public:
     enum Indices : uint32_t {
-        GLUE_INDEX = 0,
-        OBJECT_INDEX = 1,
-        VALUE_INDEX = 2,
-        NUM_INPUTS = 3,
+        OBJECT_INDEX = 0,
+        VALUE_INDEX = 1,
+        NUM_INPUTS = 2,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
-        ValueRepresentation::INT_PTR,
         ValueRepresentation::TAGGED,
         ValueRepresentation::TAGGED,
     };
@@ -1313,15 +1331,13 @@ class StoreTaggedElementWithBarrierVertex
     : public FixedInputVertexMixin<NonControlVertex, StoreTaggedElementWithBarrierVertex> {
 public:
     enum Indices : uint32_t {
-        GLUE_INDEX = 0,
-        OBJECT_INDEX = 1,
-        INDEX_INDEX = 2,
-        VALUE_INDEX = 3,
-        NUM_INPUTS = 4,
+        OBJECT_INDEX = 0,
+        INDEX_INDEX = 1,
+        VALUE_INDEX = 2,
+        NUM_INPUTS = 3,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
-        ValueRepresentation::INT_PTR,
         ValueRepresentation::TAGGED,
         ValueRepresentation::INT32,
         ValueRepresentation::TAGGED,
@@ -1430,14 +1446,12 @@ class StoreSharedFieldWithBarrierVertex
       public OffsetMixin {
 public:
     enum Indices : uint32_t {
-        GLUE_INDEX = 0,
-        OBJECT_INDEX = 1,
-        VALUE_INDEX = 2,
-        NUM_INPUTS = 3,
+        OBJECT_INDEX = 0,
+        VALUE_INDEX = 1,
+        NUM_INPUTS = 2,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
-        ValueRepresentation::INT_PTR,
         ValueRepresentation::TAGGED,
         ValueRepresentation::TAGGED,
     };
@@ -1469,14 +1483,12 @@ class TransitionHClassWithBarrierVertex
     : public FixedInputVertexMixin<NonControlVertex, TransitionHClassWithBarrierVertex> {
 public:
     enum Indices : uint32_t {
-        GLUE_INDEX = 0,
-        OBJECT_INDEX = 1,
-        HCLASS_INDEX = 2,
-        NUM_INPUTS = 3,
+        OBJECT_INDEX = 0,
+        HCLASS_INDEX = 1,
+        NUM_INPUTS = 2,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
-        ValueRepresentation::INT_PTR,
         ValueRepresentation::TAGGED,
         ValueRepresentation::TAGGED,
     };
@@ -1561,9 +1573,8 @@ class EnsurePropertiesCapacityVertex : public VertexMixin<ValueVertex, EnsurePro
                                        public LazyDeoptimizableMixin {
 public:
     enum Indices : uint32_t {
-        GLUE_INDEX = 0,
-        OBJECT_INDEX = 1,
-        NUM_INPUTS = 2,
+        OBJECT_INDEX = 0,
+        NUM_INPUTS = 1,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
     static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::IS_CALL |
@@ -1590,7 +1601,6 @@ public:
     bool CheckInputs() const
     {
         return details::CheckStoredArity(this, OBJECT_INDEX + 1) &&
-               details::CheckSlotRepresentation(this, GLUE_INDEX, ValueRepresentation::INT_PTR) &&
                details::CheckSlotRepresentation(this, OBJECT_INDEX, ValueRepresentation::TAGGED);
     }
 
@@ -1609,15 +1619,13 @@ class InitializeEmptyObjectVertex : public FixedInputVertexMixin<ValueVertex, In
 public:
     enum Indices : uint32_t {
         ALLOCATION_INDEX = 0,
-        GLUE_INDEX = 1,
-        HCLASS_INDEX = 2,
-        SIZE_INDEX = 3,
-        NUM_INPUTS = 4,
+        HCLASS_INDEX = 1,
+        SIZE_INDEX = 2,
+        NUM_INPUTS = 3,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::TAGGED,
-        ValueRepresentation::INT_PTR,
         ValueRepresentation::TAGGED,
         ValueRepresentation::INT64,
     };
@@ -1691,16 +1699,14 @@ class InitializeEmptyObjectWithSizeVertex
 public:
     enum Indices : uint32_t {
         ALLOCATION_INDEX = 0,
-        GLUE_INDEX = 1,
-        HCLASS_INDEX = 2,
-        SIZE_INDEX = 3,
-        INIT_VALUE_INDEX = 4,
-        NUM_INPUTS = 5,
+        HCLASS_INDEX = 1,
+        SIZE_INDEX = 2,
+        INIT_VALUE_INDEX = 3,
+        NUM_INPUTS = 4,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::TAGGED,
-        ValueRepresentation::INT_PTR,
         ValueRepresentation::TAGGED,
         ValueRepresentation::INT64,
         ValueRepresentation::TAGGED,
@@ -1729,15 +1735,13 @@ class InitializeObjectWithBufferVertex
 public:
     enum Indices : uint32_t {
         ALLOCATION_INDEX = 0,
-        GLUE_INDEX = 1,
-        LITERAL_INDEX = 2,
-        HCLASS_INDEX = 3,
-        NUM_INPUTS = 4,
+        LITERAL_INDEX = 1,
+        HCLASS_INDEX = 2,
+        NUM_INPUTS = 3,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
         ValueRepresentation::TAGGED,
-        ValueRepresentation::INT_PTR,
         ValueRepresentation::TAGGED,
         ValueRepresentation::TAGGED,
     };
@@ -1885,10 +1889,9 @@ class StoreTaggedFieldByHClassVertex : public VertexMixin<NonControlVertex, Stor
                                        public EagerDeoptimizableMixin {
 public:
     enum Indices : uint32_t {
-        GLUE_INDEX = 0,
-        OBJECT_INDEX = 1,
-        VALUE_INDEX = 2,
-        NUM_INPUTS = 3,
+        OBJECT_INDEX = 0,
+        VALUE_INDEX = 1,
+        NUM_INPUTS = 2,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
     static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_WRITE | VertexPropertyFlag::CAN_READ |
@@ -1925,7 +1928,6 @@ public:
     bool CheckInputs() const
     {
         return !cases_.empty() && details::CheckStoredArity(this, NUM_INPUTS) &&
-               details::CheckSlotRepresentation(this, GLUE_INDEX, ValueRepresentation::INT_PTR) &&
                details::CheckSlotRepresentation(this, OBJECT_INDEX, ValueRepresentation::TAGGED) &&
                details::CheckSlotRepresentation(this, VALUE_INDEX, ValueRepresentation::TAGGED);
     }
@@ -1963,14 +1965,12 @@ class SetValueWithBarrierVertex : public FixedInputVertexMixin<NonControlVertex,
                                   public OffsetMixin {
 public:
     enum Indices : uint32_t {
-        GLUE_INDEX = 0,
-        OBJECT_INDEX = 1,
-        VALUE_INDEX = 2,
-        NUM_INPUTS = 3,
+        OBJECT_INDEX = 0,
+        VALUE_INDEX = 1,
+        NUM_INPUTS = 2,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
-        ValueRepresentation::INT_PTR,
         ValueRepresentation::TAGGED,
         ValueRepresentation::TAGGED,
     };
@@ -2060,13 +2060,11 @@ private:
 class ObjSizeTrackingStepVertex : public FixedInputVertexMixin<NonControlVertex, ObjSizeTrackingStepVertex> {
 public:
     enum Indices : uint32_t {
-        GLUE_INDEX = 0,
-        HCLASS_INDEX = 1,
-        NUM_INPUTS = 2,
+        HCLASS_INDEX = 0,
+        NUM_INPUTS = 1,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::NONE;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
-        ValueRepresentation::INT_PTR,
         ValueRepresentation::TAGGED,
     };
     static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::IS_DEFERRED_CALL |
@@ -2231,10 +2229,8 @@ public:
 
 class LoadBuiltinObjectVertex : public FixedInputVertexMixin<ValueVertex, LoadBuiltinObjectVertex> {
 public:
-    static constexpr uint32_t NUM_INPUTS = 1;
-    static constexpr uint32_t GLUE_INDEX = 0;
+    static constexpr uint32_t NUM_INPUTS = 0;
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
-    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {ValueRepresentation::INT_PTR};
     static constexpr VertexPropertyFlag PROPERTIES =
         VertexPropertyFlag::CAN_READ | VertexPropertyFlag::IS_NOT_IDEMPOTENT;
     explicit LoadBuiltinObjectVertex(size_t builtinIndex) : FixedInputVertexMixin(), builtinIndex_(builtinIndex) {}
@@ -2448,10 +2444,9 @@ private:
 // each allocation needs a fresh check, even when glue and size are unchanged.
 class CanAllocateInYoungVertex : public FixedInputVertexMixin<ValueVertex, CanAllocateInYoungVertex> {
 public:
-    enum Indices : uint32_t { GLUE_INDEX = 0, SIZE_INDEX = 1, NUM_INPUTS = 2 };
+    enum Indices : uint32_t { SIZE_INDEX = 0, NUM_INPUTS = 1 };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
-        ValueRepresentation::INT_PTR,
         ValueRepresentation::INT64,
     };
     static constexpr VertexPropertyFlag PROPERTIES
@@ -2466,10 +2461,9 @@ public:
 // matching initializer follows the allocation merge Phi.
 class AllocateInYoungVertex : public FixedInputVertexMixin<ValueVertex, AllocateInYoungVertex> {
 public:
-    enum Indices : uint32_t { GLUE_INDEX = 0, SIZE_INDEX = 1, NUM_INPUTS = 2 };
+    enum Indices : uint32_t { SIZE_INDEX = 0, NUM_INPUTS = 1 };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
-        ValueRepresentation::INT_PTR,
         ValueRepresentation::INT64,
     };
     // The fast path has ordinary register constraints; the slow node carries the call ABI.
@@ -2491,14 +2485,12 @@ class InitializeEmptyArrayVertex : public FixedInputVertexMixin<ValueVertex, Ini
 public:
     enum Indices : uint32_t {
         ALLOCATION_INDEX = 0,
-        GLUE_INDEX = 1,
-        GLOBAL_ENV_INDEX = 2,
-        HCLASS_INDEX = 3,
-        NUM_INPUTS = 4
+        GLOBAL_ENV_INDEX = 1,
+        HCLASS_INDEX = 2,
+        NUM_INPUTS = 3
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {ValueRepresentation::TAGGED,
-                                                                         ValueRepresentation::INT_PTR,
                                                                          ValueRepresentation::TAGGED,
                                                                          ValueRepresentation::TAGGED};
     static constexpr VertexPropertyFlag PROPERTIES
@@ -2519,14 +2511,12 @@ class InitializeArrayWithBufferVertex : public FixedInputVertexMixin<ValueVertex
 public:
     enum Indices : uint32_t {
         ALLOCATION_INDEX = 0,
-        GLUE_INDEX = 1,
-        LITERAL_INDEX = 2,
-        HCLASS_INDEX = 3,
-        NUM_INPUTS = 4
+        LITERAL_INDEX = 1,
+        HCLASS_INDEX = 2,
+        NUM_INPUTS = 3
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {ValueRepresentation::TAGGED,
-                                                                         ValueRepresentation::INT_PTR,
                                                                          ValueRepresentation::TAGGED,
                                                                          ValueRepresentation::TAGGED};
     static constexpr VertexPropertyFlag PROPERTIES
@@ -2589,8 +2579,7 @@ public:
         ALLOCATION_INDEX = 2,
         LENGTH_INDEX = 3,
         HCLASS_INDEX = 4,
-        GLUE_INDEX = 5,
-        NUM_INPUTS = 6,
+        NUM_INPUTS = 5,
     };
 
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
@@ -2600,7 +2589,6 @@ public:
         ValueRepresentation::TAGGED,
         ValueRepresentation::INT32,
         ValueRepresentation::TAGGED,
-        ValueRepresentation::INT_PTR,
     };
     static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_READ |
                                                      VertexPropertyFlag::CAN_WRITE |
@@ -2622,18 +2610,16 @@ class InitializeUnmappedArgumentsVertex
     : public FixedInputVertexMixin<ValueVertex, InitializeUnmappedArgumentsVertex> {
 public:
     enum Indices : uint32_t {
-        GLUE_INDEX = 0,
-        NUM_ARGS_INDEX = 1,
-        ALLOCATION_INDEX = 2,
-        ELEMENTS_INDEX = 3,
-        GLOBAL_ENV_INDEX = 4,
-        HCLASS_INDEX = 5,
-        NUM_INPUTS = 6,
+        NUM_ARGS_INDEX = 0,
+        ALLOCATION_INDEX = 1,
+        ELEMENTS_INDEX = 2,
+        GLOBAL_ENV_INDEX = 3,
+        HCLASS_INDEX = 4,
+        NUM_INPUTS = 5,
     };
 
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
-        ValueRepresentation::INT_PTR,
         ValueRepresentation::INT64,
         ValueRepresentation::TAGGED,
         ValueRepresentation::TAGGED,
@@ -2990,6 +2976,9 @@ public:
     // Non-asserting mirror of `VerifyInputs()`: one declaration of this
     // opcode's input contract, reused by the Debug assertion below and by the
     // normal Debug `ArkSteedGraphVerifier` through `VerifyInputs()`.
+    // The inputs are the stub arguments for parameters 1..N; parameter 0
+    // (glue) is installed by ArkSteedAssembler::CallCommonStub from the glue
+    // root register and is not an IR input.
     bool CheckInputs() const
     {
         return details::StoredInputCount(this) >= 1;
@@ -3297,15 +3286,13 @@ public:
 class StringEqualVertex : public FixedInputVertexMixin<ValueVertex, StringEqualVertex> {
 public:
     enum Indices : uint32_t {
-        GLUE_INDEX = 0,
-        LEFT_INDEX = 1,
-        RIGHT_INDEX = 2,
-        GLOBAL_ENV_INDEX = 3,
-        NUM_INPUTS = 4,
+        LEFT_INDEX = 0,
+        RIGHT_INDEX = 1,
+        GLOBAL_ENV_INDEX = 2,
+        NUM_INPUTS = 3,
     };
     static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
     static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
-        ValueRepresentation::INT_PTR,
         ValueRepresentation::TAGGED,
         ValueRepresentation::TAGGED,
         ValueRepresentation::TAGGED,

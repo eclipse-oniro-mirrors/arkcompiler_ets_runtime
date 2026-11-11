@@ -575,7 +575,8 @@ protected:
         fixture.call = NewVertex<CallVertex>(callInputs, callActualArgc);
         // A production-shaped runtime call with no input at all.
         fixture.runtimeCall = NewVertex<CallRuntimeVertex>({}, RTSTUB_ID(NewTaggedArray), SideEffectKind::SAFE_CALL);
-        // A common-stub call with the implemented minimum of one input (the glue).
+        // A common-stub call with the implemented minimum of one input (the
+        // first stub argument; glue is no longer an IR input).
         fixture.commonStub =
             NewVertex<CallCommonStubVertex>(commonStubInputs, CommonStubID::ToBooleanTrue, SideEffectKind::SAFE_CALL);
         // A selected fixed-input control branch: two INT32 inputs.

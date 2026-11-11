@@ -21,6 +21,7 @@
 
 #include <limits>
 
+#include "ecmascript/arksteed/arksteed_assembler-inl.h"
 #include "ecmascript/arksteed/arksteed_assembler.h"
 #include "ecmascript/arksteed/arksteed_graph.h"
 #include "ecmascript/base/bit_helper.h"
@@ -457,14 +458,14 @@ void ArkSteedAssembler::NormalizeEagerDeoptOverflowLink()
 void ArkSteedAssembler::CallArkSteedDeoptimizationEntry()
 {
     ASSERT(temporaryRegisterScope_ == nullptr);
-    ASSERT(entryThread_ != nullptr);
 
+    // The entry ABI expects glue in ARKSTEED_EAGER_DEOPT_ENTRY_GLUE_REGISTER
+    // (x17); forward it from the glue root register (x28).
     ArkSteedRegister glue = ARKSTEED_EAGER_DEOPT_ENTRY_GLUE_REGISTER;
     ArkSteedRegister target = ARKSTEED_EAGER_DEOPT_ENTRY_TARGET_REGISTER;
-    Move(glue, static_cast<uint64_t>(entryThread_->GetGlueAddr()));
+    Move(glue, GLUE_ROOT_REGISTER);
 
-    Address address = entryThread_->GetRTInterface(RTSTUB_ID(ArkSteedDeoptimizationEntry));
-    Move(target, static_cast<uint64_t>(address));
+    LoadStubEntry(target, RTSTUB_ID(ArkSteedDeoptimizationEntry));
     Push(aarch64::lr);
     Call(target);
 }
@@ -1550,8 +1551,8 @@ void ArkSteedAssembler::BranchIfNoPendingException(Label *target)
 {
     TemporaryRegisterScope scope(this);
     ArkSteedRegister scratch = scope.AcquireScratch();
-    Move(scratch, static_cast<uint64_t>(entryThread_->GetGlueAddr()));
-    LoadField(scratch, scratch, static_cast<int32_t>(JSThread::GlueData::GetExceptionOffset(false)));
+    LoadField(scratch, GLUE_ROOT_REGISTER,
+              static_cast<int32_t>(JSThread::GlueData::GetExceptionOffset(false)));
     Compare(scratch, static_cast<int32_t>(JSTaggedValue::VALUE_HOLE));
     JumpIf(Condition::EQUAL, target);
 }
@@ -1560,8 +1561,8 @@ void ArkSteedAssembler::BranchIfPendingException(Label *target)
 {
     TemporaryRegisterScope scope(this);
     ArkSteedRegister scratch = scope.AcquireScratch();
-    Move(scratch, static_cast<uint64_t>(entryThread_->GetGlueAddr()));
-    LoadField(scratch, scratch, static_cast<int32_t>(JSThread::GlueData::GetExceptionOffset(false)));
+    LoadField(scratch, GLUE_ROOT_REGISTER,
+              static_cast<int32_t>(JSThread::GlueData::GetExceptionOffset(false)));
     Compare(scratch, static_cast<int32_t>(JSTaggedValue::VALUE_HOLE));
     JumpIf(Condition::NOT_EQUAL, target);
 }

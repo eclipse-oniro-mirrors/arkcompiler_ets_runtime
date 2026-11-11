@@ -108,6 +108,11 @@ void ArkSteedCall::PrepareSteedCallFrame(ExtendedAssembler *assembler, Register 
 
     OptimizedCall::PushOptimizedArgsConfigFrame(assembler);
     __ CalleeSave();
+    // Install the glue root register expected by the generated callee. CalleeSave
+    // has already preserved the caller's x28, and glue (x0, the entry C arg0) is
+    // still live at this point. x28 stays valid for the callee's whole execution:
+    // it is excluded from ArkSteed register allocation and is AAPCS64 callee-saved.
+    __ Mov(x28, glue);
     // Keep one aligned bridge-local area outside the generated callee's
     // argument frame. The first slot stores the logical outgoing-frame size.
     __ Sub(sp, sp, Immediate(STEED_CALL_LOCAL_SIZE));
@@ -249,12 +254,19 @@ void ArkSteedCall::ArkSteedDeoptimizationEntry(ExtendedAssembler *assembler)
     // AAPCS64 requires sp to remain 16-byte aligned. Neither bl nor blr changes
     // sp, and the 464-byte entry frame preserves that alignment.
     __ Sub(sp, sp, Operand(Immediate(entryFrameSize)));
-    for (uint32_t slot = 0; slot < eager_deopt_abi::GENERAL_REGISTER_CODES.size(); slot += 2U) {
+    // GENERAL_REGISTER_CODES has an odd count (25: x28 is the ArkSteed glue
+    // root register), so the last entry is stored singly after the pairs.
+    for (uint32_t slot = 0; slot + 1U < eager_deopt_abi::GENERAL_REGISTER_CODES.size(); slot += 2U) {
         Register first =
             Register::FromCode(static_cast<int8_t>(eager_deopt_abi::GENERAL_REGISTER_CODES[slot]));
         Register second =
             Register::FromCode(static_cast<int8_t>(eager_deopt_abi::GENERAL_REGISTER_CODES[slot + 1U]));
         __ Stp(first, second, MemoryOperand(sp, slot * FRAME_SLOT_SIZE));
+    }
+    if (eager_deopt_abi::GENERAL_REGISTER_CODES.size() % 2U != 0U) {
+        uint32_t last = static_cast<uint32_t>(eager_deopt_abi::GENERAL_REGISTER_CODES.size() - 1U);
+        Register reg = Register::FromCode(static_cast<int8_t>(eager_deopt_abi::GENERAL_REGISTER_CODES[last]));
+        __ Str(reg, MemoryOperand(sp, last * FRAME_SLOT_SIZE));
     }
     for (uint32_t code = 0; code < eager_deopt_abi::FLOATING_REGISTER_COUNT; ++code) {
         VRegister reg = VRegister::Create(static_cast<int8_t>(code), D_REG_SIZE);

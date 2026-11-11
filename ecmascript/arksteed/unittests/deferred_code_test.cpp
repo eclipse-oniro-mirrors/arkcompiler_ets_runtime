@@ -56,11 +56,10 @@ using panda::test::BaseTestWithScope;
  *     `BB` and real IR vertices. The graph of every case is a single block that ends
  *     in its `ReturnVertex`, so the `Epilogue` comment of the return marks the beginning
  *     of the last code of the main flow.
- *   * C - `ArkSteedAssembler(chunk, nullptr, entryThread)` with
- *     `EnableComments(true)`. `compilerThread_` is never dereferenced on these paths,
- *     but every deferred body reads the glue address and the stub table from the entry
- *     thread, so `entryThread` must be a real `JSThread`; a null thread would trip the
- *     production `ASSERT` in Debug and make the case red.
+ *   * C - `ArkSteedAssembler(chunk, nullptr)` with
+ *     `EnableComments(true)`. `compilerThread_` is never dereferenced on these
+ *     paths, so a null compiler thread is enough; the cases never execute the
+ *     emitted code, they only compare comment texts.
  *
  * Independent oracle (D2): the number of deferred records is derived from the graph the
  * case builds, not from the production deferred list. `EnsureWritableElementsVertex`
@@ -104,7 +103,7 @@ struct CodegenRun {
 // One full production pipeline over the fixture graph: the real register-allocator
 // processors, the real register allocator and the real code generator. The returned
 // comment list is a copy, so the emission state may go out of scope with the case.
-CodegenRun RunCodegen(JSThread *entryThread, const GraphShape &shape)
+CodegenRun RunCodegen(const GraphShape &shape)
 {
     NativeAreaAllocator nativeArea;
     Chunk chunk(&nativeArea);
@@ -119,7 +118,6 @@ CodegenRun RunCodegen(JSThread *entryThread, const GraphShape &shape)
 
     ValueVertex *elements = graph->GetHeapConstant(0, 0);
     ValueVertex *receiver = graph->GetHeapConstant(1, 0);
-    ValueVertex *glue = graph->GetInt64Constant(0);
 
     for (uint32_t i = 0; i < shape.cowEnsureVertices; i++) {
         std::initializer_list<ValueVertex *> inputs {elements, receiver};
@@ -128,7 +126,7 @@ CodegenRun RunCodegen(JSThread *entryThread, const GraphShape &shape)
         block->AddVertex(ensure);
     }
     for (uint32_t i = 0; i < shape.barrierFieldStores; i++) {
-        std::initializer_list<ValueVertex *> inputs {glue, receiver, elements};
+        std::initializer_list<ValueVertex *> inputs {receiver, elements};
         auto *store = Vertex::New<StoreTaggedFieldWithBarrierVertex>(
             &chunk, inputs, FIELD_OFFSET, ArkSteedWriteBarrierValueKind::HeapObject);
         store->SetOwner(block);
@@ -157,7 +155,7 @@ CodegenRun RunCodegen(JSThread *entryThread, const GraphShape &shape)
     livenessProcessor.Run(graph);
     ArkSteedRegisterAllocator registerAllocator(graph);
 
-    ArkSteedAssembler assembler(&chunk, nullptr, entryThread);
+    ArkSteedAssembler assembler(&chunk, nullptr);
     assembler.EnableComments(true);
     ArkSteedSafepointTableBuilder safepointBuilder(&chunk);
     ArkSteedCodeGenerator codegen(&assembler, graph, &safepointBuilder);
@@ -326,7 +324,7 @@ class ArkSteedDeferredCodeTest : public BaseTestWithScope<false> {
  */
 HWTEST_F_L0(ArkSteedDeferredCodeTest, GraphWithoutDeferredVertexEmitsNoDeferredBlock)
 {
-    CodegenRun run = RunCodegen(thread, GraphShape {.plainFieldStores = 1});
+    CodegenRun run = RunCodegen(GraphShape {.plainFieldStores = 1});
 
     ASSERT_GT(run.codeSize, 0u) << "the fixture graph must have emitted code";
     EXPECT_GT(run.comments.size(), 0u) << "comments must be enabled for this domain";
@@ -349,7 +347,7 @@ HWTEST_F_L0(ArkSteedDeferredCodeTest, GraphWithoutDeferredVertexEmitsNoDeferredB
  */
 HWTEST_F_L0(ArkSteedDeferredCodeTest, CowEnsureVertexQueuesOneDeferredBlockBehindTheMainFlow)
 {
-    CodegenRun run = RunCodegen(thread, GraphShape {.cowEnsureVertices = 1});
+    CodegenRun run = RunCodegen(GraphShape {.cowEnsureVertices = 1});
 
     ASSERT_GT(run.codeSize, 0u);
     DeferredLayout layout = InspectLayout(run.comments, 1);
@@ -386,7 +384,7 @@ HWTEST_F_L0(ArkSteedDeferredCodeTest, CowEnsureVertexQueuesOneDeferredBlockBehin
  */
 HWTEST_F_L0(ArkSteedDeferredCodeTest, TwoCowVerticesQueueTwoDeferredBlocksInPostingOrder)
 {
-    CodegenRun run = RunCodegen(thread, GraphShape {.cowEnsureVertices = 2});
+    CodegenRun run = RunCodegen(GraphShape {.cowEnsureVertices = 2});
 
     ASSERT_GT(run.codeSize, 0u);
     DeferredLayout layout = InspectLayout(run.comments, 2);
@@ -418,7 +416,7 @@ HWTEST_F_L0(ArkSteedDeferredCodeTest, TwoCowVerticesQueueTwoDeferredBlocksInPost
  */
 HWTEST_F_L0(ArkSteedDeferredCodeTest, DeferredBlocksFollowPostingOrderAcrossVertexKinds)
 {
-    CodegenRun run = RunCodegen(thread, GraphShape {.cowEnsureVertices = 1, .barrierFieldStores = 1});
+    CodegenRun run = RunCodegen(GraphShape {.cowEnsureVertices = 1, .barrierFieldStores = 1});
 
     ASSERT_GT(run.codeSize, 0u);
     ASSERT_NE(LastCommentIndex(run.comments, MAIN_FLOW_TAIL_COMMENT), COMMENT_NOT_FOUND);
@@ -457,8 +455,8 @@ HWTEST_F_L0(ArkSteedDeferredCodeTest, DeferredBlocksFollowPostingOrderAcrossVert
  */
 HWTEST_F_L0(ArkSteedDeferredCodeTest, MutationControlRejectsLostBlockAndMidFlowBlock)
 {
-    CodegenRun emptyRun = RunCodegen(thread, GraphShape {.plainFieldStores = 1});
-    CodegenRun cowRun = RunCodegen(thread, GraphShape {.cowEnsureVertices = 1});
+    CodegenRun emptyRun = RunCodegen(GraphShape {.plainFieldStores = 1});
+    CodegenRun cowRun = RunCodegen(GraphShape {.cowEnsureVertices = 1});
 
     DeferredLayout emptyLayout = InspectLayout(emptyRun.comments, 0);
     DeferredLayout cowLayout = InspectLayout(cowRun.comments, 1);

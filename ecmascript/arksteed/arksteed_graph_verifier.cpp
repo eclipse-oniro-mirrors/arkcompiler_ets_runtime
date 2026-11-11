@@ -894,7 +894,7 @@ bool ArkSteedGraphVerifier::IsLadderFillValue(ValueVertex* fill)
     }
     auto* field = fill->TryCast<LoadTaggedFieldVertex>();
     return field != nullptr && field->GetOffset() == static_cast<int32_t>(freeObjectClassOffset)
-        && field->GetInput(LoadTaggedFieldVertex::OBJECT_INDEX)->Is<LoadTaggedFromAddressVertex>();
+        && field->GetInput(LoadTaggedFieldVertex::OBJECT_INDEX)->Is<LoadGlueTaggedFieldVertex>();
 }
 
 template<typename VertexT>
@@ -917,9 +917,6 @@ void ArkSteedGraphVerifier::VerifyInitializer(VertexT* vertex)
     auto* fast = phi->GetInput(0)->TryCast<AllocateInYoungVertex>();
     if (fast == nullptr) {
         fast = phi->GetInput(1)->Cast<AllocateInYoungVertex>();
-    }
-    if constexpr (!std::is_same_v<VertexT, InitializeUnmappedArgumentsElementsVertex>) {
-        ASSERT(vertex->GetInput(VertexT::GLUE_INDEX) == fast->GetInput(AllocateInYoungVertex::GLUE_INDEX));
     }
     auto* size = fast->GetInput(AllocateInYoungVertex::SIZE_INDEX);
     if constexpr (std::is_same_v<VertexT, InitializeUnmappedArgumentsElementsVertex>) {
@@ -1080,9 +1077,8 @@ void ArkSteedGraphVerifier::VerifyUninitializedAllocation(VertexT* vertex, const
     if constexpr (std::is_same_v<VertexT, AllocateInYoungVertex>) {
         static_assert(!IsCall(VertexT::PROPERTIES) && !CanDeopt(VertexT::PROPERTIES) &&
                       !CanThrow(VertexT::PROPERTIES) && CanAllocate(VertexT::PROPERTIES));
-        ASSERT(check->GetInput(CanAllocateInYoungVertex::GLUE_INDEX) == vertex->GetInput(VertexT::GLUE_INDEX) &&
-               size == vertex->GetInput(VertexT::SIZE_INDEX) &&
-               "Allocation must match the checked glue and size");
+        ASSERT(size == vertex->GetInput(VertexT::SIZE_INDEX) &&
+               "Allocation must match the checked size");
         ASSERT(branch->IfTrue() == block && "Fast allocation requires the successful check edge");
     } else {
         static_assert(IsCall(VertexT::PROPERTIES) && CanAllocate(VertexT::PROPERTIES));
