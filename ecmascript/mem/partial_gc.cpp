@@ -106,6 +106,7 @@ void PartialGC::Initialize()
             if (heap_->GetEvacuateNonMovableSpace()) {
                 heap_->GetNonMovableSpace()->SelectCSet();
             }
+            heap_->GetNativePointerSpace()->PrepareEvacuation();
             heap_->GetAppSpawnSpace()->EnumerateRegions([](Region *current) {
                 current->ClearMarkGCBitset();
                 current->ClearCrossRegionRSet();
@@ -123,6 +124,10 @@ void PartialGC::Finish()
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "PartialGC::Finish", "");
     TRACE_GC(GCStats::Scope::ScopeId::Finish, heap_->GetEcmaVM()->GetEcmaGCStats());
     bool cmsGC = heap_->GetCmsGC();
+    if (!heap_->IsYoungMark()) {
+        heap_->ProcessNativePointerCallbacks();
+        heap_->GetNativePointerSpace()->MergeToGCRegions();
+    }
     if (markingInProgress_) {
         ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "ConcurrentMarker::Reset", "");
         auto marker = heap_->GetConcurrentMarker();
@@ -193,7 +198,9 @@ void PartialGC::Mark()
 void PartialGC::Sweep()
 {
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "PartialGC::Sweep", "");
-    ProcessNativeDelete();
+    if constexpr (G_USE_CMS_GC) {
+        ProcessNativeDelete();
+    }
     if (heap_->IsYoungMark()) {
         if (heap_->GetCmsGC()) {
             heap_->GetSweeper()->Sweep(TriggerGCType::YOUNG_GC);

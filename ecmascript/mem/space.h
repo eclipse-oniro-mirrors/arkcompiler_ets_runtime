@@ -35,6 +35,7 @@ enum MemSpaceType {
     NON_MOVABLE,
     MACHINE_CODE_SPACE,
     SLOT_SPACE,
+    NATIVE_POINTER_SPACE,
     HUGE_OBJECT_SPACE,
     SNAPSHOT_SPACE,
     COMPRESS_SPACE,
@@ -116,6 +117,8 @@ static inline std::string ToSpaceTypeName(MemSpaceType type)
             return "compress space";
         case SHARED_APPSPAWN_SPACE:
             return "shared appspawn space";
+        case NATIVE_POINTER_SPACE:
+            return "native pointer space";
         default:
             return "unknown space";
     }
@@ -212,7 +215,8 @@ public:
     bool IsOOMDumpSpace()
     {
         return spaceType_ == SEMI_SPACE || spaceType_ == OLD_SPACE || spaceType_ == NON_MOVABLE ||
-            spaceType_ == HUGE_OBJECT_SPACE || spaceType_ == MODULE_SPACE;
+            spaceType_ == HUGE_OBJECT_SPACE || spaceType_ == MODULE_SPACE ||
+            spaceType_ == NATIVE_POINTER_SPACE;
     }
 
     // methods for allocation inspector

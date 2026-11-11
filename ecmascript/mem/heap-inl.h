@@ -37,6 +37,7 @@
 #include "ecmascript/mem/local_cmc/concurrent_copy_gc.h"
 #include "ecmascript/mem/mem.h"
 #include "ecmascript/mem/mem_controller.h"
+#include "ecmascript/mem/native_pointer_space.h"
 #include "ecmascript/mem/shared_heap/global_gc.h"
 #include "ecmascript/mem/shared_mem_controller.h"
 #include "ecmascript/mem/sparse_space.h"
@@ -124,6 +125,7 @@ void Heap::EnumerateOldSpaceRegions(const Callback &cb, Region *region) const
     } else {
         ASSERT(!G_USE_CMS_GC);
         oldSpace_->EnumerateRegions(cb);
+        nativePointerSpace_->EnumerateRegions(cb);
     }
     appSpawnSpace_->EnumerateRegions(cb);
     nonMovableSpace_->EnumerateRegions(cb);
@@ -150,6 +152,7 @@ void Heap::EnumerateNonNewSpaceRegions(const Callback &cb) const
         if (!isCSetClearing_.load(std::memory_order_acquire)) {
             oldSpace_->EnumerateCollectRegionSet(cb);
         }
+        nativePointerSpace_->EnumerateRegions(cb);
     }
     appSpawnSpace_->EnumerateRegions(cb);
     snapshotSpace_->EnumerateRegions(cb);
@@ -171,6 +174,7 @@ void Heap::EnumerateNonNewSpaceRegionsWithRecord(const Callback &cb) const
         if (!isCSetClearing_.load(std::memory_order_acquire)) {
             oldSpace_->EnumerateCollectRegionSet(cb);
         }
+        nativePointerSpace_->EnumerateRegionsWithRecord(cb);
     }
     snapshotSpace_->EnumerateRegionsWithRecord(cb);
     nonMovableSpace_->EnumerateRegionsWithRecord(cb);
@@ -216,6 +220,7 @@ void Heap::EnumerateRegions(const Callback &cb) const
         if (!isCSetClearing_.load(std::memory_order_acquire)) {
             oldSpace_->EnumerateCollectRegionSet(cb);
         }
+        nativePointerSpace_->EnumerateRegions(cb);
     }
     appSpawnSpace_->EnumerateRegions(cb);
     snapshotSpace_->EnumerateRegions(cb);
@@ -236,6 +241,7 @@ void Heap::IterateOverObjects(const Callback &cb, bool isSimplify) const
     } else {
         activeSemiSpace_->IterateOverObjects(cb);
         oldSpace_->IterateOverObjects(cb);
+        nativePointerSpace_->IterateOverObjects(cb);
     }
     nonMovableSpace_->IterateOverObjects(cb);
     hugeObjectSpace_->IterateOverObjects(cb);
@@ -543,7 +549,7 @@ TaggedObject *Heap::AllocateOldOrHugeObject(size_t size)
                 LOG_GC(ERROR) << "Heap::AllocateOldOrHugeObject almost OOM, obj size: " << GetHeapObjectSize()
                               << ", committed size: " << GetCommittedSize();
                 CollectGarbage(TriggerGCType::FULL_GC, GCReason::ALLOCATION_FAILED);
-                size_t committedSize = oldSpace_->GetCommittedSize() + hugeObjectSpace_->GetCommittedSize();
+                size_t committedSize = GetOldSpaceCommittedSize() + hugeObjectSpace_->GetCommittedSize();
                 size_t capacity = oldSpace_->GetMaximumCapacity();
                 size_t usableSize = std::max(committedSize, capacity) - committedSize;
                 if (usableSize > MIN_USABLE_MEMORY_THRESHOLD_TO_OOM_AFTER_FULL_GC) {
@@ -567,6 +573,55 @@ TaggedObject *Heap::AllocateOldOrHugeObject(JSHandle<JSHClass> hclass, size_t si
 #endif
 #if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER)
     OnAllocateEvent(GetEcmaVM(), reinterpret_cast<TaggedObject*>(object), size);
+#endif
+    return object;
+}
+
+TaggedObject *Heap::AllocateNativePointerObject(JSHandle<JSHClass> hclass)
+{
+    constexpr size_t size = JSNativePointer::SIZE;
+    auto allocateNativePointer = [this]() {
+        return reinterpret_cast<TaggedObject *>(nativePointerSpace_->Allocate());
+    };
+    TaggedObject *object = allocateNativePointer();
+    if (UNLIKELY(object == nullptr)) {
+        bool gcSuccess = CheckAndTriggerOldGC();
+        if (gcSuccess) {
+            object = allocateNativePointer();
+        }
+    }
+    if (UNLIKELY(object == nullptr)) {
+        CollectGarbage(TriggerGCType::OLD_GC, GCReason::ALLOCATION_FAILED);
+        object = allocateNativePointer();
+    }
+    if (UNLIKELY(object == nullptr)) {
+        LOG_GC(ERROR) << "Heap::AllocateNativePointerObject almost OOM, obj size: " << GetHeapObjectSize()
+                      << ", committed size: " << GetCommittedSize();
+        CollectGarbage(TriggerGCType::FULL_GC, GCReason::ALLOCATION_FAILED);
+        size_t committedSize = GetOldSpaceCommittedSize() + hugeObjectSpace_->GetCommittedSize();
+        size_t capacity = oldSpace_->GetMaximumCapacity();
+        size_t usableSize = std::max(committedSize, capacity) - committedSize;
+        if (usableSize > MIN_USABLE_MEMORY_THRESHOLD_TO_OOM_AFTER_FULL_GC) {
+            object = allocateNativePointer();
+        }
+    }
+    if (UNLIKELY(object == nullptr)) {
+        EcmaVM *vm = GetEcmaVM();
+        size_t oomOvershootSize = vm->GetEcmaParamConfiguration().GetOutOfMemoryOvershootSize();
+        nativePointerSpace_->IncreaseOutOfMemoryOvershootSize(oomOvershootSize);
+        if (nativePointerSpace_->IsOOMDumpSpace()) {
+            DumpHeapSnapshotBeforeOOM(false, ToSpaceTypeName(nativePointerSpace_->GetSpaceType()), size,
+                                      LOCAL_HEAP_STR);
+        }
+        StatisticHeapDetail();
+        ThrowOutOfMemoryError(GetJSThread(), size,
+            "Heap::AllocateNativePointerObject, local heap oom, used size: " + std::to_string(GetHeapObjectSize()) +
+            " bytes, committed size: " + std::to_string(GetCommittedSize()) + " bytes");
+        object = reinterpret_cast<TaggedObject *>(nativePointerSpace_->Allocate());
+    }
+    object->SetClass(thread_, *hclass);
+#if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER)
+    OnAllocateEvent(GetEcmaVM(), object, size);
 #endif
     return object;
 }
@@ -689,7 +744,7 @@ TaggedObject *Heap::AllocateHugeObject(size_t size)
             LOG_GC(ERROR) << "Heap::AllocateHugeObject almost OOM, obj size: " << GetHeapObjectSize()
                           << ", committed size: " << GetCommittedSize();
             CollectGarbage(TriggerGCType::FULL_GC, GCReason::ALLOCATION_FAILED);
-            size_t committedSize = oldSpace_->GetCommittedSize() + hugeObjectSpace_->GetCommittedSize();
+            size_t committedSize = GetOldSpaceCommittedSize() + hugeObjectSpace_->GetCommittedSize();
             size_t capacity = oldSpace_->GetMaximumCapacity();
             size_t usableSize = std::max(committedSize, capacity) - committedSize;
             if (usableSize > MIN_USABLE_MEMORY_THRESHOLD_TO_OOM_AFTER_FULL_GC) {
@@ -1014,6 +1069,9 @@ void Heap::ReclaimRegions(TriggerGCType gcType, bool cmsGC)
         if (!cmsGC) {
             clearActiveSemiSpace(false);
         }
+        if constexpr (!G_USE_CMS_GC) {
+            nativePointerSpace_->ReclaimFromRegions();
+        }
         size_t cachedSize = 0;
         cachedSize = inactiveSemiSpace_->GetInitialCapacity();
         if (gcType == TriggerGCType::FULL_GC || gcType == TriggerGCType::LOCAL_CC) {
@@ -1096,7 +1154,7 @@ size_t Heap::GetCommittedSize() const
         result += slotSpace_->GetCommittedSize();
     } else {
         result += activeSemiSpace_->GetCommittedSize() +
-                  oldSpace_->GetCommittedSize();
+                  GetOldSpaceCommittedSize();
     }
     return result;
 }
@@ -1116,7 +1174,7 @@ size_t Heap::GetHeapObjectSize() const
         result += slotSpace_->GetHeapObjectSize();
     } else {
         result += activeSemiSpace_->GetHeapObjectSize() +
-                  oldSpace_->GetHeapObjectSize();
+                  GetOldSpaceSize();
     }
     return result;
 }
@@ -1147,6 +1205,7 @@ size_t Heap::GetRegionCount() const
     size_t result = activeSemiSpace_->GetRegionCount() +
         oldSpace_->GetRegionCount() +
         oldSpace_->GetCollectSetRegionCount() +
+        nativePointerSpace_->GetRegionCount() +
         appSpawnSpace_->GetRegionCount() +
         snapshotSpace_->GetRegionCount() +
         nonMovableSpace_->GetRegionCount() +
@@ -1734,15 +1793,18 @@ void Heap::ProcessNativeDelete(const WeakRootVisitor& visitor)
             ("ProcessNativeDeleteNum:" + std::to_string(nativePointerList_.size())
             + ";ConcurrentNum:" + std::to_string(concurrentNativePointerList_.size())).c_str(), "");
 
-        auto& asyncNativeCallbacksPack = GetEcmaVM()->GetAsyncNativePointerCallbacksPack();
         auto iter = nativePointerList_.begin();
         while (iter != nativePointerList_.end()) {
             JSNativePointer *object = reinterpret_cast<JSNativePointer *>((*iter).GetTaggedObject());
             auto fwd = visitor(reinterpret_cast<TaggedObject*>(object));
             if (fwd == nullptr) {
                 size_t bindingSize = object->GetBindingSize();
-                asyncNativeCallbacksPack.AddCallback(std::make_pair(object->GetDeleter(),
-                    std::make_tuple(thread_->GetEnv(), object->GetExternalPointer(), object->GetData())), bindingSize);
+                DecreaseNativeBindingSize(bindingSize);
+                AddAsyncNativePointerCallback(
+                    std::make_pair(
+                        object->GetDeleter(),
+                        std::make_tuple(thread_->GetEnv(), object->GetExternalPointer(), object->GetData())),
+                    bindingSize);
                 nativeAreaAllocator_->DecreaseNativeSizeStats(bindingSize, object->GetNativeFlag());
                 SwapBackAndPop(nativePointerList_, iter);
             } else {
@@ -1751,15 +1813,16 @@ void Heap::ProcessNativeDelete(const WeakRootVisitor& visitor)
         }
         ShrinkWithFactor(nativePointerList_);
 
-        auto& concurrentNativeCallbacks = GetEcmaVM()->GetConcurrentNativePointerCallbacks();
         auto newIter = concurrentNativePointerList_.begin();
         while (newIter != concurrentNativePointerList_.end()) {
             JSNativePointer *object = reinterpret_cast<JSNativePointer *>((*newIter).GetTaggedObject());
             auto fwd = visitor(reinterpret_cast<TaggedObject*>(object));
             if (fwd == nullptr) {
+                DecreaseNativeBindingSize(object->GetBindingSize());
                 nativeAreaAllocator_->DecreaseNativeSizeStats(object->GetBindingSize(), object->GetNativeFlag());
-                concurrentNativeCallbacks.emplace_back(object->GetDeleter(),
-                    std::make_tuple(thread_->GetEnv(), object->GetExternalPointer(), object->GetData()));
+                AddConcurrentNativePointerCallback(std::make_pair(
+                    object->GetDeleter(),
+                    std::make_tuple(thread_->GetEnv(), object->GetExternalPointer(), object->GetData())));
                 SwapBackAndPop(concurrentNativePointerList_, newIter);
             } else {
                 ++newIter;
@@ -1777,8 +1840,6 @@ void Heap::ProcessReferences(const WeakRootVisitor& visitor)
             ("ProcessReferencesNum:" + std::to_string(nativePointerList_.size())
             + ";ConcurrentNum:" + std::to_string(concurrentNativePointerList_.size())).c_str(), "");
 
-        auto& asyncNativeCallbacksPack = GetEcmaVM()->GetAsyncNativePointerCallbacksPack();
-        ResetNativeBindingSize();
         // array buffer
         auto iter = nativePointerList_.begin();
         while (iter != nativePointerList_.end()) {
@@ -1786,13 +1847,16 @@ void Heap::ProcessReferences(const WeakRootVisitor& visitor)
             auto fwd = visitor(reinterpret_cast<TaggedObject*>(object));
             if (fwd == nullptr) {
                 size_t bindingSize = object->GetBindingSize();
-                asyncNativeCallbacksPack.AddCallback(std::make_pair(object->GetDeleter(),
-                    std::make_tuple(thread_->GetEnv(), object->GetExternalPointer(), object->GetData())), bindingSize);
+                DecreaseNativeBindingSize(bindingSize);
+                AddAsyncNativePointerCallback(
+                    std::make_pair(
+                        object->GetDeleter(),
+                        std::make_tuple(thread_->GetEnv(), object->GetExternalPointer(), object->GetData())),
+                    bindingSize);
                 nativeAreaAllocator_->DecreaseNativeSizeStats(bindingSize, object->GetNativeFlag());
                 SwapBackAndPop(nativePointerList_, iter);
                 continue;
             }
-            IncreaseNativeBindingSize(JSNativePointer::Cast(fwd));
             if (fwd != reinterpret_cast<TaggedObject*>(object)) {
                 *iter = JSTaggedValue(fwd);
             }
@@ -1800,19 +1864,19 @@ void Heap::ProcessReferences(const WeakRootVisitor& visitor)
         }
         ShrinkWithFactor(nativePointerList_);
 
-        auto& concurrentNativeCallbacks = GetEcmaVM()->GetConcurrentNativePointerCallbacks();
         auto newIter = concurrentNativePointerList_.begin();
         while (newIter != concurrentNativePointerList_.end()) {
             JSNativePointer *object = reinterpret_cast<JSNativePointer *>((*newIter).GetTaggedObject());
             auto fwd = visitor(reinterpret_cast<TaggedObject*>(object));
             if (fwd == nullptr) {
+                DecreaseNativeBindingSize(object->GetBindingSize());
                 nativeAreaAllocator_->DecreaseNativeSizeStats(object->GetBindingSize(), object->GetNativeFlag());
-                concurrentNativeCallbacks.emplace_back(object->GetDeleter(),
-                    std::make_tuple(thread_->GetEnv(), object->GetExternalPointer(), object->GetData()));
+                AddConcurrentNativePointerCallback(std::make_pair(
+                    object->GetDeleter(),
+                    std::make_tuple(thread_->GetEnv(), object->GetExternalPointer(), object->GetData())));
                 SwapBackAndPop(concurrentNativePointerList_, newIter);
                 continue;
             }
-            IncreaseNativeBindingSize(JSNativePointer::Cast(fwd));
             if (fwd != reinterpret_cast<TaggedObject*>(object)) {
                 *newIter = JSTaggedValue(fwd);
             }
@@ -1841,7 +1905,6 @@ void Heap::IteratorNativePointerList(WeakVisitor &visitor)
         ("IteratorNativePointerListNum:" + std::to_string(nativePointerList_.size())
         + ";ConcurrentNum:" + std::to_string(concurrentNativePointerList_.size())).c_str(), "");
 
-    auto& asyncNativeCallbacksPack = GetEcmaVM()->GetAsyncNativePointerCallbacksPack();
     auto iter = nativePointerList_.begin();
     while (iter != nativePointerList_.end()) {
         ObjectSlot slot(reinterpret_cast<uintptr_t>(&(*iter)));
@@ -1849,8 +1912,10 @@ void Heap::IteratorNativePointerList(WeakVisitor &visitor)
         if (!isAlive) {
             JSNativePointer *object = reinterpret_cast<JSNativePointer *>((*iter).GetTaggedObject());
             size_t bindingSize = object->GetBindingSize();
-            asyncNativeCallbacksPack.AddCallback(std::make_pair(object->GetDeleter(),
-                std::make_tuple(thread_->GetEnv(), object->GetExternalPointer(), object->GetData())), bindingSize);
+            AddAsyncNativePointerCallback(
+                std::make_pair(object->GetDeleter(),
+                               std::make_tuple(thread_->GetEnv(), object->GetExternalPointer(), object->GetData())),
+                bindingSize);
             nativeAreaAllocator_->DecreaseNativeSizeStats(bindingSize, object->GetNativeFlag());
             common::BaseRuntime::NotifyNativeFree(bindingSize);
             SwapBackAndPop(nativePointerList_, iter);
@@ -1860,7 +1925,6 @@ void Heap::IteratorNativePointerList(WeakVisitor &visitor)
     }
     ShrinkWithFactor(nativePointerList_);
 
-    auto& concurrentNativeCallbacks = GetEcmaVM()->GetConcurrentNativePointerCallbacks();
     auto concurrentIter = concurrentNativePointerList_.begin();
     while (concurrentIter != concurrentNativePointerList_.end()) {
         ObjectSlot slot(reinterpret_cast<uintptr_t>(&(*concurrentIter)));
@@ -1868,8 +1932,9 @@ void Heap::IteratorNativePointerList(WeakVisitor &visitor)
         if (!isAlive) {
             JSNativePointer *object = reinterpret_cast<JSNativePointer *>((*concurrentIter).GetTaggedObject());
             nativeAreaAllocator_->DecreaseNativeSizeStats(object->GetBindingSize(), object->GetNativeFlag());
-            concurrentNativeCallbacks.emplace_back(object->GetDeleter(),
-                std::make_tuple(thread_->GetEnv(), object->GetExternalPointer(), object->GetData()));
+            AddConcurrentNativePointerCallback(std::make_pair(
+                object->GetDeleter(),
+                std::make_tuple(thread_->GetEnv(), object->GetExternalPointer(), object->GetData())));
             common::BaseRuntime::NotifyNativeFree(object->GetBindingSize());
             SwapBackAndPop(concurrentNativePointerList_, concurrentIter);
         } else {
@@ -1901,6 +1966,12 @@ void Heap::RemoveFromNativePointerList(const JSNativePointer* pointer)
 
 void Heap::ClearNativePointerList()
 {
+    if constexpr (!G_USE_CMS_GC) {
+        ProcessNativePointerCallbacks();
+        CleanCallback();
+        nativePointerSpace_->ClearAll(thread_);
+        return;
+    }
     for (auto iter : nativePointerList_) {
         reinterpret_cast<JSNativePointer *>(iter.GetTaggedObject())->Destroy(thread_);
     }

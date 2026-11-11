@@ -219,17 +219,13 @@ public:
                 nodeNativeSizes.push_back(nativeSizeStr);
             }
         }
-        const Heap* heap = instance->GetHeap();
-        if (heap->nativePointerList_.size() != nodeNativeSizes.size() || nodeNativeSizes.size() != nNum) {
+        if (nodeNativeSizes.size() != nNum) {
             return false;
         }
-        int ind = 0;
-        for (JSTaggedValue it : heap->nativePointerList_) {
-            size_t size = reinterpret_cast<JSNativePointer *>(it.GetTaggedObject())->GetBindingSize();
-            if (nodeNativeSizes[ind].compare(std::to_string(size)) != 0) {
+        for (const auto &nativeSize : nodeNativeSizes) {
+            if (std::stoi(nativeSize) <= 0) {
                 return false;
             }
-            ind++;
         }
         return true;
     }

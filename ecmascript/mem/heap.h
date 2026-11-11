@@ -19,6 +19,7 @@
 #include "ecmascript/base/config.h"
 
 #include <array>
+#include <atomic>
 
 #include "common_components/taskpool/task.h"
 #include "ecmascript/cross_vm/heap_hybrid.h"
@@ -36,6 +37,7 @@
 #include "ecmascript/mem/mark_stack.h"
 #include "ecmascript/mem/local_cmc/local_cc_native_pointer_callback.h"
 #include "ecmascript/mem/module_space.h"
+#include "ecmascript/mem/native_pointer_space.h"
 #include "ecmascript/mem/shared_heap/shared_memory_reallocator.h"
 #include "ecmascript/mem/shared_heap/shared_space.h"
 #include "ecmascript/mem/sparse_space.h"
@@ -73,6 +75,8 @@ class UnifiedGCMarker;
 class MemController;
 class IdleGCTrigger;
 class NativeAreaAllocator;
+class SweepableSpace;
+SweepableSpace *GetSweepableSpace(NativePointerSpace *space);
 class ParallelEvacuator;
 class PartialGC;
 class StickySweepGC;
@@ -1314,6 +1318,9 @@ public:
         return oldSpace_;
     }
 
+    size_t GetOldSpaceSize() const;
+    size_t GetOldSpaceCommittedSize() const;
+
     SlotSpace *GetSlotSpace() const
     {
         return slotSpace_;
@@ -1322,6 +1329,11 @@ public:
     ModuleSpace *GetModuleSpace() const
     {
         return moduleSpace_;
+    }
+
+    NativePointerSpace *GetNativePointerSpace() const
+    {
+        return nativePointerSpace_;
     }
 
     OldSpace *GetCompressSpace() const
@@ -1381,6 +1393,8 @@ public:
         switch (type) {
             case MemSpaceType::SLOT_SPACE:
                 return slotSpace_;
+            case MemSpaceType::NATIVE_POINTER_SPACE:
+                return GetSweepableSpace(nativePointerSpace_);
             case MemSpaceType::SEMI_SPACE:
                 return activeSemiSpace_;
             case MemSpaceType::OLD_SPACE:
@@ -1526,6 +1540,7 @@ public:
     inline TaggedObject *AllocateOldOrHugeObject(JSHandle<JSHClass> hclass);
     inline TaggedObject *AllocateOldOrHugeObject(JSHandle<JSHClass> hclass, size_t size);
     inline TaggedObject *AllocateOldOrHugeObject(size_t size);
+    inline TaggedObject *AllocateNativePointerObject(JSHandle<JSHClass> hclass);
     // Non-movable
     inline TaggedObject *AllocateNonMovableOrHugeObject(JSHandle<JSHClass> hclass);
     inline TaggedObject *AllocateNonMovableOrHugeObject(JSHandle<JSHClass> hclass, size_t size);
@@ -1645,7 +1660,7 @@ public:
     void WaitAllTasksFinished();
     void WaitConcurrentMarkingFinished();
     PUBLIC_API void WaitCCFinished() const;
-    void WaitAndHandleCCFinished();
+    void WaitAndHandleCCFinished(bool cleanCallback = true);
 
     MemGrowingType GetMemGrowingType() const
     {
@@ -1882,8 +1897,7 @@ public:
         if constexpr (G_USE_CMS_GC) {
             return SlotSpaceExceedCapacity(size);
         }
-        size_t totalSize = oldSpace_->GetCommittedSize() + hugeObjectSpace_->GetCommittedSize() +
-                           moduleSpace_->GetCommittedSize() + size;
+        size_t totalSize = GetOldSpaceCommittedSize() + hugeObjectSpace_->GetCommittedSize() + size;
         return totalSize >= oldSpace_->GetMaximumCapacity() + oldSpace_->GetOvershootSize() +
                oldSpace_->GetOutOfMemoryOvershootSize();
     }
@@ -1894,8 +1908,7 @@ public:
         if constexpr (G_USE_CMS_GC) {
             return SlotSpaceExceedLimit();
         }
-        size_t totalSize = oldSpace_->GetHeapObjectSize() + hugeObjectSpace_->GetHeapObjectSize() +
-                           moduleSpace_->GetHeapObjectSize();
+        size_t totalSize = GetOldSpaceSize() + hugeObjectSpace_->GetHeapObjectSize();
         return totalSize >= oldSpace_->GetInitialCapacity() + oldSpace_->GetOvershootSize();
     }
 
@@ -1933,7 +1946,7 @@ public:
     void DecreaseNativeBindingSize(size_t size);
     void ResetNativeBindingSize()
     {
-        nativeBindingSize_ = 0;
+        nativeBindingSize_.store(0, std::memory_order_relaxed);
     }
 
     size_t GetNativeBindingSize() const
@@ -1941,7 +1954,7 @@ public:
         if (g_isEnableCMCGC) {
             return common::BaseRuntime::GetNotifiedNativeSize();
         }
-        return nativeBindingSize_;
+        return nativeBindingSize_.load(std::memory_order_relaxed);
     }
 
     size_t GetGlobalSpaceNativeLimit() const
@@ -1962,7 +1975,7 @@ public:
     void ResetNativeSizeAfterLastGC()
     {
         nativeSizeAfterLastGC_ = 0;
-        nativeBindingSizeAfterLastGC_= nativeBindingSize_;
+        nativeBindingSizeAfterLastGC_ = GetNativeBindingSize();
     }
 
     void IncNativeSizeAfterLastGC(size_t size)
@@ -1972,8 +1985,9 @@ public:
 
     bool GlobalNativeSizeLargerToTriggerGC() const
     {
-        auto incNativeBindingSizeAfterLastGC = nativeBindingSize_ > nativeBindingSizeAfterLastGC_ ?
-            nativeBindingSize_ - nativeBindingSizeAfterLastGC_ : 0;
+        size_t nativeBindingSize = GetNativeBindingSize();
+        auto incNativeBindingSizeAfterLastGC = nativeBindingSize > nativeBindingSizeAfterLastGC_ ?
+            nativeBindingSize - nativeBindingSizeAfterLastGC_ : 0;
         return GetGlobalNativeSize() > nativeSizeTriggerGCThreshold_ &&
             nativeSizeAfterLastGC_ + incNativeBindingSizeAfterLastGC > incNativeSizeTriggerGC_;
     }
@@ -2031,9 +2045,23 @@ public:
     inline void ClearNativePointerList();
     inline void IteratorNativePointerList(WeakVisitor &vistor);
     void WaitLocalCCNativePointerCallbacks();
+    bool HasPendingNativePointerCallbacks();
+
+    void CollectDeadNativePointerCallbacks();
+    void ProcessNativePointerCallbacks();
+    void AddConcurrentNativePointerCallback(NativePointerCallbackData callback);
+    void AddAsyncNativePointerCallback(NativePointerCallbackData callback, size_t bindingSize);
+    void AddNativePointerCallbacks(const std::vector<NativePointerCallbackData> &concurrentCallbacks,
+                                   const std::vector<NativePointerCallbackData> &asyncCallbacks,
+                                   size_t asyncBindingSize);
+    void DeferCleanCallback();
+    void HandleDeferredCleanCallback();
 
     size_t GetNativePointerListSize() const
     {
+        if constexpr (!G_USE_CMS_GC) {
+            return nativePointerSpace_->GetHeapObjectSize() / nativePointerSpace_->GetSlotSize();
+        }
         return nativePointerList_.size();
     }
 
@@ -2271,6 +2299,7 @@ private:
     OldSpace *compressSpace_ {nullptr};
     SlotSpace *slotSpace_ {nullptr};
     ModuleSpace *moduleSpace_ {nullptr};
+    NativePointerSpace *nativePointerSpace_ {nullptr};
     ToSpace *toSpace_ {nullptr};
     ReadOnlySpace *readOnlySpace_ {nullptr};
     AppSpawnSpace *appSpawnSpace_ {nullptr};
@@ -2341,7 +2370,7 @@ private:
     MemController *memController_ {nullptr};
     size_t promotedSize_ {0};
     size_t semiSpaceCopiedSize_ {0};
-    size_t nativeBindingSize_{0};
+    std::atomic<size_t> nativeBindingSize_{0};
     size_t globalSpaceNativeLimit_ {0};
     size_t nativeSizeTriggerGCThreshold_ {0};
     size_t incNativeSizeTriggerGC_ {0};
@@ -2361,7 +2390,9 @@ private:
 
     size_t pendingAsyncNativeCallbackSize_ {0};
     size_t runningLocalCCNativePointerCallbackTasks_ {0};
+    std::atomic_bool deferredCleanCallback_ {false};
     Mutex localCCNativePointerCallbackMutex_;
+    Mutex nativePointerCallbackMutex_;
     ConditionVariable localCCNativePointerCallbackCV_;
     MemGrowingType memGrowingtype_ {MemGrowingType::HIGH_THROUGHPUT};
 

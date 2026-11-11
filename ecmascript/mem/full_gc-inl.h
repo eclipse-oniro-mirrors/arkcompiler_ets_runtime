@@ -31,9 +31,17 @@ namespace panda::ecmascript {
 inline MemSpaceType FullGC::GetEvacuateTargetSpace(Region *region)
 {
     // NonMovable objects must be evacuated into NonMovableSpace (e.g. HClasses), never into
-    // CompressSpace/AppSpawnSpace. Module objects likewise stay in ModuleSpace.
-    return region->InNonMovableSpace() ? NON_MOVABLE
-        : (region->InModuleSpace() ? MODULE_SPACE : COMPRESS_SPACE);
+    // CompressSpace/AppSpawnSpace. Module and native pointer objects likewise stay in their spaces.
+    if (region->InNativePointerSpace()) {
+        return NATIVE_POINTER_SPACE;
+    }
+    if (region->InNonMovableSpace()) {
+        return NON_MOVABLE;
+    }
+    if (region->InModuleSpace()) {
+        return MODULE_SPACE;
+    }
+    return COMPRESS_SPACE;
 }
 
 template <bool evacuateNonMovableSpace>
@@ -202,12 +210,15 @@ void FullGCRunner<evacuateNonMovableSpace>::EvacuateObject(ObjectSlotBase<refTyp
     MemSpaceType space = FullGC::GetEvacuateTargetSpace(objectRegion);
     uintptr_t forwardAddress = AllocateForwardAddress(size, space);
     RawCopyObject(ToUintPtr(object), forwardAddress, size, markWord);
-
     MarkWordType oldValue = markWord.GetValue();
     MarkWordType result = Barriers::AtomicSetPrimitive(object, 0, oldValue,
                                                        MarkWord::FromForwardingAddress(forwardAddress));
     if (result == oldValue) {
         TaggedObject *toObject = reinterpret_cast<TaggedObject*>(forwardAddress);
+        Region* toRegion = Region::ObjectAddressToRange(toObject);
+        if (toRegion->InNativePointerSpace()) {
+            heap_->GetNativePointerSpace()->AddSurvivalObjectSize(size);
+        }
         UpdateForwardAddressIfSuccess(slot, object, klass, size, toObject);
         if (objectRegion->HasLocalToShareRememberedSet()) {
             ObjectXRay::VisitObjectBody<VisitType::OLD_GC_VISIT>(toObject, klass, updateLocalToShareRSetVisitor_);
@@ -232,9 +243,9 @@ uintptr_t FullGCRunner<evacuateNonMovableSpace>::AllocateForwardAddress(size_t s
         ASSERT(!isAppSpawn_);
         return AllocateDstSpace(size, space);
     } else {
-        // Module slots go back to their own space even in appspawn mode: the
-        // appspawn target is the shared appspawn space, which modules never enter.
-        if (!isAppSpawn_ || space == MemSpaceType::MODULE_SPACE) {
+        // Module and native-pointer slots go back to their own spaces even in appspawn mode.
+        if (!isAppSpawn_ || space == MemSpaceType::MODULE_SPACE ||
+            space == MemSpaceType::NATIVE_POINTER_SPACE) {
             return AllocateDstSpace(size, space);
         }
         return AllocateAppSpawnSpace(size);
@@ -302,7 +313,11 @@ template <ReferenceType refType>
 void FullGCRunner<evacuateNonMovableSpace>::UpdateForwardAddressIfFailed(ObjectSlotBase<refType> slot, size_t size,
     uintptr_t toAddress, TaggedObject *dst)
 {
-    FreeObject::FillFreeObject(heap_, toAddress, size);
+    if (Region::ObjectAddressToRange(toAddress)->InNativePointerSpace()) {
+        SlotFreeSegment::FillFreeSegment(toAddress, size);
+    } else {
+        FreeObject::FillFreeObject(heap_, toAddress, size);
+    }
     slot.Update(dst);
 }
 

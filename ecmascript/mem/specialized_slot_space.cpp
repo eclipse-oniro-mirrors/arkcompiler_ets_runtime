@@ -101,9 +101,11 @@ void SpecializedSlotSpace::ExpandInGC()
     Region *region = heapRegionAllocator_->AllocateAlignedRegion(
         this, DEFAULT_REGION_SIZE, localHeap_->GetJSThread(), localHeap_, false, slotSize_);
     gcAllocator_.Expand(region);
-    region->SetRegionTypeFlag(RegionTypeFlag::TO);
-    region->CreateLocalToShareRememberedSet();
-    region->SwapLocalToShareRSetForCS();
+    if (localHeap_->GetJSThread()->IsConcurrentCopying()) {
+        region->SetRegionTypeFlag(RegionTypeFlag::TO);
+        region->CreateLocalToShareRememberedSet();
+        region->SwapLocalToShareRSetForCS();
+    }
 }
 
 void SpecializedSlotSpace::SetRecordRegion()

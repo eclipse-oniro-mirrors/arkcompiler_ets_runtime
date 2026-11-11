@@ -117,10 +117,14 @@ JSHandle<JSNativePointer> ObjectFactory::NewJSNativePointer(void *externalPointe
     NewObjectHook();
     TaggedObject *header;
     JSHandle<JSHClass> jsNativePointerClass(thread_->GlobalConstants()->GetHandledJSNativePointerClass());
-    if (nonMovable) {
-        header = heap_->AllocateNonMovableOrHugeObject(jsNativePointerClass);
+    if constexpr (!G_USE_CMS_GC) {
+        header = heap_->AllocateNativePointerObject(jsNativePointerClass);
     } else {
-        header = heap_->AllocateOldOrHugeObject(jsNativePointerClass);
+        if (nonMovable) {
+            header = heap_->AllocateNonMovableOrHugeObject(jsNativePointerClass);
+        } else {
+            header = heap_->AllocateOldOrHugeObject(jsNativePointerClass);
+        }
     }
     JSHandle<JSNativePointer> obj(thread_, header);
     obj->SetExternalPointer(externalPointer);
@@ -130,10 +134,13 @@ JSHandle<JSNativePointer> ObjectFactory::NewJSNativePointer(void *externalPointe
                                                                      : UINT32_MAX;
     obj->SetBindingSize(fixedNativeBindingsize);
     obj->SetNativeFlag(flag);
+    obj->SetIsConcurrent(isConcurrent == Concurrent::YES);
 
     heap_->IncreaseNativeBindingSize(fixedNativeBindingsize);
     if (callBack != nullptr) {
-        vm_->PushToNativePointerList(static_cast<JSNativePointer *>(header), isConcurrent);
+        if constexpr (G_USE_CMS_GC) {
+            vm_->PushToNativePointerList(static_cast<JSNativePointer *>(header), isConcurrent);
+        }
         // In some cases, the size of JS/TS object is too small and the native binding size is too large.
         // Check and try trigger concurrent mark here.
         if (!g_isEnableCMCGC) {

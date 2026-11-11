@@ -136,7 +136,9 @@ void SweepGC::Mark()
 void SweepGC::Sweep()
 {
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "SweepGC::Sweep", "");
-    ProcessNativeDelete();
+    if constexpr (G_USE_CMS_GC) {
+        ProcessNativeDelete();
+    }
     if constexpr (G_USE_STICKY_CMS_GC) {
         heap_->EnumerateRegions([](Region *current) {
             current->ClearOldToNewRSet();

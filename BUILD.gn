@@ -1282,6 +1282,7 @@ ecma_source = [
   "ecmascript/mem/mem_controller_utils.cpp",
   "ecmascript/mem/common_mem_map_allocator.cpp",
   "ecmascript/mem/native_area_allocator.cpp",
+  "ecmascript/mem/native_pointer_space.cpp",
   "ecmascript/mem/parallel_evacuator.cpp",
   "ecmascript/mem/parallel_marker.cpp",
   "ecmascript/mem/partial_gc.cpp",

@@ -35,7 +35,7 @@ public:
     {
         return heap_;
     }
-    void HandleUpdateFinished();
+    void HandleUpdateFinished(bool cleanCallback = true);
     PUBLIC_API void WaitFinished();
     static WeakRootVisitor CreateUpdateWeakVisitor(CCEvacuator *evacuator);
 
@@ -157,6 +157,7 @@ public:
 
 private:
     Region *GetNextTask();
+    void CopyRegion(Region *region, CCEvacuator &evacuator);
     std::vector<Region*> &tasks_;
     std::atomic<size_t> &taskIter_;
     std::atomic<size_t> &runningTaskCount_;

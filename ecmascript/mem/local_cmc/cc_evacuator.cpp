@@ -25,7 +25,9 @@ TaggedObject *CCEvacuator::CopyObject(TaggedObject *fromObj, const MarkWord &mar
 {
     JSHClass *klass = markWord.GetJSHClass();
     size_t size = klass->SizeFromJSHClass(fromObj);
-    uintptr_t forwardAddress = tlab_->Allocate(size);
+    Region* fromRegion = Region::ObjectAddressToRange(fromObj);
+    uintptr_t forwardAddress
+        = fromRegion->InNativePointerSpace() ? tlab_->AllocateNativePointer() : tlab_->Allocate(size);
     if (UNLIKELY(forwardAddress == 0)) {
         LOG_ECMA_MEM(FATAL) << "EvacuateObject alloc failed: " << " size: " << size;
         UNREACHABLE();
@@ -40,11 +42,19 @@ TaggedObject *CCEvacuator::CopyObject(TaggedObject *fromObj, const MarkWord &mar
                                                        MarkWord::FromForwardingAddress(forwardAddress));
     if (result == oldValue) {
         TaggedObject *toObject = reinterpret_cast<TaggedObject*>(forwardAddress);
+        Region* toRegion = Region::ObjectAddressToRange(toObject);
+        if (toRegion->InNativePointerSpace()) {
+            heap_->GetNativePointerSpace()->AddSurvivalObjectSize(size);
+        }
         heap_->OnMoveEvent(reinterpret_cast<uintptr_t>(fromObj), toObject, size);
         return toObject;
     }
     ASSERT(MarkWord::IsForwardingAddress(result));
-    FreeObject::FillFreeObject(heap_, forwardAddress, size);
+    if (Region::ObjectAddressToRange(forwardAddress)->InNativePointerSpace()) {
+        SlotFreeSegment::FillFreeSegment(forwardAddress, size);
+    } else {
+        FreeObject::FillFreeObject(heap_, forwardAddress, size);
+    }
     return MarkWord::ToForwardingAddress(result);
 }
 
@@ -61,4 +71,5 @@ TaggedObject *CCEvacuator::Copy(TaggedObject *fromObj, const MarkWord &markWord)
     }
     return toObject;
 }
+
 }  // namespace panda::ecmascript

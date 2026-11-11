@@ -50,6 +50,8 @@ public:
         return promotedSize_;
     }
 private:
+    static MemSpaceType SelectEvacuateSpace(Region* region, bool promoted);
+
     class UpdateRootVisitor final : public RootVisitor {
     public:
         explicit UpdateRootVisitor(ParallelEvacuator *evacuator);

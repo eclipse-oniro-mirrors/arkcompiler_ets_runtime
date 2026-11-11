@@ -29,6 +29,11 @@ namespace panda::ecmascript {
 // Used for the requirement of ACE that wants to associated a registered C++ resource with a JSObject.
 class JSNativePointer : public TaggedObject {
 public:
+    static constexpr size_t NATIVE_FLAG_BITS = 3;
+    static constexpr size_t IS_CONCURRENT_BITS = 1;
+    static_assert(static_cast<uint32_t>(NativeFlag::WRAPPER_DATA) < (1U << NATIVE_FLAG_BITS));
+    static_assert(NATIVE_FLAG_BITS + IS_CONCURRENT_BITS <= sizeof(uint32_t) * 8U);
+
     static JSNativePointer *Cast(TaggedObject *object)
     {
         ASSERT(JSTaggedValue(object).IsJSNativePointer());
@@ -50,8 +55,9 @@ public:
     ACCESSORS_PRIMITIVE_FIELD(Deleter, NativePointerCallback, DELETER_OFFSET, DATA_OFFSET)
     ACCESSORS_NATIVE_FIELD(Data, void, DATA_OFFSET, DATA_SIZE_OFFSET);
     ACCESSORS_PRIMITIVE_FIELD(BindingSize, uint32_t, DATA_SIZE_OFFSET, FLAG_OFFSET);
-    // native memory statistic flag
-    ACCESSORS_PRIMITIVE_FIELD(NativeFlag, NativeFlag, FLAG_OFFSET, LAST_OFFSET);
+    ACCESSORS_BIT_FIELD(BitField, FLAG_OFFSET, LAST_OFFSET)
+    FIRST_BIT_FIELD(BitField, NativeFlag, NativeFlag, NATIVE_FLAG_BITS)
+    NEXT_BIT_FIELD(BitField, IsConcurrent, bool, IS_CONCURRENT_BITS, NativeFlag)
     DEFINE_ALIGN_SIZE(LAST_OFFSET);
 
     DECL_VISIT_NATIVE_FIELD(POINTER_OFFSET, DATA_SIZE_OFFSET)

@@ -25,12 +25,18 @@ class SharedLocalSpace;
 
 class SpecializedSlotTlabAllocator {
 public:
+    SpecializedSlotTlabAllocator() = default;
     inline explicit SpecializedSlotTlabAllocator(SpecializedSlotSpace *space);
     ~SpecializedSlotTlabAllocator() = default;
 
     inline uintptr_t Allocate();
     inline void Reset(SpecializedSlotSpace *space);
     inline void Finalize();
+
+    size_t GetSlotSize() const
+    {
+        return slotSize_;
+    }
 
 private:
     inline void Discard();
@@ -74,6 +80,7 @@ private:
     inline uintptr_t AllocateInNonMovableSpace(size_t size);
     inline uintptr_t AllocateInModuleSpace(size_t size);
     inline void DrainBumpAllocator(BumpPointerAllocator &allocator);
+    inline uintptr_t AllocateInNativePointerSpace(size_t size);
 
     inline bool ExpandYoung();
     inline bool ExpandCompressFromOld(size_t size);
@@ -90,6 +97,7 @@ private:
 
     LocalSpace *localSpace_;
     NonMovableSpace *nonMovableSpace_ {nullptr};
+    SpecializedSlotTlabAllocator nativePointerAllocator_;
 };
 
 class CCTlabAllocator : public TlabAllocatorBase {
@@ -97,6 +105,7 @@ public:
     CCTlabAllocator() = default;
     ~CCTlabAllocator() = default;
     inline uintptr_t Allocate(size_t size);
+    inline uintptr_t AllocateNativePointer();
     inline void Setup(Heap *heap);
     inline void Initialize();
     inline void Finalize();
@@ -110,6 +119,7 @@ private:
     BumpPointerAllocator bpAllocator_;
     Region *tlabRegion_ {nullptr};
     ToSpace *toSpace_ {nullptr};
+    SpecializedSlotTlabAllocator nativePointerAllocator_;
 };
 
 class SharedTlabAllocator : public TlabAllocatorBase {

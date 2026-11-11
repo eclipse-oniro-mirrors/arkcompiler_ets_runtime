@@ -259,6 +259,16 @@ public:
         callBacks_.emplace_back(callback);
         totalBindingSize_ += bindingSize;
     }
+
+    void AddCallbacks(const std::vector<NativePointerCallbackData> &callbacks, size_t bindingSize)
+    {
+        if (callbacks.empty()) {
+            return;
+        }
+        callBacks_.insert(callBacks_.end(), callbacks.begin(), callbacks.end());
+        totalBindingSize_ += bindingSize;
+    }
+
 private:
     void NotifyFinish() const
     {

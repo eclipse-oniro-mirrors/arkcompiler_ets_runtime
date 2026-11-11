@@ -115,17 +115,17 @@ public:
 
     size_t GetArrayBufferNativeSize() const
     {
-        return arrayBufferNativeSize_;
+        return arrayBufferNativeSize_.load(std::memory_order_relaxed);
     }
 
     size_t GetRegExpNativeSize() const
     {
-        return regExpNativeSize_;
+        return regExpNativeSize_.load(std::memory_order_relaxed);
     }
 
     size_t GetChunkNativeSize() const
     {
-        return chunkNativeSize_;
+        return chunkNativeSize_.load(std::memory_order_relaxed);
     }
 
     inline void IncreaseNativeSizeStats(size_t size, NativeFlag flag)
@@ -135,13 +135,13 @@ public:
         }
         switch (flag) {
             case NativeFlag::ARRAY_BUFFER:
-                arrayBufferNativeSize_ += size;
+                arrayBufferNativeSize_.fetch_add(size, std::memory_order_relaxed);
                 break;
             case NativeFlag::REGEXP_BTYECODE:
-                regExpNativeSize_ += size;
+                regExpNativeSize_.fetch_add(size, std::memory_order_relaxed);
                 break;
             case NativeFlag::CHUNK_MEM:
-                chunkNativeSize_ += size;
+                chunkNativeSize_.fetch_add(size, std::memory_order_relaxed);
                 break;
             default:
                 break;
@@ -155,13 +155,13 @@ public:
         }
         switch (flag) {
             case NativeFlag::ARRAY_BUFFER:
-                arrayBufferNativeSize_ -= size;
+                arrayBufferNativeSize_.fetch_sub(size, std::memory_order_relaxed);
                 break;
             case NativeFlag::REGEXP_BTYECODE:
-                regExpNativeSize_ -= size;
+                regExpNativeSize_.fetch_sub(size, std::memory_order_relaxed);
                 break;
             case NativeFlag::CHUNK_MEM:
-                chunkNativeSize_ -= size;
+                chunkNativeSize_.fetch_sub(size, std::memory_order_relaxed);
                 break;
             default:
                 break;
@@ -228,9 +228,9 @@ private:
     std::atomic<size_t> nativeMemoryUsage_ {0};
     std::atomic<size_t> maxNativeMemoryUsage_ {0};
     // native area size stats
-    size_t arrayBufferNativeSize_ {0};
-    size_t regExpNativeSize_ {0};
-    size_t chunkNativeSize_ {0};
+    std::atomic<size_t> arrayBufferNativeSize_ {0};
+    std::atomic<size_t> regExpNativeSize_ {0};
+    std::atomic<size_t> chunkNativeSize_ {0};
 };
 }  // namespace panda::ecmascript
 

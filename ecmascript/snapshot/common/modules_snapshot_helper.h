@@ -187,6 +187,7 @@ private:
         size_t regularSpaceSize_;
         size_t pinSpaceSize_;
         size_t oldSpaceSize_;
+        size_t nativePointerSpaceSize_;
         size_t nonMovableSpaceSize_;
         size_t machineCodeSpaceSize_;
         size_t moduleSpaceSize_;

@@ -15,6 +15,8 @@
 
 #include "ecmascript/tests/test_helper.h"
 
+#include <vector>
+
 #include "ecmascript/builtins/builtins_ark_tools.h"
 #include "ecmascript/builtins/builtins_gc.h"
 #include "ecmascript/ecma_vm.h"
@@ -101,7 +103,10 @@ public:
     }
 
     void PrepareSweeping() override {}
-    void Sweep() override {}
+    void Sweep() override
+    {
+        SpecializedSlotSpace::Sweep();
+    }
     void AsyncSweep([[maybe_unused]] bool isMain,
                     [[maybe_unused]] bool releaseMemory = false) override {}
     bool TryFillSweptRegion() override
@@ -402,6 +407,101 @@ HWTEST_F_L0(LocalCCTest, EvacuatorCopyTest)
     thread->SetCCStatus(CCStatus::READY);
 }
 
+HWTEST_F_L0(LocalCCTest, EvacuatorCopyNativePointerTest)
+{
+    if constexpr (G_USE_CMS_GC) {
+        return;
+    }
+
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    JSHandle<JSNativePointer> nativePointer = factory->NewJSNativePointer(nullptr, nullptr, nullptr, false, 16);
+    TaggedObject *testObject = nativePointer.GetTaggedValue().GetTaggedObject();
+    MarkWord markWord(testObject, RELAXED_LOAD);
+    MarkWordType originalMarkWord = markWord.GetValue();
+    CCEvacuator *mainEvacuator = thread->GetLocalCCEvacuator();
+    thread->SetReadBarrierState(true);
+    thread->SetCCStatus(CCStatus::COPYING);
+    TaggedObject *dst1 = mainEvacuator->Copy(testObject, markWord);
+    TaggedObject *dst2 = mainEvacuator->Copy(testObject, markWord);
+    EXPECT_EQ(dst1, dst2);
+    EXPECT_TRUE(Region::ObjectAddressToRange(dst1)->InNativePointerSpace());
+    Barriers::SetPrimitive(testObject, 0, originalMarkWord);
+    thread->SetReadBarrierState(false);
+    thread->SetCCStatus(CCStatus::READY);
+}
+
+HWTEST_F_L0(LocalCCTest, LocalCCSplitsConcurrentNativePointerTasks)
+{
+    if constexpr (G_USE_CMS_GC) {
+        return;
+    }
+
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    constexpr size_t objectCount = 9000;
+    std::vector<JSHandle<JSNativePointer>> nativePointers;
+    nativePointers.reserve(objectCount);
+    for (size_t index = 0; index < objectCount; index++) {
+        nativePointers.emplace_back(
+            factory->NewJSNativePointer(nullptr, nullptr, nullptr, false, 0));
+        heap_->PushToNativePointerList(
+            reinterpret_cast<JSNativePointer *>(nativePointers.back().GetTaggedValue().GetTaggedObject()), true);
+    }
+
+    if (heap_->TryTriggerCCMarking(MarkReason::OTHER)) {
+        heap_->CollectGarbageFromCCMark(GCReason::OTHER);
+        heap_->WaitCCFinished();
+        heap_->WaitAndHandleCCFinished();
+    }
+    EXPECT_TRUE(Region::ObjectAddressToRange(*nativePointers.front())->InNativePointerSpace());
+}
+
+HWTEST_F_L0(LocalCCTest, IterateNativePointerFreeObject)
+{
+    if constexpr (G_USE_CMS_GC) {
+        return;
+    }
+
+    CCTlabAllocator allocator;
+    allocator.Setup(heap_);
+    allocator.Initialize();
+    uintptr_t address = allocator.AllocateNativePointer();
+    ASSERT_NE(address, 0U);
+    Region *region = Region::ObjectAddressToRange(address);
+    ASSERT_TRUE(region->InNativePointerSpace());
+
+    uintptr_t end = CMSRegion::GetAllocatableEnd(CMSRegion::FromRegion(region), JSNativePointer::SIZE);
+    for (uintptr_t current = address; current < end; current += JSNativePointer::SIZE) {
+        FreeObject::FillFreeObject(heap_, current, JSNativePointer::SIZE);
+    }
+    int callbackCount = 0;
+    heap_->GetNativePointerSpace()->IterateSlotObjectsInRegion(region,
+        [&callbackCount]([[maybe_unused]] TaggedObject *object) {
+            callbackCount++;
+        });
+    EXPECT_EQ(callbackCount, 0);
+    allocator.Finalize();
+}
+
+HWTEST_F_L0(LocalCCTest, OldGCEvacuatesNativeAndNonNativeRegions)
+{
+    if constexpr (G_USE_CMS_GC) {
+        return;
+    }
+
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    JSHandle<JSNativePointer> nativePointer = factory->NewJSNativePointer(nullptr, nullptr, nullptr, false, 16);
+    {
+        EcmaHandleScope scope(thread);
+        for (int i = 0; i < 64; i++) {
+            JSHandle<TaggedArray> array = factory->NewTaggedArray(
+                1024, JSTaggedValue::Hole(), MemSpaceType::OLD_SPACE);
+            ASSERT_FALSE(array.IsEmpty());
+        }
+    }
+    heap_->CollectGarbage(TriggerGCType::OLD_GC, GCReason::OTHER);
+    EXPECT_TRUE(Region::ObjectAddressToRange(*nativePointer)->InNativePointerSpace());
+}
+
 HWTEST_F_L0(LocalCCTest, UpdateRecordJSWeakMapTest)
 {
     constexpr size_t OBJ_SIZE = 3_KB;
@@ -651,10 +751,10 @@ HWTEST_F_L0(LocalCCTest, DisableTest)
 
 HWTEST_F_L0(LocalCCTest, SpecializedSlotSpaceAllocationTest)
 {
-    constexpr size_t SLOT_SIZE = SlotSpaceConfig::SLOT_STEP_SIZE * 2;
-    TestSpecializedSlotSpace space(heap_, SLOT_SIZE, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
+    constexpr size_t slotSize = SlotSpaceConfig::SLOT_STEP_SIZE * 2;
+    TestSpecializedSlotSpace space(heap_, slotSize, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
     space.SetAllowExpand(false);
-    EXPECT_EQ(space.GetSlotSize(), SLOT_SIZE);
+    EXPECT_EQ(space.GetSlotSize(), slotSize);
     EXPECT_EQ(space.Allocate(), 0U);
     EXPECT_EQ(space.GetRegionCount(), 0U);
 
@@ -666,8 +766,8 @@ HWTEST_F_L0(LocalCCTest, SpecializedSlotSpaceAllocationTest)
 
 HWTEST_F_L0(LocalCCTest, SpecializedSlotSpacePrepareEvacuateWithPendingRegionTest)
 {
-    constexpr size_t SLOT_SIZE = SlotSpaceConfig::SLOT_STEP_SIZE * 2;
-    TestSpecializedSlotSpace space(heap_, SLOT_SIZE, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
+    constexpr size_t slotSize = SlotSpaceConfig::SLOT_STEP_SIZE * 2;
+    TestSpecializedSlotSpace space(heap_, slotSize, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
     uintptr_t address = space.Allocate();
     EXPECT_NE(address, 0U);
     EXPECT_EQ(space.GetRegionCount(), 1U);
@@ -680,13 +780,13 @@ HWTEST_F_L0(LocalCCTest, SpecializedSlotSpacePrepareEvacuateWithPendingRegionTes
 
 HWTEST_F_L0(LocalCCTest, SpecializedSlotSpaceGCObjectTest)
 {
-    constexpr size_t SLOT_SIZE = SlotSpaceConfig::SLOT_STEP_SIZE * 2;
-    TestSpecializedSlotSpace space(heap_, SLOT_SIZE, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
+    constexpr size_t slotSize = SlotSpaceConfig::SLOT_STEP_SIZE * 2;
+    TestSpecializedSlotSpace space(heap_, slotSize, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
     space.PrepareEvacuation();
     auto [address, bufferSize] = space.AllocateBufferSync();
     EXPECT_NE(address, 0U);
     EXPECT_NE(bufferSize, 0U);
-    EXPECT_EQ(bufferSize % SLOT_SIZE, 0U);
+    EXPECT_EQ(bufferSize % slotSize, 0U);
 
     space.MergeToGCRegions();
     space.ReclaimFromRegions();
@@ -695,8 +795,8 @@ HWTEST_F_L0(LocalCCTest, SpecializedSlotSpaceGCObjectTest)
 
 HWTEST_F_L0(LocalCCTest, SpecializedSlotSpaceGCBufferAllocationTest)
 {
-    constexpr size_t SLOT_SIZE = SlotSpaceConfig::SLOT_STEP_SIZE * 2;
-    TestSpecializedSlotSpace space(heap_, SLOT_SIZE, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
+    constexpr size_t slotSize = SlotSpaceConfig::SLOT_STEP_SIZE * 2;
+    TestSpecializedSlotSpace space(heap_, slotSize, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
     space.PrepareEvacuation();
 
     auto [first, firstBufferSize] = space.AllocateBufferSync();
@@ -705,20 +805,41 @@ HWTEST_F_L0(LocalCCTest, SpecializedSlotSpaceGCBufferAllocationTest)
     EXPECT_NE(second, 0U);
     EXPECT_NE(firstBufferSize, 0U);
     EXPECT_NE(secondBufferSize, 0U);
-    EXPECT_EQ(firstBufferSize % SLOT_SIZE, 0U);
-    EXPECT_EQ(secondBufferSize % SLOT_SIZE, 0U);
+    EXPECT_EQ(firstBufferSize % slotSize, 0U);
+    EXPECT_EQ(secondBufferSize % slotSize, 0U);
 
     space.MergeToGCRegions();
     space.ReclaimFromRegions();
     EXPECT_EQ(space.GetRegionCount(), 1U);
 }
 
+HWTEST_F_L0(LocalCCTest, SpecializedSlotSpaceSweepReusesFreeSlotTest)
+{
+    constexpr size_t slotSize = SlotSpaceConfig::SLOT_STEP_SIZE * 2;
+    TestSpecializedSlotSpace space(heap_, slotSize, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
+    space.PrepareEvacuation();
+    auto [liveAddress, bufferSize] = space.AllocateBufferSync();
+    EXPECT_NE(liveAddress, 0U);
+    EXPECT_NE(bufferSize, 0U);
+    Region::ObjectAddressToRange(liveAddress)->AtomicMark(
+        reinterpret_cast<void *>(liveAddress));
+
+    space.MergeToGCRegions();
+    space.Sweep();
+    uintptr_t reusedAddress = space.Allocate();
+    EXPECT_NE(reusedAddress, 0U);
+    EXPECT_NE(reusedAddress, liveAddress);
+    EXPECT_EQ(space.GetRegionCount(), 1U);
+
+    space.ReclaimFromRegions();
+}
+
 HWTEST_F_L0(LocalCCTest, SpecializedSlotTlabAllocatorTest)
 {
-    constexpr size_t SLOT_SIZE = SlotSpaceConfig::SLOT_STEP_SIZE * 2;
-    constexpr size_t OTHER_SLOT_SIZE = SlotSpaceConfig::SLOT_STEP_SIZE * 4;
-    TestSpecializedSlotSpace space(heap_, SLOT_SIZE, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
-    TestSpecializedSlotSpace otherSpace(heap_, OTHER_SLOT_SIZE, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
+    constexpr size_t slotSize = SlotSpaceConfig::SLOT_STEP_SIZE * 2;
+    constexpr size_t otherSlotSize = SlotSpaceConfig::SLOT_STEP_SIZE * 4;
+    TestSpecializedSlotSpace space(heap_, slotSize, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
+    TestSpecializedSlotSpace otherSpace(heap_, otherSlotSize, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
     space.PrepareEvacuation();
     otherSpace.PrepareEvacuation();
     SpecializedSlotTlabAllocator allocator(&space);
@@ -731,7 +852,7 @@ HWTEST_F_L0(LocalCCTest, SpecializedSlotTlabAllocatorTest)
     EXPECT_NE(secondAddress, 0U);
     EXPECT_NE(thirdAddress, 0U);
     EXPECT_NE(firstAddress, secondAddress);
-    EXPECT_EQ(thirdAddress - secondAddress, OTHER_SLOT_SIZE);
+    EXPECT_EQ(thirdAddress - secondAddress, otherSlotSize);
 
     allocator.Finalize();
     space.MergeToGCRegions();
@@ -746,27 +867,27 @@ HWTEST_F_L0(LocalCCTest, SpecializedSlotTlabAllocatorTest)
 // finalized when that work node finishes; production never re-binds it to another space.
 HWTEST_F_L0(LocalCCTest, SpecializedSlotTlabAllocatorAccountingTest)
 {
-    constexpr size_t SLOT_SIZE = SlotSpaceConfig::SLOT_STEP_SIZE * 2;
-    constexpr size_t WORK_NODE_COUNT = 3;
-    constexpr size_t SLOT_PER_NODE = 4;
-    TestSpecializedSlotSpace space(heap_, SLOT_SIZE, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
+    constexpr size_t slotSize = SlotSpaceConfig::SLOT_STEP_SIZE * 2;
+    constexpr size_t workNodeCount = 3;
+    constexpr size_t slotPerNode = 4;
+    TestSpecializedSlotSpace space(heap_, slotSize, DEFAULT_REGION_SIZE, DEFAULT_REGION_SIZE);
     space.PrepareEvacuation();
     EXPECT_EQ(space.GetHeapObjectSize(), 0U);
 
-    for (size_t node = 0; node < WORK_NODE_COUNT; node++) {
+    for (size_t node = 0; node < workNodeCount; node++) {
         // One TLAB per work node, like WorkNodeHolder owns one per GC thread.
         SpecializedSlotTlabAllocator allocator(&space);
         uintptr_t previous = allocator.Allocate();
         ASSERT_NE(previous, 0U);
-        for (size_t i = 1; i < SLOT_PER_NODE; i++) {
+        for (size_t i = 1; i < slotPerNode; i++) {
             uintptr_t current = allocator.Allocate();
-            EXPECT_EQ(current - previous, SLOT_SIZE);
+            EXPECT_EQ(current - previous, slotSize);
             previous = current;
         }
         // Slots handed out by a work node are published only when that node finalizes.
-        EXPECT_EQ(space.GetHeapObjectSize(), node * SLOT_PER_NODE * SLOT_SIZE);
+        EXPECT_EQ(space.GetHeapObjectSize(), node * slotPerNode * slotSize);
         allocator.Finalize();
-        EXPECT_EQ(space.GetHeapObjectSize(), (node + 1) * SLOT_PER_NODE * SLOT_SIZE);
+        EXPECT_EQ(space.GetHeapObjectSize(), (node + 1) * slotPerNode * slotSize);
     }
 
     space.MergeToGCRegions();
