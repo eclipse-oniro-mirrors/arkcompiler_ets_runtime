@@ -240,11 +240,10 @@ void GCKeyStats::InitializeRecordList()
 | The Judgment criteria of Long GC
 |  IsInBackground  |  IsSensitive or Idle |  GCTime |
 | -----------------| ---------------------|---------|
-|       false      |       Sensitive      |    33   |
+|       false      |    Sensitive & !Idle |    33   |
 |       false      |  !Sensitive & !Idle  |    33   |
-|       true       |         Idle         |    200  |
-|       true       |        !Idle         |    200  |
-|       true       |         Idle         |    500  |
+|       false      |         Idle         |   N/A   |
+|       true       |          *           |   N/A   |
 */
 void GCKeyStats::ProcessLongGCEvent()
 {
@@ -253,32 +252,13 @@ void GCKeyStats::ProcessLongGCEvent()
     }
     LongGCStats *longGCStats = gcStats_->GetLongGCStats();
     GCReason gcReason = gcStats_->GetGCReason();
-    bool gcIsSensitive = longGCStats->GetGCIsSensitive();
-    bool gcIsInBackground = longGCStats->GetGCIsInBackground();
-    float gcTotalTime = longGCStats->GetGCTotalTime();
-    if (gcIsSensitive) {
-        if (gcTotalTime > GC_SENSITIVE_LONG_TIME) {
-            SendLongGCHiSysEvent(*longGCStats, false);
-            longGCStats->Reset();
-        }
-    } else {
-        if (IsIdle(gcReason)) {
-            if (!gcIsInBackground && gcTotalTime > GC_IDLE_LONG_TIME) {
-                SendLongGCHiSysEvent(*longGCStats, true);
-                longGCStats->Reset();
-            } else if (gcIsInBackground && gcTotalTime > GC_BACKGROUD_IDLE_LONG_TIME) {
-                SendLongGCHiSysEvent(*longGCStats, true);
-                longGCStats->Reset();
-            }
-        } else {
-            if (!gcIsInBackground && gcTotalTime > GC_NOT_SENSITIVE_LONG_TIME) {
-                SendLongGCHiSysEvent(*longGCStats, false);
-                longGCStats->Reset();
-            } else if (gcIsInBackground && gcTotalTime > GC_BACKGROUD_LONG_TIME) {
-                SendLongGCHiSysEvent(*longGCStats, true);
-                longGCStats->Reset();
-            }
-        }
+    if (ShouldSkipLongGCReport(Runtime::GetInstance()->IsInBackground(), gcReason)) {
+        longGCStats->Reset();
+        return;
+    }
+    if (ShouldReportLongGC(longGCStats->GetGCIsSensitive(), longGCStats->GetGCTotalTime())) {
+        SendLongGCHiSysEvent(*longGCStats, false);
+        longGCStats->Reset();
     }
 }
 } // namespace panda::ecmascript

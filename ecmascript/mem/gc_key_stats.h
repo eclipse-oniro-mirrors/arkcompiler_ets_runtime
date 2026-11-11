@@ -83,6 +83,19 @@ public:
         return false;
     }
 
+    static bool ShouldSkipLongGCReport(bool inBackground, GCReason gcReason)
+    {
+        return inBackground || IsIdle(gcReason);
+    }
+
+    static bool ShouldReportLongGC(bool gcIsSensitive, float gcTotalTime)
+    {
+        if (gcIsSensitive) {
+            return gcTotalTime > GC_SENSITIVE_LONG_TIME;
+        }
+        return gcTotalTime > GC_NOT_SENSITIVE_LONG_TIME;
+    }
+
     void IncGCCount()
     {
         gcCount_++;
