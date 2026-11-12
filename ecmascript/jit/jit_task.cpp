@@ -335,7 +335,7 @@ void JitTask::InstallCode()
         return;
     }
 
-#if defined(PANDA_TARGET_MACOS)
+#if defined(PANDA_TARGET_MACOS) && defined(STANDALONE_MODE)
     std::optional<JitWriteScope> jitWriteScope;
     jitWriteScope.emplace();
 #endif
@@ -378,7 +378,7 @@ void JitTask::InstallCode()
     uintptr_t codeAddrEnd = codeAddr + machineCodeObj->GetInstructionsSize();
     __builtin___clear_cache(reinterpret_cast<char *>(codeAddr), reinterpret_cast<char*>(codeAddrEnd));
 
-#if defined(PANDA_TARGET_MACOS)
+#if defined(PANDA_TARGET_MACOS) && defined(STANDALONE_MODE)
     jitWriteScope.reset();
 #endif
     if (IsOsrTask()) {
