@@ -373,6 +373,14 @@ class ArkSteedHeapBroker {
     uint32_t GetArgumentsObjectSize() const;
     bool CanLoadExternalModuleVar(int32_t index, bool installDependency) const;
     bool CanLoadLocalModuleVar() const;
+    bool IsExternalModuleBindingInitialized(int32_t index) const;
+
+    struct PermanentGlobalCell {
+        bool constant {false};
+        JSTaggedType primitive {0};
+        ArkSteedObjectRef object {};
+    };
+    bool TryGetPermanentGlobalCell(uint16_t cpIdx, const ArkSteedObjectRef &box, PermanentGlobalCell *cell) const;
     ArkSteedObjectRef GetBuiltinMethod(uint16_t builtinId, uint32_t globalEnvIndex) const;
     ArkSteedHClassRef GetEmptyObjectHClass(uint32_t *objectSize) const;
     bool TryGetObjectType(const ArkSteedHeapRef &ref, JSType *type, bool *callable = nullptr) const;

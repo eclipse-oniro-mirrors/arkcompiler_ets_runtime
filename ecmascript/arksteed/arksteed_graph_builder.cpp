@@ -3031,7 +3031,25 @@ struct GraphBuilder::BytecodeVisitor {
         if (box == nullptr) {
             return false;
         }
-        frameState.SetAcc(BuildGlobalCellBoxValue(bcIndex, box));
+        ArkSteedHeapBroker::PermanentGlobalCell cell;
+        if (!self->pgoContext_.GetBroker()->TryGetPermanentGlobalCell(GetConstDataId<uint16_t>(bcInfo, 1),
+                                                                      boxRef.value(), &cell)) {
+            frameState.SetAcc(BuildGlobalCellBoxValue(bcIndex, box));
+            return true;
+        }
+        // As for Maglev's non-configurable cells: the box never holds Hole, and a
+        // read-only one is a constant.
+        ValueVertex *value = nullptr;
+        if (cell.constant) {
+            value = cell.object.IsSafeForCompile() ? GetHeapConstant(cell.object)
+                                                   : self->graph_->GetTaggedConstant(cell.primitive);
+        }
+        if (value == nullptr) {
+            value = self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {box},
+                                                           static_cast<int32_t>(PropertyBox::VALUE_OFFSET));
+            compileInfoFacts_->RecordNonHole(value);
+        }
+        frameState.SetAcc(value);
         return true;
     }
 
@@ -3063,7 +3081,12 @@ struct GraphBuilder::BytecodeVisitor {
         if (box == nullptr) {
             return false;
         }
-        BuildGlobalCellBoxValue(bcIndex, box);
+        ArkSteedHeapBroker::PermanentGlobalCell cell;
+        // A permanent box needs no validity check before the store.
+        if (!self->pgoContext_.GetBroker()->TryGetPermanentGlobalCell(GetConstDataId<uint16_t>(bcInfo, 1),
+                                                                      boxRef.value(), &cell) || cell.constant) {
+            BuildGlobalCellBoxValue(bcIndex, box);
+        }
         BuildStoreTaggedField(box, static_cast<int32_t>(PropertyBox::VALUE_OFFSET), frameState.GetAcc());
         return true;
     }
@@ -12486,8 +12509,11 @@ struct GraphBuilder::BytecodeVisitor {
     {
         ValueVertex *value = self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {box},
                                                                     static_cast<int32_t>(PropertyBox::VALUE_OFFSET));
-        ValueVertex *hole = self->graph_->GetTaggedConstant(JSTaggedValue::VALUE_HOLE);
-        BuildCheckTaggedCondition(bcIndex, value, hole, Condition::EQUAL, kungfu::DeoptType::PROPERTYBOXINVALID);
+        if (!compileInfoFacts_->IsKnownNonHole(value)) {
+            ValueVertex *hole = self->graph_->GetTaggedConstant(JSTaggedValue::VALUE_HOLE);
+            BuildCheckTaggedCondition(bcIndex, value, hole, Condition::EQUAL, kungfu::DeoptType::PROPERTYBOXINVALID);
+            compileInfoFacts_->RecordNonHole(value);
+        }
         return value;
     }
 
@@ -12532,6 +12558,10 @@ struct GraphBuilder::BytecodeVisitor {
         }
         ValueVertex *result =
             self->NewVertex<LoadTaggedElementVertex>(compileInfoFacts_, currentBlock, {dictionary, targetIndex});
+        // An import initialized at compile time can never return to the TDZ.
+        if (self->pgoContext_.GetBroker()->IsExternalModuleBindingInitialized(index)) {
+            compileInfoFacts_->RecordNonHole(result);
+        }
         frameState.SetAcc(result);
         return true;
     }
