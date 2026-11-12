@@ -83,6 +83,9 @@ class SharedConcurrentSweeper;
 class GlobalGC;
 class GlobalGCMarker;
 class GlobalGCWorkManager;
+class GlobalCC;
+class GlobalCCMarker;
+class GlobalCCWorkManager;
 class SharedGC;
 class SharedGCEvacuator;
 class SharedGCMarkerBase;
@@ -151,6 +154,7 @@ enum class VerifyKind {
     VERIFY_SHARED_RSET_POST_FULL_GC,
     VERIFY_PRE_SHARED_GC,
     VERIFY_POST_SHARED_GC,
+    VERIFY_GLOBAL_CC_MARK,
     VERIFY_SHARED_GC_MARK,
     VERIFY_SHARED_GC_SWEEP,
     VERIFY_NO_SLOT_CHECK,
@@ -572,6 +576,23 @@ public:
         uint32_t epoch_ {0};
     };
 
+    class GlobalCCMarkTask : public GuardedTask {
+    public:
+        GlobalCCMarkTask(int32_t id, SharedHeap *heap, std::shared_ptr<EpochGuardedTaskMonitor> mon, uint32_t epoch)
+            : GuardedTask(id), sHeap_(heap), monitor_(mon), epoch_(epoch) {}
+        ~GlobalCCMarkTask() override = default;
+        bool RunInternal(uint32_t threadIndex) override;
+        bool Scheduable() override;
+
+        NO_COPY_SEMANTIC(GlobalCCMarkTask);
+        NO_MOVE_SEMANTIC(GlobalCCMarkTask);
+
+    private:
+        SharedHeap *sHeap_ {nullptr};
+        std::shared_ptr<EpochGuardedTaskMonitor> monitor_;
+        uint32_t epoch_ {0};
+    };
+
     class GlobalGCMarkTask : public GuardedTask {
     public:
         GlobalGCMarkTask(int32_t id, SharedHeap *heap,
@@ -762,6 +783,10 @@ public:
     bool CheckCanTriggerConcurrentMarking(JSThread *thread);
 
     void UpdateWorkManager(SharedGCWorkManager *sWorkManager);
+
+    // Mirror UpdateWorkManager for the Global CC mark work manager (e.g. thread-count change);
+    // refreshes the GlobalCC copy too.
+    void UpdateGlobalCCWorkManager(GlobalCCWorkManager *workManager);
 
     bool CheckOngoingConcurrentMarking() override;
 
@@ -965,6 +990,7 @@ public:
     void PrepareByJSThread(JSThread *thread, bool inTriggerGCThread);
     void Reclaim(TriggerGCType gcType);
     void TryPostGCMarkingTask(SharedParallelMarkPhase sharedTaskPhase);
+    void TryPostGlobalCCMarkingTask();
     void TryPostGlobalGCMarkingTask();
     inline bool CheckCanDistributeGlobalGCTask() const;
     void WaitGlobalGCMarkTaskFinished();
@@ -1000,6 +1026,21 @@ public:
     GlobalGCWorkManager *GetGlobalGCWorkManager() const
     {
         return globalGCWorkManager_;
+    }
+
+    GlobalCC *GetGlobalCC() const
+    {
+        return globalCC_;
+    }
+
+    GlobalCCMarker *GetGlobalCCMarker() const
+    {
+        return globalCCMarker_;
+    }
+
+    GlobalCCWorkManager *GetGlobalCCWorkManager() const
+    {
+        return globalCCWorkManager_;
     }
 
     SharedGCMarker *GetSharedGCMarker() const
@@ -1198,6 +1239,9 @@ private:
     GlobalGC *globalGC_ {nullptr};
     GlobalGCMarker *globalGCMarker_ {nullptr};
     GlobalGCWorkManager *globalGCWorkManager_ {nullptr};
+    GlobalCC *globalCC_ {nullptr};
+    GlobalCCMarker *globalCCMarker_ {nullptr};
+    GlobalCCWorkManager *globalCCWorkManager_ {nullptr};
     SharedFullGC *sharedFullGC_ {nullptr};
     SharedCC *sharedCC_ {nullptr};
     SharedGCEvacuator *sEvacuator_ {nullptr};
@@ -1456,6 +1500,12 @@ public:
     MarkWorkNode *&GetMarkingObjectLocalBuffer()
     {
         return sharedGCData_.sharedConcurrentMarkingLocalBuffer_;
+    }
+
+    // Per-local-Heap buffer for the Global CC mark WB (mirrors GetMarkingObjectLocalBuffer).
+    MarkWorkNode *&GetGlobalCCMarkingLocalBuffer()
+    {
+        return sharedGCData_.globalCCConcurrentMarkingLocalBuffer_;
     }
 
     IdleGCTrigger *GetIdleGCTrigger() const
@@ -2239,6 +2289,10 @@ private:
          * If the heap is destructed before push this node to global, check and try to push remain object as well.
         */
         MarkWorkNode *sharedConcurrentMarkingLocalBuffer_ {nullptr};
+        // Per-local-Heap WB buffer for Global CC concurrent mark (one local Heap per JSThread).
+        // Filled by Barriers::UpdateGlobalCC -> GlobalCCMarker::MarkFromWriteBarrier, flushed to
+        // the global stack in ReMark (and on Heap destruction), mirroring sharedConcurrentMarkingLocalBuffer_.
+        MarkWorkNode *globalCCConcurrentMarkingLocalBuffer_ {nullptr};
         /**
          * Recording the local_to_share rset used in SharedGC concurrentMark,
          * which lifecycle is in one SharedGC.

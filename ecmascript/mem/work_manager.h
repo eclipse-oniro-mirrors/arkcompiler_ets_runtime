@@ -41,6 +41,7 @@ class SharedGCWorkManager;
 class SharedTlabAllocator;
 class TlabAllocator;
 class WorkManager;
+class WorkManagerBase;
 class WorkSpaceChunk;
 
 enum ParallelGCTaskPhase {
@@ -84,10 +85,10 @@ public:
     NO_MOVE_SEMANTIC(WorkNodeWrapper);
 
     void Setup(T *globalStack);
-    void Initialize(WorkManager *workManager);
+    void Initialize(WorkManagerBase *workManager);
 
-    void Push(ElementType e, WorkManager *workManager);
-    void PushWorkNodeToGlobal(WorkManager *workManager);
+    void Push(ElementType e, WorkManagerBase *workManager);
+    void PushWorkNodeToGlobal(WorkManagerBase *workManager);
     bool Pop(ElementType *e);
     bool PopWorkNodeFromGlobal();
 
@@ -110,7 +111,7 @@ public:
     NO_MOVE_SEMANTIC(WorkNodeHolder);
 
 #define PARAM_WEAK_AGGREGATE_GLOBAL_STACK(type, name, _)            Global##type##Stack *name##Stack,
-    inline void Setup(Heap *heap, WorkManager *workManager,
+    inline void Setup(Heap *heap, WorkManagerBase *workManager,
                       WEAK_AGGREGATE_LIST(PARAM_WEAK_AGGREGATE_GLOBAL_STACK)
                       GlobalMarkStack *markStack);
 #undef PARAM_WEAK_AGGREGATE_GLOBAL_STACK
@@ -176,7 +177,7 @@ public:
     inline SlotGCAllocator *GetSlotGCAllocator();
 private:
     Heap *heap_ {nullptr};
-    WorkManager *workManager_ {nullptr};
+    WorkManagerBase *workManager_ {nullptr};
     WorkNodeWrapper<GlobalMarkStack> markWorkNodeWrapper_ {};
 
 #define DECLARE_WEAK_AGGREGATE(type, name, _)                \
@@ -250,6 +251,11 @@ public:
         return 0;
     }
 
+    // Hook invoked when a mark node is published to the global stack; overridden by
+    // concrete managers to distribute parallel mark tasks. Default is a no-op so
+    // WorkNodeWrapper can serve any WorkManagerBase-derived manager.
+    virtual void CheckAndPostTask() {}
+
     Mutex mtx_;
 private:
     NO_COPY_SEMANTIC(WorkManagerBase);
@@ -287,7 +293,7 @@ public:
         return &works_.at(threadId);
     }
 
-    inline void CheckAndPostTask();
+    inline void CheckAndPostTask() override;
 
     WORKMANAGER_PUBLIC_HYBRID_EXTENSION();
 private:

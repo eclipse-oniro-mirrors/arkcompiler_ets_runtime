@@ -20,10 +20,13 @@
 
 #include "ecmascript/cross_vm/verification_hybrid.h"
 #include "ecmascript/js_tagged_value_wrapper.h"
+#include "ecmascript/linked_hash_table.h"
 #include "ecmascript/mem/heap.h"
 #include "ecmascript/mem/object_xray.h"
 #include "ecmascript/mem/mem.h"
+#include "ecmascript/mem/region-inl.h"
 #include "ecmascript/mem/slots.h"
+#include "ecmascript/mem/visitor.h"
 
 namespace panda::ecmascript {
 static constexpr uint32_t INVALID_THRESHOLD = 0x40000;
@@ -153,6 +156,7 @@ public:
     void VerifyAll() const;
     void VerifyMark(bool cm) const;
     void VerifySweep(bool cm) const;
+    void VerifyGlobalCCMark() const;
 
     size_t VerifyRoot() const;
     size_t VerifyHeap() const;
@@ -194,6 +198,22 @@ private:
 
     SharedHeap *sHeap_ {nullptr};
     VerifyKind verifyKind_;
+};
+
+class GlobalCCVerifyMarkVisitor final : public BaseObjectVisitor<GlobalCCVerifyMarkVisitor> {
+public:
+    GlobalCCVerifyMarkVisitor() = default;
+    ~GlobalCCVerifyMarkVisitor() = default;
+
+    void VisitObjectRangeImpl(BaseObject *root, ObjectSlot start, ObjectSlot end,
+                              VisitObjectArea area) override;
+    void VisitCompressedObjectRangeImpl(BaseObject *root, CompressedObjectSlot start,
+                                        CompressedObjectSlot end) override;
+    void VisitObjectHClassImpl(BaseObject *root, BaseObject *hclass) override;
+    void VisitWeakLinkedHashMapImpl(BaseObject *root) override;
+
+private:
+    void VisitInObjectRangeImpl(BaseObject *root, ObjectSlot start, ObjectSlot end);
 };
 
 template <typename Callback>

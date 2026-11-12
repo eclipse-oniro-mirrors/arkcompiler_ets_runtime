@@ -684,6 +684,19 @@ public:
         return status == CCStatus::COPY_FINISHED;
     }
 
+    // ---- Global CC mark state (independent of the local/shared mark bitfield) ----
+    // Gates WB dispatch to Barriers::UpdateGlobalCC while a global concurrent mark/remark
+    // round is in flight. Set on every participating JSThread by GlobalCCMarker.
+    // (The per-thread WB buffer itself lives on the local Heap, mirroring SharedGC.)
+    bool IsGlobalConcurrentMarking() const
+    {
+        return globalConcurrentMarking_;
+    }
+    void SetGlobalConcurrentMarking(bool v)
+    {
+        globalConcurrentMarking_ = v;
+    }
+
     SharedCCStatus GetSharedCCStatus() const
     {
         LockHolder lock(ccStatusMutex_);
@@ -2628,6 +2641,9 @@ private:
     bool ccTaskPending_ {false};
     mutable Mutex ccStatusMutex_;
     PostTaskToThreadCallback postTaskToThreadCallback_ {nullptr};
+
+    // Global CC mark state (independent of the local/shared mark bitfield above).
+    bool globalConcurrentMarking_ {false};
 
     CMap<JSHClass *, GlobalIndex> ctorHclassEntries_;
 

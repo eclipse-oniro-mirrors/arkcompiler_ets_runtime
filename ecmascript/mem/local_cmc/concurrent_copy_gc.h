@@ -41,7 +41,9 @@ public:
 
 private:
     // Coordinate this collector's copy lifetime with the SharedGC LocalCC drain.
-    void StartLocalCCCopy();
+    // Returns false if a GlobalCC round hijacked this heap's mark state while blocked
+    // (or already in flight at entry): the local CC cycle is dead and must not proceed.
+    bool StartLocalCCCopy();
     void ProcessWeakReference();
     void ProcessRecordWeakReferenceInParallel(uint32_t totalThreadCount);
     void Sweep();

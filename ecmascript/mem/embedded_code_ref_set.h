@@ -55,6 +55,7 @@ public:
     void VisitYoungTargets(RootVisitor &visitor);
     void VisitMarkedLocalTargets(RootVisitor &visitor);
     void VisitSharedTargets(RootVisitor &visitor);
+    void VisitMarkedGlobalTargets(RootVisitor &visitor);
 
     bool UpdateYoungTargets();
     bool UpdateMarkedLocalTargets();
@@ -77,6 +78,7 @@ private:
         YOUNG,
         LOCAL,
         SHARED,
+        GLOBAL,
     };
 
     static bool IsOwnerMarked(MachineCode *owner);

@@ -14,6 +14,7 @@
  */
 
 #include "ecmascript/mem/barriers_get-inl.h"
+#include "ecmascript/mem/global_cc/global_concurrent_marker.h"
 #include "ecmascript/mem/local_cmc/cc_evacuator-inl.h"
 #include "ecmascript/mem/shared_heap/shared_cc_evacuator.h"
 #include "ecmascript/mem/work_manager-inl.h"
@@ -72,6 +73,15 @@ void Barriers::Update(const JSThread *thread, uintptr_t slotAddr, Region *object
                       Region *valueRegion, WriteBarrierType writeType)
 {
     ASSERT(!g_isEnableCMCGC);
+    if (thread->IsGlobalConcurrentMarking()) {
+        // Route to Global CC mark barrier. RSet maintenance is already done by WriteBarrier
+        // before calling Update; MarkFromWriteBarrier does AtomicMark + fence + push.
+        if (writeType == WriteBarrierType::NORMAL) {
+            TaggedObject *heapValue = JSTaggedValue(value).GetHeapObject();
+            SharedHeap::GetInstance()->GetGlobalCCMarker()->MarkFromWriteBarrier(thread, heapValue);
+        }
+        return;
+    }
     if (valueRegion->InSharedHeap()) {
         return;
     }
@@ -110,6 +120,12 @@ void Barriers::UpdateShared(const JSThread *thread, uintptr_t slotAddr, Region *
                             Region *valueRegion)
 {
     ASSERT(!g_isEnableCMCGC);
+    if (thread->IsGlobalConcurrentMarking()) {
+        // Route to Global CC mark barrier (same as Update).
+        TaggedObject *heapValue = JSTaggedValue(value).GetHeapObject();
+        SharedHeap::GetInstance()->GetGlobalCCMarker()->MarkFromWriteBarrier(thread, heapValue);
+        return;
+    }
 
     ASSERT(DaemonThread::GetInstance()->IsConcurrentMarkingOrFinished());
     ASSERT(valueRegion->InSharedSweepableSpace());

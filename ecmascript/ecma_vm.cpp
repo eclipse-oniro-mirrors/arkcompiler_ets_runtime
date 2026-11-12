@@ -56,6 +56,7 @@
 #include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/jspandafile/abc_buffer_cache.h"
 #include "ecmascript/linked_hash_table.h"
+#include "ecmascript/mem/global_cc/global_mark_work_manager.h"
 #include "ecmascript/mem/heap-inl.h"
 #include "ecmascript/mem/mem_map_allocator.h"
 #include "ecmascript/mem/shared_heap/shared_concurrent_marker.h"
@@ -278,6 +279,7 @@ void EcmaVM::PreFork()
     sHeap->DisableParallelGC(thread_);
     heap_->GetWorkManager()->FinishInPreFork();
     sHeap->GetWorkManager()->FinishInPreFork();
+    sHeap->GetGlobalCCWorkManager()->FinishInPreFork();
 
     SetPreForked(true);
     SetPostForked(false);
@@ -308,6 +310,7 @@ void EcmaVM::PostFork(const JSRuntimeOptions &option)
     heap_->GetWorkManager()->InitializeInPostFork();
     auto sHeap = SharedHeap::GetInstance();
     sHeap->GetWorkManager()->InitializeInPostFork();
+    sHeap->GetGlobalCCWorkManager()->InitializeInPostFork();
     SharedHeap::GetInstance()->EnableParallelGC(GetJSOptions());
     heap_->EnableParallelGC();
     SetPreForked(false);
@@ -533,6 +536,10 @@ bool EcmaVM::Initialize()
     Runtime::GetInstance()->InitSharedConstIfNeed(globalConst);
     thread_->SetReadyForGCIterating(true);
     thread_->SetSharedMarkStatus(DaemonThread::GetInstance()->GetSharedMarkStatus());
+    if (DaemonThread::GetInstance()->IsGlobalConcurrentMarking()) {
+        thread_->SetGlobalConcurrentMarking(true);
+        thread_->SetMarkStatus(MarkStatus::MARKING);
+    }
     snapshotEnv_ = new SnapshotEnv(this);
     bool builtinsLazyEnabled = GetJSOptions().IsWorker() && GetJSOptions().GetEnableBuiltinsLazy();
     thread_->SetEnableLazyBuiltins(builtinsLazyEnabled);

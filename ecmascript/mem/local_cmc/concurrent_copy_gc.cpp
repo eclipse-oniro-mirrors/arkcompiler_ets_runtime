@@ -72,15 +72,18 @@ ConcurrentCopyGC::ConcurrentCopyGC(Heap *heap) : heap_(heap), thread_(heap->GetJ
     thread_->InstallLocalCCEvacuator(mainEvacuator);
 }
 
-void ConcurrentCopyGC::StartLocalCCCopy()
+bool ConcurrentCopyGC::StartLocalCCCopy()
 {
     ASSERT(thread_->IsInRunningState());
     SharedHeap *sHeap = SharedHeap::GetInstance();
     {
         RuntimeLockHolder lock(thread_, sHeap->localCCDrainMutex_);
         if (!sHeap->localCCCopyStartBlocked_) {
+            if (UNLIKELY(thread_->IsGlobalConcurrentMarking())) {
+                return false;
+            }
             sHeap->activeLocalCCCount_++;
-            return;
+            return true;
         }
     }
     // SharedGC may need this thread to reach a safepoint, so never wait while remaining RUNNING.
@@ -89,7 +92,11 @@ void ConcurrentCopyGC::StartLocalCCCopy()
     while (sHeap->localCCCopyStartBlocked_) {
         sHeap->localCCDrainCV_.Wait(&sHeap->localCCDrainMutex_);
     }
+    if (UNLIKELY(thread_->IsGlobalConcurrentMarking())) {
+        return false;
+    }
     sHeap->activeLocalCCCount_++;
+    return true;
 }
 
 void ConcurrentCopyGC::RunPhase()
