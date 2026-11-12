@@ -295,8 +295,8 @@ void PGOProfiler::UpdateRootProfileTypeSafe(JSHClass* oldHClass, JSHClass* newHC
 
 void PGOProfiler::UpdateTrackArrayLength(JSTaggedValue trackInfoVal, uint32_t newSize)
 {
-    if (trackInfoVal.IsHeapObject() && trackInfoVal.IsWeak()) {
-        auto trackInfo = TrackInfo::Cast(trackInfoVal.GetWeakReferentUnChecked());
+    if (trackInfoVal.IsHeapObject()) {
+        auto trackInfo = TrackInfo::Cast(trackInfoVal.GetTaggedObject());
         uint32_t oldSize = trackInfo->GetArrayLength();
         if (oldSize >= newSize) {
             return;
