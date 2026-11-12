@@ -470,6 +470,17 @@ public:
     static bool HashIntegerString(const T *data, size_t size, uint32_t *hash, uint32_t hashSeed);
 
     /**
+     * @brief Report an ARK_RUNTIME_INCOMPATIBLE hisysevent when the UTF-16 integer-hash truncation
+     *        scenario is hit at runtime: a UTF-16 code unit >= 0x0100 whose low byte is an ASCII
+     *        digit (e.g. U+0130 -> '0') is truncated to uint8_t by ComputeIntegerHash and
+     *        misidentified as a decimal digit, so the string gets an IS_INTEGER hash which is
+     *        inconsistent with the UTF-8 source hash of the same content.
+     *        Exponentially rate-limited: reports at trigger counts 10^k (k = 0..4) and carries
+     *        the trigger count in the event; safe to call on the string hash hot path.
+     */
+    static void ReportIntegerHashTruncationEvent();
+
+    /**
      * @brief Compute the hash code of a UTF-8 encoded string buffer.
      *
      * This function computes a hash based on the UTF-8 byte sequence, optionally
