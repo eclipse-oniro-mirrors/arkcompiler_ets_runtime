@@ -52,14 +52,36 @@ HWTEST_F_L0(BacktraceTest, BacktraceTest1)
     std::ostringstream stack;
     bool enableCache = true;
     Backtrace(stack, enableCache);
+#if defined(ENABLE_BACKTRACE_LOCAL) || defined(ENABLE_UNWINDER)
+    // OHOS builds with the local backtrace or unwinder enabled fill the stack.
     EXPECT_TRUE(!stack.str().empty());
+#elif defined(PANDA_TARGET_OHOS)
+    // OHOS standalone builds (e.g. unittest running with qemu) compile
+    // Backtrace() without backtrace support, so it is a no-op and leaves the
+    // stream empty.
+    EXPECT_TRUE(stack.str().empty());
+#else
+    // Linux host builds use the execinfo-based backtrace.
+    EXPECT_TRUE(!stack.str().empty());
+#endif
 }
 
 HWTEST_F_L0(BacktraceTest, BacktraceTest2)
 {
     std::ostringstream stack;
     Backtrace(stack);
+#if defined(ENABLE_BACKTRACE_LOCAL) || defined(ENABLE_UNWINDER)
+    // OHOS builds with the local backtrace or unwinder enabled fill the stack.
     EXPECT_TRUE(!stack.str().empty());
+#elif defined(PANDA_TARGET_OHOS)
+    // OHOS standalone builds (e.g. unittest running with qemu) compile
+    // Backtrace() without backtrace support, so it is a no-op and leaves the
+    // stream empty.
+    EXPECT_TRUE(stack.str().empty());
+#else
+    // Linux host builds use the execinfo-based backtrace.
+    EXPECT_TRUE(!stack.str().empty());
+#endif
 }
 
 HWTEST_F_L0(BacktraceTest, BacktraceHybrid1)
