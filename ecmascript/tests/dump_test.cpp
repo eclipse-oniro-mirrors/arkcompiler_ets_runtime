@@ -1619,3 +1619,252 @@ HWTEST_F_L0(EcmaDumpTest, HeapProfileDump)
 #undef DUMP_FOR_HANDLE
 }
 }  // namespace panda::test
+
+namespace panda::ecmascript {
+// White-box wrapper for the snapshot build tests below; it mirrors the one in
+// heap_snapshot_test.cpp and the two suites link into separate test binaries.
+class HeapSnapShotFriendTest {
+public:
+    explicit HeapSnapShotFriendTest(const EcmaVM *vm, StringHashMap *stringTable, DumpSnapShotOption dumpOption,
+                                    bool traceAllocation, EntryIdMap *entryIdMap)
+        : heapSnapshot(vm, stringTable, dumpOption, traceAllocation, entryIdMap) {}
+
+    HeapSnapshot &Snapshot()
+    {
+        return heapSnapshot;
+    }
+
+    void FreezeForTest()
+    {
+        heapSnapshot.nodesFrozen_ = true;
+    }
+
+    HprofNode *GenerateForTest(JSTaggedValue value)
+    {
+        return heapSnapshot.GenerateNode(value, 0, true);
+    }
+
+    void EmitForTest(const Reference &reference, HprofNode *source)
+    {
+        heapSnapshot.ProcessRegularEdge(reference, source, false);
+    }
+
+    void DiscoverForTest()
+    {
+        heapSnapshot.DiscoverSnapshotNodes(false);
+    }
+
+private:
+    HeapSnapshot heapSnapshot;
+};
+}  // namespace panda::ecmascript
+
+namespace panda::test {
+
+// The serializer consumes exactly one contiguous edge block for each node.
+static void CheckSnapshotGraph(const HeapSnapshot &snapshot)
+{
+    const auto &nodes = *snapshot.GetNodes();
+    const auto &edges = *snapshot.GetEdges();
+    ASSERT_EQ(nodes.size(), snapshot.GetNodeCount());
+    size_t cursor = 0;
+    for (size_t index = 0; index < nodes.size(); ++index) {
+        const auto *node = nodes[index];
+        ASSERT_EQ(node->GetIndex(), index);
+        for (size_t i = 0; i < node->GetEdgeCount(); ++i) {
+            ASSERT_LT(cursor, edges.size());
+            const auto *edge = edges[cursor++];
+            ASSERT_NE(edge, nullptr);
+            ASSERT_EQ(edge->GetFrom(), node);
+            ASSERT_NE(edge->GetTo(), nullptr);
+            ASSERT_LT(edge->GetTo()->GetIndex(), nodes.size());
+            ASSERT_EQ(nodes[edge->GetTo()->GetIndex()], edge->GetTo());
+            if (edge->GetType() != EdgeType::ELEMENT) {
+                ASSERT_NE(edge->GetName(), nullptr);
+            }
+        }
+    }
+    ASSERT_EQ(cursor, edges.size());
+    ASSERT_EQ(cursor, snapshot.GetEdgeCount());
+}
+
+static const HprofNode *FindSnapshotNode(const HeapSnapshot &snapshot, JSTaggedType address)
+{
+    for (const auto *node : *snapshot.GetNodes()) {
+        if (node->GetAddress() == address) {
+            return node;
+        }
+    }
+    return nullptr;
+}
+
+// Objects referenced only through weak edges must not enter the snapshot:
+// consumers do not retain through weak edges and would report them unreachable.
+HWTEST_F_L0(EcmaDumpTest, TwoPhaseWeakSubtreeIsOutOfScope)
+{
+    auto *factory = thread->GetEcmaVM()->GetFactory();
+    JSHandle<TaggedArray> root = factory->NewTaggedArray(2);
+    JSTaggedType targetAddress;
+    JSTaggedType childAddress;
+    {
+        // The only strong handles to the target subtree die with the inner scope.
+        EcmaHandleScope temporary(thread);
+        auto target = factory->NewTaggedArray(2);
+        auto child = factory->NewTaggedArray(2);
+        targetAddress = target.GetTaggedValue().GetRawData();
+        childAddress = child.GetTaggedValue().GetRawData();
+        target->Set(thread, 0, child);
+        ALLOW_LOCAL_TO_SHARE_WEAK_REF_HANDLE;
+        root->Set(thread, 0, target.GetTaggedValue().CreateAndGetWeakRef());
+    }
+    for (bool vmMode : {false, true}) {
+        DumpSnapShotOption option;
+        option.isVmMode = vmMode;
+        HeapProfiler profiler(thread->GetEcmaVM());
+        HeapSnapshot snapshot(thread->GetEcmaVM(), profiler.GetEcmaStringTable(), option, false,
+                               profiler.GetEntryIdMap());
+        ASSERT_TRUE(snapshot.BuildUp());
+        EXPECT_NE(FindSnapshotNode(snapshot, root.GetTaggedValue().GetRawData()), nullptr);
+        EXPECT_EQ(FindSnapshotNode(snapshot, targetAddress), nullptr);
+        EXPECT_EQ(FindSnapshotNode(snapshot, childAddress), nullptr);
+        CheckSnapshotGraph(snapshot);
+    }
+}
+
+// A weak edge whose target is also strongly referenced must survive.
+HWTEST_F_L0(EcmaDumpTest, TwoPhaseWeakBeforeStrongKeepsEdge)
+{
+    auto *factory = thread->GetEcmaVM()->GetFactory();
+    auto root = factory->NewTaggedArray(3);
+    JSTaggedType weakSourceAddress;
+    JSTaggedType targetAddress;
+    {
+        EcmaHandleScope temporary(thread);
+        auto weakSource = factory->NewTaggedArray(2);
+        auto strongSource = factory->NewTaggedArray(2);
+        auto target = factory->NewTaggedArray(2);
+        weakSourceAddress = weakSource.GetTaggedValue().GetRawData();
+        targetAddress = target.GetTaggedValue().GetRawData();
+        ALLOW_LOCAL_TO_SHARE_WEAK_REF_HANDLE;
+        weakSource->Set(thread, 0, target.GetTaggedValue().CreateAndGetWeakRef());
+        strongSource->Set(thread, 0, target);
+        root->Set(thread, 0, weakSource);
+        root->Set(thread, 1, strongSource);
+    }
+    for (bool vmMode : {false, true}) {
+        DumpSnapShotOption option;
+        option.isVmMode = vmMode;
+        HeapProfiler profiler(thread->GetEcmaVM());
+        HeapSnapshot snapshot(thread->GetEcmaVM(), profiler.GetEcmaStringTable(), option, false,
+                               profiler.GetEntryIdMap());
+        ASSERT_TRUE(snapshot.BuildUp());
+        auto *weakSource = FindSnapshotNode(snapshot, weakSourceAddress);
+        auto *target = FindSnapshotNode(snapshot, targetAddress);
+        ASSERT_NE(weakSource, nullptr);
+        ASSERT_NE(target, nullptr);
+        size_t weakCount = 0;
+        for (const auto *edge : *snapshot.GetEdges()) {
+            if (edge->GetFrom() == weakSource && edge->GetTo() == target && edge->GetType() == EdgeType::WEAK) {
+                ++weakCount;
+            }
+        }
+        EXPECT_EQ(weakCount, 1U);
+        CheckSnapshotGraph(snapshot);
+    }
+}
+
+// Private mode: every string folds into one cached display node, so string edges
+// keep flowing through the freeze guard while a weak non-string target is dropped.
+HWTEST_F_L0(EcmaDumpTest, TwoPhasePrivateStringFoldKeepsEdges)
+{
+    auto *factory = thread->GetEcmaVM()->GetFactory();
+    auto string = factory->NewFromASCII("private_fold_target");
+    auto array = factory->NewTaggedArray(3);
+    JSTaggedType unrelatedAddress;
+    {
+        // The only strong handle to the unrelated array dies with the inner scope,
+        // so its weak reference misses and the guard sees a non-string in private mode.
+        EcmaHandleScope temporary(thread);
+        auto unrelated = factory->NewTaggedArray(2);
+        unrelatedAddress = unrelated.GetTaggedValue().GetRawData();
+        ALLOW_LOCAL_TO_SHARE_WEAK_REF_HANDLE;
+        array->Set(thread, 2, unrelated.GetTaggedValue().CreateAndGetWeakRef());
+    }
+    array->Set(thread, 0, string);
+    {
+        ALLOW_LOCAL_TO_SHARE_WEAK_REF_HANDLE;
+        array->Set(thread, 1, string.GetTaggedValue().CreateAndGetWeakRef());
+    }
+    DumpSnapShotOption option;
+    option.isPrivate = true;
+    HeapProfiler profiler(thread->GetEcmaVM());
+    HeapSnapshot snapshot(thread->GetEcmaVM(), profiler.GetEcmaStringTable(), option, false,
+                          profiler.GetEntryIdMap());
+    ASSERT_TRUE(snapshot.BuildUp());
+    auto canonical = thread->GlobalConstants()->GetStringString().GetRawData();
+    const auto *folded = FindSnapshotNode(snapshot, canonical);
+    ASSERT_NE(folded, nullptr);
+    EXPECT_EQ(FindSnapshotNode(snapshot, string.GetTaggedValue().GetRawData()), nullptr);
+    EXPECT_EQ(FindSnapshotNode(snapshot, unrelatedAddress), nullptr);
+    bool strongEdge = false;
+    bool weakEdge = false;
+    for (const auto *edge : *snapshot.GetEdges()) {
+        if (edge->GetTo() == folded) {
+            strongEdge |= edge->GetType() != EdgeType::WEAK;
+            weakEdge |= edge->GetType() == EdgeType::WEAK;
+        }
+    }
+    EXPECT_TRUE(strongEdge);
+    EXPECT_TRUE(weakEdge);
+    CheckSnapshotGraph(snapshot);
+}
+
+// Native references must be skipped during discovery and rebuilt by the
+// emission pass through the original ProcessNativeEdge/ProcessNativeStringEdge.
+HWTEST_F_L0(EcmaDumpTest, TwoPhaseNativeReferencesSkippedInDiscovery)
+{
+    auto *factory = thread->GetEcmaVM()->GetFactory();
+    auto module = factory->NewSourceTextModule();
+    module->SetEcmaModuleRecordNameString("native_skip_record");
+    static int nativeData = 0;
+    auto nativePointer = factory->NewJSNativePointer(&nativeData);
+    DumpSnapShotOption option;
+    HeapProfiler profiler(thread->GetEcmaVM());
+    HeapSnapshot snapshot(thread->GetEcmaVM(), profiler.GetEcmaStringTable(), option, false,
+                          profiler.GetEntryIdMap());
+    ASSERT_TRUE(snapshot.BuildUp());
+    EXPECT_NE(FindSnapshotNode(snapshot, module.GetTaggedValue().GetRawData()), nullptr);
+    EXPECT_NE(FindSnapshotNode(snapshot, nativePointer.GetTaggedValue().GetRawData()), nullptr);
+    CheckSnapshotGraph(snapshot);
+}
+
+// The freeze guard only drops undiscovered targets of the snapshot build:
+// before the freeze a miss still becomes a node (legacy behavior), after it a
+// strong miss is dropped while weak misses (tagged or explicit) stay silent.
+HWTEST_F_L0(EcmaDumpTest, TwoPhaseGuardDistinguishesFrozenAndWeak)
+{
+    auto *factory = thread->GetEcmaVM()->GetFactory();
+    auto source = factory->NewTaggedArray(2);
+    auto missing = factory->NewTaggedArray(2);
+    auto missing2 = factory->NewTaggedArray(2);
+    DumpSnapShotOption option;
+    HeapProfiler profiler(thread->GetEcmaVM());
+    HeapSnapShotFriendTest tester(thread->GetEcmaVM(), profiler.GetEcmaStringTable(), option, false,
+                                  profiler.GetEntryIdMap());
+    HprofNode *sourceNode = tester.GenerateForTest(source.GetTaggedValue());
+    ASSERT_NE(sourceNode, nullptr);
+    // A primitive node (as seeded by a non-heap root value) is skipped during discovery.
+    tester.GenerateForTest(JSTaggedValue::Undefined());
+    tester.DiscoverForTest();
+    // Before the freeze an undiscovered target still becomes a node (legacy behavior).
+    tester.EmitForTest(Reference("legacy_strong", missing.GetTaggedValue()), sourceNode);
+    EXPECT_NE(FindSnapshotNode(tester.Snapshot(), missing.GetTaggedValue().GetRawData()), nullptr);
+    // After the freeze a strong miss is dropped; weak misses (tagged or explicit) are silent.
+    tester.FreezeForTest();
+    tester.EmitForTest(Reference("strong", missing2.GetTaggedValue()), sourceNode);
+    tester.EmitForTest(Reference("weak", missing2.GetTaggedValue().CreateAndGetWeakRef()), sourceNode);
+    tester.EmitForTest(Reference("explicit_weak", missing2.GetTaggedValue(), EdgeType::WEAK), sourceNode);
+    EXPECT_EQ(FindSnapshotNode(tester.Snapshot(), missing2.GetTaggedValue().GetRawData()), nullptr);
+    CheckSnapshotGraph(tester.Snapshot());
+}
+}  // namespace panda::test
