@@ -87,7 +87,8 @@ uintptr_t SpecializedSlotTlabAllocator::Refill()
 
 TlabAllocator::TlabAllocator(Heap *heap)
     : heap_(heap), enableExpandYoung_(true), enableStealOldRegion_(true),
-      moduleTlab_(heap->GetModuleSpace()), nonMovableSpace_(heap_->GetNonMovableSpace())
+      moduleTlab_(heap->GetModuleSpace()), nonMovableSpace_(heap_->GetNonMovableSpace()),
+      nativePointerAllocator_(heap_->GetNativePointerSpace())
 {
     size_t maxOldSpaceCapacity = heap->GetOldSpace()->GetMaximumCapacity();
     localSpace_ = new LocalSpace(heap, maxOldSpaceCapacity, maxOldSpaceCapacity);
@@ -108,6 +109,7 @@ inline void TlabAllocator::Finalize()
     DrainBumpAllocator(youngAllocator_);
     DrainBumpAllocator(nonMovableAllocator_);
     moduleTlab_.Finalize();
+    nativePointerAllocator_.Finalize();
     heap_->MergeToOldSpaceSync(localSpace_);
 }
 
@@ -129,6 +131,9 @@ uintptr_t TlabAllocator::Allocate(size_t size, MemSpaceType space)
             break;
         case MODULE_SPACE:
             result = AllocateInModuleSpace(size);
+            break;
+        case NATIVE_POINTER_SPACE:
+            result = AllocateInNativePointerSpace(size);
             break;
         default:
             LOG_ECMA(FATAL) << "this branch is unreachable";
@@ -186,6 +191,12 @@ uintptr_t TlabAllocator::AllocateInModuleSpace(size_t size)
 {
     ASSERT(size == heap_->GetModuleSpace()->GetSlotSize());
     return moduleTlab_.Allocate();
+}
+
+uintptr_t TlabAllocator::AllocateInNativePointerSpace(size_t size)
+{
+    ASSERT(size == nativePointerAllocator_.GetSlotSize());
+    return nativePointerAllocator_.Allocate();
 }
 
 uintptr_t TlabAllocator::AllocateInOldSpace(size_t size)
@@ -257,11 +268,17 @@ void CCTlabAllocator::Setup(Heap *heap)
 {
     heap_ = heap;
     toSpace_ = heap->GetToSpace();
+    if constexpr (!G_USE_CMS_GC) {
+        nativePointerAllocator_.Reset(heap->GetNativePointerSpace());
+    }
 }
 
 void CCTlabAllocator::Initialize()
 {
     bpAllocator_.Reset();
+    if constexpr (!G_USE_CMS_GC) {
+        nativePointerAllocator_.Reset(heap_->GetNativePointerSpace());
+    }
 }
 
 void CCTlabAllocator::Finalize()
@@ -270,6 +287,14 @@ void CCTlabAllocator::Finalize()
         FreeObject::FillFreeObject(heap_, bpAllocator_.GetTop(), bpAllocator_.Available());
     }
     bpAllocator_.Reset();
+    if constexpr (!G_USE_CMS_GC) {
+        nativePointerAllocator_.Finalize();
+    }
+}
+
+uintptr_t CCTlabAllocator::AllocateNativePointer()
+{
+    return nativePointerAllocator_.Allocate();
 }
 
 uintptr_t CCTlabAllocator::Allocate(size_t size)

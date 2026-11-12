@@ -638,6 +638,10 @@ EcmaVM::~EcmaVM()
     }
     ClearBufferData();
     heap_->WaitAllTasksFinished();
+    while (heap_->HasPendingNativePointerCallbacks()) {
+        heap_->ClearNativePointerList();
+        heap_->WaitAllTasksFinished();
+    }
     ASSERT(!thread_->IsConcurrentCopying());
     common::Taskpool::GetCurrentTaskpool()->Destroy(thread_->GetThreadId());
 

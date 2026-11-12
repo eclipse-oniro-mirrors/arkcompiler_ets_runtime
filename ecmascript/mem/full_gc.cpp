@@ -109,6 +109,7 @@ void FullGC::Initialize()
     } else {
         heap_->SwapNewSpace();
         heap_->GetModuleSpace()->PrepareEvacuation();
+        heap_->GetNativePointerSpace()->PrepareEvacuation();
     }
 #if ENABLE_MEMORY_OPTIMIZATION
     if (!forAppSpawn_) {
@@ -249,6 +250,9 @@ template <bool evacuateNonMovableSpace>
 void FullGC::SweepImpl()
 {
     TRACE_GC(GCStats::Scope::ScopeId::Sweep, heap_->GetEcmaVM()->GetEcmaGCStats());
+    if constexpr (!G_USE_CMS_GC) {
+        heap_->CollectDeadNativePointerCallbacks();
+    }
     // process weak reference
     uint32_t totalThreadCount = 1; // 1 : mainthread
     if (heap_->IsParallelGCEnabled()) {
@@ -310,7 +314,9 @@ void FullGC::Finish()
         if (!forAppSpawn_) {
             heap_->SwapOldSpace();
         }
+        heap_->ProcessNativePointerCallbacks();
         heap_->GetModuleSpace()->MergeToGCRegions();
+        heap_->GetNativePointerSpace()->MergeToGCRegions();
     } else {
         heap_->GetSlotSpace()->MergeToRegions();
     }

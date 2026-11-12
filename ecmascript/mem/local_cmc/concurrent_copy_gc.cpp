@@ -23,6 +23,7 @@
 #include "ecmascript/mem/concurrent_marker.h"
 #include "ecmascript/mem/local_cmc/cc_evacuator-inl.h"
 #include "ecmascript/mem/local_cmc/cc_gc_visitor-inl.h"
+#include "ecmascript/mem/native_pointer_space-inl.h"
 #include "ecmascript/mem/verification.h"
 #include "ecmascript/mem/work_manager-inl.h"
 #include "ecmascript/runtime_call_id.h"
@@ -245,7 +246,7 @@ void ConcurrentCopyGC::UpdateRoot()
     TRACE_GC(GCStats::Scope::ScopeId::UpdateRoot, heap_->GetEcmaVM()->GetEcmaGCStats());
     InitializeCopyPhase();
     CCEvacuator *mainEvacuator = thread_->GetLocalCCEvacuator();
-    WeakRootVisitor weakVisitor = [mainEvacuator](TaggedObject *object) -> TaggedObject* {
+    WeakRootVisitor weakVisitor = [mainEvacuator](TaggedObject* object) -> TaggedObject* {
         Region *objectRegion = Region::ObjectAddressToRange(object);
         ASSERT(objectRegion != nullptr);
         if (objectRegion->InSharedHeap()) {
@@ -436,6 +437,7 @@ void ConcurrentCopyGC::InitializeCopyPhase()
     thread_->AcquireReadBarrier(ReadBarrierOwner::LOCAL_CC);
     thread_->SetCCStatus(CCStatus::COPYING);
     heap_->SelectFromSpace();
+    heap_->GetNativePointerSpace()->PrepareEvacuation();
     ccUpdateFinished_ = false;
     GetTlabAllocator(MAIN_THREAD_INDEX)->Initialize();
 }
@@ -473,17 +475,7 @@ bool ConcurrentCopyTask::Run(uint32_t threadIndex)
     Region *region = GetNextTask();
     while (region) {
         ASSERT(region->IsFromRegion());
-        region->IterateAllMarkedBits([&](void *mem) {
-            TaggedObject *object = reinterpret_cast<TaggedObject *>(mem);
-            MarkWord markWord(object, RELAXED_LOAD);
-            if (!markWord.IsForwardingAddress()) {
-                TaggedObject *toObject = evacuator.Copy(object, markWord);
-                Region::ObjectAddressToRange(toObject)->AtomicMark(toObject);
-            } else {
-                TaggedObject *toObject = markWord.ToForwardingAddress();
-                Region::ObjectAddressToRange(toObject)->AtomicMark(toObject);
-            }
-        });
+        CopyRegion(region, evacuator);
         region = GetNextTask();
     }
     allocator->Finalize();
@@ -498,6 +490,33 @@ bool ConcurrentCopyUpdateWeakReferenceTask::Run([[maybe_unused]] uint32_t thread
     cc_->UpdateRecordWeakReference(weakReferenceThreadIndex_);
     monitor_->NotifyFinishOne();
     return true;
+}
+
+void ConcurrentCopyTask::CopyRegion(Region *region, CCEvacuator &evacuator)
+{
+    if constexpr (!G_USE_CMS_GC) {
+        if (region->InNativePointerSpace()) {
+            cc_->GetHeap()->GetNativePointerSpace()->CollectDeadCallbacksFromRegion(region,
+                [&evacuator](TaggedObject *object) {
+                    MarkWord markWord(object, RELAXED_LOAD);
+                    TaggedObject *toObject = markWord.IsForwardingAddress() ?
+                        markWord.ToForwardingAddress() : evacuator.Copy(object, markWord);
+                    Region::ObjectAddressToRange(toObject)->AtomicMark(toObject);
+                });
+            return;
+        }
+    }
+    region->IterateAllMarkedBits([&](void *mem) {
+        TaggedObject *object = reinterpret_cast<TaggedObject *>(mem);
+        MarkWord markWord(object, RELAXED_LOAD);
+        if (!markWord.IsForwardingAddress()) {
+            TaggedObject *toObject = evacuator.Copy(object, markWord);
+            Region::ObjectAddressToRange(toObject)->AtomicMark(toObject);
+        } else {
+            TaggedObject *toObject = markWord.ToForwardingAddress();
+            Region::ObjectAddressToRange(toObject)->AtomicMark(toObject);
+        }
+    });
 }
 
 Region* ConcurrentCopyTask::GetNextTask()
@@ -519,6 +538,7 @@ int ConcurrentCopyGC::CalculateCopyThreadNum()
     if constexpr (!G_USE_CMS_GC) {
         heap_->GetFromSpaceDuringEvacuation()->EnumerateRegions(collectTask);
         heap_->GetCompressSpace()->EnumerateRegions(collectTask);
+        heap_->GetNativePointerSpace()->EnumerateFromRegions(collectTask);
     } else {
         heap_->GetSlotSpace()->EnumerateFromRegions(collectTask);
     }
@@ -632,12 +652,18 @@ void ConcurrentCopyGC::WaitFinished()
     }
 }
 
-void ConcurrentCopyGC::HandleUpdateFinished()
+void ConcurrentCopyGC::HandleUpdateFinished(bool cleanCallback)
 {
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "ConcurrentCopyGC::HandleUpdateFinished", "");
     ASSERT(thread_->NeedReadBarrier());
+    heap_->ProcessNativePointerCallbacks();
     Finish();
     PostGC();
+    if (cleanCallback) {
+        heap_->CleanCallback();
+    } else {
+        heap_->DeferCleanCallback();
+    }
 #if ENABLE_LOCALCC_OPTIMIZATION
     heap_->SetGCState(false);
 #endif  // ENABLE_LOCALCC_OPTIMIZATION
@@ -648,6 +674,7 @@ void ConcurrentCopyGC::Finish()
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "ConcurrentCopyGC::Finish", "");
     GetTlabAllocator(MAIN_THREAD_INDEX)->Finalize();
     if constexpr (!G_USE_CMS_GC) {
+        heap_->GetNativePointerSpace()->MergeToGCRegions();
         heap_->GetOldSpace()->MergeToSpace(heap_->GetToSpace());
     } else {
         heap_->GetSlotSpace()->MergeToRegions();

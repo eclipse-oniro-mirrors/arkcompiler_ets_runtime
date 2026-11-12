@@ -335,6 +335,7 @@ HWTEST_F_L0(GCTest, CallbackTask)
     auto vm = thread->GetEcmaVM();
     Heap *heap = const_cast<Heap *>(vm->GetHeap());
     auto factory = vm->GetFactory();
+    size_t oldNativeSize = heap->GetNativeBindingSize();
     {
         [[maybe_unused]] ecmascript::EcmaHandleScope baseScope(thread);
 
@@ -350,11 +351,9 @@ HWTEST_F_L0(GCTest, CallbackTask)
             nullptr, false, 10, Concurrent::YES);
         }
     }
-    size_t number = heap->concurrentNativePointerList_.size();
-    EXPECT_TRUE(number > 0);
     heap->CollectGarbage(TriggerGCType::OLD_GC);
-    size_t newNumber = heap->concurrentNativePointerList_.size();
-    EXPECT_TRUE(number > newNumber);
+    size_t newNativeSize = heap->GetNativeBindingSize();
+    EXPECT_EQ(newNativeSize, oldNativeSize);
 }
 
 HWTEST_F_L0(GCTest, RecomputeLimitsTest)
@@ -371,7 +370,7 @@ HWTEST_F_L0(GCTest, RecomputeLimitsTest)
     EXPECT_NE(newCapacity, oldCapacity);
     double gcSpeed = heap->GetMemController()->CalculateMarkCompactSpeedPerMS();
     double mutatorSpeed = heap->GetMemController()->GetCurrentOldSpaceAllocationThroughputPerMS();
-    size_t oldSpaceSize = heap->GetOldSpace()->GetHeapObjectSize() + heap->GetHugeObjectSpace()->GetHeapObjectSize() +
+    size_t oldSpaceSize = heap->GetOldSpaceSize() + heap->GetHugeObjectSpace()->GetHeapObjectSize() +
         heap->GetHugeMachineCodeSpace()->GetHeapObjectSize();
     size_t newSpaceCapacity = heap->GetNewSpace()->GetInitialCapacity();
     double growingFactor =  heap->GetMemController()->CalculateGrowingFactor(gcSpeed, mutatorSpeed);

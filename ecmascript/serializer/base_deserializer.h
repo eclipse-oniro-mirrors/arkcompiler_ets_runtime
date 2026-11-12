@@ -110,6 +110,7 @@ private:
     size_t ReadSingleEncodeData(uint8_t encodeFlag, uintptr_t objAddr, size_t fieldOffset);
     virtual size_t DerivedExtraReadSingleEncodeData(uint8_t encodeFlag, uintptr_t objAddr, size_t fieldOffset);
     void HandleNewObjectEncodeFlag(SerializedObjectSpace space, uintptr_t objAddr, size_t fieldOffset);
+    void TrackNativePointer(TaggedObject* object);
 
     void TransferArrayBufferAttach(uintptr_t objAddr);
     void IncreaseSharedArrayBufferReference(uintptr_t objAddr);

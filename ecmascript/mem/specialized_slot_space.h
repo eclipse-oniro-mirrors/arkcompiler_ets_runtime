@@ -98,6 +98,9 @@ protected:
     Heap *localHeap_ {nullptr};
 
 private:
+    template <typename Callback>
+    size_t IterateOneSlotObject(uintptr_t address, const Callback &objectCallback) const;
+
     bool TryExpandAllocator(size_t expandSize);
     void ExpandAllocator(size_t expandSize);
     void ExpandInGC();

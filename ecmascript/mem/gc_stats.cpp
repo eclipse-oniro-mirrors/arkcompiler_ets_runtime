@@ -324,6 +324,10 @@ void GCStats::PrintGCMemoryStatistic()
                     << STATS_DATA_FORMAT(sizeToKB(heap_->GetOldSpace()->GetHeapObjectSize())) << "KB"
                     << "     committed:"
                     << STATS_DATA_FORMAT(sizeToKB(heap_->GetOldSpace()->GetCommittedSize())) << "KB\n"
+                    << "NativePointerSpace used:"
+                    << STATS_DATA_FORMAT(sizeToKB(heap_->GetNativePointerSpace()->GetHeapObjectSize())) << "KB"
+                    << "     committed:"
+                    << STATS_DATA_FORMAT(sizeToKB(heap_->GetNativePointerSpace()->GetCommittedSize())) << "KB\n"
 #endif
                     << "HugeObjectSpace  used:"
                     << STATS_DATA_FORMAT(sizeToKB(heap_->GetHugeObjectSpace()->GetHeapObjectSize())) << "KB"

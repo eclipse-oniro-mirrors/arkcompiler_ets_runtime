@@ -24,6 +24,7 @@
 #include "ecmascript/checkpoint/thread_state_transition.h"
 #include "ecmascript/module/js_shared_module.h"
 #include "ecmascript/module/js_shared_module_manager.h"
+#include "ecmascript/mem/native_pointer_space.h"
 #include "ecmascript/napi/jsnapi_helper.h"
 #include "mem/mem.h"
 
@@ -226,12 +227,7 @@ void BaseDeserializer::HandleNewObjectEncodeFlag(SerializedObjectSpace space,  u
     }
     TaggedObject *object = reinterpret_cast<TaggedObject *>(addr);
     if (object->GetClass()->IsJSNativePointer()) {
-        JSNativePointer *nativePointer = reinterpret_cast<JSNativePointer *>(object);
-        if (nativePointer->GetDeleter() != nullptr) {
-            if (!object->GetClass()->IsJSShared()) {
-                thread_->GetEcmaVM()->PushToNativePointerList(nativePointer);
-            }
-        }
+        TrackNativePointer(object);
     } else if (object->GetClass()->IsJSFunction()) {
         JSFunction* func = reinterpret_cast<JSFunction *>(object);
         FunctionKind funcKind = func->GetFunctionKind(thread_);
@@ -280,6 +276,18 @@ void BaseDeserializer::HandleNewObjectEncodeFlag(SerializedObjectSpace space,  u
                                                                           isWeakOrCompressed);
 }
 
+void BaseDeserializer::TrackNativePointer(TaggedObject* object)
+{
+    if constexpr (!G_USE_CMS_GC) {
+        return;
+    }
+    auto* nativePointer = reinterpret_cast<JSNativePointer*>(object);
+    if (nativePointer->GetDeleter() == nullptr || object->GetClass()->IsJSShared()) {
+        return;
+    }
+    thread_->GetEcmaVM()->PushToNativePointerList(nativePointer);
+}
+
 void BaseDeserializer::TransferArrayBufferAttach(uintptr_t objAddr)
 {
     ASSERT(JSTaggedValue(static_cast<JSTaggedType>(objAddr)).IsArrayBuffer());
@@ -289,6 +297,7 @@ void BaseDeserializer::TransferArrayBufferAttach(uintptr_t objAddr)
     JSNativePointer *np =
         reinterpret_cast<JSNativePointer *>(arrayBuffer->GetArrayBufferData(thread_).GetTaggedObject());
     arrayBuffer->Attach(thread_, arrayLength, JSTaggedValue(np), withNativeAreaAllocator);
+    heap_->IncreaseNativeBindingSize(np->GetBindingSize());
 }
 
 void BaseDeserializer::IncreaseSharedArrayBufferReference(uintptr_t objAddr)
@@ -299,6 +308,7 @@ void BaseDeserializer::IncreaseSharedArrayBufferReference(uintptr_t objAddr)
     JSNativePointer *np =
         reinterpret_cast<JSNativePointer *>(arrayBuffer->GetArrayBufferData(thread_).GetTaggedObject());
     void *buffer = np->GetExternalPointer();
+    heap_->IncreaseNativeBindingSize(np->GetBindingSize());
     if (JSSharedMemoryManager::GetInstance()->CreateOrLoad(&buffer, arrayLength)) {
         LOG_ECMA(FATAL) << "BaseDeserializer::IncreaseSharedArrayBufferReference failed";
     }
@@ -355,6 +365,7 @@ size_t BaseDeserializer::ReadSingleEncodeData(uint8_t encodeFlag, uintptr_t objA
         case (uint8_t)SerializedObjectSpace::PIN_SPACE:
         case (uint8_t)SerializedObjectSpace::LARGE_SPACE:
         case (uint8_t)SerializedObjectSpace::OLD_SPACE:
+        case (uint8_t)SerializedObjectSpace::NATIVE_POINTER_SPACE:
         case (uint8_t)SerializedObjectSpace::SLOT_SPACE:
         case (uint8_t)SerializedObjectSpace::MODULE_SPACE:
         case (uint8_t)SerializedObjectSpace::NON_MOVABLE_SPACE:
@@ -596,6 +607,13 @@ uintptr_t BaseDeserializer::RelocateObjectAddr(SerializedObjectSpace space, size
             oldSpaceBeginAddr_ += objSize;
             break;
         }
+        case SerializedObjectSpace::NATIVE_POINTER_SPACE: {
+            res = heap_->GetNativePointerSpace()->Allocate();
+            if (res == 0) {
+                DeserializeFatalOutOfMemory(ToSpaceTypeName(MemSpaceType::NATIVE_POINTER_SPACE), objSize);
+            }
+            break;
+        }
         case SerializedObjectSpace::SLOT_SPACE: {
             // fixme: add impl
             res = heap_->GetSlotSpace()->Allocate<false>(objSize);
@@ -797,7 +815,8 @@ void BaseDeserializer::AllocateToDifferentSpaces()
         AllocateToDifferentCMCSpaces();
     } else {
         // Check whether it's needed to trigger old gc
-        size_t oldOrHugeSize = data_->GetOldSpaceSize() + data_->GetHugeSpaceSize() + data_->GetModuleSpaceSize();
+        size_t oldOrHugeSize = data_->GetOldSpaceSize() + data_->GetHugeSpaceSize() +
+            data_->GetModuleSpaceSize() + data_->GetNativePointerSpaceSize();
         if (heap_->OldSpaceExceedCapacity(oldOrHugeSize)) {
             heap_->CollectGarbage(TriggerGCType::OLD_GC, GCReason::ALLOCATION_FAILED);
         }

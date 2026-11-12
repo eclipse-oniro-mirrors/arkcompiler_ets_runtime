@@ -216,14 +216,21 @@ void ObjectFactory::NewJSArrayBufferData(const JSHandle<JSArrayBuffer> &array, i
     size_t size = static_cast<size_t>(length) * sizeof(uint8_t);
     if (!data.IsUndefined()) {
         auto *pointer = JSNativePointer::Cast(data.GetTaggedObject());
+        size_t oldBindingSize = pointer->GetBindingSize();
         auto newData = vm_->GetNativeAreaAllocator()->AllocateZeroBuffer(size);
         heap_->IncNativeSizeAfterLastGC(size);
         pointer->ResetExternalPointer(thread_, newData);
         if (g_isEnableCMCGC) {
-            common::BaseRuntime::NotifyNativeReset(pointer->GetBindingSize(), size);
+            common::BaseRuntime::NotifyNativeReset(oldBindingSize, size);
         }
-        vm_->GetNativeAreaAllocator()->ModifyNativeSizeStats(pointer->GetBindingSize(), size,
+        vm_->GetNativeAreaAllocator()->ModifyNativeSizeStats(oldBindingSize, size,
                                                              NativeFlag::ARRAY_BUFFER);
+        pointer->SetBindingSize(size);
+        if (size > oldBindingSize) {
+            heap_->IncreaseNativeBindingSize(size - oldBindingSize);
+        } else {
+            heap_->DecreaseNativeBindingSize(oldBindingSize - size);
+        }
         return;
     }
 
@@ -429,9 +436,18 @@ void ObjectFactory::NewJSRegExpByteCodeData(const JSHandle<JSRegExp> &regexp, vo
     JSTaggedValue data = regexp->GetByteCodeBuffer(thread_);
     if (!data.IsUndefined()) {
         JSNativePointer *native = JSNativePointer::Cast(data.GetTaggedObject());
+        size_t oldBindingSize = native->GetBindingSize();
         native->ResetExternalPointer(thread_, newBuffer);
         if (g_isEnableCMCGC) {
-            common::BaseRuntime::NotifyNativeReset(native->GetBindingSize(), size);
+            common::BaseRuntime::NotifyNativeReset(oldBindingSize, size);
+        }
+        vm_->GetNativeAreaAllocator()->ModifyNativeSizeStats(oldBindingSize, size,
+                                                             NativeFlag::REGEXP_BTYECODE);
+        native->SetBindingSize(size);
+        if (size > oldBindingSize) {
+            heap_->IncreaseNativeBindingSize(size - oldBindingSize);
+        } else {
+            heap_->DecreaseNativeBindingSize(oldBindingSize - size);
         }
         return;
     }

@@ -356,6 +356,7 @@ bool ModulesSnapshotHelper::WriteDataInfo(FileMemMapWriter& writer, const std::u
         .regularSpaceSize_ = data->regularSpaceSize_,
         .pinSpaceSize_ = data->pinSpaceSize_,
         .oldSpaceSize_ = data->oldSpaceSize_,
+        .nativePointerSpaceSize_ = data->nativePointerSpaceSize_,
         .nonMovableSpaceSize_ = data->nonMovableSpaceSize_,
         .machineCodeSpaceSize_ = data->machineCodeSpaceSize_,
         .moduleSpaceSize_ = data->moduleSpaceSize_,
@@ -380,6 +381,7 @@ bool ModulesSnapshotHelper::ReadDataInfo(FileMemMapReader& reader, const std::un
     data->regularSpaceSize_ = info->regularSpaceSize_;
     data->pinSpaceSize_ = info->pinSpaceSize_;
     data->oldSpaceSize_ = info->oldSpaceSize_;
+    data->nativePointerSpaceSize_ = info->nativePointerSpaceSize_;
     data->nonMovableSpaceSize_ = info->nonMovableSpaceSize_;
     data->machineCodeSpaceSize_ = info->machineCodeSpaceSize_;
     data->moduleSpaceSize_ = info->moduleSpaceSize_;

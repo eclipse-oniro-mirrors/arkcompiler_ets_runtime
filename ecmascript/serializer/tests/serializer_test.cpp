@@ -1301,6 +1301,9 @@ public:
         JSHandle<JSTaggedValue> nativePtr(thread, arrBuf->GetArrayBufferData(thread));
         EXPECT_TRUE(nativePtr->IsJSNativePointer()) << "[NotJSNativePointer] Deserialize TransferJSArrayBuffer1 fail";
         JSHandle<JSNativePointer> np = JSHandle<JSNativePointer>::Cast(nativePtr);
+        if constexpr (!G_USE_CMS_GC) {
+            EXPECT_TRUE(Region::ObjectAddressToRange(*np)->InNativePointerSpace());
+        }
         uintptr_t bufferAddr = reinterpret_cast<uintptr_t>(np->GetExternalPointer());
         // The deserialized C buffer pointer shall be same to the original one
         EXPECT_EQ(static_cast<uint64_t>(bufferAddr), static_cast<uint64_t>(bufferAddrCheck));

@@ -1301,6 +1301,7 @@ bool JSThread::CheckSafepoint()
     }
 #endif
     auto heap = const_cast<Heap *>(vm_->GetHeap());
+    heap->HandleDeferredCleanCallback();
     // Handle exit app senstive scene
     heap->HandleExitHighSensitiveEvent();
 

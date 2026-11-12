@@ -97,6 +97,7 @@ enum class SerializedObjectSpace : uint8_t {
     SHARED_NON_MOVABLE_SPACE,
     SHARED_HUGE_SPACE,
     MODULE_SPACE,
+    NATIVE_POINTER_SPACE,
     TOTAL_SPACE_NUM,
 };
 
@@ -381,6 +382,11 @@ public:
         return oldSpaceSize_;
     }
 
+    size_t GetNativePointerSpaceSize() const
+    {
+        return nativePointerSpaceSize_;
+    }
+
     size_t GetHugeSpaceSize() const
     {
         return hugeSpaceSize_;
@@ -428,6 +434,9 @@ public:
             switch (space) {
                 case SerializedObjectSpace::OLD_SPACE:
                     AlignSpaceObjectSize(oldSpaceSize_, objectSize, SerializedObjectSpace::OLD_SPACE);
+                    break;
+                case SerializedObjectSpace::NATIVE_POINTER_SPACE:
+                    nativePointerSpaceSize_ += objectSize;
                     break;
                 case SerializedObjectSpace::SLOT_SPACE:
                     // fixme: support;
@@ -564,6 +573,7 @@ private:
     size_t regularSpaceSize_ {0};
     size_t pinSpaceSize_ {0};
     size_t oldSpaceSize_ {0};
+    size_t nativePointerSpaceSize_ {0};
     size_t hugeSpaceSize_ {0};
     size_t nonMovableSpaceSize_ {0};
     size_t machineCodeSpaceSize_ {0};

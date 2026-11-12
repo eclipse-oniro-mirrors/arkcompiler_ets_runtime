@@ -30,8 +30,9 @@
 #include "ecmascript/mem/idle_gc_trigger.h"
 #include "ecmascript/mem/module_space.h"
 #include "ecmascript/mem/local_cmc/cc_evacuator-inl.h"
-#include "ecmascript/mem/native_area_allocator.h"
 #include "ecmascript/mem/local_cmc/concurrent_copy_gc.h"
+#include "ecmascript/mem/native_area_allocator.h"
+#include "ecmascript/mem/native_pointer_space.h"
 #include "ecmascript/mem/partial_gc.h"
 #include "ecmascript/mem/parallel_evacuator.h"
 #include "ecmascript/mem/parallel_marker.h"
@@ -859,7 +860,7 @@ SharedHeap::SharedGCScope::SharedGCScope()
 {
     Runtime::GetInstance()->GCIterateThreadList([](JSThread *thread) {
         auto heap = thread->GetEcmaVM()->GetHeap();
-        heap->WaitAndHandleCCFinished();
+        heap->WaitAndHandleCCFinished(false);
 #ifndef EXCLUDE_PGO
         std::shared_ptr<pgo::PGOProfiler> pgoProfiler =  thread->GetEcmaVM()->GetPGOProfiler();
         if (pgoProfiler != nullptr) {
@@ -1380,6 +1381,8 @@ void Heap::InitializeSpaces()
         compressSpace_ = new OldSpace(this, oldSpaceCapacity, oldSpaceCapacity);
         toSpace_ = new ToSpace(this, oldSpaceCapacity, oldSpaceCapacity);
         oldSpace_->Initialize();
+        nativePointerSpace_ = new NativePointerSpace(this, oldSpaceCapacity, oldSpaceCapacity);
+        nativePointerSpace_->Initialize();
 
         globalSpaceAllocLimit_ = maxHeapSize - minSemiSpaceCapacity;
         globalSpaceNativeLimit_ = INIT_GLOBAL_SPACE_NATIVE_SIZE_LIMIT;
@@ -1479,6 +1482,8 @@ void Heap::ResetLargeCapacity(size_t heapSize)
         oldSpace_->SetMaximumCapacity(newOldCapacity);
         compressSpace_->SetInitialCapacity(newOldCapacity);
         compressSpace_->SetMaximumCapacity(newOldCapacity);
+        nativePointerSpace_->SetInitialCapacity(newOldCapacity);
+        nativePointerSpace_->SetMaximumCapacity(newOldCapacity);
     }
     hugeObjectSpace_->SetInitialCapacity(newOldCapacity);
     hugeObjectSpace_->SetMaximumCapacity(newOldCapacity);
@@ -1599,6 +1604,11 @@ void Heap::Destroy()
         moduleSpace_->Destroy();
         delete moduleSpace_;
         moduleSpace_ = nullptr;
+    }
+    if (nativePointerSpace_ != nullptr) {
+        nativePointerSpace_->Destroy();
+        delete nativePointerSpace_;
+        nativePointerSpace_ = nullptr;
     }
     if (toSpace_ != nullptr) {
         toSpace_->Destroy();
@@ -1780,6 +1790,7 @@ void Heap::ResumeForAppSpawn()
     } else {
         moduleSpace_->ReclaimFromRegions();
         inactiveSemiSpace_->ReclaimRegions();
+        nativePointerSpace_->ReclaimFromRegions();
         oldSpace_->Reset();
     }
     auto cb = [] (Region *region) {
@@ -1847,6 +1858,26 @@ void Heap::EnableParallelGC()
 #endif
     sweeper_->ConfigConcurrentSweep(ecmaVm_->GetJSOptions().EnableConcurrentSweep());
     concurrentMarker_->ConfigConcurrentMark(concurrentMarkerEnabled);
+}
+
+size_t Heap::GetOldSpaceSize() const
+{
+    size_t size = oldSpace_->GetHeapObjectSize();
+    if constexpr (!G_USE_CMS_GC) {
+        size += moduleSpace_->GetHeapObjectSize();
+        size += nativePointerSpace_->GetHeapObjectSize();
+    }
+    return size;
+}
+
+size_t Heap::GetOldSpaceCommittedSize() const
+{
+    size_t size = oldSpace_->GetCommittedSize();
+    if constexpr (!G_USE_CMS_GC) {
+        size += moduleSpace_->GetCommittedSize();
+        size += nativePointerSpace_->GetCommittedSize();
+    }
+    return size;
 }
 
 TriggerGCType Heap::SelectGCType() const
@@ -2417,7 +2448,7 @@ void Heap::AdjustOldSpaceLimit()
     }
     size_t minGrowingStep = ecmaVm_->GetEcmaParamConfiguration().GetMinGrowingStep();
     size_t oldSpaceAllocLimit = GetOldSpace()->GetInitialCapacity();
-    size_t newOldSpaceAllocLimit = std::max(oldSpace_->GetHeapObjectSize() + minGrowingStep,
+    size_t newOldSpaceAllocLimit = std::max(GetOldSpaceSize() + minGrowingStep,
         static_cast<size_t>(oldSpaceAllocLimit * memController_->GetAverageSurvivalRate()));
     if (newOldSpaceAllocLimit <= oldSpaceAllocLimit) {
         GetOldSpace()->SetInitialCapacity(newOldSpaceAllocLimit);
@@ -2542,6 +2573,7 @@ void Heap::AddAllocationInspectorToAllSpaces(AllocationInspector *inspector)
         // oldSpace_/compressSpace_:
         // only add an inspector to oldSpace_, and while sweeping for gc, inspector need be swept.
         oldSpace_->AddAllocationInspector(inspector);
+        nativePointerSpace_->AddAllocationInspector(inspector);
     }
     // readOnlySpace_ need not allocationInspector.
     // appSpawnSpace_ need not allocationInspector.
@@ -2560,6 +2592,7 @@ void Heap::ClearAllocationInspectorFromAllSpaces()
     } else {
         activeSemiSpace_->ClearAllocationInspector();
         oldSpace_->ClearAllocationInspector();
+        nativePointerSpace_->ClearAllocationInspector();
     }
     nonMovableSpace_->ClearAllocationInspector();
     machineCodeSpace_->ClearAllocationInspector();
@@ -2576,7 +2609,7 @@ void Heap::RecomputeLimits()
     }
     double gcSpeed = memController_->CalculateMarkCompactSpeedPerMS();
     double mutatorSpeed = memController_->GetCurrentOldSpaceAllocationThroughputPerMS();
-    size_t oldSpaceSize = oldSpace_->GetHeapObjectSize() + hugeObjectSpace_->GetHeapObjectSize() +
+    size_t oldSpaceSize = GetOldSpaceSize() + hugeObjectSpace_->GetHeapObjectSize() +
         hugeMachineCodeSpace_->GetHeapObjectSize();
     size_t newSpaceCapacity = activeSemiSpace_->GetInitialCapacity();
 
@@ -2597,11 +2630,11 @@ void Heap::RecomputeLimits()
     OPTIONAL_LOG(ecmaVm_, INFO) << "RecomputeLimits oldSpaceAllocLimit_: " << newOldSpaceLimit
         << " globalSpaceAllocLimit_: " << globalSpaceAllocLimit_
         << " globalSpaceNativeLimit_:" << globalSpaceNativeLimit_;
-    if ((oldSpace_->GetHeapObjectSize() * 1.0 / SHRINK_OBJECT_SURVIVAL_RATE) < oldSpace_->GetCommittedSize() &&
-        (oldSpace_->GetCommittedSize() / 2) > newOldSpaceLimit) { // 2: means half
+    if ((GetOldSpaceSize() * 1.0 / SHRINK_OBJECT_SURVIVAL_RATE) < GetOldSpaceCommittedSize() &&
+        (GetOldSpaceCommittedSize() / 2) > newOldSpaceLimit) { // 2: means half
         OPTIONAL_LOG(ecmaVm_, INFO) << " Old space heap object size is too much lower than committed size"
-                                    << " heapObjectSize: "<< oldSpace_->GetHeapObjectSize()
-                                    << " Committed Size: " << oldSpace_->GetCommittedSize();
+                                    << " heapObjectSize: "<< GetOldSpaceSize()
+                                    << " Committed Size: " << GetOldSpaceCommittedSize();
         SetFullMarkRequestedState(true);
     }
 }
@@ -2814,7 +2847,7 @@ bool Heap::TryTriggerConcurrentMarking(MarkReason markReason)
     double oldSpaceAllocToLimitDuration = 0;
     double oldSpaceAllocSpeed = memController_->GetOldSpaceAllocationThroughputPerMS();
     double oldSpaceConcurrentMarkSpeed = memController_->GetFullSpaceConcurrentMarkSpeedPerMS();
-    size_t oldSpaceHeapObjectSize = oldSpace_->GetHeapObjectSize() + hugeObjectSpace_->GetHeapObjectSize() +
+    size_t oldSpaceHeapObjectSize = GetOldSpaceSize() + hugeObjectSpace_->GetHeapObjectSize() +
         hugeMachineCodeSpace_->GetHeapObjectSize();
     size_t globalHeapObjectSize = GetHeapObjectSize();
     size_t oldSpaceAllocLimit = oldSpace_->GetInitialCapacity();
@@ -2989,13 +3022,13 @@ void Heap::IncreaseNativeBindingSize(size_t size)
     if (size == 0) {
         return;
     }
-    nativeBindingSize_ += size;
+    nativeBindingSize_.fetch_add(size, std::memory_order_relaxed);
 }
 
 void Heap::DecreaseNativeBindingSize(size_t size)
 {
-    ASSERT(size <= nativeBindingSize_);
-    nativeBindingSize_ -= size;
+    [[maybe_unused]] size_t oldValue = nativeBindingSize_.fetch_sub(size, std::memory_order_relaxed);
+    ASSERT(size <= oldValue);
 }
 
 void Heap::PrepareRecordRegionsForReclaim()
@@ -3008,6 +3041,7 @@ void Heap::PrepareRecordRegionsForReclaim()
         oldSpace_->SetRecordRegion();
         // ReclaimRegions clears bits only up to recordRegion_: stale dangles, null never clears.
         moduleSpace_->SetRecordRegion();
+        nativePointerSpace_->SetRecordRegion();
     }
     snapshotSpace_->SetRecordRegion();
     nonMovableSpace_->SetRecordRegion();
@@ -3059,11 +3093,11 @@ void Heap::WaitCCFinished() const
     }
 }
 
-void Heap::WaitAndHandleCCFinished()
+void Heap::WaitAndHandleCCFinished(bool cleanCallback)
 {
     if (thread_->IsConcurrentCopying()) {
         ccGC_->WaitFinished();
-        ccGC_->HandleUpdateFinished();
+        ccGC_->HandleUpdateFinished(cleanCallback);
     }
 }
 
@@ -3634,15 +3668,16 @@ size_t Heap::ProcessNativePointerListSerial(NativePointerList &list, const WeakR
     }
 
     size_t liveBindingSize = 0;
-    auto &asyncNativeCallbacksPack = GetEcmaVM()->GetAsyncNativePointerCallbacksPack();
     auto iter = list.begin();
     while (iter != list.end()) {
         JSNativePointer *object = reinterpret_cast<JSNativePointer *>((*iter).GetTaggedObject());
         auto fwd = visitor(reinterpret_cast<TaggedObject *>(object));
         if (fwd == nullptr) {
             size_t bindingSize = object->GetBindingSize();
-            asyncNativeCallbacksPack.AddCallback(std::make_pair(object->GetDeleter(),
-                std::make_tuple(thread_->GetEnv(), object->GetExternalPointer(), object->GetData())), bindingSize);
+            AddAsyncNativePointerCallback(
+                std::make_pair(object->GetDeleter(),
+                               std::make_tuple(thread_->GetEnv(), object->GetExternalPointer(), object->GetData())),
+                bindingSize);
             nativeAreaAllocator_->DecreaseNativeSizeStats(bindingSize, object->GetNativeFlag());
             SwapBackAndPopNativePointerList(list, iter);
             continue;
@@ -3761,7 +3796,7 @@ void Heap::ProcessReferencesForLocalCC(const WeakRootVisitor &visitor)
             + ";ConcurrentNum:" + std::to_string(concurrentNativePointerList_.size())).c_str(), "");
 
         ASSERT(!localCCConcurrentNativePointerProcessing_);
-        localCCNativeBindingSizeBeforeGC_ = nativeBindingSize_;
+    localCCNativeBindingSizeBeforeGC_ = GetNativeBindingSize();
         localCCNativePointerLiveBindingSize_ = ProcessNativePointerListSerial(nativePointerList_, visitor);
         ASSERT(localCCConcurrentNativePointerList_.empty());
         concurrentNativePointerList_.swap(localCCConcurrentNativePointerList_);
@@ -3801,10 +3836,11 @@ void Heap::FinalizeConcurrentNativePointerListForLocalCC()
     size_t liveBindingSize = localCCNativePointerLiveBindingSize_ +
         localCCConcurrentNativePointerLiveBindingSize_;
     size_t rebuiltNativeBindingSize = liveBindingSize;
-    if (nativeBindingSize_ >= localCCNativeBindingSizeBeforeGC_) {
-        rebuiltNativeBindingSize += nativeBindingSize_ - localCCNativeBindingSizeBeforeGC_;
+    size_t currentNativeBindingSize = GetNativeBindingSize();
+    if (currentNativeBindingSize >= localCCNativeBindingSizeBeforeGC_) {
+        rebuiltNativeBindingSize += currentNativeBindingSize - localCCNativeBindingSizeBeforeGC_;
     } else {
-        size_t removedDuringCopy = localCCNativeBindingSizeBeforeGC_ - nativeBindingSize_;
+        size_t removedDuringCopy = localCCNativeBindingSizeBeforeGC_ - currentNativeBindingSize;
         if (removedDuringCopy >= rebuiltNativeBindingSize) {
             rebuiltNativeBindingSize = 0;
         } else {
@@ -3871,28 +3907,39 @@ void Heap::NotifyLocalCCNativePointerCallbacksFinished()
     }
 }
 
+bool Heap::HasPendingNativePointerCallbacks()
+{
+    LockHolder lock(nativePointerCallbackMutex_);
+    return !GetEcmaVM()->GetConcurrentNativePointerCallbacks().empty() ||
+           !GetEcmaVM()->GetAsyncNativePointerCallbacksPack().TotallyEmpty();
+}
+
 void Heap::CleanCallback()
 {
     auto &concurrentCallbacks = this->GetEcmaVM()->GetConcurrentNativePointerCallbacks();
-    if (!concurrentCallbacks.empty()) {
-        common::Taskpool::GetCurrentTaskpool()->PostTask(
-            std::make_unique<DeleteCallbackTask>(thread_->GetThreadId(), concurrentCallbacks)
-        );
+    {
+        LockHolder lock(nativePointerCallbackMutex_);
+        if (!concurrentCallbacks.empty()) {
+            common::Taskpool::GetCurrentTaskpool()->PostTask(
+                std::make_unique<DeleteCallbackTask>(thread_->GetThreadId(), concurrentCallbacks));
+        }
+        ASSERT(concurrentCallbacks.empty());
     }
-    ASSERT(concurrentCallbacks.empty());
 
     AsyncNativeCallbacksPack &asyncCallbacksPack = this->GetEcmaVM()->GetAsyncNativePointerCallbacksPack();
-    if (asyncCallbacksPack.Empty()) {
+    AsyncNativeCallbacksPack* asyncCallbacks = new AsyncNativeCallbacksPack();
+    {
+        LockHolder lock(nativePointerCallbackMutex_);
+        std::swap(*asyncCallbacks, asyncCallbacksPack);
         ASSERT(asyncCallbacksPack.TotallyEmpty());
+    }
+    if (asyncCallbacks->Empty()) {
+        ASSERT(asyncCallbacks->TotallyEmpty());
+        delete asyncCallbacks;
         return;
     }
-    AsyncNativeCallbacksPack *asyncCallbacks = new AsyncNativeCallbacksPack();
-    std::swap(*asyncCallbacks, asyncCallbacksPack);
     NativePointerTaskCallback asyncTaskCb = thread_->GetAsyncCleanTaskCallback();
-    size_t currentSize = 0;
-    if (g_isEnableCMCGC) {
-        currentSize = asyncCallbacks->GetTotalBindingSize();
-    }
+    size_t currentSize = asyncCallbacks->GetTotalBindingSize();
     if (asyncTaskCb != nullptr && thread_->IsMainThreadFast() &&
         (pendingAsyncNativeCallbackSize_ + currentSize) < asyncClearNativePointerThreshold_) {
         IncreasePendingAsyncNativeCallbackSize(asyncCallbacks->GetTotalBindingSize());
@@ -3905,7 +3952,58 @@ void Heap::CleanCallback()
         asyncCallbacks->ProcessAll("ArkCompiler");
         delete asyncCallbacks;
     }
-    ASSERT(asyncCallbacksPack.TotallyEmpty());
+}
+
+void Heap::CollectDeadNativePointerCallbacks()
+{
+    if constexpr (!G_USE_CMS_GC) {
+        nativePointerSpace_->CollectDeadCallbacks();
+    }
+}
+
+void Heap::ProcessNativePointerCallbacks()
+{
+    if constexpr (!G_USE_CMS_GC) {
+        nativePointerSpace_->ProcessDeadCallbacks();
+    }
+}
+
+void Heap::AddConcurrentNativePointerCallback(NativePointerCallbackData callback)
+{
+    LockHolder lock(nativePointerCallbackMutex_);
+    GetEcmaVM()->GetConcurrentNativePointerCallbacks().emplace_back(std::move(callback));
+}
+
+void Heap::AddAsyncNativePointerCallback(NativePointerCallbackData callback, size_t bindingSize)
+{
+    LockHolder lock(nativePointerCallbackMutex_);
+    GetEcmaVM()->GetAsyncNativePointerCallbacksPack().AddCallback(std::move(callback), bindingSize);
+}
+
+void Heap::AddNativePointerCallbacks(const std::vector<NativePointerCallbackData> &concurrentCallbacks,
+                                     const std::vector<NativePointerCallbackData> &asyncCallbacks,
+                                     size_t asyncBindingSize)
+{
+    if (concurrentCallbacks.empty() && asyncCallbacks.empty()) {
+        return;
+    }
+    LockHolder lock(nativePointerCallbackMutex_);
+    auto &concurrentNativeCallbacks = GetEcmaVM()->GetConcurrentNativePointerCallbacks();
+    concurrentNativeCallbacks.insert(concurrentNativeCallbacks.end(), concurrentCallbacks.begin(),
+                                     concurrentCallbacks.end());
+    GetEcmaVM()->GetAsyncNativePointerCallbacksPack().AddCallbacks(asyncCallbacks, asyncBindingSize);
+}
+
+void Heap::HandleDeferredCleanCallback()
+{
+    if (deferredCleanCallback_.exchange(false, std::memory_order_acq_rel)) {
+        CleanCallback();
+    }
+}
+
+void Heap::DeferCleanCallback()
+{
+    deferredCleanCallback_.store(true, std::memory_order_release);
 }
 
 bool Heap::DeleteCallbackTask::Run([[maybe_unused]] uint32_t threadIndex)
@@ -4058,7 +4156,7 @@ void Heap::PrintHeapInfo(TriggerGCType gcType) const
                 << "/" << readOnlySpace_->GetInitialCapacity()
             << "), AppspawnSpace(" << appSpawnSpace_->GetHeapObjectSize()
                 << "/" << appSpawnSpace_->GetCommittedSize() << "/" << appSpawnSpace_->GetInitialCapacity()
-            << "), NativeBindingSize(" << nativeBindingSize_
+            << "), NativeBindingSize(" << GetNativeBindingSize()
             << "), NativeLimitSize(" << globalSpaceNativeLimit_
             << "), GlobalLimitSize(" << globalSpaceAllocLimit_ << ").";
     } else {
@@ -4067,8 +4165,8 @@ void Heap::PrintHeapInfo(TriggerGCType gcType) const
                 << "/" << activeSemiSpace_->GetInitialCapacity()
             << "), NonMovable(" << nonMovableSpace_->GetHeapObjectSize()
                 << "/" << nonMovableSpace_->GetCommittedSize() << "/" << nonMovableSpace_->GetInitialCapacity()
-            << "), Old(" << oldSpace_->GetHeapObjectSize()
-                << "/" << oldSpace_->GetCommittedSize() << "/" << oldSpace_->GetInitialCapacity()
+            << "), Old(" << GetOldSpaceSize()
+                << "/" << GetOldSpaceCommittedSize() << "/" << oldSpace_->GetInitialCapacity()
             << "), HugeObject(" << hugeObjectSpace_->GetHeapObjectSize()
                 << "/" << hugeObjectSpace_->GetCommittedSize() << "/" << hugeObjectSpace_->GetInitialCapacity()
             << "), Module(" << moduleSpace_->GetHeapObjectSize()
@@ -4077,7 +4175,7 @@ void Heap::PrintHeapInfo(TriggerGCType gcType) const
                 << "/" << readOnlySpace_->GetInitialCapacity()
             << "), AppspawnSpace(" << appSpawnSpace_->GetHeapObjectSize()
                 << "/" << appSpawnSpace_->GetCommittedSize() << "/" << appSpawnSpace_->GetInitialCapacity()
-            << "), NativeBindingSize(" << nativeBindingSize_
+            << "), NativeBindingSize(" << GetNativeBindingSize()
             << "), NativeLimitSize(" << globalSpaceNativeLimit_
             << "), GlobalLimitSize(" << globalSpaceAllocLimit_ << ").";
     }

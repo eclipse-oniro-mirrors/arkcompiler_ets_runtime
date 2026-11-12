@@ -32,6 +32,7 @@ void JSNativePointer::Destroy(JSThread *thread)
     SetDeleter(nullptr);
     SetData(nullptr);
     SetNativeFlag(NativeFlag::NO_DIV);
+    SetIsConcurrent(false);
 }
 
 void JSNativePointer::Detach()

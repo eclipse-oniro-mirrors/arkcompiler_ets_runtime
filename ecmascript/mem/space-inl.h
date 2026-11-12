@@ -37,6 +37,9 @@ RegionSpaceFlag Space::GetRegionFlag() const
         case MemSpaceType::MACHINE_CODE_SPACE:
             flags = RegionSpaceFlag::IN_MACHINE_CODE_SPACE;
             break;
+        case MemSpaceType::NATIVE_POINTER_SPACE:
+            flags = RegionSpaceFlag::IN_NATIVE_POINTER_SPACE;
+            break;
         case MemSpaceType::HUGE_MACHINE_CODE_SPACE:
             flags = RegionSpaceFlag::IN_HUGE_MACHINE_CODE_SPACE;
             break;

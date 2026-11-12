@@ -46,22 +46,7 @@ void SpecializedSlotSpace::IterateSlotObjectsInRegion(Region *region, const Call
     uintptr_t current = region->GetBegin();
     uintptr_t end = CMSRegion::GetAllocatableEnd(CMSRegion::FromRegion(region), slotSize_);
     while (current < end) {
-        auto *freeSegment = SlotFreeSegment::Cast(current);
-        size_t objectSize = slotSize_;
-        if (!freeSegment->IsSlotFreeSegment()) {
-            auto *freeObject = FreeObject::Cast(current);
-            if (!freeObject->IsFreeObject()) {
-                objectCallback(reinterpret_cast<TaggedObject *>(current));
-            } else {
-                freeObject->AsanUnPoisonFreeObject();
-                ASSERT(freeObject->Available() <= slotSize_);
-                freeObject->AsanPoisonFreeObject();
-            }
-        } else {
-            freeSegment->AsanUnPoisonFreeSegment();
-            objectSize = freeSegment->GetSize();
-            freeSegment->AsanPoisonFreeSegment();
-        }
+        size_t objectSize = IterateOneSlotObject(current, objectCallback);
         current += objectSize;
         ASSERT(objectSize % slotSize_ == 0);
         CHECK_OBJECT_SIZE(objectSize);
@@ -83,6 +68,36 @@ void SpecializedSlotSpace::IterateOldToNewOverObjects(Visitor &visitor) const
         region->IterateAllSweepingOldToNewRSetBits(cb);
         region->IterateAllOldToNewBits(cb);
     });
+}
+
+template <typename Callback>
+size_t SpecializedSlotSpace::IterateOneSlotObject(uintptr_t address, const Callback &objectCallback) const
+{
+    size_t objectSize = slotSize_;
+    auto *taggedObject = reinterpret_cast<TaggedObject *>(address);
+    MarkWord markWord(taggedObject, RELAXED_LOAD);
+    if (markWord.IsForwardingAddress()) {
+        objectCallback(taggedObject);
+        return objectSize;
+    }
+
+    auto *freeSegment = SlotFreeSegment::Cast(address);
+    if (freeSegment->IsSlotFreeSegment()) {
+        freeSegment->AsanUnPoisonFreeSegment();
+        objectSize = freeSegment->GetSize();
+        freeSegment->AsanPoisonFreeSegment();
+        return objectSize;
+    }
+
+    auto *freeObject = FreeObject::Cast(address);
+    if (freeObject->IsFreeObject()) {
+        freeObject->AsanUnPoisonFreeObject();
+        ASSERT(freeObject->Available() <= slotSize_);
+        freeObject->AsanPoisonFreeObject();
+    } else {
+        objectCallback(reinterpret_cast<TaggedObject *>(address));
+    }
+    return objectSize;
 }
 }  // namespace panda::ecmascript
 

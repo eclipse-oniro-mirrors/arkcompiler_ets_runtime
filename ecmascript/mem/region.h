@@ -51,17 +51,18 @@ enum RegionSpaceFlag {
     IN_APPSPAWN_SPACE = 0x0F,
     IN_HUGE_MACHINE_CODE_SPACE = 0x10,
     IN_MODULE_SPACE = 0x11,
-    IN_SLOT_SPACE = 0x12,
-    IN_SHARED_NON_MOVABLE = 0x13,
-    IN_SHARED_OLD_SPACE = 0x14,
-    IN_SHARED_APPSPAWN_SPACE = 0X15,
-    IN_SHARED_HUGE_OBJECT_SPACE = 0x16,
-    IN_SHARED_READ_ONLY_SPACE = 0x17,
+    IN_NATIVE_POINTER_SPACE = 0x12,
+    IN_SLOT_SPACE = 0x13,
+    IN_SHARED_NON_MOVABLE = 0x14,
+    IN_SHARED_OLD_SPACE = 0x15,
+    IN_SHARED_APPSPAWN_SPACE = 0X16,
+    IN_SHARED_HUGE_OBJECT_SPACE = 0x17,
+    IN_SHARED_READ_ONLY_SPACE = 0x18,
 
     VALID_SPACE_MASK = 0xFF,
 
     GENERAL_OLD_BEGIN = IN_SNAPSHOT_SPACE,
-    GENERAL_OLD_END = IN_MODULE_SPACE,
+    GENERAL_OLD_END = IN_NATIVE_POINTER_SPACE,
     SHARED_SPACE_BEGIN = IN_SHARED_NON_MOVABLE,
     SHARED_SPACE_END = IN_SHARED_READ_ONLY_SPACE,
     SHARED_SWEEPABLE_SPACE_BEGIN = IN_SHARED_NON_MOVABLE,
@@ -139,6 +140,10 @@ static inline std::string ToSpaceTypeName(uint8_t space)
             return "old space";
         case RegionSpaceFlag::IN_SLOT_SPACE:
             return "slot space";
+        case RegionSpaceFlag::IN_NATIVE_POINTER_SPACE:
+            return "native pointer space";
+        case RegionSpaceFlag::IN_MODULE_SPACE:
+            return "module space";
         case RegionSpaceFlag::IN_NON_MOVABLE_SPACE:
             return "non movable space";
         case RegionSpaceFlag::IN_MACHINE_CODE_SPACE:
@@ -149,8 +154,6 @@ static inline std::string ToSpaceTypeName(uint8_t space)
             return "appspawn space";
         case RegionSpaceFlag::IN_HUGE_MACHINE_CODE_SPACE:
             return "huge machine code space";
-        case RegionSpaceFlag::IN_MODULE_SPACE:
-            return "module space";
         case RegionSpaceFlag::IN_SHARED_NON_MOVABLE:
             return "shared non movable space";
         case RegionSpaceFlag::IN_SHARED_OLD_SPACE:
@@ -467,7 +470,7 @@ public:
     bool InYoungOrOldSpace() const
     {
         // Module regions are non-moving for LOCAL_CC but evacuable by FULL_GC, same as old regions.
-        return InYoungSpace() || InOldSpace() || InModuleSpace();
+        return InYoungSpace() || InOldSpace() || InModuleSpace() || InNativePointerSpace();
     }
 
     bool InGeneralOldSpace() const
@@ -515,6 +518,11 @@ public:
     bool InModuleSpace() const
     {
         return packedData_.flags_.spaceFlag_ == RegionSpaceFlag::IN_MODULE_SPACE;
+    }
+
+    bool InNativePointerSpace() const
+    {
+        return packedData_.flags_.spaceFlag_ == RegionSpaceFlag::IN_NATIVE_POINTER_SPACE;
     }
 
     bool InSharedOldSpace() const

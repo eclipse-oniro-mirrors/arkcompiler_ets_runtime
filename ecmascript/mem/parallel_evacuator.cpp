@@ -17,6 +17,7 @@
 
 #include "ecmascript/js_weak_container.h"
 #include "ecmascript/linked_hash_table.h"
+#include "ecmascript/mem/native_pointer_space-inl.h"
 #include "ecmascript/mem/parallel_evacuator_visitor-inl.h"
 #include "ecmascript/mem/tlab_allocator-inl.h"
 #include "ecmascript/mem/work_manager-inl.h"
@@ -24,6 +25,14 @@
 #include "ecmascript/runtime_call_id.h"
 
 namespace panda::ecmascript {
+MemSpaceType ParallelEvacuator::SelectEvacuateSpace(Region* region, bool promoted)
+{
+    if (region->InNativePointerSpace()) {
+        return NATIVE_POINTER_SPACE;
+    }
+    return promoted ? OLD_SPACE : SEMI_SPACE;
+}
+
 void ParallelEvacuator::Initialize()
 {
     MEM_ALLOCATE_AND_GC_TRACE(heap_->GetEcmaVM(), ParallelEvacuatorInitialize);
@@ -190,6 +199,11 @@ void ParallelEvacuator::EvacuateSpace()
                 ++nonMovableCSet;
             });
         }
+        if (!heap_->IsYoungMark()) {
+            heap_->GetNativePointerSpace()->EnumerateFromRegions([&workloadSet, this](Region *region) {
+                workloadSet.Add(std::make_unique<EvacuateWorkload>(this, region));
+            });
+        }
         ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK,
             ("GC::EvacuateSpace" + std::to_string(heap_->IsConcurrentFullMark())
             + ";oldCSet" + std::to_string(oldCSet)
@@ -341,8 +355,8 @@ void ParallelEvacuator::EvacuateRegion(TlabAllocator *allocator, Region *region,
     bool profilerEnabled = heap_->IsProfilerEnabled();
     size_t promotedSize = 0;
     auto thread = heap_->GetJSThread();
-    region->IterateAllMarkedBits([this, &region, &isInOldGen, &isBelowAgeMark, &pgoEnabled,
-                                  &promotedSize, &allocator, &trackSet, profilerEnabled, &thread](void *mem) {
+    auto evacuateObject = [this, &region, &isInOldGen, &isBelowAgeMark, &pgoEnabled,
+                           &promotedSize, &allocator, &trackSet, profilerEnabled, &thread](void *mem) {
         ASSERT(region->InRange(ToUintPtr(mem)));
         auto header = reinterpret_cast<TaggedObject *>(mem);
         auto klass = header->GetClass();
@@ -359,9 +373,9 @@ void ParallelEvacuator::EvacuateRegion(TlabAllocator *allocator, Region *region,
             address = allocator->Allocate(size, OLD_SPACE);
             actualPromoted = true;
         } else {
-            address = allocator->Allocate(size, SEMI_SPACE);
+            address = allocator->Allocate(size, SelectEvacuateSpace(region, false));
             if (address == 0) {
-                address = allocator->Allocate(size, OLD_SPACE);
+                address = allocator->Allocate(size, SelectEvacuateSpace(region, true));
                 actualPromoted = true;
                 promotedSize += size;
             }
@@ -383,6 +397,9 @@ void ParallelEvacuator::EvacuateRegion(TlabAllocator *allocator, Region *region,
             }
         }
         Barriers::SetPrimitive(header, 0, MarkWord::FromForwardingAddress(address));
+        if (region->InNativePointerSpace()) {
+            heap_->GetNativePointerSpace()->AddSurvivalObjectSize(size);
+        }
 
         if (actualPromoted) {
             if constexpr (updateHClass) {
@@ -391,7 +408,12 @@ void ParallelEvacuator::EvacuateRegion(TlabAllocator *allocator, Region *region,
             }
             SetObjectFieldRSet(reinterpret_cast<TaggedObject *>(address), klass);
         }
-    });
+    };
+    if (region->InNativePointerSpace()) {
+        heap_->GetNativePointerSpace()->CollectDeadCallbacksFromRegion(region, evacuateObject);
+    } else {
+        region->IterateAllMarkedBits(evacuateObject);
+    }
     promotedSize_.fetch_add(promotedSize);
 }
 
