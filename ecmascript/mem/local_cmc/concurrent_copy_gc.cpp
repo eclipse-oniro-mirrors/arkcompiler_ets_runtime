@@ -221,6 +221,15 @@ void ConcurrentCopyGC::UpdateRoot()
     CCUpdateRootVisitor updateRoot(mainEvacuator);
     ObjectXRay::VisitSTWVMRoots(heap_->GetEcmaVM(), updateRoot);
     heap_->GetEcmaVM()->IterateGlobalEnvField(updateRoot);
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    auto *refs = heap_->GetEmbeddedCodeRefSet();
+    if (!refs->IsEmpty()) {
+        refs->VisitMarkedLocalTargets(updateRoot);
+        if (!refs->UpdateMarkedLocalTargets()) {
+            LOG_GC(FATAL) << "Failed to update ArkSteed embedded heap references during LocalCC";
+        }
+    }
+#endif
     heap_->GetEcmaVM()->BeginConcurrentRootScan();
     if (enableParallel) {
         PostUpdateConcurrentRootsTask();
@@ -270,6 +279,15 @@ void ConcurrentCopyGC::UpdateRoot()
         ObjectXRay::VisitSTWVMRoots(heap_->GetEcmaVM(), updateRoot);
     }
     heap_->GetEcmaVM()->IterateGlobalEnvField(updateRoot);
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    auto *refs = heap_->GetEmbeddedCodeRefSet();
+    if (!refs->IsEmpty()) {
+        refs->VisitMarkedLocalTargets(updateRoot);
+        if (!refs->UpdateMarkedLocalTargets()) {
+            LOG_GC(FATAL) << "Failed to update ArkSteed embedded heap references during LocalCC";
+        }
+    }
+#endif
 }
 #endif
 
