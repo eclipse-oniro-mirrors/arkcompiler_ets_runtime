@@ -86,41 +86,40 @@ void ProfilerStubBuilder::ProfileOpType(
     env->SubCfgEntry(&subEntry);
 
     Label exit(env);
-    Label profiler(env);
-    BRANCH(IsProfileTypeInfoHotAndValid(profileTypeInfo), &profiler, &exit);
-    Bind(&profiler);
-    {
-        Label icSlotValid(env);
-        Label uninitialized(env);
-        Label compareLabel(env);
-        Label updateSlot(env);
-
-        GateRef slotId = GetSlotID(slotInfo);
-        GateRef length = GetICLength(profileTypeInfo);
-        BRANCH(Int32LessThan(slotId, length), &icSlotValid, &exit);
-        Bind(&icSlotValid);
+    IR_IF (TaggedIsUndefined(profileTypeInfo)) {
+        Jump(&exit);
+    }
+    GateRef slotId = GetSlotID(slotInfo);
+    GateRef length = GetICLength(profileTypeInfo);
+    IR_IF (Int32LessThan(slotId, length)) {
         GateRef slotValue = GetICSlot(glue, profileTypeInfo, slotId);
-        DEFVARIABLE(curTaggedSlotValue, VariableType::INT64(), type);
-        BRANCH(TaggedIsInt(slotValue), &compareLabel, &uninitialized);
-        Bind(&compareLabel);
-        {
-            GateRef oldTaggedSlotValue = ChangeTaggedPointerToInt64(slotValue);
-            curTaggedSlotValue = Int64Or(oldTaggedSlotValue, type);
-            BRANCH(Int64Equal(oldTaggedSlotValue, *curTaggedSlotValue), &exit, &updateSlot);
-        }
-        Bind(&uninitialized);
-        {
-            // Only when slot value is undefined, it means uninitialized, so we need to update the slot.
-            // When the slot value is hole, it means slot is overflow (0xff). Otherwise, do nothing.
-            BRANCH(TaggedIsUndefined(slotValue), &updateSlot, &exit);
-        }
-        Bind(&updateSlot);
-        {
-            SetICSlot(VariableType::JS_ANY(), glue, profileTypeInfo, slotId, *curTaggedSlotValue);
-            TryPreDumpInner(glue, func, profileTypeInfo);
+        GateRef rawSlot = ChangeTaggedPointerToInt64(slotValue);
+        // Return immediately if the slot already matches the new feedback.
+        IR_IF_LIKELY (Int64Equal(rawSlot, type)) {
             Jump(&exit);
         }
+        // type contains the full integer tag and the new feedback bits. If OR adds no bits,
+        // rawSlot already contains both: TAG_INT == TAG_MARK makes it integer feedback,
+        // and the existing feedback already covers type, so the slot needs no update.
+        static_assert(JSTaggedValue::TAG_INT == JSTaggedValue::TAG_MARK);
+        IR_IF_LIKELY (Int64Equal(Int64Or(rawSlot, type), rawSlot)) {
+            Jump(&exit);
+        }
+        DEFVARIABLE(curTaggedSlotValue, VariableType::INT64(), type);
+        IR_IF (TaggedIsInt(slotValue)) {
+            curTaggedSlotValue = Int64Or(rawSlot, type);
+        } IR_ELSE {
+            // Only undefined slots are uninitialized; holes represent overflow (0xff).
+            IR_IF (BoolNot(TaggedIsUndefined(slotValue))) {
+                Jump(&exit);
+            }
+        }
+        IR_IF (BoolNot(IsProfileTypeInfoWithBigMethod(profileTypeInfo))) {
+            SetICSlot(VariableType::JS_ANY(), glue, profileTypeInfo, slotId, *curTaggedSlotValue);
+            TryPreDumpInner(glue, func, profileTypeInfo);
+        }
     }
+    Jump(&exit);
     Bind(&exit);
     env->SubCfgExit();
 }
@@ -682,7 +681,8 @@ GateRef ProfilerStubBuilder::GetIterationFunctionId(GateRef glue, GateRef iterat
     Label notStringProtoIter(env);
     Label isTypedArrayProtoValues(env);
 
-    GateRef globalEnv = GetCurrentGlobalEnv();
+    // Keep lazy gates local: this helper is emitted in sibling control-flow branches.
+    GateRef globalEnv = HasGlobalEnv() ? GetCurrentGlobalEnv() : LazyGetGlobalEnv();
     maybeFunc = GetGlobalEnvValue(VariableType::JS_ANY(), glue, globalEnv,
                                   GlobalEnv::ARRAY_PROTO_VALUES_FUNCTION_INDEX);
     BRANCH(Int64Equal(iterator, *maybeFunc), &isArrayProtoValues, &notArrayProtoValues);
