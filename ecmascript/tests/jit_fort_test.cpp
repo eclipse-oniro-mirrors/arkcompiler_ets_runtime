@@ -59,7 +59,7 @@ public:
 private:
     static std::string ChangeFileContent(const char *value)
     {
-        const char selinuxPath[] = "/sys/fs/selinux/enforce";
+        const char selinuxPath[] = "/proc/sys/kernel/jitfort/jitfort_mode";
         std::string enforceValue {""};
         int fd = open(selinuxPath, O_RDWR);
         if (fd < 0) {
