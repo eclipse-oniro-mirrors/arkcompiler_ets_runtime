@@ -16,6 +16,8 @@
 #ifndef ECMASCRIPT_DFX_HPROF_HEAP_PROFILER_H
 #define ECMASCRIPT_DFX_HPROF_HEAP_PROFILER_H
 
+#include <atomic>
+
 #include "common_components/heap/heap.h"
 #include "ecmascript/ecma_macros.h"
 #include "ecmascript/dfx/hprof/file_stream.h"
@@ -124,6 +126,11 @@ public:
 
     void AllocationEvent(TaggedObject *address, size_t size) override;
     void MoveEvent(uintptr_t address, TaggedObject *forwardAddress, size_t size) override;
+    void MoveEventLocked(uintptr_t address, TaggedObject *forwardAddress, size_t size) override;
+    bool IsRecording() const
+    {
+        return isProfiling_;
+    }
     /**
      * dump the specific snapshot in target format
      */
@@ -183,6 +190,8 @@ private:
      * trigger full gc to make sure no unreachable objects in heap
      */
     bool ForceFullGC(const EcmaVM *vm);
+    void ActivateRecording();
+    void DeactivateRecording();
     void ForceSharedGC();
     bool DumpHeapSnapshotFromSharedGC(Stream *stream, const DumpSnapShotOption &dumpOption);
     void DumpHeapSnapshotFromSharedGCForOOM(Stream *stream, const DumpSnapShotOption &dumpOption);
@@ -220,7 +229,8 @@ private:
     const EcmaVM *vm_;
     CVector<HeapSnapshot *> hprofs_;
     StringHashMap stringTable_;
-    bool isProfiling_ {false};
+    // Read cross-thread on GC dispatch paths; ordering comes from registryMutex_/thread confinement.
+    std::atomic<bool> isProfiling_ {false};
     EntryIdMap *entryIdMap_;
     CUnorderedMap<uintptr_t, NodeId> nodeAddressIdMap_ {};
     std::unique_ptr<HeapTracker> heapTracker_;

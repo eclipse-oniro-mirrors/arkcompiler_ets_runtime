@@ -25,6 +25,7 @@
 #include "ecmascript/mem/mark_word.h"
 #include "ecmascript/mem/region-inl.h"
 #include "ecmascript/mem/work_manager-inl.h"
+#include "ecmascript/dfx/hprof/shared_heap_profiler.h"
 
 namespace panda::ecmascript {
 
@@ -46,7 +47,8 @@ inline MemSpaceType FullGC::GetEvacuateTargetSpace(Region *region)
 
 template <bool evacuateNonMovableSpace>
 FullGCRunner<evacuateNonMovableSpace>::FullGCRunner(Heap *heap, WorkNodeHolder *workNodeHolder, bool isAppSpawn)
-    : heap_(heap), workNodeHolder_(workNodeHolder), isAppSpawn_(isAppSpawn), markRootVisitor_(this),
+    : heap_(heap), workNodeHolder_(workNodeHolder), isAppSpawn_(isAppSpawn),
+      markFromForAnchor_(SharedHeapProfiler::IsMoveTrackingActive()), markRootVisitor_(this),
       markObjectVisitor_(this), updateLocalToShareRSetVisitor_(this) {}
 
 template <bool evacuateNonMovableSpace>
@@ -138,6 +140,10 @@ void FullGCRunner<evacuateNonMovableSpace>::HandleMarkingSlotObject(ObjectSlotBa
         return;
     }
 
+    // Mark the FROM copy for the finish anchor's bitset scan.
+    if (UNLIKELY(markFromForAnchor_)) {
+        objectRegion->AtomicMark(object);
+    }
     MarkWord markWord(object, ACQUIRE_LOAD);
     if (markWord.IsForwardingAddress()) {
         TaggedObject *dst = markWord.ToForwardingAddress();

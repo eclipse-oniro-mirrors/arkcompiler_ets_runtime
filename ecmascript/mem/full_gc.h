@@ -183,6 +183,7 @@ private:
     Heap *heap_ {nullptr};
     WorkNodeHolder *workNodeHolder_ {nullptr};
     bool isAppSpawn_ {false};
+    bool markFromForAnchor_ {false};  // read once per marking thread; the flag is GC-stable
     FullGCMarkRootVisitor<evacuateNonMovableSpace> markRootVisitor_;
     FullGCMarkObjectVisitor<evacuateNonMovableSpace> markObjectVisitor_;
     FullGCUpdateLocalToShareRSetVisitor<evacuateNonMovableSpace> updateLocalToShareRSetVisitor_;

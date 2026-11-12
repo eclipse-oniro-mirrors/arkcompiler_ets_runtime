@@ -15,6 +15,8 @@
 
 #include "ecmascript/mem/shared_heap/shared_partial_gc.h"
 
+#include "ecmascript/dfx/hprof/moved_object_scanner.h"
+
 #include "ecmascript/checkpoint/thread_state_transition.h"
 #include "ecmascript/mem/shared_heap/shared_concurrent_marker.h"
 #include "ecmascript/mem/shared_heap/shared_concurrent_sweeper.h"
@@ -162,6 +164,7 @@ void SharedPartialGC::Evacuate()
 {
     if (sHeap_->HasCSetRegions()) {
         sHeap_->GetSharedGCEvacuator()->Evacuate();
+        MovedObjectScanner::ScanSharedPartialGC(sHeap_);
     }
 }
 

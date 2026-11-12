@@ -28,6 +28,7 @@
 #include "ecmascript/mem/work_manager-inl.h"
 #include "ecmascript/runtime_call_id.h"
 #include "ecmascript/runtime_lock.h"
+#include "ecmascript/dfx/hprof/moved_object_scanner.h"
 
 namespace panda::ecmascript {
 namespace {
@@ -657,6 +658,8 @@ void ConcurrentCopyGC::HandleUpdateFinished(bool cleanCallback)
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "ConcurrentCopyGC::HandleUpdateFinished", "");
     ASSERT(thread_->NeedReadBarrier());
     heap_->ProcessNativePointerCallbacks();
+    // Anchor ⑥: all copies are done; must run before Finish(), whose ResumeCC reclaims the FROM regions.
+    MovedObjectScanner::ScanLocalCC(heap_);
     Finish();
     PostGC();
     if (cleanCallback) {

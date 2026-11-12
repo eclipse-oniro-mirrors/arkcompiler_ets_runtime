@@ -140,6 +140,7 @@ private:
 
     SharedHeap *sHeap_ {nullptr};
     SharedGCWorkNodeHolder *sWorkNodeHolder_ {nullptr};
+    bool markFromForAnchor_ {false};  // read once per marking thread; the flag is GC-stable
     SharedFullGCMarkRootVisitor markRootVisitor_;
     SharedFullGCMarkObjectVisitor markObjectVisitor_;
     SharedFullGCMarkLocalToShareRSetVisitor markLocalToShareRSetVisitor_;

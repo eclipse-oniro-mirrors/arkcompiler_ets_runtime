@@ -15,6 +15,8 @@
 
 #include "ecmascript/mem/full_gc-inl.h"
 
+#include "ecmascript/dfx/hprof/moved_object_scanner.h"
+
 #include "common_components/taskpool/taskpool.h"
 #include "ecmascript/js_weak_container.h"
 #include "ecmascript/linked_hash_table.h"
@@ -309,6 +311,9 @@ void FullGC::Finish()
 {
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "FullGC::Finish", "");
     TRACE_GC(GCStats::Scope::ScopeId::Finish, heap_->GetEcmaVM()->GetEcmaGCStats());
+    if (!forAppSpawn_) {
+        MovedObjectScanner::ScanLocalFullGC(heap_);
+    }
     // fixme: refactor?
     if constexpr (!G_USE_CMS_GC) {
         if (!forAppSpawn_) {

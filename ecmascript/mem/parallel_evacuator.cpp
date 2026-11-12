@@ -15,6 +15,8 @@
 
 #include "ecmascript/mem/parallel_evacuator-inl.h"
 
+#include "ecmascript/dfx/hprof/moved_object_scanner.h"
+
 #include "ecmascript/js_weak_container.h"
 #include "ecmascript/linked_hash_table.h"
 #include "ecmascript/mem/native_pointer_space-inl.h"
@@ -61,6 +63,7 @@ void ParallelEvacuator::Evacuate()
     } else {
         Initialize();
         EvacuateSpace();
+        MovedObjectScanner::ScanLocalPartialGC(heap_);
         UpdateReference();
         SweepNewToOldRegions();
         Finalize();

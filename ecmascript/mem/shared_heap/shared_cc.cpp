@@ -14,6 +14,8 @@
  */
 
 #include "ecmascript/mem/shared_heap/shared_cc.h"
+
+#include "ecmascript/dfx/hprof/moved_object_scanner.h"
 #include "common_components/taskpool/taskpool.h"
 #include "ecmascript/checkpoint/thread_state_transition.h"
 #include "ecmascript/ecma_string_table.h"
@@ -128,6 +130,7 @@ void SharedCC::FinalizeAndReclaimInSTW(float previousStwDuration)
     // Post-snapshot marker tasks read slots already updated in Phase 4.
     FinalizeCopy();
     sHeap_->GetSweeper()->TryFillSweptRegion();
+    MovedObjectScanner::ScanSharedCC(sHeap_);
     sHeap_->Reclaim(TriggerGCType::SHARED_CC);
     if (UNLIKELY(sHeap_->ShouldVerifyHeap())) {
         // Taskpool clear is outside SuspendAll; wait before verification.
