@@ -52,242 +52,26 @@ public:
     }
 };
 
-HWTEST_F_L0(GCKeyStatsTest, ProcessLongGCEventTest001)
+HWTEST_F_L0(GCKeyStatsTest, ShouldSkipLongGCReportTest001)
 {
-    JSRuntimeOptions& options = thread->GetEcmaVM()->GetJSOptions();
-    options.SetEnableDFXHiSysEvent(false);
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    GCStats *gcStats = new GCStats(heap);
-    LongGCStats *longGCStats = gcStats->GetLongGCStats();
-    longGCStats->SetGCIsSensitive(true);
-    longGCStats->SetGCIsInBackground(false);
-    longGCStats->SetGCTotalTime(34.0f);
-    gcStats->SetGCReason(GCReason::IDLE);
-    auto gcKeyStats = std::make_unique<GCKeyStats>(heap, gcStats);
-    gcKeyStats->ProcessLongGCEvent();
-    EXPECT_TRUE(longGCStats->GetGCIsSensitive());
-    delete gcStats;
+    EXPECT_TRUE(GCKeyStats::ShouldSkipLongGCReport(true, GCReason::OTHER));
+    EXPECT_TRUE(GCKeyStats::ShouldSkipLongGCReport(false, GCReason::IDLE));
+    EXPECT_TRUE(GCKeyStats::ShouldSkipLongGCReport(false, GCReason::IDLE_NATIVE));
+    EXPECT_TRUE(GCKeyStats::ShouldSkipLongGCReport(true, GCReason::IDLE));
+    EXPECT_FALSE(GCKeyStats::ShouldSkipLongGCReport(false, GCReason::OTHER));
+    EXPECT_FALSE(GCKeyStats::ShouldSkipLongGCReport(false, GCReason::TRIGGER_BY_JS));
 }
 
-HWTEST_F_L0(GCKeyStatsTest, ProcessLongGCEventTest002)
+HWTEST_F_L0(GCKeyStatsTest, ShouldReportLongGCTest001)
 {
-    JSRuntimeOptions& options = thread->GetEcmaVM()->GetJSOptions();
-    options.SetEnableDFXHiSysEvent(true);
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    GCStats *gcStats = new GCStats(heap);
-    LongGCStats *longGCStats = gcStats->GetLongGCStats();
-    longGCStats->SetGCIsSensitive(true);
-    longGCStats->SetGCIsInBackground(false);
-    longGCStats->SetGCTotalTime(32.0f);
-    gcStats->SetGCReason(GCReason::IDLE);
-    auto gcKeyStats = std::make_unique<GCKeyStats>(heap, gcStats);
-    gcKeyStats->ProcessLongGCEvent();
-    EXPECT_TRUE(longGCStats->GetGCIsSensitive());
-    delete gcStats;
-}
-
-HWTEST_F_L0(GCKeyStatsTest, ProcessLongGCEventTest003)
-{
-    JSRuntimeOptions& options = thread->GetEcmaVM()->GetJSOptions();
-    options.SetEnableDFXHiSysEvent(true);
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    GCStats *gcStats = new GCStats(heap);
-    LongGCStats *longGCStats = gcStats->GetLongGCStats();
-    longGCStats->SetGCIsSensitive(false);
-    longGCStats->SetGCIsInBackground(false);
-    longGCStats->SetGCTotalTime(201.0f);
-    gcStats->SetGCReason(GCReason::IDLE);
-    auto gcKeyStats = std::make_unique<GCKeyStats>(heap, gcStats);
-    gcKeyStats->ProcessLongGCEvent();
-    EXPECT_FALSE(longGCStats->GetGCIsInBackground());
-    delete gcStats;
-}
-
-HWTEST_F_L0(GCKeyStatsTest, ProcessLongGCEventTest004)
-{
-    JSRuntimeOptions& options = thread->GetEcmaVM()->GetJSOptions();
-    options.SetEnableDFXHiSysEvent(true);
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    GCStats *gcStats = new GCStats(heap);
-    LongGCStats *longGCStats = gcStats->GetLongGCStats();
-    longGCStats->SetGCIsSensitive(false);
-    longGCStats->SetGCIsInBackground(false);
-    longGCStats->SetGCTotalTime(201.0f);
-    gcStats->SetGCReason(GCReason::IDLE_NATIVE);
-    auto gcKeyStats = std::make_unique<GCKeyStats>(heap, gcStats);
-    gcKeyStats->ProcessLongGCEvent();
-    EXPECT_FALSE(longGCStats->GetGCIsInBackground());
-    delete gcStats;
-}
-
-HWTEST_F_L0(GCKeyStatsTest, ProcessLongGCEventTest005)
-{
-    JSRuntimeOptions& options = thread->GetEcmaVM()->GetJSOptions();
-    options.SetEnableDFXHiSysEvent(true);
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    GCStats *gcStats = new GCStats(heap);
-    LongGCStats *longGCStats = gcStats->GetLongGCStats();
-    longGCStats->SetGCIsSensitive(false);
-    longGCStats->SetGCIsInBackground(false);
-    longGCStats->SetGCTotalTime(199.0f);
-    gcStats->SetGCReason(GCReason::IDLE);
-    auto gcKeyStats = std::make_unique<GCKeyStats>(heap, gcStats);
-    gcKeyStats->ProcessLongGCEvent();
-    EXPECT_FALSE(longGCStats->GetGCIsInBackground());
-    delete gcStats;
-}
-
-HWTEST_F_L0(GCKeyStatsTest, ProcessLongGCEventTest006)
-{
-    JSRuntimeOptions& options = thread->GetEcmaVM()->GetJSOptions();
-    options.SetEnableDFXHiSysEvent(true);
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    GCStats *gcStats = new GCStats(heap);
-    LongGCStats *longGCStats = gcStats->GetLongGCStats();
-    longGCStats->SetGCIsSensitive(false);
-    longGCStats->SetGCIsInBackground(false);
-    longGCStats->SetGCTotalTime(199.0f);
-    gcStats->SetGCReason(GCReason::IDLE);
-    auto gcKeyStats = std::make_unique<GCKeyStats>(heap, gcStats);
-    gcKeyStats->ProcessLongGCEvent();
-    EXPECT_FALSE(longGCStats->GetGCIsInBackground());
-    delete gcStats;
-}
-
-HWTEST_F_L0(GCKeyStatsTest, ProcessLongGCEventTest007)
-{
-    JSRuntimeOptions& options = thread->GetEcmaVM()->GetJSOptions();
-    options.SetEnableDFXHiSysEvent(true);
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    GCStats *gcStats = new GCStats(heap);
-    LongGCStats *longGCStats = gcStats->GetLongGCStats();
-    longGCStats->SetGCIsSensitive(false);
-    longGCStats->SetGCIsInBackground(true);
-    longGCStats->SetGCTotalTime(501.0f);
-    gcStats->SetGCReason(GCReason::IDLE);
-    auto gcKeyStats = std::make_unique<GCKeyStats>(heap, gcStats);
-    gcKeyStats->ProcessLongGCEvent();
-    EXPECT_FALSE(longGCStats->GetGCIsSensitive());
-    delete gcStats;
-}
-
-HWTEST_F_L0(GCKeyStatsTest, ProcessLongGCEventTest008)
-{
-    JSRuntimeOptions& options = thread->GetEcmaVM()->GetJSOptions();
-    options.SetEnableDFXHiSysEvent(true);
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    GCStats *gcStats = new GCStats(heap);
-    LongGCStats *longGCStats = gcStats->GetLongGCStats();
-    longGCStats->SetGCIsSensitive(false);
-    longGCStats->SetGCIsInBackground(true);
-    longGCStats->SetGCTotalTime(501.0f);
-    gcStats->SetGCReason(GCReason::IDLE_NATIVE);
-    auto gcKeyStats = std::make_unique<GCKeyStats>(heap, gcStats);
-    gcKeyStats->ProcessLongGCEvent();
-    EXPECT_FALSE(longGCStats->GetGCIsSensitive());
-    delete gcStats;
-}
-
-HWTEST_F_L0(GCKeyStatsTest, ProcessLongGCEventTest009)
-{
-    JSRuntimeOptions& options = thread->GetEcmaVM()->GetJSOptions();
-    options.SetEnableDFXHiSysEvent(true);
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    GCStats *gcStats = new GCStats(heap);
-    LongGCStats *longGCStats = gcStats->GetLongGCStats();
-    longGCStats->SetGCIsSensitive(false);
-    longGCStats->SetGCIsInBackground(true);
-    longGCStats->SetGCTotalTime(499.0f);
-    gcStats->SetGCReason(GCReason::IDLE);
-    auto gcKeyStats = std::make_unique<GCKeyStats>(heap, gcStats);
-    gcKeyStats->ProcessLongGCEvent();
-    EXPECT_TRUE(longGCStats->GetGCIsInBackground());
-    delete gcStats;
-}
-
-HWTEST_F_L0(GCKeyStatsTest, ProcessLongGCEventTest010)
-{
-    JSRuntimeOptions& options = thread->GetEcmaVM()->GetJSOptions();
-    options.SetEnableDFXHiSysEvent(true);
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    GCStats *gcStats = new GCStats(heap);
-    LongGCStats *longGCStats = gcStats->GetLongGCStats();
-    longGCStats->SetGCIsSensitive(false);
-    longGCStats->SetGCIsInBackground(true);
-    longGCStats->SetGCTotalTime(499.0f);
-    gcStats->SetGCReason(GCReason::IDLE_NATIVE);
-    auto gcKeyStats = std::make_unique<GCKeyStats>(heap, gcStats);
-    gcKeyStats->ProcessLongGCEvent();
-    EXPECT_TRUE(longGCStats->GetGCIsInBackground());
-    delete gcStats;
-}
-
-HWTEST_F_L0(GCKeyStatsTest, ProcessLongGCEventTest011)
-{
-    JSRuntimeOptions& options = thread->GetEcmaVM()->GetJSOptions();
-    options.SetEnableDFXHiSysEvent(true);
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    GCStats *gcStats = new GCStats(heap);
-    LongGCStats *longGCStats = gcStats->GetLongGCStats();
-    longGCStats->SetGCIsSensitive(false);
-    longGCStats->SetGCIsInBackground(false);
-    longGCStats->SetGCTotalTime(34.0f);
-    gcStats->SetGCReason(GCReason::OTHER);
-    auto gcKeyStats = std::make_unique<GCKeyStats>(heap, gcStats);
-    gcKeyStats->ProcessLongGCEvent();
-    EXPECT_FALSE(longGCStats->GetGCIsSensitive());
-    delete gcStats;
-}
-
-HWTEST_F_L0(GCKeyStatsTest, ProcessLongGCEventTest012)
-{
-    JSRuntimeOptions& options = thread->GetEcmaVM()->GetJSOptions();
-    options.SetEnableDFXHiSysEvent(true);
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    GCStats *gcStats = new GCStats(heap);
-    LongGCStats *longGCStats = gcStats->GetLongGCStats();
-    longGCStats->SetGCIsSensitive(false);
-    longGCStats->SetGCIsInBackground(false);
-    longGCStats->SetGCTotalTime(32.0f);
-    gcStats->SetGCReason(GCReason::OTHER);
-    auto gcKeyStats = std::make_unique<GCKeyStats>(heap, gcStats);
-    gcKeyStats->ProcessLongGCEvent();
-    EXPECT_FALSE(longGCStats->GetGCIsInBackground());
-    delete gcStats;
-}
-
-HWTEST_F_L0(GCKeyStatsTest, ProcessLongGCEventTest013)
-{
-    JSRuntimeOptions& options = thread->GetEcmaVM()->GetJSOptions();
-    options.SetEnableDFXHiSysEvent(true);
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    GCStats *gcStats = new GCStats(heap);
-    LongGCStats *longGCStats = gcStats->GetLongGCStats();
-    longGCStats->SetGCIsSensitive(false);
-    longGCStats->SetGCIsInBackground(true);
-    longGCStats->SetGCTotalTime(201.0f);
-    gcStats->SetGCReason(GCReason::OTHER);
-    auto gcKeyStats = std::make_unique<GCKeyStats>(heap, gcStats);
-    gcKeyStats->ProcessLongGCEvent();
-    EXPECT_FALSE(longGCStats->GetGCIsSensitive());
-    delete gcStats;
-}
-
-HWTEST_F_L0(GCKeyStatsTest, ProcessLongGCEventTest014)
-{
-    JSRuntimeOptions& options = thread->GetEcmaVM()->GetJSOptions();
-    options.SetEnableDFXHiSysEvent(true);
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    GCStats *gcStats = new GCStats(heap);
-    LongGCStats *longGCStats = gcStats->GetLongGCStats();
-    longGCStats->SetGCIsSensitive(false);
-    longGCStats->SetGCIsInBackground(true);
-    longGCStats->SetGCTotalTime(199.0f);
-    gcStats->SetGCReason(GCReason::OTHER);
-    auto gcKeyStats = std::make_unique<GCKeyStats>(heap, gcStats);
-    gcKeyStats->ProcessLongGCEvent();
-    EXPECT_TRUE(longGCStats->GetGCIsInBackground());
-    delete gcStats;
+    EXPECT_TRUE(GCKeyStats::ShouldReportLongGC(true,
+        static_cast<float>(GCKeyStats::GC_SENSITIVE_LONG_TIME) + 0.1f));
+    EXPECT_FALSE(GCKeyStats::ShouldReportLongGC(true,
+        static_cast<float>(GCKeyStats::GC_SENSITIVE_LONG_TIME)));
+    EXPECT_TRUE(GCKeyStats::ShouldReportLongGC(false,
+        static_cast<float>(GCKeyStats::GC_NOT_SENSITIVE_LONG_TIME) + 0.1f));
+    EXPECT_FALSE(GCKeyStats::ShouldReportLongGC(false,
+        static_cast<float>(GCKeyStats::GC_NOT_SENSITIVE_LONG_TIME)));
 }
 
 HWTEST_F_L0(GCKeyStatsTest, GetAppArkTSModeTest001)

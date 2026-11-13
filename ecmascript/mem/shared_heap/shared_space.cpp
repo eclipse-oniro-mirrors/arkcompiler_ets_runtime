@@ -590,6 +590,7 @@ bool SharedReadOnlySpace::Expand(JSThread *thread)
                                                                  false, 0, &allocateLock_);
     if (region == nullptr) { // LOCV_EXCL_BR_LINE
         LOG_ECMA(FATAL) << "SharedReadOnlySpace::Expand:region is nullptr";
+        UNREACHABLE();
     }
     allocator_.Reset(region->GetBegin(), region->GetEnd());
     AddRegion(region);
