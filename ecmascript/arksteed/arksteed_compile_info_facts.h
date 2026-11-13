@@ -72,6 +72,8 @@ public:
         bool isStable {false};
     };
 
+    // Interface types only: exchanged across API boundaries as stack-scoped
+    // temporaries. They must never become members of chunk-placed objects.
     using PossibleHClasses = std::vector<ArkSteedHClassRef>;
     using PossibleHClassInfos = std::vector<PossibleHClassInfo>;
 
@@ -99,9 +101,37 @@ public:
         ANY_HEAP_OBJECT = STRING | SYMBOL | BIGINT | JS_RECEIVER,
     };
 
-    NodeInfo() = default;
+    explicit NodeInfo(Chunk *chunk) : chunk_(chunk), possibleHClasses_(chunk) {}
+
     ~NodeInfo() = default;
-    DEFAULT_COPY_SEMANTIC(NodeInfo);
+
+    // ChunkVector is non-copyable, so the copy members are hand-written: they re-create
+    // `possibleHClasses_` from the target's chunk and rely on both objects sharing the
+    // compilation chunk.
+    NodeInfo(const NodeInfo &other)
+        : type_(other.type_),
+          nonHole_(other.nonHole_),
+          possibleHClassesAreStale_(other.possibleHClassesAreStale_),
+          alternatives_(other.alternatives_),
+          chunk_(other.chunk_),
+          possibleHClasses_(other.chunk_)
+    {
+        possibleHClasses_.assign(other.possibleHClasses_.begin(), other.possibleHClasses_.end());
+    }
+
+    NodeInfo &operator=(const NodeInfo &other)
+    {
+        if (this != &other) {
+            ASSERT(chunk_ == other.chunk_);
+            type_ = other.type_;
+            nonHole_ = other.nonHole_;
+            possibleHClassesAreStale_ = other.possibleHClassesAreStale_;
+            alternatives_ = other.alternatives_;
+            possibleHClasses_.assign(other.possibleHClasses_.begin(), other.possibleHClasses_.end());
+        }
+        return *this;
+    }
+
     DEFAULT_MOVE_SEMANTIC(NodeInfo);
 
     static constexpr uint16_t ToNodeTypeBits(NodeType type)
@@ -255,7 +285,9 @@ private:
     bool nonHole_ {false};
     bool possibleHClassesAreStale_ {false};
     AlternativeNodes alternatives_;
-    PossibleHClassInfos possibleHClasses_;
+    Chunk *chunk_ {nullptr};
+    // Chunk-backed storage object should keep chunk-backed storage member.
+    ChunkVector<PossibleHClassInfo> possibleHClasses_;
 };
 
 NodeInfo::NodeType NodeTypeFromJSTaggedValue(JSTaggedValue value);

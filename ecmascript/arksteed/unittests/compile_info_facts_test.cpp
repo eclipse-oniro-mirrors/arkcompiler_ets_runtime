@@ -55,6 +55,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 
 namespace panda::ecmascript::arksteed {
 
@@ -460,7 +461,10 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, NodeInfoHClassFactsOnRealHClasses)
         ASSERT_EQ(NodeTypeFromHClass(plainHClass), NodeType::OTHER_JS_RECEIVER);
         ASSERT_EQ(NodeTypeFromHClass(arrayHClass), NodeType::JS_ARRAY);
 
-        NodeInfo info;
+        NativeAreaAllocator nodeInfoAllocator;
+        Chunk nodeInfoChunk {&nodeInfoAllocator};
+
+        NodeInfo info(&nodeInfoChunk);
         ASSERT_TRUE(info.NoInfoAvailable());
         info.RecordPossibleHClasses({plainHClass, arrayHClass}, true);
         ASSERT_EQ(info.PossibleHClassCount(), 2U);
@@ -488,7 +492,7 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, NodeInfoHClassFactsOnRealHClasses)
 
         // An unstable single class is a fresh known class but not a stable
         // one.
-        NodeInfo unstable;
+        NodeInfo unstable(&nodeInfoChunk);
         unstable.RecordPossibleHClasses({plainHClass}, false);
         ASSERT_FALSE(unstable.HClassIsStable());
         ASSERT_TRUE(unstable.HasUnstablePossibleHClass());
@@ -498,16 +502,16 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, NodeInfoHClassFactsOnRealHClasses)
         ASSERT_FALSE(unstable.HasFreshKnownHClass());
 
         // A stable class is never invalidated by MarkUnstableHClassesStale.
-        NodeInfo stable;
+        NodeInfo stable(&nodeInfoChunk);
         stable.RecordPossibleHClasses({plainHClass}, true);
         stable.MarkUnstableHClassesStale();
         ASSERT_FALSE(stable.PossibleHClassesAreStale());
         ASSERT_TRUE(stable.HasFreshKnownHClass());
 
         // Merging two different single-class facts unions the receiver sets.
-        NodeInfo left;
+        NodeInfo left(&nodeInfoChunk);
         left.RecordPossibleHClasses({plainHClass}, true);
-        NodeInfo right;
+        NodeInfo right(&nodeInfoChunk);
         right.RecordPossibleHClasses({arrayHClass}, true);
         ASSERT_TRUE(left.MergeWith(right));
         ASSERT_EQ(left.PossibleHClassCount(), 2U);
@@ -515,44 +519,113 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, NodeInfoHClassFactsOnRealHClasses)
         ASSERT_TRUE(left.ContainsPossibleHClass(arrayHClass));
         ASSERT_EQ(Bits(left.GetType()), Bits(NodeType::OTHER_JS_RECEIVER) | Bits(NodeType::JS_ARRAY));
         // A side without any possible class drops the merged set entirely.
-        NodeInfo withoutHClasses;
+        NodeInfo withoutHClasses(&nodeInfoChunk);
         left.MergeWith(withoutHClasses);
         ASSERT_EQ(left.PossibleHClassCount(), 0U);
         ASSERT_FALSE(left.HasFreshPossibleHClasses());
 
         // IsCompatibleWith: an expected set with unstable entries requires
         // the actual set to be at least as stable and to be a subset of it.
-        NodeInfo expectedUnstable;
+        NodeInfo expectedUnstable(&nodeInfoChunk);
         expectedUnstable.RecordPossibleHClasses({plainHClass}, false);
-        NodeInfo actualUnstable;
+        NodeInfo actualUnstable(&nodeInfoChunk);
         actualUnstable.RecordPossibleHClasses({plainHClass}, false);
         ASSERT_TRUE(actualUnstable.IsCompatibleWith(expectedUnstable)) << "unstable expected entries are compatible";
-        NodeInfo actualOtherClass;
+        NodeInfo actualOtherClass(&nodeInfoChunk);
         actualOtherClass.RecordPossibleHClasses({arrayHClass}, false);
         ASSERT_FALSE(actualOtherClass.IsCompatibleWith(expectedUnstable)) << "class outside the expected set";
 
         // In a mixed expected set a stable expected class cannot be covered
         // by an unstable actual class, while a stable actual class is always
         // accepted.
-        NodeInfo expectedMixed;
+        NodeInfo expectedMixed(&nodeInfoChunk);
         expectedMixed.RecordPossibleHClasses(NodeInfo::PossibleHClassInfos {
             NodeInfo::PossibleHClassInfo {plainHClass, true}, NodeInfo::PossibleHClassInfo {arrayHClass, false}});
         ASSERT_TRUE(expectedMixed.HasUnstablePossibleHClass());
-        NodeInfo actualStable;
+        NodeInfo actualStable(&nodeInfoChunk);
         actualStable.RecordPossibleHClasses({plainHClass}, true);
         ASSERT_TRUE(actualStable.IsCompatibleWith(expectedMixed));
-        NodeInfo actualNotAsStable;
+        NodeInfo actualNotAsStable(&nodeInfoChunk);
         actualNotAsStable.RecordPossibleHClasses({plainHClass}, false);
         ASSERT_FALSE(actualNotAsStable.IsCompatibleWith(expectedMixed));
 
         // A stale expected set is accepted without comparing classes.
-        NodeInfo expectedStale;
+        NodeInfo expectedStale(&nodeInfoChunk);
         expectedStale.RecordPossibleHClasses({plainHClass}, false);
         expectedStale.MarkUnstableHClassesStale();
         ASSERT_TRUE(expectedStale.PossibleHClassesAreStale());
-        NodeInfo actualTyped;
+        NodeInfo actualTyped(&nodeInfoChunk);
         actualTyped.SetType(NodeType::OTHER_JS_RECEIVER);
         ASSERT_TRUE(actualTyped.IsCompatibleWith(expectedStale));
+    });
+}
+
+// Copy/move members must keep the scalar facts and the chunk-backed HClass set
+// together: a copy re-creates the set independently, and a same-chunk move hands
+// the buffer over and empties the donor.
+HWTEST_F_L0(ArkSteedCompileInfoFactsTest, NodeInfoCopyAndMoveAssignmentTransferChunkFacts)
+{
+    ArkSteedCompileInfoFactsTest::ScopedEcmaVm scope;
+    ASSERT_TRUE(scope.IsValid()) << "cannot create EcmaVM";
+    ASSERT_NE(scope.GetThread(), nullptr);
+
+    WithHClassRefs(scope.GetVm(), scope.GetThread(), [&](ArkSteedHClassRef plainHClass, ArkSteedHClassRef arrayHClass) {
+        NativeAreaAllocator allocator;
+        Chunk chunk {&allocator};
+
+        NodeInfo source(&chunk);
+        source.SetType(NodeType::JS_RECEIVER);
+        source.MarkNonHole();
+        source.RecordPossibleHClasses({plainHClass, arrayHClass}, false);
+        // Recording the classes narrows JS_RECEIVER to the union of the two
+        // atom types (IntersectTypeWithPossibleHClasses), so this is the type
+        // every copy/move below must preserve.
+        const NodeType recordedType = NodeInfo::UnionNodeType(NodeType::OTHER_JS_RECEIVER, NodeType::JS_ARRAY);
+
+        // Copy construction transfers every fact and owns an independent set.
+        NodeInfo copied(source);
+        ASSERT_EQ(Bits(copied.GetType()), Bits(recordedType));
+        ASSERT_TRUE(copied.IsNonHole());
+        ASSERT_EQ(copied.PossibleHClassCount(), 2U);
+        ASSERT_TRUE(copied.ContainsPossibleHClass(plainHClass));
+        ASSERT_TRUE(copied.ContainsPossibleHClass(arrayHClass));
+        ASSERT_TRUE(copied.HasUnstablePossibleHClass());
+        ASSERT_TRUE(copied.NarrowPossibleHClasses({plainHClass}));
+        ASSERT_EQ(copied.PossibleHClassCount(), 1U);
+        ASSERT_EQ(source.PossibleHClassCount(), 2U) << "narrowing the copy must not touch the source";
+
+        // The stale flag travels with a copy of a stale set.
+        source.MarkUnstableHClassesStale();
+        ASSERT_TRUE(source.PossibleHClassesAreStale());
+        NodeInfo copiedStale(source);
+        ASSERT_TRUE(copiedStale.PossibleHClassesAreStale());
+
+        // Copy assignment replaces the target's facts without consuming the source.
+        NodeInfo assigned(&chunk);
+        assigned.SetType(NodeType::INT);
+        assigned.RecordPossibleHClasses({plainHClass}, true);
+        assigned = source;
+        ASSERT_EQ(Bits(assigned.GetType()), Bits(recordedType));
+        ASSERT_TRUE(assigned.IsNonHole());
+        ASSERT_EQ(assigned.PossibleHClassCount(), 2U);
+        ASSERT_TRUE(assigned.HasUnstablePossibleHClass());
+        ASSERT_EQ(source.PossibleHClassCount(), 2U) << "copy assignment must not consume the source";
+
+        // Move construction hands the chunk-backed set over and empties the donor.
+        NodeInfo moveConstructed(std::move(source));
+        ASSERT_EQ(Bits(moveConstructed.GetType()), Bits(recordedType));
+        ASSERT_TRUE(moveConstructed.IsNonHole());
+        ASSERT_EQ(moveConstructed.PossibleHClassCount(), 2U);
+        ASSERT_EQ(source.PossibleHClassCount(), 0U) << "a same-chunk move must empty the donor";
+
+        // Move assignment (same chunk) behaves like move construction.
+        NodeInfo moveAssigned(&chunk);
+        moveAssigned.SetType(NodeType::STRING);
+        moveAssigned = std::move(moveConstructed);
+        ASSERT_EQ(Bits(moveAssigned.GetType()), Bits(recordedType));
+        ASSERT_TRUE(moveAssigned.IsNonHole());
+        ASSERT_EQ(moveAssigned.PossibleHClassCount(), 2U);
+        ASSERT_EQ(moveConstructed.PossibleHClassCount(), 0U) << "a same-chunk move must empty the donor";
     });
 }
 
@@ -564,11 +637,11 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, NodeInfoMergeWithAndCompatibility)
     ValueVertex *alternative = fixture.Int32(1);
     ValueVertex *otherAlternative = fixture.Int32(2);
 
-    NodeInfo lhs;
+    NodeInfo lhs(&fixture.chunk);
     lhs.SetType(NodeType::INT);
     lhs.MarkNonHole();
     lhs.GetAlternatives().Set(AlternativeNodes::Kind::INT32, alternative);
-    NodeInfo rhs;
+    NodeInfo rhs(&fixture.chunk);
     rhs.SetType(NodeType::DOUBLE);
     rhs.GetAlternatives().Set(AlternativeNodes::Kind::INT32, alternative);
 
@@ -578,16 +651,16 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, NodeInfoMergeWithAndCompatibility)
     // both sides agree on the alternative node.
     ASSERT_FALSE(lhs.IsNonHole());
     ASSERT_EQ(lhs.GetAlternatives().Get(AlternativeNodes::Kind::INT32), alternative);
-    NodeInfo conflicting;
+    NodeInfo conflicting(&fixture.chunk);
     conflicting.SetType(NodeType::INT);
     conflicting.GetAlternatives().Set(AlternativeNodes::Kind::INT32, otherAlternative);
     lhs.MergeWith(conflicting);
     ASSERT_EQ(lhs.GetAlternatives().Get(AlternativeNodes::Kind::INT32), nullptr);
 
-    NodeInfo bothNonHole;
+    NodeInfo bothNonHole(&fixture.chunk);
     bothNonHole.SetType(NodeType::INT);
     bothNonHole.MarkNonHole();
-    NodeInfo alsoNonHole;
+    NodeInfo alsoNonHole(&fixture.chunk);
     alsoNonHole.SetType(NodeType::DOUBLE);
     alsoNonHole.MarkNonHole();
     bothNonHole.MergeWith(alsoNonHole);
@@ -595,9 +668,9 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, NodeInfoMergeWithAndCompatibility)
 
     // A merge of two disjoint, narrower inputs must widen the type: keeping
     // either of the input types after the merge would be a false merge.
-    NodeInfo mergedInt;
+    NodeInfo mergedInt(&fixture.chunk);
     mergedInt.SetType(NodeType::INT);
-    NodeInfo mergedString;
+    NodeInfo mergedString(&fixture.chunk);
     mergedString.SetType(NodeType::STRING);
     ASSERT_TRUE(mergedInt.MergeWith(mergedString));
     ASSERT_EQ(Bits(mergedInt.GetType()), Bits(NodeType::INT) | Bits(NodeType::STRING));
@@ -607,37 +680,37 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, NodeInfoMergeWithAndCompatibility)
 
     // Two facts that carry no information at all stay without information, so
     // the merge reports that nothing usable was produced.
-    NodeInfo emptyLeft;
-    NodeInfo emptyRight;
+    NodeInfo emptyLeft(&fixture.chunk);
+    NodeInfo emptyRight(&fixture.chunk);
     ASSERT_TRUE(emptyLeft.NoInfoAvailable());
     ASSERT_FALSE(emptyLeft.MergeWith(emptyRight));
-    NodeInfo withType;
+    NodeInfo withType(&fixture.chunk);
     withType.SetType(NodeType::INT);
     ASSERT_FALSE(withType.NoInfoAvailable());
-    NodeInfo withNonHole;
+    NodeInfo withNonHole(&fixture.chunk);
     withNonHole.MarkNonHole();
     ASSERT_FALSE(withNonHole.NoInfoAvailable());
-    NodeInfo withAlternative;
+    NodeInfo withAlternative(&fixture.chunk);
     withAlternative.GetAlternatives().Set(AlternativeNodes::Kind::TAGGED, alternative);
     ASSERT_FALSE(withAlternative.NoInfoAvailable());
 
     // Compatibility is the subset relation on types plus the HClass rules; the
     // pairs below are hand-derived from that definition.
-    NodeInfo actualInt;
+    NodeInfo actualInt(&fixture.chunk);
     actualInt.SetType(NodeType::INT);
-    NodeInfo expectedInt;
+    NodeInfo expectedInt(&fixture.chunk);
     expectedInt.SetType(NodeType::INT);
-    NodeInfo expectedNumber;
+    NodeInfo expectedNumber(&fixture.chunk);
     expectedNumber.SetType(NodeType::NUMBER);
-    NodeInfo expectedString;
+    NodeInfo expectedString(&fixture.chunk);
     expectedString.SetType(NodeType::STRING);
-    NodeInfo expectedUnknown;
+    NodeInfo expectedUnknown(&fixture.chunk);
     expectedUnknown.SetType(NodeType::UNKNOWN);
-    NodeInfo actualNumber;
+    NodeInfo actualNumber(&fixture.chunk);
     actualNumber.SetType(NodeType::NUMBER);
-    NodeInfo actualUnknown;
+    NodeInfo actualUnknown(&fixture.chunk);
     actualUnknown.SetType(NodeType::UNKNOWN);
-    NodeInfo actualEmpty;
+    NodeInfo actualEmpty(&fixture.chunk);
     actualEmpty.SetType(NodeType::NONE);
     EXPECT_TRUE(actualInt.IsCompatibleWith(expectedInt));
     EXPECT_TRUE(actualInt.IsCompatibleWith(expectedNumber)) << "INT is a subset of NUMBER";
@@ -675,7 +748,10 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, MutationControlForTypePairAndHClassSet
         ASSERT_TRUE(arrayHClass.IsJSHClass());
         ASSERT_FALSE(plainHClass.Equals(arrayHClass));
 
-        NodeInfo info;
+        NativeAreaAllocator nodeInfoAllocator;
+        Chunk nodeInfoChunk {&nodeInfoAllocator};
+
+        NodeInfo info(&nodeInfoChunk);
         info.RecordPossibleHClasses({plainHClass}, true);
         ASSERT_TRUE(NarrowedHClassIsExpected(info, plainHClass, NodeType::OTHER_JS_RECEIVER));
         EXPECT_FALSE(NarrowedHClassIsExpected(info, arrayHClass, NodeType::OTHER_JS_RECEIVER))
