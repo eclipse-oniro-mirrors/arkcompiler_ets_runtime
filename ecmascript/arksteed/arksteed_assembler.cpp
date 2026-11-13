@@ -122,4 +122,16 @@ void ArkSteedAssembler::Disassemble(std::ostream &os, const uint8_t *commentsDat
     disassembler.Disassemble(os);
 }
 
+void TemporaryRegisterScope::AbortByExhaustedGPR()
+{
+    LOG_JIT(FATAL) << "RA temporary GPR pool exhausted";  // FATAL log triggers abort()
+    std::terminate();
+}
+
+void TemporaryRegisterScope::AbortByExhaustedFPR()
+{
+    LOG_JIT(FATAL) << "RA temporary FPR pool exhausted";  // FATAL log triggers abort()
+    std::terminate();
+}
+
 }  // namespace panda::ecmascript::arksteed

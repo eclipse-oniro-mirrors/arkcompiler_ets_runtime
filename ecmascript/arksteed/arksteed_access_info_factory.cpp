@@ -301,15 +301,11 @@ bool ArkSteedAccessInfoFactory::TryMakeNamedStoreAccessInfo(const NamedAccessCas
 {
     *info = {};
     if (!caseFeedback.expectedHClass.IsSafeForCompile() || !caseFeedback.handler.IsSafeForCompile()) {
-        LOG_COMPILER(DEBUG) << "ArkSteedPGO: named store unsafe feedback hclass="
-                            << caseFeedback.expectedHClass.IsSafeForCompile()
-                            << " handler=" << caseFeedback.handler.IsSafeForCompile();
         return false;
     }
 
     ParsedStoreHandler parsed;
     if (!broker_->TryReadStoreHandler(caseFeedback.handler, &parsed)) {
-        LOG_COMPILER(DEBUG) << "ArkSteedPGO: named store cannot read handler";
         return false;
     }
 
@@ -326,23 +322,12 @@ bool ArkSteedAccessInfoFactory::TryMakeNamedStoreAccessInfo(const NamedAccessCas
     bool isAccessor = HandlerBase::IsAccessor(parsed.handlerInfo) && !isSharedStore;
     if (isSharedStore &&
         (!isField || HandlerBase::IsAccessor(parsed.handlerInfo) || representation != Representation::TAGGED)) {
-        LOG_COMPILER(DEBUG) << "ArkSteedPGO: named store unsupported shared handler handler=0x" << std::hex
-                            << parsed.handlerInfo << std::dec << " isField=" << isField
-                            << " accessor=" << HandlerBase::IsAccessor(parsed.handlerInfo)
-                            << " rep=" << static_cast<int>(representation);
         return false;
     }
     if (isSharedStore && (parsed.hasProtoCell || !parsed.holderIsReceiver)) {
-        LOG_COMPILER(DEBUG) << "ArkSteedPGO: named store unsupported shared proto/holder handler=0x" << std::hex
-                            << parsed.handlerInfo << std::dec << " hasProtoCell=" << parsed.hasProtoCell
-                            << " holderIsReceiver=" << parsed.holderIsReceiver;
         return false;
     }
     if (!(isField && hasSupportedFieldRep) && !isAccessor && !isSharedStore) {
-        LOG_COMPILER(DEBUG) << "ArkSteedPGO: named store unsupported handler handler=0x" << std::hex
-                            << parsed.handlerInfo << std::dec << " isField=" << isField
-                            << " rep=" << static_cast<int>(representation) << " isAccessor=" << isAccessor
-                            << " isShared=" << isSharedStore;
         return false;
     }
 
@@ -367,7 +352,6 @@ bool ArkSteedAccessInfoFactory::TryMakeNamedStoreAccessInfo(const NamedAccessCas
     info->hasTransitionHClass = parsed.hasTransitionHClass;
     info->isSharedStore = isSharedStore;
     if (isField && !TrySetStoreFieldLocationFromHClass(broker_, caseFeedback, parsed, name, info)) {
-        LOG_COMPILER(DEBUG) << "ArkSteedPGO: named store field no longer matches guarded hclass";
         return false;
     }
     if (isAccessor) {

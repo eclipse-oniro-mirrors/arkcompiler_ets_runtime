@@ -371,7 +371,9 @@ void ArkSteedCompilerTask::FillCodeDesc(MachineCodeDesc &codeDesc)
     std::unique_ptr<uint8_t[]> safepointBuffer;
     safepointBuffer.reset(safepointTableBuilder_->EmitToNewBuffer());
 
+#ifndef NDEBUG
     LOG_COMPILER(DEBUG) << safepointTableBuilder_->DumpMemoryUsage();
+#endif
 
     // Build position table (if enabled and has entries)
     size_t positionSize = 0;

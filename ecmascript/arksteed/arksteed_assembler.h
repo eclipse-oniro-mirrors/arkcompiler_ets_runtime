@@ -573,20 +573,42 @@ public:
         requiredSpecificFPRs_ |= registers;
     }
 
-    ArkSteedRegister Acquire()
+    template <size_t N = 1>
+    auto Acquire() /* -> ArkSteedRegister if N == 1, std::array<ArkSteedRegister, N> otherwise */
     {
-        if (availableTemporaryGPRs_.IsEmpty()) {
-            LOG_JIT(FATAL) << "RA temporary GPR pool exhausted";
+        auto acquireFn = [this] {
+            if (UNLIKELY(availableTemporaryGPRs_.IsEmpty())) {
+                AbortByExhaustedGPR();
+            }
+            return availableTemporaryGPRs_.PopFirst();
+        };
+        if constexpr (N > 2) {
+            return std::tuple_cat(std::make_tuple(acquireFn()), Acquire<N - 1>());
+        } else if constexpr (N == 2) {
+            return std::make_pair(acquireFn(), acquireFn());
+        } else {
+            static_assert(N == 1, "N >= 1 required.");
+            return acquireFn();
         }
-        return availableTemporaryGPRs_.PopFirst();
     }
 
-    ArkSteedDoubleRegister AcquireDouble()
+    template <size_t N = 1>
+    auto AcquireDouble() /* -> ArkSteedDoubleRegister if N == 1, std::array<ArkSteedDoubleRegister, N> otherwise */
     {
-        if (availableTemporaryFPRs_.IsEmpty()) {
-            LOG_JIT(FATAL) << "RA temporary FPR pool exhausted";
+        auto acquireFn = [this] {
+            if (UNLIKELY(availableTemporaryFPRs_.IsEmpty())) {
+                AbortByExhaustedFPR();
+            }
+            return availableTemporaryFPRs_.PopFirst();
+        };
+        if constexpr (N > 2) {
+            return std::tuple_cat(std::make_tuple(acquireFn()), AcquireDouble<N - 1>());
+        } else if constexpr (N == 2) {
+            return std::make_pair(acquireFn(), acquireFn());
+        } else {
+            static_assert(N == 1, "N >= 1 required.");
+            return acquireFn();
         }
-        return availableTemporaryFPRs_.PopFirst();
     }
 
     ArkSteedRegister AcquireSpecific(ArkSteedRegister reg) const
@@ -622,6 +644,9 @@ public:
     }
 
 private:
+    [[noreturn]] static void AbortByExhaustedGPR();
+    [[noreturn]] static void AbortByExhaustedFPR();
+
     ArkSteedAssembler *assembler_;
     TemporaryRegisterScope *previous_ = nullptr;
     ArkSteedRegList availableTemporaryGPRs_;

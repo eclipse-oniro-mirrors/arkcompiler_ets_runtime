@@ -1705,9 +1705,6 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<CallRuntimeVertex>(CallRuntime
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<ObjSizeTrackingStepVertex>(ObjSizeTrackingStepVertex *step)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << step->GetId() << ": ObjSizeTrackingStepVertex";
-#endif
     ArkSteedRegister glue = ArkSteedAssembler::GLUE_ROOT_REGISTER;
     ArkSteedRegister hclass = GetInputRegister(step, ObjSizeTrackingStepVertex::HCLASS_INDEX);
     TemporaryRegisterScope scope(assembler_);
@@ -1980,10 +1977,6 @@ template<>
 void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeUnmappedArgumentsElementsVertex>(
     InitializeUnmappedArgumentsElementsVertex *initialize)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << initialize->GetId()
-                        << ": InitializeUnmappedArgumentsElementsVertex";
-#endif
     ArkSteedRegister result = GetResultRegister(initialize);
     ArkSteedRegister argc =
         GetInputRegister(initialize, InitializeUnmappedArgumentsElementsVertex::NUM_ARGS_INDEX);
@@ -2018,9 +2011,6 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeUnmappedArgumentsEle
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<StoreArraySpreadFastVertex>(StoreArraySpreadFastVertex *store)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << store->GetId() << ": StoreArraySpreadFastVertex";
-#endif
     ArkSteedRegister array = GetInputRegister(store, StoreArraySpreadFastVertex::ARRAY_INDEX);
     ArkSteedRegister value = GetInputRegister(store, StoreArraySpreadFastVertex::VALUE_INDEX);
     ArkSteedRegister newElements = GetInputRegister(store, StoreArraySpreadFastVertex::ALLOCATION_INDEX);
@@ -2034,11 +2024,10 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<StoreArraySpreadFastVertex>(St
     // element, zero beforehand for the extra-length header store. arm64 only
     // temp3: the StoreTaggedElement address scratch (x64 folds it into the
     // addressing mode).
-    ArkSteedRegister temp0 = scope.Acquire();
-    ArkSteedRegister temp1 = scope.Acquire();
-    ArkSteedRegister temp2 = scope.Acquire();
 #if defined(PANDA_TARGET_ARM64)
-    ArkSteedRegister temp3 = scope.Acquire();
+    auto [temp0, temp1, temp2, temp3] = scope.Acquire<4>();
+#else
+    auto [temp0, temp1, temp2] = scope.Acquire<3>();
 #endif
     Label copyDone;
 
@@ -2137,10 +2126,6 @@ template<>
 void ArkSteedCodeGenerator::VisitNonControlVertex<InitializeUnmappedArgumentsVertex>(
     InitializeUnmappedArgumentsVertex *initialize)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << initialize->GetId()
-                        << ": InitializeUnmappedArgumentsVertex";
-#endif
     ArkSteedRegister result = GetResultRegister(initialize);
     ArkSteedRegister argc =
         GetInputRegister(initialize, InitializeUnmappedArgumentsVertex::NUM_ARGS_INDEX);
@@ -2929,9 +2914,6 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfHClassMismatchVertex>(D
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfHClassNotInVertex>(DeoptIfHClassNotInVertex *checkHClass)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << checkHClass->GetId() << ": DeoptIfHClassNotInVertex";
-#endif
     constexpr int RECEIVER_INDEX = static_cast<int>(DeoptIfHClassNotInVertex::RECEIVER_INDEX);
     ASSERT(safepointBuilder_ != nullptr);
     TemporaryRegisterScope scope(assembler_);
@@ -2963,10 +2945,6 @@ template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfPrototypeChangedVertex>(
     DeoptIfPrototypeChangedVertex *checkPrototype)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << checkPrototype->GetId()
-                        << ": DeoptIfPrototypeChangedVertex";
-#endif
     TemporaryRegisterScope scope(assembler_);
     ArkSteedRegister current = scope.Acquire();
     ArkSteedRegister scratch = scope.Acquire();
@@ -3053,9 +3031,6 @@ template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfFloat64ConditionVertex>(
     DeoptIfFloat64ConditionVertex *check)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << check->GetId() << ": DeoptIfFloat64ConditionVertex";
-#endif
     auto left = GetInputDoubleRegister(check, DeoptIfFloat64ConditionVertex::LEFT_INDEX);
     auto right = GetInputDoubleRegister(check, DeoptIfFloat64ConditionVertex::RIGHT_INDEX);
 #if defined(PANDA_TARGET_AMD64)
@@ -3195,9 +3170,6 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfNotUndefinedOrNullVerte
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfNotHeapObjectVertex>(DeoptIfNotHeapObjectVertex *check)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << check->GetId() << ": DeoptIfNotHeapObjectVertex";
-#endif
     auto value = GetInputRegister(check, DeoptIfNotHeapObjectVertex::VALUE_INDEX);
 #if defined(PANDA_TARGET_AMD64)
     Label *deopt = RecordEagerDeoptTarget(check, kungfu::DeoptType::NOTHEAPOBJECT1);
@@ -3245,10 +3217,6 @@ template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfArrayBufferDetachedVertex>(
     DeoptIfArrayBufferDetachedVertex *check)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << check->GetId()
-                        << ": DeoptIfArrayBufferDetachedVertex";
-#endif
     auto receiver = GetInputRegister(check, DeoptIfArrayBufferDetachedVertex::RECEIVER_INDEX);
     TemporaryRegisterScope scope(assembler_);
     ArkSteedRegister scratch = scope.Acquire();
@@ -3290,9 +3258,6 @@ template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<DeoptIfElementsUnstableVertex>(
     DeoptIfElementsUnstableVertex *check)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << check->GetId() << ": DeoptIfElementsUnstableVertex";
-#endif
     auto receiver = GetInputRegister(check, DeoptIfElementsUnstableVertex::RECEIVER_INDEX);
     TemporaryRegisterScope scope(assembler_);
     ArkSteedRegister bitField = scope.Acquire();
@@ -3444,10 +3409,6 @@ template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<LoadPrototypeFromNonJSProxyObjectVertex>(
     LoadPrototypeFromNonJSProxyObjectVertex *loadPrototype)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << loadPrototype->GetId()
-                        << ": LoadPrototypeFromNonJSProxyObjectVertex";
-#endif
     auto dst = GetResultRegister(loadPrototype);
     auto obj = GetInputRegister(loadPrototype, LoadPrototypeFromNonJSProxyObjectVertex::OBJECT_INDEX);
     __ LoadHClassFromObject(dst, obj);
@@ -3472,9 +3433,6 @@ struct ArkSteedCodeGenerator::HasInPrototypeChainContext {
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<HasInPrototypeChainVertex>(HasInPrototypeChainVertex *walk)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << walk->GetId() << ": HasInPrototypeChainVertex";
-#endif
     ASSERT(safepointBuilder_ != nullptr);
     TemporaryRegisterScope scope(assembler_);
     HasInPrototypeChainContext context {
@@ -3548,10 +3506,6 @@ template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<LoadPrototypeHolderByHClassVertex>(
     LoadPrototypeHolderByHClassVertex *loadHolder)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << loadHolder->GetId()
-                        << ": LoadPrototypeHolderByHClassVertex";
-#endif
     constexpr int RECEIVER_INDEX = static_cast<int>(LoadPrototypeHolderByHClassVertex::RECEIVER_INDEX);
     ASSERT(safepointBuilder_ != nullptr);
     TemporaryRegisterScope scope(assembler_);
@@ -3606,9 +3560,6 @@ template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<ConvertHoleToUndefinedVertex>(
     ConvertHoleToUndefinedVertex *convert)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << convert->GetId() << ": ConvertHoleToUndefinedVertex";
-#endif
     auto dst = GetResultRegister(convert);
     auto value = GetInputRegister(convert, ConvertHoleToUndefinedVertex::VALUE_INDEX);
     Label done;
@@ -3622,9 +3573,6 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<ConvertHoleToUndefinedVertex>(
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<LoadHClassAddressVertex>(LoadHClassAddressVertex *loadHClass)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << loadHClass->GetId() << ": LoadHClassAddressVertex";
-#endif
     auto dst = GetResultRegister(loadHClass);
     auto object = GetInputRegister(loadHClass, LoadHClassAddressVertex::OBJECT_INDEX);
     __ LoadHClassFromObject(dst, object);
@@ -3713,9 +3661,6 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<StoreTaggedFieldWithBarrierVer
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<StoreTaggedElementVertex>(StoreTaggedElementVertex *store)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << store->GetId() << ": StoreTaggedElementVertex";
-#endif
     auto object = GetInputRegister(store, StoreTaggedElementVertex::OBJECT_INDEX);
     auto index = GetInputRegister(store, StoreTaggedElementVertex::INDEX_INDEX);
     auto value = GetInputRegister(store, StoreTaggedElementVertex::VALUE_INDEX);
@@ -3728,9 +3673,6 @@ template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<StoreTaggedElementWithBarrierVertex>(
     StoreTaggedElementWithBarrierVertex *store)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << store->GetId() << ": StoreTaggedElementWithBarrierVertex";
-#endif
     auto object = GetInputRegister(store, StoreTaggedElementWithBarrierVertex::OBJECT_INDEX);
     auto index = GetInputRegister(store, StoreTaggedElementWithBarrierVertex::INDEX_INDEX);
     auto value = GetInputRegister(store, StoreTaggedElementWithBarrierVertex::VALUE_INDEX);
@@ -3750,9 +3692,6 @@ template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<StoreIntTypedArrayElementVertex>(
     StoreIntTypedArrayElementVertex *store)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << store->GetId() << ": StoreIntTypedArrayElementVertex";
-#endif
     auto receiver = GetInputRegister(store, StoreIntTypedArrayElementVertex::RECEIVER_INDEX);
     auto index = GetInputRegister(store, StoreIntTypedArrayElementVertex::INDEX_INDEX);
     auto value = GetInputRegister(store, StoreIntTypedArrayElementVertex::VALUE_INDEX);
@@ -3768,9 +3707,6 @@ template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<StoreFloatTypedArrayElementVertex>(
     StoreFloatTypedArrayElementVertex *store)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << store->GetId() << ": StoreFloatTypedArrayElementVertex";
-#endif
     auto receiver = GetInputRegister(store, StoreFloatTypedArrayElementVertex::RECEIVER_INDEX);
     auto index = GetInputRegister(store, StoreFloatTypedArrayElementVertex::INDEX_INDEX);
     auto value = GetInputDoubleRegister(store, StoreFloatTypedArrayElementVertex::VALUE_INDEX);
@@ -3811,10 +3747,6 @@ template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<TransitionHClassWithBarrierVertex>(
     TransitionHClassWithBarrierVertex *transition)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << transition->GetId()
-                        << ": TransitionHClassWithBarrierVertex";
-#endif
     auto object = GetInputRegister(transition, TransitionHClassWithBarrierVertex::OBJECT_INDEX);
     auto hclass = GetInputRegister(transition, TransitionHClassWithBarrierVertex::HCLASS_INDEX);
     TemporaryRegisterScope scope(assembler_);
@@ -3830,10 +3762,6 @@ template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<PrepareSharedStoreFieldVertex>(
     PrepareSharedStoreFieldVertex *prepareField)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << prepareField->GetId()
-                        << ": PrepareSharedStoreFieldVertex";
-#endif
     uint64_t handlerInfo = prepareField->GetHandlerInfo();
     ASSERT(HandlerBase::IsStoreShared(handlerInfo));
     ASSERT(!HandlerBase::IsAccessor(handlerInfo));
@@ -3978,9 +3906,6 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<PrepareSharedStoreFieldVertex>
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<StoreInt32FieldVertex>(StoreInt32FieldVertex *storeField)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << storeField->GetId() << ": StoreInt32FieldVertex";
-#endif
     auto storeTarget = GetInputRegister(storeField, StoreInt32FieldVertex::STORE_TARGET_INDEX);
     auto value = GetInputRegister(storeField, StoreInt32FieldVertex::VALUE_INDEX);
     __ StoreInt32Field(value, storeTarget, storeField->GetOffset());
@@ -3989,9 +3914,6 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<StoreInt32FieldVertex>(StoreIn
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<StoreDoubleFieldVertex>(StoreDoubleFieldVertex *storeField)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << storeField->GetId() << ": StoreDoubleFieldVertex";
-#endif
     auto storeTarget = GetInputRegister(storeField, StoreDoubleFieldVertex::STORE_TARGET_INDEX);
     auto value = GetInputDoubleRegister(storeField, StoreDoubleFieldVertex::VALUE_INDEX);
     __ StoreFloat64Field(value, storeTarget, storeField->GetOffset());
@@ -4001,10 +3923,6 @@ template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<StoreInt32FieldWithRepVertex>(
     StoreInt32FieldWithRepVertex *storeField)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << storeField->GetId()
-                        << ": StoreInt32FieldWithRepVertex";
-#endif
     auto storeTarget = GetInputRegister(storeField, StoreInt32FieldWithRepVertex::STORE_TARGET_INDEX);
     auto value = GetInputRegister(storeField, StoreInt32FieldWithRepVertex::VALUE_INDEX);
 
@@ -4033,10 +3951,6 @@ template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<StoreDoubleFieldWithRepVertex>(
     StoreDoubleFieldWithRepVertex *storeField)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << storeField->GetId()
-                        << ": StoreDoubleFieldWithRepVertex";
-#endif
     auto storeTarget = GetInputRegister(storeField, StoreDoubleFieldWithRepVertex::STORE_TARGET_INDEX);
     auto value = GetInputRegister(storeField, StoreDoubleFieldWithRepVertex::VALUE_INDEX);
 
@@ -4081,10 +3995,6 @@ template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<EnsurePropertiesCapacityVertex>(
     EnsurePropertiesCapacityVertex *ensureCapacity)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << ensureCapacity->GetId()
-                        << ": EnsurePropertiesCapacityVertex";
-#endif
     auto object = GetInputRegister(ensureCapacity, EnsurePropertiesCapacityVertex::OBJECT_INDEX);
     auto result = GetResultRegister(ensureCapacity);
     TemporaryRegisterScope scope(assembler_);
@@ -4120,10 +4030,6 @@ template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<StoreTaggedFieldByHClassVertex>(
     StoreTaggedFieldByHClassVertex *storeByHClass)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << storeByHClass->GetId()
-                        << ": StoreTaggedFieldByHClassVertex";
-#endif
     auto object = GetInputRegister(storeByHClass, StoreTaggedFieldByHClassVertex::OBJECT_INDEX);
     auto value = GetInputRegister(storeByHClass, StoreTaggedFieldByHClassVertex::VALUE_INDEX);
     ASSERT(!storeByHClass->GetCases().empty());
@@ -4447,11 +4353,6 @@ void ArkSteedCodeGenerator::VisitControlVertex<BranchIfTaggedStringVertex>(Branc
 template <>
 void ArkSteedCodeGenerator::VisitControlVertex<BranchIfHClassInVertex>(BranchIfHClassInVertex *jumpIf)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << jumpIf->GetId()
-                        << ": BranchIfHClassInVertex to BB #" << jumpIf->IfTrue()->GetId()
-                        << " if true; to BB #" << jumpIf->IfFalse()->GetId() << " if false.";
-#endif
     auto value = GetInputRegister(jumpIf, BranchIfHClassInVertex::VALUE_INDEX);
     TemporaryRegisterScope scope(assembler_);
     ArkSteedRegister actualHClass = jumpIf->InputIsHClassAddress() ? value : scope.Acquire();
@@ -5151,9 +5052,6 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<F64ToI32TruncVertex>(F64ToI32T
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<I32ToUint8ClampedVertex>(I32ToUint8ClampedVertex *op)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << op->GetId() << ": I32ToUint8ClampedVertex";
-#endif
     auto value = GetInputRegister(op, I32ToUint8ClampedVertex::INPUT_INDEX);
     auto result = GetResultRegister(op);
     ASSERT(value == result);
@@ -5173,9 +5071,6 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<I32ToUint8ClampedVertex>(I32To
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<F64ToUint8ClampedVertex>(F64ToUint8ClampedVertex *op)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << op->GetId() << ": F64ToUint8ClampedVertex";
-#endif
     auto value = GetInputDoubleRegister(op, F64ToUint8ClampedVertex::INPUT_INDEX);
     auto result = GetResultRegister(op);
     TemporaryRegisterScope scope(assembler_);
@@ -5236,9 +5131,6 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<F64ToUint8ClampedVertex>(F64To
 template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<DoubleToInt32CallVertex>(DoubleToInt32CallVertex *op)
 {
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "CodeGen: Visiting v" << op->GetId() << ": DoubleToInt32CallVertex";
-#endif
     ASSERT(GetInputDoubleRegister(op, DoubleToInt32CallVertex::INPUT_INDEX).Code() == 0);
     __ Move(ArkSteedAssembler::GetParameterRegister(0), static_cast<int64_t>(base::INT32_BITS));
     __ CallNGCRuntime(RTSTUB_ID(DoubleToInt));
