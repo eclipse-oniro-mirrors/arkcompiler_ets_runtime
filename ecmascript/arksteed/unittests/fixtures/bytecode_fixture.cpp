@@ -363,13 +363,10 @@ struct JitWorkerHandshake {
     std::mutex mutex;
     std::condition_variable cv;
     bool ran {false};
+    EcmaVM *compilerVm {nullptr};
 };
 
-// Test-only task of the lifecycle handshake. It observes only its own execution
-// on the JIT worker and touches no VM state. The pool runs the prologue hook of
-// the current worker -- the hook that publishes the compiler VM -- before it
-// pops any task, so this task having run proves that the compiler VM pointer
-// read afterwards belongs to the current worker and not to a destroyed one.
+// Capture the VM on its owning worker before the fixture borrows it.
 class JitWorkerReadyTask final : public common::Task {
 public:
     explicit JitWorkerReadyTask(std::shared_ptr<JitWorkerHandshake> handshake)
@@ -380,6 +377,9 @@ public:
     bool Run([[maybe_unused]] uint32_t threadIndex) override
     {
         std::lock_guard<std::mutex> guard(handshake_->mutex);
+        if (!IsTerminate()) {
+            handshake_->compilerVm = JitTaskpool::GetCurrentTaskpool()->GetCompilerVm();
+        }
         handshake_->ran = true;
         handshake_->cv.notify_all();
         return true;
@@ -1128,14 +1128,17 @@ bool ArkSteedBytecodeFixture::DecodeBytecode(FixtureMethodKind kind, FixtureMeth
     return true;
 }
 
-bool ArkSteedBytecodeFixture::AwaitCurrentJitWorker()
+bool ArkSteedBytecodeFixture::AwaitCurrentJitWorker(EcmaVM *&compilerVm)
 {
+    compilerVm = nullptr;
     auto handshake = std::make_shared<JitWorkerHandshake>();
     common::Task *handshakeTask = nullptr;
     {
         auto task = std::make_unique<JitWorkerReadyTask>(handshake);
         handshakeTask = task.get();
-        JitTaskpool::GetCurrentTaskpool()->PostTask(std::move(task));
+        if (!JitTaskpool::GetCurrentTaskpool()->PostTask(std::move(task))) {
+            return false;
+        }
     }
 
     // (1) The current worker has executed the handshake task. `Runner::Run`
@@ -1152,11 +1155,9 @@ bool ArkSteedBytecodeFixture::AwaitCurrentJitWorker()
         ran = handshake->cv.wait_for(lock, readinessBudget_, [&handshake] { return handshake->ran; });
     }
 
-    // (2) The worker has retired the handshake task. `Jit::ClearTaskWithVm`
-    // casts every task it finds in the pool to `JitTask::AsyncTask`, so a task
-    // of the fixture must be neither queued nor running when the case destroys
-    // its host VM. A task that has run stays in `runningTask_` until the worker
-    // retires it, so its absence from `ForEachTask` is the retirement proof.
+    // (2) The worker has retired the handshake task, so the fixture can safely
+    // borrow its idle single-worker VM. A task that has run stays in
+    // `runningTask_` until retirement; absence from ForEachTask proves this.
     if (ran) {
         const auto deadline = std::chrono::steady_clock::now() + readinessBudget_;
         do {
@@ -1164,32 +1165,15 @@ bool ArkSteedBytecodeFixture::AwaitCurrentJitWorker()
             JitTaskpool::GetCurrentTaskpool()->ForEachTask(
                 [&retained, handshakeTask](common::Task *task) { retained = retained || task == handshakeTask; });
             if (!retained) {
+                compilerVm = handshake->compilerVm;
                 return true;
             }
             std::this_thread::yield();
         } while (std::chrono::steady_clock::now() < deadline);
     }
 
-    // The handshake did not prove that the compiler VM belongs to the current
-    // worker, so `SetUp` fails and the case goes red. The handshake task may
-    // still be queued or running; `Jit::ClearTaskWithVm`, reached from
-    // `~EcmaVM` when the host VM is destroyed, casts every task it finds in the
-    // pool to `JitTask::AsyncTask`, which a plain `common::Task` is not, so an
-    // outstanding task would crash the consumer process instead of releasing
-    // its resources.
-    //
-    // The pool is therefore stopped before it can be read by VM teardown.
-    // `Taskpool::Destroy` brings the pool's initialization count to zero --
-    // from which `ForEachTask`, the only pool reader that
-    // `Jit::ClearTaskWithVm` drives, returns without touching a task -- and
-    // `Runner::TerminateThread` joins the worker, whose pop loop returns every
-    // queued task before it honours the termination flag. The task is thus
-    // drained and retired in the same call, and host-VM destruction is left
-    // with no incompatible task to cast. The drain is deliberately not
-    // asserted here: the fixture contains no assertion and never aborts a
-    // case, its failures are reported through `FixtureStage` and
-    // `FailureDiagnostic()` (F-8), and the `COMPILER_VM` failure recorded by
-    // `SetUp` already makes this path observable to the consumer.
+    // A timed-out handshake may still be queued or running. Stop and join
+    // before tearing down the fixture; SetUp reports the readiness failure.
     JitTaskpool::GetCurrentTaskpool()->Destroy();
     return false;
 }
@@ -1220,15 +1204,9 @@ void ArkSteedBytecodeFixture::SetUp()
     options.SetCompilerEnableLiteCG(true);
     options.SetJitHotnessThreshold(JIT_HOTNESS_THRESHOLD);
 
-    // Readiness of the compiler VM. `Jit::IsEnableFastJit()` is checked first
-    // because its truth proves that `JitResources::InitJitEnv` already ran for
-    // this case. The pointer itself cannot be used as readiness proof: the JIT
-    // taskpool is a process-lifetime singleton whose `compilerVm_` is not
-    // cleared when the worker destroys the compiler VM, so after the previous
-    // case a bare `WaitForJitTaskPoolReady()` returns immediately on the stale
-    // pointer and the fixture would dereference a destroyed VM. Readiness of
-    // the current worker is established by the lifecycle handshake instead, and
-    // the pointer is published only after it passed every check below.
+    // Wait for pool readiness before posting the handshake. The handshake
+    // additionally proves the single worker can execute and retire a task
+    // before the fixture borrows its VM.
     if (!Jit::GetInstance()->IsEnableFastJit()) {
         FailCompilerVm("fast JIT is not enabled for the fixture VM", "Jit::IsEnableFastJit()=false");
         return;
@@ -1237,10 +1215,10 @@ void ArkSteedBytecodeFixture::SetUp()
     EcmaVM *currentCompilerVm = nullptr;
     {
         ThreadNativeScope nativeScope(hostThread_);
-        workerReady = AwaitCurrentJitWorker();
-        if (workerReady) {
-            currentCompilerVm = JitTaskpool::GetCurrentTaskpool()->GetCompilerVm();
-        }
+        auto *pool = JitTaskpool::GetCurrentTaskpool();
+        pool->Destroy();
+        pool->Initialize(!Jit::GetInstance()->IsDisableCodeSign(), 1);
+        workerReady = pool->WaitForJitTaskPoolReady() && AwaitCurrentJitWorker(currentCompilerVm);
     }
     if (!workerReady) {
         FailCompilerVm("the JIT worker did not complete the readiness handshake",

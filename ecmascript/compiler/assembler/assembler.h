@@ -200,9 +200,8 @@ public:
     {
         buffer_.EmitU32(v);
 #ifdef JIT_ENABLE_CODE_SIGN
-        if (doCodeSign && kungfu::JitSignCode::GetInstance()->GetCodeSigner() != nullptr) {
-            int err = AppendData(kungfu::JitSignCode::GetInstance()->GetCodeSigner(),
-                                 reinterpret_cast<const uint8_t *>(&v), sizeof(v));
+        if (doCodeSign && GetCodeSigner() != nullptr) {
+            int err = AppendData(GetCodeSigner(), reinterpret_cast<const uint8_t *>(&v), sizeof(v));
             if (err != 0) {
                 LOG_BASELINEJIT(ERROR) << "Baseline AppendData failed, err = " << std::hex << err;
             }
@@ -219,9 +218,8 @@ public:
     {
         buffer_.EmitU64(v);
 #ifdef JIT_ENABLE_CODE_SIGN
-        if (doCodeSign && kungfu::JitSignCode::GetInstance()->GetCodeSigner() != nullptr) {
-            int err = AppendData(kungfu::JitSignCode::GetInstance()->GetCodeSigner(),
-                                 reinterpret_cast<const uint8_t *>(&v), sizeof(v));
+        if (doCodeSign && GetCodeSigner() != nullptr) {
+            int err = AppendData(GetCodeSigner(), reinterpret_cast<const uint8_t *>(&v), sizeof(v));
             if (err != 0) {
                 LOG_BASELINEJIT(ERROR) << "AppendData for EmitU64 failed, err = " << std::hex << err;
             }
@@ -238,9 +236,8 @@ public:
     {
         buffer_.PutU32(offset, static_cast<int32_t>(data));
 #ifdef JIT_ENABLE_CODE_SIGN
-        if (doCodeSign && kungfu::JitSignCode::GetInstance()->GetCodeSigner() != nullptr) {
-            int err = PatchData(kungfu::JitSignCode::GetInstance()->GetCodeSigner(),
-                                offset, reinterpret_cast<const uint8_t *>(&data), sizeof(data));
+        if (doCodeSign && GetCodeSigner() != nullptr) {
+            int err = PatchData(GetCodeSigner(), offset, reinterpret_cast<const uint8_t *>(&data), sizeof(data));
             if (err != 0) {
                 LOG_BASELINEJIT(ERROR) << "Baseline PatchData failed, err = " << std::hex << err;
             }
@@ -308,7 +305,24 @@ public:
         doCodeSign = true;
     }
 
+#ifdef JIT_ENABLE_CODE_SIGN
+    // ArkSteed supplies a task-owned signer. Legacy backends keep their
+    // existing bridge until they support concurrent compilation as well.
+    void SetTaskCodeSigner(JitCodeSigner *signer)
+    {
+        ASSERT(signer != nullptr);
+        taskCodeSigner_ = signer;
+    }
+#endif
+
 private:
+#ifdef JIT_ENABLE_CODE_SIGN
+    JitCodeSigner *GetCodeSigner() const
+    {
+        return taskCodeSigner_ != nullptr ? taskCodeSigner_ : kungfu::JitSignCode::GetInstance()->GetCodeSigner();
+    }
+    JitCodeSigner *taskCodeSigner_ {nullptr};
+#endif
     DynChunk buffer_;
     bool doCodeSign = false;
 };

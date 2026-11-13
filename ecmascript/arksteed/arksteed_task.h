@@ -20,9 +20,16 @@
 #include <vector>
 
 #include "ecmascript/common.h"
+#include "ecmascript/compiler/aot_file/func_entry_des.h"
 #include "ecmascript/jit/jit_task.h"
 #include "ecmascript/mem/clock_scope.h"
 #include "ecmascript/mem/embedded_code_ref.h"
+
+#ifdef JIT_ENABLE_CODE_SIGN
+namespace OHOS::Security::CodeSign {
+class JitCodeSigner;
+}
+#endif
 
 namespace panda::ecmascript::arksteed {
 
@@ -33,6 +40,10 @@ public:
     ~ArkSteedTask();
 
     void Compile();
+#ifdef JIT_ENABLE_CODE_SIGN
+    void PUBLIC_API SetCodeSigner(OHOS::Security::CodeSign::JitCodeSigner *signer);
+#endif
+    void PUBLIC_API SetCodeData(const uint8_t *code, size_t size, const FuncEntryDes &entry);
     void InstallCode() override;
     void PUBLIC_API SetDeoptTranslationData(std::vector<uint8_t> data);
     void PUBLIC_API SetDeoptLiteralData(std::vector<JSHandle<JSTaggedValue>> literals);
@@ -50,6 +61,11 @@ public:
     };
 
 private:
+#ifdef JIT_ENABLE_CODE_SIGN
+    std::unique_ptr<OHOS::Security::CodeSign::JitCodeSigner> codeSigner_;
+#endif
+    std::vector<uint8_t> codeData_;
+    FuncEntryDes funcEntry_ {};
     std::vector<uint8_t> deoptTranslationData_;
     std::vector<JSHandle<JSTaggedValue>> deoptLiteralHandles_;
     std::vector<EmbeddedCodeRefReloc> embeddedRefRelocations_;

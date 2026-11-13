@@ -14,17 +14,23 @@
  */
 
 #include "assembler/assembly-emitter.h"
+#include <new>
+
 #include "assembler/assembly-parser.h"
+#include "class_data_accessor-inl.h"
 #include "ecmascript/js_function.h"
 #include "ecmascript/base/builtins_base.h"
+#include "ecmascript/compiler/aot_file/func_entry_des.h"
 #include "ecmascript/ecma_string.h"
 #include "ecmascript/ecma_vm.h"
 #include "ecmascript/global_env.h"
 #include "ecmascript/interpreter/interpreter.h"
+#include "ecmascript/jit/jit_task.h"
 #include "ecmascript/js_handle.h"
 #include "ecmascript/js_hclass.h"
 #include "ecmascript/jspandafile/js_pandafile_manager.h"
 #include "ecmascript/js_object-inl.h"
+#include "ecmascript/mem/sparse_space.h"
 #include "ecmascript/object_factory.h"
 #include "ecmascript/tagged_array-inl.h"
 #include "ecmascript/tests/test_helper.h"
@@ -242,6 +248,55 @@ HWTEST_F_L0(JSFunctionTest, ReplaceJSFunctionForHookMethodIsSame)
     EXPECT_NE(foo1Function->GetModule(thread), foo2Function->GetModule(thread));
 }
 
+// The plain NewJSPandaFile overload allocates the literal array without
+// constructing it; placement-construct each entry with its real method id
+// (mirrors production InitializeMemory) so a Method copied from it carries
+// a valid id even in zap builds.
+static void ConstructMethodLiterals(const std::shared_ptr<JSPandaFile> &pf)
+{
+    const panda_file::File *file = pf->GetPandaFile();
+    MethodLiteral *literals = pf->GetMethodLiterals();
+    uint32_t idx = 0;
+    for (const uint32_t classIdx : file->GetClasses()) {
+        panda_file::File::EntityId classId(classIdx);
+        panda_file::ClassDataAccessor cda(*file, classId);
+        cda.EnumerateMethods([&](panda_file::MethodDataAccessor &mda) {
+            new (literals + (idx++)) MethodLiteral(mda.GetMethodId());
+        });
+    }
+}
+
+// A bare NewMachineCodeObject leaves the payload uninitialized and crashes
+// GC marking on a reachable function; async fort copy skips the internal
+// instruction allocation.
+static void AttachWellFormedFastJitMachineCode(JSThread *thread, JSHandle<JSFunction> &function,
+                                               JSHandle<Method> &method)
+{
+    auto factory = thread->GetEcmaVM()->GetFactory();
+    MachineCodeDesc desc;
+    uint8_t fakeCode[16] = {0};
+    desc.codeAddr = reinterpret_cast<uintptr_t>(fakeCode);
+    desc.codeSize = sizeof(fakeCode);
+    uint8_t fakeStackMap[8] = {0};
+    desc.stackMapOrOffsetTableAddr = reinterpret_cast<uintptr_t>(fakeStackMap);
+    desc.stackMapOrOffsetTableSize = sizeof(fakeStackMap);
+    FuncEntryDes funcEntry {};
+    funcEntry.indexInKindOrMethodId_ = method->GetMethodId().GetOffset();
+    desc.funcEntryDesAddr = reinterpret_cast<uintptr_t>(&funcEntry);
+    desc.funcEntryDesSize = sizeof(funcEntry);
+    size_t payLoadSize = JitTask::ComputePayLoadSize(desc);
+    desc.instructionsAddr =
+        thread->GetEcmaVM()->GetHeap()->GetMachineCodeSpace()->JitFortAllocate(&desc);
+    ASSERT_NE(desc.instructionsAddr, 0U);
+    TaggedObject *machineCodeObj = factory->NewMachineCodeObject(payLoadSize, desc);
+    ASSERT_NE(machineCodeObj, nullptr);
+    JSHandle<MachineCode> machineCodeData =
+        factory->SetMachineCodeObjectData(machineCodeObj, payLoadSize, desc, method);
+    ASSERT_FALSE(machineCodeData.IsEmpty());
+    JSHandle<JSTaggedValue> machineCode(thread, machineCodeObj);
+    function->SetMachineCode(thread, machineCode);
+}
+
 HWTEST_F_L0(JSFunctionTest, ReplaceJSFunctionForHookOldFuncMachineCodeIsNotUndefined)
 {
     const char *source = R"(
@@ -255,6 +310,7 @@ HWTEST_F_L0(JSFunctionTest, ReplaceJSFunctionForHookOldFuncMachineCodeIsNotUndef
     std::unique_ptr<const panda_file::File> pfPtr = pandasm::AsmEmitter::Emit(res.Value());
     JSPandaFileManager *pfManager = JSPandaFileManager::GetInstance();
     std::shared_ptr<JSPandaFile> pf = pfManager->NewJSPandaFile(pfPtr.release(), fileName);
+    ConstructMethodLiterals(pf);
     MethodLiteral *methodLiterals = pf->GetMethodLiterals();
     MethodLiteral& foo1MethodLiteral = methodLiterals[0];
     MethodLiteral& foo2MethodLiteral = methodLiterals[1];
@@ -271,9 +327,7 @@ HWTEST_F_L0(JSFunctionTest, ReplaceJSFunctionForHookOldFuncMachineCodeIsNotUndef
     foo1Function->SetCallNapi(true);
     JSHandle<LexicalEnv> lexicalEnv = factory->NewLexicalEnv(1);
     foo1Function->SetLexicalEnv(thread, lexicalEnv);
-    MachineCodeDesc desc;
-    JSHandle<JSTaggedValue> machineCode(thread, factory->NewMachineCodeObject(16, desc));
-    foo1Function->SetMachineCode(thread, machineCode);
+    AttachWellFormedFastJitMachineCode(thread, foo1Function, foo1Method);
     JSHandle<JSFunction> foo2Function = factory->NewJSFunction(globalEnv, foo2Method);
     foo2Function->SetLength(2);
     foo2Function->SetCallNapi(false);
@@ -302,6 +356,7 @@ HWTEST_F_L0(JSFunctionTest, ReplaceJSFunctionForHookNewFuncMachineCodeIsNotUndef
     std::unique_ptr<const panda_file::File> pfPtr = pandasm::AsmEmitter::Emit(res.Value());
     JSPandaFileManager *pfManager = JSPandaFileManager::GetInstance();
     std::shared_ptr<JSPandaFile> pf = pfManager->NewJSPandaFile(pfPtr.release(), fileName);
+    ConstructMethodLiterals(pf);
     MethodLiteral *methodLiterals = pf->GetMethodLiterals();
     MethodLiteral& foo1MethodLiteral = methodLiterals[0];
     MethodLiteral& foo2MethodLiteral = methodLiterals[1];
@@ -323,9 +378,7 @@ HWTEST_F_L0(JSFunctionTest, ReplaceJSFunctionForHookNewFuncMachineCodeIsNotUndef
     foo2Function->SetCallNapi(false);
     foo2Function->SetHomeObject(thread, module.GetTaggedValue());
     foo2Function->SetModule(thread, module.GetTaggedValue());
-    MachineCodeDesc desc;
-    JSHandle<JSTaggedValue> machineCode(thread, factory->NewMachineCodeObject(16, desc));
-    foo2Function->SetMachineCode(thread, machineCode);
+    AttachWellFormedFastJitMachineCode(thread, foo2Function, foo2Method);
 
     JSFunction::ReplaceFunctionForHook(thread, foo1Function, foo2Function);
     // not replace when method is the same

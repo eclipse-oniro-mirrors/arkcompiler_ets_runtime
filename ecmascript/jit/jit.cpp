@@ -352,18 +352,21 @@ void Jit::Compile(EcmaVM *vm, const CompileDecision &decision)
     GetJitDfx()->SetTriggerCount(tier);
 
     {
-        {
-            ThreadNativeScope scope(vm->GetJSThread());
-            JitTaskpool::GetCurrentTaskpool()->WaitForJitTaskPoolReady();
-        }
-        EcmaVM *compilerVm = JitTaskpool::GetCurrentTaskpool()->GetCompilerVm();
-        std::shared_ptr<JitTask> jitTask = std::make_shared<JitTask>(vm->GetJSThread(),
-            // avoid check fail when enable multi-thread check
-            compilerVm->GetJSThreadNoCheck(), this, jsFunction, tier, methodName, osrOffset, mode);
+        std::shared_ptr<JitTask> jitTask = std::make_shared<JitTask>(vm->GetJSThread(), nullptr,
+            this, jsFunction, tier, methodName, osrOffset, mode);
 
         jitTask->PrepareCompile();
-        JitTaskpool::GetCurrentTaskpool()->PostTask(
-            std::make_unique<JitTask::AsyncTask>(jitTask, vm->GetJSThread()->GetThreadId()));
+        jitTask->SetMainThreadCompilerTime(scope.TotalSpentTimeInMicroseconds());
+        if (!JitTaskpool::GetCurrentTaskpool()->PostTask(
+            std::make_unique<JitTask::AsyncTask>(jitTask, vm->GetJSThread()->GetThreadId()))) {
+            jitTask->FinishWithoutCompile();
+            if (tier.IsFastJit()) {
+                jsFunction->SetJitCompilingFlag(false);
+            } else {
+                jsFunction->SetBaselinejitCompilingFlag(false);
+            }
+            return;
+        }
         if (mode.IsSync()) {
             // sync mode, also compile in taskpool as litecg unsupport parallel compile,
             // wait task compile finish then install code
@@ -371,7 +374,6 @@ void Jit::Compile(EcmaVM *vm, const CompileDecision &decision)
             jitTask->InstallCode();
         }
         int spendTime = scope.TotalSpentTimeInMicroseconds();
-        jitTask->SetMainThreadCompilerTime(spendTime);
         GetJitDfx()->RecordSpentTimeAndPrintStatsLogInJsThread(spendTime);
     }
 }
@@ -441,48 +443,58 @@ void Jit::DeleteJitCompilerTask(void *compiler, bool isArkSteed)
 void Jit::ClearTask(const std::function<bool(common::Task *task)> &checkClear)
 {
     JitTaskpool::GetCurrentTaskpool()->ForEachTask([&checkClear](common::Task *task) {
-        JitTask::AsyncTask *asyncTask = static_cast<JitTask::AsyncTask*>(task);
-        if (checkClear(asyncTask)) {
-            asyncTask->Terminated();
+        if (checkClear(task)) {
+            task->Terminated();
         }
     });
 }
 
 void Jit::ClearTaskWithVm(EcmaVM *vm)
 {
-    ClearTask([vm](common::Task *task) {
-        JitTask::AsyncTask *asyncTask = static_cast<JitTask::AsyncTask*>(task);
-        return vm == asyncTask->GetHostVM();
-    });
-
+    JSThread *host = vm->GetJSThread();
+    std::deque<std::shared_ptr<JitTask>> completed;
     {
         LockHolder holder(threadTaskInfoLock_);
-        ThreadTaskInfo &info = threadTaskInfo_[vm->GetJSThread()];
+        auto it = threadTaskInfo_.find(host);
+        if (it == threadTaskInfo_.end()) {
+            return;
+        }
+        auto &info = it->second;
         info.skipInstallTask_ = true;
-        auto &taskQueue = info.installJitTasks_;
-        taskQueue.clear();
-
-        if (info.jitTaskCnt_.load() != 0) {
-            ThreadNativeScope threadNativeScope(vm->GetJSThread());
+        completed.swap(info.installJitTasks_);
+    }
+    ClearTask([id = static_cast<int32_t>(host->GetThreadId())](common::Task *task) {
+        return task->GetId() == id;
+    });
+    // Task destruction decrements the count under the same lock.
+    completed.clear();
+    {
+        ThreadNativeScope native(host);
+        LockHolder holder(threadTaskInfoLock_);
+        auto &info = threadTaskInfo_[host];
+        while (info.jitTaskCnt_.load() != 0) {
             info.jitTaskCntCv_.Wait(&threadTaskInfoLock_);
         }
+        threadTaskInfo_.erase(host);
     }
 }
 
 void Jit::IncJitTaskCnt(JSThread *thread)
 {
     LockHolder holder(threadTaskInfoLock_);
-    ThreadTaskInfo &info = threadTaskInfo_[thread];
+    auto &info = threadTaskInfo_[thread];
+    ASSERT(!info.skipInstallTask_);
     info.jitTaskCnt_.fetch_add(1);
 }
 
 void Jit::DecJitTaskCnt(JSThread *thread)
 {
     LockHolder holder(threadTaskInfoLock_);
-    ThreadTaskInfo &info = threadTaskInfo_[thread];
+    auto &info = threadTaskInfo_.at(thread);
     uint32_t old = info.jitTaskCnt_.fetch_sub(1);
+    ASSERT(old != 0);
     if (old == 1) {
-        info.jitTaskCntCv_.Signal();
+        info.jitTaskCntCv_.SignalAll();
     }
 }
 
@@ -622,38 +634,32 @@ void Jit::CompileArkSteed(EcmaVM *vm, JSHandle<JSFunction> &jsFunction,
 void Jit::SubmitArkSteedCompileTask(EcmaVM *vm, JSHandle<JSFunction> &jsFunction, CompilerTier tier,
                                     int32_t osrOffset, JitCompileMode mode, TimeScope &timeScope)
 {
-    {
-        ThreadNativeScope scope(vm->GetJSThread());
-        JitTaskpool::GetCurrentTaskpool()->WaitForJitTaskPoolReady();
-    }
-
-    EcmaVM *compilerVm = JitTaskpool::GetCurrentTaskpool()->GetCompilerVm();
     JSThread *hostThread = vm->GetJSThread();
-    JSThread *compilerThread = compilerVm->GetJSThreadNoCheck();
 
     Method *method = Method::Cast(jsFunction->GetMethod(hostThread).GetTaggedObject());
     CString methodName = method->GetMethodName(hostThread);
 
-    auto arkSteedTask = std::make_shared<arksteed::ArkSteedTask>(
-        hostThread, compilerThread, this, jsFunction, tier, methodName, osrOffset, mode);
+    auto arkSteedTask = std::make_shared<arksteed::ArkSteedTask>(hostThread, nullptr, this, jsFunction, tier,
+                                                                 methodName, osrOffset, mode);
 
     arkSteedTask->PrepareCompile();
+    // Worker inputs must be frozen before PostTask publishes the task.
+    arkSteedTask->SetMainThreadCompilerTime(timeScope.TotalSpentTimeInMicroseconds());
 
-    JitTaskpool::GetCurrentTaskpool()->PostTask(
-        std::make_unique<arksteed::ArkSteedTask::AsyncTask>(
-            arkSteedTask, vm->GetJSThread()->GetThreadId()));
+    if (!JitTaskpool::GetCurrentTaskpool()->PostTask(
+        std::make_unique<arksteed::ArkSteedTask::AsyncTask>(arkSteedTask, vm->GetJSThread()->GetThreadId()))) {
+        arkSteedTask->FinishWithoutCompile();
+        jsFunction->SetJitCompilingFlag(false);
+        return;
+    }
 
     if (mode.IsSync()) {
-        {
-            // move to native scope to avoid deadlock among (MAIN, GC. JIT) threads
-            ThreadNativeScope scope(vm->GetJSThread());
-            arkSteedTask->WaitFinish();
-        }
+        // WaitFinish owns the NATIVE wait scope and restores Host state.
+        arkSteedTask->WaitFinish();
         arkSteedTask->InstallCode();
     }
 
     int spendTime = timeScope.TotalSpentTimeInMicroseconds();
-    arkSteedTask->SetMainThreadCompilerTime(spendTime);
     GetJitDfx()->RecordSpentTimeAndPrintStatsLogInJsThread(spendTime);
 }
 #endif

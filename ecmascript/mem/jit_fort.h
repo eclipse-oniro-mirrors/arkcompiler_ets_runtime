@@ -144,6 +144,7 @@ public:
     void MarkJitFortMemAlive(MachineCode *obj, bool inHuge = false);
     void MarkJitFortMemAwaitInstall(uintptr_t addr, size_t size, bool inHuge = false);
     void MarkJitFortMemInstalled(MachineCode *obj, bool inHuge = false);
+    void ClearJitFortMemAwaitInstall(uintptr_t addr, size_t size);
     void FreeRegion(JitFortRegion *region, bool inHuge = false);
 
     uint32_t AddrToFortRegionIdx(uint64_t addr);

@@ -5,8 +5,5 @@ obj/arkcompiler/ets_runtime/test/jittest/lazy_deopt_10/lazy_deopt_10
 #workitem 44
 obj/arkcompiler/ets_runtime/ecmascript/arksteed/unittests/ArkSteedInitializationIntervalVerifierTest
 
-#workitem 48
-obj/arkcompiler/ets_runtime/ecmascript/tests/JS_Function_Test
-
 #workitem 50
 obj/arkcompiler/ets_runtime/ecmascript/containers/tests/Containers_003_Test

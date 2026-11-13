@@ -15,8 +15,6 @@
 
 #include "ecmascript/jit/jit_task.h"
 
-#include <limits>
-
 #include "ecmascript/base/config.h"
 #include "common_components/heap/heap_manager.h"
 #include "ecmascript/jspandafile/program_object.h"
@@ -34,27 +32,158 @@ JitTaskpool *JitTaskpool::GetCurrentTaskpool()
     return taskpool;
 }
 
-uint32_t JitTaskpool::TheMostSuitableThreadNum([[maybe_unused]]uint32_t threadNum) const
+EcmaVM *JitTaskpool::GetCompilerVm()
 {
-    return 1;
+    auto *thread = JSThread::GetCurrent();
+    if (thread != nullptr && thread->IsJitThread()) {
+        return thread->GetEcmaVM();
+    }
+    return nullptr;
+}
+
+uint32_t JitTaskpool::TheMostSuitableThreadNum(uint32_t threadNum) const
+{
+    CHECK(threadNum >= 1 && threadNum <= common::MAX_TASKPOOL_THREAD_NUM);
+    return threadNum;
+}
+
+bool JitTaskpool::WaitForJitTaskPoolReady()
+{
+    LockHolder lock(jitTaskPoolMutex_);
+    while (state_ == State::STARTING) {
+        jitTaskPoolCV_.Wait(&jitTaskPoolMutex_);
+    }
+    return state_ == State::RUNNING;
+}
+
+void JitTaskpool::PublishReady()
+{
+    if (state_ == State::STARTING && runnerCreated_ && readyWorkers_ == GetWorkerCount()) {
+        state_ = initializationFailed_ ? State::FAILED : State::RUNNING;
+        jitTaskPoolCV_.SignalAll();
+    }
+}
+
+void JitTaskpool::InitializeWorker(bool needInitJitFort)
+{
+    JitVM::Create();
+    // Permission belongs to this OS thread. Serialize the process-global
+    // resource flag, and publish readiness only after this prologue completes.
+    LockHolder lock(jitTaskPoolMutex_);
+    if (needInitJitFort) {
+        JitFort::InitJitFortResource();
+        initializationFailed_ |= !JitFort::IsResourceAvailable();
+    }
+    ++readyWorkers_;
+    PublishReady();
+}
+
+void JitTaskpool::DestroyWorker()
+{
+    auto *current = JSThread::GetCurrent();
+    CHECK(current != nullptr && current->IsJitThread());
+    // Runner invokes the epilogue only after Run and its scope have returned.
+    auto *thread = static_cast<JitThread *>(current);
+    auto *compilerVm = thread->GetJitVM();
+    CHECK(thread->GetCurrentTask() == nullptr && thread->GetHostThread() == nullptr);
+    JitVM::Destroy(compilerVm);
+}
+
+void JitTaskpool::Initialize(bool needInitJitFort, uint32_t workerCount)
+{
+    std::lock_guard<std::mutex> lifecycle(lifecycleMutex_);
+    {
+        LockHolder lock(jitTaskPoolMutex_);
+        if (state_ != State::STOPPED) {
+            return;
+        }
+        CHECK(workerCount >= 1 && workerCount <= common::MAX_TASKPOOL_THREAD_NUM);
+        workerCount_.store(workerCount, std::memory_order_release);
+        state_ = State::STARTING;
+    }
+    common::Taskpool::Initialize(
+        workerCount,
+        [this, needInitJitFort](os::thread::native_handle_type thread) {
+            os::thread::SetThreadName(thread, "OS_JIT_Thread");
+            constexpr int32_t priorityVal = 5;
+            os::thread::SetPriority(os::thread::GetCurrentThreadId(), priorityVal);
+            InitializeWorker(needInitJitFort);
+            if (!WaitForJitTaskPoolReady()) {
+                ForEachTask([](common::Task *task) { task->Terminated(); });
+            }
+        },
+        [this]([[maybe_unused]] os::thread::native_handle_type thread) { DestroyWorker(); });
+    LockHolder lock(jitTaskPoolMutex_);
+    runnerCreated_ = true;
+    PublishReady();
+}
+
+bool JitTaskpool::PostTask(std::unique_ptr<common::Task> task)
+{
+    LockHolder lock(jitTaskPoolMutex_);
+    if (!runnerCreated_ || (state_ != State::STARTING && state_ != State::RUNNING)) {
+        return false;
+    }
+    // STOPPING cannot be published until this queue insertion has completed.
+    common::Taskpool::PostTask(std::move(task));
+    return true;
+}
+
+void JitTaskpool::ForEachTask(const std::function<void(common::Task *)> &callback)
+{
+    LockHolder lock(jitTaskPoolMutex_);
+    if (runnerCreated_) {
+        common::Taskpool::ForEachTask(callback);
+    }
+}
+
+void JitTaskpool::SetThreadPriority(common::PriorityMode mode)
+{
+    LockHolder lock(jitTaskPoolMutex_);
+    if (state_ == State::RUNNING) {
+        common::Taskpool::SetThreadPriority(mode);
+    }
+}
+
+void JitTaskpool::Destroy()
+{
+    std::lock_guard<std::mutex> lifecycle(lifecycleMutex_);
+    {
+        LockHolder lock(jitTaskPoolMutex_);
+        if (state_ == State::STOPPED) {
+            return;
+        }
+        state_ = State::STOPPING;
+        jitTaskPoolCV_.SignalAll();
+    }
+    // Host tasks must be drained before a production pool restart. Join also
+    // drains accepted work and prologues on failure. Do not hold the pool lock
+    // or leave a waiting Host in RUNNING while workers finish.
+    common::Taskpool::Destroy(common::ALL_TASK_ID);
+    LockHolder lock(jitTaskPoolMutex_);
+    readyWorkers_ = 0;
+    runnerCreated_ = false;
+    initializationFailed_ = false;
+    state_ = State::STOPPED;
+    jitTaskPoolCV_.SignalAll();
 }
 
 JitTask::JitTask(JSThread *hostThread, JSThread *compilerThread, Jit *jit, JSHandle<JSFunction> &jsFunction,
-    CompilerTier tier, CString &methodName, int32_t offset, JitCompileMode mode)
+                 CompilerTier tier, CString &methodName, int32_t offset, JitCompileMode mode)
     : hostThread_(hostThread),
-    compilerThread_(compilerThread),
-    jit_(jit),
-    jsFunction_(jsFunction),
-    compilerTask_(nullptr),
-    state_(CompileState::SUCCESS),
-    compilerTier_(tier),
-    methodName_(methodName),
-    offset_(offset),
-    jitCompileMode_(mode),
-    runState_(RunState::INIT)
+      compilerThread_(compilerThread),
+      jit_(jit),
+      jsFunction_(jsFunction),
+      compilerTask_(nullptr),
+      state_(CompileState::SUCCESS),
+      compilerTier_(tier),
+      methodName_(methodName),
+      offset_(offset),
+      jitCompileMode_(mode),
+      runState_(RunState::INIT)
 {
     LOG_JIT(DEBUG) << "JitTask compilerThread addr: " << compilerThread_;
-    jit->IncJitTaskCnt(hostThread);
+    jit->IncJitTaskCnt(hostThread_);
     sustainingJSHandle_ = std::make_unique<SustainingJSHandle>(hostThread->GetEcmaVM());
     dependencies_ = new kungfu::LazyDeoptAllDependencies(sustainingJSHandle_.get());
 }
@@ -63,7 +192,6 @@ void JitTask::PrepareCompile()
 {
     CloneProfileTypeInfo();
     SustainingJSHandles();
-    compilerTask_ = jit_->CreateJitCompilerTask(this);
 
     Method *method = Method::Cast(jsFunction_->GetMethod(hostThread_).GetTaggedObject());
     JSTaggedValue constpool = method->GetConstantPool(hostThread_);
@@ -72,6 +200,23 @@ void JitTask::PrepareCompile()
     }
 
     SetRunState(RunState::INIT);
+}
+
+void JitTask::CreateCompilerTask()
+{
+    ASSERT(compilerTask_ == nullptr);
+    compilerTask_ = jit_->CreateJitCompilerTask(this);
+    if (compilerTask_ == nullptr) {
+        SetCompileFailed();
+    }
+}
+
+void JitTask::ReleaseCompilerTask()
+{
+    if (compilerTask_ != nullptr) {
+        jit_->DeleteJitCompilerTask(compilerTask_, compilerTier_.IsArkSteed());
+        compilerTask_ = nullptr;
+    }
 }
 
 void JitTask::Optimize()
@@ -322,6 +467,12 @@ static void FillHeapConstantTable(JSHandle<MachineCode> &machineCodeObj, const M
 // This should only be entered from hostVM, i.e., execution jsthread
 void JitTask::InstallCode()
 {
+    if (compilerTier_.IsFastJit()) {
+        jsFunction_->SetJitCompilingFlag(false);
+    } else {
+        ASSERT(compilerTier_.IsBaseLine());
+        jsFunction_->SetBaselinejitCompilingFlag(false);
+    }
     if (!IsCompileSuccess()) {
         return;
     }
@@ -400,13 +551,6 @@ void JitTask::InstallCode()
             jitfort->MarkJitFortMemInstalled(machineCode, codeDesc_.isHugeObj);
         }
     }
-
-    if (compilerTier_.IsFastJit()) {
-        jsFunction_->SetJitCompilingFlag(false);
-    } else {
-        ASSERT(compilerTier_.IsBaseLine());
-        jsFunction_->SetBaselinejitCompilingFlag(false);
-    }
 }
 
 void JitTask::InstallCodeByCompilerTier(JSHandle<MachineCode> &machineCodeObj,
@@ -480,7 +624,7 @@ void JitTask::CloneProfileTypeInfo()
 
 JitTask::~JitTask()
 {
-    jit_->DeleteJitCompilerTask(compilerTask_, compilerTier_.IsArkSteed());
+    ReleaseCompilerTask();
     ASSERT(dependencies_ != nullptr);
     delete dependencies_;
     dependencies_ = nullptr;
@@ -499,58 +643,82 @@ void JitTask::WaitFinish()
     }
 }
 
+void JitTask::FinishWithoutCompile()
+{
+    SetCompileFailed();
+    SetRunStateFinish();
+}
+
 bool JitTask::AsyncTask::Run([[maybe_unused]] uint32_t threadIndex)
 {
     if (IsTerminate() || !jitTask_->GetHostThread()->GetEcmaVM()->IsInitialized()) {
+        jitTask_->FinishWithoutCompile();
+        if (jitTask_->IsAsyncTask()) {
+            jitTask_->GetJit()->RequestInstallCode(jitTask_);
+        }
         return false;
     }
-    DISALLOW_HEAP_ACCESS;
+    {
+        DISALLOW_HEAP_ACCESS;
+        CString info = "compile method: " + jitTask_->GetMethodName();
+        ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK,
+            ConvertToStdString("JIT::Compile:" + info).c_str(), "");
 
-    CString info = "compile method: " + jitTask_->GetMethodName();
-    ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK,
-        ConvertToStdString("JIT::Compile:" + info).c_str(), "");
+        JitAsyncTaskRunScope asyncTaskRunScope(jitTask_.get());
+        if (!asyncTaskRunScope.IsBound()) {
+            jitTask_->FinishWithoutCompile();
+        } else if (jitTask_->GetJsFunction().GetAddress() != 0) {
+            Jit::TimeScope scope(jitTask_->GetHostVM(), info, jitTask_->GetCompilerTier());
+            {
+                Jit::JitLockHolder lock(jitTask_->GetCompilerThread());
+                jitTask_->CreateCompilerTask();
+            }
+            if (jitTask_->IsCompileSuccess()) {
+                jitTask_->Optimize();
+                jitTask_->Finalize();
+            }
 
-    JitAsyncTaskRunScope asyncTaskRunScope(jitTask_.get());
+            if (jitTask_->IsCompileSuccess()) {
+                MachineCodeDesc codeDesc = jitTask_->GetMachineCodeDesc();
+                size_t instrSize = codeDesc.codeSizeAlign + codeDesc.rodataSizeBeforeTextAlign
+                                   + codeDesc.rodataSizeAfterTextAlign;
+                CString sizeInfo = ", text size: ";
+                sizeInfo.append(std::to_string(instrSize)).append("bytes");
+                scope.appendMessage(sizeInfo);
 
-    if (jitTask_->GetJsFunction().GetAddress() == 0) {
-        // for unit test
-    } else {
-        Jit::TimeScope scope(jitTask_->GetHostThread()->GetEcmaVM(), info, jitTask_->GetCompilerTier());
-
-        jitTask_->Optimize();
-        jitTask_->Finalize();
-
-        // info main thread compile complete
-        if (!jitTask_->IsCompileSuccess()) {
-            return false;
+                int compilerTime = scope.TotalSpentTimeInMicroseconds();
+                JitDfx::GetInstance()->RecordSpentTimeAndPrintStatsLogInJitThread(compilerTime, jitTask_->methodName_,
+                    jitTask_->compilerTier_.IsBaseLine(), jitTask_->mainThreadCompileTime_);
+            }
         }
-
-        if (jitTask_->IsAsyncTask()) {
-            jitTask_->jit_->RequestInstallCode(jitTask_);
-        }
-
-        MachineCodeDesc codeDesc = jitTask_->GetMachineCodeDesc();
-        size_t instrSize = codeDesc.codeSizeAlign + codeDesc.rodataSizeBeforeTextAlign
-                           + codeDesc.rodataSizeAfterTextAlign;
-        CString sizeInfo = ", text size: ";
-        sizeInfo.append(std::to_string(instrSize)).append("bytes");
-        scope.appendMessage(sizeInfo);
-
-        int compilerTime = scope.TotalSpentTimeInMicroseconds();
-        JitDfx::GetInstance()->RecordSpentTimeAndPrintStatsLogInJitThread(compilerTime, jitTask_->methodName_,
-            jitTask_->compilerTier_.IsBaseLine(), jitTask_->mainThreadCompileTime_);
     }
-    return true;
+    if (jitTask_->IsAsyncTask()) {
+        jitTask_->GetJit()->RequestInstallCode(jitTask_);
+    }
+    return jitTask_->IsCompileSuccess();
 }
 
 JitAsyncTaskRunScope::JitAsyncTaskRunScope(JitTask *task)
     : task_(task),
       jitvm_(nullptr)
 {
+    auto *pool = JitTaskpool::GetCurrentTaskpool();
+    EcmaVM *vm = pool->GetCompilerVm();
+    if (vm == nullptr) {
+        return;
+    }
+    // This worker owns the VM until Run returns and its epilogue executes.
+    if (task_->GetCompilerThread() != nullptr && task_->GetCompilerThread() != vm->GetJSThreadNoCheck()) {
+        return;
+    }
+    if (task_->GetCompilerThread() == nullptr) {
+        task_->BindCompilerThread(vm->GetJSThreadNoCheck());
+    }
     task_->SetRunState(RunState::RUNNING);
     JSThread *compilerThread = task_->GetCompilerThread();
     ASSERT(compilerThread->IsJitThread());
     JitThread *jitThread = static_cast<JitThread*>(compilerThread);
+    CHECK(jitThread->GetCurrentTask() == nullptr);
     jitvm_ = jitThread->GetJitVM();
     jitvm_->SetHostVM(task_->GetHostThread());
     jitThread->SetCurrentTask(task_);
@@ -558,10 +726,16 @@ JitAsyncTaskRunScope::JitAsyncTaskRunScope(JitTask *task)
 
 JitAsyncTaskRunScope::~JitAsyncTaskRunScope()
 {
+    if (jitvm_ == nullptr) {
+        return;
+    }
     JSThread *compilerThread = task_->GetCompilerThread();
     JitThread *jitThread = static_cast<JitThread*>(compilerThread);
     jitThread->SetCurrentTask(nullptr);
     jitvm_->ReSetHostVM();
+    if (task_->GetCompilerTier().IsArkSteed()) {
+        task_->ClearCompilerThread();
+    }
     task_->SetRunStateFinish();
 }
 }  // namespace panda::ecmascript

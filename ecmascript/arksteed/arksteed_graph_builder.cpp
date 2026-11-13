@@ -3184,7 +3184,10 @@ struct GraphBuilder::BytecodeVisitor {
 
     bool CanUseCallSelf() const
     {
-        switch (self->preproc_->GetMethod()->GetFunctionKind()) {
+        if (self->initialCallTarget_ == nullptr) {
+            return false;
+        }
+        switch (self->preproc_->GetEnv()->GetFunctionKind()) {
             case FunctionKind::NORMAL_FUNCTION:
             case FunctionKind::ARROW_FUNCTION:
             case FunctionKind::BASE_CONSTRUCTOR:
@@ -4510,7 +4513,7 @@ struct GraphBuilder::BytecodeVisitor {
         ASSERT(bcInfo != nullptr);
         ASSERT(std::size(inputs) == CallVertex::FIRST_ARG_INDEX + actualArgc);
         ValueVertex *target = *std::begin(inputs);
-        bool canUseCallSelf = CanUseCallSelf() && self->initialCallTarget_ != nullptr;
+        bool canUseCallSelf = CanUseCallSelf();
         if (canUseCallSelf && target == self->initialCallTarget_) {
             return BuildSelfCallVertex(inputs, actualArgc);
         }

@@ -14,8 +14,10 @@
  */
 
 #include <thread>
+#include <vector>
 
 #include "ecmascript/mem/concurrent_marker.h"
+#include "ecmascript/mem/jit_fort.h"
 #include "ecmascript/mem/machine_code.h"
 #include "ecmascript/jit/jit.h"
 
@@ -251,5 +253,43 @@ HWTEST_F_L0(MachineCodeTest, ConcurrentTest001)
             t.join();
         }
     }
+}
+
+// A discarded awaiting-install range must be reusable without any sweep.
+static void ExpectFortRecoveryAfterDiscard(JitFort *fort, size_t instructionsSize, bool inHuge)
+{
+    MachineCodeDesc desc {};
+    desc.isHugeObj = inHuge;
+    desc.instructionsSize = instructionsSize;
+    const size_t fortSize = fort->FortAllocSize(instructionsSize);
+    std::vector<uintptr_t> held;
+    uintptr_t addr = fort->Allocate(&desc);
+    while (addr != 0) {
+        held.push_back(addr);
+        addr = fort->Allocate(&desc);
+    }
+    ASSERT_NE(held.size(), 0U);
+    const size_t capacity = held.size();
+    for (uintptr_t heldAddr : held) {
+        fort->ClearJitFortMemAwaitInstall(heldAddr, fortSize);
+    }
+    std::vector<uintptr_t> recovered;
+    addr = fort->Allocate(&desc);
+    while (addr != 0) {
+        recovered.push_back(addr);
+        addr = fort->Allocate(&desc);
+    }
+    for (uintptr_t heldAddr : recovered) {
+        fort->ClearJitFortMemAwaitInstall(heldAddr, fortSize);
+    }
+    EXPECT_EQ(recovered.size(), capacity);
+}
+
+HWTEST_F_L0(MachineCodeTest, ClearAwaitInstallReturnsFortRangeToAllocator)
+{
+    auto *fort = thread->GetEcmaVM()->GetHeap()->GetOrCreateJitFort();
+    ASSERT_NE(fort, nullptr);
+    ExpectFortRecoveryAfterDiscard(fort, 4096, false);
+    ExpectFortRecoveryAfterDiscard(fort, 128 * 1024, true);
 }
 }

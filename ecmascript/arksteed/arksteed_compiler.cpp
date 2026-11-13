@@ -40,9 +40,9 @@
 #include "ecmascript/jit/jit.h"
 #include "ecmascript/jspandafile/method_literal.h"
 #include "ecmascript/mem/machine_code.h"
+#include "ecmascript/platform/mutex.h"
 
 #ifdef JIT_ENABLE_CODE_SIGN
-#include "ecmascript/compiler/jit_signcode.h"
 #include "ecmascript/mem/jit_fort.h"
 #include "jit_buffer_integrity.h"
 #endif
@@ -52,6 +52,14 @@
 namespace panda::ecmascript::arksteed {
 
 namespace {
+
+// Parallel ArkSteed JIT workers share one compiler log stream. The graph dump
+// (Starts marker → GraphPrinter → Finishes marker) is emitted line by line, so
+// concurrent dumps interleave and break the runner's assumption that one dump
+// block is one graph (vN numbering restarts per graph). Serialize each whole
+// dump block. Only taken when print-graph is enabled; the product path stays
+// lock-free.
+Mutex g_graphDumpMutex;
 
 CString ParseMethodNameFromEnv(JitCompilationEnv *env)
 {
@@ -69,11 +77,16 @@ static void VerifyGraph(Graph* graph, bool afterRegalloc = false)
 #endif
 }
 
-static void LogAsm(ArkSteedAssembler *assembler)
+static void LogAsm(ArkSteedAssembler *assembler, const CString &methodName)
 {
     if (assembler == nullptr) {
         return;
     }
+
+    // Serialize the whole codegen-ASM block like the graph dump: parallel
+    // compiler workers share one log stream, so an interleaved block breaks
+    // the runner's per-method attribution.
+    LockHolder lock(g_graphDumpMutex);
 
     CommentList &comments = assembler->GetCommentList();
     uint8_t *commentsData = comments.EmitToBuffer();
@@ -83,6 +96,9 @@ static void LogAsm(ArkSteedAssembler *assembler)
     delete[] commentsData;
 
     LOG_COMPILER(INFO) << "========== ArkSteed After Codegen ASM ==========";
+    // The runner attributes the codegen-comment block by this line, so
+    // parallel workers can emit codegen sections in any order.
+    LOG_COMPILER(INFO) << "ArkSteed Codegen Method: " << methodName;
     std::istringstream asmStream(asmOut.str());
     std::string line;
     while (std::getline(asmStream, line)) {
@@ -283,7 +299,11 @@ bool ArkSteedCompilerTask::Compile()
 
     // Print graph with labeller if option is enabled
     if (arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedPrintGraph()) {
+        LockHolder lock(g_graphDumpMutex);
         LOG_COMPILER(INFO) << "===== Starts Graph Dump =====";
+        // The runner attributes a dump block to a method by this line, so
+        // parallel workers can dump in any order without confusing it.
+        LOG_COMPILER(INFO) << "ArkSteed Graph Method: " << GetCompiledMethodName();
         bool withColors = arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedPrintWithColors();
         GraphProcessor<GraphPrinter> graphPrinterProcessor(chunk_.get(), withColors);
         graphPrinterProcessor.Run(graph_);
@@ -311,7 +331,9 @@ bool ArkSteedCompilerTask::Compile()
             assembler_->EnableComments(true);
         }
 #ifdef JIT_ENABLE_CODE_SIGN
-        EnableCodeSign();
+        if (!EnableCodeSign()) {
+            return false;
+        }
 #endif
         safepointTableBuilder_ = new ArkSteedSafepointTableBuilder(chunk_.get());
         if (arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedSourcePositionTable()) {
@@ -325,7 +347,7 @@ bool ArkSteedCompilerTask::Compile()
         codegen.Generate();
 
         if (arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedPrintCode()) {
-            LogAsm(assembler_);
+            LogAsm(assembler_, GetCompiledMethodName());
         }
     }
 
@@ -335,16 +357,18 @@ bool ArkSteedCompilerTask::Compile()
 }
 
 #ifdef JIT_ENABLE_CODE_SIGN
-void ArkSteedCompilerTask::EnableCodeSign()
+bool ArkSteedCompilerTask::EnableCodeSign()
 {
-    kungfu::JitSignCode *singleton = kungfu::JitSignCode::GetInstance();
-    singleton->Reset();
     if (Jit::GetInstance()->IsEnableJitFort() && !Jit::GetInstance()->IsDisableCodeSign() &&
         JitFort::IsResourceAvailable()) {
         OHOS::Security::CodeSign::JitCodeSigner *jitSigner = CreateJitCodeSigner();
-        singleton->SetCodeSigner(jitSigner);
-        assembler_->EnableCodeSign();
+        if (jitSigner == nullptr) {
+            return false;
+        }
+        arkSteedTask_->SetCodeSigner(jitSigner);
+        assembler_->EnableCodeSign(jitSigner);
     }
+    return true;
 }
 #endif
 
@@ -432,13 +456,31 @@ std::unique_ptr<uint8_t[]> ArkSteedCompilerTask::BuildTableContainer(size_t *con
     return containerBuffer;
 }
 
-void ArkSteedCompilerTask::FillCodeDesc(MachineCodeDesc &codeDesc)
+bool ArkSteedCompilerTask::FillCodeDesc(MachineCodeDesc &codeDesc)
 {
     codeDesc.codeAddr = reinterpret_cast<uintptr_t>(assembler_->GetCodeBuffer());
     codeDesc.codeSize = assembler_->GetCodeSize();
-
     codeDesc.codeType = MachineCodeType::ARKSTEED_CODE;
 
+    FillDeoptLiteralData();
+    size_t containerSize = 0;
+    auto containerBuffer = BuildTableContainer(&containerSize);
+    if (containerBuffer == nullptr) {
+        return false;
+    }
+    codeDesc.stackMapOrOffsetTableAddr = reinterpret_cast<uintptr_t>(containerBuffer.release());
+    codeDesc.stackMapOrOffsetTableSize = containerSize;
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    arkSteedTask_->SetDeoptTranslationData(translationBuilder_->Encode());
+#endif
+    FillEmbeddedRefData();
+    FillFrameInfo();
+    FillCodeComments(codeDesc);
+    return true;
+}
+
+void ArkSteedCompilerTask::FillDeoptLiteralData()
+{
     std::vector<JSHandle<JSTaggedValue>> deoptLiteralHandles;
     const auto &deoptLiteralHandleIndices = deoptLiteralTableBuilder_->GetHandleIndices();
     deoptLiteralHandles.reserve(deoptLiteralHandleIndices.size());
@@ -449,16 +491,11 @@ void ArkSteedCompilerTask::FillCodeDesc(MachineCodeDesc &codeDesc)
     CHECK(deoptLiteralHandles.size() <= std::numeric_limits<uint32_t>::max());
     safepointTableBuilder_->SetDeoptLiteralCount(static_cast<uint32_t>(deoptLiteralHandles.size()));
     arkSteedTask_->SetDeoptLiteralData(std::move(deoptLiteralHandles));
+}
 
-    size_t containerSize = 0;
-    auto containerBuffer = BuildTableContainer(&containerSize);
-    codeDesc.stackMapOrOffsetTableAddr = reinterpret_cast<uintptr_t>(containerBuffer.release());
-    codeDesc.stackMapOrOffsetTableSize = containerSize;
 
-#if ECMASCRIPT_ENABLE_ARK_STEED
-    arkSteedTask_->SetDeoptTranslationData(translationBuilder_->Encode());
-#endif
-
+void ArkSteedCompilerTask::FillEmbeddedRefData()
+{
     // Retain only referenced handles for installation, with indices local to this compact array.
     auto embeddedRelocations = assembler_->GetEmbeddedRefRelocations();
     std::vector<JSHandle<JSTaggedValue>> embeddedHandles;
@@ -473,19 +510,19 @@ void ArkSteedCompilerTask::FillCodeDesc(MachineCodeDesc &codeDesc)
         relocation.handleIndex = it->second;
     }
     arkSteedTask_->SetEmbeddedRefData(std::move(embeddedRelocations), std::move(embeddedHandles));
+}
 
-    // Frame info - fill FuncEntryDes
-    // Set funcEntry to point to heap-allocated FuncEntryDes
-    codeDesc.funcEntryDesAddr = reinterpret_cast<uintptr_t>(funcEntryDes_);
-
+void ArkSteedCompilerTask::FillFrameInfo()
+{
     // fpDelta = frame size + saved FP + return address
     funcEntryDes_->fpDeltaPrevFrameSp_ = 2 * static_cast<int>(sizeof(uint64_t));  // 2: saved FP + return address
     funcEntryDes_->funcSize_ = static_cast<uint32_t>(assembler_->GetCodeSize());
     funcEntryDes_->isFastCall_ = false;
     funcEntryDes_->calleeRegisterNum_ = 0;
-    // ArkSteed is single function, no need for CalleeReg2Offset currently
+}
 
-    // Code comments
+void ArkSteedCompilerTask::FillCodeComments(MachineCodeDesc &codeDesc)
+{
     CommentList &comments = assembler_->GetCommentList();
     if (comments.Size() > 0) {
         uint8_t *commentsData = comments.EmitToBuffer();
@@ -495,10 +532,6 @@ void ArkSteedCompilerTask::FillCodeDesc(MachineCodeDesc &codeDesc)
         codeDesc.codeCommentsAddr = 0;
         codeDesc.codeCommentsSize = 0;
     }
-
-#ifdef JIT_ENABLE_CODE_SIGN
-    codeDesc.codeSigner = reinterpret_cast<uintptr_t>(kungfu::JitSignCode::GetInstance()->GetCodeSigner());
-#endif
 }
 
 extern "C" {
@@ -536,16 +569,18 @@ PUBLIC_API bool ArkSteedFinalize(void *compilerTask, ArkSteedTask *arkSteedTask)
 
     // Fill MachineCodeDesc from compiler output
     MachineCodeDesc &machineDesc = arkSteedTask->GetMachineCodeDesc();
-    task->FillCodeDesc(machineDesc);
-
-    // JitFort async copy (if enabled)
+    if (!task->FillCodeDesc(machineDesc)) {
+        return false;
+    }
     if (Jit::GetInstance()->IsEnableJitFort() && Jit::GetInstance()->IsEnableAsyncCopyToFort() &&
         machineDesc.codeSize > 0) {
-        if (kungfu::JitCompiler::AllocFromFortAndCopy(*task->GetCompilationEnv(), machineDesc) == false) {
+        if (!kungfu::JitCompiler::AllocFromFortAndCopy(*task->GetCompilationEnv(), machineDesc)) {
             return false;
         }
+        machineDesc.isAsyncCompileMode = true;
     }
-
+    arkSteedTask->SetCodeData(reinterpret_cast<const uint8_t *>(machineDesc.codeAddr), machineDesc.codeSize,
+        *task->GetFuncEntryDes());
     return true;
 }
 
