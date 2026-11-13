@@ -236,7 +236,7 @@ public:
 
     ~JitFortRegion()
     {
-        delete gcBitSet_;
+        delete[] gcBitSet_;
     }
 
     void InitializeFreeObjectSets()
