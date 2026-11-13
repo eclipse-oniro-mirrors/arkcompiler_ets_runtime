@@ -26,13 +26,18 @@ class DFXHiSysEvent {
 public:
     enum class IncompatibleType : uint8_t {
         ARRAY_FLATMAP = 0,
+        // UTF-16 code unit (>= 0x0100) whose low byte is an ASCII digit was truncated to uint8_t
+        // in the integer-hash path and misidentified as a decimal digit.
+        STRING_HASH_UTF16_TRUNCATION = 1,
     };
     
-    static constexpr int32_t MAX_REPORT_COUNT = 2;
+    static constexpr int32_t MAX_REPORT_COUNT = 5;
 
     static void SendLongGCEvent(LongGCStats *longGCStats);
 
-    static void SendRuntimeIncompatibleEvent(JSThread *thread, IncompatibleType type);
+    // triggerCount: trigger count maintained by the caller (callers rate-limit the report
+    // count outside), reported as TRIGGERCOUNT in the event.
+    static void SendRuntimeIncompatibleEvent(JSThread *thread, IncompatibleType type, uint32_t triggerCount = 0);
 
     static bool IsEnableDFXHiSysEvent();
 

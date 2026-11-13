@@ -15,9 +15,11 @@
 #include "ecmascript/string/base_string.h"
 #include "ecmascript/string/base_string-inl.h"
 
+#include <atomic>
 #include <codecvt>
 #include <locale>
 #include "common_components/base/utf_helper.h"
+#include "ecmascript/platform/dfx_hisys_event.h"
 #include "ecmascript/platform/string_hash.h"
 #include "ecmascript/platform/string_hash_helper.h"
 
@@ -84,5 +86,47 @@ std::u16string Utf8ToU16String(const uint8_t* utf8Data, uint32_t dataLen)
     std::string str(charData, dataLen);
     std::u16string u16str = std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t>{}.from_bytes(str);
     return u16str;
+}
+
+namespace {
+constexpr uint32_t EXP_REPORT_BASE = 10;             // exponential reporting base
+constexpr uint32_t MAX_TRIGGER_COUNT = 10000;        // 10^4, counting stops at this cap
+
+// Whether the trigger count is an exponential report point, i.e. 10^k (k = 0..4).
+bool IsExponentialReportPoint(uint32_t count)
+{
+    if (count == 0) {
+        return false;
+    }
+    while (count % EXP_REPORT_BASE == 0) {
+        count /= EXP_REPORT_BASE;
+    }
+    return count == 1;
+}
+} // namespace
+
+void BaseString::ReportIntegerHashTruncationEvent()
+{
+    // This sits on the string hash hot path. Count every trigger with a relaxed atomic and
+    // only report at exponential points (10^0 .. 10^4), so SendRuntimeIncompatibleEvent
+    // (which builds strings and writes the hisysevent) is entered at most MAX_REPORT_COUNT
+    // times. After the cap is reached the hot path costs one relaxed load, and the last
+    // report carries the capped trigger count for hit-rate statistics.
+    static std::atomic<uint32_t> triggerCount {0};
+    if (triggerCount.load(std::memory_order_relaxed) >= MAX_TRIGGER_COUNT) {
+        return;
+    }
+    uint32_t count = triggerCount.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (!IsExponentialReportPoint(count)) {
+        return;
+    }
+    JSThread *thread = JSThread::GetCurrent();
+    if (thread == nullptr) {
+        // Not on a JS thread (e.g. the concurrent string table optimization thread),
+        // no EcmaVM is available to get the bundle name, skip this report.
+        return;
+    }
+    DFXHiSysEvent::SendRuntimeIncompatibleEvent(thread,
+        DFXHiSysEvent::IncompatibleType::STRING_HASH_UTF16_TRUNCATION, count);
 }
 } // namespace panda::ecmascript

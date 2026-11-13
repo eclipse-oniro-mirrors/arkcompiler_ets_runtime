@@ -165,6 +165,15 @@ inline static bool IsDecimalDigitChar(const T c)
     return (c >= '0' && c <= '9');
 }
 
+// UTF-16 only: whether the code unit is a uint8-truncation trap char, i.e. its full value is
+// out of the uint8_t range (>= 0x0100) but its low byte is an ASCII digit (e.g. U+0130 -> 0x30
+// '0'). ComputeIntegerHash takes a uint8_t char parameter, so such a code unit would be
+// truncated and misidentified as a decimal digit.
+inline static bool IsTruncatedDigitChar(uint16_t c)
+{
+    return c > 0xFF && IsDecimalDigitChar(static_cast<uint8_t>(c & 0xFF));
+}
+
 inline bool ComputeIntegerHash(uint32_t *num, uint8_t c)
 {
     if (!IsDecimalDigitChar(c)) {
@@ -178,6 +187,12 @@ inline bool ComputeIntegerHash(uint32_t *num, uint8_t c)
 template <typename T>
 bool BaseString::HashIntegerString(const T *data, size_t size, uint32_t *hash, uint32_t hashSeed)
 {
+    // Whether a uint8-truncation trap code unit was consumed as a decimal digit during the scan.
+    // If such a string finally gets an IS_INTEGER hash, the hash is inconsistent with the UTF-8
+    // source hash of the same content, report the hit for incompatibility statistics.
+    // Guarded by if constexpr: only the UTF-16 instantiation pays for the check, the uint8_t
+    // path generates exactly the same code as before.
+    [[maybe_unused]] bool hasTruncatedDigit = false;
     if (hashSeed == 0) {
         if (IsDecimalDigitChar(data[0]) && data[0] != '0') {
             uint32_t num = data[0] - '0';
@@ -188,10 +203,20 @@ bool BaseString::HashIntegerString(const T *data, size_t size, uint32_t *hash, u
                 if (i == size) {
                     // compute mix hash
                     if (num <= MAX_INTEGER_HASH_NUMBER) {
+                        if constexpr (std::is_same_v<T, uint16_t>) {
+                            if (UNLIKELY(hasTruncatedDigit)) {
+                                ReportIntegerHashTruncationEvent();
+                            }
+                        }
                         *hash = MixHashcode(num, IS_INTEGER);
                         return true;
                     }
                     return false;
+                }
+                if constexpr (std::is_same_v<T, uint16_t>) {
+                    if (!hasTruncatedDigit && IsTruncatedDigitChar(data[i])) {
+                        hasTruncatedDigit = true;
+                    }
                 }
             } while (ComputeIntegerHash(&num, data[i++]));
         }
@@ -209,10 +234,20 @@ bool BaseString::HashIntegerString(const T *data, size_t size, uint32_t *hash, u
                 if (i == size) {
                     // compute mix hash
                     if (num <= MAX_INTEGER_HASH_NUMBER) {
+                        if constexpr (std::is_same_v<T, uint16_t>) {
+                            if (UNLIKELY(hasTruncatedDigit)) {
+                                ReportIntegerHashTruncationEvent();
+                            }
+                        }
                         *hash = MixHashcode(num, IS_INTEGER);
                         return true;
                     }
                     return false;
+                }
+                if constexpr (std::is_same_v<T, uint16_t>) {
+                    if (!hasTruncatedDigit && IsTruncatedDigitChar(data[i])) {
+                        hasTruncatedDigit = true;
+                    }
                 }
             } while (ComputeIntegerHash(&num, data[i++]));
         }

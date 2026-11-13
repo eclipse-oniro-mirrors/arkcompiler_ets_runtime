@@ -26,7 +26,7 @@ void DFXHiSysEvent::SendLongGCEvent([[maybe_unused]]LongGCStats *longGCStats)
 }
 
 void DFXHiSysEvent::SendRuntimeIncompatibleEvent([[maybe_unused]] JSThread *thread,
-    [[maybe_unused]] IncompatibleType type)
+    [[maybe_unused]] IncompatibleType type, [[maybe_unused]] uint32_t triggerCount)
 {
     LOG_ECMA(WARN) << "Send RuntimeIncompatibleEvent is not support in windows.";
 }

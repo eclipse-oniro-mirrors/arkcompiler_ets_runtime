@@ -86,7 +86,7 @@ void DFXHiSysEvent::SendLongGCEvent([[maybe_unused]] LongGCStats *longGCStats)
 }
 
 void DFXHiSysEvent::SendRuntimeIncompatibleEvent([[maybe_unused]] JSThread *thread,
-    [[maybe_unused]] IncompatibleType type)
+    [[maybe_unused]] IncompatibleType type, [[maybe_unused]] uint32_t triggerCount)
 {
 #ifdef ENABLE_HISYSEVENT
     std::string functionName;
@@ -94,24 +94,26 @@ void DFXHiSysEvent::SendRuntimeIncompatibleEvent([[maybe_unused]] JSThread *thre
         case IncompatibleType::ARRAY_FLATMAP:
             functionName = "Array.prototype.flatMap";
             break;
+        case IncompatibleType::STRING_HASH_UTF16_TRUNCATION:
+            functionName = "BaseString::ComputeIntegerHash utf16 truncation";
+            break;
         default:
             LOG_ECMA(FATAL) << "this branch is unreachable, type:" << static_cast<int32_t>(type);
             UNREACHABLE();
             break;
     }
     LOG_ECMA(DEBUG) << "SendRuntimeIncompatibleEvent: functionName" << functionName;
-    uint32_t eventCount = Runtime::GetInstance()->AddIncompatibleEvent(type);
-    if (eventCount > MAX_REPORT_COUNT) {
-        LOG_ECMA(DEBUG) << functionName << " has report more than " << DFXHiSysEvent::MAX_REPORT_COUNT;
-        return ;
-    }
-    std::string stack = JsStackInfo::BuildJsStackTrace(thread, true, false, 1);
+    // The report count is rate-limited by the callers outside, no extra limiting here.
+    // JS stack walking is risky in these scenarios (the event may fire in re-entrant or
+    // non-JS-thread contexts, e.g. string hashing during concurrent string table
+    // optimization), report "Null" instead.
     std::string bundleName = ConvertToStdString(thread->GetEcmaVM()->GetBundleName());
     int32_t ret = HiSysEventWrite(OHOS::HiviewDFX::HiSysEvent::Domain::ARKTS_RUNTIME,
         "ARK_RUNTIME_INCOMPATIBLE", OHOS::HiviewDFX::HiSysEvent::EventType::STATISTIC,
         "FUNCTIONNAME", functionName,
-        "STACK", stack,
-        "BUNDLENAME", bundleName);
+        "STACK", "Null",
+        "BUNDLENAME", bundleName,
+        "TRIGGERCOUNT", triggerCount);
     if (ret != 0) {
         LOG_ECMA(ERROR) << "HiSysEventWrite RuntimeIncompatibleEvent Failed! ret = " << ret;
     }
