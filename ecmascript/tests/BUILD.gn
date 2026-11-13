@@ -3997,6 +3997,33 @@ host_unittest_action("GC_LOCAL_CC_Test") {
   deps += hiviewdfx_deps
 }
 
+host_unittest_action("GC_HintGC_Test") {
+  module_out_path = module_output_path
+
+  sources = [
+    # test file
+    "hint_gc_test.cpp",
+  ]
+
+  configs = [
+    "../../:asm_interp_enable_config",
+    "../../:ecma_test_config",
+  ]
+
+  deps = [ "../../:libark_jsruntime_test" ]
+
+  # hiviewdfx libraries
+  external_deps = hiviewdfx_ext_deps
+  external_deps += [
+    "icu:shared_icui18n",
+    "icu:shared_icuuc",
+    "runtime_core:libarkassembler_static",
+    "runtime_core:libarkverifier",
+    "zlib:libz",
+  ]
+  deps += hiviewdfx_deps
+}
+
 host_unittest_action("Runtime_Test") {
   module_out_path = module_output_path
 
@@ -4239,6 +4266,7 @@ group("unittest") {
     ":GC_IdleGCTrigger_Test",
     ":GC_JitFort_Test",
     ":GC_LOCAL_CC_Test",
+    ":GC_HintGC_Test",
     ":GC_MachineCode_Test",
     ":GC_MemController_Test",
     ":GC_MemMapAllocator_Test",
@@ -4384,6 +4412,7 @@ group("unittest") {
       ":GC_HeapHelper_Test",
       ":GC_IdleGCTrigger_Test",
       ":GC_LOCAL_CC_Test",
+      ":GC_HintGC_Test",
       ":GC_MachineCode_Test",
       ":GC_MemController_Test",
       ":GC_NewToOldPromotion_Test",
@@ -4457,6 +4486,7 @@ group("host_unittest") {
     ":GC_IdleGCTrigger_TestAction",
     ":GC_JitFort_TestAction",
     ":GC_LOCAL_CC_TestAction",
+    ":GC_HintGC_TestAction",
     ":GC_MachineCode_TestAction",
     ":GC_MemController_TestAction",
     ":GC_MemMapAllocator_TestAction",
@@ -4613,6 +4643,7 @@ group("host_unittest") {
       ":GC_IdleGCTrigger_TestAction",
       ":GC_JitFort_TestAction",
       ":GC_LOCAL_CC_TestAction",
+      ":GC_HintGC_TestAction",
       ":GC_MachineCode_TestAction",
       ":GC_MemController_TestAction",
       ":GC_MemMapAllocator_TestAction",
@@ -4749,6 +4780,7 @@ group("host_unittest") {
       ":GC_HeapHelper_TestAction",
       ":GC_IdleGCTrigger_TestAction",
       ":GC_LOCAL_CC_TestAction",
+      ":GC_HintGC_TestAction",
       ":GC_MachineCode_TestAction",
       ":GC_MemController_TestAction",
       ":GC_NewToOldPromotion_TestAction",

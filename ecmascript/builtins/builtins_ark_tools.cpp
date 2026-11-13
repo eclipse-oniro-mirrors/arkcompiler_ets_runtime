@@ -1870,7 +1870,7 @@ JSTaggedValue BuiltinsArkTools::TriggerLocalCCGC(EcmaRuntimeCallInfo *info)
         if (heap->CheckOngoingConcurrentMarking()) {
             heap->GetConcurrentMarker()->Reset();
         }
-        DFXJSNApi::TriggerLocalCCWithVmForTest(thread->GetEcmaVM());
+        DFXJSNApi::TriggerLocalCCWithVm(thread->GetEcmaVM());
     }
     return JSTaggedValue::Undefined();
 }

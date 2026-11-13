@@ -113,6 +113,7 @@ using AppFreezeFilterCallback =
     std::function<bool(const int32_t pid, const bool needDecreaseQuota, std::string &eventConfig)>;
 using BytesAndDuration = std::pair<uint64_t, double>;
 using MemoryReduceDegree = panda::JSNApi::MemoryReduceDegree;
+using UrgencyLevel = panda::JSNApi::UrgencyLevel;
 using NativePointerList = CVector<JSTaggedValue>;
 
 enum class MemGrowingType : uint8_t {
@@ -1582,6 +1583,7 @@ public:
     void ProcessGCCallback();
     bool CheckAndTriggerOldGC(size_t size = 0);
     bool CheckAndTriggerHintGC(MemoryReduceDegree degree, GCReason reason = GCReason::OTHER);
+    void CheckAndTriggerHintLocalCC(UrgencyLevel level);
     TriggerGCType SelectGCType() const;
     /*
      * Parallel GC related configurations and utilities.
@@ -1611,6 +1613,8 @@ public:
 
     bool TryTriggerConcurrentMarking(MarkReason markReason = MarkReason::OTHER);
     bool TryTriggerCCMarking(MarkReason markReason);
+    bool TryReserveLocalCCTrigger();
+    void ReleaseLocalCCTrigger();
     void AdjustBySurvivalRate(size_t originalNewSpaceSize);
     void TriggerConcurrentMarking(MarkReason markReason = MarkReason::OTHER);
     bool CheckCanTriggerConcurrentMarking();
@@ -2371,6 +2375,7 @@ private:
     bool fullMarkRequested_ {false};
     bool oldSpaceLimitAdjusted_ {false};
     bool enableLocalCC_ {true};
+    int localCCTriggerCount_ {0};
     std::atomic_bool isCSetClearing_ {false};
     HeapMode mode_ { HeapMode::NORMAL };
 

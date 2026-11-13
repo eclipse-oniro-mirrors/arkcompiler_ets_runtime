@@ -5464,6 +5464,15 @@ void JSNApi::HintGC(const EcmaVM *vm, MemoryReduceDegree degree, ecmascript::GCR
     }
 }
 
+void JSNApi::HintGC(const EcmaVM *vm, UrgencyLevel level)
+{
+    CROSS_THREAD_CHECK(vm);
+    ecmascript::ThreadManagedScope managedScope(thread);
+    if (thread != nullptr && vm->IsInitialized()) {
+        const_cast<ecmascript::Heap *>(vm->GetHeap())->CheckAndTriggerHintLocalCC(level);
+    }
+}
+
 void JSNApi::TriggerIdleGC(const EcmaVM *vm, TRIGGER_IDLE_GC_TYPE gcType)
 {
     CROSS_THREAD_CHECK(vm);

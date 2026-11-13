@@ -213,6 +213,8 @@ const char *GCStats::GCReasonToString(GCReason reason)
             return "Trigger by JS";
         case GCReason::HINT_GC:
             return "Trigger by hint";
+        case GCReason::HINT_LOCAL_CC:
+            return "Trigger by hint local cc";
         case GCReason::NATIVE_LIMIT:
             return "Native reach limit";
         case GCReason::SHARED_LIMIT:
@@ -258,6 +260,8 @@ const char *GCStats::MarkReasonToString(MarkReason reason)
             return "Trigger by JS";
         case MarkReason::HINT_GC:
             return "Trigger by hint";
+        case MarkReason::HINT_LOCAL_CC:
+            return "Trigger by hint local cc";
         case MarkReason::NATIVE_LIMIT:
             return "Native reach limit";
         case MarkReason::SHARED_LIMIT:

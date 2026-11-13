@@ -553,33 +553,44 @@ void DFXJSNApi::TriggerGCWithVm([[maybe_unused]] const EcmaVM *vm)
 #endif
 }
 
-void DFXJSNApi::TriggerLocalCCWithVmForTest([[maybe_unused]] const EcmaVM *vm)
+void DFXJSNApi::TriggerLocalCCWithVm([[maybe_unused]] const EcmaVM *vm)
 {
 #if defined(ECMASCRIPT_SUPPORT_SNAPSHOT)
 #if defined(ENABLE_DUMP_IN_FAULTLOG)
+    ecmascript::Heap *heap = const_cast<ecmascript::Heap *>(vm->GetHeap());
+    if (!heap->TryReserveLocalCCTrigger()) {
+        LOG_ECMA(INFO) << "Local cc has been trigged";
+        return;
+    }
     uv_loop_t *loop = reinterpret_cast<uv_loop_t *>(vm->GetLoop());
     if (loop == nullptr) {
         LOG_ECMA(ERROR) << "loop nullptr";
+        heap->ReleaseLocalCCTrigger();
         return;
     }
     if (uv_loop_alive(loop) == 0) {
         LOG_ECMA(ERROR) << "uv_loop_alive dead";
+        heap->ReleaseLocalCCTrigger();
         return;
     }
     uv_work_t *work = new(std::nothrow) uv_work_t;
     if (work == nullptr) {
         LOG_ECMA(FATAL) << "DFXJSNApi::TriggerLocalCCWithVm:work is nullptr";
+        heap->ReleaseLocalCCTrigger();
         return;
     }
     work->data = static_cast<void *>(const_cast<EcmaVM *>(vm));
     int ret = uv_queue_work(loop, work, [](uv_work_t *) {}, [](uv_work_t *work, int32_t) {
         const EcmaVM *vm = static_cast<const EcmaVM *>(work->data);
         ecmascript::ThreadManagedScope managedScope(vm->GetJSThread());
-        const_cast<ecmascript::Heap*>(vm->GetHeap())->TryTriggerCCMarking(ecmascript::MarkReason::OTHER);
+        const_cast<ecmascript::Heap *>(vm->GetHeap())->ReleaseLocalCCTrigger();
+        const_cast<ecmascript::Heap *>(vm->GetHeap())->TryTriggerCCMarking(
+            ecmascript::MarkReason::HINT_LOCAL_CC);
         delete work;
     });
     if (ret != 0) {
         LOG_ECMA(ERROR) << "uv_queue_work fail ret " << ret;
+        heap->ReleaseLocalCCTrigger();
         delete work;
     }
 #endif
