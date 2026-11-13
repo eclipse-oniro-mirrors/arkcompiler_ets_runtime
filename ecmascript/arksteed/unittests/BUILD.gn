@@ -454,7 +454,6 @@ group("arksteed_host_unittest") {
   deps = []
   if (ets_runtime_enable_ark_steed) {
     deps += [
-      ":ArkSteedHeapRefTestAction",
       ":ArkSteedPipelineStatisticsTestAction",
       ":ArkSteedRegisterAllocatorTestAction",
       ":ArkSteedPositionTableTestAction",
@@ -464,7 +463,6 @@ group("arksteed_host_unittest") {
       ":ArkSteedWriteBarrierValueKindTestAction",
       ":ArkSteedConstantFoldingTestAction",
       ":ArkSteedDceTestAction",
-      ":ArkSteedDeoptTranslationTestAction",
       ":ArkSteedDeoptAbiTestAction",
       ":ArkSteedWriteBarrierEmitterTestAction",
       ":ArkSteedCompileInfoFactsTestAction",
@@ -472,7 +470,13 @@ group("arksteed_host_unittest") {
       ":ArkSteedObjectLiteralTemplateTestAction",
       ":ArkSteedFeedbackReaderTestAction",
       ":ArkSteedDeferredCodeTestAction",
-      ":ArkSteedGraphVerifierTestAction",
     ]
+    if (!is_debug) {
+      deps += [
+        ":ArkSteedDeoptTranslationTestAction",
+        ":ArkSteedHeapRefTestAction",
+        ":ArkSteedGraphVerifierTestAction",
+      ]
+    }
   }
 }
