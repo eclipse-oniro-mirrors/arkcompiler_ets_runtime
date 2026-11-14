@@ -41,17 +41,10 @@ bool BytecodeAnalysis::Run()
 
     InitializeUEAndKillSets();
     InitializeLiveIn();
-
-    unsigned numIterations = 1;
-    while (UpdateLiveness()) {
-        numIterations++;
-    }
+    while (UpdateLiveness()) {}
     ExpandKillSet();
     FinalizeWithFixedParamsAndEnv();
     InitializeBytecodeLiveness();
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << "Liveness analysis done. " << numIterations << " iterations used.";
-#endif
     return true;
 }
 

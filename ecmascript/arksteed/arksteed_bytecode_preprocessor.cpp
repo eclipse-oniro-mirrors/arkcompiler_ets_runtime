@@ -489,8 +489,6 @@ void BytecodePreprocessor::CollectTryCatchBlockInfo()
                     break;
                 }
             }
-            LOG_COMPILER(DEBUG) << "Exception handler profile state: pc = [" << pcOffset << ", " << catchEndOffset
-                                << "), state = " << CatchBlockProfileStateString(curInfoItem.catchBlockState);
             return true;
         });
         tryBlocks_.push_back(curInfoItem);
@@ -749,7 +747,6 @@ struct BytecodePreprocessor::LoopCanonicalizer {
             // RB -> toIndex. 2 : numPredecessors of RB (may be incremented later)
             uint32_t newLoopBackIndex = parent_->AppendSyntheticJump(toIndex, 2);
             blocks_[toIndex].loopBackBlock = BLOCK_INDEX_TO_PTR(newLoopBackIndex);
-            LOG_COMPILER(DEBUG) << "Creates block #" << newLoopBackIndex << " as loop-back block of #" << toIndex;
             // prevLoopBackIndex -> RB
             BasicBlockInfo &prevLoopBackBlock = blocks_[prevLoopBackIndex];
             if (BLOCK_INDEX_FROM_PTR(prevLoopBackBlock.fallthroughBlock) == toIndex) {
@@ -789,7 +786,6 @@ struct BytecodePreprocessor::LoopCanonicalizer {
             // RE -> toIndex. 2 : numPredecessors or RE (may be incremented later)
             uint32_t preheaderIndex = parent_->AppendSyntheticJump(toIndex, 2);
             dfsPredecessor_[toIndex] = preheaderIndex;
-            LOG_COMPILER(DEBUG) << "Creates block #" << preheaderIndex << " as pre-header block of #" << toIndex;
             // prevEntryIndex -> RE
             BasicBlockInfo &prevEntryBlock = blocks_[prevEntryIndex];
             if (BLOCK_INDEX_FROM_PTR(prevEntryBlock.fallthroughBlock) == toIndex) {
@@ -849,8 +845,6 @@ void BytecodePreprocessor::SplitCriticalEdges()
         if (numJumpPredecessors_[fallthroughIndex] >= 2) {  // 2: critical edge threshold (needs split)
             // 1 : numJumpPredecessors_ = 1 (which is current block)
             uint32_t nextBlockIndex = AppendSyntheticJump(fallthroughIndex, 1);
-            LOG_COMPILER(DEBUG) << "Edge-split (previously fallthrough): Block #" << i << " -> #" << nextBlockIndex
-                                << " -> #" << fallthroughIndex;
             // Redirect loop-back block of the fallthrough target if necessary
             if (BLOCK_INDEX_FROM_PTR(basicBlocks_[fallthroughIndex].loopBackBlock) == i) {
                 basicBlocks_[fallthroughIndex].loopBackBlock = BLOCK_INDEX_TO_PTR(nextBlockIndex);
@@ -860,8 +854,6 @@ void BytecodePreprocessor::SplitCriticalEdges()
         if (numJumpPredecessors_[jumpIndex] >= 2) {  // 2: critical edge threshold (needs split)
             // 1 : numJumpPredecessors_ = 1 (which is current block)
             uint32_t nextBlockIndex = AppendSyntheticJump(jumpIndex, 1);
-            LOG_COMPILER(DEBUG) << "Edge-split (previously jump): Block #" << i << " -> #" << nextBlockIndex << " -> #"
-                                << jumpIndex;
             // Redirect loop-back block of the jump target if necessary
             if (BLOCK_INDEX_FROM_PTR(basicBlocks_[jumpIndex].loopBackBlock) == i) {
                 basicBlocks_[jumpIndex].loopBackBlock = BLOCK_INDEX_TO_PTR(nextBlockIndex);

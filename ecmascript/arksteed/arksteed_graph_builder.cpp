@@ -1007,25 +1007,24 @@ void GraphBuilder::FinishLoopBackedge(BB *owner, SharedBCFrameState frameState, 
 
 void GraphBuilder::DebugLog()
 {
+#ifndef NDEBUG
     if (!common::Log::LogIsLoggable(Level::DEBUG, Component::COMPILER)) {
         return;
     }
     LOG_COMPILER(DEBUG) << "arksteed::GraphBuilder: Starts graph building with "
-                           "NumLocalVRegs = "
-                        << numLocal_ << ", NumParamVRegs = " << numParams_;
-
+                           "NumLocalVRegs = " << numLocal_ << ", NumParamVRegs = " << numParams_;
     std::string dumpStr = preproc_->Dump();
     std::istringstream preprocStream(dumpStr);
     std::string line;
     while (std::getline(preprocStream, line)) {
         LOG_COMPILER(DEBUG) << line;
     }
-
     dumpStr = analysis_->Dump();
     std::istringstream analysisStream(dumpStr);
     while (std::getline(analysisStream, line)) {
         LOG_COMPILER(DEBUG) << line;
     }
+#endif
 }
 
 void GraphBuilder::InitializeStartBlock(SharedBCFrameState frameState)
@@ -1122,12 +1121,10 @@ void GraphBuilder::ProcessDeadBasicBlock(uint32_t rpoIndex)
 {
     const BasicBlockInfo *bcBlock = preproc_->GetBasicBlockByRPO(rpoIndex);
     if (!bcBlock->IsEndOfLoop()) {
-        LOG_COMPILER(DEBUG) << "Skips block #" << rpoIndex << " which is dead.";
         return;
     }
     uint32_t headerRpoIndex = bcBlock->jumpBlock->rpoIndex;
     if (BlockAt(headerRpoIndex) == nullptr) {
-        LOG_COMPILER(DEBUG) << "Skips block #" << rpoIndex << " which is dead.";
         return;
     }
     // For the rare case where the loop-back block is dead (due to pattern like if (true) break),
@@ -1648,11 +1645,8 @@ LoadTaggedFieldVertex *GraphBuilder::ActivateGlobalEnv()
 
 constexpr uintptr_t NO_CATCH_BLOCK_TAG = 1;
 
-// Logs an inline decision at DEBUG (unchanged text), and additionally at INFO
-// with caller/callee names when --compiler-trace-inline is enabled.
 #define LOG_INLINE_DECISION(env, callee, calleeFile, decisionExpr)                      \
     do {                                                                                \
-        LOG_COMPILER(DEBUG) << decisionExpr;                                            \
         if ((env)->GetJSOptions().GetCompilerArkSteedEnableTraceInline()) {             \
             std::ostringstream inlineDecision;                                          \
             inlineDecision << decisionExpr;                                             \
@@ -6907,12 +6901,10 @@ struct GraphBuilder::BytecodeVisitor {
             uint64_t rawValue = asConstant->GetValue();
 
             if (rawValue == JSTaggedValue::VALUE_TRUE) {
-                LOG_COMPILER(DEBUG) << "LowerJumpIfZero(): TRUE -> Fallthrough";
                 self->FinishBlockWithJump(currentBlock, FallthroughTarget());
                 return;
             }
             if (rawValue == JSTaggedValue::VALUE_FALSE) {
-                LOG_COMPILER(DEBUG) << "LowerJumpIfZero(): FALSE -> Jump";
                 self->FinishBlockWithJump(currentBlock, JumpTarget());
                 return;
             }
@@ -6927,12 +6919,10 @@ struct GraphBuilder::BytecodeVisitor {
             uint64_t rawValue = asConstant->GetValue();
 
             if (rawValue == JSTaggedValue::VALUE_TRUE) {
-                LOG_COMPILER(DEBUG) << "LowerJumpIfNonZero(): TRUE -> Jump";
                 self->FinishBlockWithJump(currentBlock, JumpTarget());
                 return;
             }
             if (rawValue == JSTaggedValue::VALUE_FALSE) {
-                LOG_COMPILER(DEBUG) << "LowerJumpIfNonZero(): FALSE -> Fallthrough";
                 self->FinishBlockWithJump(currentBlock, FallthroughTarget());
                 return;
             }
@@ -9278,12 +9268,18 @@ struct GraphBuilder::BytecodeVisitor {
         UNREACHABLE();
     }
 
-    void LogOperationFeedback(const OperationFeedback &feedback, const char *opcodeName, const char *chosenPath) const
+    void LogOperationFeedback([[maybe_unused]] const OperationFeedback &feedback,
+                              [[maybe_unused]] const char *opcodeName,
+                              [[maybe_unused]] const char *chosenPath) const
     {
-        LOG_COMPILER(INFO) << "ArkSteed operation feedback: op=" << opcodeName
-                           << ", bcOffset=" << self->preproc_->GetBytecodeOffset(currentBcIndex)
-                           << ", slotId=" << feedback.slotId << ", rawTypeBits=" << feedback.rawTypeBits
-                           << ", hint=" << static_cast<uint32_t>(feedback.hint) << ", path=" << chosenPath;
+#ifndef NDEBUG
+        LOG_COMPILER(DEBUG) << "ArkSteed operation feedback: op=" << opcodeName
+                            << ", bcOffset=" << self->preproc_->GetBytecodeOffset(currentBcIndex)
+                            << ", slotId=" << feedback.slotId
+                            << ", rawTypeBits=" << feedback.rawTypeBits
+                            << ", hint=" << static_cast<uint32_t>(feedback.hint)
+                            << ", path=" << chosenPath;
+#endif
     }
 
     ValueVertex *BuildNumericBinOp(BinaryOpKind kind, ValueVertex *left, ValueVertex *right,
