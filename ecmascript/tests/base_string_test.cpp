@@ -1721,4 +1721,330 @@ namespace panda::test {
     {
         EXPECT_EQ(BaseString::ComputeHashcodeUtf16(nullptr, 0), 0);
     }
+    namespace {
+    constexpr uint32_t MAX_UTF16_CODE_UNIT = 0xFFFFU;
+    constexpr uint32_t LATIN1_MAX = 0xFFU;
+    constexpr uint32_t NON_ASCII_START = 0x80U;
+    constexpr uint32_t NON_LATIN1_START = 0x100U;
+    constexpr uint32_t UTF8_TWO_BYTES_LIMIT = 0x800U;
+    constexpr uint32_t SURROGATE_START = 0xD800U;
+    constexpr uint32_t SURROGATE_END = 0xDFFFU;
+    constexpr uint32_t DECIMAL_FACTOR = 10U;
+    constexpr uint32_t BITS_PER_BYTE_SHIFT = 8U;
+    constexpr uint32_t TWO_CONTINUATION_BITS = 12U;
+    constexpr uint32_t MAX_UTF8_BYTES_PER_CODE_UNIT = 3U;
+    constexpr size_t UTF8_THIRD_BYTE_INDEX = 2U;
+    constexpr uint8_t UTF8_LOW_6BITS_MASK = 0x3FU;
+    constexpr uint8_t UTF8_TWO_BYTE_HEADER = 0xC0U;
+    constexpr uint8_t UTF8_THREE_BYTE_HEADER = 0xE0U;
+    constexpr uint8_t UTF8_CONTINUATION_HEADER = 0x80U;
+
+    inline bool IsAsciiDigitCodeUnit(uint16_t c)
+    {
+        return c >= '0' && c <= '9';
+    }
+
+    inline bool IsSurrogateCodeUnit(uint16_t c)
+    {
+        return c >= SURROGATE_START && c <= SURROGATE_END;
+    }
+
+    // Encode a BMP code unit (must not be a surrogate) as UTF-8, return the encoded byte count.
+    size_t EncodeCodeUnitToUtf8(uint16_t c, uint8_t *buf)
+    {
+        if (c < NON_ASCII_START) {
+            buf[0] = static_cast<uint8_t>(c);
+            return 1;
+        }
+        if (c < UTF8_TWO_BYTES_LIMIT) {
+            buf[0] = static_cast<uint8_t>(UTF8_TWO_BYTE_HEADER | (c >> 6));  // 6: continuation bits
+            buf[1] = static_cast<uint8_t>(UTF8_CONTINUATION_HEADER | (c & UTF8_LOW_6BITS_MASK));
+            return 2;  // 2: bytes of a two-byte UTF-8 sequence
+        }
+        buf[0] = static_cast<uint8_t>(UTF8_THREE_BYTE_HEADER | (c >> TWO_CONTINUATION_BITS));
+        buf[1] = static_cast<uint8_t>(UTF8_CONTINUATION_HEADER |
+                                      ((c >> 6) & UTF8_LOW_6BITS_MASK));  // 6: continuation bits
+        buf[UTF8_THIRD_BYTE_INDEX] = static_cast<uint8_t>(UTF8_CONTINUATION_HEADER | (c & UTF8_LOW_6BITS_MASK));
+        return MAX_UTF8_BYTES_PER_CODE_UNIT;
+    }
+    }  // namespace
+
+    /*
+     * @tc.name: ComputeIntegerHash_AllCodeUnits
+     * @tc.desc: Traverse all truncation scenarios of ComputeIntegerHash: the character parameter used
+     * to be uint8_t, so every UTF-16 code unit whose low byte is an ASCII digit (e.g. U+0130 -> 0x30
+     * '0') was truncated and misclassified as a decimal digit. Sweep the whole uint16 code unit range
+     * and require that only ASCII '0'-'9' are accepted.
+     * @tc.type: FUNC
+     * @tc.require:
+     */
+    HWTEST_F_L0(BaseStringTest, ComputeIntegerHash_AllCodeUnits)
+    {
+        constexpr uint32_t SEED_NUM = 5U;
+        for (uint32_t c = 0; c <= MAX_UTF16_CODE_UNIT; ++c) {
+            uint16_t codeUnit = static_cast<uint16_t>(c);
+            bool expectDigit = IsAsciiDigitCodeUnit(codeUnit);
+
+            uint32_t num = 0;
+            bool isDigit = ecmascript::ComputeIntegerHash(&num, codeUnit);
+            ASSERT_EQ(isDigit, expectDigit) << "code unit: 0x" << std::hex << c;
+            ASSERT_EQ(num, expectDigit ? (c - '0') : 0U) << "code unit: 0x" << std::hex << c;
+
+            // Accumulate onto a non-zero value to cover the (*num) * 10 + digit path.
+            num = SEED_NUM;
+            isDigit = ecmascript::ComputeIntegerHash(&num, codeUnit);
+            ASSERT_EQ(isDigit, expectDigit) << "code unit: 0x" << std::hex << c;
+            ASSERT_EQ(num, expectDigit ? (SEED_NUM * DECIMAL_FACTOR + (c - '0')) : SEED_NUM)
+                << "code unit: 0x" << std::hex << c;
+        }
+    }
+
+    /*
+     * @tc.name: HashIntegerString_Utf16_AllCodeUnits
+     * @tc.desc: Traverse HashIntegerString<uint16_t> with the 2-character string "1" + c for every
+     * uint16 code unit c, covering both the hashSeed == 0 and hashSeed != 0 branches which share
+     * ComputeIntegerHash. The result is an integer string only for ASCII digits, and for code units
+     * <= 0xFF the uint8_t instantiation must give exactly the same result and hash as the uint16_t
+     * one.
+     * @tc.type: FUNC
+     * @tc.require:
+     */
+    HWTEST_F_L0(BaseStringTest, HashIntegerString_Utf16_AllCodeUnits)
+    {
+        constexpr uint32_t HASH_SEED = 7U;
+        for (uint32_t c = 0; c <= MAX_UTF16_CODE_UNIT; ++c) {
+            uint16_t codeUnit = static_cast<uint16_t>(c);
+            bool expectInteger = IsAsciiDigitCodeUnit(codeUnit);
+            uint16_t data16[] = {'1', codeUnit};
+            constexpr size_t dataSize = sizeof(data16) / sizeof(data16[0]);
+
+            uint32_t hash = 0;
+            bool isInteger = ecmascript::BaseString::HashIntegerString(data16, dataSize, &hash, 0);
+            ASSERT_EQ(isInteger, expectInteger) << "code unit: 0x" << std::hex << c;
+            if (expectInteger) {
+                uint32_t expectedNum = DECIMAL_FACTOR + (c - '0');
+                ASSERT_EQ(hash, ecmascript::BaseString::MixHashcode(expectedNum, ecmascript::BaseString::IS_INTEGER))
+                    << "code unit: 0x" << std::hex << c;
+            }
+
+            uint32_t seededHash = 0;
+            bool seededIsInteger = ecmascript::BaseString::HashIntegerString(data16, dataSize, &seededHash, HASH_SEED);
+            ASSERT_EQ(seededIsInteger, expectInteger) << "code unit: 0x" << std::hex << c;
+            if (expectInteger) {
+                uint32_t expectedNum = (HASH_SEED * DECIMAL_FACTOR + ('1' - '0')) * DECIMAL_FACTOR + (c - '0');
+                ASSERT_EQ(seededHash,
+                    ecmascript::BaseString::MixHashcode(expectedNum, ecmascript::BaseString::IS_INTEGER))
+                    << "code unit: 0x" << std::hex << c;
+            }
+
+            if (c <= LATIN1_MAX) {
+                uint8_t data8[] = {'1', static_cast<uint8_t>(c)};
+                constexpr size_t dataSize8 = sizeof(data8) / sizeof(data8[0]);
+                uint32_t hash8 = 0;
+                bool isInteger8 = ecmascript::BaseString::HashIntegerString(data8, dataSize8, &hash8, 0);
+                ASSERT_EQ(isInteger8, isInteger) << "code unit: 0x" << std::hex << c;
+                ASSERT_EQ(hash8, hash) << "code unit: 0x" << std::hex << c;
+            }
+        }
+    }
+
+    /*
+     * @tc.name: HashIntegerString_LongDigitPrefix_AllCodeUnits
+     * @tc.desc: Traverse HashIntegerString<uint16_t> with a long digit prefix: "12345678" + c has
+     * length 9 which is the longest integer-string length below MAX_ELEMENT_INDEX_LEN. Only ASCII
+     * digits may complete the integer string; every truncated code unit (e.g. U+0130 -> '0') must be
+     * rejected.
+     * @tc.type: FUNC
+     * @tc.require:
+     */
+    HWTEST_F_L0(BaseStringTest, HashIntegerString_LongDigitPrefix_AllCodeUnits)
+    {
+        constexpr uint32_t DIGIT_PREFIX_NUM = 12345678U;
+        for (uint32_t c = 0; c <= MAX_UTF16_CODE_UNIT; ++c) {
+            uint16_t codeUnit = static_cast<uint16_t>(c);
+            bool expectInteger = IsAsciiDigitCodeUnit(codeUnit);
+            uint16_t data16[] = {'1', '2', '3', '4', '5', '6', '7', '8', codeUnit};
+            constexpr size_t dataSize = sizeof(data16) / sizeof(data16[0]);
+
+            uint32_t hash = 0;
+            bool isInteger = ecmascript::BaseString::HashIntegerString(data16, dataSize, &hash, 0);
+            ASSERT_EQ(isInteger, expectInteger) << "code unit: 0x" << std::hex << c;
+            if (expectInteger) {
+                uint32_t expectedNum = DIGIT_PREFIX_NUM * DECIMAL_FACTOR + (c - '0');
+                ASSERT_LE(expectedNum, ecmascript::BaseString::MAX_INTEGER_HASH_NUMBER);
+                ASSERT_EQ(hash, ecmascript::BaseString::MixHashcode(expectedNum, ecmascript::BaseString::IS_INTEGER))
+                    << "code unit: 0x" << std::hex << c;
+            }
+        }
+    }
+
+    /*
+     * @tc.name: ComputeHashcode_Utf8_Utf16_AllCodeUnits
+     * @tc.desc: Traverse the utf8/utf16 hash consistency for the string "1" + c over every uint16
+     * code unit c: the same string content must get the identical hash code whether it comes from
+     * UTF-8 data (ComputeHashcodeUtf8) or from UTF-16 data (ComputeHashcodeUtf16). Code units whose
+     * low byte is an ASCII digit but which are not ASCII themselves (the truncation traps) must never
+     * get an integer hash on the UTF-16 path. Lone surrogates have no valid UTF-8 encoding so only
+     * their UTF-16 side is checked.
+     * @tc.type: FUNC
+     * @tc.require:
+     */
+    HWTEST_F_L0(BaseStringTest, ComputeHashcode_Utf8_Utf16_AllCodeUnits)
+    {
+        for (uint32_t c = 0; c <= MAX_UTF16_CODE_UNIT; ++c) {
+            uint16_t codeUnit = static_cast<uint16_t>(c);
+            uint16_t data16[] = {'1', codeUnit};
+            uint32_t hash16 = ecmascript::BaseString::ComputeHashcodeUtf16(data16, sizeof(data16) / sizeof(data16[0]));
+
+            if (c >= NON_LATIN1_START && IsAsciiDigitCodeUnit(static_cast<uint16_t>(c & LATIN1_MAX))) {
+                ASSERT_EQ(hash16 & ecmascript::BaseString::IS_INTEGER_MASK, 0U) << "code unit: 0x" << std::hex << c;
+                uint32_t truncatedHash = ecmascript::BaseString::MixHashcode(
+                    DECIMAL_FACTOR + ((c & LATIN1_MAX) - '0'), ecmascript::BaseString::IS_INTEGER);
+                ASSERT_NE(hash16, truncatedHash) << "code unit: 0x" << std::hex << c;
+            }
+
+            if (IsSurrogateCodeUnit(codeUnit)) {
+                continue;
+            }
+
+            uint8_t data8[1 + MAX_UTF8_BYTES_PER_CODE_UNIT];
+            data8[0] = '1';
+            size_t utf8Len = 1 + EncodeCodeUnitToUtf8(codeUnit, data8 + 1);
+            bool canBeCompress = c < NON_ASCII_START;
+            uint32_t hash8 = ecmascript::BaseString::ComputeHashcodeUtf8(data8, utf8Len, canBeCompress);
+            ASSERT_EQ(hash8, hash16) << "code unit: 0x" << std::hex << c;
+        }
+    }
+
+    /*
+     * @tc.name: ComputeHashcode_IntegerBoundary_Utf8_Utf16
+     * @tc.desc: Integer-string boundary cases: empty string, "0", leading zero,
+     * MAX_INTEGER_HASH_NUMBER, MAX_ELEMENT_INDEX_LEN and truncation-trap code units. For every case
+     * the UTF-8 sourced hash and the UTF-16 sourced hash must be identical, and the IS_INTEGER bit
+     * must match the expectation.
+     * @tc.type: FUNC
+     * @tc.require:
+     */
+    HWTEST_F_L0(BaseStringTest, ComputeHashcode_IntegerBoundary_Utf8_Utf16)
+    {
+        struct HashCase {
+            std::u16string content;
+            bool isInteger;
+            uint32_t integerNum;
+        };
+        std::vector<HashCase> cases = {
+            {u"", false, 0},
+            {u"0", true, 0},
+            {u"9", true, 9},
+            {u"10", true, 10},
+            {u"01", false, 0},
+            {u"1a", false, 0},
+            {u"123456789", true, 123456789},
+            {u"999999999", true, 999999999},
+            {u"1234567890", false, 0},
+            {u"1\u0130", false, 0},
+            {u"12345678\u0130", false, 0},
+            {u"99999999\uFF39", false, 0},
+            {u"12\u4E2D34", false, 0},
+            {u"\u0130", false, 0},
+        };
+        for (size_t idx = 0; idx < cases.size(); ++idx) {
+            const HashCase &testCase = cases[idx];
+            std::vector<uint16_t> data16(testCase.content.begin(), testCase.content.end());
+            std::vector<uint8_t> data8;
+            bool canBeCompress = true;
+            uint8_t buf[MAX_UTF8_BYTES_PER_CODE_UNIT];
+            for (uint16_t unit : data16) {
+                ASSERT_FALSE(IsSurrogateCodeUnit(unit)) << "case index: " << idx;
+                size_t utf8CharLen = EncodeCodeUnitToUtf8(unit, buf);
+                data8.insert(data8.end(), buf, buf + utf8CharLen);
+                if (unit >= NON_ASCII_START) {
+                    canBeCompress = false;
+                }
+            }
+            uint32_t hash16 = ecmascript::BaseString::ComputeHashcodeUtf16(data16.data(), data16.size());
+            uint32_t hash8 = ecmascript::BaseString::ComputeHashcodeUtf8(data8.data(), data8.size(), canBeCompress);
+            ASSERT_EQ(hash8, hash16) << "case index: " << idx;
+            if (testCase.isInteger) {
+                ASSERT_EQ(hash16,
+                    ecmascript::BaseString::MixHashcode(testCase.integerNum, ecmascript::BaseString::IS_INTEGER))
+                    << "case index: " << idx;
+            } else {
+                ASSERT_EQ(hash16 & ecmascript::BaseString::IS_INTEGER_MASK, 0U) << "case index: " << idx;
+            }
+        }
+    }
+
+    /*
+     * @tc.name: GetHashcode_Utf16_TruncatedDigitRegression
+     * @tc.desc: Regression for the ComputeIntegerHash uint8_t truncation: U+0130 whose low byte is '0'
+     * must not turn "1\u0130" into the integer string "10" on the UTF-16 hash path. The same string
+     * content must get the identical hash code and be interned as the identical string table object
+     * whether the source is UTF-8 or UTF-16.
+     * @tc.type: FUNC
+     * @tc.require:
+     */
+    HWTEST_F_L0(BaseStringTest, GetHashcode_Utf16_TruncatedDigitRegression)
+    {
+        ObjectFactory *factory = instance->GetFactory();
+        // "1\u0130": U+0130 is encoded as {0xC4, 0xB0} in UTF-8.
+        const uint8_t utf8Bytes[] = {'1', 0xC4, 0xB0};
+        JSHandle<EcmaString> strFromUtf8 = factory->NewFromUtf8(
+            std::string_view(reinterpret_cast<const char *>(utf8Bytes), sizeof(utf8Bytes)));
+        JSHandle<EcmaString> strFromUtf16 = factory->NewFromUtf16(u"1\u0130");
+        JSHandle<EcmaString> strTen = factory->NewFromUtf8("10");
+
+        uint32_t hashFromUtf8 = EcmaStringAccessor(*strFromUtf8).GetHashcode(thread);
+        uint32_t hashFromUtf16 = EcmaStringAccessor(*strFromUtf16).GetHashcode(thread);
+        uint32_t hashTen = EcmaStringAccessor(*strTen).GetHashcode(thread);
+
+        // Same string content -> same hash, no matter whether the source is UTF-8 or UTF-16.
+        EXPECT_EQ(hashFromUtf8, hashFromUtf16);
+        // Same content is interned as the same string table object.
+        EXPECT_EQ(*strFromUtf8, *strFromUtf16);
+        // The truncated interpretation (integer 10) must not happen.
+        EXPECT_EQ(hashFromUtf16 & ecmascript::BaseString::IS_INTEGER_MASK, 0U);
+        EXPECT_NE(hashFromUtf16, hashTen);
+    }
+
+    /*
+     * @tc.name: GetHashcode_Utf8_Utf16_Consistency_AllTruncationChars
+     * @tc.desc: Traverse all truncation scenarios at the string table level: for every UTF-16 code
+     * unit whose low byte is an ASCII digit (255 high bytes x 10 digits, all combinations that the
+     * former uint8_t parameter could truncate), intern "1" + codeUnit from a UTF-8 source and from a
+     * UTF-16 source, and require identical hash codes, identical interned objects and no integer
+     * string hash.
+     * @tc.type: FUNC
+     * @tc.require:
+     */
+    HWTEST_F_L0(BaseStringTest, GetHashcode_Utf8_Utf16_Consistency_AllTruncationChars)
+    {
+        ObjectFactory *factory = instance->GetFactory();
+        for (uint32_t highByte = 1; highByte <= LATIN1_MAX; ++highByte) {
+            for (uint32_t digit = '0'; digit <= '9'; ++digit) {
+                uint32_t codeUnitValue = (highByte << BITS_PER_BYTE_SHIFT) | digit;
+                uint16_t codeUnit = static_cast<uint16_t>(codeUnitValue);
+                if (IsSurrogateCodeUnit(codeUnit)) {
+                    continue;  // lone surrogates have no valid UTF-8 encoding
+                }
+                uint16_t utf16Units[] = {'1', codeUnit};
+                uint8_t utf8Bytes[1 + MAX_UTF8_BYTES_PER_CODE_UNIT];
+                utf8Bytes[0] = '1';
+                size_t utf8Len = 1 + EncodeCodeUnitToUtf8(codeUnit, utf8Bytes + 1);
+
+                JSHandle<EcmaString> strFromUtf8 = factory->NewFromUtf8(
+                    std::string_view(reinterpret_cast<const char *>(utf8Bytes), utf8Len));
+                JSHandle<EcmaString> strFromUtf16 = factory->NewFromUtf16(
+                    std::u16string_view(reinterpret_cast<const char16_t *>(utf16Units),
+                                        sizeof(utf16Units) / sizeof(utf16Units[0])));
+
+                uint32_t hashFromUtf16 = EcmaStringAccessor(*strFromUtf16).GetHashcode(thread);
+                EXPECT_EQ(EcmaStringAccessor(*strFromUtf8).GetHashcode(thread), hashFromUtf16)
+                    << "code unit: 0x" << std::hex << codeUnitValue;
+                EXPECT_EQ(*strFromUtf8, *strFromUtf16) << "code unit: 0x" << std::hex << codeUnitValue;
+                EXPECT_EQ(hashFromUtf16 & ecmascript::BaseString::IS_INTEGER_MASK, 0U)
+                    << "code unit: 0x" << std::hex << codeUnitValue;
+            }
+        }
+    }
 } // namespace panda::test
