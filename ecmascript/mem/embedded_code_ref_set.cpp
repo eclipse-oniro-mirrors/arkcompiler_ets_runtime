@@ -131,6 +131,8 @@ EmbeddedCodeRefSet::EntryRange EmbeddedCodeRefSet::GetRange(const OwnerEntries &
             return {0, ownerEntries.localEnd};
         case TargetDomain::SHARED:
             return {ownerEntries.localEnd, static_cast<uint32_t>(ownerEntries.entries.size())};
+        case TargetDomain::GLOBAL:
+            return {0, static_cast<uint32_t>(ownerEntries.entries.size())};
         default:
             UNREACHABLE();
     }
@@ -168,6 +170,15 @@ void EmbeddedCodeRefSet::VisitSharedTargets(RootVisitor &visitor)
     for (auto &[owner, ownerEntries] : refsByOwner_) {
         static_cast<void>(owner);
         VisitTargets(ownerEntries, GetRange(ownerEntries, TargetDomain::SHARED), visitor);
+    }
+}
+
+void EmbeddedCodeRefSet::VisitMarkedGlobalTargets(RootVisitor &visitor)
+{
+    for (auto &[owner, ownerEntries] : refsByOwner_) {
+        if (IsOwnerMarked(owner)) {
+            VisitTargets(ownerEntries, GetRange(ownerEntries, TargetDomain::GLOBAL), visitor);
+        }
     }
 }
 

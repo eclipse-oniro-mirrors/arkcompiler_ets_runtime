@@ -31,15 +31,15 @@ void WorkNodeWrapper<T>::Setup(T *globalStack)
 }
 
 template <typename T>
-void WorkNodeWrapper<T>::Initialize(WorkManager *workManager)
+void WorkNodeWrapper<T>::Initialize(WorkManagerBase *workManager)
 {
-    inNode_ = workManager->AllocateWorkNode<WorkNode>();
-    cachedInNode_ = workManager->AllocateWorkNode<WorkNode>();
-    outNode_ = workManager->AllocateWorkNode<WorkNode>();
+    inNode_ = workManager->template AllocateWorkNode<WorkNode>();
+    cachedInNode_ = workManager->template AllocateWorkNode<WorkNode>();
+    outNode_ = workManager->template AllocateWorkNode<WorkNode>();
 }
 
 template <typename T>
-void WorkNodeWrapper<T>::Push(ElementType e, WorkManager *workManager)
+void WorkNodeWrapper<T>::Push(ElementType e, WorkManagerBase *workManager)
 {
     if (UNLIKELY(inNode_->IsFull())) {
         PushWorkNodeToGlobal(workManager);
@@ -51,7 +51,7 @@ void WorkNodeWrapper<T>::Push(ElementType e, WorkManager *workManager)
 }
 
 template <typename T>
-void WorkNodeWrapper<T>::PushWorkNodeToGlobal(WorkManager *workManager)
+void WorkNodeWrapper<T>::PushWorkNodeToGlobal(WorkManagerBase *workManager)
 {
     if (!inNode_->IsEmpty()) {
         globalStack_->Push(inNode_);
@@ -59,7 +59,7 @@ void WorkNodeWrapper<T>::PushWorkNodeToGlobal(WorkManager *workManager)
         ASSERT(inNode_ != nullptr);
         cachedInNode_ = cachedInNode_->GetNext();
         if (cachedInNode_ == nullptr) {
-            cachedInNode_ = workManager->AllocateWorkNode<WorkNode>();
+            cachedInNode_ = workManager->template AllocateWorkNode<WorkNode>();
         }
     }
 }
@@ -114,7 +114,7 @@ bool WorkNodeWrapper<T>::IsLocalAndGlobalEmpty() const
 }
 
 #define PARAM_WEAK_AGGREGATE_GLOBAL_STACK(type, name, _)            Global##type##Stack *name##Stack,
-void WorkNodeHolder::Setup(Heap *heap, WorkManager *workManager,
+void WorkNodeHolder::Setup(Heap *heap, WorkManagerBase *workManager,
                            WEAK_AGGREGATE_LIST(PARAM_WEAK_AGGREGATE_GLOBAL_STACK)
                            GlobalMarkStack *markStack)
 #undef PARAM_WEAK_AGGREGATE_GLOBAL_STACK

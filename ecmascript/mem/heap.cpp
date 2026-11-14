@@ -27,6 +27,9 @@
 #include "ecmascript/js_native_pointer.h"
 #include "ecmascript/mem/cms_mem/sticky_sweep_gc.h"
 #include "ecmascript/mem/cms_mem/sweep_gc.h"
+#include "ecmascript/mem/global_cc/global_cc.h"
+#include "ecmascript/mem/global_cc/global_concurrent_marker.h"
+#include "ecmascript/mem/global_cc/global_mark_work_manager.h"
 #include "ecmascript/mem/idle_gc_trigger.h"
 #include "ecmascript/mem/module_space.h"
 #include "ecmascript/mem/local_cmc/cc_evacuator-inl.h"
@@ -457,6 +460,20 @@ void SharedHeap::Destroy()
         delete globalGCWorkManager_;
         globalGCWorkManager_ = nullptr;
     }
+    // Global CC singletons (delete marker/workManager before the coordinator, which only
+    // holds copies).
+    if (globalCCMarker_ != nullptr) {
+        delete globalCCMarker_;
+        globalCCMarker_ = nullptr;
+    }
+    if (globalCCWorkManager_ != nullptr) {
+        delete globalCCWorkManager_;
+        globalCCWorkManager_ = nullptr;
+    }
+    if (globalCC_ != nullptr) {
+        delete globalCC_;
+        globalCC_ = nullptr;
+    }
     if (sharedFullGC_ != nullptr) {
         delete sharedFullGC_;
         sharedFullGC_ = nullptr;
@@ -522,6 +539,13 @@ void SharedHeap::PostInitialization(const JSRuntimeOptions &option)
     globalGCWorkManager_ = new GlobalGCWorkManager(this, totalThreadNum + 1);
     globalGCMarker_ = new GlobalGCMarker();
     globalGC_ = new GlobalGC(this);
+    // Global CC: SharedHeap owns the coordinator + work manager + marker (global singletons,
+    // mirrored from sWorkManager_/sConcurrentMarker_). GlobalCC holds only copies.
+    globalCC_ = new GlobalCC(this);
+    globalCCWorkManager_ = new GlobalCCWorkManager(this, totalThreadNum + 1);
+    globalCCMarker_ = new GlobalCCMarker(globalCC_);
+    globalCC_->SetWorkManager(globalCCWorkManager_);
+    globalCC_->SetMarker(globalCCMarker_);
     sEvacuator_ = new SharedGCEvacuator(this);
     sharedFullGC_ = new SharedFullGC(this);
     sharedCC_ = new SharedCC(this);
@@ -536,6 +560,15 @@ void SharedHeap::TryPostGCMarkingTask(SharedParallelMarkPhase sharedTaskPhase)
     if (succ) {
         common::Taskpool::GetCurrentTaskpool()->PostTask(std::make_unique<ParallelMarkTask>(dThread_->GetThreadId(),
             this, sharedTaskPhase, markTaskMonitor_, currentEpoch));
+    }
+}
+
+void SharedHeap::TryPostGlobalCCMarkingTask()
+{
+    auto [succ, currentEpoch] = markTaskMonitor_->TryPostTask();
+    if (succ) {
+        common::Taskpool::GetCurrentTaskpool()->PostTask(std::make_unique<GlobalCCMarkTask>(dThread_->GetThreadId(),
+            this, markTaskMonitor_, currentEpoch));
     }
 }
 
@@ -559,6 +592,21 @@ bool SharedHeap::ParallelMarkTask::RunInternal(uint32_t threadIndex)
         default: // LOCV_EXCL_BR_LINE
             break;
     }
+    monitor_->NotifyFinish();
+    return true;
+}
+
+bool SharedHeap::GlobalCCMarkTask::Scheduable()
+{
+    return monitor_->TryRunTask(epoch_);
+}
+
+bool SharedHeap::GlobalCCMarkTask::RunInternal(uint32_t threadIndex)
+{
+    ASSERT(!monitor_->IsExpired(epoch_));
+    // Synchronizes-with. Ensure that WorkManager::Initialize must be seen by MarkerThreads.
+    while (!sHeap_->GetGlobalCCWorkManager()->HasInitialized());
+    sHeap_->GetGlobalCCMarker()->ProcessMarkStack(threadIndex);
     monitor_->NotifyFinish();
     return true;
 }
@@ -976,6 +1024,9 @@ void SharedHeap::EnableParallelGC(JSRuntimeOptions &option)
         delete globalGCWorkManager_;
         globalGCWorkManager_ = new GlobalGCWorkManager(this, totalThreadNum + 1);
         UpdateWorkManager(sWorkManager_);
+        delete globalCCWorkManager_;
+        globalCCWorkManager_ = new GlobalCCWorkManager(this, totalThreadNum + 1);
+        UpdateGlobalCCWorkManager(globalCCWorkManager_);
     }
     bool concurrentMarkerEnabled = option.EnableSharedConcurrentMark();
 #if ECMASCRIPT_DISABLE_CONCURRENT_MARKING
@@ -994,6 +1045,13 @@ void SharedHeap::UpdateWorkManager(SharedGCWorkManager *sWorkManager)
     sharedPartialGC_->ResetWorkManager(sWorkManager);
     sharedFullGC_->ResetWorkManager(sWorkManager);
     globalGC_->ResetWorkManager(globalGCWorkManager_);
+}
+
+void SharedHeap::UpdateGlobalCCWorkManager(GlobalCCWorkManager *workManager)
+{
+    // The GlobalCCMarker routes through GlobalCC::GetWorkManager(), so refreshing the
+    // GlobalCC copy is all that's needed when the work manager is replaced.
+    globalCC_->SetWorkManager(workManager);
 }
 
 void SharedHeap::TryTriggerLocalConcurrentMarking()
@@ -2217,13 +2275,17 @@ void Heap::CollectGarbageFromCCMark(GCReason reason)
     if (thread_->IsCrossThreadExecutionEnable() || GetOnSerializeEvent()) {
         return;
     }
-#if defined(ECMASCRIPT_SUPPORT_CPUPROFILER)
-    [[maybe_unused]] GcStateScope scope(thread_);
-#endif
     CHECK_NO_GC;
     CheckOngoingConcurrentMarking();
     ASSERT(thread_->IsMarkFinished());
-    ccGC_->StartLocalCCCopy();
+    if (!ccGC_->StartLocalCCCopy()) {
+        ASSERT(thread_->IsGlobalConcurrentMarking());
+        SharedHeap::GetInstance()->WaitGCFinished(thread_);
+        return;
+    }
+#if defined(ECMASCRIPT_SUPPORT_CPUPROFILER)
+    [[maybe_unused]] GcStateScope scope(thread_);
+#endif
     gcType_ = TriggerGCType::LOCAL_CC;
     GetEcmaGCStats()->RecordStatisticBeforeGC(gcType_, reason);
     memController_->StartCalculationBeforeGC();

@@ -16,6 +16,7 @@
 #include "ecmascript/mem/verification.h"
 
 #include "ecmascript/mem/shared_heap/shared_concurrent_sweeper.h"
+#include "ecmascript/runtime.h"
 
 namespace panda::ecmascript {
 template <ReferenceType refType>
@@ -593,6 +594,202 @@ void Verification::VerifyEvacuate(Heap *heap)
         case MarkType::MARK_FOR_CC:
             break;
     }
+}
+
+static bool IsMarkedOrReadOnly(TaggedObject *obj)
+{
+    Region *region = Region::ObjectAddressToRange(obj);
+    if (region->InReadOnlySpace() || region->InSharedReadOnlySpace()) {
+        return true;
+    }
+    return region->Test(obj);
+}
+
+void GlobalCCVerifyMarkVisitor::VisitObjectRangeImpl(BaseObject *root, ObjectSlot start, ObjectSlot end,
+                                                     VisitObjectArea area)
+{
+    auto *obj = TaggedObject::Cast(root);
+    ASSERT(Region::ObjectAddressToRange(obj)->Test(obj));
+    if (UNLIKELY(area == VisitObjectArea::IN_OBJECT)) {
+        VisitInObjectRangeImpl(root, start, end);
+        return;
+    }
+    for (ObjectSlot slot = start; slot < end; slot++) {
+        JSTaggedValue value(slot.GetTaggedType());
+        if (value.IsHeapObject() && !value.IsWeakForHeapObject()) {
+            if (!IsMarkedOrReadOnly(value.GetTaggedObject())) { // LCOV_EXCL_START
+                LOG_GC(FATAL) << "GlobalCC verify: marked object's slot target not marked";
+                UNREACHABLE();
+            } // LCOV_EXCL_STOP
+        }
+    }
+}
+
+void GlobalCCVerifyMarkVisitor::VisitInObjectRangeImpl(BaseObject *root, ObjectSlot start, ObjectSlot end)
+{
+    auto *obj = TaggedObject::Cast(root);
+    JSHClass *hclass = obj->GetClass();
+    ASSERT(!hclass->IsAllTaggedProp());
+    int index = 0;
+    LayoutInfo *layout = LayoutInfo::UncheckCast(
+        hclass->GetLayout<RBMode::FAST_NO_RB>(nullptr).GetTaggedObject());
+    ObjectSlot realEnd = start;
+    realEnd += layout->GetPropertiesCapacity();
+    end = end > realEnd ? realEnd : end;
+    for (ObjectSlot slot = start; slot < end; slot++) {
+        PropertyAttributes attr = layout->GetAttr<RBMode::FAST_NO_RB>(nullptr, index++);
+        if (!attr.IsTaggedRep()) {
+            continue;
+        }
+        JSTaggedValue value(slot.GetTaggedType());
+        if (!value.IsHeapObject() || value.IsWeakForHeapObject()) {
+            continue;
+        }
+        if (!IsMarkedOrReadOnly(value.GetTaggedObject())) { // LCOV_EXCL_START
+            LOG_GC(FATAL) << "GlobalCC verify: marked object's slot target not marked";
+            UNREACHABLE();
+        } // LCOV_EXCL_STOP
+    }
+    return;
+}
+
+void GlobalCCVerifyMarkVisitor::VisitCompressedObjectRangeImpl(BaseObject *root, CompressedObjectSlot start,
+                                                               CompressedObjectSlot end)
+{
+    for (CompressedObjectSlot slot = start; slot < end; slot++) {
+        auto value = slot.GetTaggedValue();
+        if (value.IsHeapObject() && !value.IsWeakForHeapObject()) {
+            if (!IsMarkedOrReadOnly(value.GetTaggedObject())) { // LCOV_EXCL_START
+                LOG_GC(FATAL) << "GlobalCC verify: marked object's compressed slot target not marked";
+                UNREACHABLE();
+            } // LCOV_EXCL_STOP
+        }
+    }
+}
+
+void GlobalCCVerifyMarkVisitor::VisitObjectHClassImpl([[maybe_unused]] BaseObject *root, BaseObject *hclass)
+{
+    auto *hc = reinterpret_cast<TaggedObject *>(hclass);
+    if (!IsMarkedOrReadOnly(hc)) { // LCOV_EXCL_START
+        LOG_GC(FATAL) << "GlobalCC verify: object's HClass not marked";
+        UNREACHABLE();
+    } // LCOV_EXCL_STOP
+}
+
+void GlobalCCVerifyMarkVisitor::VisitWeakLinkedHashMapImpl(BaseObject *root)
+{
+    auto *obj = TaggedObject::Cast(root);
+    ASSERT(JSTaggedValue(obj).IsWeakLinkedHashMap());
+    ASSERT(Region::ObjectAddressToRange(obj)->Test(obj));
+    WeakLinkedHashMap *map = WeakLinkedHashMap::Cast(obj);
+    ASSERT(map->VerifyLayout());
+    JSTaggedType *data = map->GetData();
+
+    ObjectSlot nextTableSlot(ToUintPtr(&data[WeakLinkedHashMap::NEXT_TABLE_INDEX]));
+    JSTaggedValue nextTable(nextTableSlot.GetTaggedType());
+    if (nextTable.IsHeapObject()) {
+        if (!IsMarkedOrReadOnly(nextTable.GetTaggedObject())) { // LCOV_EXCL_START
+            LOG_GC(FATAL) << "GlobalCC verify: WeakLinkedHashMap NEXT_TABLE not marked";
+            UNREACHABLE();
+        } // LCOV_EXCL_STOP
+    }
+
+    int entries = map->NumberOfAllUsedElements();
+    for (int i = 0; i < entries; ++i) {
+        int keyIdx = map->GetKeyIndex(i);
+        JSTaggedValue keyValue{JSTaggedType(data[keyIdx])};
+        if (!keyValue.IsHeapObject()) {
+            continue;
+        }
+        ASSERT(keyValue.IsWeak());
+        TaggedObject *key = keyValue.GetTaggedWeakRef();
+        if (!IsMarkedOrReadOnly(key)) {
+            continue;
+        }
+        int valueIdx = map->GetValueIndex(i);
+        JSTaggedValue valueVal{JSTaggedType(data[valueIdx])};
+        if (valueVal.IsHeapObject()) {
+            if (!IsMarkedOrReadOnly(valueVal.GetHeapObject())) { // LCOV_EXCL_START
+                LOG_GC(FATAL) << "GlobalCC verify: WeakLinkedHashMap key alive but value not marked";
+                UNREACHABLE();
+            } // LCOV_EXCL_STOP
+        }
+    }
+}
+
+class GlobalCCVerifyRootVisitor final : public RootVisitor {
+public:
+    void VisitRoot([[maybe_unused]] Root type, ObjectSlot slot) override
+    {
+        JSTaggedValue value(slot.GetTaggedType());
+        if (value.IsHeapObject()) {
+            if (!IsMarkedOrReadOnly(value.GetTaggedObject())) { // LCOV_EXCL_START
+                LOG_GC(FATAL) << "GlobalCC verify: root target not marked";
+                UNREACHABLE();
+            } // LCOV_EXCL_STOP
+        }
+    }
+    void VisitRangeRoot([[maybe_unused]] Root type, ObjectSlot start, ObjectSlot end) override
+    {
+        for (ObjectSlot slot = start; slot < end; slot++) {
+            VisitRoot(type, slot);
+        }
+    }
+    void VisitBaseAndDerivedRoot([[maybe_unused]] Root type, [[maybe_unused]] ObjectSlot base,
+                                 [[maybe_unused]] ObjectSlot derived,
+                                 [[maybe_unused]] uintptr_t baseOldObject) override {}
+};
+
+void SharedHeapVerification::VerifyGlobalCCMark() const
+{
+    LOG_GC(DEBUG) << "start verify global cc mark";
+    [[maybe_unused]] VerifyScope verifyScope(sHeap_);
+
+    GlobalCCVerifyMarkVisitor visitor;
+
+    // Pass 1: iterate all local heaps + shared heap, verify marked objects' references.
+    Runtime::GetInstance()->GCIterateThreadList([&visitor](JSThread *thread) {
+        auto *heap = thread->GetEcmaVM()->GetHeap();
+        const_cast<Heap *>(heap)->FillBumpPointerForTlab();
+        heap->IterateOverObjects([&visitor](TaggedObject *obj) {
+            Region *objRegion = Region::ObjectAddressToRange(obj);
+            if (!objRegion->Test(obj)) {
+                return; // unmarked → skip
+            }
+            JSHClass *hclass = obj->GetClass();
+            visitor.VisitHClass(obj, hclass);
+            ObjectXRay::VisitObjectBody<VisitType::OLD_GC_VISIT,
+                VisitLinkedWeakHashMapType::AS_WEAK_AGGREGATE>(obj, hclass, visitor);
+        });
+    });
+    sHeap_->IterateOverObjects([&visitor](TaggedObject *obj) {
+        Region *objRegion = Region::ObjectAddressToRange(obj);
+        if (!objRegion->Test(obj)) {
+            return;
+        }
+        JSHClass *hclass = obj->GetClass();
+        visitor.VisitHClass(obj, hclass);
+        ObjectXRay::VisitObjectBody<VisitType::OLD_GC_VISIT,
+            VisitLinkedWeakHashMapType::AS_WEAK_AGGREGATE>(obj, hclass, visitor);
+    });
+
+    // Pass 2: root verify — each root target must be marked (or ReadOnly).
+    GlobalCCVerifyRootVisitor rootVisitor;
+    Runtime *runtime = Runtime::GetInstance();
+    runtime->GCIterateThreadList([&rootVisitor](JSThread *thread) {
+        EcmaVM *vm = thread->GetEcmaVM();
+        ObjectXRay::VisitVMRoots(vm, rootVisitor);
+    });
+    runtime->IterateSharedRoot(rootVisitor);
+
+    // Pass 3: WB buffer verify — all per-Heap buffers must be null.
+    Runtime::GetInstance()->GCIterateThreadList([](JSThread *thread) {
+        auto *buffer = thread->GetEcmaVM()->GetHeap()->GetGlobalCCMarkingLocalBuffer();
+        if (buffer != nullptr) { // LCOV_EXCL_START
+            LOG_GC(FATAL) << "GlobalCC verify: per-Heap WB buffer not null";
+            UNREACHABLE();
+        } // LCOV_EXCL_STOP
+    });
 }
 
 void SharedHeapVerification::VerifyAll() const
