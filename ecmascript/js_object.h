@@ -444,6 +444,9 @@ public:
     static JSHandle<JSTaggedValue> FastGetMethod(JSThread *thread, const JSHandle<JSTaggedValue> &obj,
                                                  const JSHandle<JSTaggedValue> &key);
 
+    static JSHandle<JSTaggedValue> FastGetMethodForJit(JSThread *thread, const JSHandle<JSTaggedValue> &obj,
+                                                       const JSHandle<JSTaggedValue> &key);
+
     static bool CreateDataProperty(JSThread *thread, const JSHandle<JSObject> &obj, const JSHandle<JSTaggedValue> &key,
                                    const JSHandle<JSTaggedValue> &value, SCheckMode sCheckMode = SCheckMode::CHECK);
 

@@ -2140,6 +2140,17 @@ JSHandle<JSTaggedValue> JSObject::FastGetMethod(JSThread *thread, const JSHandle
     JSHandle<JSTaggedValue> func(thread, ObjectFastOperator::FastGetPropertyByName(thread, obj.GetTaggedValue(),
                                                                                    key.GetTaggedValue()));
     RETURN_HANDLE_IF_ABRUPT_COMPLETION(JSTaggedValue, thread);
+    func = CallFunction(thread, func);
+    RETURN_HANDLE_IF_ABRUPT_COMPLETION(JSTaggedValue, thread);
+    return func;
+}
+
+JSHandle<JSTaggedValue> JSObject::FastGetMethodForJit(JSThread *thread, const JSHandle<JSTaggedValue> &obj,
+                                                      const JSHandle<JSTaggedValue> &key)
+{
+    JSHandle<JSTaggedValue> func(thread, ObjectFastOperator::FastGetPropertyByName(thread, obj.GetTaggedValue(),
+                                                                                   key.GetTaggedValue()));
+    RETURN_HANDLE_IF_ABRUPT_COMPLETION(JSTaggedValue, thread);
     if (func->IsAccessorData()) {
         func = JSTaggedValue::GetProperty(thread, obj, key).GetValue();
         RETURN_HANDLE_IF_ABRUPT_COMPLETION(JSTaggedValue, thread);

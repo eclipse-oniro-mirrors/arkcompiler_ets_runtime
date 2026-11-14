@@ -222,7 +222,8 @@ class ArkSteedHeapBroker {
 
     // Instanceof compile-time queries (single NoGCScope per multi-read sequence).
     bool TryGetInstanceofCtorHClass(ArkSteedFunctionRef ctorFunc, ArkSteedHClassRef *hclassRef) const;
-    bool TryGetInstanceofCtorProto(ArkSteedFunctionRef ctorFunc, ArkSteedObjectRef *ctorProto) const;
+    bool TryGetInstanceofCtorProto(ArkSteedFunctionRef ctorFunc, ArkSteedObjectRef *ctorProto,
+                                   ArkSteedObjectRef *protoOrDyn) const;
     bool SameHeapObject(const ArkSteedHeapRef &lhs, const ArkSteedHeapRef &rhs) const;
     struct InstanceofProtoChainWalk {
         static constexpr uint32_t MAX_CHAIN_LENGTH = 8;

@@ -7300,9 +7300,13 @@ GateRef StubBuilder::InstanceOfSingleSlot(
                 Jump(&icPopulate);
             }
             Bind(&slotNotUninit);
-            {
-                Jump(&icMegaGeneric);
-            }
+            Label slotNotHole(env);
+            BRANCH(TaggedIsHole(firstValue), &icMegaGeneric, &slotNotHole);
+            Bind(&slotNotHole);
+            Label slotWeak(env);
+            BRANCH(TaggedIsWeak(firstValue), &slotWeak, &icPopulate);
+            Bind(&slotWeak);
+            BRANCH(Equal(LoadObjectFromWeakRef(firstValue), target), &icMegaGeneric, &icPopulate);
         }
         Bind(&icPopulate);
         InstanceofPopulate(glue, object, target, profileTypeInfo, slotId, &exit, &result);

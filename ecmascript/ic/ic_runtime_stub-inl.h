@@ -836,7 +836,18 @@ void ICRuntimeStub::RecordInstanceofIC(JSThread *thread, ProfileTypeInfo *profil
 {
     INTERPRETER_TRACE(thread, RecordInstanceofIC);
     JSTaggedValue first = profileTypeInfo->GetICSlot(thread, slotId);
+    if (first.IsHole()) {
+        return;
+    }
     if (!first.IsUndefined()) {
+        if (first.IsWeak() && first.GetWeakReferentUnChecked() == target.GetTaggedObject()) {
+            return;
+        }
+        [[maybe_unused]] EcmaHandleScope handleScope(thread);
+        auto profileInfoHandle = JSHandle<JSTaggedValue>(thread, profileTypeInfo);
+        auto *pti = ProfileTypeInfo::Cast(profileInfoHandle.GetTaggedValue().GetTaggedObject());
+        IcAccessorLockScope accessorLockScope(thread);
+        pti->SetICSlot(thread, slotId, JSTaggedValue::Hole());
         return;
     }
     [[maybe_unused]] EcmaHandleScope handleScope(thread);

@@ -7,4 +7,5 @@ poly=1
 polyOther=1
 polyCustom=1
 polyBound=1
+polyGeneric=1
 arrayAfter=1

@@ -654,11 +654,6 @@ bool ArkSteedAccessInfoFactory::TryBuildInstanceofAccessInfo(InstanceofAccessInf
     return true;
 }
 
-bool ArkSteedAccessInfoFactory::InstallFunctionPrototypeDetector() const
-{
-    return dependencyRecorder_.InstallFunctionPrototypeDetector();
-}
-
 bool ArkSteedAccessInfoFactory::TryPrewalkInstanceofLhsChain(JSHClass *lhsHClass, ArkSteedHClassRef *lhsRef,
                                                              InstanceofLhsChainInfo *chain) const
 {

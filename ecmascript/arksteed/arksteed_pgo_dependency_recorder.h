@@ -57,17 +57,6 @@ public:
         return CheckStableHClass(hclass) && DependOnStableHClass(hclass);
     }
 
-    bool InstallFunctionPrototypeDetector() const
-    {
-        if (!CanUseLazyDeopt()) {
-            return false;
-        }
-        auto *dependencies = env_->GetDependencies();
-        return dependencies != nullptr &&
-            dependencies->DependOnDetector(GlobalEnv::FunctionPrototypeChangedDetectorBits::START_BIT,
-                                           env_->GetGlobalEnv().GetObject<GlobalEnv>());
-    }
-
     bool InstallArrayDetector() const { return broker_ != nullptr && broker_->DependOnArrayDetector(); }
 
     bool InstallStableProtoChain(ArkSteedHClassRef receiverHClass) const
