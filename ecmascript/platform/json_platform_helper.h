@@ -18,13 +18,9 @@
 
 #include <cstddef>
 #include <cstdint>
-#if defined(PANDA_TARGET_ARM64) && !defined(PANDA_TARGET_MACOS)
-#include "ecmascript/platform/arm64/json_helper_internal.h"
-#elif defined(PANDA_TARGET_AMD64)
-#include "ecmascript/platform/x64/json_helper_internal.h"
-#else
+// SIMD paths (arm64/x64 json_helper_internal.h) are kept but not used; fall back
+// to the scalar common implementation for both JSON parse and stringify.
 #include "ecmascript/platform/common/json_helper_internal.h"
-#endif
 
 namespace panda::ecmascript::base {
 class JsonPlatformHelper {

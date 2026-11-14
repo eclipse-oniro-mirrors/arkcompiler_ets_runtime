@@ -510,11 +510,6 @@ size_t FindFirstEscapeSIMD(const uint8_t *data, size_t length)
 
 size_t FindFirstEscape(const uint8_t *data, size_t length)
 {
-#if defined(PANDA_TARGET_AMD64) || (defined(PANDA_TARGET_ARM64) && !defined(PANDA_TARGET_MACOS))
-    if (length >= JsonEscapeSimdConstants::UTF8_SIMD_THRESHOLD) {
-        return FindFirstEscapeSIMD(data, length);
-    }
-#endif
     return FindFirstEscapeSWAR(data, 0, length);
 }
 
@@ -611,11 +606,6 @@ size_t FindFirstEscapeSIMD(const uint16_t *data, size_t length)
 
 size_t FindFirstEscape(const uint16_t *data, size_t length)
 {
-#if defined(PANDA_TARGET_AMD64) || (defined(PANDA_TARGET_ARM64) && !defined(PANDA_TARGET_MACOS))
-    if (length >= JsonEscapeSimdConstants::UTF16_SIMD_THRESHOLD) {
-        return FindFirstEscapeSIMD(data, length);
-    }
-#endif
     return FindFirstEscapeSWAR(data, 0, length);
 }
 
