@@ -48,7 +48,7 @@ void TimSort::Sort(JSThread *thread, JSHandle<TaggedArray> &elements, const JSHa
         low += runLen;
         nRemaining -= runLen;
     }
-    ASSERT(low = len);
+    ASSERT(low == len);
     ts.MergeForceCollapse();
     ASSERT(ts.pending_.size() == 1);
 }
