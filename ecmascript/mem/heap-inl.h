@@ -464,12 +464,26 @@ uintptr_t Heap::AllocateYoungSync(size_t size)
 
 bool Heap::MoveYoungRegion(Region *region)
 {
-    return activeSemiSpace_->SwapRegion(region, inactiveSemiSpace_);
+    bool moved = activeSemiSpace_->SwapRegion(region, inactiveSemiSpace_);
+#if ENABLE_HUGEPAGE_DFX_STATS
+    if (moved) {
+        MemMapAllocator::GetInstance()->NotifyHugeSlotMoved(reinterpret_cast<void *>(region->GetAllocateBase()),
+                                                            HugePageTag::SEMI);
+    }
+#endif
+    return moved;
 }
 
 bool Heap::MoveYoungRegionToOld(Region *region)
 {
-    return oldSpace_->SwapRegion(region, inactiveSemiSpace_);
+    bool moved = oldSpace_->SwapRegion(region, inactiveSemiSpace_);
+#if ENABLE_HUGEPAGE_DFX_STATS
+    if (moved) {
+        MemMapAllocator::GetInstance()->NotifyHugeSlotMoved(reinterpret_cast<void *>(region->GetAllocateBase()),
+                                                            HugePageTag::OLD);
+    }
+#endif
+    return moved;
 }
 
 void Heap::MergeToOldSpaceSync(LocalSpace *localSpace)
@@ -1051,6 +1065,9 @@ void SharedHeap::SwapOldSpace()
 
 void Heap::ReclaimRegions(TriggerGCType gcType, bool cmsGC)
 {
+#if ENABLE_HUGE_PAGE_MEM
+    [[maybe_unused]] bool shouldBatchHugeSlotRelease = false;
+#endif
     auto clearActiveSemiSpace = [this](bool cmsGC) {
         activeSemiSpace_->EnumerateRegionsWithRecord([cmsGC] (Region *region) {
             region->ResetRegionTypeFlag();
@@ -1069,6 +1086,14 @@ void Heap::ReclaimRegions(TriggerGCType gcType, bool cmsGC)
         if (!cmsGC) {
             clearActiveSemiSpace(false);
         }
+#if ENABLE_HUGE_PAGE_MEM
+        // Worker Local Heaps do not own huge-page Slots and must not mutate the process-wide GC lifecycle.
+        shouldBatchHugeSlotRelease = thread_->IsMainThreadFast() &&
+            MemMapAllocator::GetInstance()->ShouldBatchHugePageSlotRelease(gcType, false);
+        if (shouldBatchHugeSlotRelease) {
+            MemMapAllocator::GetInstance()->BeginHugePageSlotReleaseBatch();
+        }
+#endif
         if constexpr (!G_USE_CMS_GC) {
             nativePointerSpace_->ReclaimFromRegions();
         }
@@ -1085,6 +1110,14 @@ void Heap::ReclaimRegions(TriggerGCType gcType, bool cmsGC)
         }
         moduleSpace_->ReclaimFromRegions();
         inactiveSemiSpace_->ReclaimRegions(cachedSize);
+#if ENABLE_HUGE_PAGE_MEM
+    if constexpr (!G_USE_CMS_GC) {
+        if (shouldBatchHugeSlotRelease) {
+            MemMapAllocator::GetInstance()->EndHugePageSlotReleaseBatch();
+            MemMapAllocator::GetInstance()->NotifyGCReclaimFinished(gcType);
+        }
+    }
+#endif
     }
     hugeObjectSpace_->ReclaimHugeRegion();
     hugeMachineCodeSpace_->ReclaimHugeRegion();

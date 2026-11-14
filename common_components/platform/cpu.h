@@ -13,8 +13,8 @@
  * limitations under the License.
  */
 
-#ifndef COMMON_COMPONENTS_PLATFORM_OS_H
-#define COMMON_COMPONENTS_PLATFORM_OS_H
+#ifndef COMMON_COMPONENTS_PLATFORM_CPU_H
+#define COMMON_COMPONENTS_PLATFORM_CPU_H
 
 #include <cstddef>
 #include <cstdint>
@@ -24,5 +24,5 @@ uint32_t NumberOfCpuCore();
 size_t PhysicalSize();
 }  // namespace common
 
-#endif  // COMMON_COMPONENTS_PLATFORM_OS_H
+#endif  // COMMON_COMPONENTS_PLATFORM_CPU_H
  

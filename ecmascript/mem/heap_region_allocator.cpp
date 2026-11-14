@@ -16,6 +16,7 @@
 #include "ecmascript/mem/heap_region_allocator.h"
 
 #include "ecmascript/jit/jit.h"
+#include "ecmascript/mem/heap.h"
 #include "ecmascript/mem/hole_memory.h"
 #include "ecmascript/mem/mem_map_allocator.h"
 #include "ecmascript/platform/map.h"
@@ -23,6 +24,53 @@
 #include "ecmascript/runtime_lock.h"
 
 namespace panda::ecmascript {
+#if ENABLE_HUGE_PAGE_MEM
+namespace {
+bool IsMainVmHeap(BaseHeap *heap)
+{
+    JSThread *mainThread = Runtime::GetInstance()->GetMainThread();
+    if (mainThread == nullptr || mainThread->GetEcmaVM() == nullptr) {
+        return false;
+    }
+    return heap == mainThread->GetEcmaVM()->GetHeap();
+}
+
+HugePageTag GetHugePageTagForRegion(MemSpaceType type, BaseHeap *heap)
+{
+    // SHARED_COMPRESS_SPACE is an evacuation intent. Its backing SharedLocalSpace
+    // expands with SHARED_LOCAL_SPACE, which is the type observed here.
+    if (type == MemSpaceType::SHARED_OLD_SPACE || type == MemSpaceType::SHARED_LOCAL_SPACE) {
+        return HugePageTag::SHARED_OLD;
+    }
+    if (!IsMainVmHeap(heap)) {
+        return HugePageTag::INVALID;
+    }
+    if (type == MemSpaceType::SEMI_SPACE) {
+        return HugePageTag::SEMI;
+    }
+    if (type == MemSpaceType::OLD_SPACE || type == MemSpaceType::LOCAL_SPACE) {
+        return HugePageTag::OLD;
+    }
+    return HugePageTag::INVALID;
+}
+
+HugeSlotAllocPolicy GetHugeSlotAllocPolicy(MemSpaceType spaceType, BaseHeap *heap, HugePageTag hugePageTag)
+{
+    if (hugePageTag == HugePageTag::INVALID || heap == nullptr || !heap->InGC()) {
+        return HugeSlotAllocPolicy::DEFAULT;
+    }
+    TriggerGCType gcType = heap->GetGCType();
+    if (((spaceType == MemSpaceType::SEMI_SPACE ||
+          spaceType == MemSpaceType::LOCAL_SPACE || spaceType == MemSpaceType::OLD_SPACE) &&
+          gcType == TriggerGCType::FULL_GC) ||
+        ((spaceType == MemSpaceType::SHARED_LOCAL_SPACE || spaceType == MemSpaceType::SHARED_OLD_SPACE) &&
+          gcType == TriggerGCType::SHARED_FULL_GC)) {
+        return HugeSlotAllocPolicy::FULL_GC_TARGET;
+    }
+    return HugeSlotAllocPolicy::DEFAULT;
+}
+}  // namespace
+#endif
 
 #ifndef EXCLUDE_JIT
 static bool IsJitFortEnabled()
@@ -66,17 +114,33 @@ Region *HeapRegionAllocator::AllocateAlignedRegion(Space *space, size_t capacity
     if (enablePageTagThreadId_) {
         tid = thread ? thread->GetThreadId() : JSThread::GetCurrentThreadId();
     }
+    MemSpaceType spaceType = space->GetSpaceType();
+#if ENABLE_HUGE_PAGE_MEM
+    HugePageTag hugePageTag = GetHugePageTagForRegion(spaceType, heap);
+    HugeSlotAllocPolicy hugeSlotAllocPolicy = GetHugeSlotAllocPolicy(spaceType, heap, hugePageTag);
     auto pool = MemMapAllocator::GetInstance()->Allocate(tid, capacity, DEFAULT_REGION_SIZE,
-        ToSpaceTypeName(space->GetSpaceType()), isRegular, isCompress, isMachineCode,
+        ToSpaceTypeName(spaceType), isRegular, isCompress, isMachineCode,
+        IsJitFortEnabled(), shouldPageTag, false, hugePageTag, hugeSlotAllocPolicy);
+#else
+    auto pool = MemMapAllocator::GetInstance()->Allocate(tid, capacity, DEFAULT_REGION_SIZE,
+        ToSpaceTypeName(spaceType), isRegular, isCompress, isMachineCode,
         IsJitFortEnabled(), shouldPageTag, false);
+#endif
     void *mapMem = pool.GetMem();
     if (mapMem == nullptr) { // LOCV_EXCL_BR_LINE
         if (heap->InGC()) {
             // Donot crash in GC, and record to Dump&Fatal when GC completed.
             heap->ShouldForceThrowOOMError();
+#if ENABLE_HUGE_PAGE_MEM
             pool = MemMapAllocator::GetInstance()->Allocate(tid, capacity, DEFAULT_REGION_SIZE,
-                ToSpaceTypeName(space->GetSpaceType()), isRegular, isCompress, isMachineCode,
+                ToSpaceTypeName(spaceType), isRegular, isCompress, isMachineCode,
+                IsJitFortEnabled(), shouldPageTag, true, hugePageTag,
+                hugeSlotAllocPolicy);
+#else
+            pool = MemMapAllocator::GetInstance()->Allocate(tid, capacity, DEFAULT_REGION_SIZE,
+                ToSpaceTypeName(spaceType), isRegular, isCompress, isMachineCode,
                 IsJitFortEnabled(), shouldPageTag, true);
+#endif
             mapMem = pool.GetMem();
             if (mapMem == nullptr) {
                 // This should not happen

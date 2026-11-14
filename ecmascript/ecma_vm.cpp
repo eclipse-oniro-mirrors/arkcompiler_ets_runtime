@@ -264,6 +264,9 @@ bool EcmaVM::Destroy(EcmaVM *vm)
 
 void EcmaVM::PreFork()
 {
+#if ENABLE_HUGE_PAGE_MEM
+    MemMapAllocator::GetInstance()->PrepareHugePageBeforeFork();
+#endif
     Runtime::GetInstance()->PreFork(thread_);
     auto sHeap = SharedHeap::GetInstance();
     if (!g_isEnableCMCGC) {
@@ -291,6 +294,9 @@ void EcmaVM::PostFork(const JSRuntimeOptions &option)
 {
     // init signal manager on pre-process
     SignalManager::Initialize();
+#if ENABLE_HUGE_PAGE_MEM
+    MemMapAllocator::GetInstance()->ConfigureHugePageAfterFork();
+#endif
     if (Runtime::GetInstance()->GetEnableLargeHeap()) {
         // when enable large heap, reset some heap param which has initialized in appspawn
         MemMapAllocator::GetInstance()->ResetLargePoolSize();

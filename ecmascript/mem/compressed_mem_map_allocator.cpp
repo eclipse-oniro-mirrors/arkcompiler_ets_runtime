@@ -34,10 +34,18 @@ void MemMapAllocator::InitializeHugeRegionMapForCompressedPointer(size_t capacit
     memMapFreeList_.Initialize(mem);
 }
 
+#if ENABLE_HUGE_PAGE_MEM
+MemMap MemMapAllocator::Allocate(const uint32_t threadId, size_t size, size_t alignment,
+                                 const std::string &spaceName, bool regular, [[maybe_unused]] bool isCompress,
+                                 bool isMachineCode, bool isEnableJitFort, bool shouldPageTag,
+                                 bool skipCheckCapacity, HugePageTag hugePageTag,
+                                 HugeSlotAllocPolicy hugeSlotAllocPolicy)
+#else
 MemMap MemMapAllocator::Allocate(const uint32_t threadId, size_t size, size_t alignment,
                                  const std::string &spaceName, bool regular, [[maybe_unused]] bool isCompress,
                                  bool isMachineCode, bool isEnableJitFort, bool shouldPageTag,
                                  bool skipCheckCapacity)
+#endif
 {
     if (UNLIKELY(memMapTotalSize_ + size > capacity_)) {
         LOG_GC(ERROR) << "memory map overflow";
@@ -48,8 +56,13 @@ MemMap MemMapAllocator::Allocate(const uint32_t threadId, size_t size, size_t al
     PageTagType type = isMachineCode ? PageTagType::MACHINE_CODE : PageTagType::HEAP;
 
     if (regular) {
+#if ENABLE_HUGE_PAGE_MEM
+        MemMap mem = AllocateFromMemPool(threadId, size, alignment, spaceName, isMachineCode,
+            isEnableJitFort, shouldPageTag, type, hugePageTag, hugeSlotAllocPolicy);
+#else
         MemMap mem = AllocateFromMemPool(threadId, size, alignment, spaceName, isMachineCode,
             isEnableJitFort, shouldPageTag, type);
+#endif
         if (mem.GetMem() == nullptr) {
             mem = memMapFreeList_.GetMemFromList(size);
             if (mem.GetMem() != nullptr) {
@@ -73,10 +86,23 @@ MemMap MemMapAllocator::Allocate(const uint32_t threadId, size_t size, size_t al
     }
 }
 
+#if ENABLE_HUGE_PAGE_MEM
+MemMap MemMapAllocator::AllocateFromMemPool(const uint32_t threadId, size_t size, size_t alignment,
+                                            const std::string &spaceName, bool isMachineCode, bool isEnableJitFort,
+                                            bool shouldPageTag, PageTagType type, HugePageTag hugePageTag,
+                                            HugeSlotAllocPolicy hugeSlotAllocPolicy)
+#else
 MemMap MemMapAllocator::AllocateFromMemPool(const uint32_t threadId, size_t size, size_t alignment,
                                             const std::string &spaceName, bool isMachineCode, bool isEnableJitFort,
                                             bool shouldPageTag, PageTagType type)
+#endif
 {
+#if ENABLE_HUGE_PAGE_MEM
+    MemMap hugeSlot = TryAllocateHugeSlot(alignment, spaceName, hugePageTag, hugeSlotAllocPolicy);
+    if (hugeSlot.GetMem() != nullptr) {
+        return hugeSlot;
+    }
+#endif
     MemMap mem = memMapPool_.GetRegularMemFromCommitted(size);
     if (mem.GetMem() != nullptr) {
         InitialMemPool(mem, threadId, size, spaceName, isMachineCode, isEnableJitFort, shouldPageTag, type);
@@ -94,6 +120,11 @@ MemMap MemMapAllocator::AllocateFromMemPool(const uint32_t threadId, size_t size
 void MemMapAllocator::CacheOrFree(void *mem, size_t size, bool isRegular, bool isCompress, size_t cachedSize,
                                   bool shouldPageTag, bool skipCache)
 {
+#if ENABLE_HUGE_PAGE_MEM
+    if (TryReleaseHugeSlot(mem, size, isRegular)) {
+        return;
+    }
+#endif
     // Clear ThreadId tag and tag the mem with ARKTS HEAP.
     if (shouldPageTag) {
         PageTag(mem, size, PageTagType::HEAP);

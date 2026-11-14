@@ -13,9 +13,11 @@
  * limitations under the License.
  */
 #include "ecmascript/mem/heap.h"
+#include "ecmascript/mem/heap-inl.h"
 #include "ecmascript/mem/concurrent_marker.h"
 #include "ecmascript/mem/mem_controller.h"
 #include "ecmascript/tests/ecma_test_common.h"
+#include "ecmascript/tests/huge_page_test_helper.h"
 
 #if defined(PANDA_TARGET_OHOS) && !defined(STANDALONE_MODE)
 #include "parameters.h"
@@ -35,6 +37,50 @@ public:
         thread = instance->GetJSThread();
         thread->ManagedCodeBegin();
     }
+
+#if ENABLE_HUGE_PAGE_MEM
+protected:
+    void EnableHugePageForTest()
+    {
+        ConfigureHugePageStateForTest(true);
+        hugePageEnabledForTest_ = true;
+    }
+
+    bool InsertHugeChunkForTest()
+    {
+        MemMap chunk = PageMap(HugeMemMapPool::HUGE_REGION_SIZE, PAGE_PROT_READWRITE,
+                               HugeMemMapPool::HUGE_REGION_SIZE);
+        if (chunk.GetMem() == nullptr) {
+            return false;
+        }
+        HugeMemMapPool &pool = MemMapAllocator::GetInstance()->hugeMemMapPool_;
+        if (!pool.InsertHugeChunk(chunk)) {
+            PageUnmap(chunk);
+            return false;
+        }
+        pool.chunkMap_.at(reinterpret_cast<uintptr_t>(chunk.GetMem())).ownsQuotaReservation_ = false;
+        return true;
+    }
+
+    size_t GetHugeSlotReleaseBatchDepthForTest() const
+    {
+        HugeMemMapPool &pool = MemMapAllocator::GetInstance()->hugeMemMapPool_;
+        LockHolder lock(pool.lock_);
+        return pool.slotReleaseBatchDepth_;
+    }
+
+    void TearDown() override
+    {
+        BaseTestWithScope<false>::TearDown();
+        if (hugePageEnabledForTest_) {
+            MemMapAllocator::GetInstance()->hugeMemMapPool_.Finalize();
+        }
+        ConfigureHugePageStateForTest(false);
+    }
+
+private:
+    bool hugePageEnabledForTest_ {false};
+#endif
 };
 
 class HeapTestHelper {
@@ -51,6 +97,40 @@ public:
 private:
     Heap *heap_{nullptr};
 };
+
+#if ENABLE_HUGE_PAGE_MEM
+HWTEST_F_L0(HeapTest, HugePageSharedGcDoesNotBatchSlotRelease)
+{
+    if (g_isEnableCMCGC) {
+        return;
+    }
+    EnableHugePageForTest();
+    SharedHeap *sharedHeap = SharedHeap::GetInstance();
+    ASSERT_FALSE(MemMapAllocator::GetInstance()->ShouldBatchHugePageSlotRelease(
+        TriggerGCType::SHARED_GC, true));
+
+    sharedHeap->CollectGarbage<TriggerGCType::SHARED_GC, GCReason::OTHER>(thread);
+
+    EXPECT_EQ(sharedHeap->GetGCType(), TriggerGCType::SHARED_GC);
+}
+
+HWTEST_F_L0(HeapTest, HugePageSharedFullGcBatchesSlotRelease)
+{
+    if (g_isEnableCMCGC) {
+        return;
+    }
+    EnableHugePageForTest();
+    ASSERT_TRUE(InsertHugeChunkForTest());
+    SharedHeap *sharedHeap = SharedHeap::GetInstance();
+    ASSERT_TRUE(MemMapAllocator::GetInstance()->ShouldBatchHugePageSlotRelease(
+        TriggerGCType::SHARED_FULL_GC, true));
+
+    sharedHeap->CollectGarbage<TriggerGCType::SHARED_FULL_GC, GCReason::OTHER>(thread);
+    sharedHeap->WaitAllTasksFinished(thread);
+    EXPECT_EQ(sharedHeap->GetGCType(), TriggerGCType::SHARED_FULL_GC);
+    EXPECT_EQ(GetHugeSlotReleaseBatchDepthForTest(), 0U);
+}
+#endif
 
 #ifdef USE_CMC_GC
 HWTEST_F_L0(HeapTest, TryTriggerConcurrentMarking1)
