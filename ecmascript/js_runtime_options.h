@@ -147,6 +147,7 @@ enum CommandValues {
     OPTION_COMPILER_ARKSTEED_ENABLE_INLINE,
     OPTION_COMPILER_ARKSTEED_INLINE_LOOP_CALLEE,
     OPTION_COMPILER_ARKSTEED_MAX_CUMULATIVE_INLINE_BYTECODE_SIZE,
+    OPTION_COMPILER_ARKSTEED_MAX_CONSTRUCTOR_INLINE_BYTECODE_SIZE,
     OPTION_COMPILER_ARKSTEED_MAX_GRAPH_NODES_BEFORE_INLINE,
     OPTION_COMPILER_ARKSTEED_MAX_INLINE_ACTUAL_ARGS,
     OPTION_COMPILER_ARKSTEED_SMALL_INLINE_BYTECODE_SIZE,
@@ -1103,9 +1104,9 @@ public:
         return compilerArkSteedInlineLoopCallee_;
     }
 
-    static constexpr uint32_t DEFAULT_ARKSTEED_MAX_INLINE_BYTECODE_SIZE = 128;
+    static constexpr uint32_t DEFAULT_ARKSTEED_MAX_INLINE_BYTECODE_SIZE = 96;
     static constexpr uint32_t DEFAULT_ARKSTEED_MAX_INLINE_DEPTH = 4;
-    static constexpr uint32_t DEFAULT_ARKSTEED_MAX_INLINE_DEPTH_SMALL = 10;
+    static constexpr uint32_t DEFAULT_ARKSTEED_MAX_INLINE_DEPTH_SMALL = 8;
 
     // ArkSteed shares the legacy inliner's inline tracing switch.
     bool GetCompilerArkSteedEnableTraceInline() const
@@ -1130,6 +1131,16 @@ public:
     uint32_t GetCompilerArkSteedMaxCumulativeInlineBytecodeSize() const
     {
         return compilerArkSteedMaxCumulativeInlineBytecodeSize_;
+    }
+
+    void SetCompilerArkSteedMaxConstructorInlineBytecodeSize(uint32_t value)
+    {
+        compilerArkSteedMaxConstructorInlineBytecodeSize_ = value;
+    }
+
+    uint32_t GetCompilerArkSteedMaxConstructorInlineBytecodeSize() const
+    {
+        return compilerArkSteedMaxConstructorInlineBytecodeSize_;
     }
 
     void SetCompilerArkSteedMaxGraphNodesBeforeInline(uint32_t value)
@@ -2981,12 +2992,13 @@ private:
     bool compilerArkSteedPrintWithColors_ {false};
     bool compilerArkSteedReuseStackSlots_ {true};
     bool compilerArkSteedDeoptOnInsufficientProfile_ {true};
-    bool compilerArkSteedSourcePositionTable_ {false};
+    bool compilerArkSteedSourcePositionTable_ {true};
     bool compilerArkSteedPassTrace_ {false};
     std::string compilerArkSteedPassTraceMethods_ {""};
-    bool compilerArkSteedEnableInline_ {false};
+    bool compilerArkSteedEnableInline_ {true};
     bool compilerArkSteedInlineLoopCallee_ {false};
-    uint32_t compilerArkSteedMaxCumulativeInlineBytecodeSize_ {256};
+    uint32_t compilerArkSteedMaxCumulativeInlineBytecodeSize_ {128};
+    uint32_t compilerArkSteedMaxConstructorInlineBytecodeSize_ {16};
     uint32_t compilerArkSteedMaxGraphNodesBeforeInline_ {1000};
     uint32_t compilerArkSteedMaxInlineActualArgs_ {16};
     uint32_t compilerArkSteedSmallInlineBytecodeSize_ {30};

@@ -62,6 +62,8 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
          OPTION_COMPILER_ARKSTEED_INLINE_LOOP_CALLEE},
         {"compiler-arksteed-max-cumulative-inline-bytecode-size", required_argument, nullptr,
          OPTION_COMPILER_ARKSTEED_MAX_CUMULATIVE_INLINE_BYTECODE_SIZE},
+        {"compiler-arksteed-max-constructor-inline-bytecode-size", required_argument, nullptr,
+         OPTION_COMPILER_ARKSTEED_MAX_CONSTRUCTOR_INLINE_BYTECODE_SIZE},
         {"compiler-arksteed-max-graph-nodes-before-inline", required_argument, nullptr,
          OPTION_COMPILER_ARKSTEED_MAX_GRAPH_NODES_BEFORE_INLINE},
         {"compiler-arksteed-max-inline-actual-args", required_argument, nullptr,
@@ -787,6 +789,14 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
                 ret = ParseUint32Param("compiler-arksteed-max-cumulative-inline-bytecode-size", &argUint32);
                 if (ret) {
                     SetCompilerArkSteedMaxCumulativeInlineBytecodeSize(argUint32);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_ARKSTEED_MAX_CONSTRUCTOR_INLINE_BYTECODE_SIZE:
+                ret = ParseUint32Param("compiler-arksteed-max-constructor-inline-bytecode-size", &argUint32);
+                if (ret) {
+                    SetCompilerArkSteedMaxConstructorInlineBytecodeSize(argUint32);
                 } else {
                     return false;
                 }

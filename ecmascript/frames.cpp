@@ -688,6 +688,25 @@ uint32_t FrameIterator::GetSteedFrameBcOffset() const
 #endif
 }
 
+#if ECMASCRIPT_ENABLE_ARK_STEED
+bool FrameIterator::GetSteedSourceFrames(std::vector<arksteed::ArkSteedSourceFrame> &frames) const
+{
+    frames.clear();
+    JSTaggedValue codeValue(*GetMachineCodeSlot());
+    if (!codeValue.IsMachineCodeObject()) {
+        return false;
+    }
+    MachineCode *machineCode = MachineCode::Cast(codeValue.GetTaggedObject());
+    const uint8_t *container = machineCode->GetStackMapOrOffsetTableAddress();
+    size_t containerSize = machineCode->GetStackMapOrOffsetTableSize();
+    uint32_t pcOffset = static_cast<uint32_t>(GetOptimizedReturnAddr());
+    if (container == nullptr || containerSize == 0 || pcOffset == 0) {
+        return false;
+    }
+    return arksteed::LookupSourceFramesByPCOffset(container, containerSize, pcOffset - 1, &frames);
+}
+#endif
+
 uint32_t FrameIterator::GetBytecodeOffset() const
 {
     FrameType type = this->GetFrameType();

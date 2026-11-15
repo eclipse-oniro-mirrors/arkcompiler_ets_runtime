@@ -24,6 +24,7 @@
 #include "ecmascript/arksteed/arksteed_compilation_unit.h"
 #include "ecmascript/arksteed/arksteed_deopt_helper.h"
 #include "ecmascript/arksteed/arksteed_dump_helper.h"
+#include "ecmascript/arksteed/arksteed_inline_frame_state.h"
 #include "ecmascript/arksteed/arksteed_register_merge_state.h"
 #include "ecmascript/arksteed/arksteed_safepoint_table.h"
 #include "ecmascript/arksteed/arksteed_write_barrier.h"
@@ -4222,6 +4223,15 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<I64ShiftLeftVertex>(I64ShiftLe
 }
 
 template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<I64ShiftRightLogicalVertex>(I64ShiftRightLogicalVertex *op)
+{
+    auto dst = GetResultRegister(op);
+    auto input = GetInputRegister(op, I64ShiftRightLogicalVertex::INPUT_INDEX);
+    ASSERT(dst == input);
+    __ ShiftRightLogical(dst, op->GetShift());
+}
+
+template <>
 void ArkSteedCodeGenerator::VisitNonControlVertex<I64BitwiseBinaryVertex>(I64BitwiseBinaryVertex *op)
 {
     auto dst = GetResultRegister(op);
@@ -5652,6 +5662,11 @@ void ArkSteedCodeGenerator::Generate()
     for (uint32_t i = 0, numBlocks = graph_->NumBlocks(); i < numBlocks; ++i) {
         BB *curBlock = (*graph_)[i];
         currentLayoutNextBlock_ = (i + 1 < numBlocks) ? (*graph_)[i + 1] : nullptr;
+        currentPositionUnit_ = curBlock->GetInlineOwnerUnit();
+        currentPositionCallerFrame_ = curBlock->GetInlineCallerFrame();
+        if (currentPositionUnit_ == nullptr) {
+            currentPositionUnit_ = topLevelUnit_;
+        }
 
         RecordBlockComment(curBlock);
         RecordInlineTransitionComment(curBlock);
@@ -6341,14 +6356,61 @@ void ArkSteedCodeGenerator::AssignBlockColors(const std::vector<std::vector<int>
     }
 }
 
+uint32_t ArkSteedCodeGenerator::GetOrCreateInlineSite(const ArkSteedCompilationUnit *unit,
+                                                      const ArkSteedInlinedCallerFrame *callerFrame)
+{
+    ASSERT(unit != nullptr);
+    if (unit->IsTopLevel()) {
+        if (inlineSiteUnits_.empty()) {
+            inlineSiteUnits_.push_back({unit, 0, INVALID_INLINE_SITE_PARENT});
+            uint32_t rootId = positionTableBuilder_->RegisterInlineSite({
+                unit->GetMethodOffset(),
+                static_cast<uint64_t>(reinterpret_cast<uintptr_t>(unit->GetMethodPcStart())),
+                INVALID_INLINE_SITE_PARENT,
+                0,
+                unit->GetInlineDepth(),
+            });
+            ASSERT(rootId == TOP_LEVEL_INLINE_SITE_ID);
+        }
+        return TOP_LEVEL_INLINE_SITE_ID;
+    }
+
+    ASSERT(callerFrame != nullptr);
+    ASSERT(callerFrame->GetCompilationUnit() == unit->GetCaller());
+    uint32_t callerBcOffset = callerFrame->GetResumeBcOffset();
+    uint32_t parentSiteId =
+        GetOrCreateInlineSite(unit->GetCaller(), callerFrame->GetParent());
+    for (size_t i = 0; i < inlineSiteUnits_.size(); ++i) {
+        const InlineSiteKey &key = inlineSiteUnits_[i];
+        if (key.unit == unit && key.callerBcOffset == callerBcOffset && key.parentSiteId == parentSiteId) {
+            return static_cast<uint32_t>(i);
+        }
+    }
+
+    uint32_t siteId = positionTableBuilder_->RegisterInlineSite({
+        unit->GetMethodOffset(),
+        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(unit->GetMethodPcStart())),
+        parentSiteId,
+        callerBcOffset,
+        unit->GetInlineDepth(),
+    });
+    inlineSiteUnits_.push_back({unit, callerBcOffset, parentSiteId});
+    ASSERT(siteId == inlineSiteUnits_.size() - 1);
+    return siteId;
+}
+
 void ArkSteedCodeGenerator::RecordPositionBoundary(uint32_t pcBefore, uint32_t bcOffset)
 {
-    if (positionTableBuilder_ == nullptr || bcOffset == 0) {
+    if (positionTableBuilder_ == nullptr) {
         return;
+    }
+    uint32_t inlineSiteId = TOP_LEVEL_INLINE_SITE_ID;
+    if (currentPositionUnit_ != nullptr && !currentPositionUnit_->IsTopLevel()) {
+        inlineSiteId = GetOrCreateInlineSite(currentPositionUnit_, currentPositionCallerFrame_);
     }
     // Only record when code was actually emitted at this pcBefore.
     // This avoids recording boundaries for vertices that produced no code.
-    positionTableBuilder_->RecordBoundary(pcBefore, bcOffset);
+    positionTableBuilder_->RecordBoundary(pcBefore, bcOffset, inlineSiteId);
 }
 
 #undef __

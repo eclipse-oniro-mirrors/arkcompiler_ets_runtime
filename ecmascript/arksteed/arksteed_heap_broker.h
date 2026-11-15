@@ -318,9 +318,7 @@ class ArkSteedHeapBroker {
     bool TryGetMethodFromConstantPool(uint16_t cpIdx, ArkSteedObjectRef *method) const
     {
         ASSERT(method != nullptr);
-        if (!SerializingAllowed()) {
-            return false;
-        }
+        // This lookup is read-only and has no safepoint; NoGCScope also permits a short read after serialization.
         NoGCScope scope(this);
         JSTaggedValue constpool = env_->GetConstantPoolByMethodOffset(methodOffset_);
         if (!constpool.IsConstantPool()) {
@@ -368,7 +366,6 @@ class ArkSteedHeapBroker {
     // These reads require an outer JitHeapAccessScope. They never park, change
     // thread state, or lock. NoGCScope checks that raw temporaries cannot cross
     // a safepoint; callers receive copied data or rooted refs.
-    bool CanCallFunction(const ArkSteedFunctionRef &ref, uint32_t actualArgc) const;
     bool TryGetKnownConstructInfo(const ArkSteedFunctionRef &ref, KnownConstructInfo *info) const;
     // Kind-only constructor query (the predicate JumpIfConstructorIsBase tests at
     // runtime); safe to fold on whenever the identity deopt pins the callee to `ref`.

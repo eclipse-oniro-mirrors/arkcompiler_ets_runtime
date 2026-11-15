@@ -1,0 +1,5 @@
+helper:33|direct:40|func_main_0:88
+inner:45|middle:51|nested:56|func_main_0:94
+PASS
+captureStack:109|captureCaller:119|captureRoot:124|func_main_0:133
+PASS

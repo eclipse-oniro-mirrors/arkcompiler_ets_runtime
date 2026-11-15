@@ -371,8 +371,8 @@ bool ArkSteedHeapBroker::CanLoadExternalModuleVar(int32_t index, bool installDep
 {
     NoGCScope scope(this);
     auto *hostThread = env_->GetHostThread();
-    auto *function = *env_->GetJsFunction();
-    if (function == nullptr || !ModuleManager::CheckModuleValueOutterResolved(hostThread, index, function)) {
+    auto function = env_->GetJsFunctionByMethodOffset(methodOffset_);
+    if (function.IsEmpty() || !ModuleManager::CheckModuleValueOutterResolved(hostThread, index, *function)) {
         return false;
     }
     if (!installDependency) {
@@ -397,22 +397,6 @@ bool ArkSteedHeapBroker::CanLoadLocalModuleVar() const
         return false;
     }
     return true;
-}
-
-bool ArkSteedHeapBroker::CanCallFunction(const ArkSteedFunctionRef &ref, uint32_t actualArgc) const
-{
-    NoGCScope scope(this);
-    JSTaggedValue target;
-    if (!ref.IsJSFunction() || !TryResolveRef(ref, &target) || target.IsJSShared() || target.IsClassConstructor()) {
-        return false;
-    }
-    auto *function = JSFunction::Cast(target.GetTaggedObject());
-    JSTaggedValue methodValue = function->GetMethod(compilerThread_);
-    if (function->IsSharedFunction() || !methodValue.IsMethod()) {
-        return false;
-    }
-    auto *method = Method::Cast(methodValue.GetTaggedObject());
-    return !method->IsNativeWithCallField() && actualArgc == method->GetNumArgsWithCallField();
 }
 
 ArkSteedObjectRef ArkSteedHeapBroker::GetBuiltinMethod(uint16_t builtinId, uint32_t globalEnvIndex) const

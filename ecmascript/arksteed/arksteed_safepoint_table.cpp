@@ -25,6 +25,7 @@
 #include <limits>
 #include <numeric>
 #include <sstream>
+#include <type_traits>
 
 namespace panda::ecmascript::arksteed {
 namespace {
@@ -80,6 +81,12 @@ uint32_t ReadU32Unaligned(const uint8_t *p)
 {
     using unaligned_u32 __attribute__((aligned(1))) = const uint32_t;
     return *reinterpret_cast<unaligned_u32 *>(p);
+}
+
+uint64_t ReadU64Unaligned(const uint8_t *p)
+{
+    using unaligned_u64 __attribute__((aligned(1))) = const uint64_t;
+    return *reinterpret_cast<unaligned_u64 *>(p);
 }
 
 }  // namespace
@@ -344,10 +351,16 @@ ExceptionHandlerKind ArkSteedSafepointTable::GetExceptionHandlerKind(uint32_t pc
 // SourcePositionTableBuilder
 // ============================================================================
 
-void SourcePositionTableBuilder::RecordBoundary(uint32_t pcOffset, uint32_t bcOffset)
+void SourcePositionTableBuilder::RecordBoundary(uint32_t pcOffset, uint32_t bcOffset, uint32_t inlineSiteId)
 {
     ASSERT(entries_.empty() || pcOffset >= entries_.back().pcOffset);
-    entries_.push_back({pcOffset, bcOffset});
+    entries_.push_back({pcOffset, bcOffset, inlineSiteId});
+}
+
+uint32_t SourcePositionTableBuilder::RegisterInlineSite(const ArkSteedInlineSite &site)
+{
+    inlineSites_.push_back(site);
+    return static_cast<uint32_t>(inlineSites_.size() - 1);
 }
 
 size_t SourcePositionTableBuilder::GetSize() const
@@ -355,8 +368,8 @@ size_t SourcePositionTableBuilder::GetSize() const
     if (entries_.empty()) {
         return 0;
     }
-    constexpr size_t ENTRY_SIZE = 2 * sizeof(uint32_t);  // pcOffset + bcOffset
-    return sizeof(uint32_t) + entries_.size() * ENTRY_SIZE;
+    size_t entrySize = (HasInlineSites() ? 3U : 2U) * sizeof(uint32_t);
+    return sizeof(uint32_t) + entries_.size() * entrySize;
 }
 
 void SourcePositionTableBuilder::Emit(uint8_t *buffer) const
@@ -366,20 +379,18 @@ void SourcePositionTableBuilder::Emit(uint8_t *buffer) const
     if (numEntries == 0) {
         return;
     }
-    // Write numEntries
     if (memcpy_s(buffer, sizeof(numEntries), &numEntries, sizeof(numEntries)) != EOK) {
         LOG_COMPILER(ERROR) << "memcpy_s failed in SourcePositionTableBuilder::Emit";
         return;
     }
-    // Write entries
     size_t offset = sizeof(uint32_t);
-    constexpr size_t ENTRY_SIZE = 2 * sizeof(uint32_t);
+    size_t entrySize = (HasInlineSites() ? 3U : 2U) * sizeof(uint32_t);
     for (size_t i = 0; i < entries_.size(); i++) {
-        if (memcpy_s(buffer + offset, ENTRY_SIZE, &entries_[i], ENTRY_SIZE) != EOK) {
+        if (memcpy_s(buffer + offset, entrySize, &entries_[i], entrySize) != EOK) {
             LOG_COMPILER(ERROR) << "memcpy_s failed in SourcePositionTableBuilder::Emit";
             return;
         }
-        offset += ENTRY_SIZE;
+        offset += entrySize;
     }
 }
 
@@ -394,9 +405,55 @@ std::unique_ptr<uint8_t[]> SourcePositionTableBuilder::EmitToNewBuffer() const
     return buffer;
 }
 
+size_t SourcePositionTableBuilder::GetInlineSiteSize() const
+{
+    if (inlineSites_.empty()) {
+        return 0;
+    }
+    constexpr size_t SERIALIZED_SITE_SIZE = 6 * sizeof(uint32_t);
+    return sizeof(uint32_t) + inlineSites_.size() * SERIALIZED_SITE_SIZE;
+}
+
+void SourcePositionTableBuilder::EmitInlineSites(uint8_t *buffer) const
+{
+    ASSERT(buffer != nullptr);
+    size_t offset = 0;
+    auto write = [&](const auto &value) -> bool {
+        using Value = std::decay_t<decltype(value)>;
+        if (memcpy_s(buffer + offset, sizeof(Value), &value, sizeof(Value)) != EOK) {
+            LOG_COMPILER(ERROR) << "memcpy_s failed in SourcePositionTableBuilder::EmitInlineSites";
+            return false;
+        }
+        offset += sizeof(Value);
+        return true;
+    };
+    uint32_t numSites = static_cast<uint32_t>(inlineSites_.size());
+    if (!write(numSites)) {
+        return;
+    }
+    for (const auto &site : inlineSites_) {
+        if (!write(site.methodOffset) || !write(site.methodPcStart) || !write(site.parentSiteId) ||
+            !write(site.callerBcOffset) || !write(site.depth)) {
+            return;
+        }
+    }
+}
+
+std::unique_ptr<uint8_t[]> SourcePositionTableBuilder::EmitInlineSitesToNewBuffer() const
+{
+    size_t size = GetInlineSiteSize();
+    if (size == 0) {
+        return nullptr;
+    }
+    auto buffer = std::make_unique<uint8_t[]>(size);
+    EmitInlineSites(buffer.get());
+    return buffer;
+}
+
 void SourcePositionTableBuilder::Clear()
 {
     entries_.clear();
+    inlineSites_.clear();
 }
 
 // ============================================================================
@@ -412,14 +469,27 @@ bool CheckSafepointWrapperHeader(const uint8_t *container, size_t containerSize,
         return false;
     }
     const auto *header = reinterpret_cast<const ArkSteedTableContainerHeader *>(container);
-    if (header->magic != ArkSteedTableContainerHeader::MAGIC ||
-        header->version != ArkSteedTableContainerHeader::VERSION) {
+    bool supportedVersion = header->version == ArkSteedTableContainerHeader::VERSION ||
+        header->version == ArkSteedTableContainerHeader::VERSION_WITH_INLINE_SITES;
+    size_t requiredSize = sizeof(ArkSteedTableContainerHeader);
+    if (header->version == ArkSteedTableContainerHeader::VERSION_WITH_INLINE_SITES) {
+        requiredSize += sizeof(ArkSteedInlineSiteSectionHeader);
+    }
+    if (header->magic != ArkSteedTableContainerHeader::MAGIC || !supportedVersion || containerSize < requiredSize) {
         if (outSize != nullptr) {
             *outSize = 0;
         }
         return false;
     }
     return true;
+}
+
+uint32_t GetArkSteedTableContainerVersion(const uint8_t *container, size_t containerSize)
+{
+    if (!CheckSafepointWrapperHeader(container, containerSize, nullptr)) {
+        return 0;
+    }
+    return reinterpret_cast<const ArkSteedTableContainerHeader *>(container)->version;
 }
 
 const uint8_t *GetArkSteedSafepointTable(const uint8_t *container, size_t containerSize, size_t *outSize)
@@ -466,6 +536,32 @@ const uint8_t *GetArkSteedPositionTable(const uint8_t *container, size_t contain
     return container + header->positionOffset;
 }
 
+const uint8_t *GetArkSteedInlineSiteTable(const uint8_t *container, size_t containerSize, size_t *outSize)
+{
+    if (GetArkSteedTableContainerVersion(container, containerSize) !=
+        ArkSteedTableContainerHeader::VERSION_WITH_INLINE_SITES) {
+        if (outSize != nullptr) {
+            *outSize = 0;
+        }
+        return nullptr;
+    }
+    const auto *section = reinterpret_cast<const ArkSteedInlineSiteSectionHeader *>(
+        container + sizeof(ArkSteedTableContainerHeader));
+    const bool invalidSection = section->inlineSiteOffset == 0 || section->inlineSiteSize == 0 ||
+                                section->inlineSiteOffset > containerSize ||
+                                section->inlineSiteSize > containerSize - section->inlineSiteOffset;
+    if (invalidSection) {
+        if (outSize != nullptr) {
+            *outSize = 0;
+        }
+        return nullptr;
+    }
+    if (outSize != nullptr) {
+        *outSize = section->inlineSiteSize;
+    }
+    return container + section->inlineSiteOffset;
+}
+
 uint32_t FindBcOffsetByPCOffset(MachineCode *machineCode, uint32_t pcOffset)
 {
     // Priority chain: position table → safepoint table → 0
@@ -478,9 +574,17 @@ uint32_t FindBcOffsetByPCOffset(MachineCode *machineCode, uint32_t pcOffset)
     size_t posTableSize = 0;
     const uint8_t *posTableData = GetArkSteedPositionTable(containerData, containerSize, &posTableSize);
     if (posTableData != nullptr && posTableSize > 0) {
-        auto result = arksteed::LookupBcOffsetFromPositionTable(posTableData, posTableSize, pcOffset-1);
-        if (result.has_value()) {
-            return result.value();
+        if (GetArkSteedTableContainerVersion(containerData, containerSize) ==
+            ArkSteedTableContainerHeader::VERSION_WITH_INLINE_SITES) {
+            auto result = arksteed::LookupBcOffsetAndSiteIdFromPositionTableV2(posTableData, posTableSize, pcOffset-1);
+            if (result.has_value()) {
+                return result->first;
+            }
+        } else {
+            auto result = arksteed::LookupBcOffsetFromPositionTable(posTableData, posTableSize, pcOffset-1);
+            if (result.has_value()) {
+                return result.value();
+            }
         }
     }
     // Fallback to safepoint table deopt data
@@ -603,8 +707,8 @@ std::optional<uint32_t> LookupBcOffsetFromPositionTable(const uint8_t *tableData
     if (numEntries == 0) {
         return std::nullopt;
     }
-    constexpr size_t ENTRY_SIZE = 2 * sizeof(uint32_t);  // pcOffset + bcOffset
-    size_t entriesSize = static_cast<size_t>(numEntries) * ENTRY_SIZE;
+    constexpr size_t entrySize = 2 * sizeof(uint32_t);  // pcOffset + bcOffset
+    size_t entriesSize = static_cast<size_t>(numEntries) * entrySize;
     if (entriesSize > tableSize - sizeof(uint32_t)) {
         return std::nullopt;
     }
@@ -614,7 +718,7 @@ std::optional<uint32_t> LookupBcOffsetFromPositionTable(const uint8_t *tableData
     uint32_t hi = numEntries;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2;  // 2: mid-point calculation
-        uint32_t entryPc = ReadU32Unaligned(entriesBase + mid * ENTRY_SIZE);
+        uint32_t entryPc = ReadU32Unaligned(entriesBase + mid * entrySize);
         if (entryPc <= pcOffset) {
             lo = mid + 1;
         } else {
@@ -625,8 +729,139 @@ std::optional<uint32_t> LookupBcOffsetFromPositionTable(const uint8_t *tableData
         return std::nullopt;  // pcOffset is before the first entry
     }
     // Read bcOffset from the found entry
-    size_t foundOffset = (lo - 1) * ENTRY_SIZE + sizeof(uint32_t);
+    size_t foundOffset = (lo - 1) * entrySize + sizeof(uint32_t);
     return ReadU32Unaligned(entriesBase + foundOffset);
+}
+
+std::optional<std::pair<uint32_t, uint32_t>> LookupBcOffsetAndSiteIdFromPositionTableV2(
+    const uint8_t *tableData, size_t tableSize, uint32_t pcOffset)
+{
+    if (tableData == nullptr || tableSize < sizeof(uint32_t)) {
+        return std::nullopt;
+    }
+    uint32_t numEntries = ReadU32Unaligned(tableData);
+    if (numEntries == 0) {
+        return std::nullopt;
+    }
+    constexpr size_t entrySize = 3 * sizeof(uint32_t);
+    size_t entriesSize = static_cast<size_t>(numEntries) * entrySize;
+    if (entriesSize > tableSize - sizeof(uint32_t)) {
+        return std::nullopt;
+    }
+    const uint8_t *entriesBase = tableData + sizeof(uint32_t);
+    uint32_t lo = 0;
+    uint32_t hi = numEntries;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        uint32_t entryPc = ReadU32Unaligned(entriesBase + mid * entrySize);
+        if (entryPc <= pcOffset) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo == 0) {
+        return std::nullopt;
+    }
+    size_t foundOffset = (lo - 1) * entrySize + sizeof(uint32_t);
+    uint32_t bcOffset = ReadU32Unaligned(entriesBase + foundOffset);
+    uint32_t inlineSiteId = ReadU32Unaligned(entriesBase + foundOffset + sizeof(uint32_t));
+    return std::make_pair(bcOffset, inlineSiteId);
+}
+
+namespace {
+ArkSteedInlineSite ReadInlineSite(const uint8_t *data, uint32_t siteId)
+{
+    constexpr size_t serializedSiteSize = 6 * sizeof(uint32_t);
+    const uint8_t *entry = data + sizeof(uint32_t) + static_cast<size_t>(siteId) * serializedSiteSize;
+    return {
+        ReadU32Unaligned(entry),
+        ReadU64Unaligned(entry + sizeof(uint32_t)),
+        ReadU32Unaligned(entry + 3 * sizeof(uint32_t)),
+        ReadU32Unaligned(entry + 4 * sizeof(uint32_t)),
+        ReadU32Unaligned(entry + 5 * sizeof(uint32_t)),
+    };
+}
+
+bool LookupInlineSourceFrames(const uint8_t *siteData, size_t siteEntrySize,
+                              const std::pair<uint32_t, uint32_t> &position,
+                              std::vector<ArkSteedSourceFrame> *frames)
+{
+    auto fail = [frames] {
+        frames->clear();
+        return false;
+    };
+    if (siteEntrySize < sizeof(uint32_t)) {
+        return fail();
+    }
+    uint32_t numSites = ReadU32Unaligned(siteData);
+    constexpr size_t serializedSiteSize = 6 * sizeof(uint32_t);
+    if (numSites == 0 || position.second >= numSites ||
+        static_cast<size_t>(numSites) * serializedSiteSize > siteEntrySize - sizeof(uint32_t)) {
+        return fail();
+    }
+
+    uint32_t siteId = position.second;
+    uint32_t bcOffset = position.first;
+    uint32_t expectedDepth = ReadInlineSite(siteData, siteId).depth;
+    for (uint32_t level = 0; level < numSites; ++level) {
+        ArkSteedInlineSite site = ReadInlineSite(siteData, siteId);
+        if (site.depth != expectedDepth) {
+            return fail();
+        }
+        frames->push_back({site.methodOffset, site.methodPcStart, bcOffset, site.depth});
+        if (site.parentSiteId == INVALID_INLINE_SITE_PARENT) {
+            if (siteId == TOP_LEVEL_INLINE_SITE_ID && site.depth == 0) {
+                return true;
+            }
+            return fail();
+        }
+        if (site.depth == 0 || site.parentSiteId >= numSites) {
+            return fail();
+        }
+        bcOffset = site.callerBcOffset;
+        expectedDepth = site.depth - 1;
+        siteId = site.parentSiteId;
+    }
+    return fail();
+}
+}  // namespace
+
+bool LookupSourceFramesByPCOffset(const uint8_t *container, size_t containerSize, uint32_t pcOffset,
+                                  std::vector<ArkSteedSourceFrame> *frames)
+{
+    if (frames == nullptr) {
+        return false;
+    }
+    frames->clear();
+    uint32_t version = GetArkSteedTableContainerVersion(container, containerSize);
+    size_t positionSize = 0;
+    const uint8_t *positionData = GetArkSteedPositionTable(container, containerSize, &positionSize);
+    if (positionData == nullptr) {
+        return false;
+    }
+    if (version == ArkSteedTableContainerHeader::VERSION) {
+        auto result = LookupBcOffsetFromPositionTable(positionData, positionSize, pcOffset);
+        if (!result.has_value()) {
+            return false;
+        }
+        frames->push_back({0, 0, result.value(), 0});
+        return true;
+    }
+    if (version != ArkSteedTableContainerHeader::VERSION_WITH_INLINE_SITES) {
+        return false;
+    }
+    auto position = LookupBcOffsetAndSiteIdFromPositionTableV2(positionData, positionSize, pcOffset);
+    if (!position.has_value()) {
+        return false;
+    }
+    size_t siteEntrySize = 0;
+    const uint8_t *siteData = GetArkSteedInlineSiteTable(container, containerSize, &siteEntrySize);
+    if (siteData == nullptr) {
+        frames->clear();
+        return false;
+    }
+    return LookupInlineSourceFrames(siteData, siteEntrySize, position.value(), frames);
 }
 
 }  // namespace panda::ecmascript::arksteed

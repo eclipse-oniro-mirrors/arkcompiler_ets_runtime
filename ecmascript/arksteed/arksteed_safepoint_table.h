@@ -204,27 +204,44 @@ private:
 };
 
 // ============================================================================
-// SourcePositionTableBuilder — records pcOffset ↔ bcOffset boundaries during
-// compilation.  Emitted into the position table section of the container.
-//
-// Binary layout:
-//   uint32_t numEntries
-//   Entry[] (2 × uint32_t each, sorted by pcOffset ascending):
-//     uint32_t pcOffset
-//     uint32_t bcOffset
+// SourcePositionTableBuilder — records source positions and, when present,
+// the compilation-unit chain for inlined code.
+// v1 entries contain (pcOffset, bcOffset). v2 entries add inlineSiteId.
 // ============================================================================
+
+constexpr uint32_t TOP_LEVEL_INLINE_SITE_ID = 0;
+constexpr uint32_t INVALID_INLINE_SITE_PARENT = std::numeric_limits<uint32_t>::max();
+
+struct ArkSteedInlineSite {
+    uint32_t methodOffset {0};
+    uint64_t methodPcStart {0};
+    uint32_t parentSiteId {INVALID_INLINE_SITE_PARENT};
+    uint32_t callerBcOffset {0};
+    uint32_t depth {0};
+};
+
+struct ArkSteedSourceFrame {
+    uint32_t methodOffset {0};
+    uint64_t methodPcStart {0};
+    uint32_t bcOffset {0};
+    uint32_t depth {0};
+};
 
 class PUBLIC_API SourcePositionTableBuilder {
 public:
     explicit SourcePositionTableBuilder(Chunk *chunk)
-        : entries_(chunk)
+        : entries_(chunk), inlineSites_(chunk)
     {}
     ~SourcePositionTableBuilder() = default;
 
-    void RecordBoundary(uint32_t pcOffset, uint32_t bcOffset);
+    void RecordBoundary(uint32_t pcOffset, uint32_t bcOffset, uint32_t inlineSiteId = TOP_LEVEL_INLINE_SITE_ID);
+    uint32_t RegisterInlineSite(const ArkSteedInlineSite &site);
     size_t GetSize() const;
     void Emit(uint8_t *buffer) const;
     std::unique_ptr<uint8_t[]> EmitToNewBuffer() const;
+    size_t GetInlineSiteSize() const;
+    void EmitInlineSites(uint8_t *buffer) const;
+    std::unique_ptr<uint8_t[]> EmitInlineSitesToNewBuffer() const;
     void Clear();
 
     uint32_t GetNumEntries() const
@@ -232,38 +249,34 @@ public:
         return static_cast<uint32_t>(entries_.size());
     }
 
+    uint32_t GetInlineSiteCount() const
+    {
+        return static_cast<uint32_t>(inlineSites_.size());
+    }
+
+    bool HasInlineSites() const
+    {
+        return !inlineSites_.empty();
+    }
+
 private:
     struct Entry {
         uint32_t pcOffset;
         uint32_t bcOffset;
+        uint32_t inlineSiteId;
     };
     ChunkVector<Entry> entries_;
+    ChunkVector<ArkSteedInlineSite> inlineSites_;
 };
 
 // ============================================================================
-// Section Container — wraps safepoint table + position table into one payload
+// Section Container — wraps safepoint, position and optional inline-site tables
 // ============================================================================
-
-// Binary layout of the container that replaces the raw safepoint table in
-// MachineCode's stack-map area:
-//
-//   Header (24 bytes):
-//     uint32_t magic          "ASTB" = ArkSteed Table Binary
-//     uint32_t version        1
-//     uint32_t safepointOffset  offset from header start to safepoint table section
-//     uint32_t safepointSize    size of safepoint table section
-//     uint32_t positionOffset   offset from header start to position table (0 if absent)
-//     uint32_t positionSize     size of position table (0 if absent)
-//
-//   safepoint table section:
-//     raw ArkSteedSafepointTable data (header + entries + deopt data)
-//
-//   position table section (optional, TASK-3):
-//     raw SourcePositionTable data
 
 struct ArkSteedTableContainerHeader {
     static constexpr uint32_t MAGIC = 0x41535442;  // "ASTB"
     static constexpr uint32_t VERSION = 1;
+    static constexpr uint32_t VERSION_WITH_INLINE_SITES = 2;
     static constexpr size_t SIZE = 6 * sizeof(uint32_t);  // 24 bytes
 
     uint32_t magic;
@@ -274,15 +287,15 @@ struct ArkSteedTableContainerHeader {
     uint32_t positionSize;
 };
 
-// Extract the safepoint table data pointer and size from a container.
-// Returns nullptr and sets *outSize = 0 if the container is invalid.
-// The returned pointer is within the container buffer — no ownership transfer.
-const uint8_t* GetArkSteedSafepointTable(const uint8_t* container, size_t containerSize, size_t* outSize);
+struct ArkSteedInlineSiteSectionHeader {
+    uint32_t inlineSiteOffset;
+    uint32_t inlineSiteSize;
+};
 
-// Extract the position table data pointer and size from a container.
-// Returns nullptr and sets *outSize = 0 if absent or invalid.
-// The returned pointer is within the container buffer — no ownership transfer.
+uint32_t GetArkSteedTableContainerVersion(const uint8_t *container, size_t containerSize);
+const uint8_t* GetArkSteedSafepointTable(const uint8_t* container, size_t containerSize, size_t* outSize);
 const uint8_t* GetArkSteedPositionTable(const uint8_t* container, size_t containerSize, size_t* outSize);
+const uint8_t* GetArkSteedInlineSiteTable(const uint8_t* container, size_t containerSize, size_t* outSize);
 
 // Look up bcOffset from SourcePositionTable or SafepointTable
 uint32_t FindBcOffsetByPCOffset(MachineCode *machineCode, uint32_t pcOffset);
@@ -291,20 +304,17 @@ uint32_t FindBcOffsetByPCOffset(MachineCode *machineCode, uint32_t pcOffset);
 // Pure functions (no runtime dependency — only const uint8_t* + size_t)
 // ============================================================================
 
-// Extract bcOffset from a safepoint table's deopt data.
-// Scans the deopt entries of the safepoint at pcOffset for PC_OFFSET_INDEX
-// (vreg == -2) with CONSTANT kind and returns the value.
-// Returns std::nullopt if the entry is not found, has no deopt data, or
-// does not contain PC_OFFSET_INDEX with CONSTANT kind.
 std::optional<uint32_t> ExtractBcOffsetFromSafepointTable(
     const uint8_t *tableData, size_t tableSize, uint32_t pcOffset);
 
-// Look up bcOffset from a SourcePositionTable.
-// Performs binary search for the last boundary with pcOffset <= target.
-// Format: uint32_t numEntries, then (uint32_t pcOffset, uint32_t bcOffset) pairs.
-// Returns std::nullopt if the table is empty or pcOffset is before the first entry.
 std::optional<uint32_t> LookupBcOffsetFromPositionTable(
     const uint8_t *tableData, size_t tableSize, uint32_t pcOffset);
+
+std::optional<std::pair<uint32_t, uint32_t>> LookupBcOffsetAndSiteIdFromPositionTableV2(
+    const uint8_t *tableData, size_t tableSize, uint32_t pcOffset);
+
+bool LookupSourceFramesByPCOffset(const uint8_t *container, size_t containerSize, uint32_t pcOffset,
+                                  std::vector<ArkSteedSourceFrame> *frames);
 
 }  // namespace panda::ecmascript::arksteed
 

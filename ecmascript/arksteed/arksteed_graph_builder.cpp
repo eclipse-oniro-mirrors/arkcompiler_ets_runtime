@@ -122,57 +122,6 @@ kungfu::DeoptType GetBuiltinConstructorDeoptType(uint32_t globalEnvFieldIndex)
     }
 }
 
-class KnownCallPlan {
-public:
-    static KnownCallPlan ForFeedback(uint32_t actualArgc, ValueVertex *expectedTargetConstant,
-                                     uint32_t expectedArgc, uint32_t callCount)
-    {
-        return KnownCallPlan(actualArgc, expectedTargetConstant, expectedArgc, callCount);
-    }
-
-    uint32_t GetActualArgc() const
-    {
-        return actualArgc_;
-    }
-
-    uint32_t GetExpectedArgc() const
-    {
-        return expectedArgc_;
-    }
-
-    uint32_t GetCallCount() const
-    {
-        return callCount_;
-    }
-
-    ValueVertex *GetExpectedTargetConstant() const
-    {
-        return expectedTargetConstant_;
-    }
-
-    void Verify() const
-    {
-#ifndef NDEBUG
-        ASSERT(expectedTargetConstant_ != nullptr);
-        ASSERT(expectedTargetConstant_->Is<HeapConstantVertex>());
-        ASSERT(expectedTargetConstant_->Cast<HeapConstantVertex>()->GetStaticNodeType() ==
-               static_cast<uint16_t>(NodeInfo::NodeType::JS_FUNCTION));
-#endif
-    }
-
-private:
-    KnownCallPlan(uint32_t actualArgc, ValueVertex *expectedTargetConstant, uint32_t expectedArgc, uint32_t callCount)
-        : actualArgc_(actualArgc), expectedArgc_(expectedArgc), callCount_(callCount),
-          expectedTargetConstant_(expectedTargetConstant)
-    {
-    }
-
-    uint32_t actualArgc_;
-    uint32_t expectedArgc_;
-    uint32_t callCount_;
-    ValueVertex *expectedTargetConstant_;
-};
-
 class KnownBuiltinCallPlan {
 public:
     KnownBuiltinCallPlan(uint32_t actualArgc, kungfu::BuiltinsStubCSigns::ID builtinId,
@@ -1097,8 +1046,11 @@ void GraphBuilder::InitializeInlineStartBlock(SharedBCFrameState frameState,
     frameState.SetLexicalEnv(initialLexicalEnv_);
     frameState.SetAcc(undefinedValue_);
 
-    FinishBlockWithJump(callerBlock, ActivateNonCatchBlock(1));
-    exitBlocks_[0] = callerBlock;
+    BB *inlineEntry = NewBlock();
+    blocks_[0] = inlineEntry;
+    FinishBlockWithJump(callerBlock, inlineEntry);
+    FinishBlockWithJump(inlineEntry, ActivateNonCatchBlock(1));
+    exitBlocks_[0] = inlineEntry;
 }
 
 void GraphBuilder::FinishInlineReturn(BB *returnBlock, ValueVertex *returnValue, CompileInfoFacts *returnFacts)
@@ -1604,6 +1556,7 @@ BB *GraphBuilder::NewBlock()
     ArkSteedCompilationUnit *unit = preproc_->GetCompilationUnit();
     if (!unit->IsTopLevel()) {
         result->SetInlineOwnerUnit(unit);
+        result->SetInlineCallerFrame(parentDeoptFrame_);
     }
     return result;
 }
@@ -3203,6 +3156,8 @@ struct GraphBuilder::BytecodeVisitor {
         BytecodePreprocessor *preprocessor {nullptr};
         BytecodeAnalysis *analysis {nullptr};
         uint32_t bytecodeSize {0};
+        FunctionKind functionKind {FunctionKind::NORMAL_FUNCTION};
+        bool forConstruct {false};
         // Expected methodId to guard at the call site; 0 means no site guard is
         // needed (the known-call path emits its own guards separately).
         uint32_t methodId {0};
@@ -3263,64 +3218,6 @@ struct GraphBuilder::BytecodeVisitor {
         return KnownConstructPlan(info.formalArgc, targetConstant, hclassConstant, info.objectSize,
                                   info.canAllocateDirectly, broker->TryGetIsBaseConstructor(feedback.target));
     }
-    std::optional<KnownCallPlan> TryCreateProfiledKnownCallPlan(const CallFeedback &feedback, uint32_t actualArgc)
-    {
-        if (!feedback.IsMonomorphicJSFunction()) {
-            return std::nullopt;
-        }
-
-        ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
-        if (!broker->CanCallFunction(feedback.target, actualArgc)) {
-            return std::nullopt;
-        }
-        ValueVertex *expectedTargetConstant = GetHeapConstant(feedback.target);
-        if (expectedTargetConstant == nullptr) {
-            return std::nullopt;
-        }
-        auto plan = KnownCallPlan::ForFeedback(actualArgc, expectedTargetConstant,
-                                               feedback.expectedArgc, feedback.callCount);
-        plan.Verify();
-        return plan;
-    }
-
-    template <class InputRange, class Plan>
-    CallKnownJSFunctionVertex *BuildGuardedKnownCall(const InputRange &inputs, const Plan &plan)
-    {
-        ASSERT(std::size(inputs) == CallVertex::FIRST_ARG_INDEX + plan.GetActualArgc());
-
-        auto input = std::begin(inputs);
-        ValueVertex *target = *input++;
-        ValueVertex *newTarget = *input++;
-        ValueVertex *receiver = *input++;
-
-        ValueVertex *context = self->NewVertex<LoadTaggedFieldVertex>(
-            compileInfoFacts_, currentBlock, {target}, JSFunction::LEXICAL_ENV_OFFSET);
-        ChunkVector<ValueVertex *> knownInputs(self->chunk_);
-        knownInputs.reserve(CallKnownJSFunctionVertex::FIRST_ARG_INDEX + plan.GetActualArgc());
-        knownInputs.emplace_back(target);
-        knownInputs.emplace_back(newTarget);
-        knownInputs.emplace_back(receiver);
-        knownInputs.emplace_back(context);
-        for (uint32_t index = 0; index < plan.GetActualArgc(); index++) {
-            knownInputs.emplace_back(*input++);
-        }
-
-        auto *call = self->NewVertex<CallKnownJSFunctionVertex>(
-            compileInfoFacts_, currentBlock, knownInputs, plan.GetActualArgc(),
-            plan.GetExpectedArgc(), plan.GetCallCount());
-        UpdateCatchBlockData(call);
-        return call;
-    }
-
-    template <class InputRange = std::initializer_list<ValueVertex *>>
-    ValueVertex *BuildKnownCall(const InputRange &inputs, const KnownCallPlan &plan)
-    {
-        ASSERT(std::size(inputs) == CallVertex::FIRST_ARG_INDEX + plan.GetActualArgc());
-        ValueVertex *actualTarget = *std::begin(inputs);
-        BuildEagerDeoptIfReferenceNotEqual(actualTarget, plan.GetExpectedTargetConstant());
-        return BuildGuardedKnownCall(inputs, plan);
-    }
-
     ValueVertex *TryGetCanonicalBuiltinMethodConstant(kungfu::BuiltinsStubCSigns::ID builtinId,
                                                       uint32_t globalEnvFieldIndex)
     {
@@ -3417,28 +3314,27 @@ struct GraphBuilder::BytecodeVisitor {
     // Emit the method-identity guard for a known target: quick fix / hot reload rewrites
     // the Method object in place (PatchLoader::ReplaceMethod), so a pointer-identity check
     // cannot catch the swap. Compare the methodId range of literalInfo (bits 16-47)
-    // instead, mirroring the AOT inline guard (CircuitBuilder::GetMethodId). The extracted
-    // i32 is boxed to reuse the tagged deopt vertex.
+    // instead, mirroring the AOT inline guard (CircuitBuilder::GetMethodId).
     void BuildMethodIdGuard(ValueVertex *target, uint32_t expectedMethodId)
     {
         ValueVertex *actualMethod = self->NewVertex<LoadTaggedFieldVertex>(
             compileInfoFacts_, currentBlock, {target}, static_cast<int32_t>(JSFunction::METHOD_OFFSET));
-        ValueVertex *literalInfoLo = self->NewVertex<LoadInt32FieldVertex>(
+        ValueVertex *literalInfo = self->NewVertex<LoadTaggedFieldVertex>(
             compileInfoFacts_, currentBlock, {actualMethod}, static_cast<int32_t>(Method::LITERAL_INFO_OFFSET));
-        ValueVertex *literalInfoHi = self->NewVertex<LoadInt32FieldVertex>(
-            compileInfoFacts_, currentBlock, {actualMethod},
-            static_cast<int32_t>(Method::LITERAL_INFO_OFFSET + 4));  // 4: upper half of the 64-bit field
-        ValueVertex *methodIdShift = self->graph_->GetInt32Constant(
-            static_cast<int32_t>(MethodLiteral::MethodIdBits::START_BIT));
-        ValueVertex *methodIdLo = self->NewVertex<I32BitwiseBinaryVertex>(
-            compileInfoFacts_, currentBlock, {literalInfoLo, methodIdShift},
-            IntBitwiseKind::SHIFT_RIGHT_LOGICAL);
-        ValueVertex *methodIdHi = self->NewVertex<I32BitwiseBinaryVertex>(
-            compileInfoFacts_, currentBlock, {literalInfoHi, methodIdShift}, IntBitwiseKind::SHIFT_LEFT);
-        ValueVertex *actualMethodId = self->NewVertex<I32BitwiseBinaryVertex>(
-            compileInfoFacts_, currentBlock, {methodIdLo, methodIdHi}, IntBitwiseKind::BITWISE_OR);
-        ValueVertex *actualMethodIdTagged = self->NewVertex<I32ToTaggedIntVertex>(
-            compileInfoFacts_, currentBlock, {actualMethodId});
+        ValueVertex *rawLiteralInfo = self->NewVertex<TaggedToRawI64Vertex>(
+            compileInfoFacts_, currentBlock, {literalInfo});
+        ValueVertex *shiftedLiteralInfo = self->NewVertex<I64ShiftRightLogicalVertex>(
+            compileInfoFacts_, currentBlock, {rawLiteralInfo},
+            static_cast<uint32_t>(MethodLiteral::MethodIdBits::START_BIT));
+        ValueVertex *methodIdMask = self->graph_->GetInt64Constant(
+            static_cast<int64_t>((1ULL << MethodLiteral::MethodIdBits::SIZE) - 1));
+        ValueVertex *actualMethodId = self->NewVertex<I64BitwiseBinaryVertex>(
+            compileInfoFacts_, currentBlock, {shiftedLiteralInfo, methodIdMask}, IntBitwiseKind::BITWISE_AND);
+        ValueVertex *tagInt = self->graph_->GetInt64Constant(static_cast<int64_t>(JSTaggedValue::TAG_INT));
+        ValueVertex *taggedMethodId = self->NewVertex<I64BitwiseBinaryVertex>(
+            compileInfoFacts_, currentBlock, {actualMethodId, tagInt}, IntBitwiseKind::BITWISE_OR);
+        ValueVertex *actualMethodIdTagged = self->NewVertex<RawI64ToTaggedVertex>(
+            compileInfoFacts_, currentBlock, {taggedMethodId});
         BuildCheckTaggedCondition(currentBcIndex, actualMethodIdTagged,
                                   TaggedConstantFromInt32(static_cast<int32_t>(expectedMethodId)),
                                   Condition::NOT_EQUAL, kungfu::DeoptType::NOTCALLTARGETHEAPOBJECT);
@@ -3455,12 +3351,17 @@ struct GraphBuilder::BytecodeVisitor {
         return false;
     }
 
+    bool IsBaseInlineConstructor(FunctionKind kind) const
+    {
+        return kind == FunctionKind::BASE_CONSTRUCTOR || kind == FunctionKind::CLASS_CONSTRUCTOR;
+    }
+
     bool IsSupportedInlineFunction(Method *method) const
     {
         FunctionKind kind = method->GetFunctionKind();
         return !method->IsNativeWithCallField() && !method->IsCallNapi() &&
                (kind == FunctionKind::NORMAL_FUNCTION || kind == FunctionKind::ARROW_FUNCTION ||
-                kind == FunctionKind::BASE_CONSTRUCTOR);
+                IsBaseInlineConstructor(kind) || kind == FunctionKind::DERIVED_CONSTRUCTOR);
     }
 
     bool HasOnlySupportedArkSteedBytecodes(const uint8_t *pc, uint32_t bytecodeSize) const
@@ -3502,7 +3403,11 @@ struct GraphBuilder::BytecodeVisitor {
         constexpr uint64_t CHILD_SPECIAL_VALUE_COUNT = 8;
         valueCount += CHILD_SPECIAL_VALUE_COUNT + actualArgc + callee->GetNumVregsWithCallField() +
                       callee->GetNumArgsForArkSteed();
-        return valueCount <= ArkSteedSafepointTableBuilder::MAX_DEOPT_VALUE_COUNT;
+        // Reserve the maximum continuation metadata emitted at a base-constructor
+        // deopt site; the same bound also covers derived constructors.
+        constexpr uint64_t MAX_CONSTRUCTOR_CONTINUATION_VALUE_COUNT = 2;
+        return valueCount + MAX_CONSTRUCTOR_CONTINUATION_VALUE_COUNT <=
+               ArkSteedSafepointTableBuilder::MAX_DEOPT_VALUE_COUNT;
     }
 
     // INFO-level companion of the DEBUG inline decision logs, gated by
@@ -3525,14 +3430,12 @@ struct GraphBuilder::BytecodeVisitor {
                            << ", callee " << calleeName << ')';
     }
 
-    // Split cumulative inline budget by callee size (Maglev-style): small callees
-    // charge their own pool instead of competing with large callees for the shared
-    // one, since small helpers are the most reliably profitable inlines.
+    // Small callees use a separate cumulative counter so that they do not
+    // compete with large callees, since small helpers are often profitable.
     std::pair<uint32_t *, uint32_t> InlineBudgetPool(uint32_t bytecodeSize) const
     {
         const JSRuntimeOptions &options = self->preproc_->GetEnv()->GetJSOptions();
-        // Small and large callees charge separate counters (Maglev-style split), both
-        // capped by the shared cumulative budget option.
+        // Both counters use the cumulative budget option as their cap.
         if (bytecodeSize <= options.GetCompilerArkSteedSmallInlineBytecodeSize()) {
             return {self->inlineBytecodeBudgetUsedSmall_,
                     options.GetCompilerArkSteedMaxCumulativeInlineBytecodeSize()};
@@ -3545,7 +3448,7 @@ struct GraphBuilder::BytecodeVisitor {
         MethodLiteral *literal, JSPandaFile *jsPandaFile, const uint8_t *methodPcStart,
         const JSHandle<ProfileTypeInfo> &profileTypeInfo, uint32_t constantPoolMethodOffset,
         const JSHandle<JSFunction> &targetHandle, bool isLocalClosure, uint32_t actualArgc,
-        uint64_t inlinePrepProfileKey)
+        uint64_t inlinePrepProfileKey, bool forConstruct = false)
     {
         JitCompilationEnv *env = self->preproc_->GetEnv();
         const JSRuntimeOptions &options = env->GetJSOptions();
@@ -3554,6 +3457,11 @@ struct GraphBuilder::BytecodeVisitor {
             IsRecursiveInlineCandidate(jsPandaFile, literal->GetMethodId().GetOffset())) {
             LOG_INLINE_DECISION(env, literal, jsPandaFile,
                                 "ArkSteed inline rejected: unavailable or recursive method metadata");
+            return std::nullopt;
+        }
+        if (literal->IsShared()) {
+            LOG_INLINE_DECISION(env, literal, jsPandaFile,
+                                "ArkSteed inline rejected: shared function is not supported for compilation");
             return std::nullopt;
         }
         // Depth policy: small callees may nest deeper (max-inline-depth-small),
@@ -3597,13 +3505,15 @@ struct GraphBuilder::BytecodeVisitor {
                                                inlinePrepProfileKey, callerUnit};
         if (auto it = self->inlinePrepCache_->find(inlinePrepKey); it != self->inlinePrepCache_->end()) {
             const InlinePrepCacheEntry &cached = it->second;
-            auto [budgetUsed, budgetLimit] = InlineBudgetPool(cached.bytecodeSize);
-            if (*budgetUsed + cached.bytecodeSize > budgetLimit) {
-                LOG_INLINE_DECISION(env, literal, jsPandaFile,
-                                    "ArkSteed inline rejected: cumulative bytecode budget "
-                                    << (budgetUsed == self->inlineBytecodeBudgetUsedSmall_ ? "(small) " : "")
-                                    << *budgetUsed << " + " << cached.bytecodeSize);
-                return std::nullopt;
+            if (!forConstruct) {
+                auto [budgetUsed, budgetLimit] = InlineBudgetPool(cached.bytecodeSize);
+                if (*budgetUsed + cached.bytecodeSize > budgetLimit) {
+                    LOG_INLINE_DECISION(env, literal, jsPandaFile,
+                                        "ArkSteed inline rejected: cumulative bytecode budget "
+                                        << (budgetUsed == self->inlineBytecodeBudgetUsedSmall_ ? "(small) " : "")
+                                        << *budgetUsed << " + " << cached.bytecodeSize);
+                    return std::nullopt;
+                }
             }
             uint32_t currentGraphNodes = CountCurrentGraphNodes();
             if (currentGraphNodes >= options.GetCompilerArkSteedMaxGraphNodesBeforeInline()) {
@@ -3636,13 +3546,15 @@ struct GraphBuilder::BytecodeVisitor {
                                 "ArkSteed inline rejected: bytecode size " << unit->GetBytecodeSize());
             return std::nullopt;
         }
-        auto [budgetUsed, budgetLimit] = InlineBudgetPool(unit->GetBytecodeSize());
-        if (*budgetUsed + unit->GetBytecodeSize() > budgetLimit) {
-            LOG_INLINE_DECISION(env, literal, jsPandaFile,
-                                "ArkSteed inline rejected: cumulative bytecode budget "
-                                << (budgetUsed == self->inlineBytecodeBudgetUsedSmall_ ? "(small) " : "")
-                                << *budgetUsed << " + " << unit->GetBytecodeSize());
-            return std::nullopt;
+        if (!forConstruct) {
+            auto [budgetUsed, budgetLimit] = InlineBudgetPool(unit->GetBytecodeSize());
+            if (*budgetUsed + unit->GetBytecodeSize() > budgetLimit) {
+                LOG_INLINE_DECISION(env, literal, jsPandaFile,
+                                    "ArkSteed inline rejected: cumulative bytecode budget "
+                                    << (budgetUsed == self->inlineBytecodeBudgetUsedSmall_ ? "(small) " : "")
+                                    << *budgetUsed << " + " << unit->GetBytecodeSize());
+                return std::nullopt;
+            }
         }
         uint32_t currentGraphNodes = CountCurrentGraphNodes();
         if (currentGraphNodes >= options.GetCompilerArkSteedMaxGraphNodesBeforeInline()) {
@@ -3695,7 +3607,10 @@ struct GraphBuilder::BytecodeVisitor {
         };
     }
 
-    std::optional<PreparedInlineCall> TryPrepareInlineCall(const CallFeedback &feedback, uint32_t actualArgc)
+    std::optional<PreparedInlineCall> TryPrepareInlineTarget(const ArkSteedObjectRef &targetRef,
+                                                             uint32_t actualArgc,
+                                                             std::optional<uint32_t> callCount,
+                                                             bool forConstruct)
     {
         JitCompilationEnv *env = self->preproc_->GetEnv();
         if (!env->GetJSOptions().GetCompilerArkSteedEnableInline()) {
@@ -3715,13 +3630,12 @@ struct GraphBuilder::BytecodeVisitor {
         JSHandle<ProfileTypeInfo> profileTypeInfo;
         JSHandle<JSFunction> targetHandle;
         uint64_t inlinePrepProfileKey = 0;
+        uint32_t methodId = 0;
+        FunctionKind functionKind = FunctionKind::NORMAL_FUNCTION;
         {
             ArkSteedHeapBroker::NoGCScope scope(broker);
             JSTaggedValue targetValue = JSTaggedValue::Undefined();
-            JSTaggedValue methodValue = JSTaggedValue::Undefined();
-            if (!broker->TryResolveRef(feedback.target, &targetValue) ||
-                !broker->TryResolveRef(feedback.method, &methodValue) ||
-                !targetValue.IsJSFunction() || !methodValue.IsMethod()) {
+            if (!broker->TryResolveRef(targetRef, &targetValue) || !targetValue.IsJSFunction()) {
                 LOG_INLINE_DECISION(env, nullptr, nullptr,
                                     "ArkSteed inline rejected: target or method cannot be resolved");
                 return std::nullopt;
@@ -3729,6 +3643,10 @@ struct GraphBuilder::BytecodeVisitor {
 
             ALLOW_DEREF_HANDLE;
             JSFunction *target = JSFunction::Cast(targetValue.GetTaggedObject());
+            JSTaggedValue methodValue = target->GetMethod(self->compilerThread_);
+            if (!methodValue.IsMethod()) {
+                return std::nullopt;
+            }
             Method *method = Method::Cast(methodValue.GetTaggedObject());
             if (!IsSupportedInlineFunction(method)) {
                 LOG_INLINE_DECISION(env, nullptr, nullptr,
@@ -3741,15 +3659,15 @@ struct GraphBuilder::BytecodeVisitor {
                 ? nullptr
                 : jsPandaFile->FindMethodLiteral(method->GetMethodId().GetOffset());
             methodPcStart = method->GetBytecodeArray();
+            methodId = method->GetMethodId().GetOffset();
+            functionKind = method->GetFunctionKind();
 
             bool isSmallInlinee = literal != nullptr &&
                 MethodLiteral::GetCodeSize(jsPandaFile, literal->GetMethodId()) <=
                     env->GetJSOptions().GetCompilerArkSteedSmallInlineBytecodeSize();
             // Frequency gate: skip inlining call sites that are cold relative to their
-            // caller. Small callees are never frequency-gated; compatible-closure
-            // families carry a synthetic callCount of 1, so their frequency is unknown
-            // and also exempt.
-            if (!feedback.isCompatibleClosure && !isSmallInlinee) {
+            // caller. Small callees and sites without a reliable count are exempt.
+            if (callCount.has_value() && !isSmallInlinee) {
                 // The env's profile clone only carries IC slots; header counters are
                 // not cloned (JitTask::CloneProfileTypeInfo). Read the caller's live
                 // ProfileTypeInfo for InvocationCount, like the legacy JitCanInline.
@@ -3769,11 +3687,11 @@ struct GraphBuilder::BytecodeVisitor {
                 // frequency as unknown and allow.
                 double callFrequency = callerCallCount == 0
                     ? 1.0
-                    : static_cast<double>(feedback.callCount) / callerCallCount;
+                    : static_cast<double>(callCount.value()) / callerCallCount;
                 if (callFrequency < env->GetJSOptions().GetMinCallFreq()) {
                     LOG_INLINE_DECISION(env, nullptr, nullptr,
                                         "ArkSteed inline rejected: call frequency " << callFrequency
-                                        << " (site " << feedback.callCount << " / caller " << callerCallCount
+                                        << " (site " << callCount.value() << " / caller " << callerCallCount
                                         << ") below threshold " << env->GetJSOptions().GetMinCallFreq());
                     return std::nullopt;
                 }
@@ -3789,10 +3707,50 @@ struct GraphBuilder::BytecodeVisitor {
             inlinePrepProfileKey = profileTypeInfo.IsEmpty() ? 0 : profileTypeInfo.GetTaggedType();
         }
 
+        if (targetHandle->IsSharedFunction()) {
+            LOG_INLINE_DECISION(env, literal, jsPandaFile,
+                                "ArkSteed inline rejected: shared function is not supported for compilation");
+            return std::nullopt;
+        }
+        JSTaggedValue funcEnv = targetHandle->GetLexicalEnv(env->GetHostThread());
+        JSTaggedValue globalEnv = BaseEnv::Cast(funcEnv.GetTaggedObject())->GetGlobalEnv(env->GetHostThread());
+        if (globalEnv.IsHole()) {
+            LOG_INLINE_DECISION(env, literal, jsPandaFile,
+                                "ArkSteed inline rejected: global environment is a hole");
+            return std::nullopt;
+        }
+
         uint32_t constantPoolMethodOffset = literal == nullptr ? 0 : literal->GetMethodId().GetOffset();
-        return TryPrepareInlineMethod(literal, jsPandaFile, methodPcStart, profileTypeInfo,
-                                      constantPoolMethodOffset, targetHandle, false, actualArgc,
-                                      inlinePrepProfileKey);
+        auto prepared = TryPrepareInlineMethod(literal, jsPandaFile, methodPcStart, profileTypeInfo,
+                                               constantPoolMethodOffset, targetHandle, false, actualArgc,
+                                               inlinePrepProfileKey, forConstruct);
+        if (prepared.has_value()) {
+            prepared->functionKind = functionKind;
+            if (forConstruct) {
+                uint32_t budgetLimit = env->GetJSOptions().GetCompilerArkSteedMaxConstructorInlineBytecodeSize();
+                if (*self->inlineConstructorBytecodeBudgetUsed_ + prepared->bytecodeSize > budgetLimit) {
+                    LOG_INLINE_DECISION(env, literal, jsPandaFile,
+                                        "ArkSteed inline rejected: constructor bytecode budget "
+                                        << *self->inlineConstructorBytecodeBudgetUsed_ << " + " << prepared->bytecodeSize);
+                    return std::nullopt;
+                }
+                prepared->forConstruct = true;
+                prepared->methodId = methodId;
+            }
+        }
+        return prepared;
+    }
+
+    std::optional<PreparedInlineCall> TryPrepareInlineCall(const CallFeedback &feedback, uint32_t actualArgc)
+    {
+        std::optional<uint32_t> callCount = feedback.isCompatibleClosure
+            ? std::nullopt : std::optional<uint32_t>(feedback.callCount);
+        return TryPrepareInlineTarget(feedback.target, actualArgc, callCount, false);
+    }
+
+    std::optional<PreparedInlineCall> TryPrepareInlineConstruct(const ArkSteedObjectRef &target, uint32_t actualArgc)
+    {
+        return TryPrepareInlineTarget(target, actualArgc, std::nullopt, true);
     }
 
     std::optional<PreparedInlineCall> TryPrepareLocalClosureInlineCall(
@@ -3879,7 +3837,11 @@ struct GraphBuilder::BytecodeVisitor {
         ASSERT(arguments.size() == actualArgc + FIXED_PARAM_VREG_COUNT);
 
         uint32_t callerBcOffset = self->preproc_->GetBytecodeOffset(currentBcIndex);
-        *InlineBudgetPool(prepared.bytecodeSize).first += prepared.bytecodeSize;
+        if (prepared.forConstruct) {
+            *self->inlineConstructorBytecodeBudgetUsed_ += prepared.bytecodeSize;
+        } else {
+            *InlineBudgetPool(prepared.bytecodeSize).first += prepared.bytecodeSize;
+        }
         auto *callerFrame = self->chunk_->New<ArkSteedInlinedCallerFrame>(
             self->preproc_->GetCompilationUnit(), frameState, TaggedActualArgc(),
             self->inlineActualArguments_, callerBcOffset,
@@ -3891,6 +3853,7 @@ struct GraphBuilder::BytecodeVisitor {
         childBuilder.inheritedCatchContext_ = catchContext;
         childBuilder.inlineBytecodeBudgetUsed_ = self->inlineBytecodeBudgetUsed_;
         childBuilder.inlineBytecodeBudgetUsedSmall_ = self->inlineBytecodeBudgetUsedSmall_;
+        childBuilder.inlineConstructorBytecodeBudgetUsed_ = self->inlineConstructorBytecodeBudgetUsed_;
         childBuilder.inlinePrepCache_ = self->inlinePrepCache_;
         // For inline sites nested inside this inlinee, the direct caller is the inlinee.
         childBuilder.inlineTraceCallerVertex_ = *inputs.begin();
@@ -3905,9 +3868,44 @@ struct GraphBuilder::BytecodeVisitor {
         if (!inlineResult.hasNormalReturn) {
             return nullptr;
         }
+        const ArkSteedCompilationUnit *callerUnit =
+            self->preproc_->GetCompilationUnit();
+        currentBlock->SetInlineOwnerUnit(callerUnit->IsTopLevel() ? nullptr
+                                                                  : callerUnit);
+        currentBlock->SetInlineCallerFrame(self->parentDeoptFrame_);
         compileInfoFacts_ = inlineResult.facts;
         self->compileInfoFacts_[blockInfo->rpoIndex] = compileInfoFacts_;
         return inlineResult.returnValue;
+    }
+
+    template <class InputRange = std::initializer_list<ValueVertex *>>
+    ValueVertex *BuildPreparedInlineConstruct(const PreparedInlineCall &prepared,
+                                              const InputRange &inputs,
+                                              uint32_t actualArgc)
+    {
+        ValueVertex *target = *std::begin(inputs);
+        if (prepared.methodId != 0) {
+            BuildMethodIdGuard(target, prepared.methodId);
+        }
+        ValueVertex *rawResult = BuildPreparedInlineCall(prepared, inputs, actualArgc);
+        if (rawResult == nullptr) {
+            return nullptr;
+        }
+        ValueVertex *receiver = *std::next(std::begin(inputs), CallBaseConstructorVertex::THIS_INDEX);
+        auto *result = CommonStubCallWithLazyDeopt(
+            {target, rawResult, receiver}, CommonStubID::ConstructorCheck);
+        if (result->HasLazyDeoptFrameState()) {
+            bool isBase = IsBaseInlineConstructor(prepared.functionKind);
+            auto continuation = isBase ? DeoptContinuationKind::BASE_CTOR : DeoptContinuationKind::DERIVED_CTOR;
+            auto *kindValue = self->graph_->GetTaggedConstant(EncodeDeoptContinuationKind(continuation));
+            result->AppendLazyDeoptFrameValue(static_cast<int32_t>(SpecVregIndex::DEOPT_CONTINUATION_KIND_INDEX),
+                                              kindValue, DeoptTranslationKind::TAGGED);
+            if (isBase) {
+                result->AppendLazyDeoptFrameValue(static_cast<int32_t>(SpecVregIndex::BASE_CONSTRUCTOR_THIS_INDEX),
+                                                  receiver, DeoptTranslationKind::TAGGED);
+            }
+        }
+        return result;
     }
 
     template <class ConstructorVertexT, class InputRange>
@@ -3940,7 +3938,57 @@ struct GraphBuilder::BytecodeVisitor {
     }
 
     template <class InputRange>
-    ValueVertex *BuildKnownNewObjRange(const InputRange &inputs, ValueVertex *newTarget, const KnownConstructPlan &plan)
+    ValueVertex *BuildPreparedInlineNewObj(const PreparedInlineCall &prepared, const InputRange &inputs,
+                                           ValueVertex *newTarget, ValueVertex *receiver)
+    {
+        uint32_t actualArgc = std::size(inputs) - 1U;
+        ChunkVector<ValueVertex *> callInputs(self->chunk_);
+        auto input = std::begin(inputs);
+        callInputs.emplace_back(*input++);
+        callInputs.emplace_back(newTarget);
+        callInputs.emplace_back(receiver);
+        callInputs.insert(callInputs.end(), input, std::end(inputs));
+        return BuildPreparedInlineConstruct(prepared, callInputs, actualArgc);
+    }
+
+    template <class InputRange>
+    ValueVertex *BuildNewObjBaseCall(const InputRange &inputs, ValueVertex *newTarget, ValueVertex *target,
+                                     const KnownConstructPlan &plan, const std::optional<PreparedInlineCall> &prepared)
+    {
+        ValueVertex *hclass = plan.GetHClass();
+        ValueVertex *receiver;
+        if (hclass != nullptr && plan.CanAllocateDirectly()) {
+            const uint32_t objectSize = plan.GetObjectSize();
+            auto *size = self->graph_->GetInt64Constant(static_cast<int64_t>(objectSize));
+            auto *allocation = AllocateInYoung(size, hclass);
+            receiver = self->NewVertex<InitializeEmptyObjectVertex>(compileInfoFacts_, currentBlock,
+                                                                    {allocation, hclass, size}, objectSize);
+        } else {
+            receiver = CommonStubCallWithLazyDeopt({target}, CommonStubID::FastNewThisObject);
+        }
+        if (prepared.has_value() && IsBaseInlineConstructor(prepared->functionKind)) {
+            return BuildPreparedInlineNewObj(prepared.value(), inputs, newTarget, receiver);
+        }
+        return BuildNewObjRangeCall<CallNewObjRangeBaseVertex>(
+            inputs, newTarget, receiver, plan.GetExpectedParameterCount(),
+            NewObjRangeCallInfo::CallStrategy::INLINE_DISPATCH);
+    }
+
+    template <class InputRange>
+    ValueVertex *BuildNewObjDerivedCall(const InputRange &inputs, ValueVertex *newTarget, const KnownConstructPlan &plan,
+                                        const std::optional<PreparedInlineCall> &prepared)
+    {
+        if (prepared.has_value() && prepared->functionKind == FunctionKind::DERIVED_CONSTRUCTOR) {
+            return BuildPreparedInlineNewObj(prepared.value(), inputs, newTarget, self->undefinedValue_);
+        }
+        return BuildNewObjRangeCall<CallNewObjRangeDerivedVertex>(
+            inputs, newTarget, self->undefinedValue_, plan.GetExpectedParameterCount(),
+            NewObjRangeCallInfo::CallStrategy::INLINE_DISPATCH);
+    }
+
+    template <class InputRange>
+    ValueVertex *BuildKnownNewObjRange(const InputRange &inputs, ValueVertex *newTarget, const KnownConstructPlan &plan,
+                                       const ConstructorFeedback &feedback)
     {
         ValueVertex *target = *std::begin(inputs);
         BuildEagerDeoptIfReferenceNotEqual(target, plan.GetExpectedTargetConstant());
@@ -3951,34 +3999,19 @@ struct GraphBuilder::BytecodeVisitor {
             BuildEagerDeoptIfReferenceNotEqual(actualHClass, hclass);
         }
 
-        // Receiver establishment + call for one arm. Entered with `currentBlock`
-        // = the block the body lands in.
-        auto buildBaseBody = [&]() -> ValueVertex * {
-            ValueVertex *receiver;
-            if (hclass != nullptr && plan.CanAllocateDirectly()) {
-                const uint32_t objectSize = plan.GetObjectSize();
-                auto *size = self->graph_->GetInt64Constant(static_cast<int64_t>(objectSize));
-                auto *allocation = AllocateInYoung(size, hclass);
-                receiver = self->NewVertex<InitializeEmptyObjectVertex>(compileInfoFacts_, currentBlock,
-                                                                        {allocation, hclass, size}, objectSize);
-            } else {
-                receiver = CommonStubCallWithLazyDeopt({target}, CommonStubID::FastNewThisObject);
-            }
-            return BuildNewObjRangeCall<CallNewObjRangeBaseVertex>(
-                inputs, newTarget, receiver, plan.GetExpectedParameterCount(),
-                NewObjRangeCallInfo::CallStrategy::INLINE_DISPATCH);
-        };
-        auto buildDerivedBody = [&]() -> ValueVertex * {
-            return BuildNewObjRangeCall<CallNewObjRangeDerivedVertex>(
-                inputs, newTarget, self->undefinedValue_, plan.GetExpectedParameterCount(),
-                NewObjRangeCallInfo::CallStrategy::INLINE_DISPATCH);
-        };
+        uint32_t actualArgc = std::size(inputs) - 1U;
+        std::optional<PreparedInlineCall> prepared;
+        if (actualArgc <= self->preproc_->GetEnv()->GetJSOptions().GetCompilerArkSteedMaxInlineActualArgs()) {
+            prepared = TryPrepareInlineConstruct(feedback.target, actualArgc);
+        }
 
         if (plan.GetKnownIsBase().has_value()) {
             // The identity deopt above pins the kind with the target, so only the
             // profiled kind's arm is built — the call result is the bytecode
             // result and the block stays open.
-            return *plan.GetKnownIsBase() ? buildBaseBody() : buildDerivedBody();
+            return *plan.GetKnownIsBase()
+                ? BuildNewObjBaseCall(inputs, newTarget, target, plan, prepared)
+                : BuildNewObjDerivedCall(inputs, newTarget, plan, prepared);
         }
 
         BB *baseBlock = self->NewBlock();
@@ -3990,18 +4023,29 @@ struct GraphBuilder::BytecodeVisitor {
 
         currentBlock = baseBlock;
         compileInfoFacts_ = entryFacts->Clone();
-        auto *baseCall = buildBaseBody();
-        CompileInfoFacts *mergedFacts = compileInfoFacts_;
-        self->FinishBlockWithJump(currentBlock, doneBlock);
+        ValueVertex *baseCall = BuildNewObjBaseCall(inputs, newTarget, target, plan, prepared);
+        CompileInfoFacts *baseFacts = compileInfoFacts_;
+        if (baseCall != nullptr) {
+            self->FinishBlockWithJump(currentBlock, doneBlock);
+        }
 
         currentBlock = derivedBlock;
         compileInfoFacts_ = entryFacts->Clone();
-        auto *derivedCall = buildDerivedBody();
-        mergedFacts->Merge(*compileInfoFacts_);
-        self->FinishBlockWithJump(currentBlock, doneBlock);
+        ValueVertex *derivedCall = BuildNewObjDerivedCall(inputs, newTarget, plan, prepared);
+        if (derivedCall != nullptr) {
+            self->FinishBlockWithJump(currentBlock, doneBlock);
+        }
 
         currentBlock = doneBlock;
-        compileInfoFacts_ = mergedFacts;
+        if (baseCall == nullptr) {
+            return derivedCall;
+        }
+        if (derivedCall == nullptr) {
+            compileInfoFacts_ = baseFacts;
+            return baseCall;
+        }
+        baseFacts->Merge(*compileInfoFacts_);
+        compileInfoFacts_ = baseFacts;
         return self->NewPhiVertexWith(currentBlock, {baseCall, derivedCall}, self->AccIndex());
     }
 
@@ -4730,219 +4774,269 @@ struct GraphBuilder::BytecodeVisitor {
         RuntimeCallToAccWithLazyDeopt({func, thisArg, argsArray}, RTSTUB_ID(CallSpread));
     }
 
-    // Fast/slow path structure for SUPERCALLTHISRANGE, mirroring the
-    // interpreter fast path: the super-constructor checks admit exactly a
-    // constructor JSFunction as the super, BranchIfBase splits the fast path
-    // (a monomorphic slot folds the split into the profiled kind's single arm),
-    // and the newTarget admission runs only on the base arm — its conditions
-    // are the FastSuperAllocateThis stub's inline-path prerequisites, while the derived arm forwards
-    // newTarget to the callee as an opaque value it never dereferences (the
-    // interpreter's derived arm likewise admits any non-undefined newTarget).
-    // Guard-shape failures branch directly into the slow block — no stub call
-    // before the guards and no sentinel result inspection; a monomorphic call
-    // slot folds the super-ctor checks into one identity eager deopt instead. thisObj for the fast path is produced per
-    // arm: a base super constructor allocates through the shared inline young-allocation pipeline (AllocateSuperThis,
-    // with the interpreter fill ladder inlined), a derived or builtin one gets undefined (no
-    // allocation, callee re-initializes this). The fast path enters the super through a CallConstructor vertex (steed
-    // frame convention with the caller's newTarget), never through the AOT-era trampolines, which enter steed code with
-    // the wrong calling convention. Whether the super has compiled code is left to the codegen
-    // (JumpIfFunctionNotCompiled), which routes uncompiled supers to a generic [[Construct]] fallback instead of a
-    // second IR guard. The tagged argument array is only built on the slow path.
-    ValueVertex *BuildSuperCallWithFastPath(const BytecodeInfo *bcInfo, ValueVertex *func,
-                                            ValueVertex *newTarget, uint32_t argc)
-    {
-        // The super ctor is the current function's [[Prototype]]. `func` is the executing
-        // JSFunction (frame a0), so the GetPrototype stub's TypeError branches (non-heap-object,
-        // non-EcmaObject) and its JSProxy branch are statically dead here; what remains is the
-        // two-load tail (LoadHClass + hclass->prototype), emitted inline below. The loaded value
-        // can still be anything (null / object / proxy / function); the guards below route every
-        // non-constructor outcome to the slow path (which re-derives everything from `func`),
-        // while base and derived constructors both stay on the fast path — BranchIfBase only
-        // selects how `this` is established.
-        ValueVertex *superCtor = self->NewVertex<LoadPrototypeFromNonJSProxyObjectVertex>(currentBlock, {func});
-        ValueVertex *undefined = self->undefinedValue_;
+    // Shared fast/slow path for SUPERCALLTHISRANGE and SUPERCALLARROWRANGE.
+    // A monomorphic call slot folds the super-constructor checks into an identity
+    // eager deopt and the constructor-kind split into the profiled arm. A supported
+    // monomorphic target is inlined with the receiver semantics of that arm.
+    // Other targets use CallBaseConstructor or CallDerivedConstructor, whose
+    // codegen keeps uncompiled supers on the generic [[Construct]] fallback.
+    // Missing newTarget on the arrow form and all guard-shape failures use the
+    // slow block; only that block builds the tagged argument array.
+    struct SuperCallPlan {
+        SuperCallPlan(const BytecodeInfo *info, ValueVertex *function, ValueVertex *target, ValueVertex *ctor,
+                      uint32_t actualArgc, CompileInfoFacts *facts)
+            : bcInfo(info), func(function), newTarget(target), superCtor(ctor), argc(actualArgc), entryFacts(facts)
+        {}
 
-        // Monomorphic super-ctor speculation: the interpreter records the call slot only
-        // after its own constructor checks, so a JSFunction in the slot is a constructor
-        // by construction, and one identity deopt subsumes the heap-object and
-        // JS-constructor guards below. A miss means func's [[Prototype]] changed after
-        // profiling; the slot is rewritten on the next execution, so a recompile adapts.
+        const BytecodeInfo *bcInfo;
+        ValueVertex *func;
+        ValueVertex *newTarget;
+        ValueVertex *superCtor;
         ValueVertex *expectedSuperCtor = nullptr;
-        CallFeedback feedback = self->pgoContext_.ReadCallFeedback(bcInfo);
-        if (feedback.IsMonomorphicJSFunction()) {
-            expectedSuperCtor = GetHeapConstant(feedback.target);
-        }
-        // The identity deopt below pins the runtime super ctor to feedback.target, whose
-        // Method's formal argc and constructor kind are immutable, so the steed frame
-        // contract (slot reservation, argc, undefined fill) folds to compile-time constants
-        // and the base/derived split folds to its one live arm.
+        uint32_t argc;
         std::optional<uint32_t> knownExpectedArgc;
         std::optional<bool> knownIsBase;
-        if (expectedSuperCtor != nullptr) {
+        std::optional<PreparedInlineCall> prepared;
+        CompileInfoFacts *entryFacts;
+    };
+
+    ValueVertex *BuildSuperCallWithFastPath(const BytecodeInfo *bcInfo, ValueVertex *func,
+                                            ValueVertex *newTarget, uint32_t argc, bool requireNewTarget = false)
+    {
+        // `func` is the executing JSFunction: this form reads frame a0, while the arrow form's frontend emits
+        // GetFunctionObject to load the mandatory func parameter. Only the two-load prototype tail is needed here.
+        ValueVertex *superCtor = self->NewVertex<LoadPrototypeFromNonJSProxyObjectVertex>(currentBlock, {func});
+        SuperCallPlan plan(bcInfo, func, newTarget, superCtor, argc, compileInfoFacts_);
+
+        // A monomorphic slot subsumes the constructor guards with one identity deopt.
+        CallFeedback feedback = self->pgoContext_.ReadCallFeedback(bcInfo);
+        if (feedback.IsMonomorphicJSFunction()) {
+            plan.expectedSuperCtor = GetHeapConstant(feedback.target);
+        }
+        if (plan.expectedSuperCtor != nullptr) {
             ArkSteedHeapBroker::KnownConstructInfo constructInfo;
             if (self->pgoContext_.GetBroker()->TryGetKnownConstructInfo(feedback.target, &constructInfo)) {
-                knownExpectedArgc = constructInfo.formalArgc;
+                plan.knownExpectedArgc = constructInfo.formalArgc;
             }
-            knownIsBase = self->pgoContext_.GetBroker()->TryGetIsBaseConstructor(feedback.target);
+            plan.knownIsBase = self->pgoContext_.GetBroker()->TryGetIsBaseConstructor(feedback.target);
+            if (argc <= self->preproc_->GetEnv()->GetJSOptions().GetCompilerArkSteedMaxInlineActualArgs()) {
+                plan.prepared = TryPrepareInlineConstruct(feedback.target, argc);
+            }
         }
 
-        // Base call body: inline this allocation, steed call. Entered with
-        // `currentBlock` = the block the body lands in.
-        auto buildBaseCall = [&](BB *successor) -> ValueVertex * {
-            auto *allocatedThis = AllocateSuperThis(newTarget);
-            // The base arm owns the only live undefined path (a base super's explicit
-            // `return undefined`), so its result check falls back to allocatedThis and
-            // the deopt bundle carries the bound-this spill slot as a pseudo vreg.
-            ChunkVector<ValueVertex *> baseCallInputs(self->chunk_);
-            baseCallInputs.push_back(superCtor);
-            baseCallInputs.push_back(newTarget);
-            baseCallInputs.push_back(allocatedThis);
-            for (uint32_t idx = 0; idx < argc; idx++) {
-                baseCallInputs.push_back(LoadRegister(bcInfo, static_cast<int>(idx)));
-            }
-            auto *baseCall = self->NewVertex<CallBaseConstructorVertex>(
-                compileInfoFacts_, currentBlock, baseCallInputs, argc, knownExpectedArgc);
-            UpdateCatchBlockData(baseCall);
-            LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, baseCall);
-            self->FinishBlockWithJump(currentBlock, successor);
-            return baseCall;
-        };
+        if (plan.knownIsBase.has_value()) {
+            return BuildKnownSuperCall(plan);
+        }
+        return BuildSplitSuperCall(plan, requireNewTarget);
+    }
 
-        // Base arm: newTarget admission, inline this allocation, steed call.
-        // Entered with `currentBlock` = the arm's entry block.
-        auto buildBaseArm = [&](BB *slowBlock, BB *successor) -> ValueVertex * {
-            BB *baseBlock = self->NewBlock();
-            BB *slowNotReadyBlock = self->NewBlock();
-            // Base-arm-only newTarget admission: newTarget must be a JSFunction whose
-            // proto-or-hclass slot holds a JSHClass describing JS_OBJECT instances —
-            // the conditions the inline allocation path below relies on, matching
-            // the FastSuperAllocateThis stub's inline-path admission. The derived arm skips this guard:
-            // it forwards newTarget to the callee untouched. An undefined newTarget (derived
-            // constructor invoked without new) never reaches the guard's dereference: class
-            // constructor frames are only entered through [[Construct]].
-            self->FinishBlockWithBranch<BranchIfNewTargetHClassReadyVertex>(
-                currentBlock, {newTarget}, baseBlock, slowNotReadyBlock);
+    ValueVertex *BuildKnownSuperCall(SuperCallPlan &plan)
+    {
+        // The identity deopt also pins the constructor kind, so only its live arm is needed.
+        BuildEagerDeoptIfReferenceNotEqual(plan.superCtor, plan.expectedSuperCtor);
+        plan.entryFacts = compileInfoFacts_;
+        if (!plan.knownIsBase.value()) {
+            return BuildSuperDerivedArm(plan, std::nullopt);
+        }
 
-            currentBlock = slowNotReadyBlock;
-            slowNotReadyBlock->SetDeferred(true);
-            self->FinishBlockWithJump(slowNotReadyBlock, slowBlock);
-
-            currentBlock = baseBlock;
-            return buildBaseCall(successor);
-        };
-
-        // Derived arm: undefined placeholder this, steed call. Entered with
-        // `currentBlock` = the arm's entry block; no successor leaves the block open.
-        auto buildDerivedArm = [&](std::optional<BB *> successor) -> ValueVertex * {
-            // The derived arm passes an undefined placeholder this (the callee's own
-            // super chain re-initializes it) and its result check only tests for an
-            // object: the frontend guarantees a derived constructor never returns
-            // undefined across the call boundary, so non-objects can only be raw
-            // primitives and throw.
-            ChunkVector<ValueVertex *> derivedCallInputs(self->chunk_);
-            derivedCallInputs.push_back(superCtor);
-            derivedCallInputs.push_back(newTarget);
-            derivedCallInputs.push_back(undefined);
-            for (uint32_t idx = 0; idx < argc; idx++) {
-                derivedCallInputs.push_back(LoadRegister(bcInfo, static_cast<int>(idx)));
-            }
-            auto *derivedCall = self->NewVertex<CallDerivedConstructorVertex>(
-                compileInfoFacts_, currentBlock, derivedCallInputs, argc, knownExpectedArgc);
-            UpdateCatchBlockData(derivedCall);
-            LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, derivedCall);
-            if (successor.has_value()) {
-                self->FinishBlockWithJump(currentBlock, *successor);
-            }
-            return derivedCall;
-        };
-
-        // Deferred OptSuperCall fallback: re-derives everything from `func`.
-        auto buildSlowArm = [&](BB *slowBlock, BB *mergeBlock) -> ValueVertex * {
-            currentBlock = slowBlock;
-            slowBlock->SetDeferred(true);
-            ValueVertex *taggedArgc = TaggedConstantFromInt32(static_cast<int>(argc));
-            ValueVertex *taggedArray = TaggedArrayFromValueIn(bcInfo, taggedArgc, argc);
-            ValueVertex *slowResult = RuntimeCallWithLazyDeopt(
-                {func, newTarget, taggedArray, taggedArgc}, RTSTUB_ID(OptSuperCall));
-            self->FinishBlockWithJump(slowBlock, mergeBlock);
+        BB *slowBlock = self->NewBlock();
+        ValueVertex *fastResult = BuildSuperBaseArm(plan, slowBlock, std::nullopt);
+        CompileInfoFacts *fastFacts = compileInfoFacts_;
+        BB *mergeBlock = nullptr;
+        if (fastResult != nullptr) {
+            mergeBlock = self->NewBlock();
+            self->FinishBlockWithJump(currentBlock, mergeBlock);
+        }
+        auto successor = mergeBlock == nullptr ? std::nullopt : std::optional<BB *>(mergeBlock);
+        ValueVertex *slowResult = BuildSuperSlowArm(plan, slowBlock, successor);
+        if (fastResult == nullptr) {
             return slowResult;
-        };
-
-        if (knownIsBase.has_value()) {
-            // The speculation form also folds the base/derived split: the identity
-            // deopt pins the kind, so only the profiled kind's arm is built.
-            BuildEagerDeoptIfReferenceNotEqual(superCtor, expectedSuperCtor);
-            if (*knownIsBase) {
-                // Admission failures still run the OptSuperCall fallback, so the
-                // fast result merges with the slow arm.
-                BB *slowBlock = self->NewBlock();
-                BB *mergeBlock = self->NewBlock();
-                ValueVertex *fastResult = buildBaseArm(slowBlock, mergeBlock);
-                ValueVertex *slowResult = buildSlowArm(slowBlock, mergeBlock);
-
-                currentBlock = mergeBlock;
-                return self->NewPhiVertexWith(currentBlock, {fastResult, slowResult}, self->AccIndex());
-            }
-            // No guard remains after the identity deopt (the derived arm forwards
-            // newTarget untouched), so the slow arm would be unreachable — the call
-            // result is the bytecode result and the block stays open.
-            return buildDerivedArm(std::nullopt);
         }
+        return MergeSuperCallResults(mergeBlock, fastResult, slowResult, fastFacts);
+    }
 
+    ValueVertex *BuildSplitSuperCall(SuperCallPlan &plan, bool requireNewTarget)
+    {
         BB *baseSplitBlock = self->NewBlock();
         BB *baseAdmissionBlock = self->NewBlock();
         BB *derivedBlock = self->NewBlock();
         BB *fastBlock = self->NewBlock();
         BB *slowBlock = self->NewBlock();
         BB *mergeBlock = self->NewBlock();
-        // Each guard failure edge needs its own trampoline block: a conditional
-        // branch must not land directly on the multi-predecessor slow block
-        // (a critical edge). Conditional edges carry no per-edge gap moves in
-        // codegen, and the register allocator only initializes/merges a shared
-        // target through unconditional jumps.
-
-        if (expectedSuperCtor != nullptr) {
-            BuildEagerDeoptIfReferenceNotEqual(superCtor, expectedSuperCtor);
-            self->FinishBlockWithJump(currentBlock, baseSplitBlock);
-        } else {
-            BB *checkCtorBlock = self->NewBlock();
-            BB *slowNotHeapObjectBlock = self->NewBlock();
-            BB *slowNotJSConstructorBlock = self->NewBlock();
-            // Super-ctor guards (fail fast into the slow block; superCtor stays untouched
-            // for the slow path to re-examine): a heap object first — the constructor
-            // JSFunction guard dereferences the hclass — then a constructor JSFunction.
-            self->FinishBlockWithBranch<BranchIfTaggedHeapObjectVertex>(
-                currentBlock, {superCtor}, checkCtorBlock, slowNotHeapObjectBlock);
-
-            currentBlock = checkCtorBlock;
-            self->FinishBlockWithBranch<BranchIfJSConstructorFunctionVertex>(
-                currentBlock, {superCtor}, baseSplitBlock, slowNotJSConstructorBlock);
-
-            for (BB *slowEntry : {slowNotHeapObjectBlock, slowNotJSConstructorBlock}) {
-                currentBlock = slowEntry;
-                slowEntry->SetDeferred(true);
-                self->FinishBlockWithJump(slowEntry, slowBlock);
-            }
-        }
+        // Guard failures enter the multi-predecessor slow block through separate trampolines.
+        BuildSuperCallAdmission(plan, requireNewTarget, baseSplitBlock, slowBlock);
 
         currentBlock = baseSplitBlock;
+        plan.entryFacts = compileInfoFacts_;
         self->FinishBlockWithBranch<BranchIfBaseVertex>(
-            currentBlock, {superCtor}, baseAdmissionBlock, derivedBlock);
+            currentBlock, {plan.superCtor}, baseAdmissionBlock, derivedBlock);
 
         currentBlock = baseAdmissionBlock;
-        ValueVertex *baseCall = buildBaseArm(slowBlock, fastBlock);
-
+        ValueVertex *baseCall = BuildSuperBaseArm(plan, slowBlock, fastBlock);
+        CompileInfoFacts *baseFacts = compileInfoFacts_;
         currentBlock = derivedBlock;
-        ValueVertex *derivedCall = buildDerivedArm(fastBlock);
+        ValueVertex *derivedCall = BuildSuperDerivedArm(plan, fastBlock);
+        return BuildSplitSuperCallResult(plan, baseCall, baseFacts, derivedCall, fastBlock, slowBlock, mergeBlock);
+    }
 
-        currentBlock = fastBlock;
-        ValueVertex *fastResult = self->NewPhiVertexWith(currentBlock, {baseCall, derivedCall},
-                                                         self->AccIndex());
-        self->FinishBlockWithJump(fastBlock, mergeBlock);
+    void BuildSuperCallAdmission(const SuperCallPlan &plan, bool requireNewTarget, BB *baseSplitBlock, BB *slowBlock)
+    {
+        if (requireNewTarget) {
+            BB *hasNewTargetBlock = self->NewBlock();
+            BB *missingNewTargetBlock = self->NewBlock();
+            self->FinishBlockWithBranch<BranchIfReferenceEqualVertex>(
+                currentBlock, {plan.newTarget, self->undefinedValue_}, missingNewTargetBlock, hasNewTargetBlock);
+            currentBlock = missingNewTargetBlock;
+            currentBlock->SetDeferred(true);
+            self->FinishBlockWithJump(currentBlock, slowBlock);
+            currentBlock = hasNewTargetBlock;
+        }
+        if (plan.expectedSuperCtor != nullptr) {
+            BuildEagerDeoptIfReferenceNotEqual(plan.superCtor, plan.expectedSuperCtor);
+            self->FinishBlockWithJump(currentBlock, baseSplitBlock);
+            return;
+        }
 
-        ValueVertex *slowResult = buildSlowArm(slowBlock, mergeBlock);
+        BB *checkCtorBlock = self->NewBlock();
+        BB *slowNotHeapObjectBlock = self->NewBlock();
+        BB *slowNotJSConstructorBlock = self->NewBlock();
+        self->FinishBlockWithBranch<BranchIfTaggedHeapObjectVertex>(
+            currentBlock, {plan.superCtor}, checkCtorBlock, slowNotHeapObjectBlock);
+        currentBlock = checkCtorBlock;
+        self->FinishBlockWithBranch<BranchIfJSConstructorFunctionVertex>(
+            currentBlock, {plan.superCtor}, baseSplitBlock, slowNotJSConstructorBlock);
+        for (BB *slowEntry : {slowNotHeapObjectBlock, slowNotJSConstructorBlock}) {
+            currentBlock = slowEntry;
+            slowEntry->SetDeferred(true);
+            self->FinishBlockWithJump(slowEntry, slowBlock);
+        }
+    }
 
+    ValueVertex *BuildSuperBaseArm(const SuperCallPlan &plan, BB *slowBlock, std::optional<BB *> successor)
+    {
+        BB *baseBlock = self->NewBlock();
+        BB *slowNotReadyBlock = self->NewBlock();
+        // Only the base arm requires newTarget to admit inline allocation.
+        self->FinishBlockWithBranch<BranchIfNewTargetHClassReadyVertex>(
+            currentBlock, {plan.newTarget}, baseBlock, slowNotReadyBlock);
+        currentBlock = slowNotReadyBlock;
+        slowNotReadyBlock->SetDeferred(true);
+        self->FinishBlockWithJump(slowNotReadyBlock, slowBlock);
+        currentBlock = baseBlock;
+        return BuildSuperBaseCall(plan, successor);
+    }
+
+    ValueVertex *BuildSuperBaseCall(const SuperCallPlan &plan, std::optional<BB *> successor)
+    {
+        compileInfoFacts_ = plan.entryFacts->Clone();
+        auto *allocatedThis = AllocateSuperThis(plan.newTarget);
+        // A base super's undefined result falls back to allocatedThis, also in the deopt continuation.
+        ChunkVector<ValueVertex *> callInputs(self->chunk_);
+        callInputs.push_back(plan.superCtor);
+        callInputs.push_back(plan.newTarget);
+        callInputs.push_back(allocatedThis);
+        for (uint32_t idx = 0; idx < plan.argc; idx++) {
+            callInputs.push_back(LoadRegister(plan.bcInfo, static_cast<int>(idx)));
+        }
+        ValueVertex *baseCall = nullptr;
+        if (plan.prepared.has_value() && IsBaseInlineConstructor(plan.prepared->functionKind)) {
+            baseCall = BuildPreparedInlineConstruct(plan.prepared.value(), callInputs, plan.argc);
+        } else {
+            auto *call = self->NewVertex<CallBaseConstructorVertex>(
+                compileInfoFacts_, currentBlock, callInputs, plan.argc, plan.knownExpectedArgc);
+            UpdateCatchBlockData(call);
+            LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
+            baseCall = call;
+        }
+        if (baseCall != nullptr && successor.has_value()) {
+            self->FinishBlockWithJump(currentBlock, *successor);
+        }
+        return baseCall;
+    }
+
+    ValueVertex *BuildSuperDerivedArm(const SuperCallPlan &plan, std::optional<BB *> successor)
+    {
+        compileInfoFacts_ = plan.entryFacts->Clone();
+        // A derived constructor re-initializes this itself and never returns undefined across the call boundary.
+        ChunkVector<ValueVertex *> callInputs(self->chunk_);
+        callInputs.push_back(plan.superCtor);
+        callInputs.push_back(plan.newTarget);
+        callInputs.push_back(self->undefinedValue_);
+        for (uint32_t idx = 0; idx < plan.argc; idx++) {
+            callInputs.push_back(LoadRegister(plan.bcInfo, static_cast<int>(idx)));
+        }
+        ValueVertex *derivedCall = nullptr;
+        if (plan.prepared.has_value() && plan.prepared->functionKind == FunctionKind::DERIVED_CONSTRUCTOR) {
+            derivedCall = BuildPreparedInlineConstruct(plan.prepared.value(), callInputs, plan.argc);
+        } else {
+            auto *call = self->NewVertex<CallDerivedConstructorVertex>(
+                compileInfoFacts_, currentBlock, callInputs, plan.argc, plan.knownExpectedArgc);
+            UpdateCatchBlockData(call);
+            LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
+            derivedCall = call;
+        }
+        if (derivedCall != nullptr && successor.has_value()) {
+            self->FinishBlockWithJump(currentBlock, *successor);
+        }
+        return derivedCall;
+    }
+
+    ValueVertex *BuildSuperSlowArm(const SuperCallPlan &plan, BB *slowBlock, std::optional<BB *> successor)
+    {
+        currentBlock = slowBlock;
+        compileInfoFacts_ = plan.entryFacts->Clone();
+        slowBlock->SetDeferred(true);
+        ValueVertex *taggedArgc = TaggedConstantFromInt32(static_cast<int>(plan.argc));
+        ValueVertex *taggedArray = TaggedArrayFromValueIn(plan.bcInfo, taggedArgc, plan.argc);
+        ValueVertex *slowResult = RuntimeCallWithLazyDeopt(
+            {plan.func, plan.newTarget, taggedArray, taggedArgc}, RTSTUB_ID(OptSuperCall));
+        if (successor.has_value()) {
+            self->FinishBlockWithJump(slowBlock, *successor);
+        }
+        return slowResult;
+    }
+
+    ValueVertex *BuildSplitSuperCallResult(const SuperCallPlan &plan, ValueVertex *baseCall,
+                                           CompileInfoFacts *baseFacts, ValueVertex *derivedCall, BB *fastBlock,
+                                           BB *slowBlock, BB *mergeBlock)
+    {
+        CompileInfoFacts *fastFacts = nullptr;
+        ValueVertex *fastResult = nullptr;
+        if (baseCall != nullptr) {
+            fastFacts = baseFacts;
+            fastResult = baseCall;
+        }
+        if (derivedCall != nullptr) {
+            if (fastResult == nullptr) {
+                fastFacts = compileInfoFacts_;
+            } else {
+                fastFacts->Merge(*compileInfoFacts_);
+            }
+            fastResult = derivedCall;
+        }
+        if (fastResult != nullptr) {
+            currentBlock = fastBlock;
+            compileInfoFacts_ = fastFacts;
+            if (baseCall != nullptr && derivedCall != nullptr) {
+                fastResult = self->NewPhiVertexWith(currentBlock, {baseCall, derivedCall}, self->AccIndex());
+            }
+            self->FinishBlockWithJump(fastBlock, mergeBlock);
+        }
+
+        auto successor = fastResult == nullptr ? std::nullopt : std::optional<BB *>(mergeBlock);
+        ValueVertex *slowResult = BuildSuperSlowArm(plan, slowBlock, successor);
+        if (fastResult == nullptr) {
+            return slowResult;
+        }
+        return MergeSuperCallResults(mergeBlock, fastResult, slowResult, fastFacts);
+    }
+
+    ValueVertex *MergeSuperCallResults(BB *mergeBlock, ValueVertex *fastResult, ValueVertex *slowResult,
+                                       CompileInfoFacts *fastFacts)
+    {
+        fastFacts->Merge(*compileInfoFacts_);
         currentBlock = mergeBlock;
+        compileInfoFacts_ = fastFacts;
         return self->NewPhiVertexWith(currentBlock, {fastResult, slowResult}, self->AccIndex());
     }
 
@@ -5166,7 +5260,10 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *thisFunc = LoadParam(CALL_TARGET_PARAM_INDEX);
         ValueVertex *newTarget = LoadParam(NEW_TARGET_PARAM_INDEX);
 
-        frameState.SetAcc(BuildSuperCallWithFastPath(bcInfo, thisFunc, newTarget, inputSize));
+        ValueVertex *result = BuildSuperCallWithFastPath(bcInfo, thisFunc, newTarget, inputSize);
+        if (result != nullptr) {
+            frameState.SetAcc(result);
+        }
     }
 
     void LowerSuperCallArrowRange(const BytecodeInfo *bcInfo)
@@ -5174,10 +5271,10 @@ struct GraphBuilder::BytecodeVisitor {
         uint32_t argc = bcInfo->inputs.size();
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *newTarget = LoadParam(NEW_TARGET_PARAM_INDEX);
-        ValueVertex *taggedArgc = TaggedConstantFromInt32(static_cast<int>(argc));
-        ValueVertex *taggedArray = TaggedArrayFromValueIn(bcInfo, taggedArgc, argc);
-
-        RuntimeCallToAccWithLazyDeopt({func, newTarget, taggedArray, taggedArgc}, RTSTUB_ID(OptSuperCall));
+        ValueVertex *result = BuildSuperCallWithFastPath(bcInfo, func, newTarget, argc, true);
+        if (result != nullptr) {
+            frameState.SetAcc(result);
+        }
     }
 
     void LowerSuperCallSpread(const BytecodeInfo *bcInfo)
@@ -5192,7 +5289,18 @@ struct GraphBuilder::BytecodeVisitor {
     {
         ValueVertex *func = LoadRegister(bcInfo, 0);
         ValueVertex *newTarget = LoadParam(NEW_TARGET_PARAM_INDEX);
-
+        if (!self->preproc_->GetCompilationUnit()->IsTopLevel()) {
+            // OptSuperCallForwardAllArgs reads arguments from the physical frame, which belongs to the caller
+            // rather than the inlinee. Pass the inlinee's actual arguments through an explicit array instead.
+            uint32_t actualArgc = static_cast<uint32_t>(self->inlineActualArguments_.size());
+            ValueVertex *taggedArgc = TaggedConstantFromInt32(static_cast<int>(actualArgc));
+            ValueVertex *argsArray = RuntimeCallWithLazyDeopt({taggedArgc}, RTSTUB_ID(NewTaggedArray));
+            for (uint32_t index = 0; index < actualArgc; ++index) {
+                SetValueToTaggedArray(argsArray, index, self->inlineActualArguments_[index]);
+            }
+            RuntimeCallToAccWithLazyDeopt({func, newTarget, argsArray, taggedArgc}, RTSTUB_ID(OptSuperCall));
+            return;
+        }
         frameState.SetAcc(BuildSuperCallForwardAllArgsWithFastPath(bcInfo, func, newTarget));
     }
 
@@ -5225,7 +5333,10 @@ struct GraphBuilder::BytecodeVisitor {
         if (self->IsLazyDeoptEnabled()) {
             auto plan = TryCreateProfiledKnownConstructPlan(feedback);
             if (plan.has_value()) {
-                frameState.SetAcc(BuildKnownNewObjRange(args, args.front(), plan.value()));
+                ValueVertex *result = BuildKnownNewObjRange(args, args.front(), plan.value(), feedback);
+                if (result != nullptr) {
+                    frameState.SetAcc(result);
+                }
                 return;
             }
             frameState.SetAcc(BuildDynamicNewObjRange(args, args.front()));

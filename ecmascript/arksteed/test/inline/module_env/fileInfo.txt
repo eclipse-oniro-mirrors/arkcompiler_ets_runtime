@@ -1,0 +1,3 @@
+./dep.js;dep;esm;xxx;yyy
+./helper.js;helper;esm;xxx;yyy
+./module_env.js;module_env;esm;xxx;yyy

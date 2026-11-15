@@ -34,7 +34,7 @@
 //! COUNT_GE LoadTaggedElement 3
 //! METHOD loopMutateArray
 //! HAS StoreTaggedElement
-//! COUNT_GE LoadInt32Field 2
+//! COUNT_GE LoadInt32Field 1
 
 function exactTransitionFacts(holder, arr, i, value) {
     const before = holder.value;

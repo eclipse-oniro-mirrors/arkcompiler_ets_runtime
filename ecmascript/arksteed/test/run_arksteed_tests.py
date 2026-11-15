@@ -118,6 +118,7 @@ LIB_PATH_ENV_VAR = "DYLD_LIBRARY_PATH" if IS_MACOS else "LD_LIBRARY_PATH"
 BASE_ARGS = [
     "--compiler-enable-jit=true",
     "--compiler-enable-litecg=true",
+    "--compiler-arksteed-enable-inline=false",
     "--enable-force-gc=false",
     "--open-ark-tools=true",
 ]
@@ -151,9 +152,10 @@ CRASH_RETURN_CODES = set(range(128, 128 + 32))
 # `======== ArkSteedCompilerTask: Starts compiling: <name> ========`
 # (see ArkSteedCompilerTask::DebugLogOnCompilationStart). The name may be
 # empty for anonymous functions. Counts for a method are aggregated over all
-# of its compilations.
+# of its compilations. The marker can follow program output on the same line
+# when compiler and JS threads write stdout concurrently.
 COMPILE_START_RE = re.compile(
-    r"^\[compiler\] ======== ArkSteedCompilerTask: Starts compiling: ?(\S*) ========",
+    r"\[compiler\] ======== ArkSteedCompilerTask: Starts compiling: ?(\S*) ========",
     re.MULTILINE,
 )
 # The execution marker emitted by the E1 infrastructure: the stub logs
@@ -1496,8 +1498,37 @@ def _parse_annotation_lines(
 # ---------------------------------------------------------------------------
 
 
+def compile_file_info(file_info: Path, abc_path: Path, cfg: BuildConfig) -> Tuple[bool, str]:
+    """Compile a module described by fileInfo.txt."""
+    cmd = [
+        str(cfg.es2abc),
+        "--module",
+        "--merge-abc",
+        f"@{file_info}",
+        "--output",
+        str(abc_path),
+    ]
+    try:
+        result = subprocess.run(
+            cmd, cwd=file_info.parent, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=COMPILE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "es2abc timed out"
+    except OSError as e:
+        return False, f"failed to run es2abc: {e}"
+    if result.returncode != 0:
+        tail = "\n".join((result.stderr or result.stdout or "").splitlines()[-15:])
+        return False, f"es2abc exited with {result.returncode}:\n{tail}"
+    return True, ""
+
+
 def compile_case(case: TestCase, abc_path: Path, cfg: BuildConfig) -> Tuple[bool, str]:
     """Compile the source(s) to abc with es2abc in the case's COMPILE_MODE."""
+
+    file_info = case.source.parent / "fileInfo.txt"
+    if file_info.is_file():
+        return compile_file_info(file_info, abc_path, cfg)
 
     # Single-file cases use --merge-abc (self-imports resolve into the one
     # merged record). Multi-file cases compile every source as its own module

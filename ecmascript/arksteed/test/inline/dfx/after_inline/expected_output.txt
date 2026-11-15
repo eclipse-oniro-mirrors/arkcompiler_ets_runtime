@@ -1,0 +1,2 @@
+afterInline:30|func_main_0:56
+PASS

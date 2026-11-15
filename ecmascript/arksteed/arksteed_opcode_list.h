@@ -119,6 +119,7 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(I64Add)                                   \
     V(I64Sub)                                   \
     V(I64ShiftLeft)                             \
+    V(I64ShiftRightLogical)                     \
     V(I64BitwiseBinary)                         \
     V(CheckedNonNegativeI32ToTaggedInt)         \
     V(I32BNot)                                  \

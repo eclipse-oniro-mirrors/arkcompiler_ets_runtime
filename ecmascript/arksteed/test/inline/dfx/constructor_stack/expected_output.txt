@@ -1,0 +1,2 @@
+BaseThrow:22|DerivedThrow:28|makeDerived:33|func_main_0:59
+PASS
