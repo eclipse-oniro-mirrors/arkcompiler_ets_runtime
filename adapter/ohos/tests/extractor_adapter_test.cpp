@@ -182,7 +182,6 @@ std::shared_ptr<FileMapper> GetMmapDataAsShared(Extractor& extractor, const std:
 
 std::string GetFilePathByOffset(ZipFile& zipFile, uintptr_t offset)
 {
-    static const std::string dynamicAbc = "ets/modules.abc";
     static constexpr char extNameAbc[] = ".abc";
     const ZipEntryMap& entries = zipFile.GetAllEntries();
     for (const auto& entry : entries) {
@@ -198,7 +197,7 @@ std::string GetFilePathByOffset(ZipFile& zipFile, uintptr_t offset)
             return entry.first;
         }
     }
-    return dynamicAbc;
+    return "";
 }
 }  // namespace panda::ecmascript
 
@@ -213,8 +212,6 @@ using OHOS::AbilityBase::ZipFile;
 
 namespace panda::test {
 namespace {
-constexpr const char *DYNAMIC_ABC = "ets/modules.abc";
-
 constexpr ZipPos TEST_OFFSET_FIRST = 100;
 constexpr ZipPos TEST_OFFSET_SECOND = 200;
 constexpr ZipPos TEST_OFFSET_EXACT_SUFFIX = 50;
@@ -314,13 +311,13 @@ TEST_F(ExtractorAdapterTest, GetFilePathByOffset_ReturnsPathWhenOffsetMatches)
     EXPECT_EQ(GetFilePathByOffset(zipFile, TEST_OFFSET_FIRST), "a.abc");
 }
 
-TEST_F(ExtractorAdapterTest, GetFilePathByOffset_ReturnsDefaultWhenEntriesEmpty)
+TEST_F(ExtractorAdapterTest, GetFilePathByOffset_ReturnsEmptyWhenEntriesEmpty)
 {
     ZipFile zipFile("dummy.hap");
-    EXPECT_EQ(GetFilePathByOffset(zipFile, 0), std::string(DYNAMIC_ABC));
+    EXPECT_EQ(GetFilePathByOffset(zipFile, 0), std::string(""));
 }
 
-TEST_F(ExtractorAdapterTest, GetFilePathByOffset_ReturnsDefaultWhenNoAbcEntries)
+TEST_F(ExtractorAdapterTest, GetFilePathByOffset_ReturnsEmptyWhenNoAbcEntries)
 {
     ZipFile zipFile("dummy.hap");
     FakeOffsetResult result;
@@ -329,10 +326,10 @@ TEST_F(ExtractorAdapterTest, GetFilePathByOffset_ReturnsDefaultWhenNoAbcEntries)
     result.length = TEST_LENGTH_FIRST;
     zipFile.AddEntry("a.txt", result);
 
-    EXPECT_EQ(GetFilePathByOffset(zipFile, TEST_OFFSET_FIRST), std::string(DYNAMIC_ABC));
+    EXPECT_EQ(GetFilePathByOffset(zipFile, TEST_OFFSET_FIRST), std::string(""));
 }
 
-TEST_F(ExtractorAdapterTest, GetFilePathByOffset_ReturnsDefaultWhenOffsetMismatch)
+TEST_F(ExtractorAdapterTest, GetFilePathByOffset_ReturnsEmptyWhenOffsetMismatch)
 {
     ZipFile zipFile("dummy.hap");
     FakeOffsetResult result;
@@ -341,10 +338,10 @@ TEST_F(ExtractorAdapterTest, GetFilePathByOffset_ReturnsDefaultWhenOffsetMismatc
     result.length = TEST_LENGTH_FIRST;
     zipFile.AddEntry("a.abc", result);
 
-    EXPECT_EQ(GetFilePathByOffset(zipFile, TEST_OFFSET_SECOND), std::string(DYNAMIC_ABC));
+    EXPECT_EQ(GetFilePathByOffset(zipFile, TEST_OFFSET_SECOND), std::string(""));
 }
 
-TEST_F(ExtractorAdapterTest, GetFilePathByOffset_ReturnsDefaultWhenGetDataOffsetRelativeFails)
+TEST_F(ExtractorAdapterTest, GetFilePathByOffset_ReturnsEmptyWhenGetDataOffsetRelativeFails)
 {
     ZipFile zipFile("dummy.hap");
     FakeOffsetResult result;
@@ -353,7 +350,7 @@ TEST_F(ExtractorAdapterTest, GetFilePathByOffset_ReturnsDefaultWhenGetDataOffset
     result.length = 0;
     zipFile.AddEntry("a.abc", result);
 
-    EXPECT_EQ(GetFilePathByOffset(zipFile, 0), std::string(DYNAMIC_ABC));
+    EXPECT_EQ(GetFilePathByOffset(zipFile, 0), std::string(""));
 }
 
 TEST_F(ExtractorAdapterTest, GetFilePathByOffset_ReturnsSecondEntryWhenFirstMismatch)
