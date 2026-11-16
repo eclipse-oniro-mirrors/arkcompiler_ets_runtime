@@ -319,9 +319,11 @@ HWTEST_F_L0(ArkSteedHeapRefTest, FactsMergeAndTransitionUseCanonicalHClassIdenti
         ASSERT_TRUE(objectHClass.IsJSHClass());
         ASSERT_TRUE(functionHClass.IsJSHClass());
         DISALLOW_DEREF_HANDLE;
-        NodeInfo first;
+        NativeAreaAllocator native;
+        Chunk chunk(&native);
+        NodeInfo first(&chunk);
         first.RecordHClass(objectHClass, false);
-        NodeInfo other;
+        NodeInfo other(&chunk);
         other.RecordHClass(duplicate, false);
         first.MergeWith(other);
         EXPECT_EQ(first.PossibleHClassCount(), 1U);
@@ -334,8 +336,6 @@ HWTEST_F_L0(ArkSteedHeapRefTest, FactsMergeAndTransitionUseCanonicalHClassIdenti
         ASSERT_TRUE(first.NarrowPossibleHClasses({duplicate}));
         EXPECT_TRUE(first.GetFreshKnownHClass().Equals(objectHClass));
 
-        NativeAreaAllocator native;
-        Chunk chunk(&native);
         CompileInfoFacts facts(&chunk);
         LoopEffects effects(&chunk);
         auto *receiver = Vertex::New<InitialValueVertex>(&chunk, size_t(0), 0);
@@ -365,7 +365,9 @@ HWTEST_F_L0(ArkSteedHeapRefTest, FactsMergeAndTransitionUseCanonicalHClassIdenti
 
 HWTEST_F_L0(ArkSteedHeapRefTest, FactsKeepHClassAliveAcrossFullGC)
 {
-    NodeInfo facts;
+    NativeAreaAllocator native;
+    Chunk chunk(&native);
+    NodeInfo facts(&chunk);
     ArkSteedHClassRef original;
     {
         EcmaHandleScope temporary(thread_);

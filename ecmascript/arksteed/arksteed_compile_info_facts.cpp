@@ -484,6 +484,8 @@ CompileInfoFacts *CompileInfoFacts::CloneForOptimisticLoopHeader(const LoopEffec
 
 bool CompileInfoFacts::IsCompatibleWithLoopHeader(const CompileInfoFacts &headerFacts, const BB *loopHeader) const
 {
+    // NodeInfo copies rely on both facts objects sharing one compilation chunk.
+    ASSERT(chunk_ == headerFacts.chunk_);
     if (!headerFacts.loadedEnvSlots_.empty() && headerFacts.envSlotAliasMode_ != EnvSlotAliasMode::MAY_ALIAS &&
         headerFacts.envSlotAliasMode_ != envSlotAliasMode_ && envSlotAliasMode_ != EnvSlotAliasMode::NONE) {
         return false;
@@ -526,6 +528,8 @@ bool CompileInfoFacts::IsCompatibleWithLoopHeader(const CompileInfoFacts &header
 
 void CompileInfoFacts::Merge(const CompileInfoFacts &other)
 {
+    // NodeInfo copies rely on both facts objects sharing one compilation chunk.
+    ASSERT(chunk_ == other.chunk_);
     for (auto infoIt = nodeInfos_.begin(); infoIt != nodeInfos_.end();) {
         auto otherIt = other.nodeInfos_.find(infoIt->first);
         if (otherIt == other.nodeInfos_.end() || !infoIt->second.MergeWith(otherIt->second)) {
@@ -550,7 +554,7 @@ void CompileInfoFacts::Merge(const CompileInfoFacts &other)
 NodeInfo *CompileInfoFacts::GetOrCreateInfoFor(ValueVertex *node)
 {
     ASSERT(node != nullptr);
-    auto [it, inserted] = nodeInfos_.emplace(node, NodeInfo());
+    auto [it, inserted] = nodeInfos_.emplace(node, NodeInfo(chunk_));
     static_cast<void>(inserted);
     return &it->second;
 }
