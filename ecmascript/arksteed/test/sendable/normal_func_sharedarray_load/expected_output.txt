@@ -1,0 +1,11 @@
+elem value: 1
+elem ic: mono
+oob read: undefined
+inbounds byvar: 2
+true
+true
+elem after compile: 1
+oob after compile: true
+byvar inbounds after compile: 2
+byvar oob after compile: undefined
+normal func sharedarray load over

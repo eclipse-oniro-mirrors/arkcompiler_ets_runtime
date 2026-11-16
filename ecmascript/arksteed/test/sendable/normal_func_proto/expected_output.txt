@@ -1,0 +1,22 @@
+sta proto method found: true
+sta proto ic: mono
+getter value: 7
+getter ic: mono
+setter applied: true
+setter ic: mono
+whitelist arr found: true
+whitelist arr ic: mono
+whitelist map found: true
+whitelist map ic: mono
+proto store throws TypeError: true
+true
+true
+true
+true
+true
+proto method after compile: true
+getter after compile: 7
+setter after compile: true
+whitelist arr after compile: true
+whitelist map after compile: true
+normal func proto ic over

@@ -25,6 +25,7 @@
 #include "ecmascript/js_hclass.h"
 #include "ecmascript/js_primitive_ref.h"
 #include "ecmascript/js_tagged_value_wrapper.h"
+#include "ecmascript/shared_objects/concurrent_api_scope.h"
 #include "ecmascript/shared_objects/js_shared_array.h"
 
 namespace panda::ecmascript {
@@ -62,10 +63,6 @@ bool ICRuntime::GetHandler(const ObjectOperator &op, const JSHandle<JSHClass> &h
 
     // Solve Not Found IC.
     if (!op.IsFound()) {
-        // Not support not found ic for sendable
-        if (hclass->IsJSShared()) {
-            return false;
-        }
         // Not support not found ic for global object
         if (hclass->IsJSGlobalObject()) {
             return false;
@@ -75,9 +72,18 @@ bool ICRuntime::GetHandler(const ObjectOperator &op, const JSHandle<JSHClass> &h
             return false;
         }
         JSTaggedValue proto = hclass->GetPrototype(thread_);
-        // If proto is not an EcmaObject,
-        // it means that there is no need to search for the prototype chain.
+        // A not-found answer needs no invalidation protocol only when either holds:
+        // - proto is not an ECMAObject: the chain has ended.
+        // - the receiver is shared: sendable prototype chains are sealed at build time
+        //   and published sendable hclasses are structurally immutable.
+        // Otherwise the answer spans a mutable prototype chain and must be guarded
+        // by a ProtoChangeMarker carried in a PrototypeHandler.
         if (!proto.IsECMAObject()) {
+            handlerValue = LoadHandler::LoadProperty(thread_, op);
+        } else if (hclass->IsJSShared()) {
+            // String will be wrappered to PRIMITIVE_STRING and cannot enter this branch.
+            // Bigint will be set to mega and cannot enter this branch.
+            ASSERT_LOGF(proto.IsInSharedHeap(), "prototype chain MUST be immutable");
             handlerValue = LoadHandler::LoadProperty(thread_, op);
         } else {
             handlerValue = PrototypeHandler::LoadPrototype(thread_, op, hclass);
@@ -92,12 +98,12 @@ bool ICRuntime::GetHandler(const ObjectOperator &op, const JSHandle<JSHClass> &h
     }
 
     // Solve IC On Prototype.
-    // Support prototype ic for JSSharedArray, JSSharedMap and JSSharedSet among sendable types,
-    // because their prototypes are frozen/immutable after initialization,
-    // and ICRuntimeStub::LoadPrototype already skips ProtoChangeMarker check for shared receivers.
-    if (hclass->IsJSShared() && !hclass->IsJSSharedArray() && !hclass->IsJSSharedMap() && !hclass->IsJSSharedSet()) {
-        return false;
-    }
+    // Prototype IC is enabled for ALL sendable types: sendable prototype chains are
+    // sealed at build time, and published sendable hclasses are structurally
+    // immutable (AddFieldTypeToHClass), so a cached prototype answer can never be invalidated.
+    // ICRuntimeStub::LoadPrototype and PrototypeHandler::LoadPrototype both skip the
+    // ProtoChangeMarker protocol for shared receivers. The ProtoCell of a PrototypeHandler
+    // built for a shared receiver stays Undefined.
     handlerValue = PrototypeHandler::LoadPrototype(thread_, op, hclass);
     return true;
 }
@@ -230,12 +236,13 @@ JSTaggedValue LoadICRuntime::LoadValueMiss(JSHandle<JSTaggedValue> receiver, JSH
     if (receiver->IsTypedArray() || receiver->IsSharedTypedArray()) {
         return LoadTypedArrayValueMiss(receiver, key);
     }
-    // fixme(hzzhouzebin) Open IC for SharedArray later.
-    if (receiver->IsJSSharedArray()) {
-        nexus_.SetAsMega();
-        return JSSharedArray::GetProperty(thread_, receiver, key, SCheckMode::CHECK,
-                                          SCheckMode::CHECK).GetValue().GetTaggedValue();
-    }
+
+    // The generic JSObject::GetProperty path has no ConcurrentApiScope of its own.
+    // Non-JSSharedArray receivers take the SKIP mode: the scope constructor and
+    // destructor touch nothing in that mode.
+    ConcurrentApiScope<JSSharedArray> sharedArrayScope(thread_, receiver,
+        receiver->IsJSSharedArray() ? SCheckMode::CHECK : SCheckMode::SKIP);
+    RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread_);
     ObjectOperator op(GetThread(), receiver, key);
     auto result = JSHandle<JSTaggedValue>(thread_, JSObject::GetProperty(GetThread(), &op));
     RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread_);
@@ -423,12 +430,36 @@ JSTaggedValue StoreICRuntime::StoreMiss(JSHandle<JSTaggedValue> receiver, JSHand
     }
     UpdateReceiverHClass(JSHandle<JSTaggedValue>(GetThread(), JSHandle<JSObject>::Cast(receiver)->GetClass()));
 
-    // fixme(hzzhouzebin) Open IC for SharedArray later.
+    // Element IC for JSSharedArray stores: the store itself stays on the locked slow path. After a successful
+    // in-bounds fast element store, distill a clean S_ELEMENT handler whose hit path re-reads elements/length
+    // every time and conservatively fast-paths only trivially-shareable values.
     if (receiver->IsJSSharedArray()) {
-        nexus_.SetAsMega();
         bool success = JSSharedArray::SetProperty(thread_, receiver, key, value, true, SCheckMode::CHECK);
-        RETURN_EXCEPTION_IF_ABRUPT_COMPLETION(thread_);
-        return success ? JSTaggedValue::Undefined() : JSTaggedValue::Exception();
+        if (thread_->HasPendingException() || !success) {
+            nexus_.SetAsMega();
+            return JSTaggedValue::Exception();
+        }
+        if (!GetThread()->GetEcmaVM()->ICEnabled()) {
+            nexus_.SetAsMega();
+            return JSTaggedValue::Undefined();
+        }
+        if (nexus_.GetICState() == ProfileTypeInfoNexus::ICState::MEGA) {
+            return JSTaggedValue::Undefined();
+        }
+        if (kind != ICKind::StoreIC) {
+            nexus_.SetAsMega();
+            return JSTaggedValue::Undefined();
+        }
+        ObjectOperator op(GetThread(), receiver, key);
+        if (!op.IsFastMode() || !op.IsElement() || !op.IsFound()) {
+            nexus_.SetAsMega();
+            return JSTaggedValue::Undefined();
+        }
+        // Build the S_ELEMENT handler directly instead of going through UpdateStoreHandler/StoreProperty.
+        uint64_t handler = 0;
+        JSHandle<JSTaggedValue> handlerValue = StoreHandler::StoreElement(thread_, receiver, handler);
+        nexus_.AddElementHandler(receiverHClass_, handlerValue);
+        return JSTaggedValue::Undefined();
     }
     if (key->IsJSFunction()) { // key is a private setter
         return CallPrivateSetter(receiver, key, value);

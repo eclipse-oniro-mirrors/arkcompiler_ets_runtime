@@ -1,0 +1,44 @@
+int store applied: true
+string key store applied: true
+int load: 6
+string key load: 6
+string site store: true
+tree/line store readback 0: true
+tree/line store readback 1: true
+tree/line store readback 2: true
+tree/line store readback 3: true
+poly load local: 30
+poly load shared: 300
+poly store local: true
+poly store shared: true
+poly interleave: true true
+negative store err name: TypeError
+negative store is TypeError: true
+negative read: undefined
+fractional store err name: TypeError
+fractional store is TypeError: true
+fractional read: undefined
+sta oob ignored: true
+sta inbounds kept: true
+undefined store readback: true
+null store readback: true
+int32max store err name: BusinessError
+pow31 store err name: BusinessError
+int32max read: true
+true
+true
+true
+true
+true
+true
+true
+true
+store after compile: true
+load after compile: 77
+string key store after compile: true
+tree/line store after compile: true
+poly load after compile: 31 301
+poly store after compile: true true
+sta store after compile: true
+vals store after compile: true
+normal func sharedarray keyvariants over

@@ -1,0 +1,41 @@
+# Copyright (c) 2026 Huawei Device Co., Ltd.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+int store applied: true
+string key store applied: true
+int load: 6
+string key load: 6
+string site store: true
+tree/line store readback 0: true
+tree/line store readback 1: true
+tree/line store readback 2: true
+tree/line store readback 3: true
+poly load local: 30
+poly load shared: 300
+poly store local: true
+poly store shared: true
+poly interleave: true true
+negative store err name: TypeError
+negative store is TypeError: true
+negative read: undefined
+fractional store err name: TypeError
+fractional store is TypeError: true
+fractional read: undefined
+sta oob ignored: true
+sta inbounds kept: true
+undefined store readback: true
+null store readback: true
+int32max store err name: BusinessError
+pow31 store err name: BusinessError
+int32max read: true
+normal func sharedarray keyvariants over

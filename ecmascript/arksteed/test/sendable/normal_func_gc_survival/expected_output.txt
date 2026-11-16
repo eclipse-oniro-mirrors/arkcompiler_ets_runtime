@@ -1,0 +1,30 @@
+nf before gc: undefined
+nf ic before gc: mono
+gc: true
+gc: true
+gc: true
+gc: true
+gc: true
+nf after gc: undefined
+nf ic after gc: mono
+getter before gc: 7
+getter ic before gc: mono
+getter after gc: 7
+getter ic after gc: mono
+elem before gc: 9
+elem load ic before gc: mono
+elem store ic before gc: mono
+elem after gc: 11
+elem load ic after gc: mono
+elem store ic after gc: mono
+contract after gc throws TypeError: true
+oob read after gc: true
+true
+true
+true
+true
+gc survival after compile: undefined
+getter after compile: 7
+elem after compile: 11
+store after compile: true
+normal func gc survival over

@@ -122,8 +122,9 @@ JSHandle<JSHClass> ObjectFactory::NewSEcmaHClass(JSHandle<JSHClass> hclass, uint
     return JSHandle<JSHClass>(thread_, newClass);
 }
 
+// The caller MUST SetExtensible(false) before the hclass escapes.
 // This function don't UpdateProtoClass
-JSHandle<JSHClass> ObjectFactory::NewSEcmaHClass(uint32_t size, uint32_t inlinedProps, JSType type,
+JSHandle<JSHClass> ObjectFactory::NewExtensibleSEcmaHClass(uint32_t size, uint32_t inlinedProps, JSType type,
     const JSHandle<JSTaggedValue> &prototype, const JSHandle<JSTaggedValue> &layout)
 {
     NewSObjectHook();
@@ -137,6 +138,14 @@ JSHandle<JSHClass> ObjectFactory::NewSEcmaHClass(uint32_t size, uint32_t inlined
     }
     hclass->SetProto(thread_, prototype.GetTaggedValue());
     hclass->SetNumberOfProps(inlinedProps);
+    return hclass;
+}
+
+// This function don't UpdateProtoClass
+JSHandle<JSHClass> ObjectFactory::NewSEcmaHClass(uint32_t size, uint32_t inlinedProps, JSType type,
+    const JSHandle<JSTaggedValue> &prototype, const JSHandle<JSTaggedValue> &layout)
+{
+    JSHandle<JSHClass> hclass = NewExtensibleSEcmaHClass(size, inlinedProps, type, prototype, layout);
     hclass->SetExtensible(false);
     return hclass;
 }

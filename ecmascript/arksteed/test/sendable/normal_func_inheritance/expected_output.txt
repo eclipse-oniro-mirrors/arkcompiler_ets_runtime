@@ -1,0 +1,29 @@
+child inherited method found: true
+child inherited method ic: mono
+inherited method call: 42
+grand inherited method call: 42
+child inherited getter: 7
+child inherited getter ic: mono
+inherited setter field: 5
+child not-found: undefined
+child not-found ic: mono
+child own field store/load: 11
+child inherited field via store: 33
+mixed site first (parent): true
+mixed site second (child): true
+mixed site ic: poly
+grand combined: true true
+true
+true
+true
+true
+true
+true
+inherited after compile: true
+method call after compile: 42
+getter after compile: 7
+notfound after compile: undefined
+child field after compile: 22
+inherited field after compile: 44
+mixed after compile: true true
+normal func inheritance ic over

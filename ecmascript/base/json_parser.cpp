@@ -751,12 +751,16 @@ JSHandle<JSTaggedValue> JsonParser<T>::CreateSJsonObject(JsonContinuation contin
                 thread_->CheckSafepointIfSuspended();
             }
         }
-        hclass = factory_->NewSEcmaHClass(JSSharedObject::SIZE, fieldNum, JSType::JS_SHARED_OBJECT,
-            JSHandle<JSTaggedValue>(jsonPrototype), JSHandle<JSTaggedValue>(layout));
+        // AddFieldTypeToHClass rejects non-extensible shared hclasses, so create the
+        // hclass via the extensible variant, add the fields, then SetExtensible(false).
+        hclass = factory_->NewExtensibleSEcmaHClass(JSSharedObject::SIZE, fieldNum, JSType::JS_SHARED_OBJECT,
+                                                    JSHandle<JSTaggedValue>(jsonPrototype),
+                                                    JSHandle<JSTaggedValue>(layout));
         JSHandle<NumberDictionary> elementsDic = NumberDictionary::CreateInSharedHeap(thread_);
         bool hasElement = false;
         SendableClassDefiner::AddFieldTypeToHClass(thread_, propertyArray, size, layout, hclass, elementsDic,
                                                    hasElement, start, std::move(propertyList));
+        hclass->SetExtensible(false);
         JSHandle<JSObject> obj = factory_->NewSharedOldSpaceJSObject(hclass);
         uint32_t index = 0;
         size = (hclass->GetInlinedProperties() << 1);

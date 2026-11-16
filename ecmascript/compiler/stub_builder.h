@@ -805,6 +805,7 @@ public:
     GateRef LoadFromField(GateRef glue, GateRef receiver, GateRef handlerInfo);
     GateRef LoadGlobal(GateRef glue, GateRef cell);
     GateRef LoadElement(GateRef glue, GateRef receiver, GateRef key);
+    GateRef SharedLoadElement(GateRef glue, GateRef receiver, GateRef index);
     GateRef LoadStringElement(GateRef glue, GateRef receiver, GateRef key);
     GateRef TryToElementsIndex(GateRef glue, GateRef key);
     GateRef CheckPolyHClass(GateRef glue, GateRef cachedValue, GateRef hClass);
@@ -820,6 +821,7 @@ public:
     GateRef StoreICWithHandler(GateRef glue, GateRef receiver, GateRef holder,
                                GateRef value, GateRef handler, ProfileOperation callback = ProfileOperation());
     GateRef TaggedArraySetValue(GateRef glue, GateRef receiver, GateRef value, GateRef index, GateRef capacity);
+    GateRef SharedICStoreElement(GateRef glue, GateRef receiver, GateRef key, GateRef value);
     GateRef ICStoreElement(GateRef glue, GateRef receiver, GateRef key, GateRef value, GateRef handlerInfo,
                            bool updateHandler = false, GateRef profileTypeInfo = Gate::InvalidGateRef,
                            GateRef slotId = Gate::InvalidGateRef);

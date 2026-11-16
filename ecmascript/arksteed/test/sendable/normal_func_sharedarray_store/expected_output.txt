@@ -1,0 +1,31 @@
+store applied: true
+store ic: mono
+oob store throws Error: true
+oob store err name: BusinessError
+oob store msg ok: true
+contract throws TypeError: true
+store shared obj ok: true
+mix elem: 9
+mix notfound: undefined
+mix elem after: 9
+mix site ic: mega
+window site ic: mono
+window store throws Error: true
+window store err name: BusinessError
+window store msg ok: true
+window site ic after: mega
+window length kept: true
+window slot clean: true
+window warm kept: true
+true
+true
+true
+true
+store after compile: true
+value store after compile: true
+value contract after compile: true
+window warm after compile: true
+window after compile: true
+mix after compile: 88
+mix notfound after compile: undefined
+normal func sharedarray store over

@@ -1,0 +1,5 @@
+before compile: true
+true
+after compile: true
+contract throws TypeError: true
+oob throws: true

@@ -1,0 +1,14 @@
+notfound value: undefined
+notfound ic: mono
+mix elem: 1
+mix notfound: undefined
+mix elem again: 1
+mix notfound again: undefined
+mix notfound once more: undefined
+store notfound throws TypeError: true
+true
+true
+after compile: undefined
+mix after compile: 1
+notfound after compile: undefined
+normal func not-found ic over

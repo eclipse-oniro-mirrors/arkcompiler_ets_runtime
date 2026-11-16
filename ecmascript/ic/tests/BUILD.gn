@@ -44,6 +44,7 @@ host_unittest_action("IC_RuntimeStub_Test") {
   sources = [
     # test file
     "ic_runtime_stub_test.cpp",
+    "ic_shared_concurrent_test.cpp",
   ]
 
   configs = [ "../../../:ecma_test_config" ]
@@ -170,6 +171,28 @@ host_unittest_action("IC_ProtoChangeDetails_Test") {
   deps += hiviewdfx_deps
 }
 
+host_unittest_action("IC_ProtoShared_Test") {
+  module_out_path = module_output_path
+
+  sources = [
+    # test file
+    "ic_proto_shared_test.cpp",
+  ]
+
+  configs = [ "../../../:ecma_test_config" ]
+
+  deps = [ "../../../:libark_jsruntime_test" ]
+
+  # hiviewdfx libraries
+  external_deps = hiviewdfx_ext_deps
+  external_deps += [
+    "icu:shared_icui18n",
+    "icu:shared_icuuc",
+    "zlib:libz",
+  ]
+  deps += hiviewdfx_deps
+}
+
 group("unittest") {
   testonly = true
 
@@ -180,6 +203,7 @@ group("unittest") {
     ":IC_PropertiesCache_Test",
     ":IC_PropertyBox_Test",
     ":IC_ProtoChangeDetails_Test",
+    ":IC_ProtoShared_Test",
     ":IC_RuntimeStub_Test",
     ":IC_Runtime_Test",
   ]
@@ -195,6 +219,7 @@ group("host_unittest") {
     ":IC_PropertiesCache_TestAction",
     ":IC_PropertyBox_TestAction",
     ":IC_ProtoChangeDetails_TestAction",
+    ":IC_ProtoShared_TestAction",
     ":IC_RuntimeStub_TestAction",
     ":IC_Runtime_TestAction",
   ]
@@ -206,6 +231,7 @@ group("host_unittest") {
       ":IC_PropertiesCache_TestAction",
       ":IC_PropertyBox_TestAction",
       ":IC_ProtoChangeDetails_TestAction",
+      ":IC_ProtoShared_TestAction",
       ":IC_RuntimeStub_TestAction",
       ":IC_Runtime_TestAction",
     ]

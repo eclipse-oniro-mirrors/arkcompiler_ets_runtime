@@ -842,6 +842,10 @@ public:
     JSHandle<JSHClass> PUBLIC_API NewSEcmaHClass(uint32_t size, uint32_t inlinedProps, JSType type,
         const JSHandle<JSTaggedValue> &prototype, const JSHandle<JSTaggedValue> &layout);
 
+    // The caller MUST SetExtensible(false) before the hclass escapes.
+    JSHandle<JSHClass> PUBLIC_API NewExtensibleSEcmaHClass(uint32_t size, uint32_t inlinedProps, JSType type,
+        const JSHandle<JSTaggedValue> &prototype, const JSHandle<JSTaggedValue> &layout);
+
     JSHandle<JSHClass> PUBLIC_API NewSEcmaHClassDictMode(uint32_t size, uint32_t inlinedProps, JSType type,
                                               const JSHandle<JSTaggedValue> &prototype);
 

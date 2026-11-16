@@ -1,0 +1,3 @@
+before compile: 7
+true
+after compile: 7
