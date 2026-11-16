@@ -27,6 +27,7 @@
 #include "ecmascript/jspandafile/program_object.h"
 #include "ecmascript/platform/profiler_signal_guard.h"
 #include "ecmascript/tests/test_helper.h"
+#include "libpandabase/os/thread.h"
 
 using namespace panda::ecmascript;
 
@@ -117,9 +118,37 @@ public:
         return 0;
     }
 
-    void ProcessRawSampleTest(const RawSample &sample)
+    bool ProcessRawSampleTest(const RawSample &sample)
     {
-        cpu_profiler.ProcessRawSample(sample);
+        return cpu_profiler.ProcessRawSample(sample);
+    }
+
+    bool ConsumeRawSamplesTest()
+    {
+        return cpu_profiler.ConsumeRawSamples();
+    }
+
+    void ScheduleSampleTest(pthread_t jsThreadId)
+    {
+        cpu_profiler.ScheduleSample(jsThreadId);
+    }
+
+    bool RegisterGetStackSignalTest()
+    {
+        return cpu_profiler.RegisterGetStackSignal();
+    }
+
+    void SetProfilerSignalStateTest(ProfilerSignalState state)
+    {
+        cpu_profiler.SetProfilerSignalState(state);
+    }
+
+    void PushRawSampleTest(const RawSample &sample)
+    {
+        RawSample *slot = cpu_profiler.rawQueue_.TryStartEnqueue();
+        ASSERT_NE(slot, nullptr);
+        *slot = sample;
+        cpu_profiler.rawQueue_.FinishEnqueue();
     }
 
     std::unique_ptr<ProfileInfo> GetProfileInfoTest()
@@ -597,10 +626,10 @@ HWTEST_F_L0(CpuProfilerTest, TestProcessRawSampleDropsHandlerMarkedSamples)
 
     // Regression guard for the session filter that runs before the status
     // filter: a stale-generation sample is dropped first (an unstarted session
-    // keeps generation 0).
+    // keeps generation 0); dropped samples also return false from ProcessRawSample.
     RawSample staleSession;
     staleSession.profilerGeneration = 1;
-    cpuProfilerFriend.ProcessRawSampleTest(staleSession);
+    EXPECT_FALSE(cpuProfilerFriend.ProcessRawSampleTest(staleSession));
 
     const SampleStatus dropStatuses[] = {
         SampleStatus::GC_SKIPPED,
@@ -616,7 +645,7 @@ HWTEST_F_L0(CpuProfilerTest, TestProcessRawSampleDropsHandlerMarkedSamples)
             // they must not be symbolized into the tree either.
             dropped.frameCount = 2; // 2: partial walk
         }
-        cpuProfilerFriend.ProcessRawSampleTest(dropped);
+        EXPECT_FALSE(cpuProfilerFriend.ProcessRawSampleTest(dropped));
     }
 
     // Positive control: an OK empty sample does enter the profile as one
@@ -624,13 +653,224 @@ HWTEST_F_L0(CpuProfilerTest, TestProcessRawSampleDropsHandlerMarkedSamples)
     RawSample okEmpty;
     okEmpty.status = SampleStatus::OK;
     okEmpty.timestamp = 1000; // 1000: small delta against the zero start time
-    cpuProfilerFriend.ProcessRawSampleTest(okEmpty);
+    EXPECT_TRUE(cpuProfilerFriend.ProcessRawSampleTest(okEmpty));
 
     std::unique_ptr<ProfileInfo> profileInfo = cpuProfilerFriend.GetProfileInfoTest();
     ASSERT_NE(profileInfo, nullptr);
     ASSERT_EQ(profileInfo->samples.size(), 1U);
     EXPECT_EQ(profileInfo->samples[0], PROGRAM_NODE_ID);
     EXPECT_EQ(profileInfo->nodes[PROGRAM_NODE_ID - 1].hitCount, 1);
+}
+#endif // !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
+
+#if !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
+// ConsumeRawSamples counts only applied samples as consumed, keeping the
+// idle-fallback tick policy alive during dropped-only drains.
+HWTEST_F_L0(CpuProfilerTest, TestConsumeRawSamplesCountsOnlyAppliedSamples)
+{
+    int interval = 500;
+    CpuProfilerFriendTest cpuProfilerFriend(instance, interval);
+
+    // Empty drain: nothing consumed.
+    EXPECT_FALSE(cpuProfilerFriend.ConsumeRawSamplesTest());
+
+    // Dropped-only drain: not consumed, no nodes created.
+    RawSample dropped;
+    dropped.status = SampleStatus::GC_SKIPPED;
+    cpuProfilerFriend.PushRawSampleTest(dropped);
+    EXPECT_FALSE(cpuProfilerFriend.ConsumeRawSamplesTest());
+
+    // An applied sample is consumed and folds into the profile.
+    RawSample okEmpty;
+    okEmpty.status = SampleStatus::OK;
+    okEmpty.timestamp = 1000; // 1000: small delta against the zero start time
+    cpuProfilerFriend.PushRawSampleTest(okEmpty);
+    EXPECT_TRUE(cpuProfilerFriend.ConsumeRawSamplesTest());
+
+    std::unique_ptr<ProfileInfo> profileInfo = cpuProfilerFriend.GetProfileInfoTest();
+    ASSERT_NE(profileInfo, nullptr);
+    ASSERT_EQ(profileInfo->samples.size(), 1U);
+    EXPECT_EQ(profileInfo->samples[0], PROGRAM_NODE_ID);
+}
+#endif // !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
+
+#if !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
+// ScheduleSample skips the whole tick while the previous handler is still
+// running: no timestamp write, no request bit, no re-entry SIGPROF.
+HWTEST_F_L0(CpuProfilerTest, TestScheduleSampleSkipsWhileHandlerRunning)
+{
+    int interval = 500;
+    CpuProfilerFriendTest cpuProfilerFriend(instance, interval);
+    CpuProfilerSignalContext *ctx = cpuProfilerFriend.GetSignalCtx();
+
+    // Baseline (no handler in flight): the request bit is armed. The handler is
+    // registered first so the SIGPROF fired at this thread is consumed by the
+    // profiler entry (and dropped on the unpublished-context lookup) even when
+    // this test runs alone.
+    ASSERT_TRUE(cpuProfilerFriend.RegisterGetStackSignalTest());
+    cpuProfilerFriend.ScheduleSampleTest(pthread_self());
+    EXPECT_TRUE(ctx->shouldRecordSample.load());
+    ctx->shouldRecordSample.store(false); // retract: no handler claimed the request
+
+    // Handler in flight: the tick is skipped, the bit stays retracted and the
+    // timestamp is left untouched; only the overrun is counted.
+    uint64_t tsBefore = ctx->requestTimestamp.load();
+    ctx->handlerRunning.store(true, std::memory_order_release);
+    cpuProfilerFriend.ScheduleSampleTest(pthread_self());
+    EXPECT_FALSE(ctx->shouldRecordSample.load());
+    EXPECT_EQ(ctx->requestTimestamp.load(), tsBefore);
+    EXPECT_EQ(ctx->handlerOverrunTicks.load(std::memory_order_relaxed), 1U);
+    ctx->handlerRunning.store(false, std::memory_order_release);
+}
+#endif // !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
+
+#if !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
+/**
+ * @tc.name: CpuProfilerTest_CollectSampleIntoRejectsBadAnchor
+ * @tc.desc: The signal-safe anchor gate: a leave frame failing the structural
+ *   pre-check (out-of-range type word, misaligned pointer) or forming a
+ *   self-referential prev chain drops the sample with STACK_NOT_ITERABLE.
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(CpuProfilerTest, CollectSampleIntoRejectsBadAnchor)
+{
+    int interval = 500;
+    CpuProfilerFriendTest cpuProfilerFriend(instance, interval);
+    CpuProfilerSignalContext *ctx = cpuProfilerFriend.GetSignalCtx();
+    ctx->jsThread = thread;
+    ctx->anFileDataManager = AnFileDataManager::GetInstance();
+
+    // Anchor carved from the thread's JS stack region, far below live frames;
+    // the base offset leaves headroom for the negative-slot anchor fields.
+    const JSTaggedType *regionTop = thread->GetCurrentSPFrame();
+    size_t maxStackSize = thread->GetEcmaVM()->GetEcmaParamConfiguration().GetMaxStackSize();
+    constexpr size_t baseOffset = 64; // 64: headroom slots below the anchor
+    auto *scratch = const_cast<JSTaggedType *>(regionTop - maxStackSize) + baseOffset;
+    ucontext_t context {}; // pc=0: the walk takes the non-stub leave-frame path
+    const JSTaggedType *savedLeave = thread->GetLastLeaveFrame();
+
+    // Out-of-range type word: the gate rejects, the walk never starts.
+    scratch[-1] = 0xFF;
+    thread->SetLastLeaveFrame(scratch);
+    RawSample badSample;
+    cpuProfilerFriend.CollectSampleIntoTest(badSample, ctx, &context);
+    EXPECT_EQ(badSample.status, SampleStatus::STACK_NOT_ITERABLE);
+    EXPECT_EQ(ctx->dropStackNotIterable.load(std::memory_order_relaxed), 1U);
+
+    // Misaligned anchor: rejected by the alignment pre-check before any deref.
+    auto *misaligned = reinterpret_cast<JSTaggedType *>(reinterpret_cast<uintptr_t>(scratch) + 4); // 4: odd slot
+    thread->SetLastLeaveFrame(misaligned);
+    RawSample misalignedSample;
+    cpuProfilerFriend.CollectSampleIntoTest(misalignedSample, ctx, &context);
+    EXPECT_EQ(misalignedSample.status, SampleStatus::STACK_NOT_ITERABLE);
+    EXPECT_EQ(ctx->dropStackNotIterable.load(std::memory_order_relaxed), 2U);
+
+    // Self-referential prev (in-bounds, aligned, non-increasing): rejected by
+    // the monotonic chain check.
+    scratch[-1] = static_cast<JSTaggedType>(FrameType::ASM_INTERPRETER_FRAME);
+    scratch[-2] = reinterpret_cast<JSTaggedType>(scratch); // prev == anchor: loop chain
+    thread->SetLastLeaveFrame(scratch);
+    RawSample loopedSample;
+    cpuProfilerFriend.CollectSampleIntoTest(loopedSample, ctx, &context);
+    EXPECT_EQ(loopedSample.status, SampleStatus::STACK_NOT_ITERABLE);
+    EXPECT_EQ(ctx->dropStackNotIterable.load(std::memory_order_relaxed), 3U);
+
+    thread->SetLastLeaveFrame(const_cast<JSTaggedType *>(savedLeave));
+}
+#endif // !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
+
+#if !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
+/**
+ * @tc.name: CpuProfilerTest_CollectSampleIntoAcceptsGoodAnchor
+ * @tc.desc: A structurally complete anchor passes the signal-safe anchor
+ *   gate and yields an empty OK walk for both frame families without
+ *   touching the drop counter.
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(CpuProfilerTest, CollectSampleIntoAcceptsGoodAnchor)
+{
+    int interval = 500;
+    CpuProfilerFriendTest cpuProfilerFriend(instance, interval);
+    CpuProfilerSignalContext *ctx = cpuProfilerFriend.GetSignalCtx();
+    ctx->jsThread = thread;
+    ctx->anFileDataManager = AnFileDataManager::GetInstance();
+
+    // Anchor carved from the thread's JS stack region, far below live frames;
+    // the base offset leaves headroom for the negative-slot anchor fields.
+    const JSTaggedType *regionTop = thread->GetCurrentSPFrame();
+    size_t maxStackSize = thread->GetEcmaVM()->GetEcmaParamConfiguration().GetMaxStackSize();
+    constexpr size_t baseOffset = 64; // 64: headroom slots below the anchor
+    auto *scratch = const_cast<JSTaggedType *>(regionTop - maxStackSize) + baseOffset;
+    ucontext_t context {}; // pc=0: the walk takes the non-stub leave-frame path
+    const JSTaggedType *savedLeave = thread->GetLastLeaveFrame();
+
+    // Structurally complete anchor (valid type, chain end, non-heap function
+    // slot): the gate passes and the walk runs empty.
+    scratch[-1] = static_cast<JSTaggedType>(FrameType::ASM_INTERPRETER_FRAME);
+    scratch[-2] = 0; // prev: end of the JS stack (interpreter family: base.prev @ sp[-2])
+    scratch[-9] = JSTaggedValue::Undefined().GetRawData(); // function@sp[-9]: skipped by the tag check
+    thread->SetLastLeaveFrame(scratch);
+    RawSample goodSample;
+    cpuProfilerFriend.CollectSampleIntoTest(goodSample, ctx, &context);
+    EXPECT_EQ(goodSample.status, SampleStatus::OK);
+    EXPECT_EQ(goodSample.frameCount, 0U);
+    EXPECT_EQ(ctx->dropStackNotIterable.load(std::memory_order_relaxed), 0U);
+
+    // Optimized-family anchor (prev @ sp[0]): the gate must resolve the caller
+    // by frame type and pass it through the PrevFrameSpCode branch.
+    scratch[-1] = static_cast<JSTaggedType>(FrameType::OPTIMIZED_FRAME);
+    scratch[0] = 0; // prev: end of the JS stack (optimized family: prevFp @ sp[0])
+    thread->SetLastLeaveFrame(scratch);
+    RawSample codeFamilySample;
+    cpuProfilerFriend.CollectSampleIntoTest(codeFamilySample, ctx, &context);
+    EXPECT_EQ(codeFamilySample.status, SampleStatus::OK);
+    EXPECT_EQ(codeFamilySample.frameCount, 0U);
+    EXPECT_EQ(ctx->dropStackNotIterable.load(std::memory_order_relaxed), 0U);
+
+    thread->SetLastLeaveFrame(const_cast<JSTaggedType *>(savedLeave));
+}
+#endif // !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
+
+#if !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
+/**
+ * @tc.name: CpuProfilerTest_TestSignalHandlerLifecycleClearsRunningFlag
+ * @tc.desc: The full handler lifecycle on a self-directed SIGPROF: the
+ *   request bit is consumed, the in-flight flag and handler count are
+ *   cleared on exit, and the captured sample folds through the queue.
+ *   Guards the re-entry fix: a handlerRunning flag stuck at true would
+ *   silently kill all further sampling.
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(CpuProfilerTest, TestSignalHandlerLifecycleClearsRunningFlag)
+{
+    int interval = 500;
+    CpuProfilerFriendTest cpuProfilerFriend(instance, interval);
+    CpuProfilerSignalContext *ctx = cpuProfilerFriend.GetSignalCtx();
+    ctx->jsThread = thread;
+    ctx->anFileDataManager = AnFileDataManager::GetInstance();
+    ctx->metadataSequence = ProfilerMetadataRegistry::Instance().PublishedSequence();
+    cpuProfilerFriend.SetProfilerSignalStateTest(ProfilerSignalState::RUNNING);
+    ASSERT_TRUE(cpuProfilerFriend.RegisterGetStackSignalTest());
+    // Publish the friend context for this thread so the handler finds it.
+    cpuProfilerFriend.RebindSignalContextTest(static_cast<uint64_t>(os::thread::GetCurrentThreadId()));
+    // Pin the leave frame empty: a stale frame from earlier tests could yield
+    // bytecode frames the fresh symbolizer deems stale, making the fold
+    // non-deterministic.
+    const JSTaggedType *savedLeave = thread->GetLastLeaveFrame();
+    thread->SetLastLeaveFrame(nullptr);
+
+    // pthread_kill to self: the handler runs before this call returns.
+    cpuProfilerFriend.ScheduleSampleTest(pthread_self());
+
+    EXPECT_FALSE(ctx->shouldRecordSample.load()); // request consumed by the handler
+    EXPECT_FALSE(ctx->handlerRunning.load());     // in-flight flag cleared on exit
+    EXPECT_EQ(ctx->activeHandlerCount.load(std::memory_order_acquire), 0U);
+    EXPECT_EQ(ctx->samplesRecorded.load(std::memory_order_relaxed), 1U);
+    EXPECT_TRUE(cpuProfilerFriend.ConsumeRawSamplesTest()); // the sample folds
+
+    thread->SetLastLeaveFrame(const_cast<JSTaggedType *>(savedLeave));
+    // Leave the context stopped so any stray SIGPROF finds it inert.
+    cpuProfilerFriend.SetProfilerSignalStateTest(ProfilerSignalState::STOPPED);
 }
 #endif // !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
 

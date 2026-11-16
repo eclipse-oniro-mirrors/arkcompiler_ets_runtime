@@ -23,10 +23,31 @@
 #include "securec.h"
 
 namespace panda::ecmascript {
-void CpuProfilerSymbolizer::BeginSession()
+void CpuProfilerSymbolizer::BeginSession(void *(*nativePtrGetter)(void *info))
 {
     metadataCursor_ = 0;
     liveFiles_.clear();
+    extractors_.clear();
+    nativePtrGetter_ = nativePtrGetter;
+}
+
+std::shared_ptr<DebugInfoExtractor> CpuProfilerSymbolizer::GetExtractor(const JSPandaFile *file) const
+{
+    if (file == nullptr) {
+        return nullptr;
+    }
+    auto iter = extractors_.find(file);
+    if (iter != extractors_.end()) {
+        return iter->second;
+    }
+    std::shared_ptr<DebugInfoExtractor> extractor =
+        JSPandaFileManager::GetInstance()->GetExtractorForProfiler(file);
+    if (extractor == nullptr) {
+        // Unloaded after capture: the keep-alive pins the file; tables build lazily.
+        extractor = std::make_shared<DebugInfoExtractor>(file);
+    }
+    extractors_.emplace(file, extractor);
+    return extractor;
 }
 
 void CpuProfilerSymbolizer::SeedLiveFile(const JSPandaFile *file)
@@ -61,7 +82,7 @@ int CpuProfilerSymbolizer::ResolveNativeCallLine(const RawSample &sample, uint16
     }
     MethodLiteral *methodLiteral = reinterpret_cast<MethodLiteral *>(caller.value);
     const JSPandaFile *jsPandaFile = reinterpret_cast<const JSPandaFile *>(caller.jsPandaFile);
-    DebugInfoExtractor *debugExtractor = JSPandaFileManager::GetInstance()->GetJSPtExtractor(jsPandaFile);
+    std::shared_ptr<DebugInfoExtractor> debugExtractor = GetExtractor(jsPandaFile);
     if (debugExtractor == nullptr) {
         return 0;
     }
@@ -92,13 +113,19 @@ bool CpuProfilerSymbolizer::SymbolizeBuiltinFrame(const RawSample &sample, uint1
                                                   struct MethodKey &methodKey, FrameInfoTemp &codeEntry)
 {
     const RawFrame &rawFrame = sample.frames[frameIndex];
-    // Phase 1 (plan §7.3): the native name property is no longer read anywhere;
-    // unregistered callbacks are shown as an address placeholder.
-    int len = snprintf_s(codeEntry.functionName, sizeof(codeEntry.functionName),
-        sizeof(codeEntry.functionName) - 1, "(native) 0x%lx",
-        static_cast<unsigned long>(rawFrame.value));
-    if (len <= 0 || static_cast<size_t>(len) >= sizeof(codeEntry.functionName) - 1) {
-        return false;
+    // NAPI + JSNativePointer renders "(0xaddr)" via the resolver ("(0x0)" on
+    // null); other native frames get an empty name.
+    if (methodKey.state == RunningState::NAPI && rawFrame.nativePointer != 0 &&
+        nativePtrGetter_ != nullptr) {
+        void *addr = nativePtrGetter_(reinterpret_cast<void *>(rawFrame.value));
+        int len = snprintf_s(codeEntry.functionName, sizeof(codeEntry.functionName),
+            sizeof(codeEntry.functionName) - 1, "(0x%lx)",
+            addr != nullptr ? static_cast<unsigned long>(reinterpret_cast<uintptr_t>(addr)) : 0UL);
+        if (len <= 0 || static_cast<size_t>(len) >= sizeof(codeEntry.functionName) - 1) {
+            return false;
+        }
+    } else {
+        codeEntry.functionName[0] = '\0';
     }
     if (!FillCallerSource(sample, frameIndex, codeEntry)) {
         return false;
@@ -119,7 +146,7 @@ bool CpuProfilerSymbolizer::FillCallerSource(const RawSample &sample, uint16_t f
     }
     MethodLiteral *methodLiteral = reinterpret_cast<MethodLiteral *>(caller.value);
     const JSPandaFile *jsPandaFile = reinterpret_cast<const JSPandaFile *>(caller.jsPandaFile);
-    DebugInfoExtractor *debugExtractor = JSPandaFileManager::GetInstance()->GetJSPtExtractor(jsPandaFile);
+    std::shared_ptr<DebugInfoExtractor> debugExtractor = GetExtractor(jsPandaFile);
     if (debugExtractor == nullptr) {
         return true;
     }
@@ -175,7 +202,7 @@ bool CpuProfilerSymbolizer::SymbolizeBytecodeFrame(const RawFrame &rawFrame, Fra
         }
     }
 
-    DebugInfoExtractor *debugExtractor = JSPandaFileManager::GetInstance()->GetJSPtExtractor(jsPandaFile);
+    std::shared_ptr<DebugInfoExtractor> debugExtractor = GetExtractor(jsPandaFile);
     if (debugExtractor == nullptr) {
         return false;
     }

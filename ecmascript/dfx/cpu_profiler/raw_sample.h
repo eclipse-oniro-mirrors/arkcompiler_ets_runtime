@@ -85,7 +85,8 @@ struct RawFrame {
     RawRunningState state {RawRunningState::OTHER};
     // kungfu::DeoptType value (enum underlying type is uint8_t).
     uint8_t deoptType {0};
-    uint8_t reserved {0};
+    // Native frames only: 1 when the extra info is a JSNativePointer (legacy NAPI rendering).
+    uint8_t nativePointer {0};
 };
 
 // One sample produced by the signal handler and consumed by the sampling processor.

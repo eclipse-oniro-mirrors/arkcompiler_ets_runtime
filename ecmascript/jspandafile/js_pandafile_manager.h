@@ -70,6 +70,9 @@ public:
     DebugInfoExtractor *GetJSPtExtractorAndExtract(const JSPandaFile *jsPandaFile);
 
     DebugInfoExtractor *CpuProfilerGetJSPtExtractor(const JSPandaFile *jsPandaFile);
+
+    // Profiler-only: shared ownership for unlocked use; nullptr instead of FATAL.
+    std::shared_ptr<DebugInfoExtractor> GetExtractorForProfiler(const JSPandaFile *jsPandaFile);
     
     template<ForHybridApp isHybrid = ForHybridApp::Normal>
     bool CheckFilePath(JSThread *thread, const CString &fileName);
@@ -173,7 +176,7 @@ private:
     std::unordered_map<const CString, std::shared_ptr<JSPandaFile>, CStringHash> loadedJSPandaFiles_;
     // for plugin update.
     std::set<std::shared_ptr<JSPandaFile>> oldJSPandaFiles_;
-    std::unordered_map<const JSPandaFile *, std::unique_ptr<DebugInfoExtractor>> extractors_;
+    std::unordered_map<const JSPandaFile *, std::shared_ptr<DebugInfoExtractor>> extractors_;
     std::unordered_map<CString, CString> crossBundleHspPaths_;
 
     friend class JSPandaFile;
