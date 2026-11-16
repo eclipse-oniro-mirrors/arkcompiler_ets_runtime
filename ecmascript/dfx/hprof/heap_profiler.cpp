@@ -247,7 +247,9 @@ void HeapProfiler::DumpHeapSnapshotFromSharedGCForOOM(Stream *stream, const Dump
     appTid_ = syscall(SYS_gettid);
     pid_t pid = -1;
     static std::once_flag flag;
-    std::call_once(flag, InitFork);
+    // Keep this instantiation local: GCC-built LLVM uses the same function-reference
+    // specialization, whose lambda thunk ABI differs from Clang with libstdc++.
+    std::call_once(flag, [] { InitFork(); });
     // fork for oom
     if ((pid = fork()) < 0) {
         LOG_ECMA(ERROR) << "DumpHeapSnapshotFromSharedGCForOOM fork failed: " << strerror(errno);
@@ -657,7 +659,7 @@ pid_t HeapProfiler::ForkAndPerformDump(Stream *stream,
                                        Progress *progress)
 {
     static std::once_flag flag;
-    std::call_once(flag, InitFork);
+    std::call_once(flag, [] { InitFork(); });
     appPid_ = getpid();
     appTid_ = syscall(SYS_gettid);
     pid_t pid = fork();

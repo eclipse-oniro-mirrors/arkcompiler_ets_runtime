@@ -1,7 +1,4 @@
 # x64: Unit Tests Debug Runtime
-#34112
-obj/arkcompiler/ets_runtime/ecmascript/dfx/hprof/tests/HeapDumpTest
-
 #35677
 obj/arkcompiler/ets_runtime/test/jittest/lazy_deopt_10/lazy_deopt_10
 
