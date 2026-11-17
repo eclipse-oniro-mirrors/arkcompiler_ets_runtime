@@ -81,7 +81,6 @@ public:
 
         static JSTaggedValue TestSortDescFunc(EcmaRuntimeCallInfo *argv)
         {
-            JSThread *thread = argv->GetThread();
             JSHandle<JSTaggedValue> a = GetCallArg(argv, 0);
             JSHandle<JSTaggedValue> b = GetCallArg(argv, 1);
             if (a->IsNumber() && b->IsNumber()) {
@@ -93,7 +92,6 @@ public:
 
         static JSTaggedValue TestSortAscFunc(EcmaRuntimeCallInfo *argv)
         {
-            JSThread *thread = argv->GetThread();
             JSHandle<JSTaggedValue> a = GetCallArg(argv, 0);
             JSHandle<JSTaggedValue> b = GetCallArg(argv, 1);
             if (a->IsNumber() && b->IsNumber()) {
