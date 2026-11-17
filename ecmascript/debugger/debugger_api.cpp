@@ -373,13 +373,13 @@ void DebuggerApi::RemoveSymbolicBreakpoint(JSDebugger* debugger, const std::stri
     return debugger->RemoveSymbolicBreakpoint(functionName);
 }
 
-bool DebuggerApi::ForEachFrameInUnionStack(const EcmaVM *ecmaVm,
+bool DebuggerApi::ForEachFrameInHybridStack(const EcmaVM *ecmaVm,
     const std::function<void(const void *frame, bool isStaticFrame)> &callback)
 {
     return Runtime::GetInstance()->ForEachFrameInUnionStack(ecmaVm, callback);
 }
 
-bool DebuggerApi::UnionStackIsEmpty(const EcmaVM *ecmaVm, bool *isEmpty)
+bool DebuggerApi::HybridStackIsEmpty(const EcmaVM *ecmaVm, bool *isEmpty)
 {
     return Runtime::GetInstance()->UnionStackIsEmpty(ecmaVm, isEmpty);
 }

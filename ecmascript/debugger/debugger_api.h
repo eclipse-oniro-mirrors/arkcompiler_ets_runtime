@@ -173,9 +173,9 @@ public:
     static bool IsSimplifiedMode(JSDebugger *debugger);
     static void SetSymbolicBreakpoint(JSDebugger *debugger, const std::unordered_set<std::string> &functionNamesSet);
     static void RemoveSymbolicBreakpoint(JSDebugger *debugger, const std::string &functionName);
-    static bool ForEachFrameInUnionStack(const EcmaVM *ecmaVm,
+    static bool ForEachFrameInHybridStack(const EcmaVM *ecmaVm,
                                          const std::function<void(const void *frame, bool isStaticFrame)> &callback);
-    static bool UnionStackIsEmpty(const EcmaVM *ecmaVm, bool *isEmpty);
+    static bool HybridStackIsEmpty(const EcmaVM *ecmaVm, bool *isEmpty);
 
     // HotReload
     static std::vector<DebugInfoExtractor *> GetPatchExtractors(const EcmaVM *ecmaVm, const std::string &url);
