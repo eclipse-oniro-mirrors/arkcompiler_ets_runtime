@@ -21,6 +21,7 @@
 #include "ecmascript/ecma_vm.h"
 #include "ecmascript/jit/jit.h"
 #include "ecmascript/js_runtime_options.h"
+#include "ecmascript/mem/heap.h"
 
 namespace panda::ecmascript {
 
@@ -123,6 +124,11 @@ void TieringManager::SubmitJitTask(const JSThread *thread, JSHandle<JSFunction> 
         return;
     }
     JSHandle<Method> method(thread, func->GetMethod(thread));
+    if (thread->GetEcmaVM()->GetHeap()->IsJitFortCapacityExhausted()) {
+        method->SetTieringDecision(TieringDecision::PREHEATED);
+        method->SetHotnessCounter(HotnessBudgetFor(thread, method));
+        return;
+    }
 #if ECMASCRIPT_ENABLE_ARK_STEED
     Jit::CompileArkSteed(thread->GetEcmaVM(), func, CompilerTier::Tier::ARKSTEED,
                          MachineCode::INVALID_OSR_OFFSET, JitCompileMode::Mode::ASYNC);

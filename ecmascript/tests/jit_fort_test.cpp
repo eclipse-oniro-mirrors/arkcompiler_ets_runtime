@@ -17,6 +17,8 @@
 #include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/tests/test_helper.h"
 
+#include "ecmascript/jit/jit.h"
+#include "ecmascript/jspandafile/program_object.h"
 #include "ecmascript/mem/concurrent_marker.h"
 #include "ecmascript/mem/partial_gc.h"
 #include "ecmascript/mem/jit_fort_memdesc.h"
@@ -103,14 +105,16 @@ std::string JitFortTest::enforceValueBack = "";
 
 HWTEST_F_L0(JitFortTest, AddRegionTest001)
 {
-    JitFort *jitFort = new JitFort();
+    std::atomic<bool> jitFortCapacityState {false};
+    JitFort *jitFort = new JitFort(jitFortCapacityState);
     bool res = jitFort->AddRegion();
     ASSERT_EQ(res, true);
 }
 
 HWTEST_F_L0(JitFortTest, AddRegionTest002)
 {
-    JitFort *jitFort = new JitFort();
+    std::atomic<bool> jitFortCapacityState {false};
+    JitFort *jitFort = new JitFort(jitFortCapacityState);
     for (size_t i = 0; i < JitFort::MAX_JIT_FORT_REGIONS; i++) {
         jitFort->AddRegion();
     }
@@ -121,7 +125,8 @@ HWTEST_F_L0(JitFortTest, AllocateTest001)
 {
     MachineCodeDesc desc;
     desc.instructionsSize = 18;
-    JitFort *jitFort = new JitFort();
+    std::atomic<bool> jitFortCapacityState {false};
+    JitFort *jitFort = new JitFort(jitFortCapacityState);
     ASSERT_NE(jitFort, nullptr);
     jitFort->Allocate(&desc);
 }
@@ -131,7 +136,8 @@ HWTEST_F_L0(JitFortTest, AllocateTest002)
     MachineCodeDesc desc;
     desc.instructionsSize = 18;
     desc.isHugeObj = false;
-    JitFort *jitFort = new JitFort();
+    std::atomic<bool> jitFortCapacityState {false};
+    JitFort *jitFort = new JitFort(jitFortCapacityState);
     ASSERT_NE(jitFort, nullptr);
     uintptr_t retAddr = jitFort->Allocate(&desc);
     bool inRange = jitFort->InSmallRange(retAddr);
@@ -143,7 +149,8 @@ HWTEST_F_L0(JitFortTest, AllocateTest003)
     MachineCodeDesc desc;
     desc.instructionsSize = 18;
     desc.isHugeObj = true;
-    JitFort *jitFort = new JitFort();
+    std::atomic<bool> jitFortCapacityState {false};
+    JitFort *jitFort = new JitFort(jitFortCapacityState);
     ASSERT_NE(jitFort, nullptr);
     uintptr_t retAddr = jitFort->Allocate(&desc);
     bool inHugeRange = jitFort->InHugeRange(retAddr);
@@ -166,14 +173,16 @@ HWTEST_F_L0(JitFortTest, MemDescPoolFreeTest001)
 
 HWTEST_F_L0(JitFortTest, InitRegionTest001)
 {
-    JitFort *jitFort = new JitFort();
+    std::atomic<bool> jitFortCapacityState {false};
+    JitFort *jitFort = new JitFort(jitFortCapacityState);
     ASSERT_NE(jitFort, nullptr);
     jitFort->InitRegions();
 }
 
 HWTEST_F_L0(JitFortTest, InRangeTest001)
 {
-    JitFort *jitFort = new JitFort();
+    std::atomic<bool> jitFortCapacityState {false};
+    JitFort *jitFort = new JitFort(jitFortCapacityState);
     bool result = jitFort->InSmallRange(1);
     ASSERT_EQ(result, false);
 }
@@ -184,8 +193,10 @@ HWTEST_F_L0(JitFortTest, InRangeTest001)
  */
 HWTEST_F_L0(JitFortTest, SingletonInstanceTest001)
 {
-    JitFort *jitFort1 = new JitFort();
-    JitFort *jitFort2 = new JitFort();
+    std::atomic<bool> jitFort1CapacityState {false};
+    JitFort *jitFort1 = new JitFort(jitFort1CapacityState);
+    std::atomic<bool> jitFort2CapacityState {false};
+    JitFort *jitFort2 = new JitFort(jitFort2CapacityState);
 
     ASSERT_NE(jitFort1, nullptr);
     ASSERT_NE(jitFort2, nullptr);
@@ -223,7 +234,8 @@ HWTEST_F_L0(JitFortTest, SingletonInstanceTest001)
  */
 HWTEST_F_L0(JitFortTest, HugeRegionBasicTest002)
 {
-    JitFort *jitFort = new JitFort();
+    std::atomic<bool> jitFortCapacityState {false};
+    JitFort *jitFort = new JitFort(jitFortCapacityState);
 
     // Test huge object allocation
     MachineCodeDesc desc;
@@ -253,7 +265,8 @@ HWTEST_F_L0(JitFortTest, HugeRegionBasicTest002)
  */
 HWTEST_F_L0(JitFortTest, HugeRegionSizeVarietyTest003)
 {
-    JitFort *jitFort = new JitFort();
+    std::atomic<bool> jitFortCapacityState {false};
+    JitFort *jitFort = new JitFort(jitFortCapacityState);
     std::vector<uintptr_t> addresses;
 
     // Test different huge sizes
@@ -295,7 +308,8 @@ HWTEST_F_L0(JitFortTest, HugeRegionSizeVarietyTest003)
  */
 HWTEST_F_L0(JitFortTest, MixedAllocationScenariosTest004)
 {
-    JitFort *jitFort = new JitFort();
+    std::atomic<bool> jitFortCapacityState {false};
+    JitFort *jitFort = new JitFort(jitFortCapacityState);
     std::vector<uintptr_t> smallAddrs, hugeAddrs;
 
     // Test pattern: small, small, huge, repeated
@@ -341,7 +355,8 @@ HWTEST_F_L0(JitFortTest, MixedAllocationScenariosTest004)
  */
 HWTEST_F_L0(JitFortTest, MemoryManagementOperationsTest005)
 {
-    JitFort *jitFort = new JitFort();
+    std::atomic<bool> jitFortCapacityState {false};
+    JitFort *jitFort = new JitFort(jitFortCapacityState);
 
     // Test small object memory management
     MachineCodeDesc smallDesc;
@@ -385,7 +400,8 @@ HWTEST_F_L0(JitFortTest, MemoryManagementOperationsTest005)
  */
 HWTEST_F_L0(JitFortTest, AddressRangeValidationTest006)
 {
-    JitFort *jitFort = new JitFort();
+    std::atomic<bool> jitFortCapacityState {false};
+    JitFort *jitFort = new JitFort(jitFortCapacityState);
 
     // Allocate to get valid addresses for testing
     MachineCodeDesc smallDesc, hugeDesc;
@@ -426,7 +442,8 @@ HWTEST_F_L0(JitFortTest, AddressRangeValidationTest006)
  */
 HWTEST_F_L0(JitFortTest, RegionManagementTest007)
 {
-    JitFort *jitFort = new JitFort();
+    std::atomic<bool> jitFortCapacityState {false};
+    JitFort *jitFort = new JitFort(jitFortCapacityState);
 
     // Test initial region list
     JitFortRegion *regionList = jitFort->GetRegionList();
@@ -469,7 +486,8 @@ HWTEST_F_L0(JitFortTest, RegionManagementTest007)
  */
 HWTEST_F_L0(JitFortTest, FortSizeCalculationTest008)
 {
-    JitFort *jitFort = new JitFort();
+    std::atomic<bool> jitFortCapacityState {false};
+    JitFort *jitFort = new JitFort(jitFortCapacityState);
 
     // Test FortAllocSize method with various instruction sizes
     size_t smallSize = 64;
@@ -510,7 +528,8 @@ HWTEST_F_L0(JitFortTest, ConcurrentThreadSafetyTest009)
 
     auto workerThread = [&successCount]() {
         for (int i = 0; i < opsPerThread; i++) {
-            JitFort *jitFort = new JitFort();
+            std::atomic<bool> jitFortCapacityState {false};
+            JitFort *jitFort = new JitFort(jitFortCapacityState);
             MachineCodeDesc desc;
             desc.instructionsSize = 128 + (rand() % 1024); // Random size 128-1152
             desc.isHugeObj = (rand() % 4) == 0;            // 25% chance of huge object
@@ -556,7 +575,8 @@ HWTEST_F_L0(JitFortTest, ResourceAvailabilityTest010)
     bool resourceAvailable = JitFort::IsResourceAvailable();
     EXPECT_TRUE(resourceAvailable) << "JitFort resources should be available";
 
-    JitFort *jitFort = new JitFort();
+    std::atomic<bool> jitFortCapacityState {false};
+    JitFort *jitFort = new JitFort(jitFortCapacityState);
 
     // Test after instance creation
     EXPECT_TRUE(JitFort::IsResourceAvailable()) << "Resource availability should remain true after instance creation";
@@ -594,7 +614,8 @@ HWTEST_F_L0(JitFortTest, ResourceAvailabilityTest010)
  */
 HWTEST_F_L0(JitFortTest, AddrToFortRegionIndexTest011)
 {
-    JitFort *jitFort = new JitFort();
+    std::atomic<bool> jitFortCapacityState {false};
+    JitFort *jitFort = new JitFort(jitFortCapacityState);
 
     // Allocate small object to get valid address
     MachineCodeDesc desc;
@@ -625,7 +646,8 @@ HWTEST_F_L0(JitFortTest, MemoryLeakTest012)
     const int perCycle = 10;
 
     for (int cycle = 0; cycle < cycles; cycle++) {
-        JitFort *jitFort = new JitFort();
+        std::atomic<bool> jitFortCapacityState {false};
+        JitFort *jitFort = new JitFort(jitFortCapacityState);
 
         std::vector<uintptr_t> addresses;
         for (int i = 0; i < perCycle; i++) {
@@ -645,5 +667,146 @@ HWTEST_F_L0(JitFortTest, MemoryLeakTest012)
         delete jitFort;
     }
 }
+
+class JitFortCapacityTest : public BaseTestWithScope<false> {
+public:
+    void SetUp() override
+    {
+        BaseTestWithScope<false>::SetUp();
+        enableJitFort_ = Jit::GetInstance()->IsEnableJitFort();
+        Jit::GetInstance()->SetEnableJitFort(true);
+    }
+
+    void TearDown() override
+    {
+        Jit::GetInstance()->SetEnableJitFort(enableJitFort_);
+        BaseTestWithScope<false>::TearDown();
+    }
+
+    static void MakeBufferDead(JitFort &fort, uintptr_t address, size_t size)
+    {
+        auto *region = fort.ObjectAddressToRange(address);
+        region->ClearMark(reinterpret_cast<void *>(address));
+        region->ClearMark(reinterpret_cast<void *>(address + sizeof(uint64_t)));
+        region->ClearMark(reinterpret_cast<void *>(address + size - 1));
+    }
+
+private:
+    bool enableJitFort_ {false};
+};
+
+HWTEST_F_L0(JitFortCapacityTest, OversizedRequestsDoNotStopCompilation)
+{
+    std::atomic<bool> fortCapacityState {false};
+    JitFort fort(fortCapacityState);
+    MachineCodeDesc desc;
+    desc.instructionsSize = DEFAULT_REGION_SIZE + 1;
+    EXPECT_EQ(fort.Allocate(&desc), 0U);
+    desc.instructionsSize = static_cast<size_t>(-1);
+    EXPECT_EQ(fort.Allocate(&desc), 0U);
+    desc.isHugeObj = true;
+    desc.instructionsSize = HUGE_JITFORT_REGION_SIZE + 1;
+    EXPECT_EQ(fort.Allocate(&desc), 0U);
+    EXPECT_FALSE(fort.IsCapacityExhausted());
+    desc.instructionsSize = JitFort::FORT_BUF_ALIGN;
+    EXPECT_NE(fort.Allocate(&desc), 0U);
+}
+
+HWTEST_F_L0(JitFortCapacityTest, ReclaimedSpaceClearsCapacityStateRepeatedly)
+{
+    for (bool inHuge : {false, true}) {
+        std::atomic<bool> fortCapacityState {false};
+        JitFort fort(fortCapacityState);
+        MachineCodeDesc desc;
+        desc.isHugeObj = inHuge;
+        const size_t size = inHuge ? HUGE_JITFORT_REGION_SIZE : DEFAULT_REGION_SIZE;
+        const size_t count = inHuge ? 1 : JitFort::MAX_JIT_FORT_REGIONS;
+        for (size_t cycle = 0; cycle < 3; ++cycle) {
+            std::vector<uintptr_t> addresses;
+            desc.instructionsSize = size;
+            for (size_t i = 0; i < count; ++i) {
+                uintptr_t address = fort.Allocate(&desc);
+                ASSERT_NE(address, 0U);
+                addresses.push_back(address);
+            }
+            desc.instructionsSize = JitFort::FORT_BUF_ALIGN;
+            ASSERT_EQ(fort.Allocate(&desc), 0U);
+            // Pending installation keeps all buffers alive, so sweeping must not resume compilation.
+            fort.Sweep(inHuge);
+            EXPECT_TRUE(fort.IsCapacityExhausted());
+            for (uintptr_t address : addresses) {
+                MakeBufferDead(fort, address, size);
+            }
+            fort.Sweep(inHuge);
+            EXPECT_FALSE(fort.IsCapacityExhausted());
+        }
+    }
+}
+
+HWTEST_F_L0(JitFortCapacityTest, LaterAllocationFailurePreservesRecoveryCondition)
+{
+    std::atomic<bool> fortCapacityState {false};
+    JitFort fort(fortCapacityState);
+    MachineCodeDesc desc;
+    desc.isHugeObj = true;
+    desc.instructionsSize = HUGE_JITFORT_REGION_SIZE;
+    uintptr_t hugeAddress = fort.Allocate(&desc);
+    ASSERT_NE(hugeAddress, 0U);
+    desc.instructionsSize = JitFort::FORT_BUF_ALIGN;
+    ASSERT_EQ(fort.Allocate(&desc), 0U);
+
+    desc.isHugeObj = false;
+    desc.instructionsSize = DEFAULT_REGION_SIZE;
+    uintptr_t smallAddress = 0;
+    for (size_t i = 0; i < JitFort::MAX_JIT_FORT_REGIONS; ++i) {
+        smallAddress = fort.Allocate(&desc);
+        ASSERT_NE(smallAddress, 0U);
+    }
+    desc.instructionsSize = 2 * JitFort::FORT_BUF_ALIGN;
+    ASSERT_EQ(fort.Allocate(&desc), 0U);
+    // A later failure in small must not replace the original huge recovery condition.
+    MakeBufferDead(fort, hugeAddress, HUGE_JITFORT_REGION_SIZE);
+    fort.Sweep(true);
+    EXPECT_FALSE(fort.IsCapacityExhausted());
+
+    // A new failure after recovery starts a new pause with its own recovery condition.
+    ASSERT_EQ(fort.Allocate(&desc), 0U);
+    EXPECT_TRUE(fort.IsCapacityExhausted());
+    MakeBufferDead(fort, smallAddress, DEFAULT_REGION_SIZE);
+    fort.Sweep(false);
+    EXPECT_FALSE(fort.IsCapacityExhausted());
+    EXPECT_NE(fort.Allocate(&desc), 0U);
+}
+
+HWTEST_F_L0(JitFortCapacityTest, FragmentedSpaceDoesNotClearCapacityState)
+{
+    std::atomic<bool> fortCapacityState {false};
+    JitFort fort(fortCapacityState);
+    MachineCodeDesc desc;
+    desc.isHugeObj = true;
+    const size_t unit = JitFort::FORT_BUF_ALIGN;
+    desc.instructionsSize = 2 * unit;
+    uintptr_t first = fort.Allocate(&desc);
+    ASSERT_NE(first, 0U);
+    desc.instructionsSize = unit;
+    uintptr_t middle = fort.Allocate(&desc);
+    ASSERT_NE(middle, 0U);
+    desc.instructionsSize = 2 * unit;
+    uintptr_t last = fort.Allocate(&desc);
+    ASSERT_NE(last, 0U);
+    desc.instructionsSize = HUGE_JITFORT_REGION_SIZE - 5 * unit;
+    ASSERT_NE(fort.Allocate(&desc), 0U);
+    desc.instructionsSize = 3 * unit;
+    ASSERT_EQ(fort.Allocate(&desc), 0U);
+    MakeBufferDead(fort, first, 2 * unit);
+    MakeBufferDead(fort, last, 2 * unit);
+    fort.Sweep(true);
+    EXPECT_TRUE(fort.IsCapacityExhausted());
+    MakeBufferDead(fort, middle, unit);
+    fort.Sweep(true);
+    EXPECT_FALSE(fort.IsCapacityExhausted());
+    EXPECT_NE(fort.Allocate(&desc), 0U);
+}
+
 
 } // namespace panda::test

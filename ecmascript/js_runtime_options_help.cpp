@@ -102,7 +102,7 @@ const std::string PUBLIC_API HELP_OPTION_MSG =
     "Default: '1'\n"
     "--compiler-max-inline-count           Set max inline count which aot function can be inlined. Default: '6'\n"
     "--compiler-max-inline-size-large      Set max inline size which large aot function can be inlined. Default: '45'\n"
-    "--compiler-deopt-threshold:           Set max count which aot function can occur deoptimization. Default: '10'\n"
+    "--compiler-deopt-threshold:           Set deoptimization count limit (1-31). Default: '10'\n"
     "--compiler-stress-deopt:              Enable stress deopt for aot compiler. Default: 'false'\n"
     "--compiler-opt-code-profiler:         Enable opt code Bytecode Statistics for aot runtime. Default: 'false'\n"
     "--compiler-opt-bc-range:              Range list for EcmaOpCode range Example '1:2,5:8'\n"

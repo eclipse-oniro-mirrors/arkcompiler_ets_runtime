@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-//! PARAMS --compiler-jit-hotness-threshold=60000 --enable-force-gc=true
+//! PARAMS --compiler-jit-hotness-threshold=60000 --enable-force-gc=true --compiler-deopt-threshold=31
 //! METHOD construct
 // Sixteen explicit compilations, each with one dynamic constructor body call.
 //! COUNT CallCommonStub NewThisObjectChecked 16

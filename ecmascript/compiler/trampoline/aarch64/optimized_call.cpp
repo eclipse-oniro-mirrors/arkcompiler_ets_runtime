@@ -458,9 +458,9 @@ void OptimizedCall::JSCallInternal(ExtendedAssembler *assembler, Register jsfunc
         Label noSubmit;
         Register extraLiteralInfo = x6;
         __ Ldr(extraLiteralInfo.W(), MemoryOperand(method, Method::EXTRA_LITERAL_INFO_OFFSET));
-        __ Lsr(extraLiteralInfo.W(), extraLiteralInfo.W(), Method::DeoptCountBits::START_BIT);
+        __ Lsr(extraLiteralInfo.W(), extraLiteralInfo.W(), Method::TieringDecisionBits::START_BIT);
         __ And(extraLiteralInfo.W(), extraLiteralInfo.W(),
-            LogicalImmediate::Create((1LU << Method::DeoptCountBits::SIZE) - 1, W_REG_SIZE));
+            LogicalImmediate::Create((1LU << Method::TieringDecisionBits::SIZE) - 1, W_REG_SIZE));
         __ Cmp(extraLiteralInfo.W(), Immediate(static_cast<int32_t>(TieringDecision::ARKSTEED_REQUESTED)));
         __ B(Condition::NE, &noSubmit);
         {

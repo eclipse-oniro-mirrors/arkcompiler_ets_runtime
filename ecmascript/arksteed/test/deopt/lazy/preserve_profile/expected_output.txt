@@ -1,0 +1,13 @@
+mono
+true
+10
+false
+true
+mono
+20
+true
+20
+false
+true
+poly
+30

@@ -119,14 +119,14 @@ T *FreeObjectList<T>::LookupSuitableFreeObject(size_t size)
         FreeObjectSet<T> *current = sets_[type];
         while (current != nullptr) {
             FreeObjectSet<T> *next = nullptr;
-            T *object = INVALID_OBJECT;
+            T *object = T::Cast(INVALID_OBJPTR);
             if (type <= SMALL_SET_MAX_INDEX) {
                 object = current->LookupSmallFreeObject(size);
             } else {
                 next = current->next_;
                 object = current->LookupLargeFreeObject(size);
             }
-            if (object != INVALID_OBJECT) {
+            if (object != T::Cast(INVALID_OBJPTR)) {
                 return object;
             }
             current = next;
@@ -135,6 +135,7 @@ T *FreeObjectList<T>::LookupSuitableFreeObject(size_t size)
     return nullptr;
 }
 template FreeObject *FreeObjectList<FreeObject>::LookupSuitableFreeObject(size_t);
+template MemDesc *FreeObjectList<MemDesc>::LookupSuitableFreeObject(size_t);
 
 template <typename T>
 void FreeObjectList<T>::Free(uintptr_t start, size_t size, bool isAdd)

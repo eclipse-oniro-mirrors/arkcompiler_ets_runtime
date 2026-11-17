@@ -59,7 +59,7 @@ FreeListAllocator<MemDesc>::FreeListAllocator(BaseHeap *heap, MemDescPool *pool,
     freeList_ = std::make_unique<FreeObjectList<MemDesc>>(fort);
 }
 
-JitFort::JitFort()
+JitFort::JitFort(std::atomic<bool> &capacityState) : capacityState_(&capacityState)
 {
     jitFortMem_ = PageMap(JIT_FORT_REG_SPACE_MAX,
                           PageProtectProt(IsDisableCodeSign() || !IsResourceAvailable()),
@@ -175,6 +175,11 @@ uintptr_t JitFort::Allocate(MachineCodeDesc *desc)
 {
     LockHolder lock(mutex_);
 
+    // Reject oversized requests without treating them as capacity pressure.
+    size_t maxSize = desc->isHugeObj ? HUGE_JITFORT_REGION_SIZE : DEFAULT_REGION_SIZE;
+    if (desc->instructionsSize > maxSize) {
+        return ToUintPtr(nullptr);
+    }
     size_t size = FortAllocSize(desc->instructionsSize);
     uintptr_t ret = ToUintPtr(nullptr);
     bool inHuge = desc->isHugeObj;
@@ -184,6 +189,12 @@ uintptr_t JitFort::Allocate(MachineCodeDesc *desc)
         ret = AllocateSmall(size);
     }
     if (ret == ToUintPtr(nullptr)) {
+        // In-flight tasks may still allocate; keep the first failure as the recovery condition.
+        if (!IsCapacityExhausted()) {
+            failedAllocationSize_ = size;
+            failedAllocationInHuge_ = inHuge;
+            capacityState_->store(true, std::memory_order_release);
+        }
         LOG_JIT(DEBUG) << (inHuge ? "Huge " : "Small ") << "JitFort:: Allocate return nullptr for size " << size;
         return ret;
     }
@@ -313,6 +324,12 @@ void JitFort::UpdateFreeSpace(bool inHuge)
             FreeRegion(region);
             region = region->GetNext();
         }
+    }
+    // Rebuilding resets the bump allocator, so all reusable blocks are in the free list.
+    auto *allocator = inHuge ? hugeAlloc_ : allocator_;
+    if (IsCapacityExhausted() && failedAllocationInHuge_ == inHuge &&
+        allocator->LookupSuitableFreeObject(failedAllocationSize_) != 0) {
+        capacityState_->store(false, std::memory_order_release);
     }
 }
 

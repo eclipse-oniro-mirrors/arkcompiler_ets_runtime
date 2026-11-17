@@ -17,6 +17,7 @@
 #define ECMASCRIPT_MEM_JIT_FORT_H
 
 #include <array>
+#include <atomic>
 
 #include "ecmascript/log_wrapper.h"
 #include "ecmascript/mem/mem_common.h"
@@ -114,7 +115,12 @@ public:
     static constexpr size_t FORT_BUF_ADDR_MASK = FORT_BUF_ALIGN - 1;
     static constexpr size_t MAX_JIT_FORT_REGIONS = JIT_FORT_REG_SPACE_MAX / DEFAULT_REGION_SIZE;
 
-    JitFort();
+    explicit JitFort(std::atomic<bool> &capacityState);
+
+    bool IsCapacityExhausted() const
+    {
+        return capacityState_->load(std::memory_order_acquire);
+    }
     ~JitFort();
     NO_COPY_SEMANTIC(JitFort);
     NO_MOVE_SEMANTIC(JitFort);
@@ -175,6 +181,9 @@ private:
     uintptr_t AllocateHuge(size_t size);
     void InitHugeRegion();
 
+    std::atomic<bool> *capacityState_;
+    size_t failedAllocationSize_ {0};
+    bool failedAllocationInHuge_ {false};
     Mutex mutex_;
     std::atomic<bool> isSweeping_ {false};
     friend class HugeMachineCodeSpace;
