@@ -153,30 +153,31 @@ void ArkSteedRegisterAllocator::ApplyPatches(BB *block)
     }
 #endif
 
-    std::vector<NonControlVertex *> newVertices;
-    newVertices.reserve(vertices.size() + patches_.size());
-    size_t patchIndex = 0;
+    const size_t oldSize = vertices.size();
+    const size_t patchCount = patches_.size();
+    CHECK(patchCount <= vertices.max_size() - oldSize);
+    vertices.resize(oldSize + patchCount);
 
-    for (size_t i = 0; i < vertices.size(); ++i) {
-        VertexId currentVertexId = vertices[i]->GetId();
-
-        while (patchIndex < patches_.size() && patches_[patchIndex].beforeVertexId == currentVertexId) {
-            newVertices.push_back(patches_[patchIndex].gapMove);
-            patchIndex++;
+    size_t readIndex = oldSize;
+    size_t patchIndex = patchCount;
+    size_t writeIndex = vertices.size();
+    [[maybe_unused]] VertexId nextVertexId = block->GetControlVertex()->GetId();
+    // Merge backwards so writes cannot overwrite unread original vertices.
+    while (patchIndex != 0) {
+        const auto &patch = patches_[patchIndex - 1];
+        if (readIndex != 0 && vertices[readIndex - 1]->GetId() >= patch.beforeVertexId) {
+            auto *original = vertices[--readIndex];
+            nextVertexId = original->GetId();
+            vertices[--writeIndex] = original;
+        } else {
+            ASSERT(patch.beforeVertexId == nextVertexId);
+            // Reverse consumption and reverse writing preserve equal-target patch order.
+            vertices[--writeIndex] = patch.gapMove;
+            --patchIndex;
         }
-
-        newVertices.push_back(vertices[i]);
     }
-
-    // Append remaining gap moves at the end
-    while (patchIndex < patches_.size()) {
-        ASSERT(patches_[patchIndex].beforeVertexId == block->GetControlVertex()->GetId());
-        newVertices.push_back(patches_[patchIndex].gapMove);
-        patchIndex++;
-    }
-
-    // Replace vertices with new array
-    block->ReplaceVertices(newVertices);
+    // The remaining original prefix is already in its final position.
+    ASSERT(writeIndex == readIndex);
     patches_.clear();
 }
 
@@ -507,6 +508,8 @@ void ArkSteedRegisterAllocator::AssignDeoptInput(ValueVertex *vertex, InputLocat
 template <class VertexT, class Callback>
 void AssignDeoptInputsFor(VertexT *vertex, Callback assign)
 {
+    static_assert(CanLazyDeopt(VertexT::PROPERTIES) == std::is_base_of_v<LazyDeoptimizableMixin, VertexT>,
+                  "Lazy deopt property must match the mixin used by input assignment");
     if constexpr (std::is_base_of_v<LazyDeoptimizableMixin, VertexT>) {
         if (vertex->HasLazyDeoptFrameState()) {
             for (uint32_t index = 0, valueCount = vertex->GetDeoptFrameValueCount(); index < valueCount; ++index) {
@@ -518,6 +521,9 @@ void AssignDeoptInputsFor(VertexT *vertex, Callback assign)
 
 void ArkSteedRegisterAllocator::AssignDeoptInputs(Vertex *vertex)
 {
+    if (!vertex->CanLazyDeopt()) {
+        return;
+    }
     auto assign = [this](ValueVertex *source, InputLocation *location) { AssignDeoptInput(source, location); };
     switch (vertex->GetOpcode()) {
 #define ASSIGN_DEOPT_INPUTS(type)                                      \

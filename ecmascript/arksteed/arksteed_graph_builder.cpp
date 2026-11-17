@@ -7196,22 +7196,38 @@ struct GraphBuilder::BytecodeVisitor {
         AppendLiveLocalsAndParams(deoptFrameState, 0, [&liveSet](VRegIDType index) { return liveSet.TestBit(index); });
     }
 
-    EagerDeoptFrameState BuildCurrentEagerDeoptFrameState(uint32_t bcIndex)
+    EagerDeoptFrameState BuildEagerDeoptFrameState(uint32_t bcIndex, const kungfu::BitSet &liveSet)
     {
         EagerDeoptFrameState frameStateValues {self->chunk_};
-        kungfu::BitSet liveSet(self->chunk_, self->analysis_->GetNumVRegs());
-        liveSet.CopyFrom(self->analysis_->GetLiveInOfBytecode(bcIndex));
-        if (blockInfo->catchBlock != nullptr) {
-            liveSet.Union(self->analysis_->GetLiveInOfBlock(blockInfo->catchBlock->rpoIndex));
-        }
-
+        // Common inputs are variable: inlined units also carry the inline depth,
+        // caller frame values and inlined actual arguments.
         AppendEagerCommonDeoptInputs(bcIndex, &frameStateValues);
+        const size_t liveCount = liveSet.Count();
+        CHECK(liveCount <= frameStateValues.max_size() - frameStateValues.size());
+        // Other inputs are a subset of liveSet. Avoid retaining intermediate growth buffers in the chunk.
+        frameStateValues.reserve(frameStateValues.size() + liveCount);
+
         if (liveSet.TestBit(self->AccIndex())) {
             AppendDeoptInput(&frameStateValues, static_cast<int32_t>(SpecVregIndex::ACC_INDEX), frameState.GetAcc());
         }
         AppendLiveLocalsAndParams(&frameStateValues, FIXED_PARAM_VREG_COUNT,
                                   [&liveSet](VRegIDType index) { return liveSet.TestBit(index); });
         return frameStateValues;
+    }
+
+    EagerDeoptFrameState BuildCurrentEagerDeoptFrameState(uint32_t bcIndex)
+    {
+        const auto &liveIn = self->analysis_->GetLiveInOfBytecode(bcIndex);
+        if (blockInfo->catchBlock == nullptr) {
+            // The analysis owns this set; frame construction only reads it.
+            return BuildEagerDeoptFrameState(bcIndex, liveIn);
+        }
+
+        // Catch-only values must still be restored. Merge into a separate set, preserving analysis data.
+        kungfu::BitSet liveSet(self->chunk_, self->analysis_->GetNumVRegs());
+        liveSet.CopyFrom(liveIn);
+        liveSet.Union(self->analysis_->GetLiveInOfBlock(blockInfo->catchBlock->rpoIndex));
+        return BuildEagerDeoptFrameState(bcIndex, liveSet);
     }
 
     template <class CallT>
