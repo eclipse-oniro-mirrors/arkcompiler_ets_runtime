@@ -174,7 +174,8 @@ inline static bool IsTruncatedDigitChar(uint16_t c)
     return c > 0xFF && IsDecimalDigitChar(static_cast<uint8_t>(c & 0xFF));
 }
 
-inline bool ComputeIntegerHash(uint32_t *num, uint8_t c)
+template <typename T>
+inline bool ComputeIntegerHash(uint32_t *num, T c)
 {
     if (!IsDecimalDigitChar(c)) {
         return false;
