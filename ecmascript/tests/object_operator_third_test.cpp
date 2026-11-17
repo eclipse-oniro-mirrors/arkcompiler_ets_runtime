@@ -712,7 +712,7 @@ HWTEST_F_L0(ObjectOperatorTest, NormalizeElements_EmptyAndShared)
 {
     JSHandle<JSObject> emptyObject = CreateObjectWithElements(thread, 4);
     JSHandle<JSTaggedValue> hole(thread, JSTaggedValue::Hole());
-    for (uint32_t i = 0; i < 4; i++) {
+    for (uint32_t i = 0; i < 4; i++) { // 4: length of array
         ElementAccessor::Set(thread, emptyObject, i, hole, true, ElementsKind::HOLE);
     }
     JSObject::NormalizeElements(thread, emptyObject);
