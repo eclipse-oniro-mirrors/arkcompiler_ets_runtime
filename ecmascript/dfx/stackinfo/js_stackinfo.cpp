@@ -76,19 +76,17 @@ bool IsSteedFunctionFrame(uintptr_t frameType)
     return static_cast<FrameType>(frameType) == FrameType::STEED_FUNCTION_FRAME;
 }
 
-void JsStackInfo::AppendMethodTrace(std::string &data, const JSThread *thread, Method *method, uint32_t pcOffset,
-                                    LastBuilderCache &lastCache, bool enableStackSourceFile)
+void JsStackInfo::AppendMethodTraceDetails(std::string &data, const std::string &name,
+                                           const JSPandaFile *pandaFile, panda_file::File::EntityId methodId,
+                                           uint32_t pcOffset, LastBuilderCache &lastCache, bool enableStackSourceFile)
 {
     data.append("    at ");
-    std::string name = method->ParseFunctionName(thread);
     if (name.empty()) {
         data.append("anonymous (");
     } else {
         data.append(name).append(" (");
     }
-    // source file
     DebugInfoExtractor *debugExtractor = nullptr;
-    const JSPandaFile *pandaFile = method->GetJSPandaFile(thread);
     if (pandaFile == lastCache.pf) {
         debugExtractor = lastCache.extractor;
     } else {
@@ -97,7 +95,7 @@ void JsStackInfo::AppendMethodTrace(std::string &data, const JSThread *thread, M
         lastCache.extractor = debugExtractor;
     }
     if (enableStackSourceFile) {
-        const std::string &sourceFile = debugExtractor->GetSourceFile(method->GetMethodId());
+        const std::string &sourceFile = debugExtractor->GetSourceFile(methodId);
         if (sourceFile.empty()) {
             data.push_back('?');
         } else {
@@ -108,7 +106,6 @@ void JsStackInfo::AppendMethodTrace(std::string &data, const JSThread *thread, M
     }
 
     data.push_back(':');
-    // line number and column number
     auto callbackLineFunc = [&data](int32_t line) -> bool {
         data += std::to_string(line + 1);
         data.push_back(':');
@@ -118,12 +115,18 @@ void JsStackInfo::AppendMethodTrace(std::string &data, const JSThread *thread, M
         data += std::to_string(column + 1);
         return true;
     };
-    panda_file::File::EntityId methodId = method->GetMethodId();
     if (!debugExtractor->MatchLineWithOffset(callbackLineFunc, methodId, pcOffset) ||
         !debugExtractor->MatchColumnWithOffset(callbackColumnFunc, methodId, pcOffset)) {
         data.push_back('?');
     }
     data.append(")\n");
+}
+
+void JsStackInfo::AppendMethodTrace(std::string &data, const JSThread *thread, Method *method, uint32_t pcOffset,
+                                    LastBuilderCache &lastCache, bool enableStackSourceFile)
+{
+    AppendMethodTraceDetails(data, method->ParseFunctionName(thread), method->GetJSPandaFile(thread),
+                             method->GetMethodId(), pcOffset, lastCache, enableStackSourceFile);
 }
 
 void JsStackInfo::DumpJitCode(JSThread *thread)
@@ -270,6 +273,21 @@ void JsStackInfo::AppendJsStackTraceInfo(std::string &data, JSThread *thread, Me
             AssembleJitCodeMap(thread, jsErrorObj, func, method, it.GetOptimizedReturnAddr());
         }
     }
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    if (frameType == FrameType::STEED_FUNCTION_FRAME) {
+        std::vector<arksteed::ArkSteedSourceFrame> sourceFrames;
+        if (it.GetSteedSourceFrames(sourceFrames) && !sourceFrames.empty() &&
+            (sourceFrames.size() > 1 || sourceFrames.front().methodOffset != 0)) {
+            const JSPandaFile *pandaFile = method->GetJSPandaFile(thread);
+            for (const auto &frame : sourceFrames) {
+                panda_file::File::EntityId methodId(frame.methodOffset);
+                AppendMethodTraceDetails(data, MethodLiteral::ParseFunctionName(pandaFile, methodId), pandaFile,
+                                         methodId, frame.bcOffset, lastCache, thread->GetEnableStackSourceFile());
+            }
+            return;
+        }
+    }
+#endif
     std::vector<std::pair<JSTaggedType, uint32_t>> stackTraceInfos;
     it.GetStackTraceInfos(stackTraceInfos, needBaselineSpecialHandling, pcOffset);
     for (auto &info : stackTraceInfos) {
@@ -319,6 +337,53 @@ void JsStackInfo::BuildCrashInfo(bool isJsCrash, uintptr_t pc, JSThread *thread)
     }
 }
 
+JsFrameInfo JsStackInfo::BuildJsFrameInfoForSource(const JSPandaFile *pandaFile,
+                                                   panda_file::File::EntityId methodId,
+                                                   const std::string &name, uint32_t offset)
+{
+    struct JsFrameInfo frameInfo;
+    frameInfo.functionName = name.empty() ? "anonymous" : name;
+    DebugInfoExtractor *debugExtractor = JSPandaFileManager::GetInstance()->GetJSPtExtractor(pandaFile);
+    const std::string &sourceFile = debugExtractor->GetSourceFile(methodId);
+    frameInfo.fileName = sourceFile.empty() ? "?" : sourceFile;
+    int lineNumber = 0;
+    auto callbackLineFunc = [&frameInfo, &lineNumber](int32_t line) -> bool {
+        lineNumber = line + 1;
+        frameInfo.pos = std::to_string(lineNumber) + ":";
+        return true;
+    };
+    auto callbackColumnFunc = [&frameInfo](int32_t column) -> bool {
+        frameInfo.pos += std::to_string(column + 1);
+        return true;
+    };
+    if (!debugExtractor->MatchLineWithOffset(callbackLineFunc, methodId, offset) ||
+        !debugExtractor->MatchColumnWithOffset(callbackColumnFunc, methodId, offset)) {
+        frameInfo.pos = "?";
+    }
+    return frameInfo;
+}
+
+#if ECMASCRIPT_ENABLE_ARK_STEED
+bool JsStackInfo::AppendSteedSourceFrames(JSThread *thread, Method *method, FrameIterator &it,
+                                          std::vector<JsFrameInfo> &jsFrame)
+{
+    if (it.GetFrameType() != FrameType::STEED_FUNCTION_FRAME) {
+        return false;
+    }
+    std::vector<arksteed::ArkSteedSourceFrame> sourceFrames;
+    if (!it.GetSteedSourceFrames(sourceFrames) || sourceFrames.empty() || sourceFrames.front().methodOffset == 0) {
+        return false;
+    }
+    const JSPandaFile *pandaFile = method->GetJSPandaFile(thread);
+    for (const auto &frame : sourceFrames) {
+        panda_file::File::EntityId methodId(frame.methodOffset);
+        jsFrame.push_back(BuildJsFrameInfoForSource(
+            pandaFile, methodId, MethodLiteral::ParseFunctionName(pandaFile, methodId), frame.bcOffset));
+    }
+    return true;
+}
+#endif
+
 std::vector<struct JsFrameInfo> JsStackInfo::BuildJsStackInfo(JSThread *thread, bool currentStack)
 {
     std::vector<struct JsFrameInfo> jsFrame;
@@ -329,47 +394,20 @@ std::vector<struct JsFrameInfo> JsStackInfo::BuildJsStackInfo(JSThread *thread, 
             continue;
         }
         auto method = it.CheckAndGetMethod();
-        if (method == nullptr) {
+        if (method == nullptr || method->IsNativeWithCallField()) {
             continue;
         }
-        struct JsFrameInfo frameInfo;
-        if (!method->IsNativeWithCallField()) {
-            std::string name = method->ParseFunctionName(thread);
-            if (name.empty()) {
-                frameInfo.functionName = "anonymous";
-            } else {
-                frameInfo.functionName = name;
-            }
-            // source file
-            DebugInfoExtractor *debugExtractor =
-                JSPandaFileManager::GetInstance()->GetJSPtExtractor(method->GetJSPandaFile(thread));
-            const std::string &sourceFile = debugExtractor->GetSourceFile(method->GetMethodId());
-            if (sourceFile.empty()) {
-                frameInfo.fileName = "?";
-            } else {
-                frameInfo.fileName = sourceFile;
-            }
-            // line number and column number
-            int lineNumber = 0;
-            auto callbackLineFunc = [&frameInfo, &lineNumber](int32_t line) -> bool {
-                lineNumber = line + 1;
-                frameInfo.pos = std::to_string(lineNumber) + ":";
-                return true;
-            };
-            auto callbackColumnFunc = [&frameInfo](int32_t column) -> bool {
-                frameInfo.pos += std::to_string(column + 1);
-                return true;
-            };
-            panda_file::File::EntityId methodId = method->GetMethodId();
-            uint32_t offset = it.GetBytecodeOffset();
-            if (!debugExtractor->MatchLineWithOffset(callbackLineFunc, methodId, offset) ||
-                !debugExtractor->MatchColumnWithOffset(callbackColumnFunc, methodId, offset)) {
-                frameInfo.pos = "?";
-            }
-            jsFrame.push_back(std::move(frameInfo));
-            if (currentStack) {
-                return jsFrame;
-            }
+        bool appendedSourceFrames = false;
+#if ECMASCRIPT_ENABLE_ARK_STEED
+        appendedSourceFrames = AppendSteedSourceFrames(thread, method, it, jsFrame);
+#endif
+        if (!appendedSourceFrames) {
+            const JSPandaFile *pandaFile = method->GetJSPandaFile(thread);
+            jsFrame.push_back(BuildJsFrameInfoForSource(
+                pandaFile, method->GetMethodId(), method->ParseFunctionName(thread), it.GetBytecodeOffset()));
+        }
+        if (currentStack) {
+            return jsFrame;
         }
     }
     return jsFrame;
@@ -948,8 +986,9 @@ static bool tryReadSteedTableContainer(const ReadSteedMachineCodeParam& param)
     if (memcpy_s(&header, sizeof(header), headerBytes, sizeof(headerBytes)) != EOK) {
         return false;
     }
-    if (header.magic != arksteed::ArkSteedTableContainerHeader::MAGIC ||
-        header.version != arksteed::ArkSteedTableContainerHeader::VERSION) {
+    bool supportedVersion = header.version == arksteed::ArkSteedTableContainerHeader::VERSION ||
+        header.version == arksteed::ArkSteedTableContainerHeader::VERSION_WITH_INLINE_SITES;
+    if (header.magic != arksteed::ArkSteedTableContainerHeader::MAGIC || !supportedVersion) {
         return false;
     }
     // section directory must stay inside the declared container size
@@ -977,6 +1016,13 @@ static bool tryReadSteedTableContainer(const ReadSteedMachineCodeParam& param)
             return false;
         }
         off += sizeof(uintptr_t);
+    }
+    if (header.version == arksteed::ArkSteedTableContainerHeader::VERSION_WITH_INLINE_SITES) {
+        size_t inlineSiteSize = 0;
+        if (arksteed::GetArkSteedInlineSiteTable(container.data(), container.size(), &inlineSiteSize) == nullptr) {
+            container.clear();
+            return false;
+        }
     }
     return true;
 }
@@ -1053,14 +1099,16 @@ static uintptr_t GetSteedBytecodePc(void *ctx, ReadMemFunc readMem, uintptr_t ty
     // position entry (a misreport).
     uint32_t bcOffset = 0;
     if (copied && codeOffset != 0) {
-        size_t posSize = 0;
         size_t sfpSize = 0;
-        const uint8_t *posTable =
-            arksteed::GetArkSteedPositionTable(container.data(), container.size(), &posSize);
-        auto bc = (posTable != nullptr) ?
-            arksteed::LookupBcOffsetFromPositionTable(posTable, posSize,
-                                                      static_cast<uint32_t>(codeOffset-1))
-            : std::optional<uint32_t>(std::nullopt);
+        std::optional<uint32_t> bc;
+        std::vector<arksteed::ArkSteedSourceFrame> sourceFrames;
+        if (arksteed::LookupSourceFramesByPCOffset(
+            container.data(), container.size(), static_cast<uint32_t>(codeOffset-1), &sourceFrames) &&
+            !sourceFrames.empty()) {
+            // This API returns the physical method's bytecode array, so use the
+            // outermost resume offset instead of an inlinee's bytecode offset.
+            bc = sourceFrames.back().bcOffset;
+        }
         if (!bc) {
             const uint8_t *sfpTable =
                 arksteed::GetArkSteedSafepointTable(container.data(), container.size(), &sfpSize);

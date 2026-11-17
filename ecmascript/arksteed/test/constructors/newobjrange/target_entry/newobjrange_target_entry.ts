@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-//! PARAMS --compiler-jit-hotness-threshold=60000
+//! PARAMS --compiler-jit-hotness-threshold=60000 --compiler-arksteed-enable-inline=false
 
 // newobjrange specialization: the target execution entry changes between
 // interpreted and ArkSteed-compiled code while the caller stays compiled.

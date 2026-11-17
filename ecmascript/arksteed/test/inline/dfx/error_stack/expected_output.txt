@@ -1,0 +1,2 @@
+innerThrow:25|middleCall:29|outerCall:33|func_main_0:59
+PASS

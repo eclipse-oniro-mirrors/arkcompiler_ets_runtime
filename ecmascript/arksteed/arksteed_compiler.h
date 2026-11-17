@@ -29,6 +29,7 @@ class ArkSteedAssembler;
 class ArkSteedSafepointTableBuilder;
 class DeoptLiteralTableBuilder;
 class DeoptTranslationBuilder;
+class ArkSteedCompilationUnit;
 class Graph;
 class SourcePositionTableBuilder;
 
@@ -98,6 +99,7 @@ private:
     void DebugLogOnCompilationStart();
     void DebugLogOnCompilationDone();
     CString GetCompiledMethodName() const;
+    std::unique_ptr<uint8_t[]> BuildTableContainer(size_t *containerSize);
 
     ArkSteedTask *arkSteedTask_;
     JSHandle<JSFunction> jsFunction_;
@@ -111,6 +113,7 @@ private:
     std::unique_ptr<Chunk> chunk_;
     ArkSteedAssembler *assembler_ = nullptr;
     Graph *graph_ = nullptr;
+    ArkSteedCompilationUnit *topLevelUnit_ = nullptr;
     ArkSteedSafepointTableBuilder *safepointTableBuilder_ = nullptr;
     SourcePositionTableBuilder *positionTableBuilder_ = nullptr;
     DeoptTranslationBuilder *translationBuilder_ = nullptr;

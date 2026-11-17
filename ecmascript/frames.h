@@ -30,6 +30,9 @@ class FrameIterator;
 namespace kungfu {
     class ArkStackMapParser;
 };
+namespace arksteed {
+    struct ArkSteedSourceFrame;
+}
 
 static constexpr int64_t BASELINEJIT_PC_FLAG = static_cast<int64_t>(std::numeric_limits<uint64_t>::max());
 
@@ -2338,6 +2341,9 @@ public:
     template <GCVisitedFlag GCVisit = GCVisitedFlag::IGNORED>
     void Advance();
     uint32_t GetBytecodeOffset() const;
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    bool GetSteedSourceFrames(std::vector<arksteed::ArkSteedSourceFrame> &frames) const;
+#endif
     void GetStackTraceInfos(std::vector<std::pair<JSTaggedType, uint32_t>> &stackTraceInfos,
         bool needBaselineSpecialHandling, uint32_t pcOffset) const;
     void CollectStackTraceInfos(std::vector<std::pair<JSTaggedType, uint32_t>> &info) const;

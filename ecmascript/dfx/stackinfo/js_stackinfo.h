@@ -256,6 +256,15 @@ public:
     static void DumpJitCode(JSThread *thread);
 
 private:
+    static void AppendMethodTraceDetails(std::string &data, const std::string &name,
+                                         const JSPandaFile *pandaFile, panda_file::File::EntityId methodId,
+                                         uint32_t pcOffset, LastBuilderCache &lastCache, bool enableStackSourceFile);
+#if ECMASCRIPT_ENABLE_ARK_STEED
+    static bool AppendSteedSourceFrames(JSThread *thread, Method *method, FrameIterator &it,
+                                        std::vector<JsFrameInfo> &jsFrame);
+#endif
+    static JsFrameInfo BuildJsFrameInfoForSource(const JSPandaFile *pandaFile, panda_file::File::EntityId methodId,
+                                                 const std::string &name, uint32_t offset);
     static void AppendJsStackTraceInfo(std::string &data, JSThread *thread, Method *method, FrameIterator &it,
                                        const JSHandle<JSObject> &jsErrorObj,
                                        LastBuilderCache &lastCache,

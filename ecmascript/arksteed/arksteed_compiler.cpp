@@ -23,6 +23,7 @@
 
 #include "ecmascript/arksteed/arksteed_assembler.h"
 #include "ecmascript/arksteed/arksteed_pipeline_statistics.h"
+#include "ecmascript/arksteed/arksteed_compilation_unit.h"
 #include "ecmascript/arksteed/arksteed_deopt_helper.h"
 #include "ecmascript/arksteed/arksteed_graph_builder.h"
 #include "ecmascript/arksteed/arksteed_codegen.h"
@@ -183,8 +184,8 @@ bool ArkSteedCompilerTask::BuildGraph(JSThread *compilerThread)
     }
     JitHeapAccessScope heapAccess(compilerThread);
     DISALLOW_HEAP_ALLOC;
-    ArkSteedCompilationUnit topLevelUnit(env);
-    BytecodePreprocessor preproc(&topLevelUnit, chunk_.get());
+    topLevelUnit_ = chunk_->New<ArkSteedCompilationUnit>(env);
+    BytecodePreprocessor preproc(topLevelUnit_, chunk_.get());
     {
         ArkSteedPipelineStatistics stats(pipelineStatistics_, "BytecodePreprocessor");
         if (!preproc.Run()) {
@@ -320,7 +321,7 @@ bool ArkSteedCompilerTask::Compile()
         deoptLiteralTableBuilder_ = new DeoptLiteralTableBuilder();
         bool withColors = arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedPrintWithColors();
         ArkSteedCodeGenerator codegen(assembler_, graph_, safepointTableBuilder_, translationBuilder_,
-            deoptLiteralTableBuilder_, positionTableBuilder_, withColors);
+            deoptLiteralTableBuilder_, positionTableBuilder_, withColors, topLevelUnit_);
         codegen.Generate();
 
         if (arkSteedTask_->GetHostVM()->GetJSOptions().GetCompilerArkSteedPrintCode()) {
@@ -347,6 +348,90 @@ void ArkSteedCompilerTask::EnableCodeSign()
 }
 #endif
 
+namespace {
+void WriteTableContainerHeader(uint8_t *buffer, size_t headerSize, size_t safepointSize, size_t positionSize,
+                               size_t inlineSiteSize)
+{
+    bool hasInlineSites = inlineSiteSize > 0;
+    auto *header = reinterpret_cast<ArkSteedTableContainerHeader *>(buffer);
+    header->magic = ArkSteedTableContainerHeader::MAGIC;
+    header->version = hasInlineSites ? ArkSteedTableContainerHeader::VERSION_WITH_INLINE_SITES
+                                     : ArkSteedTableContainerHeader::VERSION;
+    header->safepointOffset = static_cast<uint32_t>(headerSize);
+    header->safepointSize = static_cast<uint32_t>(safepointSize);
+    header->positionOffset = positionSize > 0 ? static_cast<uint32_t>(headerSize + safepointSize) : 0;
+    header->positionSize = static_cast<uint32_t>(positionSize);
+    if (hasInlineSites) {
+        auto *section = reinterpret_cast<ArkSteedInlineSiteSectionHeader *>(
+            buffer + ArkSteedTableContainerHeader::SIZE);
+        section->inlineSiteOffset = static_cast<uint32_t>(headerSize + safepointSize + positionSize);
+        section->inlineSiteSize = static_cast<uint32_t>(inlineSiteSize);
+    }
+}
+
+bool CopyTableSection(uint8_t *destination, const std::unique_ptr<uint8_t[]> &source, size_t sectionSize,
+                      const char *sectionName)
+{
+    if (sectionSize == 0) {
+        return true;
+    }
+    if (memcpy_s(destination, sectionSize, source.get(), sectionSize) == EOK) {
+        return true;
+    }
+    LOG_COMPILER(ERROR) << "memcpy fail in copy " << sectionName << " table to container";
+    return false;
+}
+}  // namespace
+
+std::unique_ptr<uint8_t[]> ArkSteedCompilerTask::BuildTableContainer(size_t *containerSize)
+{
+    *containerSize = 0;
+    safepointTableBuilder_->SetFrameSlots(graph_->GetTaggedStackSlots(), graph_->GetUntaggedStackSlots());
+    size_t safepointSize = safepointTableBuilder_->GetTableSize();
+    std::unique_ptr<uint8_t[]> safepointBuffer;
+    safepointBuffer.reset(safepointTableBuilder_->EmitToNewBuffer());
+
+#ifndef NDEBUG
+    LOG_COMPILER(DEBUG) << safepointTableBuilder_->DumpMemoryUsage();
+#endif
+
+    size_t positionSize = 0;
+    std::unique_ptr<uint8_t[]> positionBuffer;
+    if (positionTableBuilder_ != nullptr && positionTableBuilder_->GetNumEntries() > 0) {
+        positionBuffer = positionTableBuilder_->EmitToNewBuffer();
+        if (positionBuffer != nullptr) {
+            positionSize = positionTableBuilder_->GetSize();
+        }
+    }
+
+    size_t inlineSiteSize = 0;
+    std::unique_ptr<uint8_t[]> inlineSiteBuffer;
+    if (positionSize > 0 && positionTableBuilder_->HasInlineSites()) {
+        inlineSiteBuffer = positionTableBuilder_->EmitInlineSitesToNewBuffer();
+        inlineSiteSize = positionTableBuilder_->GetInlineSiteSize();
+    }
+    size_t headerSize = ArkSteedTableContainerHeader::SIZE;
+    if (inlineSiteSize > 0) {
+        headerSize += sizeof(ArkSteedInlineSiteSectionHeader);
+    }
+    size_t totalSize = headerSize + safepointSize + positionSize + inlineSiteSize;
+    if (totalSize == 0) {
+        return nullptr;
+    }
+
+    auto containerBuffer = std::make_unique<uint8_t[]>(totalSize);
+    WriteTableContainerHeader(containerBuffer.get(), headerSize, safepointSize, positionSize, inlineSiteSize);
+    size_t positionOffset = headerSize + safepointSize;
+    size_t inlineSiteOffset = positionOffset + positionSize;
+    if (!CopyTableSection(containerBuffer.get() + headerSize, safepointBuffer, safepointSize, "safepoint") ||
+        !CopyTableSection(containerBuffer.get() + positionOffset, positionBuffer, positionSize, "position") ||
+        !CopyTableSection(containerBuffer.get() + inlineSiteOffset, inlineSiteBuffer, inlineSiteSize, "inline site")) {
+        return nullptr;
+    }
+    *containerSize = totalSize;
+    return containerBuffer;
+}
+
 void ArkSteedCompilerTask::FillCodeDesc(MachineCodeDesc &codeDesc)
 {
     codeDesc.codeAddr = reinterpret_cast<uintptr_t>(assembler_->GetCodeBuffer());
@@ -365,68 +450,10 @@ void ArkSteedCompilerTask::FillCodeDesc(MachineCodeDesc &codeDesc)
     safepointTableBuilder_->SetDeoptLiteralCount(static_cast<uint32_t>(deoptLiteralHandles.size()));
     arkSteedTask_->SetDeoptLiteralData(std::move(deoptLiteralHandles));
 
-    // Safepoint table
-    safepointTableBuilder_->SetFrameSlots(graph_->GetTaggedStackSlots(), graph_->GetUntaggedStackSlots());
-    size_t safepointSize = safepointTableBuilder_->GetTableSize();
-    std::unique_ptr<uint8_t[]> safepointBuffer;
-    safepointBuffer.reset(safepointTableBuilder_->EmitToNewBuffer());
-
-#ifndef NDEBUG
-    LOG_COMPILER(DEBUG) << safepointTableBuilder_->DumpMemoryUsage();
-#endif
-
-    // Build position table (if enabled and has entries)
-    size_t positionSize = 0;
-    std::unique_ptr<uint8_t[]> positionBuffer;
-    if (positionTableBuilder_ != nullptr && positionTableBuilder_->GetNumEntries() > 0) {
-        positionBuffer = positionTableBuilder_->EmitToNewBuffer();
-        if (positionBuffer != nullptr) {
-            positionSize = positionTableBuilder_->GetSize();
-        }
-    }
-
-    // Wrap safepoint table + position table in a section container:
-    //   [header][safepoint table][position table]
-    constexpr size_t HEADER_SIZE = ArkSteedTableContainerHeader::SIZE;
-    size_t containerSize = HEADER_SIZE + safepointSize + positionSize;
-    if (containerSize > 0) {
-        auto containerBuffer = std::make_unique<uint8_t[]>(containerSize);
-        auto *header = reinterpret_cast<ArkSteedTableContainerHeader *>(containerBuffer.get());
-        header->magic = ArkSteedTableContainerHeader::MAGIC;
-        header->version = ArkSteedTableContainerHeader::VERSION;
-        header->safepointOffset = static_cast<uint32_t>(HEADER_SIZE);
-        header->safepointSize = static_cast<uint32_t>(safepointSize);
-        if (positionSize > 0) {
-            header->positionOffset = static_cast<uint32_t>(HEADER_SIZE + safepointSize);
-            header->positionSize = static_cast<uint32_t>(positionSize);
-        } else {
-            header->positionOffset = 0;
-            header->positionSize = 0;
-        }
-        if (safepointSize > 0) {
-            if (memcpy_s(containerBuffer.get() + HEADER_SIZE, safepointSize,
-                         safepointBuffer.get(), safepointSize) != EOK) {
-                LOG_COMPILER(ERROR) << "memcpy fail in copy safepoint table to container";
-                codeDesc.stackMapOrOffsetTableAddr = 0;
-                codeDesc.stackMapOrOffsetTableSize = 0;
-                return;
-            }
-        }
-        if (positionSize > 0) {
-            if (memcpy_s(containerBuffer.get() + HEADER_SIZE + safepointSize, positionSize,
-                         positionBuffer.get(), positionSize) != EOK) {
-                LOG_COMPILER(ERROR) << "memcpy fail in copy position table to container";
-                codeDesc.stackMapOrOffsetTableAddr = 0;
-                codeDesc.stackMapOrOffsetTableSize = 0;
-                return;
-            }
-        }
-        codeDesc.stackMapOrOffsetTableAddr = reinterpret_cast<uintptr_t>(containerBuffer.release());
-        codeDesc.stackMapOrOffsetTableSize = containerSize;
-    } else {
-        codeDesc.stackMapOrOffsetTableAddr = 0;
-        codeDesc.stackMapOrOffsetTableSize = 0;
-    }
+    size_t containerSize = 0;
+    auto containerBuffer = BuildTableContainer(&containerSize);
+    codeDesc.stackMapOrOffsetTableAddr = reinterpret_cast<uintptr_t>(containerBuffer.release());
+    codeDesc.stackMapOrOffsetTableSize = containerSize;
 
 #if ECMASCRIPT_ENABLE_ARK_STEED
     arkSteedTask_->SetDeoptTranslationData(translationBuilder_->Encode());

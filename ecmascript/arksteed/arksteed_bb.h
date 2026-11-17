@@ -25,6 +25,7 @@
 namespace panda::ecmascript::arksteed {
 
 class ArkSteedCompilationUnit;
+class ArkSteedInlinedCallerFrame;
 class ControlVertex;
 class NonControlVertex;
 class ValueVertex;
@@ -194,6 +195,16 @@ public:
         inlineOwnerUnit_ = unit;
     }
 
+    const ArkSteedInlinedCallerFrame *GetInlineCallerFrame() const
+    {
+        return inlineCallerFrame_;
+    }
+
+    void SetInlineCallerFrame(const ArkSteedInlinedCallerFrame *frame)
+    {
+        inlineCallerFrame_ = frame;
+    }
+
     bool HasPhi() const
     {
         return !phis_.empty();
@@ -327,6 +338,7 @@ private:
     RegisterMergeState *registerMergeState_;
     RegallocLoopInfo *regallocLoopInfo_;
     const ArkSteedCompilationUnit *inlineOwnerUnit_ {nullptr};
+    const ArkSteedInlinedCallerFrame *inlineCallerFrame_ {nullptr};
     LoopEffects *loopEffects_;
     bool hasPeeledIteration_ {false};
     Label label_;

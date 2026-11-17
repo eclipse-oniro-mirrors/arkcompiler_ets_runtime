@@ -1853,6 +1853,12 @@ void AppendU32(std::vector<uint8_t> &out, uint32_t v)
     }
 }
 
+void AppendU64(std::vector<uint8_t> &out, uint64_t v)
+{
+    AppendU32(out, static_cast<uint32_t>(v));
+    AppendU32(out, static_cast<uint32_t>(v >> 32));  // 32: upper half of the 64-bit value
+}
+
 void AppendSleb128(std::vector<uint8_t> &out, int64_t v)
 {
     bool more = true;
@@ -1880,6 +1886,18 @@ void PutField(std::vector<uint8_t> &obj, size_t offset, T value)
 // SafeMemContext.
 struct SteedFuncWorld {
     static constexpr uint32_t TEXT_SIZE = 64;
+    static constexpr uint32_t POSITION_ENTRY_COUNT = 2;
+    static constexpr uint32_t INLINE_SITE_COUNT = 2;
+    static constexpr uint32_t CHILD_INLINE_SITE_ID = 1;
+    static constexpr uint32_t CALLER_BC_OFFSET = 400;
+    static constexpr uint32_t ROOT_METHOD_OFFSET = 0x1000;
+    static constexpr uint32_t CHILD_METHOD_OFFSET = 0x2000;
+    static constexpr uint32_t CHILD_PC_START_DELTA = 0x100;
+    static constexpr uint32_t INLINEE_BC_OFFSET = 500;
+    static constexpr uint32_t TOP_LEVEL_BC_OFFSET = 600;
+    static constexpr uint32_t FIRST_PC_OFFSET = 32;
+    static constexpr uint32_t SECOND_PC_OFFSET = 48;
+    static constexpr uint32_t FAULT_PC_OFFSET = 33;
     uintptr_t bytecodeArray = 0x00000000BC00DE00ULL;  // bytecode-space base
 
     std::vector<uint8_t> text;
@@ -1894,14 +1912,12 @@ struct SteedFuncWorld {
 
     void Build(bool jitFortLayout, bool withPosition, bool withSafepoint,
                uint32_t posPc, uint32_t posBc, uint32_t sfpPc, uint32_t sfpBc,
-               uint32_t posPc2 = 0, uint32_t posBc2 = 0, uint32_t methodId = 0x1234)
+               uint32_t posPc2 = 0, uint32_t posBc2 = 0, uint32_t methodId = 0x1234,
+               bool withInlineSites = false)
     {
         text.assign(TEXT_SIZE, 0x90);  // 0x90: filler byte for the machine-code text
 
-        // ASTB container: 24B directory header + safepoint section + position
-        // section. All sizes/offsets below are body-relative first, then the
-        // directory entries get the +header bias (the reader validates them
-        // container-relative).
+        // ASTB container: directory header + safepoint section + position section.
         std::vector<uint8_t> body;
         uint32_t sfpSize = 0;
         if (withSafepoint) {
@@ -1924,34 +1940,59 @@ struct SteedFuncWorld {
         uint32_t posBodyOff = static_cast<uint32_t>(body.size());
         uint32_t posSize = 0;
         if (withPosition) {
-            // position table: uint32 numEntries + (pcOffset, bcOffset) pairs;
-            // a second (non-zero) entry models adjacent call-site boundaries.
-            // The reader binary-searches the table, so keep the entries in
-            // ascending pc order exactly like the real builder's
-            // RecordBoundary ASSERT demands.
+            // The reader binary-searches the table, so keep entries in ascending pc order.
             if (posPc2 != 0 && posPc2 < posPc) {
                 std::swap(posPc, posPc2);
                 std::swap(posBc, posBc2);
             }
-            uint32_t numEntries = (posPc2 != 0 || posBc2 != 0) ? 2 : 1;
+            uint32_t numEntries = (posPc2 != 0 || posBc2 != 0) ? POSITION_ENTRY_COUNT : 1;
             AppendU32(body, numEntries);
             AppendU32(body, posPc);
             AppendU32(body, posBc);
-            if (numEntries == 2) {  // 2: the second position entry is present
+            if (withInlineSites) {
+                AppendU32(body, CHILD_INLINE_SITE_ID);
+            }
+            if (numEntries == POSITION_ENTRY_COUNT) {
                 AppendU32(body, posPc2);
                 AppendU32(body, posBc2);
+                if (withInlineSites) {
+                    AppendU32(body, arksteed::TOP_LEVEL_INLINE_SITE_ID);
+                }
             }
             posSize = static_cast<uint32_t>(body.size()) - posBodyOff;
         }
+        std::vector<uint8_t> inlineSites;
+        if (withInlineSites) {
+            auto appendSite = [&inlineSites](uint32_t methodOffset, uint64_t methodPcStart, uint32_t parent,
+                                             uint32_t callerBc, uint32_t depth) {
+                AppendU32(inlineSites, methodOffset);
+                AppendU64(inlineSites, methodPcStart);
+                AppendU32(inlineSites, parent);
+                AppendU32(inlineSites, callerBc);
+                AppendU32(inlineSites, depth);
+            };
+            AppendU32(inlineSites, INLINE_SITE_COUNT);
+            appendSite(ROOT_METHOD_OFFSET, bytecodeArray, arksteed::INVALID_INLINE_SITE_PARENT, 0, 0);
+            appendSite(CHILD_METHOD_OFFSET, bytecodeArray + CHILD_PC_START_DELTA,
+                       arksteed::TOP_LEVEL_INLINE_SITE_ID, CALLER_BC_OFFSET, CHILD_INLINE_SITE_ID);
+        }
         constexpr uint32_t HEADER_SIZE = arksteed::ArkSteedTableContainerHeader::SIZE;
+        uint32_t headerSize = HEADER_SIZE +
+            (withInlineSites ? sizeof(arksteed::ArkSteedInlineSiteSectionHeader) : 0);
         std::vector<uint8_t> container;
         AppendU32(container, arksteed::ArkSteedTableContainerHeader::MAGIC);
-        AppendU32(container, arksteed::ArkSteedTableContainerHeader::VERSION);
-        AppendU32(container, HEADER_SIZE);              // safepointOffset
+        AppendU32(container, withInlineSites ? arksteed::ArkSteedTableContainerHeader::VERSION_WITH_INLINE_SITES
+                                             : arksteed::ArkSteedTableContainerHeader::VERSION);
+        AppendU32(container, headerSize);
         AppendU32(container, sfpSize);
-        AppendU32(container, HEADER_SIZE + posBodyOff); // positionOffset
+        AppendU32(container, headerSize + posBodyOff);
         AppendU32(container, posSize);
+        if (withInlineSites) {
+            AppendU32(container, headerSize + static_cast<uint32_t>(body.size()));
+            AppendU32(container, static_cast<uint32_t>(inlineSites.size()));
+        }
         container.insert(container.end(), body.begin(), body.end());
+        container.insert(container.end(), inlineSites.begin(), inlineSites.end());
 
         // fake MachineCode object; the container goes either into the JitFort
         // NonText region (right after the object) or right after the text
@@ -2150,6 +2191,39 @@ HWTEST_F_L0(JsStackInfoTest, SteedPcStateMachine_FirstFrameFaultPc)
     uintptr_t pcOut = 0;
     ASSERT_TRUE(SteedStep(ctx, frame.Fp(), world.funcAddr + 33, fpOut, pcOut));
     EXPECT_EQ(pcOut, world.bytecodeArray + 400);
+    JsStackInfo::machineCodeMap.clear();
+}
+
+/**
+ * @tc.name: SteedPcStateMachine_InlineSiteV2Position
+ * @tc.desc: A v2 position table must use 12-byte entries during out-of-process pc resolution.
+ * @tc.type: FUNC
+ * @tc.require:
+ */
+HWTEST_F_L0(JsStackInfoTest, SteedPcStateMachine_InlineSiteV2Position)
+{
+    SteedFuncWorld world;
+    world.Build(true, true, false, SteedFuncWorld::FIRST_PC_OFFSET, SteedFuncWorld::INLINEE_BC_OFFSET, 0, 0,
+                SteedFuncWorld::SECOND_PC_OFFSET, SteedFuncWorld::TOP_LEVEL_BC_OFFSET, 0x1234, true);
+    SteedFrameMem frame(world.jsFunc, 0, 0x1111);
+
+    SafeMemContext &ctx = NewSteedCtx();
+    world.Register(ctx);
+    ctx.AddRange(reinterpret_cast<uintptr_t>(&frame.slots[0]),
+                  reinterpret_cast<uintptr_t>(&frame.slots[5]));
+
+    const uint8_t *container = world.machineCodeObj.data() + MachineCode::SIZE;
+    size_t containerSize = world.machineCodeObj.size() - MachineCode::SIZE - 64;
+    std::vector<arksteed::ArkSteedSourceFrame> sourceFrames;
+    ASSERT_TRUE(arksteed::LookupSourceFramesByPCOffset(container, containerSize,
+                                                       SteedFuncWorld::FIRST_PC_OFFSET, &sourceFrames));
+    ASSERT_EQ(sourceFrames.size(), SteedFuncWorld::INLINE_SITE_COUNT);
+    EXPECT_EQ(sourceFrames.back().bcOffset, SteedFuncWorld::CALLER_BC_OFFSET);
+
+    uintptr_t fpOut = 0;
+    uintptr_t pcOut = 0;
+    ASSERT_TRUE(SteedStep(ctx, frame.Fp(), world.funcAddr + SteedFuncWorld::FAULT_PC_OFFSET, fpOut, pcOut));
+    EXPECT_EQ(pcOut, world.bytecodeArray + SteedFuncWorld::CALLER_BC_OFFSET);
     JsStackInfo::machineCodeMap.clear();
 }
 

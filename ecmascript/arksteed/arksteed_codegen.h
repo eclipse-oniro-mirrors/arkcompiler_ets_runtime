@@ -40,13 +40,16 @@ public:
                           DeoptTranslationBuilder *translationBuilder = nullptr,
                           DeoptLiteralTableBuilder *deoptLiteralTableBuilder = nullptr,
                           SourcePositionTableBuilder *positionTableBuilder = nullptr,
-                          bool withColors = false)
+                          bool withColors = false,
+                          const ArkSteedCompilationUnit *topLevelUnit = nullptr)
         : assembler_(assembler),
           graph_(graph),
           safepointBuilder_(safepointBuilder),
           translationBuilder_(translationBuilder),
           deoptLiteralTableBuilder_(deoptLiteralTableBuilder),
           positionTableBuilder_(positionTableBuilder),
+          topLevelUnit_(topLevelUnit),
+          inlineSiteUnits_(graph->GetChunk()),
           eagerDeoptTargetsById_(graph->GetChunk()),
           blockColorAssignment_(graph->GetChunk()),
           deferredCode_(graph->GetChunk()),
@@ -227,6 +230,14 @@ private:
     int GetBlockColorIndex(int blockId) const;
 
     void RecordPositionBoundary(uint32_t pcBefore, uint32_t bcOffset);
+    uint32_t GetOrCreateInlineSite(const ArkSteedCompilationUnit *unit,
+                                   const ArkSteedInlinedCallerFrame *callerFrame);
+
+    struct InlineSiteKey {
+        const ArkSteedCompilationUnit *unit;
+        uint32_t callerBcOffset;
+        uint32_t parentSiteId;
+    };
 
     ArkSteedAssembler *assembler_;
     Graph *graph_;
@@ -234,6 +245,10 @@ private:
     DeoptTranslationBuilder *translationBuilder_;
     DeoptLiteralTableBuilder *deoptLiteralTableBuilder_;
     SourcePositionTableBuilder *positionTableBuilder_;
+    const ArkSteedCompilationUnit *topLevelUnit_;
+    const ArkSteedCompilationUnit *currentPositionUnit_ {nullptr};
+    const ArkSteedInlinedCallerFrame *currentPositionCallerFrame_ {nullptr};
+    ChunkVector<InlineSiteKey> inlineSiteUnits_;
     Label entryLabel_;
     ChunkVector<EagerDeoptTarget *> eagerDeoptTargetsById_;
     int currentBlockColorIndex_ = 0;

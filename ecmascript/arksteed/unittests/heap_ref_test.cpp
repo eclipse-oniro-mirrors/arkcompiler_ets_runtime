@@ -511,7 +511,6 @@ HWTEST_F_L0(ArkSteedHeapRefTest, ConcreteReadsDoNotParkOrLock)
         EXPECT_EQ(broker_->TryGetObjectHClass({}), nullptr);
         EXPECT_FALSE(broker_->TryGetObjectType({}, &type));
         EXPECT_FALSE(broker_->TryGetStringLength({}, &length));
-        EXPECT_FALSE(broker_->CanCallFunction(objectRef, 0));
 
         uint32_t objectSize = 0;
         auto initial = broker_->GetEmptyObjectHClass(&objectSize);

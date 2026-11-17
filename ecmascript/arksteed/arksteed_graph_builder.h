@@ -237,8 +237,10 @@ private:
     ChunkVector<ValueVertex *> inlineActualArguments_;
     uint32_t inlineBytecodeBudgetUsedStorage_ {0};
     uint32_t inlineBytecodeBudgetUsedSmallStorage_ {0};
+    uint32_t inlineConstructorBytecodeBudgetUsedStorage_ {0};
     uint32_t *inlineBytecodeBudgetUsed_ {&inlineBytecodeBudgetUsedStorage_};
     uint32_t *inlineBytecodeBudgetUsedSmall_ {&inlineBytecodeBudgetUsedSmallStorage_};
+    uint32_t *inlineConstructorBytecodeBudgetUsed_ {&inlineConstructorBytecodeBudgetUsedStorage_};
 
     // Inline preparation cache: when the same callee is inlined repeatedly under the
     // same caller unit and the same profile, the finished compilation unit, preprocessor

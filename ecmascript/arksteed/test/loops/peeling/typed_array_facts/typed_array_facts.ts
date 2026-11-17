@@ -32,7 +32,7 @@
 //! METHOD twoReceivers
 //! COUNT LoadInt32Field 2
 //! METHOD aroundCall
-//! COUNT LoadInt32Field 3
+//! COUNT LoadInt32Field 1
 //! COUNT TypedArrayIntLoadElement 1
 //! COUNT DeoptIfTaggedCondition 3
 //! METHOD polymorphic

@@ -14,11 +14,13 @@
  */
 
 #include <cstdint>
-#include <cstring>
 #include <optional>
+#include <tuple>
 #include <vector>
 
+#include "securec.h"
 #include "ecmascript/arksteed/arksteed_safepoint_table.h"
+#include "ecmascript/mem/chunk.h"
 #include "ecmascript/tests/test_helper.h"
 
 using namespace panda::ecmascript;
@@ -48,7 +50,7 @@ static std::vector<uint8_t> BuildPositionTable(
 // ============================================================================
 // Test suite
 // ============================================================================
-class ArkSteedPositionTableTest : public BaseTestWithScope<false> {
+class ArkSteedPositionTableTest : public BaseTestWithOutScope {
 };
 
 // -----------------------------------------------------------------------
@@ -255,6 +257,95 @@ HWTEST_F_L0(ArkSteedPositionTableTest, NullData)
 {
     auto result = LookupBcOffsetFromPositionTable(nullptr, 0, 100);
     ASSERT_FALSE(result.has_value());
+}
+
+static std::vector<uint8_t> BuildPositionTableV2(
+    const std::vector<std::tuple<uint32_t, uint32_t, uint32_t>> &entries)
+{
+    std::vector<uint8_t> buf;
+    uint32_t numEntries = static_cast<uint32_t>(entries.size());
+    buf.insert(buf.end(), reinterpret_cast<const uint8_t *>(&numEntries),
+               reinterpret_cast<const uint8_t *>(&numEntries) + sizeof(numEntries));
+    for (const auto &[pc, bc, siteId] : entries) {
+        for (const auto *value : {&pc, &bc, &siteId}) {
+            buf.insert(buf.end(), reinterpret_cast<const uint8_t *>(value),
+                       reinterpret_cast<const uint8_t *>(value) + sizeof(uint32_t));
+        }
+    }
+    return buf;
+}
+
+HWTEST_F_L0(ArkSteedPositionTableTest, V2Roundtrip)
+{
+    auto data = BuildPositionTableV2({{100, 0, 2}, {200, 25, 1}});
+    auto first = LookupBcOffsetAndSiteIdFromPositionTableV2(data.data(), data.size(), 150);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_EQ(first->first, 0U);
+    ASSERT_EQ(first->second, 2U);
+
+    auto second = LookupBcOffsetAndSiteIdFromPositionTableV2(data.data(), data.size(), 200);
+    ASSERT_TRUE(second.has_value());
+    ASSERT_EQ(second->first, 25U);
+    ASSERT_EQ(second->second, 1U);
+
+    auto beforeFirst = LookupBcOffsetAndSiteIdFromPositionTableV2(data.data(), data.size(), 50);
+    ASSERT_FALSE(beforeFirst.has_value());
+}
+
+HWTEST_F_L0(ArkSteedPositionTableTest, V2TruncatedData)
+{
+    std::vector<uint8_t> data = BuildPositionTableV2({{100, 42, 1}});
+    data.pop_back();
+    auto result = LookupBcOffsetAndSiteIdFromPositionTableV2(data.data(), data.size(), 100);
+    ASSERT_FALSE(result.has_value());
+}
+
+HWTEST_F_L0(ArkSteedPositionTableTest, BuilderV2Emission)
+{
+    NativeAreaAllocator allocator;
+    Chunk chunk(&allocator);
+    SourcePositionTableBuilder builder(&chunk);
+    ASSERT_EQ(builder.RegisterInlineSite({1000, 0x10000, INVALID_INLINE_SITE_PARENT, 0, 0}), 0U);
+    ASSERT_EQ(builder.RegisterInlineSite({2000, 0x20000, 0, 42, 1}), 1U);
+    builder.RecordBoundary(100, 0, 1);
+    builder.RecordBoundary(200, 25, 0);
+
+    auto positions = builder.EmitToNewBuffer();
+    auto sites = builder.EmitInlineSitesToNewBuffer();
+    ASSERT_NE(positions, nullptr);
+    ASSERT_NE(sites, nullptr);
+    ASSERT_EQ(builder.GetSize(), 4U + 2U * 3U * sizeof(uint32_t));
+    ASSERT_EQ(builder.GetInlineSiteSize(), 4U + 2U * 6U * sizeof(uint32_t));
+
+    auto first = LookupBcOffsetAndSiteIdFromPositionTableV2(positions.get(), builder.GetSize(), 100);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_EQ(first->first, 0U);
+    ASSERT_EQ(first->second, 1U);
+
+    uint32_t numSites = 0;
+    uint32_t childMethod = 0;
+    uint64_t childPcStart = 0;
+    uint32_t parent = 0;
+    uint32_t callerBc = 0;
+    uint32_t depth = 0;
+    auto readValue = [](const uint8_t *source, auto &destination) {
+        errno_t copyResult = memcpy_s(&destination, sizeof(destination), source, sizeof(destination));
+        if (copyResult != EOK) {
+            ADD_FAILURE();
+        }
+    };
+    readValue(sites.get(), numSites);
+    readValue(sites.get() + 28, childMethod);
+    readValue(sites.get() + 32, childPcStart);
+    readValue(sites.get() + 40, parent);
+    readValue(sites.get() + 44, callerBc);
+    readValue(sites.get() + 48, depth);
+    ASSERT_EQ(numSites, 2U);
+    ASSERT_EQ(childMethod, 2000U);
+    ASSERT_EQ(childPcStart, 0x20000U);
+    ASSERT_EQ(parent, 0U);
+    ASSERT_EQ(callerBc, 42U);
+    ASSERT_EQ(depth, 1U);
 }
 
 } // namespace panda::test

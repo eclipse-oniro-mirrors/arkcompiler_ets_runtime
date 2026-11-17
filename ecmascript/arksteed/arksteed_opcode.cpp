@@ -1510,6 +1510,12 @@ void I64ShiftLeftVertex::SetValueLocationConstraints()
     DefineSameAsFirst(this);
 }
 
+void I64ShiftRightLogicalVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(INPUT_INDEX));
+    DefineSameAsFirst(this);
+}
+
 void I64BitwiseBinaryVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);

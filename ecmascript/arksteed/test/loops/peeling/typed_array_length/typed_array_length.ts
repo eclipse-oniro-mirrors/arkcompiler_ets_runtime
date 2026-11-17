@@ -15,7 +15,7 @@
 
 //! PARAMS --compiler-jit-hotness-threshold=10000 --compiler-arksteed-enable-inline=false
 //! METHOD repeatedLength
-//! COUNT LoadInt32Field 3
+//! COUNT LoadInt32Field 1
 //! COUNT DeoptIfArrayBufferDetached 2
 //! HAS_NOT CallCommonStub GetPropertyByName
 //! METHOD lengthAndElement
@@ -39,7 +39,7 @@
 //! COUNT_GE LoadInt32Field 2
 //! HAS_NOT CallCommonStub GetPropertyByName
 //! METHOD getterAroundCall
-//! COUNT LoadInt32Field 3
+//! COUNT LoadInt32Field 1
 //! COUNT DeoptIfPrototypeChanged 2
 //! HAS_NOT CallCommonStub GetPropertyByName
 //! METHOD customLength

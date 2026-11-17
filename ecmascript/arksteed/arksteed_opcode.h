@@ -5528,6 +5528,31 @@ private:
     uint32_t shift_;
 };
 
+class I64ShiftRightLogicalVertex : public FixedInputVertexMixin<ValueVertex, I64ShiftRightLogicalVertex> {
+public:
+    enum Indices : uint32_t {
+        INPUT_INDEX = 0,
+        NUM_INPUTS = 1,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::INT64;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT64,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = {};
+
+    explicit I64ShiftRightLogicalVertex(uint32_t shift) : FixedInputVertexMixin(), shift_(shift) {}
+
+    uint32_t GetShift() const
+    {
+        return shift_;
+    }
+
+    void SetValueLocationConstraints();
+
+private:
+    uint32_t shift_;
+};
+
 class I64BitwiseBinaryVertex : public FixedInputVertexMixin<ValueVertex, I64BitwiseBinaryVertex> {
 public:
     enum Indices : uint32_t {

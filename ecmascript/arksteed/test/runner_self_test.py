@@ -1065,11 +1065,14 @@ def check_control_default_path_invariance(module) -> List[str]:
         failures.append("build_vm_command is not deterministic")
     if "--compiler-enable-jit=true" not in cmd:
         failures.append(f"the JIT default was lost: {' '.join(cmd)}")
+    if "--compiler-arksteed-enable-inline=false" not in cmd:
+        failures.append(f"the inline-off default was lost: {' '.join(cmd)}")
     if any(token.startswith("--compiler-enable-jit=false") for token in cmd):
         failures.append(f"a JIT-off override leaked into the default command: {cmd}")
 
     expected_names = {
         "--compiler-enable-jit", "--compiler-enable-litecg", "--enable-force-gc",
+        "--compiler-arksteed-enable-inline",
         "--open-ark-tools", "--log-level", "--log-components",
         "--compiler-arksteed-print-graph", "--compiler-arksteed-print-method-name",
         "--compiler-trace-deopt", "--compiler-enable-lazy-deopt-trace",

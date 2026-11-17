@@ -33,14 +33,14 @@
 
 #include <cstdint>
 #include <cstring>
-
-#include "securec.h"
 #include <optional>
 #include <utility>
 #include <vector>
 
+#include "securec.h"
 #include "ecmascript/arksteed/arksteed_safepoint_table.h"
 #include "ecmascript/deoptimizer/deoptimizer.h"
+#include "ecmascript/mem/chunk.h"
 #include "ecmascript/tests/test_helper.h"
 
 using namespace panda::ecmascript;
@@ -195,7 +195,7 @@ public:
 // ============================================================================
 // Test suite
 // ============================================================================
-class ArkSteedSafepointPositionTableMatrixTest : public BaseTestWithScope<false> {
+class ArkSteedSafepointPositionTableMatrixTest : public BaseTestWithOutScope {
 };
 
 // -----------------------------------------------------------------------
@@ -534,6 +534,168 @@ HWTEST_F_L0(ArkSteedSafepointPositionTableMatrixTest, RealCodegenLayout_CallLast
 
     auto safepointMinusOne = ExtractBcOffsetFromSafepointTable(safepointTable, safepointSize, RA - 1);
     ASSERT_FALSE(safepointMinusOne.has_value());
+}
+
+class V2ContainerFixture {
+public:
+    V2ContainerFixture() : builder(&chunk)
+    {
+        constexpr uint32_t rootMethod = 1000;
+        constexpr uint32_t childMethod = 2000;
+        constexpr uint32_t grandchildMethod = 3000;
+        constexpr uint64_t rootMethodPcStart = 0x10000;
+        constexpr uint64_t childMethodPcStart = 0x20000;
+        constexpr uint64_t grandchildMethodPcStart = 0x30000;
+        constexpr uint32_t rootCallerBc = 0;
+        constexpr uint32_t childCallerBc = 42;
+        constexpr uint32_t grandchildCallerBc = 25;
+        constexpr uint32_t rootDepth = 0;
+        constexpr uint32_t childDepth = 1;
+        constexpr uint32_t grandchildDepth = 2;
+        constexpr uint32_t rootSiteId = 0;
+        constexpr uint32_t childSiteId = 1;
+        constexpr uint32_t grandchildSiteId = 2;
+        EXPECT_EQ(builder.RegisterInlineSite(
+            {rootMethod, rootMethodPcStart, INVALID_INLINE_SITE_PARENT, rootCallerBc, rootDepth}), rootSiteId);
+        EXPECT_EQ(builder.RegisterInlineSite(
+            {childMethod, childMethodPcStart, rootSiteId, childCallerBc, childDepth}), childSiteId);
+        EXPECT_EQ(builder.RegisterInlineSite(
+            {grandchildMethod, grandchildMethodPcStart, childSiteId, grandchildCallerBc, grandchildDepth}),
+            grandchildSiteId);
+        constexpr uint32_t firstPc = 100;
+        constexpr uint32_t secondPc = 200;
+        constexpr uint32_t thirdPc = 300;
+        builder.RecordBoundary(firstPc, rootCallerBc, grandchildSiteId);
+        builder.RecordBoundary(secondPc, grandchildCallerBc, childSiteId);
+        builder.RecordBoundary(thirdPc, childCallerBc, rootSiteId);
+        auto positions = builder.EmitToNewBuffer();
+        auto sites = builder.EmitInlineSitesToNewBuffer();
+        positionData.assign(positions.get(), positions.get() + builder.GetSize());
+        siteData.assign(sites.get(), sites.get() + builder.GetInlineSiteSize());
+        RebuildContainer();
+    }
+
+    void RebuildContainer()
+    {
+        size_t headerSize = ArkSteedTableContainerHeader::SIZE + sizeof(ArkSteedInlineSiteSectionHeader);
+        container.assign(headerSize + positionData.size() + siteData.size(), 0);
+        auto *header = reinterpret_cast<ArkSteedTableContainerHeader *>(container.data());
+        header->magic = ArkSteedTableContainerHeader::MAGIC;
+        header->version = ArkSteedTableContainerHeader::VERSION_WITH_INLINE_SITES;
+        header->safepointOffset = static_cast<uint32_t>(headerSize);
+        header->safepointSize = 0;
+        header->positionOffset = static_cast<uint32_t>(headerSize);
+        header->positionSize = static_cast<uint32_t>(positionData.size());
+        auto *section = reinterpret_cast<ArkSteedInlineSiteSectionHeader *>(
+            container.data() + ArkSteedTableContainerHeader::SIZE);
+        section->inlineSiteOffset = static_cast<uint32_t>(headerSize + positionData.size());
+        section->inlineSiteSize = static_cast<uint32_t>(siteData.size());
+        errno_t copyResult = memcpy_s(container.data() + headerSize, container.size() - headerSize,
+            positionData.data(), positionData.size());
+        if (copyResult != EOK) {
+            ADD_FAILURE();
+        }
+        copyResult = memcpy_s(container.data() + headerSize + positionData.size(),
+            container.size() - headerSize - positionData.size(), siteData.data(), siteData.size());
+        if (copyResult != EOK) {
+            ADD_FAILURE();
+        }
+    }
+
+    static void WriteU32(std::vector<uint8_t> &data, size_t offset, uint32_t value)
+    {
+        ASSERT_LE(offset + sizeof(value), data.size());
+        errno_t copyResult = memcpy_s(data.data() + offset, data.size() - offset, &value, sizeof(value));
+        if (copyResult != EOK) {
+            ADD_FAILURE();
+        }
+    }
+
+    NativeAreaAllocator allocator;
+    Chunk chunk {&allocator};
+    SourcePositionTableBuilder builder {&chunk};
+    std::vector<uint8_t> positionData;
+    std::vector<uint8_t> siteData;
+    std::vector<uint8_t> container;
+};
+
+HWTEST_F_L0(ArkSteedSafepointPositionTableMatrixTest, V2NestedInlineSourceFrames)
+{
+    V2ContainerFixture fixture;
+    std::vector<ArkSteedSourceFrame> frames;
+    ASSERT_TRUE(LookupSourceFramesByPCOffset(fixture.container.data(), fixture.container.size(), 100, &frames));
+    ASSERT_EQ(frames.size(), 3U);
+    EXPECT_EQ(frames[0].methodOffset, 3000U);
+    EXPECT_EQ(frames[0].methodPcStart, 0x30000U);
+    EXPECT_EQ(frames[0].bcOffset, 0U);
+    EXPECT_EQ(frames[0].depth, 2U);
+    EXPECT_EQ(frames[1].methodOffset, 2000U);
+    EXPECT_EQ(frames[1].bcOffset, 25U);
+    EXPECT_EQ(frames[1].depth, 1U);
+    EXPECT_EQ(frames[2].methodOffset, 1000U);
+    EXPECT_EQ(frames[2].bcOffset, 42U);
+    EXPECT_EQ(frames[2].depth, 0U);
+
+    ASSERT_TRUE(LookupSourceFramesByPCOffset(fixture.container.data(), fixture.container.size(), 200, &frames));
+    ASSERT_EQ(frames.size(), 2U);
+    EXPECT_EQ(frames[0].methodOffset, 2000U);
+    EXPECT_EQ(frames[1].methodOffset, 1000U);
+    EXPECT_EQ(frames[1].bcOffset, 42U);
+
+    ASSERT_TRUE(LookupSourceFramesByPCOffset(fixture.container.data(), fixture.container.size(), 300, &frames));
+    ASSERT_EQ(frames.size(), 1U);
+    EXPECT_EQ(frames[0].methodOffset, 1000U);
+    EXPECT_EQ(frames[0].bcOffset, 42U);
+}
+
+HWTEST_F_L0(ArkSteedSafepointPositionTableMatrixTest, V2SourceFrameRejectsInvalidPositionSite)
+{
+    V2ContainerFixture fixture;
+    fixture.WriteU32(fixture.positionData, 12, 99);
+    fixture.RebuildContainer();
+    std::vector<ArkSteedSourceFrame> frames;
+    ASSERT_FALSE(LookupSourceFramesByPCOffset(fixture.container.data(), fixture.container.size(), 100, &frames));
+    ASSERT_TRUE(frames.empty());
+}
+
+HWTEST_F_L0(ArkSteedSafepointPositionTableMatrixTest, V2SourceFrameRejectsParentCycle)
+{
+    V2ContainerFixture fixture;
+    fixture.WriteU32(fixture.siteData, 4 + 2 * 6 * sizeof(uint32_t) + 3 * sizeof(uint32_t), 2);
+    fixture.RebuildContainer();
+    std::vector<ArkSteedSourceFrame> frames;
+    ASSERT_FALSE(LookupSourceFramesByPCOffset(fixture.container.data(), fixture.container.size(), 100, &frames));
+    ASSERT_TRUE(frames.empty());
+}
+
+HWTEST_F_L0(ArkSteedSafepointPositionTableMatrixTest, V2SourceFrameRejectsTruncatedSites)
+{
+    V2ContainerFixture fixture;
+    fixture.siteData.resize(10);
+    fixture.RebuildContainer();
+    std::vector<ArkSteedSourceFrame> frames;
+    ASSERT_FALSE(LookupSourceFramesByPCOffset(fixture.container.data(), fixture.container.size(), 100, &frames));
+    ASSERT_TRUE(frames.empty());
+}
+
+HWTEST_F_L0(ArkSteedSafepointPositionTableMatrixTest, V1SourceFrameFallback)
+{
+    auto container = ContainerBuilder::BuildContainer({}, ContainerBuilder::BuildPositionTable({{100, 42}}));
+    std::vector<ArkSteedSourceFrame> frames;
+    ASSERT_TRUE(LookupSourceFramesByPCOffset(container.data(), container.size(), 100, &frames));
+    ASSERT_EQ(frames.size(), 1U);
+    EXPECT_EQ(frames[0].methodOffset, 0U);
+    EXPECT_EQ(frames[0].bcOffset, 42U);
+    EXPECT_EQ(frames[0].depth, 0U);
+}
+
+HWTEST_F_L0(ArkSteedSafepointPositionTableMatrixTest, V2HeaderRequiresExtension)
+{
+    std::vector<uint8_t> container(ArkSteedTableContainerHeader::SIZE, 0);
+    auto *header = reinterpret_cast<ArkSteedTableContainerHeader *>(container.data());
+    header->magic = ArkSteedTableContainerHeader::MAGIC;
+    header->version = ArkSteedTableContainerHeader::VERSION_WITH_INLINE_SITES;
+    ASSERT_EQ(GetArkSteedTableContainerVersion(container.data(), container.size()), 0U);
 }
 
 } // namespace panda::test

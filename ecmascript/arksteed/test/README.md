@@ -2,9 +2,7 @@
 
 This folder contains test cases for ArkSteed JIT compiler.
 
-Each leaf sub-directory contains a test case consisting of the following files:
-* **Exactly one** JS/TS file which is the test case;
-* **Exactly one** `expected_output.txt` file which holds the expected contents to stdout.
+Each leaf sub-directory contains a test case with one entry JS/TS file and one `expected_output.txt`. Additional sibling modules are allowed; with several sources, the entry file must be named after the directory. Siblings are emitted as separate ABC files by default. If the directory contains `fileInfo.txt`, all sources are instead compiled into one merged ABC with `es2abc --module --merge-abc @fileInfo.txt`, using record names supplied by that file.
 
 `./run_arksteed_tests.py` is the test case runner which collects all the test cases by traversing the directory tree and then run them.
 
@@ -63,6 +61,7 @@ Annotations start with `//!`. In-line comments to annotations (starting with `#`
 * `PARAMS <params>`: Which runtime options shall be passed to the ArkTS runtime (i.e. the `ark_js_vm` executable) for this test case.
     * Example: `//! PARAMS --enable-force-gc=true --compiler-jit-hotness-threshold=100` passes these 2 parameters to `ark_js_vm`.
     * A parameter replaces the runner default of the same option (e.g. `--enable-force-gc=true` overrides the default `=false`).
+    * The runner disables inline by default to preserve the IR and behavior expected by existing tests. Inline-specific cases explicitly enable it with `--compiler-arksteed-enable-inline=true`.
     * `--enable-force-gc=true` only forces collection in a debug VM; the relevant runtime hooks are compiled out in release builds. A release test must create enough natural allocation pressure instead of relying on this option.
     * The following options are core to the runner and **can not** be overriden by `PARAMS` annotation. An error will occur if you attempt to override them:
         * `--log-level`

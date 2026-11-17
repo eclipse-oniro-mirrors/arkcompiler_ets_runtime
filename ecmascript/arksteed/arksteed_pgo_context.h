@@ -84,7 +84,7 @@ public:
 
     bool TargetsCurrentFunction(const CallFeedback &feedback) const
     {
-        return feedback.isMonomorphic && !feedback.isCompatibleClosure &&
+        return feedback.isMonomorphic && !feedback.isCompatibleClosure && !feedback.isClassConstructor &&
                broker_.IsSameFunction(feedback.target);
     }
 
