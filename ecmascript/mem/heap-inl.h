@@ -101,6 +101,29 @@ void SharedHeap::EnumerateOldSpaceRegions(const Callback &cb) const
 }
 
 template<class Callback>
+void SharedHeap::EnumerateFullGCFromRegions(const Callback &cb) const
+{
+    sOldSpace_->EnumerateRegions(cb);  // old sOldSpace_ (anchor runs before SwapOldSpace)
+}
+
+template<class Callback>
+void SharedHeap::EnumerateCCFromRegions(const Callback &cb) const
+{
+    auto fromOnly = [&cb](Region *region) {
+        if (region->IsFromRegion()) {
+            cb(region);
+        }
+    };
+    sCompressSpace_->EnumerateRegions(fromOnly);  // regions flagged FROM by PrepareForCopy
+}
+
+template<class Callback>
+void SharedHeap::EnumeratePartialGCFromRegions(const Callback &cb) const
+{
+    sOldSpace_->EnumerateCollectRegionSet(cb);  // CSet (anchor runs before reclaim)
+}
+
+template<class Callback>
 void SharedHeap::EnumerateOldSpaceRegionsWithRecord(const Callback &cb) const
 {
     sOldSpace_->EnumerateRegionsWithRecord(cb);
@@ -139,6 +162,38 @@ template<class Callback>
 void Heap::EnumerateSnapshotSpaceRegions(const Callback &cb) const
 {
     snapshotSpace_->EnumerateRegions(cb);
+}
+
+template<class Callback>
+void Heap::EnumerateFullGCFromRegions(const Callback &cb) const
+{
+    oldSpace_->EnumerateRegions(cb);
+    inactiveSemiSpace_->EnumerateRegions(cb);  // retired semiSpace after SwapNewSpace
+    if (GetEvacuateNonMovableSpace()) {
+        nonMovableSpace_->EnumerateCollectRegionSet(cb);
+    }
+}
+
+template<class Callback>
+void Heap::EnumeratePartialGCFromRegions(const Callback &cb) const
+{
+    inactiveSemiSpace_->EnumerateRegions(cb);
+    oldSpace_->EnumerateCollectRegionSet(cb);
+    if (GetEvacuateNonMovableSpace()) {
+        nonMovableSpace_->EnumerateCollectRegionSet(cb);
+    }
+}
+
+template<class Callback>
+void Heap::EnumerateLocalCCFromRegions(const Callback &cb) const
+{
+    auto fromOnly = [&cb](Region *region) {
+        if (region->IsFromRegion()) {
+            cb(region);
+        }
+    };
+    compressSpace_->EnumerateRegions(fromOnly);  // retired oldSpace after SwapOldSpace
+    inactiveSemiSpace_->EnumerateRegions(fromOnly);
 }
 
 template<class Callback>
@@ -1024,13 +1079,8 @@ void Heap::OnMoveEvent([[maybe_unused]] uintptr_t address, [[maybe_unused]] Tagg
                        [[maybe_unused]] size_t size)
 {
 #if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER)
-    if (Runtime::GetInstance()->IsHiProfilerEnabled()) {
+    if (UNLIKELY(Runtime::GetInstance()->IsHiProfilerEnabled())) {
         MEMORY_TRACE_MOVE(address, forwardAddress, size);
-    }
-    HeapProfilerInterface *profiler = GetEcmaVM()->GetHeapProfile();
-    if (profiler != nullptr) {
-        base::BlockHookScope blockScope;
-        profiler->MoveEvent(address, forwardAddress, size);
     }
 #endif
 }
@@ -1039,16 +1089,9 @@ void SharedHeap::OnMoveEvent([[maybe_unused]] uintptr_t address, [[maybe_unused]
                              [[maybe_unused]] size_t size)
 {
 #if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER)
-    if (Runtime::GetInstance()->IsHiProfilerEnabled()) {
+    if (UNLIKELY(Runtime::GetInstance()->IsHiProfilerEnabled())) {
         MEMORY_TRACE_MOVE(address, forwardAddress, size);
     }
-    Runtime::GetInstance()->GCIterateThreadList([&](JSThread *thread) {
-        HeapProfilerInterface *profiler = thread->GetEcmaVM()->GetHeapProfile();
-        if (profiler != nullptr) {
-            base::BlockHookScope blockScope;
-            profiler->MoveEvent(address, forwardAddress, size);
-        }
-    });
 #endif
 }
 

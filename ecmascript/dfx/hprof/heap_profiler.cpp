@@ -18,6 +18,8 @@
 #include "profiler/heap_profiler_listener.h"
 #include "ecmascript/dfx/hprof/heap_profiler.h"
 
+#include "ecmascript/dfx/hprof/shared_heap_profiler.h"
+
 #include "ecmascript/checkpoint/thread_state_transition.h"
 #include "ecmascript/dfx/hprof/heap_snapshot.h"
 #include "ecmascript/dfx/hprof/rawheap_dump.h"
@@ -138,6 +140,7 @@ HeapProfiler::HeapProfiler(const EcmaVM *vm) : vm_(vm), stringTable_(vm), chunk_
 
 HeapProfiler::~HeapProfiler()
 {
+    SharedHeapProfiler::UnregisterHeapTracker(this);
     JSPandaFileManager::GetInstance()->ClearNameMap();
     ClearSnapshot();
     GetChunk()->Delete(entryIdMap_);
@@ -166,6 +169,17 @@ void HeapProfiler::MoveEvent(uintptr_t address, TaggedObject *forwardAddress, si
         if (heapTracker_ != nullptr) {
             heapTracker_->MoveEvent(address, forwardAddress, size);
         }
+    }
+}
+
+void HeapProfiler::MoveEventLocked(uintptr_t address, TaggedObject *forwardAddress, size_t size)
+{
+    if (!isProfiling_) {
+        return;
+    }
+    entryIdMap_->Move(static_cast<JSTaggedType>(address), reinterpret_cast<JSTaggedType>(forwardAddress));
+    if (heapTracker_ != nullptr) {
+        heapTracker_->MoveEvent(address, forwardAddress, size);
     }
 }
 
@@ -329,7 +343,7 @@ bool HeapProfiler::DoDump(Stream *stream, Progress *progress, const DumpSnapShot
             snapshot->SetNodeAddressIdMap(nodeAddressIdMap_);
         }
     }
-    isProfiling_ = true;
+    ActivateRecording();
     if (progress != nullptr) {
         progress->ReportProgress(heapCount, heapCount);
     }
@@ -650,8 +664,24 @@ bool HeapProfiler::DumpHeapSnapshot(Stream *stream, const DumpSnapShotOption &du
         std::thread thread(&WaitProcess, pid, callback);
         thread.detach();
     }
-    isProfiling_ = true;
+    ActivateRecording();
     return true;
+}
+
+// Flag on first, then register: recording must imply registered (mark-gate superset).
+void HeapProfiler::ActivateRecording()
+{
+    isProfiling_ = true;
+    SharedHeapProfiler::RegisterHeapTracker(this);
+}
+
+// Flag off first, then unregister: the in-between state stays "registered but not
+// recording" (a scan would only drop post-freeze events), never "recording but
+// unregistered" (local anchors would scan without FROM marks and find nothing).
+void HeapProfiler::DeactivateRecording()
+{
+    isProfiling_ = false;
+    SharedHeapProfiler::UnregisterHeapTracker(this);
 }
 
 pid_t HeapProfiler::ForkAndPerformDump(Stream *stream,
@@ -710,7 +740,7 @@ bool HeapProfiler::StartHeapTracking(double timeInterval, bool isVmMode, Stream 
     if (snapshot == nullptr) {
         return false;
     }
-    isProfiling_ = true;
+    ActivateRecording();
     UpdateHeapObjects(snapshot);
     heapTracker_ = std::make_unique<HeapTracker>(snapshot, timeInterval, stream);
     const_cast<EcmaVM *>(vm_)->StartHeapTracking();
@@ -781,7 +811,7 @@ bool HeapProfiler::StopHeapTracking(Stream *stream, Progress *progress, bool new
         }
     }
 
-    isProfiling_ = false;
+    DeactivateRecording();
     if (progress != nullptr) {
         progress->ReportProgress(heapCount, heapCount);
     }

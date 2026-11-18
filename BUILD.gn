@@ -1530,6 +1530,8 @@ if (!is_mingw && !is_mac && target_os != "ios") {
       "ecmascript/dfx/hprof/heap_marker.cpp",
       "ecmascript/dfx/hprof/heap_profiler.cpp",
       "ecmascript/dfx/hprof/heap_profiler_interface.cpp",
+      "ecmascript/dfx/hprof/moved_object_scanner.cpp",
+      "ecmascript/dfx/hprof/shared_heap_profiler.cpp",
       "ecmascript/dfx/hprof/heap_root_visitor.cpp",
       "ecmascript/dfx/hprof/heap_sampling.cpp",
       "ecmascript/dfx/hprof/heap_snapshot.cpp",

@@ -15,6 +15,8 @@
 
 #include "ecmascript/mem/shared_heap/shared_full_gc-inl.h"
 
+#include "ecmascript/dfx/hprof/moved_object_scanner.h"
+
 #include "common_components/taskpool/taskpool.h"
 #include "ecmascript/mem/shared_heap/shared_concurrent_marker.h"
 #include "ecmascript/mem/shared_heap/shared_concurrent_sweeper.h"
@@ -143,6 +145,7 @@ void SharedFullGC::Finish()
 {
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "SharedFullGC::Finish", "");
     TRACE_GC(GCStats::Scope::ScopeId::Finish, sHeap_->GetEcmaGCStats());
+    MovedObjectScanner::ScanSharedFullGC(sHeap_);
     sHeap_->SwapOldSpace();
     sWorkManager_->Finish();
     if (!isAppspawn_) {

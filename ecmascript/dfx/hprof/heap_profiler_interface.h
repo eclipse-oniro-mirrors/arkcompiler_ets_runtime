@@ -88,6 +88,7 @@ public:
     virtual size_t GetIdCount() = 0;
     virtual void AllocationEvent(TaggedObject *address, size_t size) = 0;
     virtual void MoveEvent(uintptr_t address, TaggedObject *forwardAddress, size_t size)= 0;
+    virtual void MoveEventLocked(uintptr_t address, TaggedObject *forwardAddress, size_t size) = 0;
     virtual bool DumpHeapSnapshot(Stream *stream, const DumpSnapShotOption &dumpOption,
                                   Progress *progress = nullptr,
                                   std::function<void(uint8_t)> callback = [] (uint8_t) {}) = 0;

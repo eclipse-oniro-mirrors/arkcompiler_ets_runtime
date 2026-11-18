@@ -1095,6 +1095,16 @@ public:
     template<class Callback>
     void IterateOverObjects(const Callback &cb) const;
 
+    // FROM-region sets consumed by the shared finish anchors; keep in sync with each GC's evacuation domain.
+    template<class Callback>
+    void EnumerateFullGCFromRegions(const Callback &cb) const;
+
+    template<class Callback>
+    void EnumerateCCFromRegions(const Callback &cb) const;
+
+    template<class Callback>
+    void EnumeratePartialGCFromRegions(const Callback &cb) const;
+
     inline TaggedObject *AllocateClassClass(JSThread *thread, size_t size);
 
     inline TaggedObject *AllocateNonMovableOrHugeObject(JSThread *thread, JSHandle<JSHClass> hclass);
@@ -1708,6 +1718,16 @@ public:
 
     template<class Callback>
     inline void EnumerateRegions(const Callback &cb) const;
+
+    // FROM-region sets consumed by the finish anchors; keep in sync with each GC's evacuation domain.
+    template<class Callback>
+    void EnumerateFullGCFromRegions(const Callback &cb) const;
+
+    template<class Callback>
+    void EnumeratePartialGCFromRegions(const Callback &cb) const;
+
+    template<class Callback>
+    void EnumerateLocalCCFromRegions(const Callback &cb) const;
 
     inline void ClearSlotsRange(Region *current, uintptr_t freeStart, uintptr_t freeEnd);
 

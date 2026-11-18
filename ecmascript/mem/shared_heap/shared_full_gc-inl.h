@@ -20,12 +20,14 @@
 
 #include "ecmascript/js_hclass-inl.h"
 #include "ecmascript/mem/work_manager-inl.h"
+#include "ecmascript/dfx/hprof/shared_heap_profiler.h"
 
 namespace panda::ecmascript {
 
 SharedFullGCRunner::SharedFullGCRunner(SharedHeap *sHeap, SharedGCWorkNodeHolder *sWorkNodeHolder)
-    : sHeap_(sHeap), sWorkNodeHolder_(sWorkNodeHolder), markRootVisitor_(this), markObjectVisitor_(this),
-      markLocalToShareRSetVisitor_(this)
+    : sHeap_(sHeap), sWorkNodeHolder_(sWorkNodeHolder),
+      markFromForAnchor_(SharedHeapProfiler::IsMoveTrackingActive()), markRootVisitor_(this),
+      markObjectVisitor_(this), markLocalToShareRSetVisitor_(this)
 {
 }
 
@@ -81,6 +83,10 @@ void SharedFullGCRunner::MarkObject(ObjectSlotBase<refType> slot, TaggedObject *
         return;
     }
 
+    // Mark the FROM copy for the finish anchor's bitset scan.
+    if (UNLIKELY(markFromForAnchor_)) {
+        objectRegion->AtomicMark(object);
+    }
     MarkWord markWord(object, ACQUIRE_LOAD);
     if (markWord.IsForwardingAddress()) {
         TaggedObject *dst = markWord.ToForwardingAddress();

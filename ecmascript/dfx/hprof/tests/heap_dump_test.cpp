@@ -961,6 +961,11 @@ public:
         return profiler_->MoveEvent(address, forwardAddress, size);
     }
 
+    void MoveEventLocked(uintptr_t address, TaggedObject *forwardAddress, size_t size) override
+    {
+        return profiler_->MoveEventLocked(address, forwardAddress, size);
+    }
+
     bool DumpHeapSnapshot(Stream *stream, const DumpSnapShotOption &dumpOption, Progress *progress = nullptr,
                           std::function<void(uint8_t)> callback = [] (uint8_t) {}) override
     {

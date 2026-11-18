@@ -486,6 +486,24 @@ host_unittest_action("GlobalRefTrackTest") {
   deps += hiviewdfx_deps
 }
 
+host_unittest_action("SharedHeapOnMoveEventTest") {
+  module_out_path = module_output_path
+
+  sources = [ "shared_heap_onmove_event_test.cpp" ]
+
+  configs = [ "$js_root:ecma_test_config" ]
+
+  deps = [ "$js_root:libark_jsruntime_test" ]
+
+  # hiviewdfx libraries
+  external_deps = hiviewdfx_ext_deps
+  external_deps += [
+    "icu:shared_icui18n",
+    "icu:shared_icuuc",
+  ]
+  deps += hiviewdfx_deps
+}
+
 host_unittest_action("HybridHeapSnapshotTest") {
   module_out_path = module_output_path
   sources = []
