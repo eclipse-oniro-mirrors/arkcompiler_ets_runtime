@@ -163,6 +163,8 @@ public:
     bool AddProfilePathArg(std::vector<std::string> &argVector, const std::string &pgoDir,
                            const std::string &moduleName);
 
+    void AddCompilationPolicyArg(std::vector<std::string> &argVector);
+
     AotParserType GetParserType() const override
     {
         return AotParserType::STATIC_AOT;

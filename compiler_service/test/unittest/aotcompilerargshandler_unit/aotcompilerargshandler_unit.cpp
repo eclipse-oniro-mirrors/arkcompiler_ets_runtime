@@ -355,6 +355,17 @@ HWTEST_F(AotArgsHandlerTest, AotArgsHandlerTest_028, TestSize.Level0)
     EXPECT_FALSE(result);
 }
 
+HWTEST_F(AotArgsHandlerTest, AotArgsHandlerTest_029, TestSize.Level0)
+{
+    StaticAOTArgsParser parser;
+    std::vector<std::string> argVector;
+
+    parser.AddCompilationPolicyArg(argVector);
+
+    ASSERT_EQ(argVector.size(), 1u);
+    EXPECT_EQ(argVector[0], "--paoc-compilation-policy=profile-guided");
+}
+
 HWTEST_F(AotArgsHandlerTest, AotArgsHandlerTest_032, TestSize.Level0) {
     AotCompilerArgs args;
     args.moduleArkTSMode = ArgsIdx::ARKTS_DYNAMIC;

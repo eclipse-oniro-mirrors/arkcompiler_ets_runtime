@@ -69,6 +69,8 @@ const std::string PAOC_PANDA_FILES = "paoc-panda-files";
 const std::string PAOC_LOCATION = "paoc-location";
 const std::string PAOC_OUTPUT = "paoc-output";
 const std::string PAOC_USE_PROFILE = "paoc-use-profile";
+const std::string PAOC_COMPILATION_POLICY = "paoc-compilation-policy";
+const std::string PAOC_COMPILATION_POLICY_PROFILE_GUIDED = "profile-guided";
 const std::string COMPILER_REGEX = "compiler-regex";
 
 // FD argument names
