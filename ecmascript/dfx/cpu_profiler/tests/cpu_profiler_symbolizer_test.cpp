@@ -115,10 +115,10 @@ HWTEST_F_L0(CpuProfilerSymbolizerTest, CursorAdvances)
     EXPECT_EQ(symbolizer.MetadataCursor(), 10U);
 }
 
-HWTEST_F_L0(CpuProfilerSymbolizerTest, SymbolizeBuiltinPlaceholder)
+HWTEST_F_L0(CpuProfilerSymbolizerTest, SymbolizeBuiltinLegacyNameShapes)
 {
-    // A native frame must symbolize to the documented "(native) 0x..." placeholder
-    // without touching any JS property (plan §7.3).
+    // NAPI + JSNativePointer renders "(0xaddr)" with a resolver ("(0x0)" on
+    // null); everything else renders an empty name.
     CpuProfilerSymbolizer symbolizer;
     symbolizer.BeginSession();
 
@@ -134,9 +134,25 @@ HWTEST_F_L0(CpuProfilerSymbolizerTest, SymbolizeBuiltinPlaceholder)
     methodKey.methodIdentifier = reinterpret_cast<void *>(sample.frames[0].value);
     methodKey.lineNumber = 0;
     ASSERT_TRUE(symbolizer.SymbolizeFrame(sample, 0, methodKey, codeEntry));
-    EXPECT_STRNE(codeEntry.functionName, "");
-    EXPECT_NE(strstr(codeEntry.functionName, "(native)"), nullptr);
-    EXPECT_NE(strstr(codeEntry.functionName, "1234000"), nullptr);
+    EXPECT_STREQ(codeEntry.functionName, "");
+
+    methodKey.state = RunningState::NAPI;
+    ASSERT_TRUE(symbolizer.SymbolizeFrame(sample, 0, methodKey, codeEntry));
+    EXPECT_STREQ(codeEntry.functionName, "");
+
+    sample.frames[0].nativePointer = 1;
+    symbolizer.BeginSession([](void *info) -> void * { return info; });
+    ASSERT_TRUE(symbolizer.SymbolizeFrame(sample, 0, methodKey, codeEntry));
+    EXPECT_STREQ(codeEntry.functionName, "(0x1234000)");
+
+    sample.frames[0].nativePointer = 0;
+    ASSERT_TRUE(symbolizer.SymbolizeFrame(sample, 0, methodKey, codeEntry));
+    EXPECT_STREQ(codeEntry.functionName, "");
+
+    sample.frames[0].nativePointer = 1;
+    symbolizer.BeginSession([](void *) -> void * { return nullptr; });
+    ASSERT_TRUE(symbolizer.SymbolizeFrame(sample, 0, methodKey, codeEntry));
+    EXPECT_STREQ(codeEntry.functionName, "(0x0)");
 }
 
 HWTEST_F_L0(CpuProfilerSymbolizerTest, SymbolizeFrameRejectsNullFile)
@@ -287,7 +303,7 @@ HWTEST_F_L0(CpuProfilerSymbolizerFileTest, SymbolizeBuiltinFrameWithInterpreterC
     methodKey.methodIdentifier = reinterpret_cast<void *>(sample.frames[0].value);
     methodKey.lineNumber = 7; // 7: the call line resolved from the caller
     ASSERT_TRUE(symbolizer.SymbolizeFrame(sample, 0, methodKey, codeEntry));
-    EXPECT_NE(strstr(codeEntry.functionName, "(native)"), nullptr);
+    EXPECT_STREQ(codeEntry.functionName, "");
     EXPECT_EQ(codeEntry.lineNumber, 7);
     EXPECT_STRNE(codeEntry.url, "");
 }
@@ -310,5 +326,24 @@ HWTEST_F_L0(CpuProfilerSymbolizerFileTest, SymbolizeBuiltinFrameWithNativeCaller
     ASSERT_TRUE(symbolizer.SymbolizeFrame(sample, 0, methodKey, codeEntry));
     EXPECT_EQ(codeEntry.lineNumber, 3);
     EXPECT_STREQ(codeEntry.url, "");
+}
+
+// The profiler-facing extractor APIs must never FATAL on unloaded files
+// (GC-time module unload during profiling would otherwise abort the process).
+HWTEST_F_L0(CpuProfilerSymbolizerFileTest, ProfilerExtractorApisNeverFatal)
+{
+    ASSERT_TRUE(executed);
+    ASSERT_NE(jsPandaFile, nullptr);
+    // Loaded file: shared ownership of the same extractor.
+    DebugInfoExtractor *warmed = JSPandaFileManager::GetInstance()->GetJSPtExtractorAndExtract(jsPandaFile);
+    ASSERT_NE(warmed, nullptr);
+    std::shared_ptr<DebugInfoExtractor> served =
+        JSPandaFileManager::GetInstance()->GetExtractorForProfiler(jsPandaFile);
+    EXPECT_NE(served, nullptr);
+    EXPECT_EQ(served.get(), warmed);
+    // Unmanaged pointers: nullptr instead of a process abort.
+    EXPECT_EQ(JSPandaFileManager::GetInstance()->GetExtractorForProfiler(nullptr), nullptr);
+    static const JSPandaFile *unknown = reinterpret_cast<const JSPandaFile *>(0x10);
+    EXPECT_EQ(JSPandaFileManager::GetInstance()->GetExtractorForProfiler(unknown), nullptr);
 }
 } // namespace panda::test

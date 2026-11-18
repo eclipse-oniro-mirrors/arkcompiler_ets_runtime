@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <csignal>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <unistd.h>
@@ -178,7 +179,7 @@ bool CpuProfiler::StartProfilerCommon()
     ResetSamplingStats();
     RawSample stale;
     while (rawQueue_.TryPop(stale)) {}
-    symbolizer_.BeginSession();
+    symbolizer_.BeginSession(vm_->GetNativePtrGetter());
     ProfilerMetadataRegistry::Instance().Activate();
     signalCtx_.metadataSequence = ProfilerMetadataRegistry::Instance().PublishedSequence();
 #ifdef PANDA_JS_ETS_HYBRID_MODE
@@ -254,11 +255,15 @@ bool CpuProfiler::StartCpuProfilerForFile(const std::string &fileName)
     }
     void *taskHandle = nullptr;
     if (!PrepareProfilerSession(&taskHandle)) {
+#if !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
+        generator_->fileHandle_.close();
+#endif
         return false;
     }
     generator_->SetTimeDeltaThreshold(interval_ * THRESHOLD_GROWTH_FACTORY + THRESHOLD_FIXED_INCREMENT);
 #if !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
     if (!StartProfilerCommon()) {
+        generator_->fileHandle_.close();
         return false;
     }
 #endif
@@ -270,6 +275,7 @@ bool CpuProfiler::StartCpuProfilerForFile(const std::string &fileName)
         LOG_ECMA(ERROR) << "CpuProfiler::StartCpuProfilerForFile, pthread_create failed, errno = " << errno;
         delete params;
 #if !defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
+        generator_->fileHandle_.close();
         AbortProfilerStart();
 #endif
         return false;
@@ -781,13 +787,16 @@ static RunningState GetRunningStateRawTagged(const SignalSafeProfilerFrameIterat
 
 // Raw counterpart of JsStackGetter::GetMethodIdentifier for the signal-safe
 // iterator: identical identity resolution, every tagged read no-barrier.
+// hasNativePointer: extra info is a JSNativePointer (legacy NAPI rendering).
 static void *GetMethodIdentifierRaw(Method *method, const SignalSafeProfilerFrameIterator &it,
-                                    const EcmaVM *vm)
+                                    const EcmaVM *vm, bool &hasNativePointer)
 {
+    hasNativePointer = false;
     JSFunction *function = JSFunction::Cast(it.GetFunction().GetTaggedObject());
     if (method->IsNativeWithCallField()) {
         JSTaggedValue extraInfoValue = GetNativeFunctionExtraInfoNoBarrier(function);
         if (extraInfoValue.CheckIsJSNativePointer()) {
+            hasNativePointer = true;
             JSNativePointer *extraInfo = JSNativePointer::Cast(extraInfoValue.GetTaggedObject());
             return reinterpret_cast<void *>(extraInfo->GetData());
         }
@@ -957,14 +966,17 @@ void CpuProfiler::GetStackSignalHandlerLockFree(int signal, [[maybe_unused]] sig
     if (!ctx->shouldRecordSample.exchange(false, std::memory_order_acquire)) {
         return;
     }
+    // Publish in-flight state before the count so ScheduleSample sees it for the
+    // whole handler body and skips ticks instead of re-entering sampling.
+    ctx->handlerRunning.store(true, std::memory_order_release);
     ctx->activeHandlerCount.fetch_add(1, std::memory_order_acq_rel);
     // Re-check after publishing the count so Stop either observes this handler or
     // this handler observes Stop (plan §8.1 stop-safety).
     if (!ctx->IsRunning()) {
+        ctx->handlerRunning.store(false, std::memory_order_release);
         ctx->activeHandlerCount.fetch_sub(1, std::memory_order_release);
         return;
     }
-    ctx->handlerRunning.store(true, std::memory_order_release);
     [[maybe_unused]] SignalStateScope scope(ctx->jsThread->GetEcmaVM()->GetJsDebuggerManager());
     // Plan §6.6 debug interception: flags this thread for the lock/handle hooks.
     ProfilerSignalGuardScope signalGuard;
@@ -1033,6 +1045,49 @@ void CpuProfiler::CollectSampleInto(RawSample &sample, CpuProfilerSignalContext 
         }
         pc = GetPcFromContext(context);
     }
+    CollectWalkFrames(sample, ctx, pc, context);
+}
+
+namespace {
+
+// Signal-safe anchor pre-check: the anchor must be in-bounds, aligned and carry
+// a valid type word, and its caller chain must resolve to an in-bounds frame
+// with a valid type word, before the walk is allowed to start from it.
+bool IsAnchorFrameWalkableSignalSafe(const JSThread *thread, const JSTaggedType *anchor)
+{
+    uintptr_t anchorAddr = reinterpret_cast<uintptr_t>(anchor);
+    if (anchorAddr % sizeof(JSTaggedType) != 0 || !thread->IsLegalSp(anchorAddr)) {
+        return false;
+    }
+    FrameType type = FrameHandler::GetFrameType(anchor);
+    if (type > FrameType::FRAME_TYPE_LAST || type < FrameType::FRAME_TYPE_FIRST) {
+        return false;
+    }
+    JSTaggedType *next = nullptr;
+    JSTaggedType *sp = const_cast<JSTaggedType *>(anchor);
+    if (!SignalSafeProfilerFrameIterator::PrevFrameSpCode(type, sp, &next) &&
+        !SignalSafeProfilerFrameIterator::PrevFrameSpInterpreter(type, sp, &next)) {
+        return false; // range-valid but unmapped type: no walkable chain
+    }
+    if (next == nullptr) {
+        return true; // end of the JS stack
+    }
+    uintptr_t nextAddr = reinterpret_cast<uintptr_t>(next);
+    if (nextAddr <= anchorAddr || nextAddr % sizeof(JSTaggedType) != 0 || !thread->IsLegalSp(nextAddr)) {
+        return false; // non-increasing chain, misaligned, or outside the stack bounds
+    }
+    FrameType nextType = FrameHandler::GetFrameType(next);
+    return nextType <= FrameType::FRAME_TYPE_LAST && nextType >= FrameType::FRAME_TYPE_FIRST;
+}
+
+} // namespace
+
+// Walk selection: PC-in-code samples walk from the ucontext (guarded by the
+// entry-frame and barrier-stub header windows); other samples walk from the
+// runtime glue anchor, structurally validated before the walk starts.
+void CpuProfiler::CollectWalkFrames(RawSample &sample, CpuProfilerSignalContext *ctx, uint64_t pc, void *context)
+{
+    JSThread *thread = ctx->jsThread;
     // Use JIT-fort-aware safe variant: old IsAddrAtStubOrAot() missed JIT-fort range,
     // routing PC-in-JIT samples to stale lastLeaveFrame. Do NOT gate on pcInJitFort —
     // stub/AOT frames also need the fp walk; routing them to lastLeaveFrame causes SEGV.
@@ -1046,12 +1101,23 @@ void CpuProfiler::CollectSampleInto(RawSample &sample, CpuProfilerSignalContext 
     } else if (thread->IsAsmInterpreter()) {
         if (thread->GetLastLeaveFrame() != nullptr) {
             JSTaggedType *leaveFrame = const_cast<JSTaggedType *>(thread->GetLastLeaveFrame());
+            if (!IsAnchorFrameWalkableSignalSafe(thread, leaveFrame)) {
+                sample.status = SampleStatus::STACK_NOT_ITERABLE;
+                ctx->dropStackNotIterable.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
             SignalSafeProfilerFrameIterator it(leaveFrame, thread);
             CollectRawFrames(sample, ctx, it);
         }
     } else {
         if (thread->GetCurrentFrame() != nullptr) {
-            SignalSafeProfilerFrameIterator it(const_cast<JSTaggedType *>(thread->GetCurrentFrame()), thread);
+            JSTaggedType *currentFrame = const_cast<JSTaggedType *>(thread->GetCurrentFrame());
+            if (!IsAnchorFrameWalkableSignalSafe(thread, currentFrame)) {
+                sample.status = SampleStatus::STACK_NOT_ITERABLE;
+                ctx->dropStackNotIterable.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            SignalSafeProfilerFrameIterator it(currentFrame, thread);
             CollectRawFrames(sample, ctx, it);
         }
     }
@@ -1099,7 +1165,8 @@ void CpuProfiler::CollectRawFrames(RawSample &sample, CpuProfilerSignalContext *
         bool isNative = method->IsNativeWithCallField();
         RunningState state = GetRunningStateRaw(it, vm_, isNative, topFrame, enableVMTag_);
         topFrame = false;
-        void *methodIdentifier = GetMethodIdentifierRaw(method, it, vm_);
+        bool hasNativePointer = false;
+        void *methodIdentifier = GetMethodIdentifierRaw(method, it, vm_, hasNativePointer);
         if (methodIdentifier == nullptr) {
             continue;
         }
@@ -1108,7 +1175,7 @@ void CpuProfiler::CollectRawFrames(RawSample &sample, CpuProfilerSignalContext *
         frame.kind = ClassifyRawFrameKind(it, isNative);
         frame.state = ToRawRunningState(state);
         frame.deoptType = static_cast<uint8_t>(method->GetDeoptType());
-        frame.reserved = 0;
+        frame.nativePointer = hasNativePointer ? 1 : 0;
         if (isNative) {
             frame.jsPandaFile = 0;
             frame.bytecodeOffset = 0;
@@ -1131,7 +1198,10 @@ void CpuProfiler::CollectRawFrames(RawSample &sample, CpuProfilerSignalContext *
 void CpuProfiler::ScheduleSample(pthread_t jsThreadId)
 {
     if (signalCtx_.handlerRunning.load(std::memory_order_acquire)) {
+        // The previous handler is still running on the JS thread; posting another
+        // SIGPROF would re-enter sampling the moment it returns. Skip the tick.
         signalCtx_.handlerOverrunTicks.fetch_add(1, std::memory_order_relaxed);
+        return;
     }
     signalCtx_.requestTimestamp.store(SamplingProcessor::GetMicrosecondsTimeStamp(),
                                       std::memory_order_release);
@@ -1159,8 +1229,11 @@ bool CpuProfiler::ConsumeRawSamples()
             eventIdx++;
             applied++;
         }
-        ProcessRawSample(sample);
-        consumed = true;
+        // Dropped samples create no nodes; counting them as consumed would
+        // starve the idle-fallback tick policy.
+        if (ProcessRawSample(sample)) {
+            consumed = true;
+        }
     }
     symbolizer_.AdvanceCursor(applied);
     return consumed;
@@ -1168,19 +1241,19 @@ bool CpuProfiler::ConsumeRawSamples()
 
 // Processor-thread side: orchestrates symbolization of one raw sample; all
 // allocation and JSPandaFile/DebugInfo lookups live in the symbolizer.
-void CpuProfiler::ProcessRawSample(const RawSample &sample)
+bool CpuProfiler::ProcessRawSample(const RawSample &sample)
 {
     // Drop samples left over from a previous session (late-delivered SIGPROF that
     // survived the start-time queue drain; Oracle review F5).
     if (sample.profilerGeneration != signalCtx_.generation.load(std::memory_order_acquire)) {
-        return;
+        return false;
     }
     // Drop handler-marked samples (raw_sample.h contract): without this they
     // become idle (program-node) samples or leak a partial INVALID_FRAME walk
     // into the tree. Capture-side drop* counters were already incremented by
     // the handler, so no counter is touched here.
     if (sample.status != SampleStatus::OK) {
-        return;
+        return false;
     }
     // Pre-validate every frame's owning file against the sample's metadata view:
     // symbolizing a frame dereferences its (and its caller's) MethodLiteral data,
@@ -1189,7 +1262,7 @@ void CpuProfiler::ProcessRawSample(const RawSample &sample)
         if (sample.frames[i].jsPandaFile != 0 &&
             !symbolizer_.IsJSPandaFileLive(sample.frames[i].jsPandaFile)) {
             signalCtx_.dropMetadataStale.fetch_add(1, std::memory_order_relaxed);
-            return;
+            return false;
         }
     }
     auto frame = std::make_unique<FrameStackAndInfo>();
@@ -1215,6 +1288,7 @@ void CpuProfiler::ProcessRawSample(const RawSample &sample)
         frame->frameStack[frame->frameStackLength++] = methodKey;
     }
     generator_->AddSample(*frame);
+    return true;
 }
 
 bool CpuProfiler::InHeaderOrTail(uint64_t pc, uint64_t entryBegin, uint64_t entryDuration, uint64_t headerSize,

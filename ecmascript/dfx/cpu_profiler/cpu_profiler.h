@@ -148,7 +148,8 @@ public:
     static EcmaVM *GetVmbyTid(pthread_t tid);
 
     // Processor-thread side: send one sampling request (pending bit + timestamp) and
-    // consume whatever raw samples have arrived. Never blocks on the handler.
+    // consume whatever raw samples have arrived. Skips the tick while the previous
+    // handler is still running. Never blocks on the handler.
     void ScheduleSample(pthread_t jsThreadId);
     bool ConsumeRawSamples();
     // Sampling-thread side: migrate the signal-context tid binding when the FFRT
@@ -166,11 +167,12 @@ private:
     // preallocated raw sample slot. Must stay free of locks, allocation and logging.
     void CollectSampleInto(RawSample &sample, CpuProfilerSignalContext *ctx, void *context);
     void CollectUContextFrames(RawSample &sample, CpuProfilerSignalContext *ctx, void *context);
+    void CollectWalkFrames(RawSample &sample, CpuProfilerSignalContext *ctx, uint64_t pc, void *context);
     void CollectRawFrames(RawSample &sample, CpuProfilerSignalContext *ctx,
                           SignalSafeProfilerFrameIterator &it);
-    // Processor-thread side: orchestrates symbolization of one raw sample; all
-    // allocation and metadata lookups live in CpuProfilerSymbolizer/SamplesRecord.
-    void ProcessRawSample(const RawSample &sample);
+    // Processor-thread side: orchestrates symbolization of one raw sample;
+    // returns false for dropped samples (no nodes created, not consumed).
+    bool ProcessRawSample(const RawSample &sample);
     void ResetSamplingStats();
     void LogSamplingStats();
     void WaitHandlersDrained();

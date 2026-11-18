@@ -64,6 +64,10 @@ public:
     bool IsOptimizedJSFunctionFrame() const;
     bool IsFastJitFunctionFrame() const;
     bool IsSteedFunctionFrame() const;
+    // Caller-frame resolvers split by frame family; each returns false for
+    // types it does not own. Plain loads only, usable from the handler path.
+    static bool PrevFrameSpCode(FrameType type, JSTaggedType *sp, JSTaggedType **next);
+    static bool PrevFrameSpInterpreter(FrameType type, JSTaggedType *sp, JSTaggedType **next);
 
 private:
     template<class T>
@@ -73,11 +77,6 @@ private:
     }
 
     bool ValidateNextSp(JSTaggedType *next);
-    // Advance helpers split the frame-type switch into two families so each
-    // stays within complexity limits; each resolves the caller's frame pointer
-    // for its family and returns false for types it does not own.
-    static bool PrevFrameSpCode(FrameType type, JSTaggedType *sp, JSTaggedType **next);
-    static bool PrevFrameSpInterpreter(FrameType type, JSTaggedType *sp, JSTaggedType **next);
 
     JSTaggedType *current_ {nullptr};
     const JSThread *thread_ {nullptr};

@@ -45,7 +45,8 @@ struct CpuProfilerSignalContext {
     std::atomic<uint8_t> profilerState {static_cast<uint8_t>(ProfilerSignalState::STOPPED)};
     std::atomic<uint32_t> generation {0};
     std::atomic<bool> shouldRecordSample {false};
-    // Diagnostics/lifecycle only: never used to block or cancel the handler.
+    // True while the JS thread executes the SIGPROF handler body; ScheduleSample
+    // skips the tick instead of posting another SIGPROF.
     std::atomic<bool> handlerRunning {false};
     std::atomic<uint32_t> activeHandlerCount {0};
     // Request timestamp written by the sending thread (plan §5.2: approximate time).

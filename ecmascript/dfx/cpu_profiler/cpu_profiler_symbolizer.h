@@ -16,12 +16,15 @@
 #ifndef ECMASCRIPT_DFX_CPU_PROFILER_CPU_PROFILER_SYMBOLIZER_H
 #define ECMASCRIPT_DFX_CPU_PROFILER_CPU_PROFILER_SYMBOLIZER_H
 
+#include <memory>
+
 #include "ecmascript/dfx/cpu_profiler/profiler_metadata_registry.h"
 #include "ecmascript/dfx/cpu_profiler/raw_sample.h"
 #include "ecmascript/dfx/stackinfo/js_stackgetter.h"
 #include "ecmascript/mem/c_containers.h"
 
 namespace panda::ecmascript {
+class DebugInfoExtractor;
 // Processor-thread-only symbolization of raw samples (plan §7.1). Nothing here may
 // ever run in the SIGPROF handler: every method may allocate, take locks or touch
 // lazily-initialized metadata singletons. The metadata cursor and live-file set
@@ -36,8 +39,8 @@ public:
     NO_COPY_SEMANTIC(CpuProfilerSymbolizer);
     NO_MOVE_SEMANTIC(CpuProfilerSymbolizer);
 
-    // Control thread, at session start.
-    void BeginSession();
+    // Control thread, at session start (nativePtrGetter may be null).
+    void BeginSession(void *(*nativePtrGetter)(void *info) = nullptr);
 
     // Control thread, while enumerating files loaded before the session.
     void SeedLiveFile(const JSPandaFile *file);
@@ -74,9 +77,13 @@ private:
                                struct MethodKey &methodKey, FrameInfoTemp &codeEntry);
     bool SymbolizeBytecodeFrame(const RawFrame &rawFrame, FrameInfoTemp &codeEntry);
     bool FillCallerSource(const RawSample &sample, uint16_t frameIndex, FrameInfoTemp &codeEntry);
+    // Shared ownership: valid outside jsPandaFileLock_, concurrent with file removal.
+    std::shared_ptr<DebugInfoExtractor> GetExtractor(const JSPandaFile *file) const;
 
     uint64_t metadataCursor_ {0};
     CUnorderedSet<const JSPandaFile *> liveFiles_;
+    mutable CUnorderedMap<const JSPandaFile *, std::shared_ptr<DebugInfoExtractor>> extractors_;
+    void *(*nativePtrGetter_)(void *info) {nullptr};
 };
 } // namespace panda::ecmascript
 #endif // ECMASCRIPT_DFX_CPU_PROFILER_CPU_PROFILER_SYMBOLIZER_H

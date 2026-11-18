@@ -553,14 +553,14 @@ DebugInfoExtractor *JSPandaFileManager::GetJSPtExtractor(const JSPandaFile *jsPa
 
     auto *extractors = &extractors_;
     if (Runtime::GetFork()) {
-        static std::unordered_map<const JSPandaFile *, std::unique_ptr<DebugInfoExtractor>> forkExtractors;
+        static std::unordered_map<const JSPandaFile *, std::shared_ptr<DebugInfoExtractor>> forkExtractors;
         extractors = &forkExtractors;
     }
     auto iter = extractors->find(jsPandaFile);
     if (iter == extractors->end()) {
-        auto extractorPtr = std::make_unique<DebugInfoExtractor>(jsPandaFile);
+        auto extractorPtr = std::make_shared<DebugInfoExtractor>(jsPandaFile);
         DebugInfoExtractor *extractor = extractorPtr.get();
-        (*extractors)[jsPandaFile] = std::move(extractorPtr);
+        (*extractors)[jsPandaFile] = extractorPtr;
         return extractor;
     }
     return iter->second.get();
@@ -579,10 +579,10 @@ DebugInfoExtractor *JSPandaFileManager::GetJSPtExtractorAndExtract(const JSPanda
 
     auto iter = extractors_.find(jsPandaFile);
     if (iter == extractors_.end()) {
-        auto extractorPtr = std::make_unique<DebugInfoExtractor>(jsPandaFile);
+        auto extractorPtr = std::make_shared<DebugInfoExtractor>(jsPandaFile);
         DebugInfoExtractor *extractor = extractorPtr.get();
         extractor->Extract();
-        extractors_[jsPandaFile] = std::move(extractorPtr);
+        extractors_[jsPandaFile] = extractorPtr;
         return extractor;
     }
 
@@ -603,15 +603,28 @@ DebugInfoExtractor *JSPandaFileManager::CpuProfilerGetJSPtExtractor(const JSPand
     DebugInfoExtractor *extractor = nullptr;
     auto iter = extractors_.find(jsPandaFile);
     if (iter == extractors_.end()) {
-        auto extractorPtr = std::make_unique<DebugInfoExtractor>(jsPandaFile);
+        auto extractorPtr = std::make_shared<DebugInfoExtractor>(jsPandaFile);
+        extractors_[jsPandaFile] = extractorPtr;
         extractor = extractorPtr.get();
-        extractors_[jsPandaFile] = std::move(extractorPtr);
     } else {
         extractor = iter->second.get();
     }
 
     extractor->Extract();
     return extractor;
+}
+
+std::shared_ptr<DebugInfoExtractor> JSPandaFileManager::GetExtractorForProfiler(const JSPandaFile *jsPandaFile)
+{
+    if (jsPandaFile == nullptr) {
+        return nullptr;
+    }
+    LockHolder lock(jsPandaFileLock_);
+    auto iter = extractors_.find(jsPandaFile);
+    if (iter == extractors_.end()) {
+        return nullptr;
+    }
+    return iter->second;
 }
 
 std::string GetModuleNameFromDesc(const std::string &desc)

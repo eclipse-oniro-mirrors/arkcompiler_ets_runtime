@@ -69,7 +69,7 @@ HWTEST_F_L0(RawSampleTest, DefaultInitialization)
     EXPECT_EQ(frame.kind, RawFrameKind::UNKNOWN);
     EXPECT_EQ(frame.state, RawRunningState::OTHER);
     EXPECT_EQ(frame.deoptType, 0U);
-    EXPECT_EQ(frame.reserved, 0U);
+    EXPECT_EQ(frame.nativePointer, 0U);
 }
 
 HWTEST_F_L0(RawSampleTest, MemcpyRoundTrip)
