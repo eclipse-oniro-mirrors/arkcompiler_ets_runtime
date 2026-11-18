@@ -638,23 +638,17 @@ void ProfilerStubBuilder::TryPreDumpInner(GateRef glue, GateRef func, GateRef pr
     auto env = GetEnvironment();
     Label subEntry(env);
     env->SubCfgEntry(&subEntry);
-    Label setPreDump(env);
     Label setPreDumpPeriodIndex(env);
-    Label setAndAddPredumpWorkList(env);
+    Label addPredumpWorkList(env);
     Label exit(env);
-    BRANCH(IsProfileTypeInfoPreDumped(profileTypeInfo), &exit, &setPreDump);
-    Bind(&setPreDump);
-    {
-        BRANCH(IsProfileTypeInfoInit(profileTypeInfo), &setAndAddPredumpWorkList, &setPreDumpPeriodIndex);
-    }
+    BRANCH(IsProfileTypeInfoPreDumped(profileTypeInfo), &exit, &setPreDumpPeriodIndex);
     Bind(&setPreDumpPeriodIndex);
     {
         SetPreDumpPeriodIndex(glue, profileTypeInfo);
-        Jump(&exit);
+        Jump(&addPredumpWorkList);
     }
-    Bind(&setAndAddPredumpWorkList);
+    Bind(&addPredumpWorkList);
     {
-        SetPreDumpPeriodIndex(glue, profileTypeInfo);
         CallRuntime(glue, RTSTUB_ID(PGOPreDump), { func });
         Jump(&exit);
     }
@@ -811,12 +805,6 @@ GateRef ProfilerStubBuilder::GetSlotID(const SlotIDInfo &slotInfo)
         return ZExtInt8ToInt32(LoadPrimitive(VariableType::INT8(), pc, IntPtr(2))); // 2 : skip 1 byte of bytecode
     }
     return ZExtInt8ToInt32(LoadPrimitive(VariableType::INT8(), pc, IntPtr(1)));
-}
-
-GateRef ProfilerStubBuilder::IsProfileTypeInfoInit(GateRef profileTypeInfo)
-{
-    GateRef count = LoadPrimitive(VariableType::INT32(), profileTypeInfo, IntPtr(ProfileTypeInfo::PERIOD_INDEX_OFFSET));
-    return Int32Equal(count, Int32(ProfileTypeInfo::INITIAL_PERIOD_INDEX));
 }
 
 GateRef ProfilerStubBuilder::IsProfileTypeInfoDumped(GateRef profileTypeInfo)
