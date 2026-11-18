@@ -14,6 +14,7 @@
  */
 
 #include <array>
+#include <vector>
 
 #include "ecmascript/arksteed/arksteed_assembler-inl.h"
 #include "ecmascript/arksteed/arksteed_graph.h"
@@ -844,7 +845,188 @@ protected:
         EXPECT_TRUE((inputRegisters & temporaries).IsEmpty())
             << "initializer temporary was assigned over an input register";
     }
+
+    static BB *CreatePatchMergeBlock(Chunk &chunk, const std::vector<VertexId> &originalIds)
+    {
+        BB *block = BB::New(&chunk);
+        auto *control = Vertex::New<ReturnVertex>(&chunk, static_cast<size_t>(ReturnVertex::NUM_INPUTS));
+        control->SetRegallocInfo(chunk.New<RegallocVertexInfo>(&chunk, control->GetInputCount()));
+        const VertexId controlId = originalIds.empty() ? CURRENT_ID : originalIds.back() + CURRENT_ID;
+        control->SetId(controlId);
+        block->SetControlVertex(control);
+
+        for (VertexId id : originalIds) {
+            auto *original = Vertex::New<Int32ConstantVertex>(&chunk, static_cast<size_t>(0), 0);
+            original->SetRegallocInfo(chunk.New<RegallocValueVertexInfo>(
+                &chunk, original->GetInputCount(), original->GetMachineRepresentation()));
+            original->SetId(id);
+            block->AddVertex(original);
+        }
+        return block;
+    }
+
+    static std::vector<NonControlVertex *> RegisterPatchMoves(Chunk &chunk, ArkSteedRegisterAllocator &allocator,
+                                                              const std::vector<VertexId> &patchTargets)
+    {
+        std::vector<NonControlVertex *> moves;
+        const AllocatedState source(LocationState::LocationKind::STACK_SLOT, MachineRepresentation::Tagged, 0);
+        const AllocatedState target(LocationState::LocationKind::STACK_SLOT, MachineRepresentation::Tagged, 1);
+        for (VertexId id : patchTargets) {
+            auto *move = Vertex::New<GapMoveVertex>(&chunk, static_cast<size_t>(0), source, target);
+            allocator.patches_.emplace_back(id, move);
+            moves.push_back(move);
+        }
+        return moves;
+    }
+
+    static std::vector<NonControlVertex *> BuildExpectedPatchOrder(
+        BB *block, const std::vector<VertexId> &patchTargets, const std::vector<NonControlVertex *> &moves)
+    {
+        std::vector<NonControlVertex *> expected;
+        // Independent oracle: group patches by their target, then expand the original sequence.
+        for (auto *original : block->GetVertices()) {
+            for (size_t i = 0; i < patchTargets.size(); ++i) {
+                if (patchTargets[i] == original->GetId()) {
+                    expected.push_back(moves[i]);
+                }
+            }
+            expected.push_back(original);
+        }
+        for (size_t i = 0; i < patchTargets.size(); ++i) {
+            if (patchTargets[i] == block->GetControlVertex()->GetId()) {
+                expected.push_back(moves[i]);
+            }
+        }
+        return expected;
+    }
+
+    static void RunPatchMergeCase(const std::vector<VertexId> &originalIds,
+                                  const std::vector<VertexId> &patchTargets, bool reserveCapacity)
+    {
+        NativeAreaAllocator native;
+        Chunk chunk {&native};
+        Graph graph {&chunk};
+        ArkSteedRegisterAllocator allocator {&graph};
+        BB *block = CreatePatchMergeBlock(chunk, originalIds);
+        auto *control = block->GetControlVertex();
+        auto moves = RegisterPatchMoves(chunk, allocator, patchTargets);
+        auto expected = BuildExpectedPatchOrder(block, patchTargets, moves);
+        auto &vertices = block->GetVertices();
+        if (reserveCapacity) {
+            vertices.reserve(vertices.size() + patchTargets.size());
+        }
+        auto *previousData = vertices.data();
+        allocator.ApplyPatches(block);
+        ASSERT_EQ(vertices.size(), expected.size());
+        for (size_t i = 0; i < expected.size(); ++i) {
+            EXPECT_EQ(vertices[i], expected[i]) << "merged pointer differs at " << i;
+        }
+        if (reserveCapacity || patchTargets.empty()) {
+            EXPECT_EQ(vertices.data(), previousData) << "sufficient capacity must keep the existing buffer";
+        }
+        EXPECT_EQ(block->GetControlVertex(), control);
+        EXPECT_TRUE(allocator.patches_.empty());
+        previousData = vertices.data();
+        allocator.ApplyPatches(block);
+        EXPECT_EQ(vertices.data(), previousData);
+        EXPECT_EQ(vertices.size(), expected.size());
+    }
+
+    static constexpr uint32_t kConstantFrameIndex = 0;
+    static constexpr uint32_t kStackFrameIndex = 1;
+    static constexpr size_t kLazyFrameValueCount = 2;
+    static constexpr VertexId kConstantValueId = 1;
+    static constexpr VertexId kStackValueId = 2;
+
+    static void PopulateLazyDeoptFrame(Chunk &chunk, LazyDeoptimizableMixin::LazyDeoptFrameState &frame)
+    {
+        frame.reserve(kLazyFrameValueCount);
+        auto *constant = Vertex::New<TaggedConstantVertex>(
+            &chunk, static_cast<size_t>(0), static_cast<uint64_t>(JSTaggedValue::VALUE_UNDEFINED));
+        constant->SetRegallocInfo(chunk.New<RegallocValueVertexInfo>(
+            &chunk, constant->GetInputCount(), constant->GetMachineRepresentation()));
+        constant->SetId(kConstantValueId);
+        constant->GetRegallocInfo()->SetConstantLocation(1);
+        frame.emplace_back(kConstantFrameIndex, constant, DeoptTranslationKind::TAGGED);
+
+        auto *stackValue = Vertex::New<InitialValueVertex>(&chunk, static_cast<size_t>(0), 0);
+        stackValue->SetRegallocInfo(chunk.New<RegallocValueVertexInfo>(
+            &chunk, stackValue->GetInputCount(), stackValue->GetMachineRepresentation()));
+        stackValue->SetId(kStackValueId);
+        const AllocatedState slot(LocationState::LocationKind::STACK_SLOT, MachineRepresentation::Tagged, 0);
+        stackValue->GetRegallocInfo()->SetResultAllocated(slot);
+        frame.emplace_back(kStackFrameIndex, stackValue, DeoptTranslationKind::TAGGED);
+    }
+
+    static void RunLazyDeoptInputAssignment()
+    {
+        NativeAreaAllocator native;
+        Chunk chunk {&native};
+        Graph graph {&chunk};
+        ArkSteedRegisterAllocator allocator {&graph};
+        auto *plain = Vertex::New<I32AddVertex>(&chunk, static_cast<size_t>(I32AddVertex::NUM_INPUTS));
+        EXPECT_FALSE(plain->CanLazyDeopt());
+        allocator.AssignDeoptInputs(plain);
+
+        auto *call = Vertex::New<CallRuntimeVertex>(&chunk, static_cast<size_t>(0), RTSTUB_ID(CreateEmptyObject));
+        call->SetRegallocInfo(chunk.New<RegallocValueVertexInfo>(
+            &chunk, call->GetInputCount(), call->GetMachineRepresentation()));
+        call->SetId(CURRENT_ID);
+        allocator.currentVertex_ = call;
+        ASSERT_TRUE(call->CanLazyDeopt());
+        EXPECT_FALSE(call->HasLazyDeoptFrameState());
+        allocator.AssignDeoptInputs(call);
+
+        auto *frame = chunk.New<LazyDeoptimizableMixin::LazyDeoptFrameState>(&chunk);
+        call->SetLazyDeoptFrameState(frame, 0);
+        allocator.AssignDeoptInputs(call);
+        PopulateLazyDeoptFrame(chunk, *frame);
+        auto *constant = call->GetDeoptFrameValue(kConstantFrameIndex);
+        auto *stackValue = call->GetDeoptFrameValue(kStackFrameIndex);
+
+        for (uint32_t i = 0; i < call->GetDeoptFrameValueCount(); ++i) {
+            call->GetDeoptSourceLocation(i)->SetUnallocated(Policy::MUST_HAVE_SLOT, 0, NO_VREG);
+        }
+        auto *stackLocation = call->GetDeoptSourceLocation(kStackFrameIndex);
+        stackValue->GetRegallocInfo()->RecordUse(CURRENT_ID, stackLocation);
+        stackValue->GetRegallocInfo()->RecordUse(LATER_ID, chunk.New<InputLocation>());
+        allocator.AssignDeoptInputs(call);
+
+        EXPECT_TRUE(call->GetDeoptSourceLocation(kConstantFrameIndex)->IsConstant());
+        EXPECT_TRUE(call->GetDeoptSourceLocation(kConstantFrameIndex)->GetOperand() ==
+                    constant->GetRegallocInfo()->GetAllocation());
+        const AllocatedState slot(LocationState::LocationKind::STACK_SLOT, MachineRepresentation::Tagged, 0);
+        EXPECT_TRUE(stackLocation->GetOperand() == slot);
+        EXPECT_EQ(stackValue->GetRegallocInfo()->CurrentNextUse(), LATER_ID);
+        EXPECT_TRUE(allocator.patches_.empty());
+    }
 };
+
+HWTEST_F_L0(ArkSteedRegisterAllocatorTest, PatchMergePreservesOrderAndCapacity)
+{
+    for (bool reserveCapacity : {false, true}) {
+        RunPatchMergeCase({}, {}, reserveCapacity);
+        RunPatchMergeCase({10, 20, 40}, {}, reserveCapacity);
+        RunPatchMergeCase({}, {CURRENT_ID, CURRENT_ID, CURRENT_ID}, reserveCapacity);
+        RunPatchMergeCase({10, 20, 40}, {10, 10, 20, 40, 40, 50, 50}, reserveCapacity);
+        RunPatchMergeCase({10, 20, 40}, {40, 50}, reserveCapacity);
+        RunPatchMergeCase({10, 20, 40}, std::vector<VertexId>(32, 20), reserveCapacity);
+    }
+}
+
+#ifndef NDEBUG
+HWTEST_F_L0(ArkSteedRegisterAllocatorTest, PatchMergeRejectsMissingTarget)
+{
+    EXPECT_DEATH(RunPatchMergeCase({10, 30}, {0}, false), "ASSERTION FAILED");
+    EXPECT_DEATH(RunPatchMergeCase({10, 30}, {20}, false), "ASSERTION FAILED");
+    EXPECT_DEATH(RunPatchMergeCase({10, 30}, {50}, false), "ASSERTION FAILED");
+}
+#endif
+
+HWTEST_F_L0(ArkSteedRegisterAllocatorTest, LazyDeoptInputAssignmentRetainsLocationsAndNextUse)
+{
+    RunLazyDeoptInputAssignment();
+}
 
 HWTEST_F_L0(ArkSteedRegisterAllocatorTest, GeneralResultSelection)
 {
