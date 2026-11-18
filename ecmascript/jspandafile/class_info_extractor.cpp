@@ -999,6 +999,13 @@ void SendableClassDefiner::AddFieldTypeToHClass(JSThread *thread, const JSHandle
                                                 bool &hasElement, size_t start,
                                                 std::vector<JSHandle<JSTaggedValue>> &&propertyList)
 {
+    // A published sendable hclass is immutable: sendable IC caches and the shared heap rely on
+    // "layout never changes after publication". Reject in-place field insertion here so misuse fails fast.
+    // Building-phase hclasses remain extensible. SetExtensible(false) is the final step of building.
+    if (hclass->IsJSShared() && !hclass->IsExtensible()) {
+        LOG_FULL(FATAL) << "AddFieldTypeToHClass: published sendable hclass is immutable, "
+                        << "only a newly-created (unpublished) hclass may receive fields";
+    }
     ASSERT(length <= fieldTypeArray->GetLength());
     JSMutableHandle<JSTaggedValue> key(thread, JSTaggedValue::Undefined());
     uint32_t index = static_cast<uint32_t>(layout->NumberOfElements());
@@ -1066,6 +1073,11 @@ void SendableClassDefiner::AddFieldTypeToHClass(JSThread *thread, const JSHandle
                                                 JSHandle<NumberDictionary> &elementsDic,
                                                 bool &hasElement)
 {
+    // See the LayoutInfo overload: a published sendable hclass must not be mutated.
+    if (hclass->IsJSShared() && !hclass->IsExtensible()) {
+        LOG_FULL(FATAL) << "AddFieldTypeToHClass: published sendable hclass is immutable, "
+                        << "only a newly-created (unpublished) hclass may receive fields";
+    }
     JSMutableHandle<NameDictionary> dict(thread, nameDict);
     AddFieldTypeToDict(thread, fieldTypeArray, length, dict, elementsDic, hasElement);
     hclass->SetLayout(thread, dict);

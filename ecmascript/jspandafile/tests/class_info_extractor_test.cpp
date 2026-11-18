@@ -272,4 +272,39 @@ HWTEST_F_L0(ClassInfoExtractorTest, BuildDictionaryProperties_AllBranches)
     EXPECT_FALSE(JSHandle<JSTaggedValue>::Cast(dictWithFunc)->IsUndefined());
 }
 
+/**
+ * @tc.name: AddFieldTypeToHClass_NewHClassNormal
+ * @tc.desc: AddFieldTypeToHClass accepts a newly-created (unpublished, extensible) shared hclass
+ *           and appends fields to its layout
+ * @tc.type: FUNC
+ */
+HWTEST_F_L0(ClassInfoExtractorTest, AddFieldTypeToHClass_NewHClassNormal)
+{
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    constexpr uint32_t fieldNum = 2; // 2: two fields
+
+    // fieldTypeArray = [key0, type0, key1, type1]; keys use shared (read-only) global strings,
+    // matching the real sendable pipeline where keys come from the shared constant pool.
+    JSHandle<TaggedArray> fieldTypeArray = factory->NewOldSpaceTaggedArray(fieldNum * 2); // 2: key-type pair
+    fieldTypeArray->Set(thread, 0, thread->GlobalConstants()->GetHandledPrototypeString());
+    fieldTypeArray->Set(thread, 1, JSTaggedValue(static_cast<int>(FieldType::NUMBER)));
+    fieldTypeArray->Set(thread, 2, thread->GlobalConstants()->GetHandledSizeString());
+    fieldTypeArray->Set(thread, 3, JSTaggedValue(static_cast<int>(FieldType::STRING)));
+
+    // A newly-created building-phase hclass is extensible (sealed with SetExtensible(false)
+    // only after publication, class_info_extractor.cpp:1147).
+    JSHandle<JSHClass> iHClass = factory->NewSEcmaHClass(
+        JSSharedObject::SIZE, JSType::JS_SHARED_OBJECT, fieldNum);
+    JSHandle<LayoutInfo> layout = factory->CreateSLayoutInfo(fieldNum);
+    JSHandle<NumberDictionary> elementsDic = NumberDictionary::CreateInSharedHeap(thread);
+    bool hasElement = false;
+
+    SendableClassDefiner::AddFieldTypeToHClass(thread, fieldTypeArray, fieldNum * 2, layout, iHClass,
+                                               elementsDic, hasElement, ~0U);
+
+    JSHandle<LayoutInfo> resultLayout(thread, iHClass->GetLayout(thread));
+    EXPECT_EQ(resultLayout->NumberOfElements(), fieldNum);
+    EXPECT_EQ(iHClass->NumberOfProps(), fieldNum);
+    EXPECT_FALSE(hasElement);
+}
 } // namespace panda::test

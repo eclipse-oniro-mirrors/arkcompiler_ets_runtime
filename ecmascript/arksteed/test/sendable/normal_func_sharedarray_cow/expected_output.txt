@@ -1,0 +1,11 @@
+warm ic: mono
+cow store applied: true
+cow site ic kept: mono
+cow store repeat: true
+cow site ic final: mono
+cow load: b
+true
+true
+cow store after compile: true
+cow load after compile: b
+normal func sharedarray cow over

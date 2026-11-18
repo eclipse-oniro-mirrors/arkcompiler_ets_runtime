@@ -30,6 +30,8 @@
 #include "ecmascript/js_function.h"
 #include "ecmascript/js_proxy.h"
 #include "ecmascript/js_handle.h"
+#include "ecmascript/shared_objects/concurrent_api_scope.h"
+#include "ecmascript/shared_objects/js_shared_array.h"
 #include "ecmascript/js_tagged_value_wrapper.h"
 #include "ecmascript/object_factory-inl.h"
 #include "ecmascript/runtime_call_id.h"
@@ -165,6 +167,9 @@ ARK_INLINE JSTaggedValue ICRuntimeStub::TryStoreICByValue(JSThread *thread, JSTa
     if (receiver.IsHeapObject()) {
         auto hclass = receiver.GetTaggedObject()->GetClass();
         if (firstValue.GetWeakReferentUnChecked() == hclass) {
+            if (hclass->IsJSSharedArray()) {
+                return SharedStoreElement(thread, receiver, hclass, key, value, secondValue);
+            }
             return StoreElement(thread, JSObject::Cast(receiver.GetTaggedObject()), key, value, secondValue);
         }
         // Check key
@@ -542,8 +547,36 @@ ARK_INLINE JSTaggedValue ICRuntimeStub::LoadICWithElementHandler(JSThread *threa
     return JSTaggedValue::Hole();
 }
 
+// Shared element load hit path (JSSharedArray): participates in the ConcurrentApiScope
+// READ protocol with the same RAII object as the slow path's JSSharedArray::GetProperty.
+// ARK_NOINLINE: inlining this body (ConcurrentApiScope/handles) would bloat the caller's
+// stack frame and shrink the recursion depth before stack overflow.
+ARK_NOINLINE JSTaggedValue ICRuntimeStub::SharedLoadElement(JSThread *thread, JSObject *receiver,
+                                                            JSTaggedValue key)
+{
+    ASSERT(receiver->GetClass()->IsJSSharedArray());
+    auto index = TryToElementsIndex(thread, key);
+    if (index < 0) {
+        return JSTaggedValue::Hole();
+    }
+    uint32_t elementIndex = static_cast<uint32_t>(index);
+    [[maybe_unused]] EcmaHandleScope handleScope(thread);
+    ConcurrentApiScope<JSSharedArray> scope(thread, JSHandle<JSTaggedValue>(thread, JSTaggedValue(receiver)));
+    RETURN_VALUE_IF_ABRUPT_COMPLETION(thread, JSTaggedValue::Exception());
+    // Bounds check against the array's logical length, not the elements' physical capacity.
+    uint32_t arrayLength = static_cast<JSSharedArray *>(receiver)->GetArrayLength();
+    if (elementIndex >= arrayLength) {
+        return JSTaggedValue::Hole();
+    }
+    JSTaggedValue value = ElementAccessor::Get(thread, receiver, elementIndex);
+    return value;
+}
+
 ARK_INLINE JSTaggedValue ICRuntimeStub::LoadElement(JSThread *thread, JSObject *receiver, JSTaggedValue key)
 {
+    if (receiver->GetClass()->IsJSSharedArray()) {
+        return SharedLoadElement(thread, receiver, key);
+    }
     auto index = TryToElementsIndex(thread, key);
     if (index < 0) {
         return JSTaggedValue::Hole();
@@ -618,6 +651,50 @@ ARK_INLINE JSTaggedValue ICRuntimeStub::StoreElementWithProtoHandler(JSThread *t
     }
     JSTaggedValue handlerInfo = protoHandler->GetHandlerInfo(thread);
     return StoreElement(thread, receiver, key, value, handlerInfo);
+}
+
+// The store participates in the ConcurrentApiScope WRITE protocol, same as the
+// slow path's JSSharedArray::SetProperty.
+// ARK_NOINLINE: inlining this body (ConcurrentApiScope/handles) would bloat the caller's
+// stack frame and shrink the recursion depth before stack overflow.
+ARK_NOINLINE JSTaggedValue ICRuntimeStub::SharedStoreElement(JSThread *thread, JSTaggedValue receiver,
+                                                             JSHClass *hclass, JSTaggedValue key,
+                                                             JSTaggedValue value, JSTaggedValue handler)
+{
+    ASSERT(hclass->IsJSSharedArray());
+    auto index = TryToElementsIndex(thread, key);
+    if (index < 0) {
+        return JSTaggedValue::Hole();
+    }
+    uint32_t elementIndex = static_cast<uint32_t>(index);
+    [[maybe_unused]] EcmaHandleScope handleScope(thread);
+    JSHandle<JSObject> receiverHandle(thread, JSObject::Cast(receiver.GetTaggedObject()));
+    JSHandle<JSTaggedValue> valueHandle(thread, value);
+    ConcurrentApiScope<JSSharedArray, ModType::WRITE> scope(thread,
+                                                            JSHandle<JSTaggedValue>::Cast(receiverHandle));
+    RETURN_VALUE_IF_ABRUPT_COMPLETION(thread, JSTaggedValue::Exception());
+    TaggedArray *elements = TaggedArray::Cast(receiverHandle->GetElements(thread).GetTaggedObject());
+    if (elements->GetClass()->IsCOWArray()) {
+        return JSTaggedValue::Hole();
+    }
+    // Bounds check against the array's logical length, not the elements' physical capacity.
+    uint32_t arrayLength = JSHandle<JSSharedArray>::Cast(receiverHandle)->GetArrayLength();
+    if (elementIndex >= arrayLength) {
+        return JSTaggedValue::Hole();
+    }
+    if (elements->Get(thread, elementIndex).IsHole()) {
+        return JSTaggedValue::Hole();
+    }
+    // Value check mirrors the slow path's MatchFieldType(NONE, value) exactly.
+    if (value.IsHeapObject() && !value.IsJSShared()) {
+        return JSTaggedValue::Hole();
+    }
+    // A TreeString must be flattened before entering a shared container.
+    if (value.IsTreeString()) {
+        return JSTaggedValue::Hole();
+    }
+    ElementAccessor::Set(thread, receiverHandle, elementIndex, valueHandle, false);
+    return JSTaggedValue::Undefined();
 }
 
 JSTaggedValue ICRuntimeStub::StoreElement(JSThread *thread, JSObject *receiver, JSTaggedValue key,

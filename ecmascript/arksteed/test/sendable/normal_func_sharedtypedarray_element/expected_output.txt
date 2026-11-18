@@ -1,0 +1,15 @@
+sta store applied: true
+sta store ic: mono
+sta store repeat: true
+sta load: 3
+sta load ic: mono
+mixed sta store: true
+mixed sarr store: true
+mixed site ic: poly
+true
+true
+true
+sta store after compile: true
+sta load after compile: 3
+mixed store after compile: true true
+normal func sharedtypedarray element over

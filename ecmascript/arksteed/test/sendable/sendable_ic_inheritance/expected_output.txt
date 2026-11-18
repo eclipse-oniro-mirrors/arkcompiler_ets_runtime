@@ -1,0 +1,4 @@
+before compile: true
+true
+after compile: true
+method call: 42

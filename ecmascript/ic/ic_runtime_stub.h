@@ -74,6 +74,7 @@ public:
                                                JSTaggedValue receiver, JSTaggedValue key, JSTaggedValue value,
                                                uint32_t slotId);
     static inline JSTaggedValue LoadElement(JSThread *thread, JSObject *receiver, JSTaggedValue key);
+    static inline JSTaggedValue SharedLoadElement(JSThread *thread, JSObject *receiver, JSTaggedValue key);
     static inline JSTaggedValue LoadStringElement(JSThread *thread, JSTaggedValue receiver, JSTaggedValue key);
     static inline JSTaggedValue LoadTypedArrayElement(JSThread *thread, JSTaggedValue receiver, JSTaggedValue key);
     template <typename T>
@@ -81,6 +82,8 @@ public:
                                                              JSTaggedValue value, JSTaggedValue handlerInfo);
     static inline JSTaggedValue StoreElement(JSThread *thread, JSObject *receiver, JSTaggedValue key,
                                              JSTaggedValue value, JSTaggedValue handlerInfo);
+    static inline JSTaggedValue SharedStoreElement(JSThread *thread, JSTaggedValue receiver, JSHClass *hclass,
+                                                   JSTaggedValue key, JSTaggedValue value, JSTaggedValue handler);
     static inline JSTaggedValue StoreTypedArrayElement(JSThread *thread, JSTaggedValue receiver, JSTaggedValue key,
                                                        JSTaggedValue value);
     static inline int64_t TryToElementsIndex(JSThread *thread, JSTaggedValue key);

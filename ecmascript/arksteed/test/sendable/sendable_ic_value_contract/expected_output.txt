@@ -1,0 +1,8 @@
+number store: true
+string store: true
+bigint store: true
+true
+number after compile: true
+string after compile: true
+bigint after compile: true
+object store throws TypeError: true

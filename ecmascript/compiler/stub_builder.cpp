@@ -3369,6 +3369,15 @@ GateRef StubBuilder::LoadICWithHandler(
 
             // For "Not Found" case (holder equals Undefined()),
             // we should ensure that both GetNotFoundHasChanged() and GetHasChanged() return false.
+            // Note: a shared-hclass receiver CAN legally reach here with a cell-bearing
+            // PrototypeHandler - a string's not-found IC is distilled through its JSPrimitiveRef
+            // wrapper's hclass (non-shared, prototype chain mutable -> cell version), while the
+            // hit-path receiver is the raw string whose hclass carries the shared-type bit.
+            // Invariant: cellValue is a REAL marker at this point. The only Undefined-cell
+            // producer is the shared proto-found handler (LoadPrototype skips the marker for
+            // sealed chains), and a proto-FOUND handler always carries a non-Undefined
+            // holder - so "cell == Undefined && holder == Undefined" is unreachable and
+            // GetNotFoundHasChanged below never sees a non-marker input.
             Bind(&handleInfoIsNotFound);
             {
                 BRANCH(GetNotFoundHasChanged(cellValue), &cellNotFoundHasChanged, &cellNotFoundNotChanged);
@@ -3439,6 +3448,58 @@ GateRef StubBuilder::LoadICWithHandler(
     return ret;
 }
 
+// @ref ICRuntimeStub::SharedLoadElement
+GateRef StubBuilder::SharedLoadElement(GateRef glue, GateRef receiver, GateRef index)
+{
+    auto env = GetEnvironment();
+    Label entry(env);
+    env->SubCfgEntry(&entry);
+    Label canReadExit(env);
+    Label readDoneExit(env);
+    Label scopeHasPending(env);
+    Label scopeNoPending(env);
+    Label sharedReadSlot(env);
+    Label sharedDone(env);
+    DEFVARIABLE(result, VariableType::JS_ANY(), Hole());
+    DEFVARIABLE(expectModRecord, VariableType::INT32(), Int32(0));
+    DEFVARIABLE(desiredModRecord, VariableType::INT32(), Int32(0));
+    DEFVARIABLE(scopeEntered, VariableType::BOOL(), False());
+
+    ConcurrentApiScopeCanRead<JSSharedArray>(glue, receiver, expectModRecord, desiredModRecord,
+                                             scopeEntered, &canReadExit);
+    Bind(&canReadExit);
+    BRANCH(HasPendingException(glue), &scopeHasPending, &scopeNoPending);
+    Bind(&scopeHasPending);
+    {
+        result = Exception();
+        Jump(&sharedDone);
+    }
+    Bind(&scopeNoPending);
+    {
+        // Bounds check against the array's logical length, not the elements' physical capacity.
+        GateRef arrayLength = LoadPrimitive(VariableType::INT32(), receiver,
+            IntPtr(JSSharedArray::LENGTH_OFFSET));
+        BRANCH(Int32UnsignedGreaterThanOrEqual(index, arrayLength), &sharedDone,
+               &sharedReadSlot);
+    }
+    Bind(&sharedReadSlot);
+    {
+        result = GetTaggedValueWithElementsKind(glue, receiver, index);
+        Jump(&sharedDone);
+    }
+    Bind(&sharedDone);
+    {
+        ConcurrentApiScopeReadDone<JSSharedArray>(glue, receiver, expectModRecord, desiredModRecord,
+                                                  scopeEntered, &readDoneExit);
+    }
+    Bind(&readDoneExit);
+    {
+        auto ret = *result;
+        env->SubCfgExit();
+        return ret;
+    }
+}
+
 GateRef StubBuilder::LoadElement(GateRef glue, GateRef receiver, GateRef key)
 {
     auto env = GetEnvironment();
@@ -3451,6 +3512,8 @@ GateRef StubBuilder::LoadElement(GateRef glue, GateRef receiver, GateRef key)
     Label lengthNotLessIndex(env);
     Label greaterThanInt32Max(env);
     Label notGreaterThanInt32Max(env);
+    Label receiverIsSharedArray(env);
+    Label receiverNotSharedArray(env);
     DEFVARIABLE(result, VariableType::JS_ANY(), Hole());
     GateRef index64 = TryToElementsIndex(glue, key);
     BRANCH(Int64GreaterThanOrEqual(index64, Int64(INT32_MAX)), &greaterThanInt32Max, &notGreaterThanInt32Max);
@@ -3467,13 +3530,23 @@ GateRef StubBuilder::LoadElement(GateRef glue, GateRef receiver, GateRef key)
     }
     Bind(&indexNotLessZero);
     {
-        GateRef elements = GetElementsArray(glue, receiver);
-        BRANCH(Int32LessThanOrEqual(GetLengthOfTaggedArray(elements), index), &lengthLessIndex, &lengthNotLessIndex);
-        Bind(&lengthLessIndex);
-        Jump(&exit);
-        Bind(&lengthNotLessIndex);
-        result = GetTaggedValueWithElementsKind(glue, receiver, index);
-        Jump(&exit);
+        BRANCH(TaggedIsJSSharedArray(glue, receiver), &receiverIsSharedArray, &receiverNotSharedArray);
+        Bind(&receiverIsSharedArray);
+        {
+            result = SharedLoadElement(glue, receiver, index);
+            Jump(&exit);
+        }
+        Bind(&receiverNotSharedArray);
+        {
+            GateRef elements = GetElementsArray(glue, receiver);
+            BRANCH(Int32LessThanOrEqual(GetLengthOfTaggedArray(elements), index), &lengthLessIndex,
+                   &lengthNotLessIndex);
+            Bind(&lengthLessIndex);
+            Jump(&exit);
+            Bind(&lengthNotLessIndex);
+            result = GetTaggedValueWithElementsKind(glue, receiver, index);
+            Jump(&exit);
+        }
     }
     Bind(&exit);
     auto ret = *result;
@@ -3568,6 +3641,104 @@ GateRef StubBuilder::TaggedArraySetValue(GateRef glue, GateRef receiver, GateRef
     return ret;
 }
 
+// @ref ICRuntimeStub::SharedStoreElement
+GateRef StubBuilder::SharedICStoreElement(GateRef glue, GateRef receiver, GateRef key, GateRef value)
+{
+    auto env = GetEnvironment();
+    Label entry(env);
+    env->SubCfgEntry(&entry);
+    Label exit(env);
+    Label canWriteExit(env);
+    Label writeDoneExit(env);
+    Label scopeHasPending(env);
+    Label scopeNoPending(env);
+    Label indexLessZero(env);
+    Label indexNotLessZero(env);
+    Label greaterThanInt32Max(env);
+    Label notGreaterThanInt32Max(env);
+    Label sharedCapacityCheck(env);
+    Label sharedSlotCheck(env);
+    Label sharedValueCheck(env);
+    Label sharedNotTreeString(env);
+    Label sharedStoreElement(env);
+    DEFVARIABLE(result, VariableType::JS_ANY(), Hole());
+    DEFVARIABLE(scopeEntered, VariableType::BOOL(), False());
+
+    GateRef index64 = TryToElementsIndex(glue, key);
+    BRANCH_UNLIKELY(Int64GreaterThanOrEqual(index64, Int64(INT32_MAX)), &greaterThanInt32Max,
+                    &notGreaterThanInt32Max);
+    Bind(&greaterThanInt32Max);
+    {
+        Jump(&exit);
+    }
+    Bind(&notGreaterThanInt32Max);
+    GateRef index = TruncInt64ToInt32(index64);
+    BRANCH_UNLIKELY(Int32LessThan(index, Int32(0)), &indexLessZero, &indexNotLessZero);
+    Bind(&indexLessZero);
+    {
+        Jump(&exit);
+    }
+    Bind(&indexNotLessZero);
+
+    ConcurrentApiScopeCanWrite<JSSharedArray>(glue, receiver, scopeEntered, &canWriteExit);
+    Bind(&canWriteExit);
+    BRANCH(HasPendingException(glue), &scopeHasPending, &scopeNoPending);
+    Bind(&scopeHasPending);
+    {
+        result = Exception();
+        Jump(&exit);
+    }
+    Bind(&scopeNoPending);
+    {
+        GateRef sharedElements = GetElementsArray(glue, receiver);
+        BRANCH(IsCOWArray(glue, sharedElements), &exit, &sharedCapacityCheck);
+        Bind(&sharedCapacityCheck);
+        {
+            // Bounds check against the array's logical length, not the elements' physical capacity.
+            GateRef arrayLength = LoadPrimitive(VariableType::INT32(), receiver,
+                IntPtr(JSSharedArray::LENGTH_OFFSET));
+            BRANCH(Int32UnsignedGreaterThanOrEqual(index, arrayLength), &exit,
+                   &sharedSlotCheck);
+        }
+        Bind(&sharedSlotCheck);
+        {
+            GateRef slot = GetValueFromTaggedArray(glue, sharedElements, index);
+            BRANCH(TaggedIsHole(slot), &exit, &sharedValueCheck);
+        }
+        Bind(&sharedValueCheck);
+        {
+            // Mirrors the slow path's MatchFieldType(NONE, value).
+            BRANCH(TaggedIsSharedType(glue, value), &sharedNotTreeString, &exit);
+        }
+        Bind(&sharedNotTreeString);
+        {
+            // A TreeString must be flattened before entering a shared container:
+            GateRef isHeapTreeString = LogicAndBuilder(env_)
+                .And(TaggedIsHeapObject(value))
+                .And(IsTreeString(glue, value))
+                .Done();
+            BRANCH(isHeapTreeString, &exit, &sharedStoreElement);
+        }
+        Bind(&sharedStoreElement);
+        {
+            SetValueWithElementsKind(glue, receiver, value, index, Boolean(false),
+                Int32(Elements::ToUint(ElementsKind::NONE)));
+            result = Undefined();
+            Jump(&exit);
+        }
+    }
+    Bind(&exit);
+    {
+        ConcurrentApiScopeWriteDone<JSSharedArray>(glue, receiver, scopeEntered, &writeDoneExit);
+    }
+    Bind(&writeDoneExit);
+    {
+        auto ret = *result;
+        env->SubCfgExit();
+        return ret;
+    }
+}
+
 GateRef StubBuilder::ICStoreElement(GateRef glue, GateRef receiver, GateRef key, GateRef value, GateRef handler,
                                     bool updateHandler, GateRef profileTypeInfo, GateRef slotId)
 {
@@ -3593,8 +3764,19 @@ GateRef StubBuilder::ICStoreElement(GateRef glue, GateRef receiver, GateRef key,
     Label loopEnd(env);
     Label greaterThanInt32Max(env);
     Label notGreaterThanInt32Max(env);
+    Label receiverIsSharedArray(env);
+    Label receiverNotSharedArray(env);
     DEFVARIABLE(result, VariableType::JS_ANY(), Hole());
     DEFVARIABLE(varHandler, VariableType::JS_ANY(), handler);
+    // Mirroring ICRuntimeStub::TryStoreICByValue: dispatch JSSharedArray
+    // receivers to the dedicated shared store path before any generic handling.
+    BRANCH(TaggedIsJSSharedArray(glue, receiver), &receiverIsSharedArray, &receiverNotSharedArray);
+    Bind(&receiverIsSharedArray);
+    {
+        result = SharedICStoreElement(glue, receiver, key, value);
+        Jump(&exit);
+    }
+    Bind(&receiverNotSharedArray);
     GateRef index64 = TryToElementsIndex(glue, key);
     BRANCH_UNLIKELY(Int64GreaterThanOrEqual(index64, Int64(INT32_MAX)), &greaterThanInt32Max, &notGreaterThanInt32Max);
     Bind(&greaterThanInt32Max);

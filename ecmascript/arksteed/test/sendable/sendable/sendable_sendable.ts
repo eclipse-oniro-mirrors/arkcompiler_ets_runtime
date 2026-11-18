@@ -13,6 +13,8 @@
  * limitations under the License.
  */
 
+//! PARAMS --compiler-jit-hotness-threshold=60000
+
 function foo1()
 {
     'use sendable'

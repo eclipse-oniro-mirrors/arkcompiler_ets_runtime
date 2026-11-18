@@ -193,8 +193,24 @@ JSHandle<JSTaggedValue> PrototypeHandler::LoadPrototype(const JSThread *thread, 
             }
         }
     }
-    auto result = JSHClass::EnableProtoChangeMarker(thread, hclass);
-    handler->SetProtoCell(thread, result);
+    // Shared-type receivers come in two flavors on this path:
+    // 1. Strings: a string's named/value IC is distilled through its JSPrimitiveRef wrapper, and the wrapper's
+    //    hclass is NOT shared - strings take the marker branch below like any local object(mutable-prototype-chain).
+    //    This guard never fires for them, even though the raw string's own hclass carries the shared bit.
+    // 2. Sendable objects: their prototype chains are pure-shared and sealed at build time, and the only way such a
+    //    receiver reaches here is a proto-FOUND hit (GetHandler routes every shared not-found to the bare int
+    //    NON_EXIST handler instead). No cell is needed: skip the allocation and registration;
+    //    the cell stays Undefined and the hit path short-circuits on it
+    // NOTE: A bigint also carries a shared-bit hclass with a mutable local prototype chain, but it never gets here:
+    //    the load miss entries Mega-ize it before GetHandler because it is not a JSObject.
+    if (!hclass->IsJSShared()) {
+        auto result = JSHClass::EnableProtoChangeMarker(thread, hclass);
+        handler->SetProtoCell(thread, result);
+    } else {
+        // Debug-only
+        ASSERT_LOGF(hclass->GetPrototype(thread).IsInSharedHeap(),
+            "shared cell skip requires a sealed pure-shared prototype chain");
+    }
     return JSHandle<JSTaggedValue>::Cast(handler);
 }
 
@@ -220,10 +236,16 @@ JSHandle<JSTaggedValue> PrototypeHandler::StorePrototype(const JSThread *thread,
             handler->SetAccessorJSFunction(thread, setter);
         }
     }
-    // ShareToLocal is prohibited
+    // ShareToLocal is prohibited. The only shared receivers reaching here are proto-FOUND hits
+    // (see LoadPrototype above for the routing argument); the sealed chain has no invalidation events,
+    // so the marker allocation is skipped and the cell stays Undefined.
     if (!hclass->IsJSShared()) {
         auto result = JSHClass::EnableProtoChangeMarker(thread, hclass);
         handler->SetProtoCell(thread, result);
+    } else {
+        // Debug-only
+        ASSERT_LOGF(hclass->GetPrototype(thread).IsInSharedHeap(),
+            "shared cell skip requires a sealed pure-shared prototype chain");
     }
     return JSHandle<JSTaggedValue>::Cast(handler);
 }
