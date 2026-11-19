@@ -226,6 +226,7 @@ GC_TRACE_LOG_RE = re.compile(
 
 GRAPH_DUMP_START = "[compiler] ===== Starts Graph Dump ====="
 GRAPH_DUMP_END = "[compiler] ===== Finishes Graph Dump ====="
+GRAPH_DUMP_METHOD_RE = re.compile(r"\[compiler\] ArkSteed Graph Method: ?(\S+)")
 
 # ark_disasm renders function bodies as `.function ... {`, followed by
 # indented instruction lines and a closing `}`. Restrict bytecode matching to
@@ -237,6 +238,7 @@ DISASM_INSTRUCTION_RE = re.compile(
 )
 CODEGEN_ASM_START = "[compiler] ========== ArkSteed After Codegen ASM =========="
 CODEGEN_ASM_END = "[compiler] ================================================"
+CODEGEN_METHOD_RE = re.compile(r"\[compiler\] ArkSteed Codegen Method: ?(\S+)")
 ARKSTEED_COMMENT_RE = re.compile(r"^\[compiler\]\s+\[ArkSteed\]\s*(.*?)\s*$")
 
 
@@ -255,9 +257,16 @@ def iter_graph_dumps(stdout: str):
             return
         end = stdout.find(GRAPH_DUMP_END, start)
         end = len(stdout) if end == -1 else end + len(GRAPH_DUMP_END)
-        method = "(unknown)"
-        for match in COMPILE_START_RE.finditer(stdout, 0, start):
-            method = match.group(1) or "(anonymous)"
+        # Prefer the explicit method-name line emitted inside the dump block;
+        # parallel workers interleave the `Starts compiling` markers, so the
+        # fallback "last marker before the dump" attribution is unreliable.
+        method_match = GRAPH_DUMP_METHOD_RE.search(stdout, start, end)
+        if method_match:
+            method = method_match.group(1)
+        else:
+            method = "(unknown)"
+            for match in COMPILE_START_RE.finditer(stdout, 0, start):
+                method = match.group(1) or "(anonymous)"
         yield method, stdout[start:end]
         position = end
 
@@ -2073,25 +2082,33 @@ def check_bytecode_constraints(
 
 
 def collect_codegen_comments(stdout: str) -> Dict[str, List[str]]:
-    """Collect normalized ArkSteed generated-code comments by method."""
+    """Collect normalized ArkSteed generated-code comments by method.
+
+    Each codegen-ASM block carries an explicit method-name line, so parallel
+    workers can emit blocks in any order; the `Starts compiling` markers are
+    not used for attribution here.
+    """
 
     comments: Dict[str, List[str]] = {}
-    for method, section in iter_compilation_sections(stdout):
+    position = 0
+    while True:
+        start = stdout.find(CODEGEN_ASM_START, position)
+        if start == -1:
+            break
+        end = stdout.find(CODEGEN_ASM_END, start)
+        end = len(stdout) if end == -1 else end + len(CODEGEN_ASM_END)
+        section = stdout[start:end]
+        method_match = CODEGEN_METHOD_RE.search(section)
+        method = method_match.group(1) if method_match else "(unknown)"
         method_comments = comments.setdefault(method, [])
-        in_asm_dump = False
         for raw_line in section.splitlines():
             line = ANSI_ESCAPE_RE.sub("", raw_line)
-            if line == CODEGEN_ASM_START:
-                in_asm_dump = True
-                continue
-            if line == CODEGEN_ASM_END:
-                in_asm_dump = False
-                continue
-            if not in_asm_dump:
+            if line == CODEGEN_ASM_START or line == CODEGEN_ASM_END:
                 continue
             match = ARKSTEED_COMMENT_RE.match(line)
             if match is not None:
                 method_comments.append(" ".join(match.group(1).split()))
+        position = end
     return comments
 
 

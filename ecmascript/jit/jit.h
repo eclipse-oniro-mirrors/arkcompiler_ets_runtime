@@ -36,7 +36,7 @@ struct ThreadTaskInfo {
     std::deque<std::shared_ptr<JitTask>> installJitTasks_;
     bool skipInstallTask_ { false };
 
-    std::atomic<uint32_t> jitTaskCnt_;
+    std::atomic<uint32_t> jitTaskCnt_ {0};
     ConditionVariable jitTaskCntCv_;
 };
 

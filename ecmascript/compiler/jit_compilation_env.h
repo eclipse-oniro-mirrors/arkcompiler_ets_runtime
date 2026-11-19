@@ -50,9 +50,13 @@ public:
         }
     };
 
-    JitCompilationEnv(EcmaVM *vm, EcmaVM *hVm,
-        JSHandle<JSFunction> &jsFunction, kungfu::LazyDeoptAllDependencies *dependencies);
+    JitCompilationEnv(EcmaVM *vm, EcmaVM *hVm, JSHandle<JSFunction> &jsFunction,
+                      kungfu::LazyDeoptAllDependencies *dependencies);
     ~JitCompilationEnv() override;
+    FunctionKind GetFunctionKind() const
+    {
+        return functionKind_;
+    }
     bool IsJitCompiler() const override
     {
         return true;
@@ -351,6 +355,7 @@ private:
     JSTaggedValue globalEnv_ {JSTaggedValue::Hole()};
     JSPandaFile *jsPandaFile_ {nullptr};
     MethodLiteral *methodLiteral_ {nullptr};
+    FunctionKind functionKind_ {FunctionKind::NORMAL_FUNCTION};
     const uint8_t* pcStart_ {nullptr};
     pgo::ApEntityId abcId_ {0};
     JSHandle<ProfileTypeInfo> profileTypeInfo_;

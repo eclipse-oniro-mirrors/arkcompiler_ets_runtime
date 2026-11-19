@@ -115,6 +115,12 @@ void JitResources::InitCompiler()
 void JitResources::InitJitTaskpool()
 {
     bool enableCodeSign = !ohos::JitTools::GetCodeSignDisable(jsRuntimeOptions_.GetDisableCodeSign());
-    JitTaskpool::GetCurrentTaskpool()->Initialize(enableCodeSign);
+    bool parallelSupported = jsRuntimeOptions_.GetCompilerJitBackend() == JitBackend::ARKSTEED && !g_isEnableCMCGC &&
+                             !jsRuntimeOptions_.IsEnableBaselineJIT();
+#if !ECMASCRIPT_ENABLE_ARK_STEED
+    parallelSupported = false;
+#endif
+    uint32_t workers = parallelSupported ? jsRuntimeOptions_.GetCompilerJitWorkerCount() : 1;
+    JitTaskpool::GetCurrentTaskpool()->Initialize(enableCodeSign, workers);
 }
 }  // namespace panda::ecmascript

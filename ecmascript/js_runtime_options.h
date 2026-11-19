@@ -307,6 +307,7 @@ enum CommandValues {
     OPTION_HAP_FD,
 
     OPTION_COMPILER_JIT_BACKEND,
+    OPTION_COMPILER_JIT_WORKER_COUNT,
 
     // OPTION_LAST should at the last
     OPTION_LAST,
@@ -1695,6 +1696,16 @@ public:
     JitBackend GetCompilerJitBackend() const
     {
         return compilerJitBackend_;
+    }
+
+    void SetCompilerJitWorkerCount(uint32_t value)
+    {
+        compilerJitWorkerCount_ = value;
+    }
+
+    uint32_t GetCompilerJitWorkerCount() const
+    {
+        return compilerJitWorkerCount_;
     }
 
     void SetEnableDFXHiSysEvent(bool value)
@@ -3088,6 +3099,7 @@ private:
 #else
     JitBackend compilerJitBackend_ {JitBackend::FASTJIT};
 #endif
+    uint32_t compilerJitWorkerCount_ {3}; // 3: default JIT worker count
     bool enableDFXHiSysEvent_ {true};
     bool enableAPPJIT_ {false};
     bool isEnableJitDfxDump_ {false};

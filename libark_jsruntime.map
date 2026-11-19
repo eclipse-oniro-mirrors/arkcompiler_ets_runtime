@@ -452,6 +452,8 @@
       panda::ecmascript::arksteed::ArkSteedSafepointTableBuilder::SetFrameSlots*;
       panda::ecmascript::arksteed::ArkSteedSafepointTableBuilder::GetTableSize*;
       panda::ecmascript::arksteed::ArkSteedSafepointTableBuilder::EmitToNewBuffer*;
+      panda::ecmascript::arksteed::ArkSteedTask::SetCodeData*;
+      panda::ecmascript::arksteed::ArkSteedTask::SetCodeSigner*;
       panda::ecmascript::arksteed::ArkSteedTask::SetDeoptTranslationData*;
       panda::ecmascript::arksteed::ArkSteedTask::SetDeoptLiteralData*;
       panda::ecmascript::arksteed::ArkSteedTask::SetEmbeddedRefData*;

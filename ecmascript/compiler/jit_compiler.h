@@ -78,7 +78,12 @@ public:
                            jitTask->GetHostVM(), jsFunction_, jitTask->GetDependencies())),
         profileTypeInfo_(jitTask->GetProfileTypeInfo()),
         compilerTier_(jitTask->GetCompilerTier()),
-        passManager_(nullptr), jitCodeGenerator_(nullptr) { };
+        passManager_(nullptr), jitCodeGenerator_(nullptr)
+    {
+        if (jitCompilationEnv_->GetFunctionKind() == FunctionKind::CLASS_CONSTRUCTOR) {
+            jitCompilationEnv_->GetMethodLiteral()->SetFunctionKind(FunctionKind::CLASS_CONSTRUCTOR);
+        }
+    };
     static JitCompilerTask *CreateJitCompilerTask(JitTask *jitTask);
 
     bool Compile();

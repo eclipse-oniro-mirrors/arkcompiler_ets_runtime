@@ -77,10 +77,10 @@ public:
 
     bool BuildGraph(JSThread *compilerThread);
     void RunPreRegallocProcessors();
-    void FillCodeDesc(MachineCodeDesc &codeDesc);
+    bool FillCodeDesc(MachineCodeDesc &codeDesc);
 
 #ifdef JIT_ENABLE_CODE_SIGN
-    void EnableCodeSign();
+    bool EnableCodeSign();
 #endif
 
     JitCompilationEnv *GetCompilationEnv() const
@@ -100,6 +100,10 @@ private:
     void DebugLogOnCompilationDone();
     CString GetCompiledMethodName() const;
     std::unique_ptr<uint8_t[]> BuildTableContainer(size_t *containerSize);
+    void FillDeoptLiteralData();
+    void FillEmbeddedRefData();
+    void FillFrameInfo();
+    void FillCodeComments(MachineCodeDesc &codeDesc);
 
     ArkSteedTask *arkSteedTask_;
     JSHandle<JSFunction> jsFunction_;

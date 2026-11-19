@@ -211,6 +211,7 @@ const std::string PUBLIC_API HELP_OPTION_MSG =
     "--compiler-enable-litecg:             Enable LiteCG: Default: 'true'\n"
     "--compiler-enable-jit:                Enable jit: Default: 'false'\n"
     "--compiler-jit-backend:               JIT backend: 'arksteed' or 'fastjit'. Default: 'arksteed'\n"
+    "--compiler-jit-worker-count:          ArkSteed workers: 1-5. Default: '3'; unsupported parallel modes use 1.\n"
     "--compiler-enable-osr:                Enable osr: Default: 'false'\n"
     "--compiler-enable-framework-aot:      Enable frame aot: Default: 'true'\n"
     "--compiler-enable-pgo-space:          Enable pgo space used for compiler. Default: 'true'\n"

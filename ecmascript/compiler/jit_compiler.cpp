@@ -209,7 +209,9 @@ static ARK_INLINE bool CopyCodeToFort(MachineCodeDesc &desc)
         } else {
             LOG_JIT(DEBUG) << "     CopyToJitCode success!!";
         }
-        delete reinterpret_cast<OHOS::Security::CodeSign::JitCodeSigner*>(desc.codeSigner);
+        if (desc.codeType != MachineCodeType::ARKSTEED_CODE) {
+            delete reinterpret_cast<OHOS::Security::CodeSign::JitCodeSigner *>(desc.codeSigner);
+        }
     }
 #else
     if (memcpy_s(pText, desc.codeSizeAlign, reinterpret_cast<uint8_t*>(desc.codeAddr), desc.codeSize) != EOK) {

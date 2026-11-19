@@ -19,6 +19,9 @@
 #include <limits>
 #include <optional>
 #include <utility>
+#ifdef JIT_ENABLE_CODE_SIGN
+#include "jit_code_signer.h"
+#endif
 
 #include "ecmascript/base/config.h"
 #include "ecmascript/compiler/lazy_deopt_dependency.h"
@@ -28,6 +31,7 @@
 #include "ecmascript/js_function.h"
 #include "ecmascript/mem/embedded_code_ref_set.h"
 #include "ecmascript/mem/heap.h"
+#include "ecmascript/mem/heap_region_allocator.h"
 #include "ecmascript/mem/machine_code.h"
 #include "ecmascript/mem/region.h"
 #include "ecmascript/method.h"
@@ -72,8 +76,40 @@ ArkSteedTask::ArkSteedTask(JSThread *hostThread, JSThread *compilerThread, Jit *
 ArkSteedTask::~ArkSteedTask()
 {
     auto &codeDesc = GetMachineCodeDesc();
+    auto *heap = GetHostVM()->GetHeap();
+    if (codeDesc.instructionsAddr != 0) {
+        auto *fort = heap->GetOrCreateJitFort();
+        size_t size = fort->FortAllocSize(codeDesc.instructionsSize);
+        fort->ClearJitFortMemAwaitInstall(codeDesc.instructionsAddr, size);
+    }
+    if (codeDesc.hugeObjRegion != 0) {
+        heap->GetHeapRegionAllocator()->FreeRegion(reinterpret_cast<Region *>(codeDesc.hugeObjRegion), 0);
+    }
     delete[] reinterpret_cast<uint8_t *>(codeDesc.stackMapOrOffsetTableAddr);
     delete[] reinterpret_cast<uint8_t *>(codeDesc.codeCommentsAddr);
+}
+
+#ifdef JIT_ENABLE_CODE_SIGN
+void ArkSteedTask::SetCodeSigner(OHOS::Security::CodeSign::JitCodeSigner *signer)
+{
+    codeSigner_.reset(signer);
+    // The descriptor only borrows this pointer, including across Host install.
+    GetMachineCodeDesc().codeSigner = reinterpret_cast<uintptr_t>(signer);
+}
+#endif
+
+void ArkSteedTask::SetCodeData(const uint8_t *code, size_t size, const FuncEntryDes &entry)
+{
+    auto &desc = GetMachineCodeDesc();
+    if (desc.isAsyncCompileMode) {
+        desc.codeAddr = 0;
+    } else {
+        codeData_.assign(code, code + size);
+        desc.codeAddr = reinterpret_cast<uintptr_t>(codeData_.data());
+    }
+    desc.codeSize = size;
+    funcEntry_ = entry;
+    desc.funcEntryDesAddr = reinterpret_cast<uintptr_t>(&funcEntry_);
 }
 
 void ArkSteedTask::SetDeoptTranslationData(std::vector<uint8_t> data)
@@ -104,6 +140,13 @@ void ArkSteedTask::SetEmbeddedRefData(std::vector<EmbeddedCodeRefReloc> relocati
 void ArkSteedTask::Compile()
 {
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "ArkSteed::Compile", "");
+    {
+        JitHeapAccessScope heapAccess(GetCompilerThread());
+        CreateCompilerTask();
+    }
+    if (!IsCompileSuccess()) {
+        return;
+    }
     bool res = GetJit()->JitCompile(GetCompilerTask(), this);
     if (!res) {
         SetCompileFailed();
@@ -122,6 +165,13 @@ void ArkSteedTask::Compile()
 
 void ArkSteedTask::InstallCode()
 {
+    struct ClearCompilingFlag {
+        JSHandle<JSFunction> function;
+        ~ClearCompilingFlag()
+        {
+            function->SetJitCompilingFlag(false);
+        }
+    } clearFlag {GetJsFunction()};
     if (!IsCompileSuccess()) {
         return;
     }
@@ -131,7 +181,6 @@ void ArkSteedTask::InstallCode()
     [[maybe_unused]] EcmaHandleScope handleScope(hostThread);
     JSHandle<Method> methodHandle(hostThread, Method::Cast(jsFunction->GetMethod(hostThread).GetTaggedObject()));
     size_t size = ComputePayLoadSize(codeDesc);
-    codeDesc.isAsyncCompileMode = IsAsyncTask();
 
     if (!kungfu::LazyDeoptAllDependencies::Commit(GetDependencies(), hostThread, jsFunction.GetTaggedValue())) {
         return;
@@ -152,6 +201,7 @@ void ArkSteedTask::InstallCode()
             }
             return;
         }
+        codeDesc.hugeObjRegion = 0;
         machineCodeObj =
             hostThread->GetEcmaVM()->GetFactory()->SetMachineCodeObjectData(machineCode, size, codeDesc, methodHandle);
     } else {
@@ -168,8 +218,8 @@ void ArkSteedTask::InstallCode()
         hostThread->ClearExceptionAndExtraErrorMessage();
     }
 
-    // Async installation already holds JitGCLockHolder in JSThread::CheckSafepoint.
-    // Sync installation needs the same no-move boundary before resolving handles.
+    // Async installation already holds this lock in JSThread::CheckSafepoint.
+    // Acquire it before resolving handles to raw pointers for installation.
     std::optional<Jit::JitGCLockHolder> syncInstallLock;
     if (!IsAsyncTask()) {
         syncInstallLock.emplace(hostThread);
@@ -184,8 +234,8 @@ void ArkSteedTask::InstallCode()
             auto *jitFort = heap->GetOrCreateJitFort();
             ASSERT(jitFort != nullptr);
             jitFort->MarkJitFortMemInstalled(machineCode, codeDesc.isHugeObj);
+            codeDesc.instructionsAddr = 0;
         }
-        jsFunction->SetJitCompilingFlag(false);
     };
 
     std::vector<EmbeddedCodeRefEntry> embeddedRefEntries;
@@ -232,51 +282,53 @@ void ArkSteedTask::InstallCode()
         ASSERT(jitFort != nullptr);
         ASSERT(codeDesc.isHugeObj == jitFort->InHugeRange(machineCodeObj->GetText()));
         jitFort->MarkJitFortMemInstalled(machineCodeObj.GetObject<MachineCode>(), codeDesc.isHugeObj);
+        codeDesc.instructionsAddr = 0;
     }
-
-    jsFunction->SetJitCompilingFlag(false);
 }
 
-bool ArkSteedTask::AsyncTask::Run(uint32_t threadIndex)
+bool ArkSteedTask::AsyncTask::Run([[maybe_unused]] uint32_t threadIndex)
 {
-    if (IsTerminate() || !task_->GetHostThread()->GetEcmaVM()->IsInitialized()) {
-        return false;
-    }
-    DISALLOW_HEAP_ACCESS;
-
-    CString info = "compile method (ArkSteed): " + task_->GetMethodName();
-    ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK,
-                      ConvertToStdString("ArkSteed::Compile:" + info).c_str(), "");
-
-    JitAsyncTaskRunScope asyncTaskRunScope(task_.get());
-
-    if (task_->GetJsFunction().GetAddress() == 0) {
-    } else {
-        Jit::TimeScope scope(task_->GetHostThread()->GetEcmaVM(), info, task_->GetCompilerTier());
-
-        task_->Compile();
-
-        // info main thread compile complete
-        if (!task_->IsCompileSuccess()) {
-            return false;
-        }
-
+    if (IsTerminate()) {
+        task_->FinishWithoutCompile();
         if (task_->IsAsyncTask()) {
             task_->GetJit()->RequestInstallCode(task_);
         }
-
-        MachineCodeDesc codeDesc = task_->GetMachineCodeDesc();
-        size_t instrSize = codeDesc.codeSizeAlign;
-        CString sizeInfo = ", text size : ";
-        sizeInfo.append(std::to_string(instrSize)).append("bytes");
-        scope.appendMessage(sizeInfo);
-
-        int compilerTime = scope.TotalSpentTimeInMicroseconds();
-        JitDfx::GetInstance()->RecordSpentTimeAndPrintStatsLogInJitThread(compilerTime, task_->GetMethodName(),
-                                                                          task_->GetCompilerTier().IsBaseLine(),
-                                                                          task_->GetMainThreadCompilerTime());
+        return task_->IsCompileSuccess();
     }
-    return true;
+    {
+        DISALLOW_HEAP_ACCESS;
+        CString info = "compile method (ArkSteed): " + task_->GetMethodName();
+        ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK,
+                          ConvertToStdString("ArkSteed::Compile:" + info).c_str(), "");
+        // The scope unbinds the Host and publishes FINISH before the completion
+        // is queued. No compiler/allocator storage escapes to the Host.
+        JitAsyncTaskRunScope asyncTaskRunScope(task_.get());
+        if (!asyncTaskRunScope.IsBound()) {
+            task_->FinishWithoutCompile();
+        } else if (task_->GetJsFunction().GetAddress() != 0) {
+            Jit::TimeScope scope(task_->GetHostVM(), info, task_->GetCompilerTier());
+            task_->Compile();
+            task_->ReleaseCompilerTask();
+            CString sizeInfo = ", text size : ";
+            sizeInfo.append(std::to_string(task_->GetMachineCodeDesc().codeSizeAlign)).append("bytes");
+            scope.appendMessage(sizeInfo);
+            int compilerTime = scope.TotalSpentTimeInMicroseconds();
+            auto *dfx = JitDfx::GetInstance();
+            if (JitTaskpool::GetCurrentTaskpool()->GetWorkerCount() == 1) {
+                dfx->RecordSpentTimeAndPrintStatsLogInJitThread(compilerTime, task_->GetMethodName(), false,
+                                                                task_->GetMainThreadCompilerTime());
+            } else {
+                // Legacy single-compilation event fields are shared. Parallel
+                // workers update only the atomic aggregate counter.
+                dfx->SetTotalTimeOnJitThread(compilerTime);
+            }
+        }
+    }
+    // Failed asynchronous tasks also need Host-side flag cleanup.
+    if (task_->IsAsyncTask()) {
+        task_->GetJit()->RequestInstallCode(task_);
+    }
+    return task_->IsCompileSuccess();
 }
 
 }  // namespace panda::ecmascript::arksteed

@@ -16,6 +16,9 @@
 #ifndef ECMASCRIPT_JIT_TASK_H
 #define ECMASCRIPT_JIT_TASK_H
 
+#include <atomic>
+#include <mutex>
+
 #include "common_components/taskpool/taskpool.h"
 #include "ecmascript/checkpoint/thread_state_transition.h"
 #include "ecmascript/common.h"
@@ -43,67 +46,52 @@ enum RunState : uint8_t {
 
 class JitTaskpool : public common::Taskpool {
 public:
+    static constexpr uint32_t DEFAULT_WORKER_COUNT = 3;
+
     PUBLIC_API static JitTaskpool *GetCurrentTaskpool();
     JitTaskpool() = default;
     NO_COPY_SEMANTIC(JitTaskpool);
     NO_MOVE_SEMANTIC(JitTaskpool);
 
-    EcmaVM *GetCompilerVm()
+    // Returns the current JIT thread's VM, or nullptr on other threads.
+    PUBLIC_API EcmaVM *GetCompilerVm();
+    PUBLIC_API bool WaitForJitTaskPoolReady();
+    PUBLIC_API void Initialize(bool needInitJitFort, uint32_t workerCount = DEFAULT_WORKER_COUNT);
+    PUBLIC_API void Destroy();
+    PUBLIC_API bool PostTask(std::unique_ptr<common::Task> task);
+    PUBLIC_API void ForEachTask(const std::function<void(common::Task *)> &callback);
+    PUBLIC_API void SetThreadPriority(common::PriorityMode mode);
+    uint32_t GetWorkerCount() const
     {
-        return compilerVm_;
-    }
-
-    void SetCompilerVm(EcmaVM *vm)
-    {
-        LockHolder lock(jitTaskPoolMutex_);
-        compilerVm_ = vm;
-        threadId_ = static_cast<int32_t>(compilerVm_->GetJSThread()->GetThreadId());
-        jitTaskPoolCV_.SignalAll();
-    }
-
-    void WaitForJitTaskPoolReady()
-    {
-        LockHolder lock(jitTaskPoolMutex_);
-        if (compilerVm_ == nullptr) {
-            jitTaskPoolCV_.Wait(&jitTaskPoolMutex_);
-        }
-    }
-
-    void Initialize(bool needInitJitFort)
-    {
-        common::Taskpool::Initialize(0, [needInitJitFort](os::thread::native_handle_type thread) {
-            os::thread::SetThreadName(thread, "OS_JIT_Thread");
-            constexpr int32_t priorityVal = 5; // 5: The priority can be set within range [-20, 19]
-            os::thread::SetPriority(os::thread::GetCurrentThreadId(), priorityVal);
-            auto jitVm = JitVM::Create();
-            JitTaskpool::GetCurrentTaskpool()->SetCompilerVm(jitVm);
-            if (needInitJitFort) {
-                JitFort::InitJitFortResource();
-            }
-        }, []([[maybe_unused]] os::thread::native_handle_type thread) {
-            EcmaVM *compilerVm = JitTaskpool::GetCurrentTaskpool()->GetCompilerVm();
-            JitVM::Destroy(compilerVm);
-        });
-    }
-
-    void Destroy()
-    {
-        WaitForJitTaskPoolReady();
-        common::Taskpool::Destroy(threadId_);
+        return workerCount_.load(std::memory_order_acquire);
     }
 
 private:
     uint32_t TheMostSuitableThreadNum(uint32_t threadNum) const override;
-    EcmaVM *compilerVm_ { nullptr };
+    enum class State { STOPPED, STARTING, RUNNING, STOPPING, FAILED };
+    void InitializeWorker(bool needInitJitFort);
+    void DestroyWorker();
+    void PublishReady();  // Called with jitTaskPoolMutex_ held.
+
+    std::mutex lifecycleMutex_;
     Mutex jitTaskPoolMutex_;
     ConditionVariable jitTaskPoolCV_;
-    int32_t threadId_ { -1 };
+    std::atomic<uint32_t> workerCount_ {DEFAULT_WORKER_COUNT};
+    State state_ {State::STOPPED};
+    uint32_t readyWorkers_ {0};
+    bool runnerCreated_ {false};
+    bool initializationFailed_ {false};
 };
 
 class JitAsyncTaskRunScope {
 public:
     JitAsyncTaskRunScope(JitTask *task);
     ~JitAsyncTaskRunScope();
+    bool IsBound() const
+    {
+        return jitvm_ != nullptr;
+    }
+
 private:
     JitTask *task_;
     JitVM *jitvm_;
@@ -121,6 +109,21 @@ public:
     void Optimize();
     void Finalize();
     void PrepareCompile();
+
+    void CreateCompilerTask();
+    void ReleaseCompilerTask();
+    void FinishWithoutCompile();
+
+    void ClearCompilerThread()
+    {
+        compilerThread_ = nullptr;
+    }
+
+    void BindCompilerThread(JSThread *thread)
+    {
+        ASSERT(compilerThread_ == nullptr);
+        compilerThread_ = thread;
+    }
 
     virtual void InstallCode();
     void InstallOsrCode(JSHandle<MachineCode> &codeObj);

@@ -21,6 +21,7 @@
 #include <type_traits>
 
 #include "common_components/common_runtime/base_runtime_param.h"
+#include "common_components/taskpool/runner.h"
 #include "ecmascript/compiler/aot_file/an_file_data_manager.h"
 #include "ecmascript/compiler/assembler/assembler.h"
 #include "ecmascript/compiler/bc_call_signature.h"
@@ -186,6 +187,7 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
         {"compiler-enable-litecg", required_argument, nullptr, OPTION_COMPILER_ENABLE_LITECG},
         {"compiler-enable-jit", required_argument, nullptr, OPTION_COMPILER_ENABLE_JIT},
         {"compiler-jit-backend", required_argument, nullptr, OPTION_COMPILER_JIT_BACKEND},
+        {"compiler-jit-worker-count", required_argument, nullptr, OPTION_COMPILER_JIT_WORKER_COUNT},
         {"compiler-enable-dfx-hisys-event", required_argument, nullptr, OPTION_COMPILER_ENABLE_DFX_HISYS_EVENT},
         {"compiler-enable-osr", required_argument, nullptr, OPTION_COMPILER_ENABLE_OSR},
         {"compiler-trace-jit", required_argument, nullptr, OPTION_COMPILER_TRACE_JIT},
@@ -1256,6 +1258,24 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
                     return false;
                 }
                 break;
+            case OPTION_COMPILER_JIT_WORKER_COUNT: {
+                if (optarg[0] < '0' || optarg[0] > '9') {
+                    LOG_ECMA(ERROR) << "Invalid compiler-jit-worker-count: '" << optarg
+                                    << "', expected an integer in [1, " << common::MAX_TASKPOOL_THREAD_NUM << "]";
+                    return false;
+                }
+                char *end = nullptr;
+                errno = 0;
+                uint64_t value = std::strtoull(optarg, &end, 10);
+                if (errno == ERANGE || end == optarg || *end != '\0' ||
+                    value < 1 || value > common::MAX_TASKPOOL_THREAD_NUM) {
+                    LOG_ECMA(ERROR) << "Invalid compiler-jit-worker-count: '" << optarg
+                                    << "', expected an integer in [1, " << common::MAX_TASKPOOL_THREAD_NUM << "]";
+                    return false;
+                }
+                SetCompilerJitWorkerCount(static_cast<uint32_t>(value));
+                break;
+            }
             case OPTION_COMPILER_ENABLE_DFX_HISYS_EVENT:
                 ret = ParseBoolParam(&argBool);
                 if (ret) {

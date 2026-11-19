@@ -322,13 +322,9 @@ public:
 
     // The real `JitTask` the fixture created for the case and bound as the
     // current task of `CompilerThread()`, or `nullptr` while no context is bound
-    // yet (the first `GetMethod` request of the case creates it). A consumer that
-    // dispatches work to the JIT taskpool builds the pool-owned task as
-    // `JitTask::AsyncTask` on this task: the task walk of the VM destructor
-    // (`Jit::ClearTaskWithVm` -> `Jit::ClearTask`) downcasts every task the pool
-    // still references to that type and resolves the host VM through the wrapped
-    // task, so a pool task of another type, or one without a task, would be an
-    // invalid downcast. The fixture keeps ownership: the task outlives every
+    // yet (the first `GetMethod` request of the case creates it). The Host task
+    // registry tracks its lifetime independently of the pool dispatch adapter's
+    // type. The fixture keeps ownership: the task outlives every
     // dispatch whose completion the case waited for and is deleted by `TearDown`
     // before the host VM.
     JitTask *PoolTask() const;
@@ -397,17 +393,9 @@ private:
     // Executes the fixture abc exactly once with the entry point and directory
     // of the published macros and resolves `globalThis.__arksteedFixtures`.
     bool ExecuteFixtureScript(JSHandle<JSTaggedValue> &fixtures);
-    // Establishes that the compiler VM obtained afterwards belongs to the
-    // current JIT worker. The JIT taskpool is a process-lifetime singleton whose
-    // `compilerVm_` is not cleared when its worker destroys the compiler VM, so
-    // a readiness wait in a later case would return on the stale pointer of the
-    // previous case. The handshake posts a task to the pool and waits until the
-    // current worker has run it (the worker runs its prologue, which publishes
-    // the compiler VM, before it pops any task) and has retired it. Returns
-    // false on timeout; no value is substituted. Before a false return the pool
-    // is stopped, so a handshake task that is still queued or running can never
-    // reach `Jit::ClearTaskWithVm` when the host VM is destroyed.
-    bool AwaitCurrentJitWorker();
+    // Capture the VM on the single worker and wait for the handshake to retire
+    // before borrowing it. Stop and join the pool on timeout.
+    bool AwaitCurrentJitWorker(EcmaVM *&compilerVm);
     // Resolves the published function of `kind`, reads the metadata of its
     // method and decodes its bytecode. Returns false after `Fail` and leaves
     // the entry of `kind` invalid.

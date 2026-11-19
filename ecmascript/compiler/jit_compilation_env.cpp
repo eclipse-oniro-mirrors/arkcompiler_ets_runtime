@@ -20,11 +20,12 @@
 
 namespace panda::ecmascript {
 // jit
-JitCompilationEnv::JitCompilationEnv(EcmaVM *jitVm, EcmaVM *jsVm,
-                                     JSHandle<JSFunction> &jsFunction,
+JitCompilationEnv::JitCompilationEnv(EcmaVM *jitVm, EcmaVM *jsVm, JSHandle<JSFunction> &jsFunction,
                                      kungfu::LazyDeoptAllDependencies *dependencies)
-    : CompilationEnv(jitVm), hostThread_(jsVm->GetJSThreadNoCheck()),
-    jsFunction_(jsFunction), dependencies_(dependencies)
+    : CompilationEnv(jitVm),
+      hostThread_(jsVm->GetJSThreadNoCheck()),
+      jsFunction_(jsFunction),
+      dependencies_(dependencies)
 {
     if (hostThread_ != nullptr && jsVm->GetPTManager() != nullptr) {
         ptManager_ = jsVm->GetPTManager();
@@ -35,11 +36,9 @@ JitCompilationEnv::JitCompilationEnv(EcmaVM *jitVm, EcmaVM *jsVm,
     Method *method = Method::Cast(jsFunction->GetMethod(thread_).GetTaggedObject());
     jsPandaFile_ = const_cast<JSPandaFile*>(method->GetJSPandaFile(thread_));
     methodLiteral_ = method->GetMethodLiteral(thread_);
+    functionKind_ = method->GetFunctionKind();
     pcStart_ = method->GetBytecodeArray();
     abcId_ = PGOProfiler::GetMethodAbcId(thread_, *jsFunction);
-    if (method->GetFunctionKind() == FunctionKind::CLASS_CONSTRUCTOR) {
-        methodLiteral_->SetFunctionKind(FunctionKind::CLASS_CONSTRUCTOR);
-    }
 }
 
 JitCompilationEnv::~JitCompilationEnv() = default;

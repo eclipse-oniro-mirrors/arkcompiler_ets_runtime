@@ -433,10 +433,13 @@ public:
         hasFrame_ = hasFrame;
     }
 
-    void EnableCodeSign()
+#ifdef JIT_ENABLE_CODE_SIGN
+    void EnableCodeSign(OHOS::Security::CodeSign::JitCodeSigner *signer)
     {
+        assembler_.SetTaskCodeSigner(signer);
         assembler_.SetDoCodeSign();
     }
+#endif
 
 private:
     friend class TemporaryRegisterScope;

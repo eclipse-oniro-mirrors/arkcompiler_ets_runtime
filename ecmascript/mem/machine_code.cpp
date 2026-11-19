@@ -83,7 +83,10 @@ static int MachineCodeCopyToCache([[maybe_unused]] const MachineCodeDesc &desc, 
         } else {
             LOG_JIT(DEBUG) << "     CopyToJitCode success!!";
         }
-        delete reinterpret_cast<OHOS::Security::CodeSign::JitCodeSigner*>(desc.codeSigner);
+        // ArkSteed's task owns its signer until install/discard completes.
+        if (desc.codeType != MachineCodeType::ARKSTEED_CODE) {
+            delete reinterpret_cast<OHOS::Security::CodeSign::JitCodeSigner *>(desc.codeSigner);
+        }
     }
 #else
     if (memcpy_s(pText, desc.codeSizeAlign, // LCOV_EXCL_BR_LINE

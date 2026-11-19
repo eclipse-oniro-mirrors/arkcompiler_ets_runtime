@@ -286,6 +286,19 @@ void JitFort::MarkJitFortMemInstalled(MachineCode *obj, bool inHuge)
                    << obj->GetInstructionsSize() << " mahine code addr: " << obj;
 }
 
+void JitFort::ClearJitFortMemAwaitInstall(uintptr_t addr, size_t size)
+{
+    LockHolder lock(mutex_);
+    JitFortRegion *region = ObjectAddressToRange(addr);
+    region->ClearMark(reinterpret_cast<void *>(addr)); // clear start bit
+    region->ClearMark(reinterpret_cast<void *>(addr + sizeof(uint64_t))); // clear AwaitInstall bit
+    region->ClearMark(reinterpret_cast<void *>(addr + size - 1)); // clear end bit
+    // The awaiting-install marks were the only owner: return the range now;
+    // sweep rebuilds the free list from the mark bits and stays consistent.
+    auto *allocator = InHugeRange(addr) ? hugeAlloc_ : allocator_;
+    allocator->Free(addr, size, true);
+}
+
 uint32_t JitFort::AddrToFortRegionIdx(uint64_t addr)
 {
     ASSERT(InSmallRange(addr));
@@ -523,7 +536,7 @@ void JitFort::InitJitFortResource()
     constexpr int prSetJitFort = 0x6a6974;
     constexpr int jitFortInit = 5;
     int res = prctl(prSetJitFort, jitFortInit, 0);
-    if (res < 0) {
+    if (res < 0 && errno != EEXIST) {
         isResourceAvailable_ = false;
         LOG_JIT(ERROR) << "Failed to init jitfort resource: " << strerror(errno);
         return;
