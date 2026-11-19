@@ -397,10 +397,6 @@ void ParallelEvacuator::EvacuateRegion(TlabAllocator *allocator, Region *region,
             }
         }
         Barriers::SetPrimitive(header, 0, MarkWord::FromForwardingAddress(address));
-        if (region->InNativePointerSpace()) {
-            heap_->GetNativePointerSpace()->AddSurvivalObjectSize(size);
-        }
-
         if (actualPromoted) {
             if constexpr (updateHClass) {
                 Region *toRegion = Region::ObjectAddressToRange(address);

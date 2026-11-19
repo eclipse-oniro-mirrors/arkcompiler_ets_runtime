@@ -274,7 +274,7 @@ void SharedPartialGC::PreProcessLocalThread()
             return;
         }
         auto heap = const_cast<Heap*>(thread->GetEcmaVM()->GetHeap());
-        heap->WaitAndHandleCCFinished();
+        heap->WaitAndHandleCCFinished(false);
         heap->ResetTlab();
 #ifndef EXCLUDE_PGO
         std::shared_ptr<pgo::PGOProfiler> pgoProfiler =  thread->GetEcmaVM()->GetPGOProfiler();

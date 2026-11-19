@@ -56,6 +56,9 @@ public:
     bool FinishFillSweptRegion() override;
 
 private:
+    template <bool checkForwarding, typename Callback>
+    void ProcessObjectsImpl(Region *region, const Callback &liveObjectCallback);
+
     bool CheckExpandBudget(size_t expandSize) override;
 
     uint32_t CalculateCollectTaskCount() const;

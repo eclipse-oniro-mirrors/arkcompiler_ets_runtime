@@ -890,6 +890,13 @@ HWTEST_F_L0(LocalCCTest, SpecializedSlotTlabAllocatorAccountingTest)
         EXPECT_EQ(space.GetHeapObjectSize(), (node + 1) * slotPerNode * slotSize);
     }
 
+    SpecializedSlotTlabAllocator failedCopyAllocator(&space);
+    uintptr_t failedCopyAddress = failedCopyAllocator.Allocate();
+    ASSERT_NE(failedCopyAddress, 0U);
+    failedCopyAllocator.Release(failedCopyAddress);
+    failedCopyAllocator.Finalize();
+    EXPECT_EQ(space.GetHeapObjectSize(), workNodeCount * slotPerNode * slotSize);
+
     space.MergeToGCRegions();
     space.ReclaimFromRegions();
     EXPECT_GE(space.GetRegionCount(), 1U);
@@ -916,6 +923,34 @@ HWTEST_F_L0(LocalCCTest, ModuleSpaceAllocTest)
         EXPECT_TRUE(ModuleSpaceTestHelper::InModuleSpace(modules[i].GetTaggedValue().GetTaggedObject()));
     }
     EXPECT_GT(moduleSpace->GetCommittedSize(), 0U);
+
+    if constexpr (!G_USE_CMS_GC) {
+        size_t expectedCommittedSize = heap_->GetHugeObjectSpace()->GetCommittedSize() +
+            heap_->GetNonMovableSpace()->GetCommittedSize() +
+            heap_->GetMachineCodeSpace()->GetCommittedSize() +
+            heap_->GetHugeMachineCodeSpace()->GetCommittedSize() +
+            heap_->GetReadOnlySpace()->GetCommittedSize() +
+            heap_->GetAppSpawnSpace()->GetCommittedSize() +
+            heap_->GetSnapshotSpace()->GetCommittedSize() +
+            heap_->GetOldSpace()->GetCommittedSize() +
+            moduleSpace->GetCommittedSize() +
+            heap_->GetNativePointerSpace()->GetCommittedSize() +
+            heap_->GetNewSpace()->GetCommittedSize();
+        EXPECT_EQ(heap_->GetCommittedSize(), expectedCommittedSize);
+
+        size_t expectedHeapObjectSize = heap_->GetHugeObjectSpace()->GetHeapObjectSize() +
+            heap_->GetNonMovableSpace()->GetHeapObjectSize() +
+            heap_->GetMachineCodeSpace()->GetCommittedSize() +
+            heap_->GetHugeMachineCodeSpace()->GetCommittedSize() +
+            heap_->GetReadOnlySpace()->GetCommittedSize() +
+            heap_->GetAppSpawnSpace()->GetHeapObjectSize() +
+            heap_->GetSnapshotSpace()->GetHeapObjectSize() +
+            heap_->GetOldSpace()->GetHeapObjectSize() +
+            moduleSpace->GetHeapObjectSize() +
+            heap_->GetNativePointerSpace()->GetHeapObjectSize() +
+            heap_->GetNewSpace()->GetHeapObjectSize();
+        EXPECT_EQ(heap_->GetHeapObjectSize(), expectedHeapObjectSize);
+    }
 }
 
 // A4: module root address stays put across a LocalCC cycle (never FROM).

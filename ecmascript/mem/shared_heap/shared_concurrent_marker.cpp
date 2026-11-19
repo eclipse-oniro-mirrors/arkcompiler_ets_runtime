@@ -69,7 +69,7 @@ public:
         CHECK_DAEMON_THREAD();
         JSThread *mainThread = Runtime::GetInstance()->GetMainThread();
         Runtime::GetInstance()->GCIterateThreadList([&](JSThread *thread) {
-            thread->GetEcmaVM()->GetHeap()->WaitAndHandleCCFinished();
+            thread->GetEcmaVM()->GetHeap()->WaitAndHandleCCFinished(false);
             if (thread == mainThread && sHeap->GetConcurrentMarker()->IsSharedPartialGCMode()) {
                 thread->SetSwitchRBStubRequest(true);
             }

@@ -58,13 +58,28 @@ void SpecializedSlotTlabAllocator::Finalize()
 {
     Discard();
     if (allocatedBytes_ != 0) {
-        // The slots handed out here are module objects copied into module space during a full
-        // GC evacuation, so they are exactly the space's surviving bytes for this work node.
+        // The slots handed out here are copied into a specialized slot space during GC
+        // evacuation, so they are exactly the space's surviving bytes for this work node.
         space_->AddSurvivalObjectSize(allocatedBytes_);
         allocatedBytes_ = 0;
     }
     space_ = nullptr;
     slotSize_ = 0;
+}
+
+void SpecializedSlotTlabAllocator::Decrease(uintptr_t address)
+{
+    ASSERT(address != 0);
+    ASSERT(allocatedBytes_ >= slotSize_);
+    allocatedBytes_ -= slotSize_;
+}
+
+void SpecializedSlotTlabAllocator::Release(uintptr_t address)
+{
+    ASSERT(address != 0);
+    ASSERT(address + slotSize_ == top_);
+    top_ = address;
+    Decrease(address);
 }
 
 void SpecializedSlotTlabAllocator::Discard()
@@ -111,6 +126,13 @@ inline void TlabAllocator::Finalize()
     moduleTlab_.Finalize();
     nativePointerAllocator_.Finalize();
     heap_->MergeToOldSpaceSync(localSpace_);
+}
+
+inline void TlabAllocator::ReleaseNativePointer(uintptr_t address)
+{
+    if constexpr (!G_USE_CMS_GC) {
+        nativePointerAllocator_.Release(address);
+    }
 }
 
 uintptr_t TlabAllocator::Allocate(size_t size, MemSpaceType space)
@@ -289,6 +311,13 @@ void CCTlabAllocator::Finalize()
     bpAllocator_.Reset();
     if constexpr (!G_USE_CMS_GC) {
         nativePointerAllocator_.Finalize();
+    }
+}
+
+void CCTlabAllocator::ReleaseNativePointer(uintptr_t address)
+{
+    if constexpr (!G_USE_CMS_GC) {
+        nativePointerAllocator_.Release(address);
     }
 }
 

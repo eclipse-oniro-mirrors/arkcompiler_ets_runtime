@@ -42,16 +42,12 @@ TaggedObject *CCEvacuator::CopyObject(TaggedObject *fromObj, const MarkWord &mar
                                                        MarkWord::FromForwardingAddress(forwardAddress));
     if (result == oldValue) {
         TaggedObject *toObject = reinterpret_cast<TaggedObject*>(forwardAddress);
-        Region* toRegion = Region::ObjectAddressToRange(toObject);
-        if (toRegion->InNativePointerSpace()) {
-            heap_->GetNativePointerSpace()->AddSurvivalObjectSize(size);
-        }
         heap_->OnMoveEvent(reinterpret_cast<uintptr_t>(fromObj), toObject, size);
         return toObject;
     }
     ASSERT(MarkWord::IsForwardingAddress(result));
-    if (Region::ObjectAddressToRange(forwardAddress)->InNativePointerSpace()) {
-        SlotFreeSegment::FillFreeSegment(forwardAddress, size);
+    if (fromRegion->InNativePointerSpace()) {
+        tlab_->ReleaseNativePointer(forwardAddress);
     } else {
         FreeObject::FillFreeObject(heap_, forwardAddress, size);
     }
