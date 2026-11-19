@@ -1,0 +1,5 @@
+PASS own/key/this/poly/value-update
+PASS out-of-object
+PASS call/alias/catch/delete/getter
+PASS compiled-loop-shape-change
+PASS accessor/dictionary/proxy-fallback
