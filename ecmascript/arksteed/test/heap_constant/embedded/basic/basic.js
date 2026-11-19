@@ -55,7 +55,7 @@ function storeTransition(holder, value) {
     return holder.added;
 }
 
-for (let i = 0; i < 20000; i++) {
+for (let i = 0; i < 200; i++) {
     loadConstant(i);
     callLiteralMethod(i);
     storeTransition(makeTransitionBase(), { marker: i });

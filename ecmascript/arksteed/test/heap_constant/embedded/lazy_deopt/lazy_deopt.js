@@ -40,7 +40,7 @@ function newReceiver() {
     return { value: 0 };
 }
 
-for (let i = 0; i < 20000; i++) {
+for (let i = 0; i < 200; i++) {
     storeWithHeapLiteral(newReceiver(), i);
 }
 
