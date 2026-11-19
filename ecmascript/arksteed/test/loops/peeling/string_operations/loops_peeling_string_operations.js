@@ -18,12 +18,14 @@
 //! HAS CallCommonStub StringAdd
 //! COUNT LoadTaggedField 3 # GlobalEnv, holder.value once, packing function and its environment.
 //! METHOD numberStringFacts
-//! HAS CallRuntime NumberToString
+//! HAS NumberToString
+//! HAS_NOT CallRuntime NumberToString
 //! HAS CallCommonStub StringAdd
 //! HAS BranchIfTaggedString
 //! COUNT LoadTaggedField 3
 //! METHOD knownNumberStringFacts
-//! HAS CallRuntime NumberToString
+//! HAS NumberToString
+//! HAS_NOT CallRuntime NumberToString
 //! HAS_NOT BranchIfTaggedString
 //! COUNT LoadTaggedField 2 # No GlobalEnv load is needed for the known-number path.
 //! METHOD peelConcatFacts

@@ -21,7 +21,7 @@
 //! HAS_NOT BranchIfInt64Compare
 //! HAS_NOT Phi
 //! HAS LoadTaggedElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 //! HAS_NOT CheckedTaggedIntToI32
 //! COMPILE_COUNT numericIndexMixed 1
 //! EXEC_COUNT_GE *numericIndexMixed 5

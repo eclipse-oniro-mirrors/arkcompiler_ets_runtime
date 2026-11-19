@@ -34,14 +34,13 @@
 //! COMPILE_COUNT dce_dead_value 1
 //! EXEC_COUNT_GE *dce_dead_value* 1
 
-// Dead chain: a dead multiplication consumes the dead addition. The addition's
-// tagged result stays because the multiplication's eager frame state references
-// it as the live `dead0` local, while the multiplication's own tagged result is
-// removed, so exactly one `I32ToTaggedInt` survives (two without DCE).
+// Dead chain: the checked multiplication consumes the raw addition result.
+// Its eager frame recovers `dead0` with INT32_TO_TAGGED, so neither arithmetic
+// result needs an I32ToTaggedInt node. Both checked guards must remain.
 //! METHOD dce_dead_chain
 //! HAS I32AddWithOverflow
 //! HAS I32MulWithOverflow
-//! COUNT I32ToTaggedInt 1
+//! HAS_NOT I32ToTaggedInt
 //! COMPILE_COUNT dce_dead_chain 1
 //! EXEC_COUNT_GE *dce_dead_chain* 1
 
@@ -55,14 +54,13 @@
 //! COMPILE_COUNT dce_shared_live_operand 1
 //! EXEC_COUNT_GE *dce_shared_live_operand* 1
 
-// Dead consumer exposing a dead producer: removing the dead `consumer`
-// multiplication also removes its tagged result, while the `producer` tagged
-// result stays live through the multiplication's eager frame state, so exactly
-// one `I32ToTaggedInt` survives (two without DCE).
+// Dead consumer exposing a dead producer: the multiplication's eager frame
+// recovers `producer` directly from the raw int32 result. Both tagged wrappers
+// are dead, but the checked addition and multiplication must remain.
 //! METHOD dce_exposed_dead_producer
 //! HAS I32AddWithOverflow
 //! HAS I32MulWithOverflow
-//! COUNT I32ToTaggedInt 1
+//! HAS_NOT I32ToTaggedInt
 //! COMPILE_COUNT dce_exposed_dead_producer 1
 //! EXEC_COUNT_GE *dce_exposed_dead_producer* 1
 

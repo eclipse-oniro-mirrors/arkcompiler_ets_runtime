@@ -49,6 +49,11 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
          OPTION_COMPILER_ARKSTEED_PRINT_WITH_COLORS},
         {"compiler-arksteed-reuse-stack-slots", required_argument, nullptr,
          OPTION_COMPILER_ARKSTEED_REUSE_STACK_SLOTS},
+        {"compiler-arksteed-untagged-phis", required_argument, nullptr, OPTION_COMPILER_ARKSTEED_UNTAGGED_PHIS},
+        {"compiler-arksteed-speculative-hoist-phi-untagging", required_argument, nullptr,
+         OPTION_COMPILER_ARKSTEED_SPECULATIVE_HOIST_PHI_UNTAGGING},
+        {"compiler-arksteed-truncated-int32-phis", required_argument, nullptr,
+         OPTION_COMPILER_ARKSTEED_TRUNCATED_INT32_PHIS},
         {"compiler-arksteed-deopt-on-insufficient-profile", required_argument, nullptr,
          OPTION_COMPILER_ARKSTEED_DEOPT_ON_INSUFFICIENT_PROFILE},
         {"compiler-arksteed-source-position-table", required_argument, nullptr,
@@ -739,6 +744,30 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
                 ret = ParseBoolParam(&argBool);
                 if (ret) {
                     SetCompilerArkSteedReuseStackSlots(argBool);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_ARKSTEED_UNTAGGED_PHIS:
+                ret = ParseBoolParam(&argBool);
+                if (ret) {
+                    SetCompilerArkSteedUntaggedPhis(argBool);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_ARKSTEED_SPECULATIVE_HOIST_PHI_UNTAGGING:
+                ret = ParseBoolParam(&argBool);
+                if (ret) {
+                    SetCompilerArkSteedSpeculativeHoistPhiUntagging(argBool);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_ARKSTEED_TRUNCATED_INT32_PHIS:
+                ret = ParseBoolParam(&argBool);
+                if (ret) {
+                    SetCompilerArkSteedTruncatedInt32Phis(argBool);
                 } else {
                     return false;
                 }

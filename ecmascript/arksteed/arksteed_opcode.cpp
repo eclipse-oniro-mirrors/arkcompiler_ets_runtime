@@ -169,6 +169,14 @@ void LoadActualArgumentVertex::SetValueLocationConstraints()
     SetTemporariesNeeded(1);
 }
 
+void NumberToStringVertex::SetValueLocationConstraints()
+{
+    DefineAsFixed(this, 0);
+    UseRegister(Arg(0));
+    SetTemporariesNeeded(1);
+    UseLazyDeoptFrameSlots(this);
+}
+
 void CallRuntimeVertex::SetValueLocationConstraints()
 {
     // Define return value in x0/rax (C calling convention)
@@ -1263,6 +1271,19 @@ void I32ToI64Vertex::SetValueLocationConstraints()
     UseRegister(Arg(INPUT_INDEX));
 }
 
+void U32ToF64Vertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+}
+
+void TaggedNumberToF64Vertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+    SetTemporariesNeeded(2);
+}
+
 void CheckedNumberToF64Vertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
@@ -1270,10 +1291,25 @@ void CheckedNumberToF64Vertex::SetValueLocationConstraints()
     SetTemporariesNeeded(2);  // 2: tag-bits and tag-constant scratches for the int/double decode
 }
 
-void F64ToI32TruncVertex::SetValueLocationConstraints()
+void CheckedF64ToI32Vertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
     UseRegister(Arg(INPUT_INDEX));
+    SetTemporariesNeeded(2);
+    SetDoubleTemporariesNeeded(1);
+}
+
+void UnsafeF64ToI32Vertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+}
+
+void DoubleToInt32Vertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+    SetTemporariesNeeded(1);
 }
 
 void I32ToUint8ClampedVertex::SetValueLocationConstraints()
@@ -1295,6 +1331,15 @@ void DoubleToInt32CallVertex::SetValueLocationConstraints()
     DefineAsFixed(this, 0);
     UseFixed(Arg(INPUT_INDEX), ArkSteedDoubleRegister::FromCode(0));
 }
+
+void NumberToTaggedVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(0));
+    SetTemporariesNeeded(2);
+    SetDoubleTemporariesNeeded(1);
+}
+
 void F64ToTaggedDoubleVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);

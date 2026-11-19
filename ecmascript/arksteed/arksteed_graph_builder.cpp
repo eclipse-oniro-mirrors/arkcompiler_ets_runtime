@@ -122,6 +122,34 @@ kungfu::DeoptType GetBuiltinConstructorDeoptType(uint32_t globalEnvFieldIndex)
     }
 }
 
+template <class VertexT, class InputRange> void RecordInputUseReprHints(const InputRange &inputs)
+{
+    // Conversion builders record the requested representation, including when
+    // they reuse an alternative. Return does not constrain Phi representation.
+    if constexpr (std::is_same_v<VertexT, TaggedIntToI32Vertex> ||
+                  std::is_same_v<VertexT, CheckedTaggedIntToI32Vertex> ||
+                  std::is_same_v<VertexT, CheckedNumberToF64Vertex> || std::is_same_v<VertexT, ReturnVertex>) {
+        return;
+    }
+    for (ValueVertex *input : inputs) {
+        auto *phi = input->TryCast<PhiVertex>();
+        if (phi == nullptr) {
+            continue;
+        }
+        UseRepresentation repr = UseRepresentation::TAGGED;
+        if constexpr (std::is_same_v<VertexT, NumberToStringVertex>) {
+            repr = UseRepresentation::TAGGED_FOR_NUMBER_TO_STRING;
+        } else if constexpr (std::is_same_v<VertexT, U32ToTaggedNumberVertex>) {
+            repr = UseRepresentation::UINT32;
+        } else if (phi->IsInt32()) {
+            repr = UseRepresentation::INT32;
+        } else if (phi->IsFloat64()) {
+            repr = UseRepresentation::FLOAT64;
+        }
+        phi->RecordUseReprHint(UseRepresentationSet(repr));
+    }
+}
+
 class KnownBuiltinCallPlan {
 public:
     KnownBuiltinCallPlan(uint32_t actualArgc, kungfu::BuiltinsStubCSigns::ID builtinId,
@@ -464,6 +492,7 @@ constexpr bool CseIsExcludedAvailableExpressionOpcode(VertexOpcode opcode)
         case VertexOpcode::ActualArgc:
         case VertexOpcode::Call:
         case VertexOpcode::CallRuntime:
+        case VertexOpcode::NumberToString:
         case VertexOpcode::CallCommonStub:
         case VertexOpcode::Deopt:
         case VertexOpcode::Phi:
@@ -714,6 +743,11 @@ void GraphBuilder::BeginLoopEffects(const BytecodeLoopInfo *loop)
         effects = chunk_->New<LoopEffects>(chunk_);
     }
     loopEffectsStack_.push_back(LoopEffectScope {loop, effects});
+    if (header != nullptr) {
+        for (PhiVertex *phi : header->GetPhis()) {
+            phi->SetInLoopScope(true);
+        }
+    }
 }
 
 LoopEffects *GraphBuilder::EndLoopEffects()
@@ -724,6 +758,9 @@ LoopEffects *GraphBuilder::EndLoopEffects()
     BB *header = BlockAt(scope.source->header->rpoIndex);
     if (header != nullptr && header->IsLoopHeader()) {
         header->SetLoopEffects(scope.effects);
+        for (PhiVertex *phi : header->GetPhis()) {
+            phi->SetInLoopScope(false);
+        }
     }
     if (LoopEffects *outer = CurrentLoopEffects()) {
         outer->Merge(*scope.effects);
@@ -933,12 +970,12 @@ void GraphBuilder::TurnOptimisticLoopIntoPeeledIteration()
     }
 }
 
-void GraphBuilder::FinishLoopBackedge(BB *owner, SharedBCFrameState frameState, CompileInfoFacts *facts,
-                                      uint32_t targetRpoIndex)
+JumpLoopVertex *GraphBuilder::FinishLoopBackedge(
+    BB *owner, SharedBCFrameState frameState, CompileInfoFacts *facts, uint32_t targetRpoIndex,
+    const EagerDeoptimizableMixin::EagerDeoptFrameState *phiUntaggingFrameState, uint32_t bytecodeOffset)
 {
     if (activePeeledLoop_ == nullptr) {
-        FinishBlockWithJumpLoop(owner, ActivateNonCatchBlock(targetRpoIndex));
-        return;
+        return FinishBlockWithJumpLoop(owner, ActivateNonCatchBlock(targetRpoIndex));
     }
     ASSERT(activePeeledLoop_->header->rpoIndex == targetRpoIndex);
     if (loopPeelingStage_ == LoopPeelingStage::PEELED_ITERATION ||
@@ -949,9 +986,13 @@ void GraphBuilder::FinishLoopBackedge(BB *owner, SharedBCFrameState frameState, 
         }
         nextLoopHeader_ = NewBlock();
         FinishBlockWithJump(owner, nextLoopHeader_);
-        return;
+        return nullptr;
     }
-    FinishBlockWithJumpLoop(owner, BlockAt(targetRpoIndex));
+    JumpLoopVertex *jump = FinishBlockWithJumpLoop(owner, BlockAt(targetRpoIndex));
+    if (jump->Target()->HasPeeledIteration() && phiUntaggingFrameState != nullptr) {
+        jump->SetPhiUntaggingFrameState(chunk_, *phiUntaggingFrameState, bytecodeOffset);
+    }
+    return jump;
 }
 
 void GraphBuilder::DebugLog()
@@ -1098,6 +1139,10 @@ void GraphBuilder::FinishDeadLoopBackEdge(BB *owner, uint32_t rpoIndex)
     for (PhiVertex *phi : BlockAt(headerRpoIndex)->GetPhis()) {
         ASSERT(phi->GetInputCount() == 2);  // 2 : Two jumpPredecessors: one is entry, the other is loop-back
         phi->SetInput(1, undefinedValue_);
+        // The synthetic backedge is unreachable, but its input must still
+        // satisfy the completed Phi's type until dead CFG edges are removed.
+        phi->SetType(UnionNodeType(phi->GetPostLoopType(), NodeType::UNDEFINED));
+        phi->SetIsUnmergedLoopPhi(false);
     }
 }
 
@@ -1132,6 +1177,10 @@ void GraphBuilder::ProcessBasicBlock(SharedBCFrameState frameState, uint32_t rpo
     (bcBlock->IsLoopHeader() && !isAcyclicLoopCopy)
         ? InitFrameStateForLoopHeader(frameState, rpoIndex)
         : InitFrameState(frameState, rpoIndex);
+    if (graph_->IsPhiUntaggingEnabled() && graph_->IsSpeculativePhiHoistingEnabled() &&
+        BlockAt(rpoIndex)->IsLoopHeader()) {
+        AttachLoopEntryCheckpoint(frameState, rpoIndex);
+    }
 
     if (bcBlock->IsLoopHeader() && loopPeelingStage_ == LoopPeelingStage::OPTIMISTIC_LOOP) {
         optimisticHeaderFacts_ = CompileInfoFactsAt(rpoIndex)->Clone();
@@ -1221,7 +1270,8 @@ void GraphBuilder::InitFrameStateForLoopHeader(SharedBCFrameState frameState, ui
     CompileInfoFacts *facts = CompileInfoFactsAt(rpoIndex);
     if (activePeeledLoop_ != nullptr && loopPeelingStage_ == LoopPeelingStage::OPTIMISTIC_LOOP) {
         for (PhiVertex *phi : header->GetPhis()) {
-            facts->EnsureType(phi, facts->GetKnownType(phi->GetInput(0)));
+            phi->SetType(phi->GetPostLoopType());
+            facts->EnsureType(phi, phi->GetType());
         }
     }
 }
@@ -1312,10 +1362,19 @@ void GraphBuilder::WriteBackFrameStateToLoopHeader(SharedBCFrameState current, u
     ASSERT(blockInfo->jumpBlock->jumpPredecessors.size() == 2);  // 2 : One is entry, the other is loop-back
 
     uint32_t headerIndex = blockInfo->jumpBlock->rpoIndex;
+    CompileInfoFacts *facts = CompileInfoFactsAt(rpoIndex);
     for (PhiVertex *phi : BlockAt(headerIndex)->GetPhis()) {
         ASSERT(phi->GetInputCount() == 2);  // 2 : One is entry, the other is loop-back
         ValueVertex *fromCurrent = current.Get(phi->GetOwner().GetId());
-        phi->SetInput(1, fromCurrent != nullptr ? fromCurrent : undefinedValue_);
+        ValueVertex *backedgeValue = fromCurrent != nullptr ? fromCurrent : undefinedValue_;
+        phi->SetInput(1, backedgeValue);
+        phi->MergePostLoopType(facts->GetKnownType(backedgeValue));
+        phi->PropagateUseReprHintsToInput(1);
+    }
+    // Keep all loop Phis unmerged while propagating backedge hints between them.
+    for (PhiVertex *phi : BlockAt(headerIndex)->GetPhis()) {
+        phi->PromotePostLoopType();
+        phi->SetIsUnmergedLoopPhi(false);
     }
 }
 
@@ -1339,13 +1398,26 @@ void GraphBuilder::MergeFrameState(SharedBCFrameState dest, uint32_t rpoIndex,
         PhiVertex *phi = cur->TryCast<PhiVertex>();
         if (phi != nullptr && cur->GetOwner() == BlockAt(rpoIndex)) {
             phi->SetInput(actualPredIndex, fromPred);
+            NodeType inputType = incoming.facts->GetKnownType(fromPred);
+            if (BlockAt(rpoIndex)->IsLoopHeader()) {
+                ASSERT(actualPredIndex == 0);
+                phi->SetPostLoopType(inputType);
+            } else if (actualPredIndex == 0) {
+                phi->SetType(inputType);
+            } else {
+                phi->MergeType(inputType);
+            }
             return;
         }
         phi = NewPhiVertex(BlockAt(rpoIndex), actualNumPreds, vregIndex);
+        NodeType type = NodeType::NONE;
         for (uint32_t k = 0; k < actualPredIndex; k++) {
             phi->SetInput(k, cur);
+            BB *predecessor = BlockAt(rpoIndex)->GetPredecessor(k);
+            type = UnionNodeType(type, GetOutgoingBlockState(predecessor).facts->GetKnownType(cur));
         }
         phi->SetInput(actualPredIndex, fromPred);
+        phi->SetType(UnionNodeType(type, incoming.facts->GetKnownType(fromPred)));
         dest.Set(vregIndex, phi);
     });
 }
@@ -1354,6 +1426,10 @@ PhiVertex *GraphBuilder::NewPhiVertex(BB *owner, uint32_t numPredecessors, VRegI
 {
     PhiVertex *phi = PhiVertex::New(chunk_, numPredecessors, VirtualRegister(vreg));
     phi->SetOwner(owner);
+    phi->SetIsUnmergedLoopPhi(owner->IsLoopHeader());
+    for (uint32_t index = 0; index < numPredecessors; ++index) {
+        phi->SetInput(index, nullptr);
+    }
     owner->AddPhiVertex(phi);
     return phi;
 }
@@ -1365,10 +1441,13 @@ PhiVertex *GraphBuilder::NewPhiVertexWith(BB *owner, const InputRange &inputs, V
     PhiVertex *phi = NewPhiVertex(owner, numInputs, vreg);
 
     auto iter = std::begin(inputs);
+    NodeType type = NodeType::NONE;
     for (uint32_t i = 0; i < numInputs; i++) {
         phi->SetInput(i, *iter);
+        type = UnionNodeType(type, (*iter)->GetStaticType());
         ++iter;
     }
+    phi->SetType(type);
     return phi;
 }
 
@@ -1411,6 +1490,7 @@ VertexT *GraphBuilder::NewVertexImpl(BB *owner, const InputRange &inputs, Args &
 template <class VertexT, class InputRange, class... Args>
 VertexT *GraphBuilder::NewVertex(BB *owner, const InputRange &inputs, Args &&...args)
 {
+    RecordInputUseReprHints<VertexT>(inputs);
     VertexT *vertex = NewVertexImpl<VertexT>(owner, inputs, std::forward<Args>(args)...);
     if constexpr (CanWrite(VertexT::PROPERTIES)) {
         if (LoopEffects *effects = CurrentLoopEffects()) {
@@ -1427,6 +1507,7 @@ template <class VertexT, class InputRange, class... Args>
 VertexT *GraphBuilder::NewVertex(
     CompileInfoFacts *compileInfoFacts, BB *owner, const InputRange &inputs, Args &&...args)
 {
+    RecordInputUseReprHints<VertexT>(inputs);
     if constexpr (CseCanUseAvailableExpression<VertexT>()) {
         static_assert(!CanWrite(VertexT::PROPERTIES));
         CompileInfoFacts::ExpressionInputs expressionInputs(chunk_);
@@ -1535,6 +1616,7 @@ BranchVertexT *GraphBuilder::FinishBlockWithBranch(BB *owner, const InputRange &
 template <class VertexT, class InputRange, class... Args>
 VertexT *GraphBuilder::FinishBlockWith(BB *owner, const InputRange &inputs, Args &&...args)
 {
+    RecordInputUseReprHints<VertexT>(inputs);
     VertexT *vertex = Vertex::New<VertexT>(chunk_, inputs, std::forward<Args>(args)...);
     vertex->SetOwner(owner);
     owner->SetControlVertex(vertex);
@@ -7045,7 +7127,15 @@ struct GraphBuilder::BytecodeVisitor {
     {
         ASSERT(blockInfo->IsJump());
         if (blockInfo->jumpBlock->loopBackBlock == blockInfo) {
-            self->FinishLoopBackedge(currentBlock, frameState, compileInfoFacts_, blockInfo->jumpBlock->rpoIndex);
+            uint32_t loopHeaderRpo = blockInfo->jumpBlock->rpoIndex;
+            if (!self->graph_->IsPhiUntaggingEnabled() || !self->BlockAt(loopHeaderRpo)->HasPeeledIteration()) {
+                self->FinishLoopBackedge(currentBlock, frameState, compileInfoFacts_, loopHeaderRpo);
+                return;
+            }
+            EagerDeoptFrameState phiUntaggingFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
+            self->FinishLoopBackedge(currentBlock, frameState, compileInfoFacts_, loopHeaderRpo,
+                                     &phiUntaggingFrameState,
+                                     self->preproc_->GetBytecodeOffset(currentBcIndex));
             return;
         }
         self->FinishBlockWithJump(currentBlock, self->ActivateNonCatchBlock(blockInfo->jumpBlock->rpoIndex));
@@ -8100,8 +8190,9 @@ struct GraphBuilder::BytecodeVisitor {
         return std::nullopt;
     }
 
-    ValueVertex *BuildTaggedIntToI32(ValueVertex *value)
+    ValueVertex *BuildTaggedIntToI32(ValueVertex *value, UseRepresentation use = UseRepresentation::INT32)
     {
+        value->MaybeRecordUseReprHint(use);
         if (std::optional<int32_t> constant = TryGetInt32Value(value)) {
             return self->graph_->GetInt32Constant(*constant);
         }
@@ -8113,8 +8204,9 @@ struct GraphBuilder::BytecodeVisitor {
         return i32;
     }
 
-    ValueVertex *BuildCheckedTaggedIntToI32(ValueVertex *value)
+    ValueVertex *BuildCheckedTaggedIntToI32(ValueVertex *value, UseRepresentation use = UseRepresentation::INT32)
     {
+        value->MaybeRecordUseReprHint(use);
         if (std::optional<int32_t> constant = TryGetInt32Value(value)) {
             return self->graph_->GetInt32Constant(*constant);
         }
@@ -8198,13 +8290,20 @@ struct GraphBuilder::BytecodeVisitor {
         compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::NULL_OR_UNDEFINED);
     }
 
+    ValueVertex *BuildNumberToStringCall(ValueVertex *value)
+    {
+        auto *call = self->NewVertex<NumberToStringVertex>(compileInfoFacts_, currentBlock, {value});
+        UpdateCatchBlockData(call);
+        return call;
+    }
+
     ValueVertex *BuildNumberToString(ValueVertex *value)
     {
         if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::STRING)) {
             return value;
         }
         if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::NUMBER)) {
-            ValueVertex *result = RuntimeCall({value}, RTSTUB_ID(NumberToString), SideEffectKind::SAFE_CALL);
+            ValueVertex *result = BuildNumberToStringCall(value);
             compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::STRING);
             return result;
         }
@@ -8213,7 +8312,7 @@ struct GraphBuilder::BytecodeVisitor {
             {value}, self->AccIndex(), [&]() -> ValueVertex * { return value; },
             [&]() -> ValueVertex * {
                 BuildDeoptIfNotNumber(value);
-                ValueVertex *numberResult = RuntimeCall({value}, RTSTUB_ID(NumberToString), SideEffectKind::SAFE_CALL);
+                ValueVertex *numberResult = BuildNumberToStringCall(value);
                 compileInfoFacts_->EnsureType(numberResult, NodeInfo::NodeType::STRING);
                 return numberResult;
             });
@@ -8614,8 +8713,9 @@ struct GraphBuilder::BytecodeVisitor {
         return BuildI32BinOp(kind, left, right);
     }
 
-    ValueVertex *BuildCheckedNumberToF64(ValueVertex *value)
+    ValueVertex *BuildCheckedNumberToF64(ValueVertex *value, UseRepresentation use = UseRepresentation::FLOAT64)
     {
+        value->MaybeRecordUseReprHint(use);
         if (ValueVertex *alternative =
                 compileInfoFacts_->TryGetAlternative(value, AlternativeNodes::Kind::HOLEY_FLOAT64)) {
             return alternative;
@@ -8624,7 +8724,7 @@ struct GraphBuilder::BytecodeVisitor {
             return self->graph_->GetFloat64Constant(static_cast<double>(*constant));
         }
         if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::INT)) {
-            ValueVertex *i32 = BuildTaggedIntToI32(value);
+            ValueVertex *i32 = BuildTaggedIntToI32(value, UseRepresentation::INT32);
             ValueVertex *f64 = self->NewVertex<I32ToF64Vertex>(compileInfoFacts_, currentBlock,
                                                                std::initializer_list<ValueVertex *> {i32});
             compileInfoFacts_->SetAlternative(value, AlternativeNodes::Kind::HOLEY_FLOAT64, f64);
@@ -8897,10 +8997,10 @@ struct GraphBuilder::BytecodeVisitor {
     ValueVertex *BuildTruncatingNumberToInt32(ValueVertex *value)
     {
         if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::INT)) {
-            return BuildTaggedIntToI32(value);
+            return BuildTaggedIntToI32(value, UseRepresentation::TRUNCATED_INT32);
         }
-        ValueVertex *valueF64 = BuildCheckedNumberToF64(value);
-        return self->NewVertex<F64ToI32TruncVertex>(compileInfoFacts_, currentBlock, {valueF64});
+        ValueVertex *valueF64 = BuildCheckedNumberToF64(value, UseRepresentation::TRUNCATED_INT32);
+        return self->NewVertex<DoubleToInt32Vertex>(compileInfoFacts_, currentBlock, {valueF64});
     }
 
     void BuildTruncatingNumberTypedArrayStore(ValueVertex *receiver, ValueVertex *index, ValueVertex *value,
@@ -8931,7 +9031,7 @@ struct GraphBuilder::BytecodeVisitor {
                                                                   upperOverflowBlock, Condition::LESS_THAN);
 
         currentBlock = fastBlock;
-        ValueVertex *fastValue = self->NewVertex<F64ToI32TruncVertex>(
+        ValueVertex *fastValue = self->NewVertex<UnsafeF64ToI32Vertex>(
             compileInfoFacts_, currentBlock, std::initializer_list<ValueVertex *> {doubleValue});
         self->NewVertex<StoreIntTypedArrayElementVertex>(compileInfoFacts_, currentBlock, {receiver, index, fastValue},
                                                          access.typedArrayType, access.onHeapMode);
@@ -8972,7 +9072,7 @@ struct GraphBuilder::BytecodeVisitor {
     {
         if (raw != nullptr) {
             // This is a consumer-local truncation, not an exact alternative for value.
-            return self->NewVertex<F64ToI32TruncVertex>(compileInfoFacts_, currentBlock, {raw});
+            return self->NewVertex<UnsafeF64ToI32Vertex>(compileInfoFacts_, currentBlock, {raw});
         }
         return knownInt ? BuildTaggedIntToI32(value) : BuildCheckedTaggedIntToI32(value);
     }
@@ -9490,12 +9590,12 @@ struct GraphBuilder::BytecodeVisitor {
     ValueVertex *BuildTruncatingI32BNot(ValueVertex *value)
     {
         if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::INT)) {
-            ValueVertex *valueI32 = BuildTaggedIntToI32(value);
+            ValueVertex *valueI32 = BuildTaggedIntToI32(value, UseRepresentation::TRUNCATED_INT32);
             ValueVertex *rawResult = self->NewVertex<I32BNotVertex>(compileInfoFacts_, currentBlock, {valueI32});
             return BuildTaggedI32Result(rawResult);
         }
-        ValueVertex *valueF64 = BuildCheckedNumberToF64(value);
-        ValueVertex *truncI32 = self->NewVertex<F64ToI32TruncVertex>(compileInfoFacts_, currentBlock, {valueF64});
+        ValueVertex *valueF64 = BuildCheckedNumberToF64(value, UseRepresentation::TRUNCATED_INT32);
+        ValueVertex *truncI32 = self->NewVertex<DoubleToInt32Vertex>(compileInfoFacts_, currentBlock, {valueF64});
         ValueVertex *rawResult = self->NewVertex<I32BNotVertex>(compileInfoFacts_, currentBlock, {truncI32});
         return BuildTaggedI32Result(rawResult);
     }
@@ -10250,8 +10350,8 @@ struct GraphBuilder::BytecodeVisitor {
             return BuildTaggedIntToI32(key);
         }
         ValueVertex *keyF64 = BuildCheckedNumberToF64(key);
-        ValueVertex *index = self->NewVertex<F64ToI32TruncVertex>(compileInfoFacts_, currentBlock,
-                                                                  std::initializer_list<ValueVertex *> {keyF64});
+        ValueVertex *index = self->NewVertex<UnsafeF64ToI32Vertex>(compileInfoFacts_, currentBlock,
+                                                                   std::initializer_list<ValueVertex *> {keyF64});
         ValueVertex *roundTrip = self->NewVertex<I32ToF64Vertex>(compileInfoFacts_, currentBlock,
                                                                  std::initializer_list<ValueVertex *> {index});
         BuildDeoptIfFloat64Condition(keyF64, roundTrip, Condition::NOT_EQUAL, kungfu::DeoptType::NOTINT7);
@@ -12831,6 +12931,52 @@ struct GraphBuilder::BytecodeVisitor {
 };
 
 #undef LOG_INLINE_DECISION
+
+void GraphBuilder::AttachLoopEntryCheckpoint(SharedBCFrameState frameState, uint32_t rpoIndex)
+{
+    const BasicBlockInfo *headerInfo = preproc_->GetBasicBlockByRPO(rpoIndex);
+    const BytecodeLoopInfo *loop = preproc_->TryGetLoopInfo(headerInfo);
+    if (isOsr_ || loop == nullptr || loop->resumable) {
+        return;
+    }
+    BB *header = BlockAt(rpoIndex);
+    ASSERT(header->PredecessorCount() == 1);
+    auto *jump = header->GetPredecessor(0)->GetControlVertex()->TryCast<JumpVertex>();
+    if (jump == nullptr || jump->Target() != header) {
+        return;
+    }
+    // A synthetic header has no interpreter PC. Its unconditional successors
+    // have not executed yet, so resume at the first actual bytecode.
+    const BasicBlockInfo *resume = headerInfo;
+    uint32_t skippedBlocks = 0;
+    while (resume->IsSynthetic()) {
+        if (++skippedBlocks > preproc_->GetNumAllBasicBlocks() || resume->jumpBlock == nullptr ||
+            resume->IsCatchBlockHeader()) {
+            return;
+        }
+        resume = resume->jumpBlock;
+    }
+    BytecodeVisitor visitor {
+        .self = this,
+        .lazyGlobalEnv = lazyGlobalEnv_,
+        .blockInfo = resume,
+        .currentBlock = header,
+        .lazyCatchBlock = reinterpret_cast<BB *>(NO_CATCH_BLOCK_TAG),
+        .compileInfoFacts_ = CompileInfoFactsAt(rpoIndex),
+        .frameState = frameState,
+        .lazyCatchBlockInputs = reinterpret_cast<CatchBlockInputData *>(NO_CATCH_BLOCK_TAG),
+    };
+    auto checkpoint = visitor.BuildCurrentEagerDeoptFrameState(resume->startBcIndex);
+    for (auto &slot : checkpoint) {
+        // The check executes before the header: use the incoming value, never
+        // a Phi defined in the header that has not executed yet.
+        if (auto *phi = slot.value->TryCast<PhiVertex>();
+            phi != nullptr && static_cast<Vertex *>(phi)->GetOwner() == header) {
+            slot.value = phi->GetInput(0);
+        }
+    }
+    jump->SetPhiUntaggingFrameState(chunk_, checkpoint, preproc_->GetBytecodeOffset(resume->startBcIndex));
+}
 
 BB *GraphBuilder::VisitBytecodesOfBasicBlock(SharedBCFrameState frameState, uint32_t rpoIndex,
                                              CompileInfoFacts **outFacts)

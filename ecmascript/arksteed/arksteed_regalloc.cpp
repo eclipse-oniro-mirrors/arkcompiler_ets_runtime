@@ -34,7 +34,7 @@ void VerifyLazyDeoptInputLocations(const Vertex *vertex)
     ASSERT(deopt != nullptr);
     for (uint32_t index = 0, valueCount = deopt->GetDeoptFrameValueCount(); index < valueCount; ++index) {
         const InputLocation *location = deopt->GetDeoptSourceLocation(index);
-        ASSERT(location->IsStackSlot() || location->IsConstant());
+        ASSERT(location->IsStackSlot() || location->IsFPStackSlot() || location->IsConstant());
     }
 }
 }  // namespace
@@ -488,7 +488,7 @@ void ArkSteedRegisterAllocator::AssignDeoptInput(ValueVertex *vertex, InputLocat
         return;
     }
 
-    ASSERT(currentLocation.IsRegister());
+    ASSERT(currentLocation.IsRegister() || currentLocation.IsDoubleRegister());
     auto *vertexInfo = vertex->GetRegallocInfo();
     if (vertexInfo->IsLoadable()) {
         location->GetOperand() = vertexInfo->GetSpillSlot();

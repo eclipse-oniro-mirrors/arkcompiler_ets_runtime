@@ -18,27 +18,23 @@
 //! METHOD strDoubleBang
 //! COMPILE_COUNT_GE *strDoubleBang 1
 //! EXEC_COUNT_GE *strDoubleBang 1
-//! HAS CallCommonStub ToBoolean*
 //! HAS_NOT DeoptIfNotNumber
 //! HAS_NOT DeoptIfNotUndefinedOrNull
 
 //! METHOD objDoubleBang
 //! COMPILE_COUNT_GE *objDoubleBang 1
 //! EXEC_COUNT_GE *objDoubleBang 1
-//! HAS CallCommonStub ToBoolean*
 //! HAS_NOT DeoptIfNotNumber
 //! HAS_NOT DeoptIfNotUndefinedOrNull
 
 //! METHOD bigintDoubleBang
 //! COMPILE_COUNT_GE *bigintDoubleBang 1
 //! EXEC_COUNT_GE *bigintDoubleBang 1
-//! HAS CallCommonStub ToBoolean*
 //! HAS_NOT DeoptIfNotNumber
 
 //! METHOD mixedDoubleBang
 //! COMPILE_COUNT_GE *mixedDoubleBang 1
 //! EXEC_COUNT_GE *mixedDoubleBang 1
-//! HAS CallCommonStub ToBoolean*
 //! HAS_NOT DeoptIfNotNumber
 
 //! METHOD strNegate

@@ -77,29 +77,7 @@ public:
     using PossibleHClasses = std::vector<ArkSteedHClassRef>;
     using PossibleHClassInfos = std::vector<PossibleHClassInfo>;
 
-    enum class NodeType : uint16_t {
-        NONE = 0,
-        INT = 1U << 0U,
-        DOUBLE = 1U << 1U,
-        NULL_TYPE = 1U << 2U,
-        UNDEFINED = 1U << 3U,
-        BOOLEAN = 1U << 4U,
-        STRING = 1U << 5U,
-        SYMBOL = 1U << 6U,
-        BIGINT = 1U << 7U,
-        JS_ARRAY = 1U << 8U,
-        JS_FUNCTION = 1U << 9U,
-        JS_TYPED_ARRAY = 1U << 10U,
-        OTHER_JS_RECEIVER = 1U << 11U,
-        // Universal set
-        UNKNOWN = (1U << 12U) - 1U,
-
-        NUMBER = INT | DOUBLE,
-        NULL_OR_UNDEFINED = NULL_TYPE | UNDEFINED,
-        ODDBALL = NULL_OR_UNDEFINED | BOOLEAN,
-        JS_RECEIVER = JS_ARRAY | JS_FUNCTION | JS_TYPED_ARRAY | OTHER_JS_RECEIVER,
-        ANY_HEAP_OBJECT = STRING | SYMBOL | BIGINT | JS_RECEIVER,
-    };
+    using NodeType = arksteed::NodeType;
 
     explicit NodeInfo(Chunk *chunk) : chunk_(chunk), possibleHClasses_(chunk) {}
 
@@ -636,7 +614,6 @@ private:
         uint32_t effectEpoch {0};
     };
 
-    NodeInfo::NodeType GetStaticNodeType(ValueVertex *node) const;
     void AdvanceEpochAfterMerge(uint32_t otherEpoch);
     ExpressionInputs *CopyExpressionInputs(const ExpressionInputs &inputs);
     ExpressionOptions *CopyExpressionOptions(const ExpressionOptions &options);

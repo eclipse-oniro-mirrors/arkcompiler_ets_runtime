@@ -24,7 +24,7 @@ declare function print(arg: any): void;
 // High unsigned results require the existing result-side representation check.
 //! METHOD uint32UnsignedIdentityResult
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 //! HAS CheckedNonNegativeI32ToTaggedInt
 function uint32UnsignedIdentityResult(a, i) {
     return a[i] >>> 0;
@@ -32,7 +32,7 @@ function uint32UnsignedIdentityResult(a, i) {
 
 //! METHOD extendedUnsignedRightResult
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 //! HAS CheckedNonNegativeI32ToTaggedInt
 function extendedUnsignedRightResult(a, b, i, k) {
     return k >>> a[i];
@@ -40,7 +40,7 @@ function extendedUnsignedRightResult(a, b, i, k) {
 
 //! METHOD extendedUnsignedBothResult
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 2
+//! COUNT_GE UnsafeF64ToI32 2
 //! HAS CheckedNonNegativeI32ToTaggedInt
 function extendedUnsignedBothResult(a, b, i, k) {
     return a[i] >>> b[i];

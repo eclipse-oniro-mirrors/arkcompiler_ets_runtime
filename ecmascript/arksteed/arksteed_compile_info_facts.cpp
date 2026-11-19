@@ -573,7 +573,7 @@ const NodeInfo *CompileInfoFacts::TryGetInfoFor(ValueVertex *node) const
 
 NodeInfo::NodeType CompileInfoFacts::GetKnownType(ValueVertex *node) const
 {
-    NodeInfo::NodeType staticType = GetStaticNodeType(node);
+    NodeInfo::NodeType staticType = node == nullptr ? NodeInfo::NodeType::UNKNOWN : node->GetStaticType();
     const NodeInfo *info = TryGetInfoFor(node);
     if (info == nullptr) {
         return staticType;
@@ -1081,29 +1081,6 @@ void CompileInfoFacts::IncrementEffectEpoch()
     if (effectEpoch_ < EFFECT_EPOCH_OVERFLOW) {
         ++effectEpoch_;
     }
-}
-
-NodeInfo::NodeType CompileInfoFacts::GetStaticNodeType(ValueVertex *node) const
-{
-    if (node == nullptr) {
-        return NodeInfo::NodeType::UNKNOWN;
-    }
-    if (auto *constant = node->TryCast<TaggedConstantVertex>()) {
-        return NodeTypeFromJSTaggedValue(JSTaggedValue(constant->GetValue()));
-    }
-    if (auto *constant = node->TryCast<HeapConstantVertex>()) {
-        return static_cast<NodeInfo::NodeType>(constant->GetStaticNodeType());
-    }
-    if (node->Is<Int32ConstantVertex>() || node->IsAnyInt32()) {
-        return NodeInfo::NodeType::INT;
-    }
-    if (node->Is<U32ToTaggedNumberVertex>()) {
-        return NodeInfo::NodeType::NUMBER;
-    }
-    if (node->Is<Float64ConstantVertex>() || node->IsAnyFloat64()) {
-        return NodeInfo::NodeType::DOUBLE;
-    }
-    return NodeInfo::NodeType::UNKNOWN;
 }
 
 void CompileInfoFacts::AdvanceEpochAfterMerge(uint32_t otherEpoch)

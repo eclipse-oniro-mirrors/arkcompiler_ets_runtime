@@ -27,21 +27,21 @@ declare function print(arg: any): void;
 // Truncation is local to each bitwise consumer, never an exact I32 alternative for x.
 //! METHOD reuseUint32Number
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function reuseUint32Number(a, i) {
     const x = a[i]; const bits = x & 255; return x + 2147483648 + bits;
 }
 
 //! METHOD reuseUint32Twice
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function reuseUint32Twice(a, i) {
     const x = a[i]; const bits = x & 255; const shifted = x >> 8; return x + 2147483648 + bits + shifted;
 }
 
 //! METHOD reuseUint32AfterNumber
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function reuseUint32AfterNumber(a, i) {
     const x = a[i]; const number = x + 2147483648; const bits = x ^ 1437226410; return number + bits;
 }
@@ -49,21 +49,21 @@ function reuseUint32AfterNumber(a, i) {
 // The original unsigned Numbers remain available to other consumers.
 //! METHOD extendedReuseRight
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedReuseRight(a, b, i, k) {
     const x = a[i]; const bits = 255 & x; return x + 2147483648 + bits;
 }
 
 //! METHOD extendedReuseBoth
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 2
+//! COUNT_GE UnsafeF64ToI32 2
 function extendedReuseBoth(a, b, i, k) {
     const x = a[i]; const y = b[i]; const bits = x ^ y; return x + 2147483648 + y + bits;
 }
 
 //! METHOD extendedReuseRightTwice
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedReuseRightTwice(a, b, i, k) {
     const x = a[i]; const bits = 255 & x; const shifted = k >> x; return x + 2147483648 + bits + shifted;
 }

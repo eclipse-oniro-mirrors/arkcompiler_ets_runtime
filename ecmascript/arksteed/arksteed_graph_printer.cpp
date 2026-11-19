@@ -187,7 +187,7 @@ void GraphPrinter::PrintFloat64Constants(Graph *graph)
     for (const auto &[value, vertex] : graph->GetFloat64Constants()) {
         std::string line = "  ";
         line += FormatVertexLabel(vertex) + ": ";
-        line += "Float64Constant " + std::to_string(value);
+        line += "Float64Constant " + std::to_string(vertex->GetValue());
         LOG_COMPILER(INFO) << line;
     }
 }

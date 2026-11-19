@@ -24,21 +24,21 @@ declare function print(arg: any): void;
 // The right operand has an Int type fact but is not a literal constant.
 //! METHOD maskUint32KnownInt
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function maskUint32KnownInt(a, i, selector) {
     const mask = selector | 0; return a[i] & mask;
 }
 
 //! METHOD shlUint32KnownInt
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function shlUint32KnownInt(a, i, count) {
     const shift = count & 31; return a[i] << shift;
 }
 
 //! METHOD sarUint32KnownInt
 //! HAS TypedArrayDoubleLoadElement
-//! HAS F64ToI32Trunc
+//! HAS UnsafeF64ToI32
 function sarUint32KnownInt(a, i, count) {
     const shift = count & 31; return a[i] >> shift;
 }

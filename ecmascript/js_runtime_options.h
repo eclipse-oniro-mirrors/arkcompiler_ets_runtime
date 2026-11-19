@@ -140,6 +140,9 @@ enum CommandValues {
     OPTION_COMPILER_ARKSTEED_PRINT_CODE,
     OPTION_COMPILER_ARKSTEED_PRINT_WITH_COLORS,
     OPTION_COMPILER_ARKSTEED_REUSE_STACK_SLOTS,
+    OPTION_COMPILER_ARKSTEED_UNTAGGED_PHIS,
+    OPTION_COMPILER_ARKSTEED_SPECULATIVE_HOIST_PHI_UNTAGGING,
+    OPTION_COMPILER_ARKSTEED_TRUNCATED_INT32_PHIS,
     OPTION_COMPILER_ARKSTEED_DEOPT_ON_INSUFFICIENT_PROFILE,
     OPTION_COMPILER_ARKSTEED_SOURCE_POSITION_TABLE,
     OPTION_COMPILER_ARKSTEED_PASS_TRACE,
@@ -1042,6 +1045,36 @@ public:
     bool GetCompilerArkSteedReuseStackSlots() const
     {
         return compilerArkSteedReuseStackSlots_;
+    }
+
+    void SetCompilerArkSteedUntaggedPhis(bool value)
+    {
+        compilerArkSteedUntaggedPhis_ = value;
+    }
+
+    bool GetCompilerArkSteedUntaggedPhis() const
+    {
+        return compilerArkSteedUntaggedPhis_;
+    }
+
+    void SetCompilerArkSteedSpeculativeHoistPhiUntagging(bool value)
+    {
+        compilerArkSteedSpeculativeHoistPhiUntagging_ = value;
+    }
+
+    bool GetCompilerArkSteedSpeculativeHoistPhiUntagging() const
+    {
+        return compilerArkSteedSpeculativeHoistPhiUntagging_;
+    }
+
+    void SetCompilerArkSteedTruncatedInt32Phis(bool value)
+    {
+        compilerArkSteedTruncatedInt32Phis_ = value;
+    }
+
+    bool GetCompilerArkSteedTruncatedInt32Phis() const
+    {
+        return compilerArkSteedTruncatedInt32Phis_;
     }
 
     void SetCompilerArkSteedDeoptOnInsufficientProfile(bool value)
@@ -2993,6 +3026,9 @@ private:
     bool compilerArkSteedPrintCode_ {false};
     bool compilerArkSteedPrintWithColors_ {false};
     bool compilerArkSteedReuseStackSlots_ {true};
+    bool compilerArkSteedUntaggedPhis_ {true};
+    bool compilerArkSteedSpeculativeHoistPhiUntagging_ {false};
+    bool compilerArkSteedTruncatedInt32Phis_ {false};
     bool compilerArkSteedDeoptOnInsufficientProfile_ {true};
     bool compilerArkSteedSourcePositionTable_ {true};
     bool compilerArkSteedPassTrace_ {false};

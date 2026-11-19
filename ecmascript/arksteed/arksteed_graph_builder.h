@@ -134,8 +134,10 @@ private:
     bool IsEligibleForLoopPeeling(const BytecodeLoopInfo *loop) const;
     void BuildPeeledLoop(const BytecodeLoopInfo *loop);
     void ResetLoopBuildState(const BytecodeLoopInfo *loop);
-    void FinishLoopBackedge(BB *owner, SharedBCFrameState frameState, CompileInfoFacts *facts,
-                            uint32_t targetRpoIndex);
+    JumpLoopVertex *FinishLoopBackedge(
+        BB *owner, SharedBCFrameState frameState, CompileInfoFacts *facts, uint32_t targetRpoIndex,
+        const EagerDeoptimizableMixin::EagerDeoptFrameState *phiUntaggingFrameState = nullptr,
+        uint32_t bytecodeOffset = 0);
     bool IsOptimisticBackedgeCompatible(SharedBCFrameState frameState, CompileInfoFacts *facts) const;
     void TurnOptimisticLoopIntoPeeledIteration();
     void SynchronizeLoopEffects(const BytecodeLoopInfo *loop);
@@ -144,6 +146,7 @@ private:
     void FinalizeLoopExitEdges(uint32_t sourceRpoIndex);
     BB *GetOrCreateLoopExitLanding(uint32_t sourceRpoIndex, uint32_t targetRpoIndex, BB *target);
 
+    void AttachLoopEntryCheckpoint(SharedBCFrameState frameState, uint32_t rpoIndex);
     void InitFrameState(SharedBCFrameState framestate, uint32_t rpoIndex);
     void InitFrameStateForLoopHeader(SharedBCFrameState framestate, uint32_t rpoIndex);
     void InitFrameStateForCatchBlockHeader(SharedBCFrameState framestate, uint32_t rpoIndex);

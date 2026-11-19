@@ -45,168 +45,168 @@ declare function print(arg: any): void;
 // All right-side, two-load and checked-Int forms stay in JIT for U32 edge values.
 //! METHOD extendedAndRight
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedAndRight(a, b, i, k) {
     return 305419896 & a[i];
 }
 
 //! METHOD extendedAndBoth
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 2
+//! COUNT_GE UnsafeF64ToI32 2
 function extendedAndBoth(a, b, i, k) {
     return a[i] & b[i];
 }
 
 //! METHOD extendedAndDynamicRight
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedAndDynamicRight(a, b, i, k) {
     return a[i] & k;
 }
 
 //! METHOD extendedAndDynamicLeft
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedAndDynamicLeft(a, b, i, k) {
     return k & a[i];
 }
 
 //! METHOD extendedOrRight
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedOrRight(a, b, i, k) {
     return 305419896 | a[i];
 }
 
 //! METHOD extendedOrBoth
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 2
+//! COUNT_GE UnsafeF64ToI32 2
 function extendedOrBoth(a, b, i, k) {
     return a[i] | b[i];
 }
 
 //! METHOD extendedOrDynamicRight
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedOrDynamicRight(a, b, i, k) {
     return a[i] | k;
 }
 
 //! METHOD extendedOrDynamicLeft
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedOrDynamicLeft(a, b, i, k) {
     return k | a[i];
 }
 
 //! METHOD extendedXorRight
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedXorRight(a, b, i, k) {
     return 305419896 ^ a[i];
 }
 
 //! METHOD extendedXorBoth
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 2
+//! COUNT_GE UnsafeF64ToI32 2
 function extendedXorBoth(a, b, i, k) {
     return a[i] ^ b[i];
 }
 
 //! METHOD extendedXorDynamicRight
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedXorDynamicRight(a, b, i, k) {
     return a[i] ^ k;
 }
 
 //! METHOD extendedXorDynamicLeft
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedXorDynamicLeft(a, b, i, k) {
     return k ^ a[i];
 }
 
 //! METHOD extendedShlRight
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedShlRight(a, b, i, k) {
     return 305419896 << a[i];
 }
 
 //! METHOD extendedShlBoth
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 2
+//! COUNT_GE UnsafeF64ToI32 2
 function extendedShlBoth(a, b, i, k) {
     return a[i] << b[i];
 }
 
 //! METHOD extendedShlDynamicRight
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedShlDynamicRight(a, b, i, k) {
     return a[i] << k;
 }
 
 //! METHOD extendedShlDynamicLeft
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedShlDynamicLeft(a, b, i, k) {
     return k << a[i];
 }
 
 //! METHOD extendedSarRight
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedSarRight(a, b, i, k) {
     return 305419896 >> a[i];
 }
 
 //! METHOD extendedSarBoth
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 2
+//! COUNT_GE UnsafeF64ToI32 2
 function extendedSarBoth(a, b, i, k) {
     return a[i] >> b[i];
 }
 
 //! METHOD extendedSarDynamicRight
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedSarDynamicRight(a, b, i, k) {
     return a[i] >> k;
 }
 
 //! METHOD extendedSarDynamicLeft
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedSarDynamicLeft(a, b, i, k) {
     return k >> a[i];
 }
 
 //! METHOD extendedShrRight
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedShrRight(a, b, i, k) {
     return 305419896 >>> a[i];
 }
 
 //! METHOD extendedShrBoth
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 2
+//! COUNT_GE UnsafeF64ToI32 2
 function extendedShrBoth(a, b, i, k) {
     return a[i] >>> b[i];
 }
 
 //! METHOD extendedShrDynamicRight
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedShrDynamicRight(a, b, i, k) {
     return a[i] >>> k;
 }
 
 //! METHOD extendedShrDynamicLeft
 //! HAS TypedArrayDoubleLoadElement
-//! COUNT_GE F64ToI32Trunc 1
+//! COUNT_GE UnsafeF64ToI32 1
 function extendedShrDynamicLeft(a, b, i, k) {
     return k >>> a[i];
 }

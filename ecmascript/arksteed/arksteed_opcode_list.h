@@ -37,6 +37,7 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
 
 #define VALUE_VERTEX_LIST(V)                    \
     CONSTANT_VALUE_VERTEX_LIST(V)               \
+    V(Identity)                                \
     V(InitialValue)                             \
     V(ActualArgc)                               \
     V(LoadActualArgument)                       \
@@ -60,6 +61,7 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(CallDerivedConstructorSpread)             \
     V(CallBaseConstructorForwardAllArgs)        \
     V(CallDerivedConstructorForwardAllArgs)     \
+    V(NumberToString)                          \
     V(CallRuntime)                              \
     V(CallCommonStub)                           \
     V(InitializeEmptyObject)                    \
@@ -126,13 +128,18 @@ static constexpr VertexId INVALID_VERTEX_ID = static_cast<VertexId>(-1);
     V(I32NegWithOverflow)                       \
     V(I32IncWithOverflow)                       \
     V(I32DecWithOverflow)                       \
+    V(U32ToF64)                                \
     V(I32ToF64)                                 \
     V(I32ToI64)                                 \
+    V(TaggedNumberToF64)                       \
     V(CheckedNumberToF64)                       \
-    V(F64ToI32Trunc)                            \
+    V(CheckedF64ToI32)                         \
+    V(UnsafeF64ToI32)                          \
+    V(DoubleToInt32)                            \
     V(I32ToUint8Clamped)                        \
     V(F64ToUint8Clamped)                        \
     V(DoubleToInt32Call)                        \
+    V(NumberToTagged)                          \
     V(F64ToTaggedDouble)                        \
     V(F64Neg)                                   \
     V(F64Add)                                   \

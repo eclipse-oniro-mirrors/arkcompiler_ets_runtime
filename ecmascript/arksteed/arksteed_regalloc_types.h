@@ -739,7 +739,7 @@ constexpr ArkSteedRegList GetNGCRuntimeCallerSavedGeneralRegisters()
 constexpr ArkDoubleRegList GetNGCRuntimeCallerSavedDoubleRegisters()
 {
 #if defined(PANDA_TARGET_ARM64)
-    // AAPCS64 preserves the low 64 bits of v8-v15, which is sufficient for ArkSteed double values.
+    // AAPCS64 preserves the low 64 bits of these callee-saved SIMD registers, sufficient for double values.
     return ArkDoubleRegList {aarch64::d0,  aarch64::d1,  aarch64::d2,  aarch64::d3,  aarch64::d4,  aarch64::d5,
                              aarch64::d6,  aarch64::d7,  aarch64::d16, aarch64::d17, aarch64::d18, aarch64::d19,
                              aarch64::d20, aarch64::d21, aarch64::d22, aarch64::d23, aarch64::d24, aarch64::d25,
