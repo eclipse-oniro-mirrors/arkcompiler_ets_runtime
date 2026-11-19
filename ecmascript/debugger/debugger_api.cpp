@@ -490,8 +490,6 @@ JSTaggedValue DebuggerApi::GetCurrentModule(const EcmaVM *ecmaVm)
 {
     JSThread *thread = ecmaVm->GetJSThread();
     FrameHandler frameHandler(thread);
-    auto runningTestcases = (ecmaVm->GetJsDebuggerManager() == nullptr) ? false :
-                             ecmaVm->GetJsDebuggerManager()->IsRunningTestcases();
     for (; frameHandler.HasFrame(); frameHandler.PrevJSFrame()) {
         if (frameHandler.IsEntryFrame()) {
             continue;
@@ -506,7 +504,10 @@ JSTaggedValue DebuggerApi::GetCurrentModule(const EcmaVM *ecmaVm)
         if (module.IsUndefined()) {
             continue;
         }
-        if (!runningTestcases && SourceTextModule::IsSendableFunctionModule(module)) {
+        if (!module.IsSourceTextModule()) { // CJS module is string
+            return module;
+        }
+        if (SourceTextModule::IsSendableFunctionModule(module)) {
             CString recordName = SourceTextModule::Cast(module.GetTaggedObject())->GetEcmaModuleRecordNameString();
             module = thread->GetModuleManager()->TryGetImportedModule(recordName).GetTaggedValue();
         }
