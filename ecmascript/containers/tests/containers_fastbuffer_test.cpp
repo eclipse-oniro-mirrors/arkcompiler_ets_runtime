@@ -1041,7 +1041,7 @@ HWTEST_F_L0(ContainersFastBufferTest, WriteBigUInt64SecurityFaultTest001)
     JSHandle<JSTaggedValue> numberValue(thread, JSTaggedValue(42)); // 42 means a number value
     constexpr uint32_t wrappedOffset = 0xFFFFFFFF;
     JSTaggedValue result = JSAPIFastBuffer::WriteBigUInt64(thread, buffer, numberValue, wrappedOffset, false);
-    EXPECT_EQ(result, JSTaggedValue(7));
+    EXPECT_EQ(result, JSTaggedValue::Exception());
     EXPECT_TRUE(thread->HasPendingException());
     thread->ClearException();
 }
@@ -1058,7 +1058,7 @@ HWTEST_F_L0(ContainersFastBufferTest, WriteBigInt64SecurityFaultTest001)
     JSHandle<JSTaggedValue> numberValue(thread, JSTaggedValue(42)); // 42 means a number value
     constexpr uint32_t wrappedOffset = 0xFFFFFFFF;
     JSTaggedValue result = JSAPIFastBuffer::WriteBigInt64(thread, buffer, numberValue, wrappedOffset, false);
-    EXPECT_EQ(result, JSTaggedValue(7));
+    EXPECT_EQ(result, JSTaggedValue::Exception());
     EXPECT_TRUE(thread->HasPendingException());
     thread->ClearException();
 }
@@ -1092,8 +1092,9 @@ HWTEST_F_L0(ContainersFastBufferTest, ReadBigUInt64SecurityFaultTest001)
     JSHandle<JSArrayBuffer>::Cast(arrayBufferValue)->Detach(thread);
     constexpr uint32_t wrappedOffset = 0xFFFFFFFF;
     JSTaggedValue fault = JSAPIFastBuffer::ReadBigUInt64(thread, buffer, wrappedOffset, false);
-    EXPECT_TRUE(fault.IsUndefined());
-    EXPECT_FALSE(thread->HasPendingException());
+    EXPECT_EQ(fault, JSTaggedValue::Exception());
+    EXPECT_TRUE(thread->HasPendingException());
+    thread->ClearException();
 }
 
 HWTEST_F_L0(ContainersFastBufferTest, ReadBigInt64SecurityFaultTest001)
@@ -1125,8 +1126,39 @@ HWTEST_F_L0(ContainersFastBufferTest, ReadBigInt64SecurityFaultTest001)
     JSHandle<JSArrayBuffer>::Cast(arrayBufferValue)->Detach(thread);
     constexpr uint32_t wrappedOffset = 0xFFFFFFFF;
     JSTaggedValue fault = JSAPIFastBuffer::ReadBigInt64(thread, buffer, wrappedOffset, false);
-    EXPECT_TRUE(fault.IsUndefined());
-    EXPECT_FALSE(thread->HasPendingException());
+    EXPECT_EQ(fault, JSTaggedValue::Exception());
+    EXPECT_TRUE(thread->HasPendingException());
+    thread->ClearException();
+}
+
+HWTEST_F_L0(ContainersFastBufferTest, FixedWidthAccessRejectsOutOfRangeOffset)
+{
+    const JSHandle<JSAPIFastBuffer> shortBuffer = CreateJSAPIBuffer(1);
+    const JSHandle<JSTaggedValue> bigIntInput(thread, JSTaggedValue::True());
+    const JSHandle<JSTaggedValue> uint16Input(thread, JSTaggedValue(1));
+
+    auto expectRangeError = [this](JSTaggedValue result) {
+        EXPECT_EQ(result, JSTaggedValue::Exception());
+        EXPECT_TRUE(thread->HasPendingException());
+        thread->ClearException();
+    };
+    auto checkAccesses = [this, &expectRangeError, &bigIntInput, &uint16Input](
+                             const JSHandle<JSAPIFastBuffer> &buffer, uint32_t offset) {
+        SCOPED_TRACE(::testing::Message() << "length=" << buffer->GetLength() << ", offset=" << offset);
+        expectRangeError(JSAPIFastBuffer::ReadBigUInt64(thread, buffer, offset, false));
+        expectRangeError(JSAPIFastBuffer::WriteBigUInt64(thread, buffer, bigIntInput, offset, false));
+        expectRangeError(JSAPIFastBuffer::ReadBigInt64(thread, buffer, offset, false));
+        expectRangeError(JSAPIFastBuffer::WriteBigInt64(thread, buffer, bigIntInput, offset, false));
+        expectRangeError(JSAPIFastBuffer::ReadUInt16(thread, buffer, offset, false));
+        expectRangeError(JSAPIFastBuffer::WriteUInt16(thread, buffer, uint16Input, offset, false));
+    };
+
+    // Offset zero still requires enough bytes for the selected access width.
+    checkAccesses(shortBuffer, 0);
+
+    // Starting at the last byte leaves too few bytes for any of these accesses.
+    constexpr uint32_t bufferLength = 8;
+    checkAccesses(CreateJSAPIBuffer(bufferLength), bufferLength - 1);
 }
 
 HWTEST_F_L0(ContainersFastBufferTest, WriteUInt8AndReadUInt8OffsetOverflowTest001)
@@ -1162,10 +1194,12 @@ HWTEST_F_L0(ContainersFastBufferTest, WriteUInt8AndReadUInt8OffsetOverflowTest00
     JSHandle<JSTaggedValue> faultValue(thread, JSTaggedValue(5)); // 5: length
     constexpr uint32_t wrappedOffset = 0xFFFFFFFF;
     JSTaggedValue faultWrite = JSAPIFastBuffer::WriteUInt8(thread, buffer, faultValue, wrappedOffset, false);
-    EXPECT_EQ(faultWrite, JSTaggedValue(0)); // UINT32_MAX + 1 wraps to 0
-    EXPECT_FALSE(thread->HasPendingException());
+    EXPECT_EQ(faultWrite, JSTaggedValue::Exception());
+    EXPECT_TRUE(thread->HasPendingException());
+    thread->ClearException();
     JSTaggedValue faultRead = JSAPIFastBuffer::ReadUInt8(thread, buffer, wrappedOffset, false);
-    EXPECT_EQ(faultRead, JSTaggedValue(5));
-    EXPECT_FALSE(thread->HasPendingException());
+    EXPECT_EQ(faultRead, JSTaggedValue::Exception());
+    EXPECT_TRUE(thread->HasPendingException());
+    thread->ClearException();
 }
 };  // namespace panda::test

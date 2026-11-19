@@ -64,7 +64,14 @@ using BuiltinsArrayBuffer = builtins::BuiltinsArrayBuffer;
             JSTaggedValue error = ContainerError::BusinessError(thread, ErrorFlag::RANGE_ERROR, oss.str().c_str());   \
             THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, JSTaggedValue::Exception());                              \
         }                                                                                                             \
-        if (offset + NumberSize::type > buffer->GetLength()) {                                                        \
+        if (offset > (UINT32_MAX - static_cast<uint32_t>(NumberSize::type))) {                                        \
+            /* "offset + size" wraps around for such offsets and bypasses the */                                      \
+            /* wrap-free length check below.                                  */                                      \
+            ContainerError::ReportSecurityFault("JSAPIFastBuffer.Write" #name, "offset-overflow", -1,                 \
+                static_cast<int32_t>(buffer->GetLength()), static_cast<int32_t>(offset));                             \
+        }                                                                                                             \
+        if (buffer->GetLength() < static_cast<uint32_t>(NumberSize::type) ||                                          \
+            offset > buffer->GetLength() - static_cast<uint32_t>(NumberSize::type)) {                                 \
             std::ostringstream oss;                                                                                   \
             oss << "The value of \"offset\" is out of range. It must be >= " << 0                                     \
                 << " and <= " << static_cast<int64_t>(buffer->GetLength()) - NumberSize::type                         \
@@ -72,13 +79,6 @@ using BuiltinsArrayBuffer = builtins::BuiltinsArrayBuffer;
             JSTaggedValue error = ContainerError::BusinessError(thread, ErrorFlag::RANGE_ERROR, oss.str().c_str());   \
             THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, JSTaggedValue::Exception());                              \
         }                                                                                                             \
-        if (offset > buffer->GetLength() ||                                                             \
-            static_cast<uint32_t>(NumberSize::type) > buffer->GetLength() - offset) {                        \
-            /* "offset + size" wrapped around the check above, so the access  */                             \
-            /* below goes out of bounds. Detection only, the original flow continues. */                    \
-            ContainerError::ReportSecurityFault("JSAPIFastBuffer.Write" #name, "offset-overflow", -1,              \
-                static_cast<int32_t>(buffer->GetLength()), static_cast<int32_t>(offset));                    \
-        }                                                                                                    \
         JSAPIFastBuffer::SetValueByIndex(thread, typedArray.GetTaggedValue(), buffer->GetOffset() + offset,           \
                                          value.GetTaggedValue(), type, littleEndian);                                 \
         return JSTaggedValue(offset + byteSize);                                                                      \
@@ -89,7 +89,14 @@ using BuiltinsArrayBuffer = builtins::BuiltinsArrayBuffer;
         JSType type = JSType::JS_##type##_ARRAY;                                                                      \
         JSHandle<JSTypedArray> typedArray =                                                                           \
             JSHandle<JSTypedArray>(thread, JSTypedArray::Cast(buffer->GetFastBufferData(thread).GetTaggedObject()));  \
-        if (offset + NumberSize::type > buffer->GetLength()) {                                                        \
+        if (offset > (UINT32_MAX - static_cast<uint32_t>(NumberSize::type))) {                                        \
+            /* "offset + size" wraps around for such offsets and bypasses the */                                      \
+            /* wrap-free length check below.                                  */                                      \
+            ContainerError::ReportSecurityFault("JSAPIFastBuffer.Read" #name, "offset-overflow", -1,                  \
+                static_cast<int32_t>(buffer->GetLength()), static_cast<int32_t>(offset));                             \
+        }                                                                                                             \
+        if (buffer->GetLength() < static_cast<uint32_t>(NumberSize::type) ||                                          \
+            offset > buffer->GetLength() - static_cast<uint32_t>(NumberSize::type)) {                                 \
             std::ostringstream oss;                                                                                   \
             oss << "The value of \"offset\" is out of range. It must be >= " << 0                                     \
                 << " and <= " << static_cast<int64_t>(buffer->GetLength()) - NumberSize::type                         \
@@ -97,13 +104,6 @@ using BuiltinsArrayBuffer = builtins::BuiltinsArrayBuffer;
             JSTaggedValue error = ContainerError::BusinessError(thread, ErrorFlag::RANGE_ERROR, oss.str().c_str());   \
             THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, JSTaggedValue::Exception());                              \
         }                                                                                                             \
-        if (offset > buffer->GetLength() ||                                                             \
-            static_cast<uint32_t>(NumberSize::type) > buffer->GetLength() - offset) {                        \
-            /* "offset + size" wrapped around the check above, so the access  */                             \
-            /* below goes out of bounds. Detection only, the original flow continues. */                    \
-            ContainerError::ReportSecurityFault("JSAPIFastBuffer.Read" #name, "offset-overflow", -1,              \
-                static_cast<int32_t>(buffer->GetLength()), static_cast<int32_t>(offset));                    \
-        }                                                                                                    \
         return JSAPIFastBuffer::GetValueByIndex(thread, typedArray.GetTaggedValue(), buffer->GetOffset() + offset,    \
                                                 type, littleEndian);                                                  \
     }

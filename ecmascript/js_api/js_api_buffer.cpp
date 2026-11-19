@@ -1392,19 +1392,21 @@ JSTaggedValue JSAPIFastBuffer::WriteBigUInt64(JSThread *thread, const JSHandle<J
         JSTaggedValue error = ContainerError::BusinessError(thread, ErrorFlag::RANGE_ERROR, oss.str().c_str());
         THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, JSTaggedValue::Exception());
     }
-    if (offset < 0 || offset + NumberSize::BIGUINT64 > buffer->GetLength()) {
-        std::ostringstream oss;
-        oss << std::fixed << "The value of \"offset\" is out of range. It must be >= " << 0
-            << " and <= " << buffer->GetLength() - NumberSize::BIGUINT64 << ". Received value is: " << offset;
-        JSTaggedValue error = ContainerError::BusinessError(thread, ErrorFlag::RANGE_ERROR, oss.str().c_str());
-        THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, JSTaggedValue::Exception());
-    }
-    if (offset > buffer->GetLength() || NumberSize::BIGUINT64 > buffer->GetLength() - offset) {
-        // "offset + 8" wrapped around the check above, so the write below goes out of
-        // bounds. Detection only, the original flow continues.
+    if (offset > (UINT32_MAX - NumberSize::BIGUINT64)) {
+        // "offset + 8" wraps around for such offsets and bypasses the wrap-free
+        // length check below.
         ContainerError::ReportSecurityFault("JSAPIFastBuffer.WriteBigUInt64", "offset-overflow", -1,
                                             static_cast<int32_t>(buffer->GetLength()),
                                             static_cast<int32_t>(offset));
+    }
+    if (buffer->GetLength() < static_cast<uint32_t>(NumberSize::BIGUINT64) ||
+        offset > buffer->GetLength() - static_cast<uint32_t>(NumberSize::BIGUINT64)) {
+        std::ostringstream oss;
+        oss << std::fixed << "The value of \"offset\" is out of range. It must be >= " << 0
+            << " and <= " << static_cast<int64_t>(buffer->GetLength()) - NumberSize::BIGUINT64
+            << ". Received value is: " << offset;
+        JSTaggedValue error = ContainerError::BusinessError(thread, ErrorFlag::RANGE_ERROR, oss.str().c_str());
+        THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, JSTaggedValue::Exception());
     }
     JSAPIFastBuffer::SetValueByIndex(thread, typedArray.GetTaggedValue(), offset, value.GetTaggedValue(), type,
                                      littleEndian);
@@ -1417,19 +1419,21 @@ JSTaggedValue JSAPIFastBuffer::ReadBigUInt64(JSThread *thread, const JSHandle<JS
     JSType type = JSType::JS_BIGUINT64_ARRAY;
     JSHandle<JSTypedArray> typedArray =
         JSHandle<JSTypedArray>(thread, JSTypedArray ::Cast(buffer->GetFastBufferData(thread).GetTaggedObject()));
-    if (offset < 0 || offset + NumberSize::BIGUINT64 > buffer->GetLength()) {
-        std::ostringstream oss;
-        oss << std::fixed << "The value of \"offset\" is out of range. It must be >= " << 0
-            << " and <= " << buffer->GetLength() - NumberSize::BIGUINT64 << ". Received value is: " << offset;
-        JSTaggedValue error = ContainerError::BusinessError(thread, ErrorFlag::RANGE_ERROR, oss.str().c_str());
-        THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, JSTaggedValue::Exception());
-    }
-    if (offset > buffer->GetLength() || NumberSize::BIGUINT64 > buffer->GetLength() - offset) {
-        // "offset + 8" wrapped around the check above, so the read below goes out of
-        // bounds. Detection only, the original flow continues.
+    if (offset > (UINT32_MAX - NumberSize::BIGUINT64)) {
+        // "offset + 8" wraps around for such offsets and bypasses the wrap-free
+        // length check below.
         ContainerError::ReportSecurityFault("JSAPIFastBuffer.ReadBigUInt64", "offset-overflow", -1,
                                             static_cast<int32_t>(buffer->GetLength()),
                                             static_cast<int32_t>(offset));
+    }
+    if (buffer->GetLength() < static_cast<uint32_t>(NumberSize::BIGUINT64) ||
+        offset > buffer->GetLength() - static_cast<uint32_t>(NumberSize::BIGUINT64)) {
+        std::ostringstream oss;
+        oss << std::fixed << "The value of \"offset\" is out of range. It must be >= " << 0
+            << " and <= " << static_cast<int64_t>(buffer->GetLength()) - NumberSize::BIGUINT64
+            << ". Received value is: " << offset;
+        JSTaggedValue error = ContainerError::BusinessError(thread, ErrorFlag::RANGE_ERROR, oss.str().c_str());
+        THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, JSTaggedValue::Exception());
     }
     return JSAPIFastBuffer::GetValueByIndex(thread, typedArray.GetTaggedValue(), offset, type, littleEndian);
 }
@@ -1459,19 +1463,21 @@ JSTaggedValue JSAPIFastBuffer::WriteBigInt64(JSThread *thread, const JSHandle<JS
         JSTaggedValue error = ContainerError::BusinessError(thread, ErrorFlag::RANGE_ERROR, oss.str().c_str());
         THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, JSTaggedValue::Exception());
     }
-    if (offset < 0 || offset + NumberSize::BIGUINT64 > buffer->GetLength()) {
-        std::ostringstream oss;
-        oss << std::fixed << "The value of \"offset\" is out of range. It must be >= " << 0
-            << " and <= " << buffer->GetLength() - NumberSize::BIGUINT64 << ". Received value is: " << offset;
-        JSTaggedValue error = ContainerError::BusinessError(thread, ErrorFlag::RANGE_ERROR, oss.str().c_str());
-        THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, JSTaggedValue::Exception());
-    }
-    if (offset > buffer->GetLength() || NumberSize::BIGUINT64 > buffer->GetLength() - offset) {
-        // "offset + 8" wrapped around the check above, so the write below goes out of
-        // bounds. Detection only, the original flow continues.
+    if (offset > (UINT32_MAX - NumberSize::BIGUINT64)) {
+        // "offset + 8" wraps around for such offsets and bypasses the wrap-free
+        // length check below.
         ContainerError::ReportSecurityFault("JSAPIFastBuffer.WriteBigInt64", "offset-overflow", -1,
                                             static_cast<int32_t>(buffer->GetLength()),
                                             static_cast<int32_t>(offset));
+    }
+    if (buffer->GetLength() < static_cast<uint32_t>(NumberSize::BIGUINT64) ||
+        offset > buffer->GetLength() - static_cast<uint32_t>(NumberSize::BIGUINT64)) {
+        std::ostringstream oss;
+        oss << std::fixed << "The value of \"offset\" is out of range. It must be >= " << 0
+            << " and <= " << static_cast<int64_t>(buffer->GetLength()) - NumberSize::BIGUINT64
+            << ". Received value is: " << offset;
+        JSTaggedValue error = ContainerError::BusinessError(thread, ErrorFlag::RANGE_ERROR, oss.str().c_str());
+        THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, JSTaggedValue::Exception());
     }
     JSAPIFastBuffer::SetValueByIndex(thread, typedArray.GetTaggedValue(), offset, value.GetTaggedValue(), type,
                                      littleEndian);
@@ -1484,19 +1490,21 @@ JSTaggedValue JSAPIFastBuffer::ReadBigInt64(JSThread *thread, const JSHandle<JSA
     JSType type = JSType::JS_BIGINT64_ARRAY;
     JSHandle<JSTypedArray> typedArray =
         JSHandle<JSTypedArray>(thread, JSTypedArray ::Cast(buffer->GetFastBufferData(thread).GetTaggedObject()));
-    if (offset < 0 || offset + NumberSize::BIGINT64 > buffer->GetLength()) {
-        std::ostringstream oss;
-        oss << std::fixed << "The value of \"offset\" is out of range. It must be >= " << 0
-            << " and <= " << buffer->GetLength() - NumberSize::BIGINT64 << ". Received value is: " << offset;
-        JSTaggedValue error = ContainerError::BusinessError(thread, ErrorFlag::RANGE_ERROR, oss.str().c_str());
-        THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, JSTaggedValue::Exception());
-    }
-    if (offset > buffer->GetLength() || NumberSize::BIGINT64 > buffer->GetLength() - offset) {
-        // "offset + 8" wrapped around the check above, so the read below goes out of
-        // bounds. Detection only, the original flow continues.
+    if (offset > (UINT32_MAX - NumberSize::BIGINT64)) {
+        // "offset + 8" wraps around for such offsets and bypasses the wrap-free
+        // length check below.
         ContainerError::ReportSecurityFault("JSAPIFastBuffer.ReadBigInt64", "offset-overflow", -1,
                                             static_cast<int32_t>(buffer->GetLength()),
                                             static_cast<int32_t>(offset));
+    }
+    if (buffer->GetLength() < static_cast<uint32_t>(NumberSize::BIGINT64) ||
+        offset > buffer->GetLength() - static_cast<uint32_t>(NumberSize::BIGINT64)) {
+        std::ostringstream oss;
+        oss << std::fixed << "The value of \"offset\" is out of range. It must be >= " << 0
+            << " and <= " << static_cast<int64_t>(buffer->GetLength()) - NumberSize::BIGINT64
+            << ". Received value is: " << offset;
+        JSTaggedValue error = ContainerError::BusinessError(thread, ErrorFlag::RANGE_ERROR, oss.str().c_str());
+        THROW_NEW_ERROR_AND_RETURN_VALUE(thread, error, JSTaggedValue::Exception());
     }
     return JSAPIFastBuffer ::GetValueByIndex(thread, typedArray.GetTaggedValue(), offset, type, littleEndian);
 }
