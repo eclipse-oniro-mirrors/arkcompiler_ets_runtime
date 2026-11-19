@@ -7246,6 +7246,8 @@ struct GraphBuilder::BytecodeVisitor {
     {
         const BytecodeInfo *bcInfo = self->preproc_->GetBytecode(bcIndex);
         const auto &liveOut = self->analysis_->GetLiveOutOfBytecode(bcIndex);
+        const auto &catchLiveIn = blockInfo->catchBlock == nullptr ? nullptr :
+            &self->analysis_->GetLiveInOfBlock(blockInfo->catchBlock->rpoIndex);
 
         auto isInVRegOut = [bcInfo](VRegIDType index) {
             return (bcInfo->vregOut != BytecodeInfo::NO_VREG) && (bcInfo->vregOut == index);
@@ -7261,8 +7263,9 @@ struct GraphBuilder::BytecodeVisitor {
             constexpr int32_t ACC_INDEX = static_cast<int32_t>(SpecVregIndex::ACC_INDEX);
             AppendDeoptInput(deoptFrameState, ACC_INDEX, frameState.GetAcc());
         }
-        AppendLiveLocalsAndParams(deoptFrameState, 0, [&liveOut, &isInVRegOut](VRegIDType index) {
-            return liveOut.TestBit(index) && !isInVRegOut(index);
+        AppendLiveLocalsAndParams(deoptFrameState, 0, [&liveOut, &catchLiveIn, &isInVRegOut](VRegIDType index) {
+            return (liveOut.TestBit(index) || (catchLiveIn != nullptr && catchLiveIn->TestBit(index))) &&
+                   !isInVRegOut(index);
         });
     }
 

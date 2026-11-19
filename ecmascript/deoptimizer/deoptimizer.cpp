@@ -807,7 +807,9 @@ void Deoptimizier::ResetJitHotness(JSThread *thread, JSFunction *jsFunc)
         JSTaggedValue profileTypeInfoVal = jsFunc->GetProfileTypeInfo(thread);
         if (!profileTypeInfoVal.IsUndefined()) {
             JSHandle<Method> method(thread, jsFunc->GetMethod(thread));
-            method->SetTieringDecision(TieringDecision::PREHEATED);
+            if (method->GetTieringDecision() != TieringDecision::DISABLED) {
+                method->SetTieringDecision(TieringDecision::PREHEATED);
+            }
             method->SetHotnessCounter(TieringManager::HotnessBudgetFor(thread, method));
             ProfileTypeInfoCell::Cast(jsFunc->GetRawProfileTypeInfo(thread))
                 ->SetMachineCode(thread, JSTaggedValue::Hole());
@@ -827,6 +829,11 @@ void Deoptimizier::ClearCompiledCodeStatusWhenDeopt(JSThread *thread, JSFunction
 #endif
     }
     if (func->IsCompiledCode()) {
+        method->SetDeoptCount(std::min<uint8_t>(method->GetDeoptCount() + 1, Method::MAX_DEOPT_COUNT));
+        if (method->GetDeoptCount() >= thread->GetEcmaVM()->GetJSOptions().GetDeoptThreshold()) {
+            method->SetTieringDecision(TieringDecision::DISABLED);
+            method->SetHotnessCounter(TieringManager::MAX_BUDGET);
+        }
         bool isFastCall = func->IsCompiledFastCall();  // get this flag before clear it
         uintptr_t entry =
             isFastCall ? thread->GetRTInterface(kungfu::RuntimeStubCSigns::ID_FastCallToAsmInterBridge)

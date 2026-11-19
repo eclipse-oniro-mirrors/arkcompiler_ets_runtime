@@ -482,12 +482,13 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
                 }
                 break;
             case OPTION_COMPILER_DEOPT_THRESHOLD:
-                ret = ParseUint32Param("deopt-threshol", &argUint32);
-                if (ret) {
-                    SetDeoptThreshold(argUint32);
-                } else {
+                if (!ParseUint32Param("compiler-deopt-threshold", &argUint32) || argUint32 == 0 ||
+                    argUint32 > MAX_DEOPT_THRESHOLD) {
+                    LOG_ECMA(ERROR) << "compiler-deopt-threshold must be between 1 and "
+                                   << static_cast<uint32_t>(MAX_DEOPT_THRESHOLD);
                     return false;
                 }
+                SetDeoptThreshold(static_cast<uint8_t>(argUint32));
                 break;
             case OPTION_COMPILER_DEVICE_STATE:
                 ret = ParseBoolParam(&argBool);

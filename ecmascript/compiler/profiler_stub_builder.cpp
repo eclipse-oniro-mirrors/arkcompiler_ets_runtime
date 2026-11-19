@@ -876,13 +876,12 @@ GateRef ProfilerStubBuilder::GetTieringDecisionFromFunction(GateRef glue, GateRe
 
 GateRef ProfilerStubBuilder::GetTieringDecisionFromMethod(GateRef method)
 {
-    // Matches Method::GetTieringDecision: the tiering state machine reuses the
-    // deopt count field.
+    // Matches Method::GetTieringDecision.
     GateRef extraLiteralInfo = LoadPrimitive(VariableType::INT64(), method,
         IntPtr(Method::EXTRA_LITERAL_INFO_OFFSET));
     GateRef decision = Int64And(
-        Int64LSR(extraLiteralInfo, Int64(Method::DeoptCountBits::START_BIT)),
-        Int64((1ULL << Method::DEOPT_THRESHOLD_BITS) - 1));
+        Int64LSR(extraLiteralInfo, Int64(Method::TieringDecisionBits::START_BIT)),
+        Int64((1ULL << Method::TIERING_DECISION_BITS) - 1));
     return TruncInt64ToInt32(decision);
 }
 
@@ -892,9 +891,9 @@ void ProfilerStubBuilder::SetTieringDecisionFromFunction(GateRef glue, GateRef f
     GateRef extraLiteralInfo = LoadPrimitive(VariableType::INT64(), method,
         IntPtr(Method::EXTRA_LITERAL_INFO_OFFSET));
     GateRef clearedBits = Int64And(extraLiteralInfo,
-        Int64(static_cast<int64_t>(~Method::DeoptCountBits::Mask())));
+        Int64(static_cast<int64_t>(~Method::TieringDecisionBits::Mask())));
     GateRef newBits = Int64LSL(ZExtInt32ToInt64(decision),
-        Int64(static_cast<int64_t>(Method::DeoptCountBits::START_BIT)));
+        Int64(static_cast<int64_t>(Method::TieringDecisionBits::START_BIT)));
     Store(VariableType::INT64(), glue, method, IntPtr(Method::EXTRA_LITERAL_INFO_OFFSET),
         Int64Or(clearedBits, newBits));
 }

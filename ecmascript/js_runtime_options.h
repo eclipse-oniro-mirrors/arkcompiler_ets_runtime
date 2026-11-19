@@ -1906,6 +1906,7 @@ public:
 
     void SetDeoptThreshold(uint8_t value)
     {
+        ASSERT(value > 0 && value <= MAX_DEOPT_THRESHOLD);
         deoptThreshold_ = value;
     }
 
@@ -2807,6 +2808,7 @@ public:
 #endif
 public:
     static constexpr int32_t MAX_APP_COMPILE_METHOD_SIZE = 4_KB;
+    static constexpr uint8_t MAX_DEOPT_THRESHOLD = 31;
 
 private:
     void ParseRuntimeParam(const std::string &str);

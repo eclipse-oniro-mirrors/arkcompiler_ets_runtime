@@ -80,6 +80,12 @@ void Jit::SetJitEnablePostFork(EcmaVM *vm, const std::string &bundleName)
         uint32_t defaultIcFeedback = 500;
         uint32_t jitIcFeedbackThreshold = ohos::JitTools::GetJitIcFeedbackThreshold(defaultIcFeedback);
         options.SetJitIcFeedbackThreshold(jitIcFeedbackThreshold);
+        uint32_t defaultDeoptThreshold = 10;
+        uint32_t jitDeoptThreshold = ohos::JitTools::GetJitDeoptThreshold(defaultDeoptThreshold);
+        if (jitDeoptThreshold == 0 || jitDeoptThreshold > JSRuntimeOptions::MAX_DEOPT_THRESHOLD) {
+            jitDeoptThreshold = defaultDeoptThreshold;
+        }
+        options.SetDeoptThreshold(static_cast<uint8_t>(jitDeoptThreshold));
         bundleName_ = bundleName;
         SetEnableOrDisable(options, isEnableFastJit, isEnableBaselineJit);
         if (fastJitEnable_ || baselineJitEnable_) {
@@ -578,6 +584,10 @@ void Jit::CompileArkSteed(EcmaVM *vm, JSHandle<JSFunction> &jsFunction,
         return;
     }
     ASSERT(tier.IsArkSteed());
+    Method *method = Method::Cast(jsFunction->GetMethod(vm->GetJSThread()).GetTaggedObject());
+    if (method->GetTieringDecision() == TieringDecision::DISABLED) {
+        return;
+    }
 
     if (!vm->IsEnableOsr() && osrOffset != MachineCode::INVALID_OSR_OFFSET) {
         return;

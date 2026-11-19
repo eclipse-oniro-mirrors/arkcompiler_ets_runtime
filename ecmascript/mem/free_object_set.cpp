@@ -135,7 +135,7 @@ template MemDesc *FreeObjectSet<MemDesc>::ObtainLargeFreeObject(size_t);
 template <typename T>
 T *FreeObjectSet<T>::LookupSmallFreeObject(size_t size)
 {
-    if (freeObject_ != INVALID_OBJECT) {
+    if (freeObject_ != T::Cast(INVALID_OBJPTR)) {
         freeObject_->AsanUnPoisonFreeObject();
         if (freeObject_->Available() >= size) {
             freeObject_->AsanPoisonFreeObject();
@@ -143,19 +143,20 @@ T *FreeObjectSet<T>::LookupSmallFreeObject(size_t size)
         }
         freeObject_->AsanPoisonFreeObject();
     }
-    return INVALID_OBJECT;
+    return T::Cast(INVALID_OBJPTR);
 }
 
 template FreeObject *FreeObjectSet<FreeObject>::LookupSmallFreeObject(size_t);
+template MemDesc *FreeObjectSet<MemDesc>::LookupSmallFreeObject(size_t);
 
 template <typename T>
 T *FreeObjectSet<T>::LookupLargeFreeObject(size_t size)
 {
     if (available_ < size) {
-        return INVALID_OBJECT;
+        return T::Cast(INVALID_OBJPTR);
     }
     T *curFreeObject = freeObject_;
-    while (curFreeObject != INVALID_OBJECT) {
+    while (curFreeObject != T::Cast(INVALID_OBJPTR)) {
         curFreeObject->AsanUnPoisonFreeObject();
         if (curFreeObject->Available() >= size) {
             curFreeObject->AsanPoisonFreeObject();
@@ -165,9 +166,10 @@ T *FreeObjectSet<T>::LookupLargeFreeObject(size_t size)
         curFreeObject = curFreeObject->GetNext();
         preFreeObject->AsanPoisonFreeObject();
     }
-    return INVALID_OBJECT;
+    return T::Cast(INVALID_OBJPTR);
 }
 
 template FreeObject *FreeObjectSet<FreeObject>::LookupLargeFreeObject(size_t);
+template MemDesc *FreeObjectSet<MemDesc>::LookupLargeFreeObject(size_t);
 
 }  // namespace panda::ecmascript

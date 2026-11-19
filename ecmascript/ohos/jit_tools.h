@@ -61,6 +61,14 @@ public:
         return threshold;
     }
 
+    static uint32_t GetJitDeoptThreshold(uint32_t threshold)
+    {
+#ifdef ENABLE_OHOS_PARAMETER
+        return OHOS::system::GetUintParameter("ark.jit.deopt.threshold", threshold);
+#endif
+        return threshold;
+    }
+
     static uint16_t GetJitCallThreshold(uint16_t threshold)
     {
 #ifdef ENABLE_OHOS_PARAMETER

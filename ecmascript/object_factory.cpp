@@ -2358,6 +2358,7 @@ void ObjectFactory::InitializeMethod(const MethodLiteral *methodLiteral, JSHandl
         codeSize = MethodLiteral::GetCodeSize(jsPandaFile, methodLiteral->GetMethodId());
     }
     method->SetTieringDecision(TieringDecision::PENDING);
+    method->SetDeoptCount(0);
     if (vm_->IsEnableFastJit()) {
         method->SetHotnessCounter(TieringManager::HotnessBudgetFor(thread_, method, codeSize));
     } else {

@@ -193,8 +193,8 @@ void AsmInterpreterCall::CheckDeferredCompilationForCallEntry(ExtendedAssembler 
     // Reuse the entry Method and the HClass bitfield register after the type check.
     // Do not spill registers on the no-submit path.
     __ Movl(Operand(method, Method::EXTRA_LITERAL_INFO_OFFSET), extraLiteralInfo);
-    __ Shr(Method::DeoptCountBits::START_BIT, extraLiteralInfo);
-    __ Andl((1LU << Method::DeoptCountBits::SIZE) - 1, extraLiteralInfo);
+    __ Shr(Method::TieringDecisionBits::START_BIT, extraLiteralInfo);
+    __ Andl((1LU << Method::TieringDecisionBits::SIZE) - 1, extraLiteralInfo);
     __ Cmpl(static_cast<int32_t>(TieringDecision::ARKSTEED_REQUESTED), extraLiteralInfo);
     __ Jne(&noSubmit);
     {

@@ -246,12 +246,12 @@ public:
 
     uint64_t SetTieringDecision(uint64_t extraLiteralInfo, TieringDecision decision)
     {
-        return DeoptCountBits::Update(extraLiteralInfo, static_cast<uint8_t>(decision));
+        return TieringDecisionBits::Update(extraLiteralInfo, static_cast<uint8_t>(decision));
     }
 
     TieringDecision GetTieringDecision(uint64_t extraLiteralInfo) const
     {
-        return static_cast<TieringDecision>(DeoptCountBits::Decode(extraLiteralInfo));
+        return static_cast<TieringDecision>(TieringDecisionBits::Decode(extraLiteralInfo));
     }
 
     void SetTieringDecision(TieringDecision decision)
@@ -265,6 +265,17 @@ public:
     {
         uint64_t extraLiteralInfo = GetExtraLiteralInfo();
         return GetTieringDecision(extraLiteralInfo);
+    }
+
+    void SetDeoptCount(uint8_t count)
+    {
+        ASSERT(count <= MAX_DEOPT_COUNT);
+        SetExtraLiteralInfo(DeoptCountBits::Update(GetExtraLiteralInfo(), count));
+    }
+
+    uint8_t GetDeoptCount() const
+    {
+        return DeoptCountBits::Decode(GetExtraLiteralInfo());
     }
 
     EntityId GetMethodId() const
@@ -301,12 +312,12 @@ public:
 
     uint64_t SetDeoptThreshold(uint64_t literalInfo, uint8_t count)
     {
-        return DeoptCountBits::Update(literalInfo, count);
+        return DeoptThresholdBits::Update(literalInfo, count);
     }
 
     uint16_t GetDeoptThreshold(uint64_t literalInfo) const
     {
-        return DeoptCountBits::Decode(literalInfo);
+        return DeoptThresholdBits::Decode(literalInfo);
     }
 
     uint64_t SetDeoptType(uint64_t extraLiteralInfo, kungfu::DeoptType type)
@@ -506,12 +517,16 @@ public:
     static constexpr size_t DEOPT_THRESHOLD_BITS = 8;
     static constexpr size_t DEOPTTYPE_NUM_BITS = 8;
     static constexpr size_t TIERING_DECISION_BITS = 3;
+    static constexpr size_t DEOPT_COUNT_BITS = 5;
     static constexpr size_t FP_DELTA_BITS = 32;
+    static constexpr uint8_t MAX_DEOPT_COUNT = (1U << DEOPT_COUNT_BITS) - 1;
     using FunctionKindBits = BitField<FunctionKind, 0, FUNCTION_KIND_NUM_BITS>; // offset 0-3
     using IsSharedBit = FunctionKindBits::NextFlag; // offset 4
     using BuiltinIdBits = IsSharedBit::NextField<uint16_t, BUILTINID_NUM_BITS>; // offset 5-13
-    // Reused by the ArkSteed tiering state while ArkSteed is the active backend
-    using DeoptCountBits = BuiltinIdBits::NextField<uint8_t, DEOPT_THRESHOLD_BITS>; // offset 14-21
+    using DeoptThresholdBits = BuiltinIdBits::NextField<uint8_t, DEOPT_THRESHOLD_BITS>; // offset 14-21
+    // Reused by ArkSteed
+    using TieringDecisionBits = BuiltinIdBits::NextField<uint8_t, TIERING_DECISION_BITS>; // offset 14-16
+    using DeoptCountBits = TieringDecisionBits::NextField<uint8_t, DEOPT_COUNT_BITS>; // offset 17-21
     using DeoptTypeBits = DeoptCountBits::NextField<kungfu::DeoptType, DEOPTTYPE_NUM_BITS>; // offset 22-29
     using IsCallNapiBit = DeoptTypeBits::NextFlag; // offset 30
     using IsJitCompiledCodeBit = IsCallNapiBit::NextFlag; // offset 31

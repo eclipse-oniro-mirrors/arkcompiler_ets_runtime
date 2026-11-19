@@ -1538,10 +1538,15 @@ public:
         return idleGCTrigger_;
     }
 
+    bool IsJitFortCapacityExhausted() const
+    {
+        return jitFortCapacityExhausted_.load(std::memory_order_acquire);
+    }
+
     JitFort *GetOrCreateJitFort()
     {
         if (jitFort_ == nullptr) {
-            jitFort_ = new JitFort();
+            jitFort_ = new JitFort(jitFortCapacityExhausted_);
         }
         return jitFort_;
     }
@@ -2509,6 +2514,7 @@ private:
 
     IdleGCTrigger *idleGCTrigger_ {nullptr};
 
+    std::atomic<bool> jitFortCapacityExhausted_ {false};
     JitFort *jitFort_ {nullptr};
 
     bool hasOOMDump_ {false};
