@@ -27,6 +27,7 @@
 #include "ecmascript/compiler/lazy_deopt_dependency.h"
 #include "ecmascript/ecma_string-inl.h"
 #include "ecmascript/global_env.h"
+#include "ecmascript/global_dictionary-inl.h"
 #include "ecmascript/mem/region.h"
 
 #include "ecmascript/arksteed/arksteed_opcode.h"
@@ -395,6 +396,74 @@ bool ArkSteedHeapBroker::CanLoadLocalModuleVar() const
     auto *moduleRecord = SourceTextModule::Cast(module.GetTaggedObject());
     if (!moduleRecord->GetIsNewBcVersion() || moduleRecord->GetNameDictionary(hostThread).IsUndefined()) {
         return false;
+    }
+    return true;
+}
+
+// Resolve the import in the module of the function being compiled, including an inlined callee.
+// An initialized ECMA binding never returns to Hole.
+bool ArkSteedHeapBroker::IsExternalModuleBindingInitialized(int32_t index) const
+{
+    NoGCScope scope(this);
+    auto *hostThread = env_->GetHostThread();
+    JSHandle<JSFunction> function = env_->GetJsFunctionByMethodOffset(methodOffset_);
+    if (function.IsEmpty() || !ModuleManager::CheckModuleValueOutterResolved(hostThread, index, *function)) {
+        return false;
+    }
+    auto *module = SourceTextModule::Cast(function->GetModule(hostThread).GetTaggedObject());
+    auto *environment = TaggedArray::Cast(module->GetEnvironment(hostThread).GetTaggedObject());
+    auto *binding = ResolvedIndexBinding::Cast(environment->Get(hostThread, index).GetTaggedObject());
+    auto *target = SourceTextModule::Cast(binding->GetModule(hostThread).GetTaggedObject());
+    auto *dictionary = TaggedArray::Cast(target->GetNameDictionary(hostThread).GetTaggedObject());
+    return !dictionary->Get(hostThread, binding->GetIndex()).IsHole();
+}
+
+// Script let/const/class bindings live in the global record and are never removed;
+// script var/function bindings are non-configurable. Neither box can be deleted or
+// replaced, so it never becomes Hole. A const or non-writable one keeps its value.
+bool ArkSteedHeapBroker::TryGetPermanentGlobalCell(uint16_t cpIdx, const ArkSteedObjectRef &boxRef,
+                                                   PermanentGlobalCell *cell) const
+{
+    NoGCScope scope(this);
+    ArkSteedNameRef nameRef;
+    JSTaggedValue name;
+    JSTaggedValue box;
+    if (!TryGetNameFromConstantPool(cpIdx, &nameRef) || !TryResolveRef(nameRef, &name) ||
+        !TryResolveRef(boxRef, &box)) {
+        return false;
+    }
+    auto globalEnv = env_->GetGlobalEnv();
+    auto *record = GlobalDictionary::Cast(globalEnv->GetGlobalRecordWithBarrier()->GetTaggedObject());
+    int entry = record->FindEntry(compilerThread_, name);
+    bool constant = false;
+    if (entry != -1 && JSTaggedValue(record->GetBox(compilerThread_, entry)) == box) {
+        constant = record->GetAttributes(compilerThread_, entry).IsConstProps();
+    } else {
+        auto *globalObject = JSObject::Cast(globalEnv->GetJSGlobalObjectWithBarrier()->GetTaggedObject());
+        auto *properties = GlobalDictionary::Cast(globalObject->GetProperties(compilerThread_).GetTaggedObject());
+        entry = properties->FindEntry(compilerThread_, name);
+        if (entry == -1 || JSTaggedValue(properties->GetBox(compilerThread_, entry)) != box) {
+            return false;
+        }
+        PropertyAttributes attributes = properties->GetAttributes(compilerThread_, entry);
+        if (attributes.IsConfigurable()) {
+            return false;
+        }
+        constant = !attributes.IsWritable();
+    }
+    *cell = {};
+    if (constant) {
+        JSTaggedValue value = PropertyBox::Cast(box.GetTaggedObject())->GetValue(compilerThread_);
+        if (value.IsHole()) {
+            return false;
+        }
+        if (value.IsHeapObject()) {
+            cell->object = MakeObjectRef(value);
+            cell->constant = cell->object.IsSafeForCompile();
+        } else {
+            cell->primitive = value.GetRawData();
+            cell->constant = true;
+        }
     }
     return true;
 }

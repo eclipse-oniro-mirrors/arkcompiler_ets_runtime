@@ -18,7 +18,7 @@
 //! METHOD readGlobalVar
 //! HAS HeapConstant
 //! HAS LoadTaggedField
-//! HAS DeoptIfTaggedCondition
+//! HAS_NOT DeoptIfTaggedCondition  # script var gLoad is non-configurable; its box is never cleared
 //! HAS_NOT CallCommonStub LdGlobalVar
 
 var gLoad = 1;

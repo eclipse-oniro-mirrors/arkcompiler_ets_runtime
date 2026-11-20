@@ -145,13 +145,14 @@
 //! HAS_NOT CallKnownJSFunction
 //! HAS_NOT Call
 
+// In the forced-GC cases, the permanent global ArkTools contributes no PropertyBox Hole check.
 //! METHOD callArgumentsAfterForcedGC
-//! COUNT DeoptIfTaggedCondition 2
+//! COUNT_LE DeoptIfTaggedCondition 1  # method ID check for the inlined argumentsAfterForcedGCTarget
 //! HAS_NOT CallKnownJSFunction
 //! COUNT Call 1
 
 //! METHOD callRestAfterForcedGC
-//! COUNT DeoptIfTaggedCondition 5
+//! COUNT_LE DeoptIfTaggedCondition 4  # restAfterForcedGCTarget method ID + Hole checks on values[0], [1] and [2]
 //! HAS_NOT CallKnownJSFunction
 //! COUNT Call 1
 
@@ -287,7 +288,7 @@
 //! HAS_NOT Call
 
 //! METHOD callInlineForcedGC
-//! COUNT DeoptIfTaggedCondition 2
+//! COUNT_LE DeoptIfTaggedCondition 1  # method ID check for the inlined inlineForcedGCTarget
 //! HAS_NOT CallKnownJSFunction
 //! COUNT Call 1
 
@@ -297,7 +298,7 @@
 //! HAS_NOT Call
 
 //! METHOD callNestedForcedGC
-//! COUNT DeoptIfTaggedCondition 3
+//! COUNT_LE DeoptIfTaggedCondition 2  # method ID checks for nestedGCMiddle and its call to inlineForcedGCTarget
 //! HAS_NOT CallKnownJSFunction
 //! COUNT Call 1
 

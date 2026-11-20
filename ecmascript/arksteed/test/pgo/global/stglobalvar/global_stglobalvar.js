@@ -18,7 +18,7 @@
 //! METHOD writeGlobalVar
 //! HAS HeapConstant
 //! HAS StoreTaggedFieldWithBarrier
-//! HAS DeoptIfTaggedCondition
+//! HAS_NOT DeoptIfTaggedCondition  # script var gStore is non-configurable; its box is never cleared
 //! HAS_NOT CallCommonStub StGlobalVar
 
 var gStore = 0;
