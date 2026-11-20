@@ -34,7 +34,7 @@ public:
     {
         return heap_;
     }
-    //Shared with GlobalCC's copy tasks for local-heap T0 allocation.
+    // Shared with GlobalCC's copy tasks for local-heap TO allocation.
 #if USE_CMS_GC
     SlotGCAllocator *GetTlabAllocator(uint32_t threadIndex)
     {

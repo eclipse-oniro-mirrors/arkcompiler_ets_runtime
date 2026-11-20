@@ -202,8 +202,9 @@ void SlotSpace::EnumerateFromRegions(Callback &&cb) const
 }
 
 template <typename Callback>
-void SlotSpace::EnumerateToRegions(Callback &&cb) const
+void SlotSpace::EnumerateToRegionsSync(Callback &&cb) const
 {
+    LockHolder holder(mutex_);
     for (const CMSRegionChainManager *regionChainManager : gcRegionChainManagerInstances_) {
         regionChainManager->EnumerateRegions(cb);
     }

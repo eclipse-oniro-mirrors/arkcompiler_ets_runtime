@@ -41,6 +41,13 @@ void SpecializedSlotSpace::EnumerateFromRegions(Callback &&regionCallback) const
 }
 
 template <typename Callback>
+void SpecializedSlotSpace::EnumerateToRegionsSync(Callback &&regionCallback) const
+{
+    LockHolder holder(gcAllocateMutex_);
+    gcRegionChainManager_.EnumerateRegions(std::forward<Callback>(regionCallback));
+}
+
+template <typename Callback>
 void SpecializedSlotSpace::IterateSlotObjectsInRegion(Region *region, const Callback &objectCallback) const
 {
     uintptr_t current = region->GetBegin();

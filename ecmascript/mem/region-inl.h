@@ -117,7 +117,9 @@ ARK_NOINLINE RememberedSet *Region::CreateLocalToShareRememberedSet()
 {
     LockHolder lock(*lock_);
     if (packedData_.localToShareSet_ == nullptr) {
-        if (sweepingLocalToShareRSet_ != nullptr && IsGCFlagSet(RegionGCFlags::HAS_BEEN_SWEPT)) {
+        // GlobalCC may still rebuild a non-TO region's L2S set after sweeping finishes.
+        if (sweepingLocalToShareRSet_ != nullptr && IsGCFlagSet(RegionGCFlags::HAS_BEEN_SWEPT) &&
+            (pendingReTrimRangesForCC_ == nullptr || IsToRegion())) {
             packedData_.localToShareSet_ = sweepingLocalToShareRSet_;
             ClearRSetSwapFlag(RSetSwapFlag::LOCAL_TO_SHARE_SWAPPED_MASK);
             sweepingLocalToShareRSet_ = nullptr;
@@ -130,9 +132,13 @@ ARK_NOINLINE RememberedSet *Region::CreateLocalToShareRememberedSet()
 
 ARK_NOINLINE CompressedRememberedSet *Region::CreateCompressedLocalToShareRememberedSet()
 {
+#ifndef USE_COMPRESSED_POINTER
+    return nullptr;
+#endif
     LockHolder lock(*lock_);
     if (packedData_.compressedLocalToShareSet_ == nullptr) {
-        if (compressedSweepingLocalToShareRSet_ != nullptr && IsGCFlagSet(RegionGCFlags::HAS_BEEN_SWEPT)) {
+        if (compressedSweepingLocalToShareRSet_ != nullptr && IsGCFlagSet(RegionGCFlags::HAS_BEEN_SWEPT) &&
+            (pendingReTrimRangesForCC_ == nullptr || IsToRegion())) {
             packedData_.compressedLocalToShareSet_ = compressedSweepingLocalToShareRSet_;
             // const pool do not support copy, so do not need support for batch barrier
             compressedSweepingLocalToShareRSet_ = nullptr;
@@ -186,6 +192,30 @@ inline void Region::MergeLocalToShareRSetForCS()
     }
 }
 
+inline void Region::MergeLocalToShareRSetForCC()
+{
+    ASSERT(pendingReTrimRangesForCC_ != nullptr);
+    if (IsToRegion()) {
+        MergeLocalToShareRSetForCS();
+        for (auto [start, end] : *pendingReTrimRangesForCC_) {
+            ClearLocalToShareRSetInRange(start, end);
+        }
+    } else {
+        // Swept regions may reuse trimmed ranges; preserve their new write-barrier records.
+        for (auto [start, end] : *pendingReTrimRangesForCC_) {
+            if (sweepingLocalToShareRSet_ != nullptr) {
+                sweepingLocalToShareRSet_->ClearRange(ToUintPtr(this), start, end);
+            }
+            if (compressedSweepingLocalToShareRSet_ != nullptr) {
+                compressedSweepingLocalToShareRSet_->ClearRange(ToUintPtr(this), start, end);
+            }
+        }
+        MergeLocalToShareRSetForCS();
+    }
+    delete pendingReTrimRangesForCC_;
+    pendingReTrimRangesForCC_ = nullptr;
+}
+
 inline void Region::MergeOldToNewRSetForCS()
 {
     if (sweepingOldToNewRSet_ != nullptr) {
@@ -232,7 +262,13 @@ inline void Region::MergeLocalToShareRSetForCM(RememberedSetBase<refType> *set)
     }
     // fixme: compressed pointer : const pool do not support copy, so do not need support for batch barrier
     if constexpr (!ReferenceIsCompressed<refType>) {
+        // The merged set must be exactly the one collected from this region.
+        ASSERT(collectedLocalToShareRSet_ == set);
+        collectedLocalToShareRSet_ = nullptr;
         ClearRSetSwapFlag(RSetSwapFlag::LOCAL_TO_SHARE_COLLECTED_MASK);
+    } else {
+        ASSERT(collectedCompressedLocalToShareRSet_ == set);
+        collectedCompressedLocalToShareRSet_ = nullptr;
     }
 }
 
@@ -367,18 +403,22 @@ inline bool Region::HasLocalToShareRememberedSet() const
 
 inline RememberedSet *Region::CollectLocalToShareRSet()
 {
+    ASSERT(collectedLocalToShareRSet_ == nullptr);
     RememberedSet *set = packedData_.localToShareSet_;
     packedData_.localToShareSet_ = nullptr;
     if (set != nullptr) {
         SetRSetSwapFlag(RSetSwapFlag::LOCAL_TO_SHARE_COLLECTED_MASK);
     }
+    collectedLocalToShareRSet_ = set;
     return set;
 }
 
 inline CompressedRememberedSet *Region::CollectCompressedLocalToShareRSet()
 {
+    ASSERT(collectedCompressedLocalToShareRSet_ == nullptr);
     CompressedRememberedSet *set = packedData_.compressedLocalToShareSet_;
     packedData_.compressedLocalToShareSet_ = nullptr;
+    collectedCompressedLocalToShareRSet_ = set;
     // const pool do not support copy, so do not need support for batch barrier
     return set;
 }
@@ -409,7 +449,8 @@ inline void Region::InsertSweepingLocalToShareRSetForCC(uintptr_t addr)
         }
     }();
     ASSERT(set);
-    set->Insert(ToUintPtr(this), addr);
+    // Trim atomically clears this set while the update visitor inserts.
+    set->AtomicInsert(ToUintPtr(this), addr);
 }
 
 template <Region::RegionSpaceKind kind>
@@ -462,6 +503,23 @@ inline void Region::AtomicClearSweepingLocalToShareRSetInRange(uintptr_t start, 
     }
     if (compressedSweepingLocalToShareRSet_ != nullptr) {
         compressedSweepingLocalToShareRSet_->AtomicClearRange(ToUintPtr(this), start, end);
+    }
+}
+
+inline void Region::AtomicClearCollectedLocalToShareRSetInRange(uintptr_t start, uintptr_t end)
+{
+    if (collectedLocalToShareRSet_ != nullptr) {
+        collectedLocalToShareRSet_->AtomicClearRange(ToUintPtr(this), start, end);
+    }
+    if (collectedCompressedLocalToShareRSet_ != nullptr) {
+        collectedCompressedLocalToShareRSet_->AtomicClearRange(ToUintPtr(this), start, end);
+    }
+}
+
+inline void Region::RecordReTrimRangesIfNeededForCC(uintptr_t start, uintptr_t end)
+{
+    if (pendingReTrimRangesForCC_ != nullptr) {
+        pendingReTrimRangesForCC_->emplace_back(start, end);
     }
 }
 

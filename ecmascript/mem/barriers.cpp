@@ -29,8 +29,8 @@ void Barriers::Update(const JSThread *thread, uintptr_t slotAddr, Region *object
 {
     ASSERT(!g_isEnableCMCGC);
     if (thread->IsGlobalConcurrentMarking()) {
-        // Route to Global CC mark barrier. RSet maintenance is already done by WriteBarrier
-        // before calling Update; MarkFromWriteBarrier does AtomicMark + fence + push.
+        // RSet maintenance is already done by WriteBarrier before calling Update.
+        // Deserialized objects stay unmarked until ReMark can traverse their initialized fields.
         if (writeType == WriteBarrierType::NORMAL) {
             TaggedObject *heapValue = JSTaggedValue(value).GetHeapObject();
             SharedHeap::GetInstance()->GetGlobalCCMarker()->MarkFromWriteBarrier(thread, heapValue);

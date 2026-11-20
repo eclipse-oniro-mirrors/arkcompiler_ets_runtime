@@ -107,23 +107,26 @@ class CCTlabAllocator : public TlabAllocatorBase {
 public:
     CCTlabAllocator() = default;
     ~CCTlabAllocator() = default;
-    inline uintptr_t Allocate(size_t size);
+    inline uintptr_t Allocate(size_t size, MemSpaceType space = MemSpaceType::OLD_SPACE);
     inline uintptr_t AllocateNativePointer();
     inline void Setup(Heap *heap);
     inline void Initialize();
     inline void Finalize();
     inline void ReleaseNativePointer(uintptr_t address);
+    inline void ReleaseModule(uintptr_t address);
 
     NO_COPY_SEMANTIC(CCTlabAllocator);
     NO_MOVE_SEMANTIC(CCTlabAllocator);
 private:
     inline void Expand();
+    inline uintptr_t AllocateInModuleSpace(size_t size);
 
     Heap *heap_ {nullptr};
     BumpPointerAllocator bpAllocator_;
     Region *tlabRegion_ {nullptr};
     ToSpace *toSpace_ {nullptr};
     SpecializedSlotTlabAllocator nativePointerAllocator_;
+    SpecializedSlotTlabAllocator moduleTlab_ {};
 };
 
 class SharedTlabAllocator : public TlabAllocatorBase {

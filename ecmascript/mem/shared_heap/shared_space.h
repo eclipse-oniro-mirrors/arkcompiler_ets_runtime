@@ -119,10 +119,12 @@ private:
     void IncAllocSObjectSize(uintptr_t object, size_t size);
 
     Mutex lock_;
-    Mutex allocateLock_;
+    mutable Mutex allocateLock_;
     std::vector<Region *> sweepingList_;
     std::vector<Region *> sweptList_;
     size_t triggerLocalFullMarkLimit_ {0};
+
+    friend class SharedLocalSpace;
 };
 
 class SharedAppSpawnSpace : public SharedSparseSpace {
@@ -218,6 +220,14 @@ public:
     NO_MOVE_SEMANTIC(SharedLocalSpace);
 
     uintptr_t Allocate(size_t size, bool isExpand = true);
+
+    template <class Callback>
+    void EnumerateToRegionsSync(const Callback &cb) const
+    {
+        LockHolder holder(allocateLock_);
+        MonoSpace::EnumerateRegions(cb);
+    }
+
     bool AddRegionToList(Region *region);
     void FreeBumpPoint();
     void Stop();
@@ -289,8 +299,9 @@ public:
         return CommittedSizeExceed(alignedSize);
     }
 
-    // In HugeObject allocation, we have a revervation of 8 bytes for markBitSet in objectSize.
-    // In case Region is not aligned by 16 bytes, HUGE_OBJECT_BITSET_SIZE is 8 bytes more.
+    // In HugeObject allocation, the region reserves Region::HUGE_REGION_MARK_BITSET_SIZE (8 bytes, 2 words)
+    // for the mark bitset after the Region header. HUGE_OBJECT_BITSET_SIZE (16 bytes) additionally covers
+    // the alignment slop of rounding the Region header up to 16 bytes.
     static size_t AlignUpHugeObjectSize(size_t objectSize)
     {
         return AlignUp(objectSize + sizeof(DefaultRegion) + HUGE_OBJECT_BITSET_SIZE, DEFAULT_REGION_SIZE);

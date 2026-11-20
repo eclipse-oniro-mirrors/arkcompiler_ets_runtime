@@ -59,6 +59,7 @@ const char *GCStats::GetGCStatisticType(GCType type)
         case GCType::SHARED_PARTIAL_GC:
         case GCType::SHARED_FULL_GC:
         case GCType::GLOBAL_GC:
+        case GCType::GLOBAL_CC:
         case GCType::SHARED_CC:
             return "Shared GC";
         case GCType::PARTIAL_YOUNG_GC:
@@ -938,6 +939,8 @@ GCType GCStats::GetGCType(TriggerGCType gcType)
             return GCType::SHARED_CC;
         case TriggerGCType::GLOBAL_GC:
             return GCType::GLOBAL_GC;
+        case TriggerGCType::GLOBAL_CC:
+            return GCType::GLOBAL_CC;
         case TriggerGCType::CMS_GC:
             return GCType::CMS_GC;
         default:
@@ -976,7 +979,8 @@ void SharedGCStats::PrintGCStatistic()
         PrintSharedGCDuration();
         PrintGCMemoryStatistic();
         PrintSharedGCSummaryStatistic();
-    } else if (gcType_ == GCType::SHARED_PARTIAL_GC || gcType_ == GCType::SHARED_CC) {
+    } else if (gcType_ == GCType::SHARED_PARTIAL_GC || gcType_ == GCType::SHARED_CC ||
+               gcType_ == GCType::GLOBAL_CC) {
         PrintSharedGCOverview();
         PrintGCMemoryStatistic();
     }
@@ -1002,10 +1006,12 @@ void SharedGCStats::SharedGCFinishTrace()
 
 void SharedGCStats::PrintSharedGCOverview()
 {
-    // SharedCC: default position shows total STW pause (STW2+STW3); total duration is the extra line.
+    // CC overview shows total STW pause; GlobalCC records both STW windows in SuspendAll.
     float mainDuration = scopeDuration_[Scope::ScopeId::TotalGC];
     if (gcType_ == GCType::SHARED_CC) {
         mainDuration = scopeDuration_[Scope::ScopeId::ReMark] + scopeDuration_[Scope::ScopeId::SuspendAll];
+    } else if (gcType_ == GCType::GLOBAL_CC) {
+        mainDuration = scopeDuration_[Scope::ScopeId::SuspendAll];
     }
     LOG_GC(INFO) << " [ " << GetGCTypeName() << " ] "
                  << sizeToMB(recordData_[(uint8_t)RecordData::START_OBJ_SIZE]) << " ("
@@ -1015,7 +1021,7 @@ void SharedGCStats::PrintSharedGCOverview()
                  << mainDuration
                  << "ms, GCReason: " << GCReasonToString()
                  << ", MarkReason: " << MarkReasonToString();
-    if (gcType_ == GCType::SHARED_CC) {
+    if (gcType_ == GCType::SHARED_CC || gcType_ == GCType::GLOBAL_CC) {
         LOG_GC(INFO) << "TotalTime: " << scopeDuration_[Scope::ScopeId::TotalGC] << "ms";
     }
     LOG_GC(INFO) << "IsInBackground: " << Runtime::GetInstance()->IsInBackground() << "; "

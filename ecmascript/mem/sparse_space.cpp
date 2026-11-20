@@ -140,9 +140,10 @@ void SparseSpace::PrepareSweeping()
 {
     JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     liveObjectSize_ = 0;
+    const bool maintainRSet = localHeap_->GetGCType() != TriggerGCType::GLOBAL_CC;
     ASSERT(GetSweepingRegionSafe() == nullptr);
     ASSERT(GetSweptRegionSafe() == nullptr);
-    EnumerateRegions([this](Region *current) {
+    EnumerateRegions([this, maintainRSet](Region *current) {
         ASSERT(!current->IsToRegion());
         if (!current->InCollectSet()) {
             ASSERT(!current->IsGCFlagSet(RegionGCFlags::HAS_BEEN_SWEPT));
@@ -152,8 +153,10 @@ void SparseSpace::PrepareSweeping()
             }
             IncreaseLiveObjectSize(current->AliveObject());
             current->ResetWasted();
-            current->SwapOldToNewRSetForCS();
-            current->SwapLocalToShareRSetForCS();
+            if (maintainRSet) {
+                current->SwapOldToNewRSetForCS();
+                current->SwapLocalToShareRSetForCS();
+            }
             AddSweepingRegion(current);
         }
     });
@@ -162,30 +165,42 @@ void SparseSpace::PrepareSweeping()
     allocator_->RebuildFreeList();
 }
 
-void SparseSpace::AsyncSweep(bool isMain, bool releaseMemory)
+template<bool maintainRSet>
+void SparseSpace::AsyncSweepImpl(bool isMain, bool releaseMemory)
 {
-    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
     Region *current = GetSweepingRegionSafe();
     while (current != nullptr) {
         if (releaseMemory) {
-            FreeRegion<true>(current, isMain);
+            FreeRegionImpl<true, maintainRSet>(current, isMain);
         } else {
-            FreeRegion<false>(current, isMain);
+            FreeRegionImpl<false, maintainRSet>(current, isMain);
         }
         // Main thread sweeping region is added;
         if (!isMain) {
             AddSweptRegionSafe(current);
         } else {
-            current->MergeOldToNewRSetForCS();
-            current->MergeLocalToShareRSetForCS();
+            if constexpr (maintainRSet) {
+                current->MergeOldToNewRSetForCS();
+                current->MergeLocalToShareRSetForCS();
+            }
         }
         current = GetSweepingRegionSafe();
     }
 }
 
-void SparseSpace::Sweep()
+void SparseSpace::AsyncSweep(bool isMain, bool releaseMemory)
 {
     JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
+    if (UNLIKELY(localHeap_->GetGCType() == TriggerGCType::GLOBAL_CC)) {
+        AsyncSweepImpl<false>(isMain, releaseMemory);
+    } else {
+        AsyncSweepImpl<true>(isMain, releaseMemory);
+    }
+}
+
+template<bool maintainRSet>
+void SparseSpace::SweepImpl()
+{
     liveObjectSize_ = 0;
     allocator_->RebuildFreeList();
     EnumerateRegions([this](Region *current) {
@@ -193,9 +208,19 @@ void SparseSpace::Sweep()
         if (!current->InCollectSet()) {
             IncreaseLiveObjectSize(current->AliveObject());
             current->ResetWasted();
-            FreeRegion<false>(current, true);
+            FreeRegionImpl<false, maintainRSet>(current, true);
         }
     });
+}
+
+void SparseSpace::Sweep()
+{
+    JIT_WRITE_SCOPE(jitWriteScope, spaceType_ == MemSpaceType::MACHINE_CODE_SPACE);
+    if (UNLIKELY(localHeap_->GetGCType() == TriggerGCType::GLOBAL_CC)) {
+        SweepImpl<false>();
+    } else {
+        SweepImpl<true>();
+    }
 }
 
 bool SparseSpace::TryFillSweptRegion()
@@ -204,12 +229,15 @@ bool SparseSpace::TryFillSweptRegion()
     if (sweptList_.empty()) {
         return false;
     }
+    const bool maintainRSet = localHeap_->GetGCType() != TriggerGCType::GLOBAL_CC;
     Region *region = nullptr;
     while ((region = GetSweptRegionSafe()) != nullptr) {
         allocator_->CollectFreeObjectSet(region);
         region->ResetSwept();
-        region->MergeOldToNewRSetForCS();
-        region->MergeLocalToShareRSetForCS();
+        if (maintainRSet) {
+            region->MergeOldToNewRSetForCS();
+            region->MergeLocalToShareRSetForCS();
+        }
     }
     return true;
 }
@@ -286,6 +314,12 @@ Region *SparseSpace::TryToGetSuitableSweptRegion(size_t size)
 template<bool releaseMemory>
 void SparseSpace::FreeRegion(Region *current, bool isMain)
 {
+    FreeRegionImpl<releaseMemory, true>(current, isMain);
+}
+
+template<bool releaseMemory, bool maintainRSet>
+void SparseSpace::FreeRegionImpl(Region *current, bool isMain)
+{
     uintptr_t freeStart = current->GetBegin();
     current->IterateAllMarkedBits([this, &current, &freeStart, isMain](void *mem) {
         ASSERT(current->InRange(ToUintPtr(mem)));
@@ -294,18 +328,24 @@ void SparseSpace::FreeRegion(Region *current, bool isMain)
 
         uintptr_t freeEnd = ToUintPtr(mem);
         if (freeStart != freeEnd) {
-            FreeLiveRange<releaseMemory>(current, freeStart, freeEnd, isMain);
+            FreeLiveRangeImpl<releaseMemory, maintainRSet>(current, freeStart, freeEnd, isMain);
         }
         freeStart = freeEnd + size;
     });
     uintptr_t freeEnd = current->GetEnd();
     if (freeStart != freeEnd) {
-        FreeLiveRange<releaseMemory>(current, freeStart, freeEnd, isMain);
+        FreeLiveRangeImpl<releaseMemory, maintainRSet>(current, freeStart, freeEnd, isMain);
     }
 }
 
 template<bool releaseMemory>
 void SparseSpace::FreeLiveRange(Region *current, uintptr_t freeStart, uintptr_t freeEnd, bool isMain)
+{
+    FreeLiveRangeImpl<releaseMemory, true>(current, freeStart, freeEnd, isMain);
+}
+
+template<bool releaseMemory, bool maintainRSet>
+void SparseSpace::FreeLiveRangeImpl(Region *current, uintptr_t freeStart, uintptr_t freeEnd, bool isMain)
 {
 #if ENABLE_MEMORY_OPTIMIZATION
     if constexpr (releaseMemory) {
@@ -318,7 +358,9 @@ void SparseSpace::FreeLiveRange(Region *current, uintptr_t freeStart, uintptr_t 
         }
     }
 #endif
-    localHeap_->GetSweeper()->ClearRSetInRange(current, freeStart, freeEnd);
+    if constexpr (maintainRSet) {
+        localHeap_->GetSweeper()->ClearRSetInRange(current, freeStart, freeEnd);
+    }
     allocator_->Free(freeStart, freeEnd - freeStart, isMain);
     MEMORY_TRACE_FREEREGION(freeStart, freeEnd - freeStart);
 }
@@ -511,7 +553,7 @@ void OldSpace::MergeToSpace(ToSpace *toSpace)
     toSpace->EnumerateRegions([&](Region *region) {
         toSpace->RemoveRegion(region);
         region->ResetSwept();
-        region->MergeLocalToShareRSetForCS();
+        region->MergeLocalToShareRSetForCC();
         AddRegion(region);
         totalAllocatedSize += region->AliveObject();
     });
@@ -718,7 +760,8 @@ Region* ToSpace::ForceExpandSync()
     region->SetRegionTypeFlag(RegionTypeFlag::TO);
     // Forbidden batch rset update during concurrent copying.
     region->CreateLocalToShareRememberedSet();
-    region->SwapLocalToShareRSetForCS();
+    region->CreateCompressedLocalToShareRememberedSet();
+    region->SwapLocalToShareRSetForCC();
     AddRegion(region);
     return region;
 }

@@ -555,6 +555,8 @@ uintptr_t SharedLocalSpace::Allocate(size_t size, bool isExpand)
 {
     auto object = allocator_->Allocate(size);
     if (object == 0 && isExpand) {
+        // CC update may enumerate this space while a delayed read-barrier copy expands it.
+        LockHolder lock(allocateLock_);
         // Shared Full GC will compress all regions and cannot recognize all threads' region.
         if (!Expand(Runtime::GetInstance()->GetMainThread())) {
             ForceExpandInSharedGC(Runtime::GetInstance()->GetMainThread());
@@ -666,8 +668,7 @@ uintptr_t SharedHugeObjectSpace::Allocate(JSThread *thread, size_t objectSize, A
         UNREACHABLE();
     }
 #endif
-    // In HugeObject allocation, we have a revervation of 8 bytes for markBitSet in objectSize.
-    // In case Region is not aligned by 16 bytes, HUGE_OBJECT_BITSET_SIZE is 8 bytes more.
+    // See the comment on AlignUpHugeObjectSize for the huge-object head layout.
     size_t alignedSize = AlignUpHugeObjectSize(objectSize);
     if (allocType == AllocateEventType::NORMAL) {
         thread->CheckSafepointIfSuspended();

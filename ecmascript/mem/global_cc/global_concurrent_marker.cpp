@@ -31,7 +31,7 @@
 
 namespace panda::ecmascript {
 
-GlobalCCMarker::GlobalCCMarker(GlobalCC *globalCC) : globalCC_(globalCC), sHeap_(globalCC->GetSharedHeap()) {}
+GlobalCCMarker::GlobalCCMarker(GlobalCC *globalCC) : globalCC_(globalCC), sHeap_(globalCC->GetHeap()) {}
 
 // Sum of committed sizes over all local heaps; call only with all JSThreads suspended.
 static size_t SumLocalHeapCommittedSize()
@@ -258,7 +258,6 @@ void GlobalCCMarker::InitializeMarking()
     DaemonThread::GetInstance()->SetGlobalConcurrentMarking(true);
     auto clearAppSpawn = [](Region *current) {
         current->ClearMarkGCBitset();
-        current->ClearCrossRegionRSet();
     };
     auto resetAlive = [](Region *current) {
         current->ResetAliveObject();
@@ -266,7 +265,8 @@ void GlobalCCMarker::InitializeMarking()
     Runtime::GetInstance()->GCIterateThreadList(
         [this, &clearAppSpawn, &resetAlive](JSThread *thread) {
             Heap *heap = thread->GetEcmaVM()->GetHeap();
-            heap->Prepare();
+            // LocalCC native cleanup must run later on the owner, outside this STW.
+            heap->Prepare(false);
             if (heap->CheckOngoingConcurrentMarking()) {
                 heap->GetConcurrentMarker()->Reset(true);
             }

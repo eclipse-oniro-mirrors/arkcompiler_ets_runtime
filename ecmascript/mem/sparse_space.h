@@ -171,6 +171,18 @@ protected:
     uintptr_t AllocateAfterSweepingCompleted(size_t size);
 
 private:
+    template<bool maintainRSet>
+    void AsyncSweepImpl(bool isMain, bool releaseMemory);
+
+    template<bool maintainRSet>
+    void SweepImpl();
+
+    template<bool releaseMemory, bool maintainRSet>
+    void FreeRegionImpl(Region *current, bool isMain);
+
+    template<bool releaseMemory, bool maintainRSet>
+    void FreeLiveRangeImpl(Region *current, uintptr_t freeStart, uintptr_t freeEnd, bool isMain);
+
     Mutex lock_;
     std::vector<Region *> sweepingList_;
     std::vector<Region *> sweptList_;
@@ -183,11 +195,18 @@ public:
     Region *ForceExpandSync();
     uintptr_t Allocate(size_t size, bool allowGC = true);
 
+    template <class Callback>
+    void EnumerateToRegionsSync(const Callback &cb) const
+    {
+        LockHolder holder(mutex_);
+        MonoSpace::EnumerateRegions(cb);
+    }
+
     NO_COPY_SEMANTIC(ToSpace);
     NO_MOVE_SEMANTIC(ToSpace);
 
 private:
-    Mutex mutex_;
+    mutable Mutex mutex_;
 };
 
 class OldSpace : public SparseSpace {

@@ -359,14 +359,19 @@ void ConcurrentCopyGC::RunUpdatePhase()
             ObjectXRay::VisitObjectBody<VisitType::OLD_GC_VISIT>(object, jsHClass, updator);
         });
     };
-    auto toSpaceUpdator = [&](Region *region) {
-        updateMarkedRegion(region, updatorWithBarrier);
-        region->SetSwept();
+    tasks_.clear();
+    auto collectToSpace = [this](Region *region) {
+        tasks_.emplace_back(region);
     };
     if constexpr (!G_USE_CMS_GC) {
-        heap_->GetToSpace()->EnumerateRegions(toSpaceUpdator);
+        heap_->GetToSpace()->EnumerateToRegionsSync(collectToSpace);
     } else {
-        heap_->GetSlotSpace()->EnumerateToRegions(toSpaceUpdator);
+        heap_->GetSlotSpace()->EnumerateToRegionsSync(collectToSpace);
+    }
+    // Snapshot under the allocation lock; object updates run after releasing it.
+    for (Region *region : tasks_) {
+        updateMarkedRegion(region, updatorWithBarrier);
+        region->SetSwept();
     }
     CCUpdateVisitor<false> updatorWithoutBarrier(thread_);
     heap_->EnumerateNonmovableRegionsWithRecord([&](Region *region) {

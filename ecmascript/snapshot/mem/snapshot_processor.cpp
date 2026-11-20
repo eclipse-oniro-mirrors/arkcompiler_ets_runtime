@@ -1396,7 +1396,7 @@ void SnapshotProcessor::DeserializeHugeSpaceObject(uintptr_t beginAddr, HugeObje
         size_t objSize = info->aliveObjectSize_;
         size_t alignedRegionObjSize = AlignUp(sizeof(DefaultRegion),
                                               static_cast<size_t>(MemAlignment::MEM_ALIGN_REGION));
-        size_t hugeRegionHeadSize = AlignUp(alignedRegionObjSize + GCBitset::BYTE_PER_WORD,
+        size_t hugeRegionHeadSize = AlignUp(alignedRegionObjSize + Region::HUGE_REGION_MARK_BITSET_SIZE,
                                             static_cast<size_t>(MemAlignment::MEM_ALIGN_OBJECT));
 
         ASSERT(objSize > g_maxRegularHeapObjectSize);

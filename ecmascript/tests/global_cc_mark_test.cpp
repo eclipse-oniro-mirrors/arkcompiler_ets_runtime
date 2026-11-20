@@ -39,6 +39,8 @@ namespace panda::test {
 
 namespace {
 bool g_taskIsRunning {false};
+bool g_waitBeforeReMark {false};
+bool g_concurrentMarkFinished {false};
 Mutex g_mutex;
 ConditionVariable g_cv;
 
@@ -49,11 +51,26 @@ public:
 
     void HandleMarkingFinished() override
     {
+        {
+            LockHolder lock(g_mutex);
+            g_concurrentMarkFinished = true;
+            g_cv.SignalAll();
+            while (g_waitBeforeReMark) {
+                g_cv.Wait(&g_mutex);
+            }
+        }
         DaemonThread *dThread = DaemonThread::GetInstance();
         {
             // ReMark requires a launched suspend-all.
             SuspendAllScope<DaemonThread> scope(dThread);
             ReMark();
+            // This mark-only round has no copy/finalize phase to close the marking routes.
+            Runtime::GetInstance()->GCIterateThreadList([](JSThread *thread) {
+                thread->SetGlobalConcurrentMarking(false);
+                thread->SetMarkStatus(MarkStatus::READY_TO_MARK);
+            });
+            dThread->SetGlobalConcurrentMarking(false);
+            dThread->SetSharedMarkStatus(SharedMarkStatus::READY_TO_CONCURRENT_MARK);
             dThread->FinishRunningTask();
         }
     }
@@ -91,10 +108,12 @@ public:
         scope = new EcmaHandleScope(thread);
     }
 
-    void RunGlobalCCRound()
+    void RunGlobalCCRound(bool waitBeforeReMark = false)
     {
         LockHolder lock(g_mutex);
         g_taskIsRunning = true;
+        g_waitBeforeReMark = waitBeforeReMark;
+        g_concurrentMarkFinished = false;
         DaemonThread::PostTaskResult result =
             DaemonThread::GetInstance()->CheckAndPostTask(GlobalCCRoundTask(thread));
         EXPECT_TRUE(result == DaemonThread::PostTaskResult::SUCCESS);
@@ -104,6 +123,8 @@ public:
     {
         ThreadNativeScope nativeScope(thread);
         LockHolder lock(g_mutex);
+        g_waitBeforeReMark = false;
+        g_cv.SignalAll();
         while (g_taskIsRunning) {
             g_cv.Wait(&g_mutex);
         }
@@ -166,16 +187,27 @@ HWTEST_F_L0(GlobalCCMarkTest, GlobalCCWriteBarrierNoMissTest)
     constexpr size_t ARRAY_LEN = 8;
     JSHandle<TaggedArray> holder = AllocateLocalArray(ARRAY_LEN);
     JSHandle<TaggedArray> target = AllocateLocalArray(ARRAY_LEN);
-    RunGlobalCCRound();
+    // Keep ReMark from completing while the owner resumes from the initial flip.
+    RunGlobalCCRound(true);
     while (!thread->HasSuspendRequest()) {
         continue;
     }
     thread->CheckSafepointIfSuspended();
+    {
+        ThreadNativeScope nativeScope(thread);
+        LockHolder lock(g_mutex);
+        while (!g_concurrentMarkFinished) {
+            g_cv.Wait(&g_mutex);
+        }
+    }
+    EXPECT_TRUE(thread->IsGlobalConcurrentMarking());
     JSHandle<TaggedArray> newObj = AllocateLocalArray(ARRAY_LEN);
     JSHandle<TaggedArray> sharedObj = AllocateSharedArray(ARRAY_LEN);
     holder->Set(thread, 0, target);     // 0 : first slot
     holder->Set(thread, 1, newObj);     // 1 : second slot
     holder->Set(thread, 2, sharedObj);  // 2 : third slot
+    EXPECT_TRUE(Region::ObjectAddressToRange(*newObj)->Test(*newObj));
+    EXPECT_TRUE(Region::ObjectAddressToRange(*sharedObj)->Test(*sharedObj));
     JSTaggedValue ref = holder->Get(thread, 0);
     EXPECT_TRUE(ref.IsHeapObject());
     EXPECT_EQ(ref.GetRawHeapObject(), target.GetTaggedValue().GetRawHeapObject());

@@ -1152,6 +1152,8 @@ void Heap::ClearSlotsRange(Region *current, uintptr_t freeStart, uintptr_t freeE
     }
     current->ClearLocalToShareRSetInRange(freeStart, freeEnd);
     current->AtomicClearSweepingLocalToShareRSetInRange(freeStart, freeEnd);
+    current->AtomicClearCollectedLocalToShareRSetInRange(freeStart, freeEnd);
+    current->RecordReTrimRangesIfNeededForCC(freeStart, freeEnd);
 }
 
 size_t Heap::GetCommittedSize() const
@@ -1427,7 +1429,10 @@ TaggedObject *SharedHeap::AllocateInSOldSpace(JSThread *thread, size_t size)
         ASSERT(!thread->IsJitThread());
         return AllocateOldForCMC(thread, size);
     }
-    // jit thread no heap
+    // Invariant: a JIT-reachable allocation must never wait for a GC — the
+    // compile pass holds the JitLock (and possibly the string-table mutex),
+    // and waiting would close a deadlock cycle with the GC's STW. Keep every
+    // GC trigger below gated by allowGC.
     bool allowGC = !thread->IsJitThread();
     if (allowGC) {
         auto localHeap = const_cast<Heap*>(thread->GetEcmaVM()->GetHeap());
@@ -1612,19 +1617,19 @@ void SharedHeap::CollectGarbage(JSThread *thread)
     }
     ASSERT(gcType == TriggerGCType::SHARED_GC || gcType == TriggerGCType::SHARED_PARTIAL_GC ||
            gcType == TriggerGCType::SHARED_FULL_GC || gcType == TriggerGCType::GLOBAL_GC
-           || gcType == TriggerGCType::SHARED_CC
+           || gcType == TriggerGCType::SHARED_CC || gcType == TriggerGCType::GLOBAL_CC
     );
 #ifndef NDEBUG
     ASSERT(!thread->HasLaunchedSuspendAll());
 #endif
     DaemonThread::PostTaskResult result;
     {
-        // lock here is outside post task to prevent the extreme case: another js thread succeeed posting a
-        // concurrentmark task, so here will directly go into WaitGCFinished, but gcFinished_ is somehow
-        // not set by that js thread before the WaitGCFinished done, and maybe cause an unexpected OOM
+        // Publish the pending GC before another thread can wait for its completion.
         LockHolder lock(sharedGCSyncMutex_);
         if constexpr (gcType == TriggerGCType::SHARED_CC) {
             result = dThread_->CheckAndPostTask(TriggerSharedCCTask<gcReason>(thread));
+        } else if constexpr (gcType == TriggerGCType::GLOBAL_CC) {
+            result = dThread_->CheckAndPostTask(TriggerGlobalCCTask<gcReason>(thread));
         } else {
             result = dThread_->CheckAndPostTask(TriggerCollectGarbageTask<gcType, gcReason>(thread));
         }
@@ -1638,6 +1643,10 @@ void SharedHeap::CollectGarbage(JSThread *thread)
         LOG_GC(ERROR) << "Try to collect garbage in shared heap, but daemon thread is not running.";
         if constexpr (gcType == TriggerGCType::SHARED_CC) {
             ForceCollectGarbageWithoutDaemonThread(TriggerGCType::SHARED_FULL_GC, gcReason, thread);
+        } else if constexpr (gcType == TriggerGCType::GLOBAL_CC) {
+            // Without the daemon thread a phased GlobalCC cannot run; fall back to
+            // the full-STW global GC.
+            ForceCollectGarbageWithoutDaemonThread(TriggerGCType::GLOBAL_GC, gcReason, thread);
         } else {
             ForceCollectGarbageWithoutDaemonThread(gcType, gcReason, thread);
         }
@@ -1650,20 +1659,22 @@ void SharedHeap::CollectGarbage(JSThread *thread)
 
 // This method is used only in the idle state and background switchover state.
 template<TriggerGCType gcType, GCReason gcReason>
-void SharedHeap::CompressCollectGarbageNotWaiting(JSThread *thread, bool isForceGC)
+bool SharedHeap::CompressCollectGarbageNotWaiting(JSThread *thread, bool isForceGC)
 {
     // If should throw OOM, skip this GC to make next allocation fail, and throw OOM.
     if (shouldThrowOOMError_ || shouldForceThrowOOMError_) {
-        return;
+        return false;
     }
+    DaemonThread::PostTaskResult result;
     {
         // lock here is outside post task to prevent the extreme case: another js thread succeeed posting a
         // concurrentmark task, so here will directly go into WaitGCFinished, but gcFinished_ is somehow
         // not set by that js thread before the WaitGCFinished done, and maybe cause an unexpected OOM
         LockHolder lock(sharedGCSyncMutex_);
-        DaemonThread::PostTaskResult result;
         if constexpr (gcType == TriggerGCType::SHARED_CC) {
             result = dThread_->CheckAndPostTask(TriggerSharedCCTask<gcReason>(thread));
+        } else if constexpr (gcType == TriggerGCType::GLOBAL_CC) {
+            result = dThread_->CheckAndPostTask(TriggerGlobalCCTask<gcReason>(thread));
         } else {
             result = dThread_->CheckAndPostTask(TriggerCollectGarbageTask<gcType, gcReason>(thread));
         }
@@ -1672,10 +1683,17 @@ void SharedHeap::CompressCollectGarbageNotWaiting(JSThread *thread, bool isForce
             gcFinished_ = false;
         }
     }
+    if constexpr (gcType == TriggerGCType::GLOBAL_CC) {
+        // Another GC in the same group does not own GlobalCC's freeze completion.
+        if (result != DaemonThread::PostTaskResult::SUCCESS) {
+            return false;
+        }
+    }
     ASSERT(!gcFinished_);
     if (isForceGC) {
         SetForceGC(true);
     }
+    return result == DaemonThread::PostTaskResult::SUCCESS;
 }
 
 template<TriggerGCType gcType, GCReason gcReason>
@@ -1686,7 +1704,8 @@ void SharedHeap::PostGCTaskForTest(JSThread *thread)
         return;
     }
     ASSERT(gcType == TriggerGCType::SHARED_GC ||gcType == TriggerGCType::SHARED_PARTIAL_GC ||
-        gcType == TriggerGCType::SHARED_FULL_GC || gcType == TriggerGCType::SHARED_CC);
+        gcType == TriggerGCType::SHARED_FULL_GC || gcType == TriggerGCType::SHARED_CC ||
+        gcType == TriggerGCType::GLOBAL_CC);
 #ifndef NDEBUG
     ASSERT(!thread->HasLaunchedSuspendAll());
 #endif
@@ -1696,6 +1715,8 @@ void SharedHeap::PostGCTaskForTest(JSThread *thread)
         DaemonThread::PostTaskResult result;
         if constexpr (gcType == TriggerGCType::SHARED_CC) {
             result = dThread_->CheckAndPostTask(TriggerSharedCCTask<gcReason>(thread));
+        } else if constexpr (gcType == TriggerGCType::GLOBAL_CC) {
+            result = dThread_->CheckAndPostTask(TriggerGlobalCCTask<gcReason>(thread));
         } else {
             result = dThread_->CheckAndPostTask(TriggerCollectGarbageTask<gcType, gcReason>(thread));
         }

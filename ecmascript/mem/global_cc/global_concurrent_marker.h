@@ -39,6 +39,8 @@ public:
 
     virtual void HandleMarkingFinished();
 
+    static bool IsAlive(TaggedObject *obj);
+
 private:
     void InitializeMarking();
     void MarkRoots();
@@ -51,7 +53,6 @@ private:
     void MarkJitCodeMaps();
     bool HandleWeakAggregate(WeakAggregate weakAggregate, GlobalCCMarkObjectVisitor &visitor);
     void MarkUntilFixPoint();
-    static bool IsAlive(TaggedObject *obj);
 
     class RecursionScope {
     public:

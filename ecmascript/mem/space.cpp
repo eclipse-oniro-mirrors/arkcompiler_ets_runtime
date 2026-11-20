@@ -343,6 +343,7 @@ void HugeObjectSpace::AsyncClearAndFreeRegion(Region *region, size_t cachedSize)
     region->DeleteCrossRegionRSet();
     region->DeleteOldToNewRSet();
     region->DeleteLocalToShareRSet();
+    region->DeleteSweepingLocalToShareRSet();
     heapRegionAllocator_->FreeRegion<true>(region, cachedSize);
 }
 

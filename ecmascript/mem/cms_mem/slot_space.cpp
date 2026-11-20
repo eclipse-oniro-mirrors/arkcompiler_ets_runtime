@@ -123,9 +123,11 @@ void SlotSpace::ExpandAllocator(SlotAllocator *allocator)
     if constexpr(!expandInGC) {
         IncreaseCommitted(region->GetCapacity());
     } else {
+        // fixme: only need in cc
         region->SetRegionTypeFlag(RegionTypeFlag::TO);
         region->CreateLocalToShareRememberedSet();
-        region->SwapLocalToShareRSetForCS();
+        region->CreateCompressedLocalToShareRememberedSet();
+        region->SwapLocalToShareRSetForCC();
     }
 }
 
@@ -285,7 +287,8 @@ void SlotSpace::MergeToRegions()
             CMSRegionChainManager *regionChainManager = regionChainManagerInstances_[i];
             gcRegionChainManager->EnumerateRegions([this, regionChainManager](Region *toRegion) {
                 toRegion->ResetSwept();
-                toRegion->MergeLocalToShareRSetForCS();
+                // fixme: dispatch for CC or for CS
+                toRegion->MergeLocalToShareRSetForCC();
                 regionChainManager->AddNewRegion(toRegion);
                 IncreaseCommitted(toRegion->GetCapacity());
             });

@@ -79,9 +79,9 @@ class RSetWorkListHandler;
 class SharedConcurrentMarker;
 class SharedConcurrentSweeper;
 class GlobalGC;
+class GlobalCC;
 class GlobalGCMarker;
 class GlobalGCWorkManager;
-class GlobalCC;
 class GlobalCCMarker;
 class GlobalCCWorkManager;
 class SharedGC;
@@ -781,8 +781,7 @@ public:
 
     void UpdateWorkManager(SharedGCWorkManager *sWorkManager);
 
-    // Mirror UpdateWorkManager for the Global CC mark work manager (e.g. thread-count change);
-    // refreshes the GlobalCC copy too.
+    // Refresh the GlobalCC work manager after a thread-count change.
     void UpdateGlobalCCWorkManager(GlobalCCWorkManager *workManager);
 
     bool CheckOngoingConcurrentMarking() override;
@@ -874,8 +873,9 @@ public:
     template<TriggerGCType gcType, GCReason gcReason>
     void CollectGarbage(JSThread *thread);
 
+    // Returns whether a new GC task was posted.
     template<TriggerGCType gcType, GCReason gcReason>
-    void CompressCollectGarbageNotWaiting(JSThread *thread, bool isForceGC = true);
+    bool CompressCollectGarbageNotWaiting(JSThread *thread, bool isForceGC = true);
 
     template<TriggerGCType gcType, GCReason gcReason>
     void PostGCTaskForTest(JSThread *thread);
@@ -895,6 +895,8 @@ public:
     void RunSharedGC(TriggerGCType gcType, GCReason gcReason);
 
     void TriggerSharedCC(GCReason gcReason);
+
+    void TriggerGlobalCC(GCReason gcReason);
 
     inline size_t GetCommittedSize() const override
     {
@@ -1005,6 +1007,21 @@ public:
         return globalGC_;
     }
 
+    GlobalCC *GetGlobalCC() const
+    {
+        return globalCC_;
+    }
+
+    GlobalCCMarker *GetGlobalCCMarker() const
+    {
+        return globalCCMarker_;
+    }
+
+    GlobalCCWorkManager *GetGlobalCCWorkManager() const
+    {
+        return globalCCWorkManager_;
+    }
+
     SharedFullGC *GetSharedFullGC() const
     {
         return sharedFullGC_;
@@ -1023,21 +1040,6 @@ public:
     GlobalGCWorkManager *GetGlobalGCWorkManager() const
     {
         return globalGCWorkManager_;
-    }
-
-    GlobalCC *GetGlobalCC() const
-    {
-        return globalCC_;
-    }
-
-    GlobalCCMarker *GetGlobalCCMarker() const
-    {
-        return globalCCMarker_;
-    }
-
-    GlobalCCWorkManager *GetGlobalCCWorkManager() const
-    {
-        return globalCCWorkManager_;
     }
 
     SharedGCMarker *GetSharedGCMarker() const
@@ -1185,6 +1187,7 @@ private:
 
     void MoveOldSpaceToAppspawn();
 
+    void PrepareReclaimForGlobalCC();
     void ReclaimRegions(TriggerGCType type, bool gcThread);
 
     void ForceCollectGarbageWithoutDaemonThread(TriggerGCType gcType, GCReason gcReason, JSThread *thread);
@@ -1244,9 +1247,9 @@ private:
     SharedGC *sharedGC_ {nullptr};
     SharedPartialGC *sharedPartialGC_ {nullptr};
     GlobalGC *globalGC_ {nullptr};
+    GlobalCC *globalCC_ {nullptr};
     GlobalGCMarker *globalGCMarker_ {nullptr};
     GlobalGCWorkManager *globalGCWorkManager_ {nullptr};
-    GlobalCC *globalCC_ {nullptr};
     GlobalCCMarker *globalCCMarker_ {nullptr};
     GlobalCCWorkManager *globalCCWorkManager_ {nullptr};
     SharedFullGC *sharedFullGC_ {nullptr};
@@ -1278,6 +1281,7 @@ private:
     SHAREDHEAP_PRIVATE_HYBRID_EXTENSION();
 
     friend class ConcurrentCopyGC;
+    friend class GlobalCC;
 };
 
 class RunningMarkTaskSnapshot {
@@ -1732,6 +1736,8 @@ public:
     void WaitConcurrentMarkingFinished();
     PUBLIC_API void WaitCCFinished() const;
     void WaitAndHandleCCFinished(bool cleanCallback = false);
+    void WaitGlobalCCFinished() const;
+    void WaitGlobalCCCopyFinished() const;
 
     MemGrowingType GetMemGrowingType() const
     {
@@ -2173,6 +2179,7 @@ private:
     // record lastRegion for each space, which will be used in ReclaimRegions()
     void PrepareRecordRegionsForReclaim();
     void PrepareRecordNonmovableRegions();
+    void PrepareReclaimForGlobalCC();
     inline void ReclaimRegions(TriggerGCType gcType, bool cmsGC);
     inline size_t CalculateCommittedCacheSize();
 #if defined(ECMASCRIPT_SUPPORT_SNAPSHOT) && defined(PANDA_TARGET_OHOS) && defined(ENABLE_HISYSEVENT)
@@ -2455,6 +2462,7 @@ private:
 #endif
 
     friend class ConcurrentCopyGC;
+    friend class GlobalCC;
     friend class ConcurrentMarker;
     friend panda::test::HProfTestHelper;
     friend panda::test::GCTest_CallbackTask_Test;

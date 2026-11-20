@@ -1862,7 +1862,9 @@ JSTaggedValue BuiltinsArkTools::TriggerLocalCCGC(EcmaRuntimeCallInfo *info)
     JSThread *thread = info->GetThread();
     RETURN_IF_DISALLOW_ARKTOOLS(thread);
     Heap *heap = const_cast<Heap*>(thread->GetEcmaVM()->GetHeap());
-    if (heap->IsCCMark()) {
+    if (thread->IsGlobalConcurrentCopying()) {
+        heap->WaitGlobalCCCopyFinished();
+    } else if (heap->IsCCMark()) {
         heap->CollectGarbageFromCCMark(GCReason::IDLE);
     } else if (thread->IsConcurrentCopying()) {
         heap->WaitAndHandleCCFinished(true);
@@ -1883,6 +1885,17 @@ JSTaggedValue BuiltinsArkTools::TriggerSharedCC(EcmaRuntimeCallInfo *info)
     SharedHeap *sHeap = SharedHeap::GetInstance();
     sHeap->WaitGCFinished(thread);
     sHeap->CollectGarbage<TriggerGCType::SHARED_CC, GCReason::TRIGGER_BY_JS>(thread);
+    return JSTaggedValue::Undefined();
+}
+
+JSTaggedValue BuiltinsArkTools::TriggerGlobalCC(EcmaRuntimeCallInfo *info)
+{
+    ASSERT(info);
+    JSThread *thread = info->GetThread();
+    RETURN_IF_DISALLOW_ARKTOOLS(thread);
+    SharedHeap *sHeap = SharedHeap::GetInstance();
+    sHeap->WaitGCFinished(thread);
+    sHeap->CollectGarbage<TriggerGCType::GLOBAL_CC, GCReason::TRIGGER_BY_JS>(thread);
     return JSTaggedValue::Undefined();
 }
 

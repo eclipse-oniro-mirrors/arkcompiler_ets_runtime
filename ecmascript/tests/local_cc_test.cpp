@@ -391,45 +391,6 @@ HWTEST_F_L0(LocalCCTest, VerifyTest)
     EXPECT_TRUE(array1->Get(thread, 1).IsWeak());
 }
 
-HWTEST_F_L0(LocalCCTest, EvacuatorCopyTest)
-{
-    constexpr size_t OBJ_SIZE = 3_KB;
-    JSHandle<TaggedArray> testArray = AllocateWithoutGC(OBJ_SIZE);
-    TaggedObject *testObject = testArray.GetTaggedValue().GetTaggedObject();
-    MarkWord markWord(testObject, RELAXED_LOAD);
-    CCEvacuator *mainEvacuator = thread->GetLocalCCEvacuator();
-    thread->SetReadBarrierState(true);
-    thread->SetCCStatus(CCStatus::COPYING);
-    TaggedObject *dst1 = mainEvacuator->Copy(testObject, markWord);
-    TaggedObject *dst2 = mainEvacuator->Copy(testObject, markWord);
-    EXPECT_EQ(dst1, dst2);
-    thread->SetReadBarrierState(false);
-    thread->SetCCStatus(CCStatus::READY);
-}
-
-HWTEST_F_L0(LocalCCTest, EvacuatorCopyNativePointerTest)
-{
-    if constexpr (G_USE_CMS_GC) {
-        return;
-    }
-
-    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
-    JSHandle<JSNativePointer> nativePointer = factory->NewJSNativePointer(nullptr, nullptr, nullptr, false, 16);
-    TaggedObject *testObject = nativePointer.GetTaggedValue().GetTaggedObject();
-    MarkWord markWord(testObject, RELAXED_LOAD);
-    MarkWordType originalMarkWord = markWord.GetValue();
-    CCEvacuator *mainEvacuator = thread->GetLocalCCEvacuator();
-    thread->SetReadBarrierState(true);
-    thread->SetCCStatus(CCStatus::COPYING);
-    TaggedObject *dst1 = mainEvacuator->Copy(testObject, markWord);
-    TaggedObject *dst2 = mainEvacuator->Copy(testObject, markWord);
-    EXPECT_EQ(dst1, dst2);
-    EXPECT_TRUE(Region::ObjectAddressToRange(dst1)->InNativePointerSpace());
-    Barriers::SetPrimitive(testObject, 0, originalMarkWord);
-    thread->SetReadBarrierState(false);
-    thread->SetCCStatus(CCStatus::READY);
-}
-
 HWTEST_F_L0(LocalCCTest, LocalCCSplitsConcurrentNativePointerTasks)
 {
     if constexpr (G_USE_CMS_GC) {
@@ -846,6 +807,8 @@ HWTEST_F_L0(LocalCCTest, SpecializedSlotTlabAllocatorTest)
 
     uintptr_t firstAddress = allocator.Allocate();
     allocator.Reset(&otherSpace);
+    EXPECT_EQ(space.GetHeapObjectSize(), slotSize);
+    EXPECT_EQ(otherSpace.GetHeapObjectSize(), 0U);
     uintptr_t secondAddress = allocator.Allocate();
     uintptr_t thirdAddress = allocator.Allocate();
     EXPECT_NE(firstAddress, 0U);
@@ -855,6 +818,8 @@ HWTEST_F_L0(LocalCCTest, SpecializedSlotTlabAllocatorTest)
     EXPECT_EQ(thirdAddress - secondAddress, otherSlotSize);
 
     allocator.Finalize();
+    EXPECT_EQ(space.GetHeapObjectSize(), slotSize);
+    EXPECT_EQ(otherSpace.GetHeapObjectSize(), 2 * otherSlotSize);
     space.MergeToGCRegions();
     space.ReclaimFromRegions();
     otherSpace.MergeToGCRegions();

@@ -117,6 +117,7 @@ public:
     TaggedValueType<refType> GetTaggedValue() const
     {
         if constexpr (IS_COMPRESSED_SLOT) {
+            // NOLINTNEXTLINE(clang-analyzer-core.NullDereference)
             CompressedJSTaggedType rawData = *reinterpret_cast<CompressedJSTaggedType *>(slotAddress_);
             return CompressedJSTaggedValue(rawData).Decompress(slotAddress_);
         } else {

@@ -65,6 +65,9 @@ public:
     void EnumerateFromRegions(Callback &&regionCallback) const;
 
     template <typename Callback>
+    void EnumerateToRegionsSync(Callback &&regionCallback) const;
+
+    template <typename Callback>
     void IterateSlotObjectsInRegion(Region *region, const Callback &objectCallback) const;
 
     template <typename Visitor>
@@ -114,7 +117,7 @@ private:
     SlotAllocator gcAllocator_ {};
     CMSRegionChainManager gcRegionChainManager_ {};
     std::vector<Region *> pendingReclaimFromRegions_ {};
-    Mutex gcAllocateMutex_ {};
+    mutable Mutex gcAllocateMutex_ {};
     mutable Mutex pendingReclaimMutex_ {};
     std::atomic<size_t> survivalObjectSize_ {0};
     size_t allocateAfterLastGC_ {0};

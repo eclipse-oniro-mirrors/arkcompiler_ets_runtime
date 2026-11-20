@@ -79,6 +79,12 @@ public:
     static MoveScanStats ScanLocalCC(Heap *) { return MoveScanStats {}; }
 #endif
 
+#if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER)
+    static MoveScanStats ScanLocalGlobalCC(Heap *heap);
+#else
+    static MoveScanStats ScanLocalGlobalCC(Heap *) { return MoveScanStats {}; }
+#endif
+
     // Test/observability hooks.
 #if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER)
     static void SetLastStats(const MoveScanStats &stats);

@@ -104,7 +104,8 @@ void SpecializedSlotSpace::ExpandInGC()
     if (localHeap_->GetJSThread()->IsConcurrentCopying()) {
         region->SetRegionTypeFlag(RegionTypeFlag::TO);
         region->CreateLocalToShareRememberedSet();
-        region->SwapLocalToShareRSetForCS();
+        region->CreateCompressedLocalToShareRememberedSet();
+        region->SwapLocalToShareRSetForCC();
     }
 }
 
@@ -149,7 +150,11 @@ void SpecializedSlotSpace::MergeToGCRegions()
         toRegion->ResetSwept();
         toRegion->ClearMarkGCBitset();
         toRegion->ResetAliveObject();
-        toRegion->MergeLocalToShareRSetForCS();
+        if (localHeap_->GetJSThread()->IsConcurrentCopying()) {
+            toRegion->MergeLocalToShareRSetForCC();
+        } else {
+            toRegion->MergeLocalToShareRSetForCS();
+        }
         regionChainManager_.AddNewRegion(toRegion);
         IncreaseCommitted(toRegion->GetCapacity());
     });

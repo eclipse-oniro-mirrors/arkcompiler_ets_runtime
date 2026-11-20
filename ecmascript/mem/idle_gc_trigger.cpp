@@ -18,6 +18,10 @@
 #include "ecmascript/mem/concurrent_marker.h"
 #include "ecmascript/mem/heap-inl.h"
 
+#if defined(PANDA_TARGET_OHOS) && !defined(STANDALONE_MODE)
+#include "parameters.h"
+#endif
+
 namespace panda::ecmascript {
 void IdleGCTrigger::NotifyVsyncIdleStart()
 {
@@ -221,6 +225,33 @@ bool IdleGCTrigger::CheckLocalBindingNativeTriggerOldGC() const
     return incrementalNative > expectIncrementalNative;
 }
 
+bool IdleGCTrigger::TryTriggerIdleGlobalCC()
+{
+    ClearPostGCTask(TRIGGER_IDLE_GC_TYPE::GLOBAL_CC);
+    if (g_isEnableCMCGC || sHeap_->NeedStopCollection() || heap_->NeedStopCollection()) {
+        return false;
+    }
+    if (thread_->IsGlobalConcurrentMarking() || thread_->IsGlobalConcurrentCopying()) {
+        return true; // The in-flight round owns the heaps and its freeze completion.
+    }
+#if defined(PANDA_TARGET_OHOS) && !defined(STANDALONE_MODE)
+    // Cache on first use in the application, rather than during appspawn preload.
+    static const bool enableGlobalCCStress = []() {
+        bool enabled = OHOS::system::GetBoolParameter("persist.ark.globalcc.stress", false);
+        LOG_GC(INFO) << "IdleGCTrigger: GlobalCC stress enabled:" << enabled;
+        return enabled;
+    }();
+#else
+    static constexpr bool enableGlobalCCStress = false;
+#endif
+    if (!enableGlobalCCStress && !CheckIdleOrHintFullGC<SharedHeap>(sHeap_) &&
+        !CheckIdleOrHintFullGC<Heap>(heap_)) {
+        return false;
+    }
+    LOG_GC(INFO) << "IdleGCTrigger: trigger global cc";
+    return sHeap_->CompressCollectGarbageNotWaiting<TriggerGCType::GLOBAL_CC, GCReason::IDLE>(thread_);
+}
+
 void IdleGCTrigger::TryTriggerIdleGC(TRIGGER_IDLE_GC_TYPE gcType)
 {
     if (ecmascript::g_isEnableCMCGC) {
@@ -275,6 +306,11 @@ void IdleGCTrigger::TryTriggerIdleGC(TRIGGER_IDLE_GC_TYPE gcType)
                 NotifyIsNeedFreeze(true);
             }
             break;
+        case TRIGGER_IDLE_GC_TYPE::GLOBAL_CC:
+            if (!TryTriggerIdleGlobalCC()) {
+                NotifyIsNeedFreeze(true);
+            }
+            return; // TryTriggerIdleGlobalCC already clears the posted task state.
         case TRIGGER_IDLE_GC_TYPE::LOCAL_CONCURRENT_YOUNG_MARK:
             if (CheckIdleYoungGC() && !heap_->NeedStopCollection()) {
                 LOG_GC(DEBUG) << "IdleGCTrigger: trigger " << GetGCTypeName(gcType);
@@ -315,6 +351,10 @@ bool IdleGCTrigger::TryTriggerLocalCC() const
 {
     if (!heap_->LocalCCEnabled() || !thread_->IsMainThreadFast() ||
         heap_->GetHeapObjectSize() < IDLE_LOCAL_CC_LIMIT || thread_->GetLastLeaveFrame() != nullptr) {
+        return false;
+    }
+    if (thread_->IsGlobalConcurrentMarking() || thread_->IsGlobalConcurrentCopying()) {
+        // A GlobalCC round owns the heap; retry the idle trigger after it.
         return false;
     }
     if (heap_->IsCCMark()) {

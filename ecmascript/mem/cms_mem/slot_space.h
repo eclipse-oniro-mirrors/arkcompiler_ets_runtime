@@ -62,7 +62,7 @@ public:
     inline void EnumerateFromRegions(Callback &&cb) const;
 
     template <typename Callback>
-    inline void EnumerateToRegions(Callback &&cb) const;
+    inline void EnumerateToRegionsSync(Callback &&cb) const;
 
     void IterateOverObjects(const std::function<void(TaggedObject *object)> &visitor);
 
@@ -212,7 +212,7 @@ private:
     std::vector<Region *> pendingReclaimFromRegions_ {};
     size_t cacheRegionSize_ {0};
 
-    Mutex mutex_ {};
+    mutable Mutex mutex_ {};
     std::vector<CMSRegionChainManager *> sweptRegionChainManagers_ {};
 
     Heap *localHeap_ {nullptr};

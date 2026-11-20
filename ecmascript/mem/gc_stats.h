@@ -40,6 +40,7 @@ enum class GCType : int {
     SHARED_FULL_GC,
     SHARED_CC,
     GLOBAL_GC,
+    GLOBAL_CC,
     // fixme: support sticky
     CMS_GC,
     OTHER,
@@ -80,8 +81,8 @@ enum class RecordDuration : uint8_t {
     FIRST_DATA = SEMI_MIN_PAUSE,
 };
 
-// SharedCC finalizes TotalGC and STW3(SuspendAll) manually (see SharedCC::RunPhases/FinalizeAndReclaim);
-// do not wrap them with TRACE_GC.
+// SharedCC and GlobalCC finalize TotalGC and STW3(SuspendAll) manually (see their
+// RunPhases/FinalizeAndReclaim); do not wrap them with TRACE_GC.
 #define TRACE_GC(scope_id, gc_stats)    \
     [[maybe_unused]] GCStats::Scope sp(scope_id, gc_stats)
 
@@ -178,6 +179,8 @@ public:
                 return "SharedCC";
             case GCType::GLOBAL_GC:
                 return "GlobalGC";
+            case GCType::GLOBAL_CC:
+                return "GlobalCC";
             case GCType::CMS_GC:
                 return "CMSGC";
             default:

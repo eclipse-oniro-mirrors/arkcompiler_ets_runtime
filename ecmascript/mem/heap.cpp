@@ -54,9 +54,6 @@
 #include "ecmascript/dfx/hprof/heap_profiler_interface.h"
 #include "ecmascript/dfx/hprof/heap_profiler.h"
 #endif
-#if defined(ECMASCRIPT_SUPPORT_CPUPROFILER)
-#include "ecmascript/dfx/cpu_profiler/cpu_profiler.h"
-#endif
 #include "ecmascript/dfx/tracing/tracing.h"
 #include "ecmascript/napi/include/jsnapi_expo.h"
 #if defined(ENABLE_DUMP_IN_FAULTLOG)
@@ -433,8 +430,7 @@ void SharedHeap::Destroy()
         delete globalGCWorkManager_;
         globalGCWorkManager_ = nullptr;
     }
-    // Global CC singletons (delete marker/workManager before the coordinator, which only
-    // holds copies).
+    // GlobalCC keeps non-owning pointers to its marker and work manager.
     if (globalCCMarker_ != nullptr) {
         delete globalCCMarker_;
         globalCCMarker_ = nullptr;
@@ -512,8 +508,8 @@ void SharedHeap::PostInitialization(const JSRuntimeOptions &option)
     globalGCWorkManager_ = new GlobalGCWorkManager(this, totalThreadNum + 1);
     globalGCMarker_ = new GlobalGCMarker();
     globalGC_ = new GlobalGC(this);
-    // Global CC: SharedHeap owns the coordinator + work manager + marker (global singletons,
-    // mirrored from sWorkManager_/sConcurrentMarker_). GlobalCC holds only copies.
+    // SharedHeap owns the GlobalCC coordinator, work manager, and marker. The
+    // coordinator keeps non-owning pointers to the latter two.
     globalCC_ = new GlobalCC(this);
     globalCCWorkManager_ = new GlobalCCWorkManager(this, totalThreadNum + 1);
     globalCCMarker_ = new GlobalCCMarker(globalCC_);
@@ -683,6 +679,14 @@ void SharedHeap::TriggerSharedCC(GCReason gcReason)
     DaemonCollectGarbage(TriggerGCType::SHARED_CC, gcReason);
 }
 
+void SharedHeap::TriggerGlobalCC(GCReason gcReason)
+{
+    ASSERT(JSThread::GetCurrent() == dThread_);
+    // Concurrent mark runs before the daemon GC scope.
+    globalCC_->RunConcurrentMarkPhase(gcReason);
+    DaemonCollectGarbage(TriggerGCType::GLOBAL_CC, gcReason);
+}
+
 void SharedHeap::RunSharedGC(TriggerGCType gcType, GCReason gcReason)
 {
     ASSERT(gcType != TriggerGCType::SHARED_CC);
@@ -717,7 +721,8 @@ void SharedHeap::RunSharedGC(TriggerGCType gcType, GCReason gcReason)
 bool SharedHeap::NeedSwitchRBStub() const
 {
     return (sharedPartialGC_ && sharedPartialGC_->IsConcurrentUpdating()) ||
-           (sharedCC_ && sharedCC_->IsRunning());
+           (sharedCC_ && sharedCC_->IsRunning()) ||
+           (globalCC_ && globalCC_->IsRunning());
 }
 
 void SharedHeap::DaemonCollectGarbageWithFlip([[maybe_unused]]TriggerGCType gcType, GCReason gcReason)
@@ -740,7 +745,7 @@ void SharedHeap::DaemonCollectGarbage([[maybe_unused]]TriggerGCType gcType, [[ma
 {
     ASSERT(gcType == TriggerGCType::SHARED_GC || gcType == TriggerGCType::SHARED_PARTIAL_GC ||
         gcType == TriggerGCType::SHARED_FULL_GC || gcType == TriggerGCType::GLOBAL_GC ||
-        gcType == TriggerGCType::SHARED_CC
+        gcType == TriggerGCType::SHARED_CC || gcType == TriggerGCType::GLOBAL_CC
     );
     ASSERT(JSThread::GetCurrent() == dThread_);
     RecursionScope recurScope(this, HeapType::SHARED_HEAP);
@@ -750,6 +755,14 @@ void SharedHeap::DaemonCollectGarbage([[maybe_unused]]TriggerGCType gcType, [[ma
         ASSERT(sConcurrentMarker_->IsTriggeredConcurrentMark());
         SetGCThreadQosPriority(common::PriorityMode::STW);
         sharedCC_->RunPhases(gcReason);
+        InvokeSharedNativePointerCallbacks();
+        SetGCThreadQosPriority(common::PriorityMode::FOREGROUND);
+        RuntimeUnLock(suspensionRequestMutex);
+        return;
+    }
+    if (gcType == TriggerGCType::GLOBAL_CC) {
+        SetGCThreadQosPriority(common::PriorityMode::STW);
+        globalCC_->RunPhases(gcReason);
         InvokeSharedNativePointerCallbacks();
         SetGCThreadQosPriority(common::PriorityMode::FOREGROUND);
         RuntimeUnLock(suspensionRequestMutex);
@@ -920,6 +933,13 @@ void SharedHeap::PrepareRecordRegionsForReclaim()
     sHugeObjectSpace_->SetRecordRegion();
 }
 
+void SharedHeap::PrepareReclaimForGlobalCC()
+{
+    ASSERT(clearTaskFinished_);
+    PrepareRecordRegionsForReclaim();
+    clearTaskFinished_ = false;
+}
+
 void SharedHeap::Reclaim(TriggerGCType gcType)
 {
     PrepareRecordRegionsForReclaim();
@@ -942,7 +962,8 @@ void SharedHeap::ReclaimRegions(TriggerGCType gcType, bool gcThread)
         MemMapAllocator::GetInstance()->BeginHugePageSlotReleaseBatch();
     }
 #endif
-    if (gcType == TriggerGCType::SHARED_FULL_GC || gcType == TriggerGCType::SHARED_CC) {
+    if (gcType == TriggerGCType::SHARED_FULL_GC || gcType == TriggerGCType::SHARED_CC ||
+        gcType == TriggerGCType::GLOBAL_CC) {
         sCompressSpace_->Reset();
     }
     if (gcThread) {
@@ -1022,8 +1043,7 @@ void SharedHeap::UpdateWorkManager(SharedGCWorkManager *sWorkManager)
 
 void SharedHeap::UpdateGlobalCCWorkManager(GlobalCCWorkManager *workManager)
 {
-    // The GlobalCCMarker routes through GlobalCC::GetWorkManager(), so refreshing the
-    // GlobalCC copy is all that's needed when the work manager is replaced.
+    // The marker resolves the current non-owning work-manager pointer through GlobalCC.
     globalCC_->SetWorkManager(workManager);
 }
 
@@ -1114,7 +1134,8 @@ void SharedHeap::CollectGarbageFinish(bool inDaemon, TriggerGCType gcType)
 
 void SharedHeap::NotifyDeferFreezeFinish(TriggerGCType gcType)
 {
-    if (gcType == TriggerGCType::SHARED_FULL_GC || gcType == TriggerGCType::SHARED_CC) {
+    if (gcType == TriggerGCType::SHARED_FULL_GC || gcType == TriggerGCType::SHARED_CC ||
+        gcType == TriggerGCType::GLOBAL_CC) {
         auto notifyDeferFreezeCallback = Runtime::GetInstance()->GetNotifyDeferFreezeCallback();
         if (notifyDeferFreezeCallback != nullptr) {
             notifyDeferFreezeCallback(true);
@@ -1753,6 +1774,10 @@ void Heap::Destroy()
 void Heap::Prepare(bool cleanCallback)
 {
     MEM_ALLOCATE_AND_GC_TRACE(ecmaVm_, HeapPrepare);
+    // Copy window only: every caller is protected by its own state discipline
+    // (self-held SuspendAllScope or RUNNING execution), which keeps a new
+    // round from opening its copy window while the caller works.
+    WaitGlobalCCCopyFinished();
     WaitAndHandleCCFinished(cleanCallback);
     WaitAllMarkTaskFinished();
     sweeper_->EnsureAllTaskFinished();
@@ -1761,6 +1786,8 @@ void Heap::Prepare(bool cleanCallback)
 
 void Heap::PrepareForIteration() const
 {
+    // Copy window only, same caller-state contract as Prepare.
+    WaitGlobalCCCopyFinished();
     const_cast<Heap*>(this)->WaitAndHandleCCFinished(false);
     sweeper_->EnsureAllTaskFinished();
 }
@@ -1815,6 +1842,15 @@ void Heap::ResumeCC()
     } else {
         ReclaimRegions(TriggerGCType::LOCAL_CC, GetCmsGC());
     }
+}
+
+void Heap::PrepareReclaimForGlobalCC()
+{
+    ASSERT(!GetCmsGC());
+    ASSERT(!GetEvacuateNonMovableSpace());
+    ASSERT(clearTaskFinished_);
+    PrepareRecordRegionsForReclaim();
+    clearTaskFinished_ = false;
 }
 
 void Heap::ResumeForAppSpawn()
@@ -2226,7 +2262,20 @@ void Heap::CollectGarbage(TriggerGCType gcType, GCReason reason)
         common::BaseRuntime::RequestGC(cmcReason, async, common::GC_TYPE_FULL);
         return;
     }
-    if (thread_->IsConcurrentCopying()) {
+    if (thread_->IsGlobalConcurrentMarking()) {
+        // This check runs with the owner in RUNNING, so ReMark cannot pass it
+        // before WaitGCFinished suspends the owner. ReMark publishes the
+        // existing shared-GC completion after handing the heap to copy.
+        SharedHeap::GetInstance()->WaitGCFinished(thread_);
+        return;
+    }
+    if (thread_->IsGlobalConcurrentCopying()) {
+        // The copy window may allocate garbage this round cannot reclaim, so
+        // the local GC must still run after it. Only the copy window blocks
+        // this GC; a new round's marking window opening afterwards cannot
+        // initialize while this RUNNING local GC executes.
+        WaitGlobalCCCopyFinished();
+    } else if (thread_->IsConcurrentCopying()) {
         WaitAndHandleCCFinished(false);
     } else if (IsCCMark()) {
         if (gcType != TriggerGCType::FULL_GC && !shouldThrowOOMError_) {
@@ -2246,6 +2295,7 @@ void Heap::CollectGarbage(TriggerGCType gcType, GCReason reason)
 void Heap::CollectGarbageFromCCMark(GCReason reason)
 {
     ASSERT(IsCCMark() && !thread_->IsConcurrentCopying());
+    ASSERT(!thread_->IsGlobalConcurrentMarking());
     if (thread_->IsCrossThreadExecutionEnable() || GetOnSerializeEvent()) {
         return;
     }
@@ -2811,7 +2861,11 @@ bool Heap::CheckOngoingConcurrentMarkingImpl(ThreadType threadType, int threadIn
 
 bool Heap::CheckCanTriggerConcurrentMarking()
 {
-    return concurrentMarker_->IsEnabled() && thread_->IsReadyToConcurrentMark();
+    // IsGlobalConcurrentCopying carries the local-mark suppression through
+    // the GlobalCC copy window (MarkStatus is restored at the ReMark STW so
+    // the write barriers leave marking mode).
+    return concurrentMarker_->IsEnabled() && thread_->IsReadyToConcurrentMark() &&
+        !thread_->IsGlobalConcurrentCopying();
 }
 
 bool Heap::TryTriggerConcurrentMarking(MarkReason markReason)
@@ -3118,15 +3172,19 @@ void Heap::PrepareRecordNonmovableRegions()
 
 void Heap::TriggerConcurrentMarking(MarkReason markReason)
 {
-    if (concurrentMarker_->IsEnabled() && !fullGCRequested_ && ConcurrentMarker::TryIncreaseTaskCounts()) {
-        WaitAndHandleCCFinished(false);
-        GetEcmaGCStats()->SetMarkReason(markReason);
-        concurrentMarker_->Mark();
+    if (concurrentMarker_->IsEnabled() && !fullGCRequested_) {
+        WaitGlobalCCFinished();
+        if (ConcurrentMarker::TryIncreaseTaskCounts()) {
+            WaitAndHandleCCFinished(false);
+            GetEcmaGCStats()->SetMarkReason(markReason);
+            concurrentMarker_->Mark();
+        }
     }
 }
 
 void Heap::WaitAllTasksFinished()
 {
+    WaitGlobalCCFinished();
     WaitAndHandleCCFinished(false);
     WaitAllMarkTaskFinished();
     sweeper_->EnsureAllTaskFinished();
@@ -3143,16 +3201,34 @@ void Heap::WaitConcurrentMarkingFinished()
 
 void Heap::WaitCCFinished() const
 {
-    if (thread_->IsConcurrentCopying()) {
+    // LocalCC only; the GlobalCC copy window borrows the CC status and is
+    // waited out by the caller via WaitGlobalCCFinished.
+    if (thread_->IsConcurrentCopying() && !thread_->IsGlobalConcurrentCopying()) {
         ccGC_->WaitFinished();
     }
 }
 
 void Heap::WaitAndHandleCCFinished(bool cleanCallback)
 {
-    if (thread_->IsConcurrentCopying()) {
+    // LocalCC only; the GlobalCC copy window borrows the CC status and is
+    // waited out by the caller via WaitGlobalCCFinished.
+    if (thread_->IsConcurrentCopying() && !thread_->IsGlobalConcurrentCopying()) {
         ccGC_->WaitFinished();
         ccGC_->HandleUpdateFinished(cleanCallback);
+    }
+}
+
+void Heap::WaitGlobalCCFinished() const
+{
+    if (thread_->IsGlobalConcurrentMarking() || thread_->IsGlobalConcurrentCopying()) {
+        SharedHeap::GetInstance()->GetGlobalCC()->WaitGlobalCCFinished(thread_);
+    }
+}
+
+void Heap::WaitGlobalCCCopyFinished() const
+{
+    if (thread_->IsGlobalConcurrentCopying()) {
+        SharedHeap::GetInstance()->GetGlobalCC()->WaitGlobalCCCopyFinished(thread_);
     }
 }
 
@@ -3761,7 +3837,7 @@ void SharedHeap::UpdateHeapStatsAfterGC(TriggerGCType gcType)
     heapAliveSizeAfterGC_ = GetHeapObjectSize();
     fragmentSizeAfterGC_ = GetCommittedSize() - GetHeapObjectSize();
     if (gcType == TriggerGCType::SHARED_FULL_GC || gcType == TriggerGCType::APPSPAWN_SHARED_FULL_GC ||
-        gcType == TriggerGCType::SHARED_CC) {
+        gcType == TriggerGCType::SHARED_CC || gcType == TriggerGCType::GLOBAL_CC) {
         heapBasicLoss_ = fragmentSizeAfterGC_;
     }
 }
@@ -3777,8 +3853,8 @@ void Heap::UpdateHeapStatsAfterGC(TriggerGCType gcType)
         heapAliveSizeExcludesYoungAfterGC_ = heapAliveSizeAfterGC_ - activeSemiSpace_->GetHeapObjectSize();
     }
     fragmentSizeAfterGC_ = GetCommittedSize() - heapAliveSizeAfterGC_;
-    if (gcType == TriggerGCType::FULL_GC || gcType == TriggerGCType::LOCAL_CC
-        || gcType == TriggerGCType::APPSPAWN_FULL_GC) {
+    if (gcType == TriggerGCType::FULL_GC || gcType == TriggerGCType::LOCAL_CC ||
+        gcType == TriggerGCType::GLOBAL_CC || gcType == TriggerGCType::APPSPAWN_FULL_GC) {
         heapBasicLoss_ = fragmentSizeAfterGC_;
     }
 }

@@ -237,9 +237,7 @@ void SharedCC::PrepareMainThread()
             return;
         }
         if (thread->TryMarkCCTaskPending()) {
-            thread->PostTaskToThread([thread]() {
-                thread->ExecuteSharedCCStubSwitch();
-            });
+            thread->PostRuntimeThreadTask();
         }
     });
     WaitMainThreadReady();
@@ -662,12 +660,12 @@ void SharedCC::UpdateReferences()
     };
     uint32_t totalTaskpoolThreads = common::Taskpool::GetCurrentTaskpool()->GetTotalThreadNum();
     for (uint32_t i = 0; i <= totalTaskpoolThreads; i++) {
-        GetTlabAllocator(i)->GetSharedLocalSpace()->EnumerateRegions(collectToSpace);
+        GetTlabAllocator(i)->GetSharedLocalSpace()->EnumerateToRegionsSync(collectToSpace);
     }
     {
         LockHolder lock(evacuatorsMutex_);
         for (auto *evacuator : evacuators_) {
-            evacuator->GetTlabAllocator()->GetSharedLocalSpace()->EnumerateRegions(collectToSpace);
+            evacuator->GetTlabAllocator()->GetSharedLocalSpace()->EnumerateToRegionsSync(collectToSpace);
         }
     }
 

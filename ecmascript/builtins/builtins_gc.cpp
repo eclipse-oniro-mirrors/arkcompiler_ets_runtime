@@ -227,7 +227,9 @@ JSTaggedValue BuiltinsGc::AllocateArrayObject(EcmaRuntimeCallInfo *info)
 
 TriggerGCType BuiltinsGc::StringToGcType(JSThread *thread, JSTaggedValue cause)
 {
-    static_assert(GC_TYPE_LAST == 13, "Update this method after TrigerGCType change");
+    // GLOBAL_CC is not exposed via the JS gc(cause) builtin; it is triggered
+    // through the idle interface (TRIGGER_IDLE_GC_TYPE::GLOBAL_CC) and inner paths.
+    static_assert(GC_TYPE_LAST == 14, "Update this method after TrigerGCType change");
     if (JSTaggedValue::StrictEqual(thread, thread->GlobalConstants()->GetYoungGcCause(), cause)) {
         return YOUNG_GC;
     }
