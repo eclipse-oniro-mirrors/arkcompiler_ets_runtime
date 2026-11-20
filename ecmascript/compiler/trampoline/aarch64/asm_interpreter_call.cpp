@@ -133,14 +133,18 @@ void AsmInterpreterCall::CheckDeferredCompilationForCallEntry(ExtendedAssembler 
         // The existing entry frame anchors the leave frame. Preserve only native values here.
         __ Stp(x0, lr, MemoryOperand(sp, -DOUBLE_SLOT_SIZE, AddrMode::PREINDEX));
         __ Stp(x4, x5, MemoryOperand(sp, -DOUBLE_SLOT_SIZE, AddrMode::PREINDEX));
+        // Submit through a dedicated copy of the target.
+        __ Ldr(x3, MemoryOperand(x5, 0));  // x3 = argv[0] = target
+        __ Stp(x3, x16, MemoryOperand(sp, -DOUBLE_SLOT_SIZE, AddrMode::PREINDEX));  // copy + padding
+        __ Mov(x3, sp);            // x3 = argv = &copy
+        __ Mov(x2, Immediate(1));  // 1 : argc for RTSTUB(SubmitJitTask)
         __ Mov(x1, Immediate(RTSTUB_ID(SubmitJitTask)));
-        // Include target, newTarget and this so GC updates the complete original argument area.
-        __ Add(x2, x4, Immediate(NUM_MANDATORY_JSFUNC_ARGS));
-        __ Mov(x3, x5);
         __ CallAssemblerStub(RTSTUB_ID(CallRuntimeWithArgv), false);
+        __ Ldp(x3, x16, MemoryOperand(sp, DOUBLE_SLOT_SIZE, AddrMode::POSTINDEX));  // drop copy + padding
         __ Ldp(x4, x5, MemoryOperand(sp, DOUBLE_SLOT_SIZE, AddrMode::POSTINDEX));
         __ Ldp(x0, lr, MemoryOperand(sp, DOUBLE_SLOT_SIZE, AddrMode::POSTINDEX));
-        // Submission may collect; reload the target and its Method from GC-updated arguments.
+        // Submission may collect; reload the target and its Method from the original
+        // argument area, which the InterpretedEntryFrame roots keep GC-updated.
         __ Ldr(x1, MemoryOperand(x5, 0));
         __ Ldr(method, MemoryOperand(x1, JSFunction::METHOD_OFFSET));
         __ Ldr(x3, MemoryOperand(method, Method::CALL_FIELD_OFFSET));

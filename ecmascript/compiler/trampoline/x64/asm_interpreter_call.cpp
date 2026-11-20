@@ -198,19 +198,25 @@ void AsmInterpreterCall::CheckDeferredCompilationForCallEntry(ExtendedAssembler 
     __ Cmpl(static_cast<int32_t>(TieringDecision::ARKSTEED_REQUESTED), extraLiteralInfo);
     __ Jne(&noSubmit);
     {
-        // Three slots preserve native values and align the stack after the entry's Callq.
+        // Preserves native values and align the stack after the entry's Callq.
         __ Pushq(rdi);
         __ Pushq(r8);
         __ Pushq(r9);
+        __ Pushq(0);  // alignment padding for the target copy
+        // Submit through a dedicated copy of the target.
+        __ Movq(Operand(r9, 0), rcx);  // rcx = argv[0] = target
+        __ Pushq(rcx);
+        __ Movq(rsp, rcx);  // rcx = argv = &copy
+        __ Movq(1, rdx);    // 1 : argc for RTSTUB(SubmitJitTask)
         __ Movq(RTSTUB_ID(SubmitJitTask), rsi);
-        // Include target, newTarget and this so GC updates the complete original argument area.
-        __ Leaq(Operand(r8, NUM_MANDATORY_JSFUNC_ARGS), rdx);
-        __ Movq(r9, rcx);
+        // rdi: glue;       rsi: stubID     rdx: argc       rcx: argv
         __ CallAssemblerStub(RTSTUB_ID(CallRuntimeWithArgv), false);
+        __ Addq(FRAME_SLOT_SIZE * 2, rsp);  // 8 * 2: drop the target copy & alignment padding
         __ Popq(r9);
         __ Popq(r8);
         __ Popq(rdi);
-        // Submission may collect; reload the target and its Method from GC-updated arguments.
+        // Submission may collect; reload the target and its Method from the original
+        // argument area, which the InterpretedEntryFrame roots keep GC-updated.
         __ Movq(Operand(r9, 0), rsi);
         __ Movq(Operand(rsi, JSFunction::METHOD_OFFSET), method);
         __ Movq(Operand(method, Method::CALL_FIELD_OFFSET), rcx);

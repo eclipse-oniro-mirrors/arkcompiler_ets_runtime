@@ -7277,6 +7277,90 @@ def check_dce_folded_comparison_witness(module) -> List[str]:
     return failures
 
 
+def check_skip_ir_check_flag(module) -> List[str]:
+    """(-S) The IR constraint verification is an explicit opt-out.
+
+    A case whose IR constraint is violated by the run output is red by
+    default and passes with `-S` (the skip is reported), a stdout mismatch
+    stays red with `-S`, and the flag cannot be combined with the corpus
+    class or the control mode: both combinations are named usage errors
+    rejected before the build stage.
+    """
+    failures: List[str] = []
+    dump = (
+        "[compiler] ======== ArkSteedCompilerTask: Starts compiling: f ========\n"
+        "[compiler] ===== Starts Graph Dump =====\n"
+        "[compiler]   v0:  Int32Constant [Int32]  value = 1 (0x1) → live range: [0-5]\n"
+        "[compiler]   v1:  I32Add [Int32]  (v0) → live range: [1-2]\n"
+        "[compiler] ===== Finishes Graph Dump =====\n"
+        "1\n"
+    )
+
+    def make_tree(expected: str) -> Path:
+        root = _temp_dir("arksteed-self-test-skip-ir-") / "test"
+        case_dir = root / "skip_ir" / "case"
+        case_dir.mkdir(parents=True)
+        (case_dir / "case.js").write_text(
+            "//! METHOD f\n//! COUNT I32Add 5\nprint(1);\n", encoding="utf-8")
+        (case_dir / "expected_output.txt").write_text(expected, encoding="utf-8")
+        return root
+
+    def fake_compile(case, abc_path, cfg):
+        return True, ""
+
+    def fake_execute(case, abc_path, cfg, args, log):
+        return ["fake"], 0, dump, "", False
+
+    def fake_disassemble(case, abc_path, disasm_path, cfg, log):
+        return None
+
+    def fake_build(build_cfg, skip):
+        events.append("build")
+        return True
+
+    events: List[str] = []
+    with _patched(module, ARK_ROOT=_fake_ark_root(),
+                  TEST_DIR=make_tree("1\n"),
+                  compile_case=fake_compile, execute_abc=fake_execute,
+                  disassemble_case=fake_disassemble, build_ark=fake_build,
+                  make_artifacts_root=lambda *a: _temp_dir(
+                      "arksteed-self-test-artifacts-")):
+        # Default run: the violated IR constraint is a red case naming it.
+        rc, output = _call_main(module, ["-p", "x64", "-m", "debug", "-F"])
+        if rc != 1 or "COUNT I32Add" not in output \
+                or "violated, found 1" not in output:
+            failures.append(
+                f"a violated IR constraint did not fail the default run: "
+                f"rc={rc} output={output[-200:]!r}")
+        # -S: the same case passes and the skip is reported.
+        rc, output = _call_main(module, ["-p", "x64", "-m", "debug", "-F", "-S"])
+        if rc != 0 or "IR constraint checking skipped" not in output:
+            failures.append(
+                f"-S did not skip the violated constraint: rc={rc} "
+                f"output={output[-200:]!r}")
+        # The combinations are named usage errors before the build stage.
+        for name in ("--sensitivity-controls", "--corpus"):
+            rc, output = _call_main(
+                module, ["-p", "x64", "-m", "debug", "-S", name])
+            if rc != 2 or "-S/--skip-ir-check" not in output \
+                    or "cannot be combined" not in output:
+                failures.append(f"-S with {name} was accepted: rc={rc}")
+        if events:
+            failures.append(f"a rejected combination built targets: {events}")
+    # -S never extends to the other checks: a stdout mismatch stays red.
+    with _patched(module, ARK_ROOT=_fake_ark_root(),
+                  TEST_DIR=make_tree("2\n"),
+                  compile_case=fake_compile, execute_abc=fake_execute,
+                  disassemble_case=fake_disassemble, build_ark=fake_build,
+                  make_artifacts_root=lambda *a: _temp_dir(
+                      "arksteed-self-test-artifacts-")):
+        rc, output = _call_main(module, ["-p", "x64", "-m", "debug", "-F", "-S"])
+        if rc != 1 or "stdout mismatch" not in output:
+            failures.append(
+                f"-S skipped a stdout mismatch: rc={rc} output={output[-200:]!r}")
+    return failures
+
+
 CHECKS: List[CHECK_RESULTS] = [
     check_deopt_events_only,
     check_real_deopt_events_counted_once,
@@ -7286,6 +7370,7 @@ CHECKS: List[CHECK_RESULTS] = [
     check_dce_anonymous_deopt_witness,
     check_dce_optimized_witness_forms,
     check_dce_folded_comparison_witness,
+    check_skip_ir_check_flag,
     check_control_evidence_collection,
     check_control_applicability,
     check_control_construction,

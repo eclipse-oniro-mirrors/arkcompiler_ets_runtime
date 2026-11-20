@@ -891,6 +891,7 @@ TaggedObject *Heap::AllocateMachineCodeObject(JSHandle<JSHClass> hclass, size_t 
             "Heap::AllocateMachineCodeObject, local heap oom, used size: " + std::to_string(GetHeapObjectSize()) +
                 " bytes, committed size: " + std::to_string(GetCommittedSize()) + " bytes");
         object->SetClass(thread_, *hclass);
+        MachineCode::Cast(object)->SetLocalHeapAddress(0);
 #if USE_STICKY_CMS_GC
         object->SetObjectState(ObjectState::YOUNG);
 #endif
@@ -928,6 +929,7 @@ TaggedObject *Heap::AllocateMachineCodeObject(JSHandle<JSHClass> hclass, size_t 
         "Heap::AllocateMachineCodeObject, local heap oom, used size: " + std::to_string(GetHeapObjectSize()) +
                 " bytes, committed size: " + std::to_string(GetCommittedSize()) + " bytes");
     object->SetClass(thread_, *hclass);
+    MachineCode::Cast(object)->SetLocalHeapAddress(0);
 #if USE_STICKY_CMS_GC
     object->SetObjectState(ObjectState::YOUNG);
 #endif

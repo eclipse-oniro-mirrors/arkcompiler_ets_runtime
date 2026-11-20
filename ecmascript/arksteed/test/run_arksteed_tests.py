@@ -27,6 +27,11 @@ unconditionally enabled, and verifies:
     CODEGEN_COUNT) hold on the CFG dumps, abc disassembly, or generated-code
     comments.
 
+With `-S/--skip-ir-check` the IR constraint half of the verification is an
+explicit opt-out of the embedded case class: the constraint counts are not
+collected and every skipped constraint is reported as such; stdout comparison
+and the bytecode, codegen, evidence and live-range checks still run.
+
 All generated artifacts (abc, disassembly, stdout/stderr captures) are
 written to a fresh /tmp/arksteed-<mode>-<timestamp>/ directory whose tree
 mirrors this test directory; nothing is written inside the source tree.
@@ -3879,16 +3884,29 @@ def run_case(
     if diff is not None:
         result.reasons.append(f"stdout mismatch:\n{diff}")
 
-    constraint_errors = check_constraints(
-        case.constraints, collect_opcode_counts(stdout, valid_opcodes)
-    )
-    if args.verbose and case.constraints and not constraint_errors:
-        detail: List[str] = []
-        for method, constraints in case.constraints.items():
-            detail.append(f"METHOD {method}:")
-            detail.extend(f"  {constraint}" for constraint in constraints)
-        result.log.append("All IR constraints are satisfied:\n" + "\n".join(detail))
-    result.reasons.extend(constraint_errors)
+    if getattr(args, "skip_ir_check", False):
+        # `-S` is an explicit opt-out of the IR constraint verification: the
+        # opcode counts are not collected and the constraints are reported as
+        # skipped; every other check (stdout comparison, bytecode, codegen,
+        # evidence, live ranges) still runs. The field is read with
+        # `getattr`, so a namespace without the option (the self-test and
+        # the corpus reference) keeps the default behaviour.
+        if case.constraints:
+            skipped = sum(len(one) for one in case.constraints.values())
+            result.log.append(
+                f"IR constraint checking skipped (--skip-ir-check): "
+                f"{skipped} constraint(s) not verified")
+    else:
+        constraint_errors = check_constraints(
+            case.constraints, collect_opcode_counts(stdout, valid_opcodes)
+        )
+        if args.verbose and case.constraints and not constraint_errors:
+            detail: List[str] = []
+            for method, constraints in case.constraints.items():
+                detail.append(f"METHOD {method}:")
+                detail.extend(f"  {constraint}" for constraint in constraints)
+            result.log.append("All IR constraints are satisfied:\n" + "\n".join(detail))
+        result.reasons.extend(constraint_errors)
     codegen_errors = check_codegen_constraints(
         case.codegen_constraints, collect_codegen_comments(stdout)
     )
@@ -7840,13 +7858,19 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Target platform; arm64 runs under QEMU (default: host platform)."
     )
     parser.add_argument(
-        "-m", "--mode", choices=("debug", "release"), default="debug",
+        "-m", "--mode", choices=("debug", "release", "fastverify"), default="debug",
         help="Build mode to use (default: debug)."
     )
     parser.add_argument("-f", "--skip-stub", action="store_true",
                         help="Skip building stub.an (safe only if stub IR is unchanged).")
     parser.add_argument("-F", "--skip-build", action="store_true",
                         help="Skip building all the targets.")
+    parser.add_argument("-S", "--skip-ir-check", action="store_true",
+                        help="Skip the IR constraint verification (//! HAS, "
+                             "HAS_NOT, COUNT, COUNT_GE, COUNT_LE) of the "
+                             "embedded test cases; stdout comparison and the "
+                             "bytecode, codegen, evidence and live-range "
+                             "checks still run.")
     parser.add_argument("-I", "--include", "--filter", dest="include", action="append",
                         default=[], metavar="DIR",
                         help="Keep only the test cases under the given directory prefix; "
@@ -7931,6 +7955,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.platform is None:
         args.platform = detect_host_platform()
     cfg = BuildConfig(args.mode, args.platform)
+
+    if args.skip_ir_check and (args.corpus or args.sensitivity_controls):
+        # -S is an opt-out of the embedded IR constraint verification: the
+        # control mode derives the verdicts of its perturbation and
+        # address-substitution variants from that check, and the corpus
+        # class treats its descriptor constraints as class-managed
+        # requirements, so neither combination is defined. The guard runs
+        # before the build stage, like the other flag-combination errors.
+        print(
+            "Error: -S/--skip-ir-check is an opt-out of the embedded IR "
+            "constraint verification and cannot be combined with "
+            "--sensitivity-controls (whose variant verdicts are defined "
+            "over that check) or --corpus (whose descriptor constraints "
+            "are class-managed and mandatory)", file=sys.stderr)
+        return 2
 
     # The corpus class is resolved before the build stage and before the tool
     # checks (C1/C2): the flag combination, the namespace of the filter
