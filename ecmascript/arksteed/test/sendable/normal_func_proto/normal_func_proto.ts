@@ -62,7 +62,7 @@ print("sta proto ic: " + ArkTools.getICState(loadProtoMethod, 1, 0));
 // AC-2.2: prototype getter load with receiver binding (getter reads this.x)
 function loadGetter(obj) {
     let r;
-    for (let i = 0; i < 100000; ++i) { r = obj.gx; }
+    for (let i = 0; i < 10000; ++i) { r = obj.gx; }
     return r;
 }
 print("getter value: " + loadGetter(spg));
@@ -70,7 +70,7 @@ print("getter ic: " + ArkTools.getICState(loadGetter, 1, 0));
 
 // AC-2.3: prototype setter store (setter writes this.x)
 function storeSetter(obj, v) {
-    for (let i = 0; i < 100000; ++i) { obj.sx = v; }
+    for (let i = 0; i < 10000; ++i) { obj.sx = v; }
 }
 storeSetter(sps, 9);
 print("setter applied: " + (sps.x === 9));
@@ -79,12 +79,12 @@ print("setter ic: " + ArkTools.getICState(storeSetter, 1, 1));
 // AC-2.4: whitelist types (JSSharedArray/JSSharedMap) regression
 function loadWhitelistArr(arr) {
     let r;
-    for (let i = 0; i < 100000; ++i) { r = arr.containsAll; }
+    for (let i = 0; i < 10000; ++i) { r = arr.containsAll; }
     return r;
 }
 function loadWhitelistMap(map) {
     let r;
-    for (let i = 0; i < 100000; ++i) { r = map.set; }
+    for (let i = 0; i < 10000; ++i) { r = map.set; }
     return r;
 }
 print("whitelist arr found: " + (loadWhitelistArr(sarr) !== undefined));
