@@ -85,7 +85,7 @@ Parser types and their FD argument names:
 
 Dynamic AOT args: `--aot-file`, `--target-compiler-mode`, `--compiler-pkg-info` (JSON), `--compiler-external-pkg-info` (JSON), `--compiler-device-state`, `--compiler-baseline-pgo`, `--compiler-opt-bc-range`, `--compiler-thermal-level`.
 
-Static AOT args: `--boot-panda-files` (from `/system/framework/bootpath.json`), `--paoc-output`, `--paoc-location`, `--paoc-panda-files`, `--paoc-use-profile:path=<profile>`, `--compiler-regex` (filter), plus defaults (`--load-runtimes=ets`, `--paoc-generate-symbols=true`, etc.).
+Static AOT args: `--boot-panda-files` (from `/system/framework/bootpath.json`), `--paoc-output`, `--paoc-location`, `--paoc-panda-files`, `--paoc-use-profile:path=<profile>`, `--paoc-compilation-policy=profile-guided` (partial mode only), `--compiler-regex` (filter), plus defaults (`--load-runtimes=ets`, `--paoc-generate-symbols=true`, etc.).
 
 ### 1.5 Security & Validation
 

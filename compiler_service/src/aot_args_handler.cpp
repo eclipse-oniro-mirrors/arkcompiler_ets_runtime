@@ -404,8 +404,14 @@ int32_t StaticAOTArgsParser::BuildStaticCompilerArgs(AotCompilerArgs &args, std:
     argVector.emplace_back(Symbols::PREFIX + ArgsIdx::PAOC_PANDA_FILES + Symbols::EQ + abcPath);
 
     std::string moduleName = ParseModuleName(anfilePath);
-    if (partialMode && !AddProfilePathArg(argVector, args.pgoDir, moduleName)) {
-        return ERR_AOT_COMPILER_PARAM_FAILED;
+    if (partialMode) {
+        // Enable profile-guided partial compilation in ark_aot (paoc). Loading the profile
+        // via --paoc-use-profile only populates profile data; the compilation policy must be
+        // set explicitly so that only profile-covered methods are compiled.
+        AddCompilationPolicyArg(argVector);
+        if (!AddProfilePathArg(argVector, args.pgoDir, moduleName)) {
+            return ERR_AOT_COMPILER_PARAM_FAILED;
+        }
     }
 
     return ERR_OK;
@@ -553,6 +559,12 @@ int32_t StaticAOTArgsParser::ParseLocationByBundleType(int32_t bundleType, const
         return ERR_AOT_COMPILER_PARAM_FAILED;
     }
     return ERR_OK;
+}
+
+void StaticAOTArgsParser::AddCompilationPolicyArg(std::vector<std::string> &argVector)
+{
+    argVector.emplace_back(Symbols::PREFIX + ArgsIdx::PAOC_COMPILATION_POLICY + Symbols::EQ +
+                           ArgsIdx::PAOC_COMPILATION_POLICY_PROFILE_GUIDED);
 }
 
 bool StaticAOTArgsParser::AddProfilePathArg(std::vector<std::string> &argVector, const std::string &pgoDir,
