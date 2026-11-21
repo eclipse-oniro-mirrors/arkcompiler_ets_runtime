@@ -1483,7 +1483,8 @@ public:
                 JSFunction::RAW_PROFILE_TYPE_INFO_OFFSET - JSFunction::HOME_OBJECT_OFFSET,
                 JSFunction::MACHINECODE_OFFSET - JSFunction::RAW_PROFILE_TYPE_INFO_OFFSET,
                 JSFunction::BASELINECODE_OFFSET - JSFunction::MACHINECODE_OFFSET,
-                JSFunction::ECMA_MODULE_OFFSET - JSFunction::BASELINECODE_OFFSET}},
+                JSFunction::ECMA_MODULE_OFFSET - JSFunction::BASELINECODE_OFFSET,
+                JSFunction::WORK_NODE_POINTER_OFFSET - JSFunction::ECMA_MODULE_OFFSET}},
             {JSType::JS_API_FUNCTION, {
                 JSApiFunction::LEXICAL_ENV_OFFSET - JSApiFunction::PROTO_OR_DYNCLASS_OFFSET,
                 JSApiFunction::HOME_OBJECT_OFFSET - JSApiFunction::LEXICAL_ENV_OFFSET,

@@ -3642,7 +3642,6 @@ inline void StubBuilder::SetModuleToFunction(GateRef glue, GateRef function, Gat
     Store(VariableType::JS_POINTER(), glue, function, offset, value, mAttr);
 }
 
-#if !ENABLE_MEMORY_OPTIMIZATION
 inline void StubBuilder::SetWorkNodePointerToFunction(GateRef glue, GateRef function, GateRef value,
                                                       MemoryAttribute mAttr)
 {
@@ -3650,7 +3649,6 @@ inline void StubBuilder::SetWorkNodePointerToFunction(GateRef glue, GateRef func
     GateRef offset = IntPtr(JSFunction::WORK_NODE_POINTER_OFFSET);
     Store(VariableType::NATIVE_POINTER(), glue, function, offset, value, mAttr);
 }
-#endif
 
 inline void StubBuilder::SetMethodToFunction(GateRef glue, GateRef function, GateRef value,
                                              MemoryAttribute mAttr)

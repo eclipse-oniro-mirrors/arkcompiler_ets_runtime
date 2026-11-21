@@ -132,7 +132,6 @@ private:
     void TryPreDumpInner(GateRef glue, GateRef func, GateRef profileTypeInfo);
 
     GateRef GetSlotID(const SlotIDInfo &slotInfo);
-    GateRef IsProfileTypeInfoInit(GateRef profileTypeInfo);
     GateRef IsProfileTypeInfoDumped(GateRef profileTypeInfo);
     GateRef IsProfileTypeInfoPreDumped(GateRef profileTypeInfo);
     GateRef IsProfileTypeInfoWithBigMethod(GateRef profileTypeInfo);
