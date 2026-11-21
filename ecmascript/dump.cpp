@@ -1819,8 +1819,10 @@ void ProfileTypeInfoCell::Dump(const JSThread *thread, std::ostream &os) const
     DISALLOW_GARBAGE_COLLECTION;
     os << " - Value: ";
     GetValue(thread).Dump(thread, os);
+#ifndef REMOVE_PGO_HANDLE
     os << " - Handle: ";
     GetHandle(thread).Dump(thread, os);
+#endif
     os << "\n";
 }
 
@@ -5188,7 +5190,9 @@ void ConstantPool::DumpForSnapshot(const JSThread *thread, std::vector<Reference
 void ProfileTypeInfoCell::DumpForSnapshot(const JSThread *thread, std::vector<Reference> &vec) const
 {
     vec.emplace_back(CString("Value"), GetValue(thread));
+#ifndef REMOVE_PGO_HANDLE
     vec.emplace_back(CString("Handle"), GetHandle(thread));
+#endif
 }
 
 void FunctionTemplate::DumpForSnapshot(const JSThread *thread, std::vector<Reference> &vec) const

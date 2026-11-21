@@ -604,7 +604,9 @@ JSHandle<ProfileTypeInfoCell> ObjectFactory::NewSEmptyProfileTypeInfoCell()
     JSHandle<ProfileTypeInfoCell> profileTypeInfoCell(thread_, header);
     profileTypeInfoCell->SetValue<SKIP_BARRIER>(thread_, JSTaggedValue::Undefined());
     profileTypeInfoCell->SetMachineCode<SKIP_BARRIER>(thread_, JSTaggedValue::Hole());
+#ifndef REMOVE_PGO_HANDLE
     profileTypeInfoCell->SetHandle<SKIP_BARRIER>(thread_, JSTaggedValue::Undefined());
+#endif
     return profileTypeInfoCell;
 }
 

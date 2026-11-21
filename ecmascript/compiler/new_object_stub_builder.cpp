@@ -3312,9 +3312,10 @@ GateRef NewObjectStubBuilder::NewProfileTypeInfoCell(GateRef glue, GateRef value
     SetValueToProfileTypeInfoCell(glue, *result, value);
     GateRef machineCodeOffset = IntPtr(ProfileTypeInfoCell::MACHINE_CODE_OFFSET);
     Store(VariableType::JS_POINTER(), glue, *result, machineCodeOffset, Hole());
+#ifndef REMOVE_PGO_HANDLE
     GateRef handleOffset = IntPtr(ProfileTypeInfoCell::HANDLE_OFFSET);
     Store(VariableType::JS_POINTER(), glue, *result, handleOffset, Undefined());
-
+#endif
     auto ret = *result;
     env->SubCfgExit();
     return ret;
