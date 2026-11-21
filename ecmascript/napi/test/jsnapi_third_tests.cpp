@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025 Huawei Device Co., Ltd.
+ * Copyright (c) 2025-2026 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -5493,5 +5493,28 @@ HWTEST_F_L0(JSNApiGlobalLeakCheckTests, GetGlobalHandleCount_006)
     EXPECT_LT(countAfterFree, countBefore + 1);
     EXPECT_EQ(countAfterFree, thread_->GetGlobalHandleCount());
     vm_->SetEnableForceGC(true);
+}
+
+HWTEST_F_L0(JSNApiTests, IsNapiFunction001)
+{
+    LocalScope scope(vm_);
+    Local<FunctionRef> func = FunctionRef::New(vm_, FunctionCallback);
+    EXPECT_FALSE(func->IsNapiFunction(vm_));
+}
+
+HWTEST_F_L0(JSNApiTests, IsNapiFunction002)
+{
+    LocalScope scope(vm_);
+    Local<FunctionRef> func = FunctionRef::New(vm_, FunctionCallback, nullptr, nullptr, true);
+    EXPECT_TRUE(func->IsNapiFunction(vm_));
+}
+
+HWTEST_F_L0(JSNApiTests, IsNapiFunction003)
+{
+    LocalScope scope(vm_);
+    Local<FunctionRef> func = FunctionRef::New(vm_, FunctionCallback);
+    EXPECT_FALSE(func->IsNapiFunction(vm_));
+    func->SetData(vm_, nullptr, nullptr, true);
+    EXPECT_TRUE(func->IsNapiFunction(vm_));
 }
 } // namespace panda::test
