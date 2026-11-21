@@ -335,11 +335,10 @@ protected:
         ValueVertex* dynamicInput = nullptr;
         if (dynamicSize) {
             if constexpr (std::is_same_v<Allocation, CallRuntimeVertex>) {
-                auto* bits = graph.GetInt64Constant(
-                    static_cast<int64_t>((uint64_t {1} << 32) | JSTaggedValue::TAG_INT | JSObject::SIZE));
-                initInfo(bits);
+                auto* bytes = graph.GetInt64Constant(static_cast<int64_t>((uint64_t {1} << 32) | JSObject::SIZE));
+                initInfo(bytes);
                 dynamicInput
-                    = Vertex::New<RawI64ToTaggedVertex>(&chunk, std::initializer_list<ValueVertex*> {bits});
+                    = Vertex::New<I64ToTaggedIntVertex>(&chunk, std::initializer_list<ValueVertex*> {bytes});
                 allocation->SetInput(0, dynamicInput);
             } else {
                 auto* highBits = graph.GetInt64Constant(int64_t {1} << 32);

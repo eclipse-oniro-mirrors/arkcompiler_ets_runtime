@@ -18,7 +18,6 @@
 //! METHOD boolPlain
 //! HAS DeoptIfNotBoolean
 //! COUNT DeoptIfNotBoolean 1
-//! COUNT I64BitwiseBinary 2
 //! HAS_NOT CallRuntime ToNumber
 
 //! METHOD nullPlain

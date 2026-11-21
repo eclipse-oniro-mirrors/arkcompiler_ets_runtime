@@ -526,7 +526,7 @@ TEST_F(ArkSteedPhiRepresentationSelectorTest, RawTaggedBitsAreNotNumericPhiInput
 {
     auto *entry = Block();
     auto *raw = Unary<TaggedToRawI64Vertex>(entry, Tagged(7));
-    auto *tagged = Unary<RawI64ToTaggedVertex>(entry, raw);
+    auto *tagged = Unary<I64ToTaggedIntVertex>(entry, raw);
     auto *merge = Diamond(entry);
     auto *phi = Phi(merge, tagged, Tagged(2));
     auto *use = Unary<TaggedIntToI32Vertex>(merge, phi);

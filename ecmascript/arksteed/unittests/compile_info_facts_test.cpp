@@ -1147,7 +1147,7 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, GenericTaggedResultsDoNotProveInt32)
     GraphFixture fixture;
     ValueVertex *u32 = Vertex::New<U32ToTaggedNumberVertex>(&fixture.chunk, fixture.Inputs({fixture.Int32(-1)}));
     ValueVertex *raw =
-        Vertex::New<RawI64ToTaggedVertex>(&fixture.chunk, fixture.Inputs({fixture.graph.GetInt64Constant(0)}));
+        Vertex::New<I64ToTaggedIntVertex>(&fixture.chunk, fixture.Inputs({fixture.graph.GetInt64Constant(0)}));
     CompileInfoFacts facts(&fixture.chunk);
 
     EXPECT_EQ(facts.GetKnownType(u32), NodeType::NUMBER);

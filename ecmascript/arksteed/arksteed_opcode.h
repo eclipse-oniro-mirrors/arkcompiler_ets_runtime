@@ -3172,6 +3172,26 @@ public:
     void SetValueLocationConstraints();
 };
 
+class I64ConditionCheckVertex : public FixedInputVertexMixin<ValueVertex, I64ConditionCheckVertex>,
+                                public ConditionMixin {
+public:
+    enum Indices : uint32_t {
+        LEFT_INDEX = 0,
+        RIGHT_INDEX = 1,
+        NUM_INPUTS = 2,
+    };
+    static constexpr ValueRepresentation VALUE_TYPE = ValueRepresentation::TAGGED;
+    static constexpr ValueRepresentationArray<NUM_INPUTS> INPUT_TYPES = {
+        ValueRepresentation::INT64,
+        ValueRepresentation::INT64,
+    };
+    static constexpr VertexPropertyFlag PROPERTIES = VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD;
+
+    explicit I64ConditionCheckVertex(Condition condition) : FixedInputVertexMixin(), ConditionMixin(condition) {}
+
+    void SetValueLocationConstraints();
+};
+
 class F64ConditionCheckVertex : public FixedInputVertexMixin<ValueVertex, F64ConditionCheckVertex>,
                                 public ConditionMixin {
 public:
@@ -5850,7 +5870,9 @@ public:
     void SetValueLocationConstraints();
 };
 
-class RawI64ToTaggedVertex : public FixedInputVertexMixin<ValueVertex, RawI64ToTaggedVertex> {
+// Precondition: You need to ensure that the input falls in signed int32 range.
+// No additional value range check is imposed for performance.
+class I64ToTaggedIntVertex : public FixedInputVertexMixin<ValueVertex, I64ToTaggedIntVertex> {
 public:
     enum Indices : uint32_t {
         INPUT_INDEX = 0,
@@ -5860,7 +5882,7 @@ public:
     static constexpr VertexPropertyFlag PROPERTIES =
         VertexPropertyFlag::CAN_BE_REMOVED_IF_DEAD | VertexPropertyFlag::IS_CONVERSION;
 
-    explicit RawI64ToTaggedVertex() : FixedInputVertexMixin() {}
+    explicit I64ToTaggedIntVertex() : FixedInputVertexMixin() {}
 
     void SetValueLocationConstraints();
 };

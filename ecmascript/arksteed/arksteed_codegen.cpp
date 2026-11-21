@@ -4552,13 +4552,14 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<U32ToTaggedNumberVertex>(U32To
 }
 
 template <>
-void ArkSteedCodeGenerator::VisitNonControlVertex<RawI64ToTaggedVertex>(RawI64ToTaggedVertex *toTagged)
+void ArkSteedCodeGenerator::VisitNonControlVertex<I64ToTaggedIntVertex>(I64ToTaggedIntVertex *toTaggedInt)
 {
-    auto dst = GetResultRegister(toTagged);
-    auto src = GetInputRegister(toTagged, RawI64ToTaggedVertex::INPUT_INDEX);
+    auto dst = GetResultRegister(toTaggedInt);
+    auto src = GetInputRegister(toTaggedInt, I64ToTaggedIntVertex::INPUT_INDEX);
     if (dst != src) {
         __ Move(dst, src);
     }
+    __ Or(dst, static_cast<int64_t>(JSTaggedValue::TAG_INT));
 }
 
 template <>
@@ -4786,6 +4787,16 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<I32ConditionCheckVertex>(I32Co
     auto dst = GetResultRegister(check);
     auto condition = EmitInt32Compare(check, check->GetCondition());
     EmitTaggedBooleanFromCondition(assembler_, dst, condition);
+}
+
+template <>
+void ArkSteedCodeGenerator::VisitNonControlVertex<I64ConditionCheckVertex>(I64ConditionCheckVertex *check)
+{
+    auto dst = GetResultRegister(check);
+    auto left = GetInputRegister(check, I64ConditionCheckVertex::LEFT_INDEX);
+    auto right = GetInputRegister(check, I64ConditionCheckVertex::RIGHT_INDEX);
+    __ Compare(left, right);
+    EmitTaggedBooleanFromCondition(assembler_, dst, check->GetCondition());
 }
 
 template <>

@@ -1163,6 +1163,13 @@ void I32ConditionCheckVertex::SetValueLocationConstraints()
                                TryGetInt32Constant(GetInput(RIGHT_INDEX)));
 }
 
+void I64ConditionCheckVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(LEFT_INDEX));
+    UseRegister(Arg(RIGHT_INDEX));
+}
+
 void F64ConditionCheckVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
@@ -1674,7 +1681,7 @@ void I32ToTaggedIntVertex::SetValueLocationConstraints()
     UseRegister(Arg(INPUT_INDEX));
 }
 
-void RawI64ToTaggedVertex::SetValueLocationConstraints()
+void I64ToTaggedIntVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
     UseRegister(Arg(INPUT_INDEX));
