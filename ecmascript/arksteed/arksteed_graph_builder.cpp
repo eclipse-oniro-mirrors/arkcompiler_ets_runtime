@@ -17,6 +17,7 @@
 #include "ecmascript/arksteed/unittests/graph_builder_test_access.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -25,10 +26,10 @@
 #include <optional>
 #include <sstream>
 #include <type_traits>
-
-#include "securec.h"
+#include <vector>
 
 #include "ecmascript/accessor_data.h"
+#include "ecmascript/arksteed/arksteed_cse.h"
 #include "ecmascript/arksteed/arksteed_compile_info_facts.h"
 #include "ecmascript/arksteed/arksteed_constant_folding.h"
 #include "ecmascript/arksteed/arksteed_deopt_helper.h"
@@ -128,7 +129,9 @@ template <class VertexT, class InputRange> void RecordInputUseReprHints(const In
     // they reuse an alternative. Return does not constrain Phi representation.
     if constexpr (std::is_same_v<VertexT, TaggedIntToI32Vertex> ||
                   std::is_same_v<VertexT, CheckedTaggedIntToI32Vertex> ||
-                  std::is_same_v<VertexT, CheckedNumberToF64Vertex> || std::is_same_v<VertexT, ReturnVertex>) {
+                  std::is_same_v<VertexT, CheckedNumberToF64Vertex> ||
+                  std::is_same_v<VertexT, TaggedNumberToF64Vertex> || std::is_same_v<VertexT, TaggedDoubleToF64Vertex> ||
+                  std::is_same_v<VertexT, ReturnVertex>) {
         return;
     }
     for (ValueVertex *input : inputs) {
@@ -416,99 +419,16 @@ bool StrictTypesCanBeEqual(NodeInfo::NodeType leftType, NodeInfo::NodeType right
            NodeInfo::NodeTypeCanBe(rightType, NodeInfo::NodeType::NUMBER);
 }
 
-// ---- Common-subexpression elimination helpers (available expressions) ----
-// Standard 64-bit FNV-1a constants. The hash is only an available-expression lookup key;
-// CompileInfoFacts::FindExpression still checks opcode, inputs, options, and effect epoch.
-constexpr uint64_t CSE_FNV_OFFSET_BASIS = 14695981039346656037ULL;
-constexpr uint64_t CSE_FNV_PRIME = 1099511628211ULL;
-
-uint64_t CseHashCombine(uint64_t hash, uint64_t value)
+template <typename InputFacts>
+void RecordPhiType(CompileInfoFacts *facts, PhiVertex *phi, InputFacts inputFacts)
 {
-    hash ^= value;
-    hash *= CSE_FNV_PRIME;
-    return hash;
-}
-
-uint64_t CseHashValue(ValueVertex *value)
-{
-    return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(value));
-}
-
-uint32_t CseHashExpression(VertexOpcode opcode, const CompileInfoFacts::ExpressionInputs &inputs,
-                           const CompileInfoFacts::ExpressionOptions &options)
-{
-    uint64_t hash = CseHashCombine(CSE_FNV_OFFSET_BASIS, static_cast<uint64_t>(opcode));
-    for (ValueVertex *input : inputs) {
-        hash = CseHashCombine(hash, CseHashValue(input));
+    NodeInfo::NodeType type = NodeInfo::NodeType::NONE;
+    for (uint32_t i = 0, count = phi->GetInputCount(); i < count; ++i) {
+        ASSERT(phi->GetInput(i) != nullptr);
+        type = NodeInfo::UnionNodeType(type, inputFacts(i)->GetKnownType(phi->GetInput(i)));
     }
-    for (uint64_t option : options) {
-        hash = CseHashCombine(hash, option);
-    }
-    return static_cast<uint32_t>(hash ^ (hash >> 32U));  // 32: fold 64-bit hash to 32-bit hash.
-}
-
-template <typename T>
-void CseAppendExpressionOption(CompileInfoFacts::ExpressionOptions &options, const T &value)
-{
-    using RawT = std::remove_cv_t<std::remove_reference_t<T>>;
-    if constexpr (std::is_enum_v<RawT>) {
-        options.push_back(static_cast<uint64_t>(value));
-    } else if constexpr (std::is_integral_v<RawT>) {
-        options.push_back(static_cast<uint64_t>(value));
-    } else if constexpr (std::is_pointer_v<RawT>) {
-        options.push_back(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(value)));
-    } else if constexpr (std::is_floating_point_v<RawT>) {
-        if constexpr (sizeof(RawT) == sizeof(uint32_t)) {
-            options.push_back(base::bit_cast<uint32_t>(value));
-        } else {
-            options.push_back(base::bit_cast<uint64_t>(value));
-        }
-    } else {
-        static_assert(std::is_trivially_copyable_v<RawT>, "Unsupported available-expression option type");
-        static_assert(sizeof(RawT) <= sizeof(uint64_t), "Available-expression option is too large");
-        uint64_t bits = 0;
-        if (memcpy_s(&bits, sizeof(bits), &value, sizeof(value)) != EOK) {
-            UNREACHABLE();
-        }
-        options.push_back(bits);
-    }
-}
-
-template <typename... Args>
-void CseBuildExpressionOptions(CompileInfoFacts::ExpressionOptions &options, const Args &...args)
-{
-    (CseAppendExpressionOption(options, args), ...);
-}
-
-constexpr bool CseIsExcludedAvailableExpressionOpcode(VertexOpcode opcode)
-{
-    switch (opcode) {
-        case VertexOpcode::Int32Constant:
-        case VertexOpcode::Int64Constant:
-        case VertexOpcode::Float64Constant:
-        case VertexOpcode::TaggedConstant:
-        case VertexOpcode::HeapConstant:
-        case VertexOpcode::InitialValue:
-        case VertexOpcode::ActualArgc:
-        case VertexOpcode::Call:
-        case VertexOpcode::CallRuntime:
-        case VertexOpcode::NumberToString:
-        case VertexOpcode::CallCommonStub:
-        case VertexOpcode::Deopt:
-        case VertexOpcode::Phi:
-            return true;
-        default:
-            return false;
-    }
-}
-
-template <typename VertexT>
-constexpr bool CseCanUseAvailableExpression()
-{
-    if constexpr (!std::is_base_of_v<ValueVertex, VertexT>) {
-        return false;
-    } else {
-        return !CseIsExcludedAvailableExpressionOpcode(OpcodeOf<VertexT>) && CanParticipateInCSE(VertexT::PROPERTIES);
+    if (type != NodeInfo::NodeType::UNKNOWN) {
+        facts->EnsureType(phi, type);
     }
 }
 }  // namespace
@@ -617,6 +537,7 @@ GraphBuilder::GraphBuilder(JSThread *compilerThread,
       numLocal_(preproc->GetNumLocalVRegs()),
       numParams_(preproc->GetNumParamVRegs()),
       isOsr_(isOsr),
+      enableCse_(preproc->GetEnv()->GetJSOptions().GetCompilerArkSteedEnableCse()),
       chunk_(preproc->GetChunk()),
       blocks_(preproc->GetNumLiveBasicBlocks(), preproc->GetChunk()),
       exitBlocks_(preproc->GetNumLiveBasicBlocks(), preproc->GetChunk()),
@@ -1026,10 +947,10 @@ void GraphBuilder::InitializeStartBlock(SharedBCFrameState frameState)
 
     blocks_[0] = BB::New(chunk_);
     // Caller argument descriptors use the shared FP-slot layout in frames.h.
-    initialActualArgc_ = NewVertex<InitialValueVertex>(blocks_[0], {}, ACTUAL_ARGC_FP_SLOT_INDEX);
+    initialActualArgc_ = NewBootstrapVertex<InitialValueVertex>(blocks_[0], {}, ACTUAL_ARGC_FP_SLOT_INDEX);
     for (uint32_t i = 0, n = numParams_; i < n; i++) {
         int32_t slotIndex = static_cast<int32_t>(i + CALL_TARGET_FP_SLOT_INDEX);
-        auto *v = NewVertex<InitialValueVertex>(blocks_[0], {}, slotIndex);
+        auto *v = NewBootstrapVertex<InitialValueVertex>(blocks_[0], {}, slotIndex);
         graph_->AddParameter(v);
         frameState.Set(VRegOfParam(numLocal_, i), v);
         if (i == CALL_TARGET_PARAM_INDEX) {
@@ -1038,11 +959,11 @@ void GraphBuilder::InitializeStartBlock(SharedBCFrameState frameState)
         }
     }
     ASSERT(initialCallTarget_ != nullptr);
-    actualArgc_ = NewVertex<ActualArgcVertex>(blocks_[0], {});
-    taggedActualArgc_ = NewVertex<I32ToTaggedIntVertex>(blocks_[0], {actualArgc_});
+    actualArgc_ = NewBootstrapVertex<ActualArgcVertex>(blocks_[0], {});
+    taggedActualArgc_ = NewBootstrapVertex<I32ToTaggedIntVertex>(blocks_[0], {actualArgc_});
 
     // -3 : Fixed header lexicalEnv is at slot -3 in word units.
-    initialLexicalEnv_ = NewVertex<InitialValueVertex>(blocks_[0], {}, -3);
+    initialLexicalEnv_ = NewBootstrapVertex<InitialValueVertex>(blocks_[0], {}, -3);
     frameState.SetLexicalEnv(initialLexicalEnv_);
     if (!isOsr_ && GetOptions()->GetCompilerArkSteedPrintMethodName()) {
         // E1 execution marker: emit a single CallRuntime PrintMethodName vertex in the
@@ -1050,7 +971,7 @@ void GraphBuilder::InitializeStartBlock(SharedBCFrameState frameState)
         // existing function-object value (initialCallTarget_) with no extra countable
         // operations; the stub logs `>>> Running method: <record>.<method>` on each
         // activation of the generated code.
-        NewVertex<CallRuntimeVertex>(blocks_[0], {initialCallTarget_}, RTSTUB_ID(PrintMethodName),
+        NewBootstrapVertex<CallRuntimeVertex>(blocks_[0], {initialCallTarget_}, RTSTUB_ID(PrintMethodName),
                                      SideEffectKind::SAFE_CALL);
     }
     FinishBlockWithJump(blocks_[0], ActivateNonCatchBlock(1));
@@ -1244,6 +1165,11 @@ void GraphBuilder::InitFrameState(SharedBCFrameState frameState, uint32_t rpoInd
     for (uint32_t actualPredIndex = 0; actualPredIndex < actualNumPreds; ++actualPredIndex) {
         BB *predecessor = target->GetPredecessor(actualPredIndex);
         MergeFrameState(frameState, rpoIndex, GetOutgoingBlockState(predecessor), actualPredIndex, actualNumPreds);
+    }
+    for (PhiVertex *phi : target->GetPhis()) {
+        ASSERT(phi->GetInputCount() == actualNumPreds);
+        RecordPhiType(CompileInfoFactsAt(rpoIndex), phi,
+                      [this, target](uint32_t i) { return GetOutgoingBlockState(target->GetPredecessor(i)).facts; });
     }
 }
 
@@ -1476,6 +1402,7 @@ void GraphBuilder::PopulateVertexBytecodeOffset(VertexT *vertex)
 template <class VertexT, class InputRange, class... Args>
 VertexT *GraphBuilder::NewVertexImpl(BB *owner, const InputRange &inputs, Args &&...args)
 {
+    RecordInputUseReprHints<VertexT>(inputs);
     VertexT *vertex = Vertex::New<VertexT>(chunk_, inputs, std::forward<Args>(args)...);
     vertex->SetOwner(owner);
     owner->AddVertex(vertex);
@@ -1487,59 +1414,252 @@ VertexT *GraphBuilder::NewVertexImpl(BB *owner, const InputRange &inputs, Args &
     return vertex;
 }
 
+struct GraphBuilder::MissingVertexFactory {
+    void operator()() const = delete;
+};
+
+struct GraphBuilder::NoVertexAction {
+    template <class VertexT>
+    void operator()(VertexT *) const
+    {}
+};
+
+struct GraphBuilder::DefaultVertexEffect {};
+
+struct GraphBuilder::VertexAccStore {
+    SharedBCFrameState *frameState;
+    bool enabled;
+
+    void operator()(ValueVertex *vertex) const
+    {
+        if (enabled) {
+            frameState->SetAcc(vertex);
+        }
+    }
+};
+
+// A synchronous configuration object: callbacks run only in Build(), in the documented
+// stage order. The query and callback captures must outlive that call.
+template <class VertexT, class Factory, class Eager, class Effect, class Catch, class Lazy, class Facts, class Acc>
+class GraphBuilder::VertexBuilder {
+    template <class, class, class, class, class, class, class, class>
+    friend class VertexBuilder;
+
+public:
+    explicit VertexBuilder(GraphBuilder &builder, VertexBuildContext context, const CseQuery<VertexT> *query = nullptr,
+                           Factory factory = {}, Eager eager = {}, Effect effect = {}, Catch catchState = {},
+                           Lazy lazy = {}, Facts facts = {}, Acc acc = {})
+        : builder_(builder),
+          context_(context),
+          query_(query),
+          factory_(std::move(factory)),
+          eager_(std::move(eager)),
+          effect_(std::move(effect)),
+          catch_(std::move(catchState)),
+          lazy_(std::move(lazy)),
+          facts_(std::move(facts)),
+          acc_(std::move(acc))
+    {}
+
+    VertexBuilder(const VertexBuilder &) = delete;
+    VertexBuilder &operator=(const VertexBuilder &) = delete;
+    VertexBuilder(VertexBuilder &&) = default;
+    VertexBuilder &operator=(VertexBuilder &&) = delete;
+
+    // Configure lookup and publication; the query is borrowed until Build() returns.
+    VertexBuilder &&TryCse(const CseQuery<VertexT> &query) &&
+    {
+        static_assert(CseTraits<VertexT>::POLICY != CsePolicy::NONE, "Vertex does not support CSE");
+        ASSERT(context_.facts != nullptr);
+        query_ = &query;
+        return std::move(*this);
+    }
+
+    // Required factory: allocate, insert into context.owner, and set the bytecode offset.
+    // Runs only when a new vertex is needed, before any state or effect processing.
+    template <class Callback>
+    auto CreateWith(Callback callback) &&
+    {
+        static_assert(std::is_same_v<Factory, MissingVertexFactory>, "Factory already configured");
+        return VertexBuilder<VertexT, Callback, Eager, Effect, Catch, Lazy, Facts, Acc>(
+            builder_, context_, query_, std::move(callback), std::move(eager_), std::move(effect_), std::move(catch_),
+            std::move(lazy_), std::move(facts_), std::move(acc_));
+    }
+
+    // Creation-only callback: install the pre-operation eager snapshot before effects.
+    template <class Callback>
+    auto WithEagerDeoptState(Callback callback) &&
+    {
+        static_assert(std::is_same_v<Eager, NoVertexAction>, "Eager state already configured");
+        return VertexBuilder<VertexT, Factory, Callback, Effect, Catch, Lazy, Facts, Acc>(
+            builder_, context_, query_, std::move(factory_), std::move(callback), std::move(effect_), std::move(catch_),
+            std::move(lazy_), std::move(facts_), std::move(acc_));
+    }
+
+    // Creation-only classifier for CAN_WRITE vertices. Return a descriptor; Build() owns
+    // facts invalidation and loop-effect recording. Omission selects the existing classifier.
+    template <class Callback>
+    auto WithEffectClassifier(Callback callback) &&
+    {
+        static_assert(CanWrite(VertexT::PROPERTIES), "Only writing vertices need an effect classifier");
+        static_assert(std::is_same_v<Effect, DefaultVertexEffect>, "Effect classifier already configured");
+        return VertexBuilder<VertexT, Factory, Eager, Callback, Catch, Lazy, Facts, Acc>(
+            builder_, context_, query_, std::move(factory_), std::move(eager_), std::move(callback), std::move(catch_),
+            std::move(lazy_), std::move(facts_), std::move(acc_));
+    }
+
+    // Creation-only callback: connect the catch edge and merge its state after effects,
+    // before the normal result is stored in ACC or added to result facts.
+    template <class Callback>
+    auto WithCatchState(Callback callback) &&
+    {
+        static_assert(std::is_same_v<Catch, NoVertexAction>, "Catch state already configured");
+        return VertexBuilder<VertexT, Factory, Eager, Effect, Callback, Lazy, Facts, Acc>(
+            builder_, context_, query_, std::move(factory_), std::move(eager_), std::move(effect_), std::move(callback),
+            std::move(lazy_), std::move(facts_), std::move(acc_));
+    }
+
+    // Store the final result on both paths, before creation-only lazy state is captured.
+    auto StoreToAcc(SharedBCFrameState &frameState, bool enabled = true) &&
+    {
+        static_assert(std::is_base_of_v<ValueVertex, VertexT>, "ACC requires a value vertex");
+        static_assert(std::is_same_v<Acc, NoVertexAction>, "ACC store already configured");
+        return VertexBuilder<VertexT, Factory, Eager, Effect, Catch, Lazy, Facts, VertexAccStore>(
+            builder_, context_, query_, std::move(factory_), std::move(eager_), std::move(effect_), std::move(catch_),
+            std::move(lazy_), std::move(facts_), VertexAccStore {&frameState, enabled});
+    }
+
+    // Creation-only callback: install the post-operation lazy state, after the ACC store.
+    // The callback retains the caller's lazy and dependency-deopt conditions.
+    template <class Callback>
+    auto WithLazyDeoptState(Callback callback) &&
+    {
+        static_assert(std::is_same_v<Lazy, NoVertexAction>, "Lazy state already configured");
+        return VertexBuilder<VertexT, Factory, Eager, Effect, Catch, Callback, Facts, Acc>(
+            builder_, context_, query_, std::move(factory_), std::move(eager_), std::move(effect_), std::move(catch_),
+            std::move(callback), std::move(facts_), std::move(acc_));
+    }
+
+    // Runs once for the final vertex on both paths. Update result facts such as types
+    // and alternative representations, without invalidating effects or publishing CSE.
+    template <class Callback>
+    auto UpdateFacts(Callback callback) &&
+    {
+        static_assert(std::is_same_v<Facts, NoVertexAction>, "Result facts already configured");
+        return VertexBuilder<VertexT, Factory, Eager, Effect, Catch, Lazy, Callback, Acc>(
+            builder_, context_, query_, std::move(factory_), std::move(eager_), std::move(effect_), std::move(catch_),
+            std::move(lazy_), std::move(callback), std::move(acc_));
+    }
+
+    VertexT *Build() &&
+    {
+        static_assert(!std::is_same_v<Factory, MissingVertexFactory>, "CreateWith is required");
+        static_assert(!CanEagerDeopt(VertexT::PROPERTIES) || !std::is_same_v<Eager, NoVertexAction>,
+                      "Eager vertices require WithEagerDeoptState");
+        uint64_t queryHash = 0;
+        if constexpr (CseTraits<VertexT>::POLICY != CsePolicy::NONE) {
+            // The diagnostic switch disables cache lookup and publication.
+            if (LIKELY(builder_.enableCse_) && query_ != nullptr) {
+                // Reuse only the hash across callbacks; epochs and bucket heads stay current.
+                queryHash = CseHashQuery(*query_);
+                if (VertexT *cached =
+                        context_.facts->GetCse().Find(*query_, queryHash, context_.facts->GetEffectEpoch())) {
+                    RecordInputUseReprHints<VertexT>(query_->inputs);
+                    acc_(cached);
+                    facts_(cached);
+                    return cached;
+                }
+            }
+        }
+
+        VertexT *vertex = factory_();
+        ASSERT(vertex != nullptr && vertex->GetOwner() == context_.owner);
+        eager_(vertex);
+        if constexpr (CanWrite(VertexT::PROPERTIES)) {
+            SideEffectDescriptor effect;
+            if constexpr (std::is_same_v<Effect, DefaultVertexEffect>) {
+                effect = context_.facts != nullptr ? ArkSteedSideEffectClassifier::Classify(vertex, *context_.facts)
+                                                   : ArkSteedSideEffectClassifier::Classify(vertex);
+            } else {
+                effect = effect_(vertex);
+            }
+            if (context_.facts != nullptr) {
+                context_.facts->MarkPossibleSideEffect(effect, builder_.CurrentLoopEffects());
+            } else if (LoopEffects *effects = builder_.CurrentLoopEffects()) {
+                effects->Record(effect.kind == SideEffectKind::ENV_SLOT_WRITE
+                                    ? SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL}
+                                    : effect);
+            }
+        }
+        catch_(vertex);
+        acc_(vertex);
+        lazy_(vertex);
+        facts_(vertex);
+        if constexpr (CseTraits<VertexT>::POLICY != CsePolicy::NONE) {
+            if (LIKELY(builder_.enableCse_) && query_ != nullptr) {
+                ASSERT(CseMatchNode(vertex, *query_) == vertex);
+                if constexpr (CanEagerDeopt(VertexT::PROPERTIES)) {
+                    ASSERT(!vertex->GetEagerDeoptFrameState().empty());
+                }
+                context_.facts->GetCse().AddExpression(*query_, vertex, queryHash, context_.facts->GetEffectEpoch());
+            }
+        }
+        return vertex;
+    }
+
+private:
+    GraphBuilder &builder_;
+    VertexBuildContext context_;
+    const CseQuery<VertexT> *query_;
+    Factory factory_;
+    Eager eager_;
+    Effect effect_;
+    Catch catch_;
+    Lazy lazy_;
+    Facts facts_;
+    Acc acc_;
+};
+
 template <class VertexT, class InputRange, class... Args>
 VertexT *GraphBuilder::NewVertex(BB *owner, const InputRange &inputs, Args &&...args)
 {
-    RecordInputUseReprHints<VertexT>(inputs);
-    VertexT *vertex = NewVertexImpl<VertexT>(owner, inputs, std::forward<Args>(args)...);
-    if constexpr (CanWrite(VertexT::PROPERTIES)) {
-        if (LoopEffects *effects = CurrentLoopEffects()) {
-            SideEffectDescriptor effect = ArkSteedSideEffectClassifier::Classify(vertex);
-            // Without facts there is no alias analysis for environment stores.
-            effects->Record(effect.kind == SideEffectKind::ENV_SLOT_WRITE
-                ? SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL} : effect);
-        }
-    }
-    return vertex;
+    return VertexBuilder<VertexT>(*this, {nullptr, owner})
+        // Create and insert only; Build() retains loop-effect recording without facts.
+        .CreateWith([&]() { return NewVertexImpl<VertexT>(owner, inputs, std::forward<Args>(args)...); })
+        .Build();
+}
+
+template <class VertexT, class InputRange, class... Args>
+VertexT *GraphBuilder::NewBootstrapVertex(BB *owner, const InputRange &inputs, Args &&...args)
+{
+    ASSERT(owner == blocks_[0]);
+    return NewVertex<VertexT>(owner, inputs, std::forward<Args>(args)...);
 }
 
 template <class VertexT, class InputRange, class... Args>
 VertexT *GraphBuilder::NewVertex(
     CompileInfoFacts *compileInfoFacts, BB *owner, const InputRange &inputs, Args &&...args)
 {
-    RecordInputUseReprHints<VertexT>(inputs);
-    if constexpr (CseCanUseAvailableExpression<VertexT>()) {
+    if constexpr (CseDefaultPolicy<VertexT>() == CsePolicy::VALUE) {
         static_assert(!CanWrite(VertexT::PROPERTIES));
-        CompileInfoFacts::ExpressionInputs expressionInputs(chunk_);
-        for (ValueVertex *input : inputs) {
-            expressionInputs.push_back(input);
-        }
-
-        CompileInfoFacts::ExpressionOptions options(chunk_);
-        CseBuildExpressionOptions(options, args...);
-        uint32_t hash = CseHashExpression(OpcodeOf<VertexT>, expressionInputs, options);
-        // Read operations are versioned by the effect epoch.
-        bool needsEpochCheck = CanRead(VertexT::PROPERTIES);
-        ValueVertex *cached =
-            compileInfoFacts->FindExpression(hash, OpcodeOf<VertexT>, expressionInputs, options, needsEpochCheck);
-        // The cached vertex is reusable if one of the following conditions is true:
-        // 1. The cached vertex is not a read vertex;
-        // 2. For read vertices, the cached vertex is created in the current block.
-        // Note: Constraint 2 can be relaxed in the future such that the cached vertex dominates current block.
-        if (cached != nullptr && (!needsEpochCheck || cached->GetOwner() == owner)) {
-            return cached->Cast<VertexT>();
-        }
-
-        VertexT *vertex = NewVertexImpl<VertexT>(owner, inputs, std::forward<Args>(args)...);
-        compileInfoFacts->AddExpression(hash, vertex, expressionInputs, options, needsEpochCheck);
-        return vertex;
+        auto query = MakeCseQuery<VertexT>(inputs, args...);
+        return VertexBuilder<VertexT>(*this, {compileInfoFacts, owner})
+            .TryCse(query)
+            // The semantic key and constructor arguments keep their original order.
+            .CreateWith([&]() { return NewVertexImpl<VertexT>(owner, inputs, std::forward<Args>(args)...); })
+            .Build();
     }
-    VertexT *vertex = NewVertexImpl<VertexT>(owner, inputs, std::forward<Args>(args)...);
-    if constexpr (CanWrite(VertexT::PROPERTIES)) {
-        SideEffectDescriptor effect = ArkSteedSideEffectClassifier::Classify(vertex);
-        compileInfoFacts->MarkPossibleSideEffect(effect, CurrentLoopEffects());
-    }
-    return vertex;
+    return NewUncachedVertex<VertexT>(compileInfoFacts, owner, inputs, std::forward<Args>(args)...);
+}
+
+template <class VertexT, class InputRange, class... Args>
+VertexT *GraphBuilder::NewUncachedVertex(CompileInfoFacts *compileInfoFacts, BB *owner, const InputRange &inputs,
+                                         Args &&...args)
+{
+    return VertexBuilder<VertexT>(*this, {compileInfoFacts, owner})
+        // No TryCse: retain creation and effects without lookup or publication.
+        .CreateWith([&]() { return NewVertexImpl<VertexT>(owner, inputs, std::forward<Args>(args)...); })
+        .Build();
 }
 
 LoopEffects *GraphBuilder::CurrentLoopEffects()
@@ -1673,7 +1793,7 @@ LoadTaggedFieldVertex *GraphBuilder::ActivateGlobalEnv()
 {
     if (UNLIKELY(lazyGlobalEnv_ == nullptr)) {
         int32_t globalEnvOffset = static_cast<int32_t>(GlobalEnv::HEADER_SIZE);
-        lazyGlobalEnv_ = NewVertex<LoadTaggedFieldVertex>(blocks_[0], {initialLexicalEnv_}, globalEnvOffset);
+        lazyGlobalEnv_ = NewBootstrapVertex<LoadTaggedFieldVertex>(blocks_[0], {initialLexicalEnv_}, globalEnvOffset);
     }
     return lazyGlobalEnv_;
 }
@@ -1712,6 +1832,50 @@ struct GraphBuilder::BytecodeVisitor {
     using NamedLoadAccessInfoOpt = std::optional<NamedLoadAccessInfo>;
     using NamedLoadAccessInfosOpt = std::optional<std::vector<NamedLoadAccessInfo>>;
 
+    bool CanSkipDeadBytecodeResult(const BytecodeInfo *bcInfo)
+    {
+        if (!bcInfo->AccOut() || bcInfo->EnvOut() || bcInfo->vregOut != BytecodeInfo::NO_VREG ||
+            self->analysis_->GetLiveOutOfBytecode(currentBcIndex).TestBit(self->AccIndex())) {
+            return false;
+        }
+        using Opcode = kungfu::EcmaOpcode;
+        switch (bcInfo->GetOpcode()) {
+            case Opcode::ISTRUE:
+            case Opcode::ISFALSE:
+            case Opcode::CALLRUNTIME_ISTRUE_PREF_IMM8:
+            case Opcode::CALLRUNTIME_ISFALSE_PREF_IMM8:
+                return true;
+            case Opcode::INC_IMM8:
+            case Opcode::DEC_IMM8:
+            case Opcode::NEG_IMM8:
+            case Opcode::NOT_IMM8:
+                return compileInfoFacts_->CheckType(frameState.GetAcc(), NodeInfo::NodeType::NUMBER);
+            case Opcode::ADD2_IMM8_V8:
+            case Opcode::SUB2_IMM8_V8:
+            case Opcode::MUL2_IMM8_V8:
+            case Opcode::DIV2_IMM8_V8:
+            case Opcode::MOD2_IMM8_V8:
+            case Opcode::SHL2_IMM8_V8:
+            case Opcode::SHR2_IMM8_V8:
+            case Opcode::ASHR2_IMM8_V8:
+            case Opcode::AND2_IMM8_V8:
+            case Opcode::OR2_IMM8_V8:
+            case Opcode::XOR2_IMM8_V8:
+            case Opcode::EQ_IMM8_V8:
+            case Opcode::NOTEQ_IMM8_V8:
+            case Opcode::LESS_IMM8_V8:
+            case Opcode::LESSEQ_IMM8_V8:
+            case Opcode::GREATER_IMM8_V8:
+            case Opcode::GREATEREQ_IMM8_V8:
+            case Opcode::STRICTNOTEQ_IMM8_V8:
+            case Opcode::STRICTEQ_IMM8_V8:
+                return compileInfoFacts_->CheckType(frameState.GetAcc(), NodeInfo::NodeType::NUMBER) &&
+                       compileInfoFacts_->CheckType(LoadRegister(bcInfo, 0), NodeInfo::NodeType::NUMBER);
+            default:
+                return false;
+        }
+    }
+
     bool Visit(const BytecodeInfo *bcInfo, uint32_t bcIndex)
     {
         if (currentBlock->GetControlVertex() != nullptr) {
@@ -1723,6 +1887,11 @@ struct GraphBuilder::BytecodeVisitor {
         if (self->GetOptions()->GetCompilerArkSteedDeoptOnInsufficientProfile() && bcInfo->IsInsufficientProfile()) {
             EmitUnconditionalDeopt();
             return false;
+        }
+
+        if (CanSkipDeadBytecodeResult(bcInfo)) {
+            frameState.SetAcc(self->undefinedValue_);
+            return true;
         }
 
         switch (bcInfo->GetOpcode()) {
@@ -2354,7 +2523,6 @@ struct GraphBuilder::BytecodeVisitor {
         }
         ValueVertex *result = BuildUnaryOperation(CommonStubID::Inc);
         frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
     }
 
     void LowerDec()
@@ -2367,7 +2535,6 @@ struct GraphBuilder::BytecodeVisitor {
         }
         ValueVertex *result = BuildUnaryOperation(CommonStubID::Dec);
         frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
     }
 
     void LowerNeg()
@@ -2380,7 +2547,6 @@ struct GraphBuilder::BytecodeVisitor {
         }
         ValueVertex *result = BuildUnaryOperation(CommonStubID::Neg);
         frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
     }
 
     void LowerNot()
@@ -2393,7 +2559,6 @@ struct GraphBuilder::BytecodeVisitor {
         }
         ValueVertex *result = BuildUnaryOperation(CommonStubID::Not);
         frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
     }
 
     // -------- Category #4: Binary Arithmetic --------
@@ -2416,7 +2581,6 @@ struct GraphBuilder::BytecodeVisitor {
         }
         ValueVertex *result = BuildBinaryOperation(BinaryOpKind::ADD);
         frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
     }
 
     void LowerSub2(const BytecodeInfo *bcInfo)
@@ -2430,7 +2594,6 @@ struct GraphBuilder::BytecodeVisitor {
         }
         ValueVertex *result = BuildBinaryOperation(BinaryOpKind::SUB);
         frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
     }
 
     void LowerMul2(const BytecodeInfo *bcInfo)
@@ -2444,7 +2607,6 @@ struct GraphBuilder::BytecodeVisitor {
         }
         ValueVertex *result = BuildBinaryOperation(BinaryOpKind::MUL);
         frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
     }
 
     void LowerDiv2(const BytecodeInfo *bcInfo)
@@ -2458,14 +2620,12 @@ struct GraphBuilder::BytecodeVisitor {
         }
         ValueVertex *result = BuildBinaryOperation(BinaryOpKind::DIV);
         frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
     }
 
     void LowerMod2(const BytecodeInfo * /*bcInfo*/)
     {
         ValueVertex *result = BuildBinaryOperation(BinaryOpKind::MOD);
         frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
     }
 
     void LowerExp(const BytecodeInfo *bcInfo)
@@ -2486,7 +2646,6 @@ struct GraphBuilder::BytecodeVisitor {
         }
         ValueVertex *result = BuildBitwiseOperation(IntBitwiseKind::SHIFT_LEFT);
         frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
     }
 
     void LowerShr2(const BytecodeInfo *bcInfo)
@@ -2500,7 +2659,6 @@ struct GraphBuilder::BytecodeVisitor {
         }
         ValueVertex *result = BuildBitwiseOperation(IntBitwiseKind::SHIFT_RIGHT_LOGICAL);
         frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
     }
 
     void LowerAshr2(const BytecodeInfo *bcInfo)
@@ -2514,7 +2672,6 @@ struct GraphBuilder::BytecodeVisitor {
         }
         ValueVertex *result = BuildBitwiseOperation(IntBitwiseKind::SHIFT_RIGHT_ARITHMETIC);
         frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
     }
 
     void LowerAnd2(const BytecodeInfo *bcInfo)
@@ -2528,7 +2685,6 @@ struct GraphBuilder::BytecodeVisitor {
         }
         ValueVertex *result = BuildBitwiseOperation(IntBitwiseKind::BITWISE_AND);
         frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
     }
 
     void LowerOr2(const BytecodeInfo *bcInfo)
@@ -2542,7 +2698,6 @@ struct GraphBuilder::BytecodeVisitor {
         }
         ValueVertex *result = BuildBitwiseOperation(IntBitwiseKind::BITWISE_OR);
         frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
     }
 
     void LowerXor2(const BytecodeInfo *bcInfo)
@@ -2556,7 +2711,6 @@ struct GraphBuilder::BytecodeVisitor {
         }
         ValueVertex *result = BuildBitwiseOperation(IntBitwiseKind::BITWISE_XOR);
         frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
     }
 
     // -------- Category #5: Comparisons --------
@@ -2573,84 +2727,57 @@ struct GraphBuilder::BytecodeVisitor {
         return true;
     }
 
-    void LowerEq(const BytecodeInfo *bcInfo)
+    void LowerCompare(const BytecodeInfo *bcInfo, BinaryFoldOp foldOp, JSCondition condition)
     {
-        if (TryFoldCompareAtBytecode(bcInfo, BinaryFoldOp::EQ)) {
+        if (TryFoldCompareAtBytecode(bcInfo, foldOp)) {
             return;
         }
-        ValueVertex *result = BuildCompareOperation(JSCondition::EQUAL);
+        ValueVertex *result = BuildCompareOperation(condition);
+        if (result == nullptr) {
+            ASSERT(currentBlock->GetControlVertex() != nullptr);
+            return;
+        }
         frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
+    }
+
+    void LowerEq(const BytecodeInfo *bcInfo)
+    {
+        LowerCompare(bcInfo, BinaryFoldOp::EQ, JSCondition::EQUAL);
     }
 
     void LowerNotEq(const BytecodeInfo *bcInfo)
     {
-        if (TryFoldCompareAtBytecode(bcInfo, BinaryFoldOp::NOT_EQ)) {
-            return;
-        }
-        ValueVertex *result = BuildCompareOperation(JSCondition::NOT_EQUAL);
-        frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
+        LowerCompare(bcInfo, BinaryFoldOp::NOT_EQ, JSCondition::NOT_EQUAL);
     }
 
     void LowerLess(const BytecodeInfo *bcInfo)
     {
-        if (TryFoldCompareAtBytecode(bcInfo, BinaryFoldOp::LESS)) {
-            return;
-        }
-        ValueVertex *result = BuildCompareOperation(JSCondition::LESS_THAN);
-        frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
+        LowerCompare(bcInfo, BinaryFoldOp::LESS, JSCondition::LESS_THAN);
     }
 
     void LowerLessEq(const BytecodeInfo *bcInfo)
     {
-        if (TryFoldCompareAtBytecode(bcInfo, BinaryFoldOp::LESS_EQ)) {
-            return;
-        }
-        ValueVertex *result = BuildCompareOperation(JSCondition::LESS_THAN_OR_EQUAL);
-        frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
+        LowerCompare(bcInfo, BinaryFoldOp::LESS_EQ, JSCondition::LESS_THAN_OR_EQUAL);
     }
 
     void LowerGreater(const BytecodeInfo *bcInfo)
     {
-        if (TryFoldCompareAtBytecode(bcInfo, BinaryFoldOp::GREATER)) {
-            return;
-        }
-        ValueVertex *result = BuildCompareOperation(JSCondition::GREATER_THAN);
-        frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
+        LowerCompare(bcInfo, BinaryFoldOp::GREATER, JSCondition::GREATER_THAN);
     }
 
     void LowerGreaterEq(const BytecodeInfo *bcInfo)
     {
-        if (TryFoldCompareAtBytecode(bcInfo, BinaryFoldOp::GREATER_EQ)) {
-            return;
-        }
-        ValueVertex *result = BuildCompareOperation(JSCondition::GREATER_THAN_OR_EQUAL);
-        frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
+        LowerCompare(bcInfo, BinaryFoldOp::GREATER_EQ, JSCondition::GREATER_THAN_OR_EQUAL);
     }
 
     void LowerStrictNotEq(const BytecodeInfo *bcInfo)
     {
-        if (TryFoldCompareAtBytecode(bcInfo, BinaryFoldOp::STRICT_NOT_EQ)) {
-            return;
-        }
-        ValueVertex *result = BuildCompareOperation(JSCondition::STRICT_NOT_EQUAL);
-        frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
+        LowerCompare(bcInfo, BinaryFoldOp::STRICT_NOT_EQ, JSCondition::STRICT_NOT_EQUAL);
     }
 
     void LowerStrictEq(const BytecodeInfo *bcInfo)
     {
-        if (TryFoldCompareAtBytecode(bcInfo, BinaryFoldOp::STRICT_EQ)) {
-            return;
-        }
-        ValueVertex *result = BuildCompareOperation(JSCondition::STRICT_EQUAL);
-        frameState.SetAcc(result);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, result);
+        LowerCompare(bcInfo, BinaryFoldOp::STRICT_EQ, JSCondition::STRICT_EQUAL);
     }
 
     void LowerIsTrue()
@@ -2670,25 +2797,36 @@ struct GraphBuilder::BytecodeVisitor {
 
     ValueVertex *TryBuildBooleanWithoutCall(ValueVertex *value, bool trueIfTruthy)
     {
+        if (ValueVertex *cached = compileInfoFacts_->LookupTruthinessResult(value, trueIfTruthy)) {
+            return cached;
+        }
+        auto finish = [this, value, trueIfTruthy](ValueVertex *result) {
+            compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
+            compileInfoFacts_->RecordTruthinessResult(value, trueIfTruthy, result);
+            return result;
+        };
         bool toBoolean = false;
         if (TryFoldToBooleanConstant(value, &toBoolean)) {
-            return GetBooleanConstant(trueIfTruthy ? toBoolean : !toBoolean);
+            return finish(GetBooleanConstant(trueIfTruthy ? toBoolean : !toBoolean));
         }
         // Static type facts are guaranteed by checked producers: no guard is needed.
         if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::BOOLEAN)) {
-            return trueIfTruthy ? value : BuildTaggedNotEqual(value, GetBooleanConstant(true));
+            return finish(trueIfTruthy ? value : BuildTaggedNotEqual(value, GetBooleanConstant(true)));
+        }
+        if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::NULL_OR_UNDEFINED)) {
+            return finish(GetBooleanConstant(!trueIfTruthy));
         }
         if (IsAlwaysTruthyHeapObject(value)) {
-            return GetBooleanConstant(trueIfTruthy);
+            return finish(GetBooleanConstant(trueIfTruthy));
         }
         ValueVertex *result = TryBuildKnownIntToBoolean(value, trueIfTruthy);
         if (result == nullptr && compileInfoFacts_->CheckType(value, NodeInfo::NodeType::NUMBER)) {
             result = BuildNumberToBoolean(value, trueIfTruthy);
         }
-        if (result != nullptr) {
-            compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
+        if (result == nullptr && compileInfoFacts_->CheckType(value, NodeInfo::NodeType::STRING)) {
+            result = self->NewVertex<StringToBooleanVertex>(compileInfoFacts_, currentBlock, {value}, trueIfTruthy);
         }
-        return result;
+        return result == nullptr ? nullptr : finish(result);
     }
 
     ValueVertex *BuildToBoolean(ValueVertex *value, bool trueIfTruthy)
@@ -2720,13 +2858,14 @@ struct GraphBuilder::BytecodeVisitor {
                     }
                     break;
                 default:
-                    result = CommonStubCall({value},
-                                            trueIfTruthy ? CommonStubID::ToBooleanTrue : CommonStubID::ToBooleanFalse,
-                                            SideEffectKind::SAFE_CALL);
+                    result = CommonStubCallToAccWithLazyDeopt(
+                        {value}, trueIfTruthy ? CommonStubID::ToBooleanTrue : CommonStubID::ToBooleanFalse,
+                        SideEffectKind::SAFE_CALL);
                     break;
             }
         }
         compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
+        compileInfoFacts_->RecordTruthinessResult(value, trueIfTruthy, result);
         return result;
     }
 
@@ -2751,17 +2890,41 @@ struct GraphBuilder::BytecodeVisitor {
             compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
             return result;
         }
+        if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::INT)) {
+            return BuildI32ToBoolean(BuildTaggedIntToI32(value), trueIfNonZero);
+        }
+        if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::DOUBLE)) {
+            return BuildTaggedDoubleToBoolean(value, trueIfNonZero);
+        }
+        if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::NUMBER)) {
+            ValueVertex *result =
+                self->NewVertex<NumberToBooleanVertex>(compileInfoFacts_, currentBlock, {value}, trueIfNonZero);
+            compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
+            return result;
+        }
         // Otherwise the fused vertex: the tag dispatch is the NOTNUMBER1
         // guard, ints test the raw low-32 bits, tagged doubles decode in
         // place for the branchless magnitude trick.
-        std::vector<ValueVertex *> inputs {value};
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
-        ValueVertex *result = self->NewVertex<TaggedNumberToBooleanVertex>(
-            currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex), trueIfNonZero);
-        result->Cast<TaggedNumberToBooleanVertex>()->SetEagerDeoptFrameState(std::move(deoptFrameState));
-        compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::NUMBER);
-        compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
-        return result;
+        const uint32_t bcIndex = currentBcIndex;
+        auto inputs = std::initializer_list<ValueVertex *> {value};
+        auto query = MakeCseQuery<TaggedNumberToBooleanVertex>(inputs, trueIfNonZero);
+        return VertexBuilder<TaggedNumberToBooleanVertex>(*self, {compileInfoFacts_, currentBlock})
+            .TryCse(query)
+            // Only create on a miss, retaining the standard eager constructor arguments.
+            .CreateWith([&]() {
+                return self->NewVertexImpl<TaggedNumberToBooleanVertex>(
+                    currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(bcIndex), trueIfNonZero);
+            })
+            // Capture the pre-operation eager state only for a new vertex.
+            .WithEagerDeoptState([this, bcIndex](TaggedNumberToBooleanVertex *vertex) {
+                vertex->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+            })
+            // Preserve the same result facts on both a cache hit and a new vertex.
+            .UpdateFacts([this, value](TaggedNumberToBooleanVertex *result) {
+                compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::NUMBER);
+                compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
+            })
+            .Build();
     }
 
     ValueVertex *BuildTaggedDoubleToBoolean(ValueVertex *value, bool trueIfNonZero)
@@ -2774,20 +2937,40 @@ struct GraphBuilder::BytecodeVisitor {
             compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
             return result;
         }
+        if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::DOUBLE)) {
+            ValueVertex *result =
+                self->NewVertex<DoubleToBooleanVertex>(compileInfoFacts_, currentBlock, {value}, trueIfNonZero);
+            compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
+            return result;
+        }
         // Double-only site: the tag check is the NOTDOUBLE1 guard, the decoded
         // payload feeds the branchless magnitude trick.
-        std::vector<ValueVertex *> inputs {value};
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
-        ValueVertex *result = self->NewVertex<TaggedDoubleToBooleanVertex>(
-            currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex), trueIfNonZero);
-        result->Cast<TaggedDoubleToBooleanVertex>()->SetEagerDeoptFrameState(std::move(deoptFrameState));
-        compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::DOUBLE);
-        compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
-        return result;
+        const uint32_t bcIndex = currentBcIndex;
+        auto inputs = std::initializer_list<ValueVertex *> {value};
+        auto query = MakeCseQuery<TaggedDoubleToBooleanVertex>(inputs, trueIfNonZero);
+        return VertexBuilder<TaggedDoubleToBooleanVertex>(*self, {compileInfoFacts_, currentBlock})
+            .TryCse(query)
+            // Only create on a miss, retaining the standard eager constructor arguments.
+            .CreateWith([&]() {
+                return self->NewVertexImpl<TaggedDoubleToBooleanVertex>(
+                    currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(bcIndex), trueIfNonZero);
+            })
+            // Capture the pre-operation eager state only for a new vertex.
+            .WithEagerDeoptState([this, bcIndex](TaggedDoubleToBooleanVertex *vertex) {
+                vertex->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+            })
+            // Preserve the same result facts on both a cache hit and a new vertex.
+            .UpdateFacts([this, value](TaggedDoubleToBooleanVertex *result) {
+                compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::DOUBLE);
+                compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
+            })
+            .Build();
     }
 
     ValueVertex *BuildBooleanToNumber(ValueVertex *value)
     {
+        // A contradictory PGO guard can leave NONE on its unreachable continuation.
+        ASSERT(NodeInfo::NodeTypeIs(compileInfoFacts_->GetKnownType(value), NodeInfo::NodeType::BOOLEAN));
         ValueVertex *raw = self->NewVertex<TaggedToRawI64Vertex>(compileInfoFacts_, currentBlock, {value});
         ValueVertex *maskOne = self->graph_->GetInt64Constant(1);
         ValueVertex *masked = self->NewVertex<I64BitwiseBinaryVertex>(
@@ -2802,6 +2985,13 @@ struct GraphBuilder::BytecodeVisitor {
 
     ValueVertex *BuildUndefinedOrNullToNumber(ValueVertex *value)
     {
+        ASSERT(NodeInfo::NodeTypeIs(compileInfoFacts_->GetKnownType(value), NodeInfo::NodeType::NULL_OR_UNDEFINED));
+        if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::NULL_TYPE)) {
+            return self->graph_->GetTaggedConstant(JSTaggedValue::VALUE_ZERO);
+        }
+        if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::UNDEFINED)) {
+            return self->graph_->GetTaggedConstant(base::NumberHelper::GetNaN());
+        }
         ValueVertex *raw = self->NewVertex<TaggedToRawI64Vertex>(compileInfoFacts_, currentBlock, {value});
         ValueVertex *undefinedValue =
             self->graph_->GetInt64Constant(static_cast<int64_t>(JSTaggedValue::VALUE_UNDEFINED));
@@ -2814,6 +3004,23 @@ struct GraphBuilder::BytecodeVisitor {
             Condition::EQUAL);
         compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::NUMBER);
         return result;
+    }
+
+    ValueVertex *TryBuildKnownNumericConversion(ValueVertex *value, bool allowBigInt)
+    {
+        if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::NUMBER)) {
+            return value;
+        }
+        if (allowBigInt && compileInfoFacts_->CheckType(value, NodeInfo::NodeType::BIGINT)) {
+            return value;
+        }
+        if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::BOOLEAN)) {
+            return BuildBooleanToNumber(value);
+        }
+        if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::NULL_OR_UNDEFINED)) {
+            return BuildUndefinedOrNullToNumber(value);
+        }
+        return nullptr;
     }
 
     // Shared PGO specialization for ToNumber/ToNumeric: boolean and
@@ -2859,8 +3066,8 @@ struct GraphBuilder::BytecodeVisitor {
             frameState.SetAcc(TaggedConstantFromFoldedValue(folded));
             return;
         }
-        if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::NUMBER)) {
-            frameState.SetAcc(value);
+        if (ValueVertex *converted = TryBuildKnownNumericConversion(value, /* allowBigInt */ false)) {
+            frameState.SetAcc(converted);
             return;
         }
         if (TrySpecializeNumericConversion(value, false)) {
@@ -2877,9 +3084,8 @@ struct GraphBuilder::BytecodeVisitor {
             frameState.SetAcc(TaggedConstantFromFoldedValue(folded));
             return;
         }
-        if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::NUMBER) ||
-            compileInfoFacts_->CheckType(value, NodeInfo::NodeType::BIGINT)) {
-            frameState.SetAcc(value);
+        if (ValueVertex *converted = TryBuildKnownNumericConversion(value, /* allowBigInt */ true)) {
+            frameState.SetAcc(converted);
             return;
         }
         if (TrySpecializeNumericConversion(value, true)) {
@@ -2916,7 +3122,7 @@ struct GraphBuilder::BytecodeVisitor {
         NamedStoreAccessSet access;
         auto factory = self->pgoContext_.CreateAccessInfoFactory(bcInfo);
         if (factory.TryBuildNamedStoreAccessInfo(0, &access) &&
-            TryLowerNamedStoreAccessSet(bcIndex, access, receiver, value, PropertyKey::ConstDataId(constDataId))) {
+            TryLowerNamedStoreAccessSet(bcIndex, access, receiver, value, PropertyKeyForConstDataId(constDataId))) {
             return;
         }
         if (TryBuildStoreNamedProperty(bcIndex, receiver, constDataId, value)) {
@@ -4209,15 +4415,13 @@ struct GraphBuilder::BytecodeVisitor {
     }
 
     template <class InputRange = std::initializer_list<ValueVertex *>>
-    CallVertex *BuildGenericCallVertex(const InputRange &inputs, uint32_t actualArgc)
+    CallVertex *BuildGenericCallVertex(const InputRange &inputs, uint32_t actualArgc, bool withLazyDeopt, bool toAcc)
     {
-        auto *call = self->NewVertex<CallVertex>(compileInfoFacts_, currentBlock, inputs, actualArgc);
-        UpdateCatchBlockData(call);
-        return call;
+        return BuildThrowableNode<CallVertex>(inputs, withLazyDeopt, toAcc, true, actualArgc);
     }
 
     template <class InputRange = std::initializer_list<ValueVertex *>>
-    CallSelfVertex *BuildSelfCallVertex(const InputRange &inputs, uint32_t actualArgc)
+    CallSelfVertex *BuildSelfCallVertex(const InputRange &inputs, uint32_t actualArgc, bool toAcc = true)
     {
         ASSERT(std::size(inputs) == CallVertex::FIRST_ARG_INDEX + actualArgc);
         auto input = std::begin(inputs);
@@ -4235,22 +4439,22 @@ struct GraphBuilder::BytecodeVisitor {
         }
 
         uint32_t expectedParameterCount = self->preproc_->GetMethod()->GetNumArgsWithCallField();
-        auto *call = self->NewVertex<CallSelfVertex>(
-            compileInfoFacts_, currentBlock, selfInputs, actualArgc, expectedParameterCount);
+        auto *call =
+            BuildThrowableNode<CallSelfVertex>(selfInputs, true, toAcc, true, actualArgc, expectedParameterCount);
         self->graph_->SetHasRecursiveCalls(true);
-        UpdateCatchBlockData(call);
         return call;
     }
 
     template <class InputRange = std::initializer_list<ValueVertex *>>
-    ValueVertex *TryBuildPGOSelfCall(const CallFeedback &feedback, const InputRange &inputs, uint32_t actualArgc)
+    ValueVertex *TryBuildPGOSelfCall(const CallFeedback &feedback, const InputRange &inputs, uint32_t actualArgc,
+                                     bool toAcc = true)
     {
         if (!self->pgoContext_.TargetsCurrentFunction(feedback)) {
             return nullptr;
         }
         ValueVertex *actualTarget = *std::begin(inputs);
         BuildEagerDeoptIfReferenceNotEqual(actualTarget, self->initialCallTarget_);
-        return BuildSelfCallVertex(inputs, actualArgc);
+        return BuildSelfCallVertex(inputs, actualArgc, toAcc);
     }
 
     ValueVertex *LoadGlobalEnvValue(uint32_t fieldIndex)
@@ -4270,10 +4474,8 @@ struct GraphBuilder::BytecodeVisitor {
     void BuildEagerDeoptIfReferenceNotEqual(ValueVertex *actual, ValueVertex *expected,
                                             kungfu::DeoptType deoptType = kungfu::DeoptType::NOTCALLTGT1)
     {
-        uint32_t bytecodeOffset = self->preproc_->GetBytecodeOffset(currentBcIndex);
-        auto *guard = self->NewVertex<DeoptIfReferenceNotEqualVertex>(
-            compileInfoFacts_, currentBlock, {actual, expected}, self->chunk_, bytecodeOffset, deoptType);
-        guard->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(currentBcIndex));
+        BuildEagerCseNode<DeoptIfReferenceNotEqualVertex>(
+            currentBcIndex, std::initializer_list<ValueVertex *> {actual, expected}, deoptType);
     }
 
     ValueVertex *BuildGuardedCanonicalBuiltinTarget(ValueVertex *actualTarget, const KnownBuiltinCallPlan &plan)
@@ -4302,10 +4504,20 @@ struct GraphBuilder::BytecodeVisitor {
 
     void BuildEagerDeoptIfNotJSHClass(ValueVertex *value, kungfu::DeoptType deoptType)
     {
+        static_assert(CseDefaultPolicy<DeoptIfNotJSHClassVertex>() == CsePolicy::NONE);
+        static_assert(!CanWrite(DeoptIfNotJSHClassVertex::PROPERTIES));
         uint32_t bytecodeOffset = self->preproc_->GetBytecodeOffset(currentBcIndex);
-        auto *guard = self->NewVertex<DeoptIfNotJSHClassVertex>(compileInfoFacts_, currentBlock, {value}, self->chunk_,
-                                                                bytecodeOffset, deoptType);
-        guard->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(currentBcIndex));
+        VertexBuilder<DeoptIfNotJSHClassVertex>(*self, {compileInfoFacts_, currentBlock})
+            // This guard was uncached; keep its original inputs and constructor order.
+            .CreateWith([&]() {
+                return self->NewVertexImpl<DeoptIfNotJSHClassVertex>(currentBlock, {value}, self->chunk_,
+                                                                     bytecodeOffset, deoptType);
+            })
+            // Install the same snapshot immediately after creating this effect-free guard.
+            .WithEagerDeoptState([this](DeoptIfNotJSHClassVertex *guard) {
+                guard->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(currentBcIndex));
+            })
+            .Build();
     }
 
     ValueVertex *BuildObjectFromPrimitive(ValueVertex *value)
@@ -4318,7 +4530,7 @@ struct GraphBuilder::BytecodeVisitor {
 
     template <class InputRange, class Plan>
     CallKnownBuiltinVertex *BuildKnownBuiltinCallVertex(const InputRange &inputs, const Plan &plan,
-                                                        ValueVertex *canonicalTarget)
+                                                        ValueVertex *canonicalTarget, bool toAcc = true)
     {
         ASSERT(std::size(inputs) == CallKnownBuiltinVertex::FIRST_ARG_INDEX + plan.GetActualArgc());
         auto input = std::begin(inputs);
@@ -4335,20 +4547,17 @@ struct GraphBuilder::BytecodeVisitor {
             knownInputs.emplace_back(*input++);
         }
 
-        auto *call = self->NewVertex<CallKnownBuiltinVertex>(
-            compileInfoFacts_, currentBlock, knownInputs, plan.GetActualArgc(), plan.GetBuiltinId(),
-            plan.GetEntryKind());
-        UpdateCatchBlockData(call);
-        return call;
+        return BuildThrowableNode<CallKnownBuiltinVertex>(knownInputs, true, toAcc, true, plan.GetActualArgc(),
+                                                          plan.GetBuiltinId(), plan.GetEntryKind());
     }
 
     template <class InputRange = std::initializer_list<ValueVertex *>>
-    ValueVertex *BuildKnownBuiltinCall(const InputRange &inputs, const KnownBuiltinCallPlan &plan)
+    ValueVertex *BuildKnownBuiltinCall(const InputRange &inputs, const KnownBuiltinCallPlan &plan, bool toAcc = true)
     {
         ASSERT(std::size(inputs) == CallKnownBuiltinVertex::FIRST_ARG_INDEX + plan.GetActualArgc());
         ValueVertex *actualTarget = *std::begin(inputs);
         ValueVertex *canonicalTarget = BuildGuardedCanonicalBuiltinTarget(actualTarget, plan);
-        return BuildKnownBuiltinCallVertex(inputs, plan, canonicalTarget);
+        return BuildKnownBuiltinCallVertex(inputs, plan, canonicalTarget, toAcc);
     }
 
     template <class InputRange>
@@ -4573,7 +4782,8 @@ struct GraphBuilder::BytecodeVisitor {
     }
 
     template <class InputRange = std::initializer_list<ValueVertex *>>
-    ValueVertex *BuildInlineOrReducedCall(const CallFeedback &feedback, const InputRange &inputs, uint32_t actualArgc)
+    ValueVertex *BuildInlineOrReducedCall(const CallFeedback &feedback, const InputRange &inputs, uint32_t actualArgc,
+                                          bool toAcc)
     {
         std::optional<PreparedInlineCall> prepared;
         uint32_t maxInlineActualArgs =
@@ -4585,7 +4795,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *target = *std::begin(inputs);
         bool needsMethodIdGuard = prepared.has_value() || feedback.reductionKind != CallReductionKind::NONE;
         if (!BuildKnownJSFunctionGuards(feedback, target, needsMethodIdGuard)) {
-            return BuildGenericCallVertex(inputs, actualArgc);
+            return BuildGenericCallVertex(inputs, actualArgc, true, toAcc);
         }
         switch (feedback.reductionKind) {
             case CallReductionKind::TAGGED_CONSTANT:
@@ -4601,11 +4811,8 @@ struct GraphBuilder::BytecodeVisitor {
                 if (prepared.has_value()) {
                     return BuildPreparedInlineCall(*prepared, inputs, actualArgc);
                 }
-                auto *call = self->NewVertex<CallKnownJSFunctionVertex>(
-                    compileInfoFacts_, currentBlock, inputs, actualArgc,
-                    feedback.expectedArgc, feedback.callCount);
-                UpdateCatchBlockData(call);
-                return call;
+                return BuildThrowableNode<CallKnownJSFunctionVertex>(inputs, true, toAcc, true, actualArgc,
+                                                                     feedback.expectedArgc, feedback.callCount);
             }
             default:
                 UNREACHABLE();
@@ -4613,14 +4820,17 @@ struct GraphBuilder::BytecodeVisitor {
     }
 
     template <class InputRange = std::initializer_list<ValueVertex *>>
-    ValueVertex *BuildCallVertex(const BytecodeInfo *bcInfo, const InputRange &inputs, uint32_t actualArgc)
+    ValueVertex *BuildCallVertex(const InputRange &inputs, uint32_t actualArgc, const BytecodeInfo *bcInfo = nullptr,
+                                 bool toAcc = true)
     {
-        ASSERT(bcInfo != nullptr);
+        if (bcInfo == nullptr) {
+            return BuildGenericCallVertex(inputs, actualArgc, true, toAcc);
+        }
         ASSERT(std::size(inputs) == CallVertex::FIRST_ARG_INDEX + actualArgc);
         ValueVertex *target = *std::begin(inputs);
         bool canUseCallSelf = CanUseCallSelf();
         if (canUseCallSelf && target == self->initialCallTarget_) {
-            return BuildSelfCallVertex(inputs, actualArgc);
+            return BuildSelfCallVertex(inputs, actualArgc, toAcc);
         }
 
         auto localClosure = self->localClosureInfos_.find(target);
@@ -4635,26 +4845,34 @@ struct GraphBuilder::BytecodeVisitor {
                 if (prepared->methodId != 0) {
                     BuildMethodIdGuard(target, prepared->methodId);
                 }
-                return BuildPreparedInlineCall(*prepared, inputs, actualArgc);
+                ValueVertex *result = BuildPreparedInlineCall(*prepared, inputs, actualArgc);
+                if (result != nullptr && toAcc) {
+                    frameState.SetAcc(result);
+                }
+                return result;
             }
-            return BuildGenericCallVertex(inputs, actualArgc);
+            return BuildGenericCallVertex(inputs, actualArgc, true, toAcc);
         }
 
         CallFeedback rawFeedback = self->pgoContext_.ReadCallFeedback(bcInfo);
         if (canUseCallSelf) {
-            if (ValueVertex *call = TryBuildPGOSelfCall(rawFeedback, inputs, actualArgc); call != nullptr) {
+            if (ValueVertex *call = TryBuildPGOSelfCall(rawFeedback, inputs, actualArgc, toAcc); call != nullptr) {
                 return call;
             }
         }
         if (std::optional<KnownBuiltinCallPlan> builtinPlan =
                 TryCreateProfiledKnownBuiltinCallPlan(rawFeedback, actualArgc);
             builtinPlan.has_value()) {
-            return BuildKnownBuiltinCall(inputs, builtinPlan.value());
+            return BuildKnownBuiltinCall(inputs, builtinPlan.value(), toAcc);
         }
         if (!g_isEnableCMCGC && !rawFeedback.isClassConstructor && !rawFeedback.IsInsufficient()) {
-            return BuildInlineOrReducedCall(rawFeedback, inputs, actualArgc);
+            ValueVertex *result = BuildInlineOrReducedCall(rawFeedback, inputs, actualArgc, toAcc);
+            if (result != nullptr && toAcc) {
+                frameState.SetAcc(result);
+            }
+            return result;
         }
-        return BuildGenericCallVertex(inputs, actualArgc);
+        return BuildGenericCallVertex(inputs, actualArgc, true, toAcc);
     }
 
     void LowerCallArg0(const BytecodeInfo *bcInfo)
@@ -4662,12 +4880,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *undefined = self->undefinedValue_;
 
-        ValueVertex *call = BuildCallVertex(bcInfo, {func, undefined, undefined}, CALL_ARG0);
-        if (call == nullptr) {
-            return;
-        }
-        frameState.SetAcc(call);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
+        BuildCallVertex({func, undefined, undefined}, CALL_ARG0, bcInfo);
     }
 
     void LowerCallArg1(const BytecodeInfo *bcInfo)
@@ -4676,12 +4889,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *undefined = self->undefinedValue_;
 
-        ValueVertex *call = BuildCallVertex(bcInfo, {func, undefined, undefined, a0Value}, CALL_ARG1);
-        if (call == nullptr) {
-            return;
-        }
-        frameState.SetAcc(call);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
+        BuildCallVertex({func, undefined, undefined, a0Value}, CALL_ARG1, bcInfo);
     }
 
     void LowerCallArgs2(const BytecodeInfo *bcInfo)
@@ -4691,12 +4899,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *undefined = self->undefinedValue_;
 
-        ValueVertex *call = BuildCallVertex(bcInfo, {func, undefined, undefined, a0Value, a1Value}, CALL_ARG2);
-        if (call == nullptr) {
-            return;
-        }
-        frameState.SetAcc(call);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
+        BuildCallVertex({func, undefined, undefined, a0Value, a1Value}, CALL_ARG2, bcInfo);
     }
 
     void LowerCallArgs3(const BytecodeInfo *bcInfo)
@@ -4707,13 +4910,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *undefined = self->undefinedValue_;
 
-        ValueVertex *call = BuildCallVertex(
-            bcInfo, {func, undefined, undefined, a0Value, a1Value, a2Value}, CALL_ARG3);
-        if (call == nullptr) {
-            return;
-        }
-        frameState.SetAcc(call);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
+        BuildCallVertex({func, undefined, undefined, a0Value, a1Value, a2Value}, CALL_ARG3, bcInfo);
     }
 
     void LowerCallThis0(const BytecodeInfo *bcInfo)
@@ -4722,12 +4919,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *undefined = self->undefinedValue_;
 
-        ValueVertex *call = BuildCallVertex(bcInfo, {func, undefined, thisObj}, CALL_ARG0);
-        if (call == nullptr) {
-            return;
-        }
-        frameState.SetAcc(call);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
+        BuildCallVertex({func, undefined, thisObj}, CALL_ARG0, bcInfo);
     }
 
     void LowerCallInit(const BytecodeInfo *bcInfo)
@@ -4736,11 +4928,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *undefined = self->undefinedValue_;
 
-        ValueVertex *call = BuildCallVertex(bcInfo, {func, undefined, thisObj}, CALL_ARG0);
-        if (call == nullptr) {
-            return;
-        }
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
+        BuildCallVertex({func, undefined, thisObj}, CALL_ARG0, bcInfo, false);
     }
 
     void LowerCallThis1(const BytecodeInfo *bcInfo)
@@ -4750,12 +4938,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *undefined = self->undefinedValue_;
 
-        ValueVertex *call = BuildCallVertex(bcInfo, {func, undefined, thisObj, a0Value}, CALL_ARG1);
-        if (call == nullptr) {
-            return;
-        }
-        frameState.SetAcc(call);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
+        BuildCallVertex({func, undefined, thisObj, a0Value}, CALL_ARG1, bcInfo);
     }
 
     void LowerCallThis2(const BytecodeInfo *bcInfo)
@@ -4766,13 +4949,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *undefined = self->undefinedValue_;
 
-        ValueVertex *call = BuildCallVertex(
-            bcInfo, {func, undefined, thisObj, a0Value, a1Value}, CALL_ARG2);
-        if (call == nullptr) {
-            return;
-        }
-        frameState.SetAcc(call);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
+        BuildCallVertex({func, undefined, thisObj, a0Value, a1Value}, CALL_ARG2, bcInfo);
     }
 
     void LowerCallThis3(const BytecodeInfo *bcInfo)
@@ -4784,13 +4961,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *undefined = self->undefinedValue_;
 
-        ValueVertex *call = BuildCallVertex(
-            bcInfo, {func, undefined, thisObj, a0Value, a1Value, a2Value}, CALL_ARG3);
-        if (call == nullptr) {
-            return;
-        }
-        frameState.SetAcc(call);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
+        BuildCallVertex({func, undefined, thisObj, a0Value, a1Value, a2Value}, CALL_ARG3, bcInfo);
     }
 
     void LowerCallRange(const BytecodeInfo *bcInfo)
@@ -4805,12 +4976,7 @@ struct GraphBuilder::BytecodeVisitor {
         for (uint32_t idx = 0; idx < inputSize; idx++) {
             args.push_back(LoadRegister(bcInfo, static_cast<int>(idx)));
         }
-        ValueVertex *call = BuildCallVertex(bcInfo, args, inputSize);
-        if (call == nullptr) {
-            return;
-        }
-        frameState.SetAcc(call);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
+        BuildCallVertex(args, inputSize, bcInfo);
     }
 
     void LowerCallThisRange(const BytecodeInfo *bcInfo)
@@ -4827,12 +4993,7 @@ struct GraphBuilder::BytecodeVisitor {
         for (uint32_t idx = 0; idx < argc; idx++) {
             args.push_back(LoadRegister(bcInfo, static_cast<int>(idx + 1)));
         }
-        ValueVertex *call = BuildCallVertex(bcInfo, args, argc);
-        if (call == nullptr) {
-            return;
-        }
-        frameState.SetAcc(call);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
+        BuildCallVertex(args, argc, bcInfo);
     }
 
     void LowerCallThisWithName(const BytecodeInfo *bcInfo)
@@ -4842,13 +5003,12 @@ struct GraphBuilder::BytecodeVisitor {
         uint32_t argc = bcInfo->inputs.size() - FIXED_INPUTS;
         ValueVertex *func = frameState.GetAcc();
         ValueVertex *thisObj = LoadRegister(bcInfo, 0);
-        CompileInfoFacts *entryFacts = compileInfoFacts_;
+
         BB *callBlock = self->NewBlock();
         BB *throwBlock = self->NewBlock();
         self->FinishBlockWithBranch<BranchIfCallableVertex>(currentBlock, {func}, callBlock, throwBlock);
 
-        currentBlock = throwBlock;
-        compileInfoFacts_ = entryFacts->Clone();
+        EnterInternalBlock(throwBlock);
         currentBlock->SetDeferred(true);
         if (!TryBuildColdCatchDeopt()) {
             ValueVertex *stringId = self->graph_->GetInt32Constant(
@@ -4859,8 +5019,7 @@ struct GraphBuilder::BytecodeVisitor {
             UpdateCatchBlockData(throws);
         }
 
-        currentBlock = callBlock;
-        compileInfoFacts_ = entryFacts;
+        EnterInternalBlock(callBlock);
         ChunkVector<ValueVertex *> args(self->chunk_);
         args.push_back(func);
         args.push_back(self->undefinedValue_);
@@ -4868,9 +5027,7 @@ struct GraphBuilder::BytecodeVisitor {
         for (uint32_t idx = 0; idx < argc; idx++) {
             args.push_back(LoadRegister(bcInfo, static_cast<int>(idx + 1)));
         }
-        CallVertex *call = BuildGenericCallVertex(args, argc);
-        frameState.SetAcc(call);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, call);
+        BuildGenericCallVertex(args, argc, true, true);
     }
 
     void LowerCallSpread(const BytecodeInfo *bcInfo)
@@ -4892,8 +5049,8 @@ struct GraphBuilder::BytecodeVisitor {
     // slow block; only that block builds the tagged argument array.
     struct SuperCallPlan {
         SuperCallPlan(const BytecodeInfo *info, ValueVertex *function, ValueVertex *target, ValueVertex *ctor,
-                      uint32_t actualArgc, CompileInfoFacts *facts)
-            : bcInfo(info), func(function), newTarget(target), superCtor(ctor), argc(actualArgc), entryFacts(facts)
+                      uint32_t actualArgc)
+            : bcInfo(info), func(function), newTarget(target), superCtor(ctor), argc(actualArgc)
         {}
 
         const BytecodeInfo *bcInfo;
@@ -4905,7 +5062,6 @@ struct GraphBuilder::BytecodeVisitor {
         std::optional<uint32_t> knownExpectedArgc;
         std::optional<bool> knownIsBase;
         std::optional<PreparedInlineCall> prepared;
-        CompileInfoFacts *entryFacts;
     };
 
     ValueVertex *BuildSuperCallWithFastPath(const BytecodeInfo *bcInfo, ValueVertex *func,
@@ -4914,7 +5070,7 @@ struct GraphBuilder::BytecodeVisitor {
         // `func` is the executing JSFunction: this form reads frame a0, while the arrow form's frontend emits
         // GetFunctionObject to load the mandatory func parameter. Only the two-load prototype tail is needed here.
         ValueVertex *superCtor = self->NewVertex<LoadPrototypeFromNonJSProxyObjectVertex>(currentBlock, {func});
-        SuperCallPlan plan(bcInfo, func, newTarget, superCtor, argc, compileInfoFacts_);
+        SuperCallPlan plan(bcInfo, func, newTarget, superCtor, argc);
 
         // A monomorphic slot subsumes the constructor guards with one identity deopt.
         CallFeedback feedback = self->pgoContext_.ReadCallFeedback(bcInfo);
@@ -4938,18 +5094,16 @@ struct GraphBuilder::BytecodeVisitor {
         return BuildSplitSuperCall(plan, requireNewTarget);
     }
 
-    ValueVertex *BuildKnownSuperCall(SuperCallPlan &plan)
+    ValueVertex *BuildKnownSuperCall(const SuperCallPlan &plan)
     {
         // The identity deopt also pins the constructor kind, so only its live arm is needed.
         BuildEagerDeoptIfReferenceNotEqual(plan.superCtor, plan.expectedSuperCtor);
-        plan.entryFacts = compileInfoFacts_;
         if (!plan.knownIsBase.value()) {
             return BuildSuperDerivedArm(plan, std::nullopt);
         }
 
         BB *slowBlock = self->NewBlock();
         ValueVertex *fastResult = BuildSuperBaseArm(plan, slowBlock, std::nullopt);
-        CompileInfoFacts *fastFacts = compileInfoFacts_;
         BB *mergeBlock = nullptr;
         if (fastResult != nullptr) {
             mergeBlock = self->NewBlock();
@@ -4960,10 +5114,10 @@ struct GraphBuilder::BytecodeVisitor {
         if (fastResult == nullptr) {
             return slowResult;
         }
-        return MergeSuperCallResults(mergeBlock, fastResult, slowResult, fastFacts);
+        return MergeSuperCallResults(mergeBlock, fastResult, slowResult);
     }
 
-    ValueVertex *BuildSplitSuperCall(SuperCallPlan &plan, bool requireNewTarget)
+    ValueVertex *BuildSplitSuperCall(const SuperCallPlan &plan, bool requireNewTarget)
     {
         BB *baseSplitBlock = self->NewBlock();
         BB *baseAdmissionBlock = self->NewBlock();
@@ -4974,17 +5128,15 @@ struct GraphBuilder::BytecodeVisitor {
         // Guard failures enter the multi-predecessor slow block through separate trampolines.
         BuildSuperCallAdmission(plan, requireNewTarget, baseSplitBlock, slowBlock);
 
-        currentBlock = baseSplitBlock;
-        plan.entryFacts = compileInfoFacts_;
+        EnterInternalBlock(baseSplitBlock);
         self->FinishBlockWithBranch<BranchIfBaseVertex>(
             currentBlock, {plan.superCtor}, baseAdmissionBlock, derivedBlock);
 
-        currentBlock = baseAdmissionBlock;
+        EnterInternalBlock(baseAdmissionBlock);
         ValueVertex *baseCall = BuildSuperBaseArm(plan, slowBlock, fastBlock);
-        CompileInfoFacts *baseFacts = compileInfoFacts_;
-        currentBlock = derivedBlock;
+        EnterInternalBlock(derivedBlock);
         ValueVertex *derivedCall = BuildSuperDerivedArm(plan, fastBlock);
-        return BuildSplitSuperCallResult(plan, baseCall, baseFacts, derivedCall, fastBlock, slowBlock, mergeBlock);
+        return BuildSplitSuperCallResult(plan, baseCall, derivedCall, fastBlock, slowBlock, mergeBlock);
     }
 
     void BuildSuperCallAdmission(const SuperCallPlan &plan, bool requireNewTarget, BB *baseSplitBlock, BB *slowBlock)
@@ -4994,10 +5146,10 @@ struct GraphBuilder::BytecodeVisitor {
             BB *missingNewTargetBlock = self->NewBlock();
             self->FinishBlockWithBranch<BranchIfReferenceEqualVertex>(
                 currentBlock, {plan.newTarget, self->undefinedValue_}, missingNewTargetBlock, hasNewTargetBlock);
-            currentBlock = missingNewTargetBlock;
+            EnterInternalBlock(missingNewTargetBlock);
             currentBlock->SetDeferred(true);
             self->FinishBlockWithJump(currentBlock, slowBlock);
-            currentBlock = hasNewTargetBlock;
+            EnterInternalBlock(hasNewTargetBlock);
         }
         if (plan.expectedSuperCtor != nullptr) {
             BuildEagerDeoptIfReferenceNotEqual(plan.superCtor, plan.expectedSuperCtor);
@@ -5010,11 +5162,11 @@ struct GraphBuilder::BytecodeVisitor {
         BB *slowNotJSConstructorBlock = self->NewBlock();
         self->FinishBlockWithBranch<BranchIfTaggedHeapObjectVertex>(
             currentBlock, {plan.superCtor}, checkCtorBlock, slowNotHeapObjectBlock);
-        currentBlock = checkCtorBlock;
+        EnterInternalBlock(checkCtorBlock);
         self->FinishBlockWithBranch<BranchIfJSConstructorFunctionVertex>(
             currentBlock, {plan.superCtor}, baseSplitBlock, slowNotJSConstructorBlock);
         for (BB *slowEntry : {slowNotHeapObjectBlock, slowNotJSConstructorBlock}) {
-            currentBlock = slowEntry;
+            EnterInternalBlock(slowEntry);
             slowEntry->SetDeferred(true);
             self->FinishBlockWithJump(slowEntry, slowBlock);
         }
@@ -5027,16 +5179,15 @@ struct GraphBuilder::BytecodeVisitor {
         // Only the base arm requires newTarget to admit inline allocation.
         self->FinishBlockWithBranch<BranchIfNewTargetHClassReadyVertex>(
             currentBlock, {plan.newTarget}, baseBlock, slowNotReadyBlock);
-        currentBlock = slowNotReadyBlock;
+        EnterInternalBlock(slowNotReadyBlock);
         slowNotReadyBlock->SetDeferred(true);
         self->FinishBlockWithJump(slowNotReadyBlock, slowBlock);
-        currentBlock = baseBlock;
+        EnterInternalBlock(baseBlock);
         return BuildSuperBaseCall(plan, successor);
     }
 
     ValueVertex *BuildSuperBaseCall(const SuperCallPlan &plan, std::optional<BB *> successor)
     {
-        compileInfoFacts_ = plan.entryFacts->Clone();
         auto *allocatedThis = AllocateSuperThis(plan.newTarget);
         // A base super's undefined result falls back to allocatedThis, also in the deopt continuation.
         ChunkVector<ValueVertex *> callInputs(self->chunk_);
@@ -5064,7 +5215,6 @@ struct GraphBuilder::BytecodeVisitor {
 
     ValueVertex *BuildSuperDerivedArm(const SuperCallPlan &plan, std::optional<BB *> successor)
     {
-        compileInfoFacts_ = plan.entryFacts->Clone();
         // A derived constructor re-initializes this itself and never returns undefined across the call boundary.
         ChunkVector<ValueVertex *> callInputs(self->chunk_);
         callInputs.push_back(plan.superCtor);
@@ -5091,8 +5241,7 @@ struct GraphBuilder::BytecodeVisitor {
 
     ValueVertex *BuildSuperSlowArm(const SuperCallPlan &plan, BB *slowBlock, std::optional<BB *> successor)
     {
-        currentBlock = slowBlock;
-        compileInfoFacts_ = plan.entryFacts->Clone();
+        EnterInternalBlock(slowBlock);
         slowBlock->SetDeferred(true);
         ValueVertex *taggedArgc = TaggedConstantFromInt32(static_cast<int>(plan.argc));
         ValueVertex *taggedArray = TaggedArrayFromValueIn(plan.bcInfo, taggedArgc, plan.argc);
@@ -5104,29 +5253,14 @@ struct GraphBuilder::BytecodeVisitor {
         return slowResult;
     }
 
-    ValueVertex *BuildSplitSuperCallResult(const SuperCallPlan &plan, ValueVertex *baseCall,
-                                           CompileInfoFacts *baseFacts, ValueVertex *derivedCall, BB *fastBlock,
-                                           BB *slowBlock, BB *mergeBlock)
+    ValueVertex *BuildSplitSuperCallResult(const SuperCallPlan &plan, ValueVertex *baseCall, ValueVertex *derivedCall,
+                                           BB *fastBlock, BB *slowBlock, BB *mergeBlock)
     {
-        CompileInfoFacts *fastFacts = nullptr;
-        ValueVertex *fastResult = nullptr;
-        if (baseCall != nullptr) {
-            fastFacts = baseFacts;
-            fastResult = baseCall;
-        }
-        if (derivedCall != nullptr) {
-            if (fastResult == nullptr) {
-                fastFacts = compileInfoFacts_;
-            } else {
-                fastFacts->Merge(*compileInfoFacts_);
-            }
-            fastResult = derivedCall;
-        }
+        ValueVertex *fastResult = baseCall != nullptr ? baseCall : derivedCall;
         if (fastResult != nullptr) {
-            currentBlock = fastBlock;
-            compileInfoFacts_ = fastFacts;
+            EnterInternalBlock(fastBlock);
             if (baseCall != nullptr && derivedCall != nullptr) {
-                fastResult = self->NewPhiVertexWith(currentBlock, {baseCall, derivedCall}, self->AccIndex());
+                fastResult = BuildPhi({baseCall, derivedCall}, self->AccIndex());
             }
             self->FinishBlockWithJump(fastBlock, mergeBlock);
         }
@@ -5136,16 +5270,13 @@ struct GraphBuilder::BytecodeVisitor {
         if (fastResult == nullptr) {
             return slowResult;
         }
-        return MergeSuperCallResults(mergeBlock, fastResult, slowResult, fastFacts);
+        return MergeSuperCallResults(mergeBlock, fastResult, slowResult);
     }
 
-    ValueVertex *MergeSuperCallResults(BB *mergeBlock, ValueVertex *fastResult, ValueVertex *slowResult,
-                                       CompileInfoFacts *fastFacts)
+    ValueVertex *MergeSuperCallResults(BB *mergeBlock, ValueVertex *fastResult, ValueVertex *slowResult)
     {
-        fastFacts->Merge(*compileInfoFacts_);
-        currentBlock = mergeBlock;
-        compileInfoFacts_ = fastFacts;
-        return self->NewPhiVertexWith(currentBlock, {fastResult, slowResult}, self->AccIndex());
+        EnterInternalBlock(mergeBlock);
+        return BuildPhi({fastResult, slowResult}, self->AccIndex());
     }
 
     // The SUPERCALLSPREAD variant of the fast path: same super-ctor guard chain
@@ -5187,37 +5318,37 @@ struct GraphBuilder::BytecodeVisitor {
         self->FinishBlockWithBranch<BranchIfTaggedHeapObjectVertex>(
             currentBlock, {superCtor}, checkCtorBlock, slowNotHeapObjectBlock);
 
-        currentBlock = checkCtorBlock;
+        EnterInternalBlock(checkCtorBlock);
         self->FinishBlockWithBranch<BranchIfJSConstructorFunctionVertex>(
             currentBlock, {superCtor}, arrayAdmissionBlock, slowNotJSConstructorBlock);
 
         for (BB *slowEntry : {slowNotHeapObjectBlock, slowNotJSConstructorBlock}) {
-            currentBlock = slowEntry;
+            EnterInternalBlock(slowEntry);
             slowEntry->SetDeferred(true);
             self->FinishBlockWithJump(slowEntry, slowBlock);
         }
 
-        currentBlock = arrayAdmissionBlock;
+        EnterInternalBlock(arrayAdmissionBlock);
         self->FinishBlockWithBranch<BranchIfFastSpreadArrayVertex>(
             currentBlock, {array, GlobalEnv()}, baseSplitBlock, slowNotFastArrayBlock, false);
 
-        currentBlock = slowNotFastArrayBlock;
+        EnterInternalBlock(slowNotFastArrayBlock);
         slowNotFastArrayBlock->SetDeferred(true);
         self->FinishBlockWithJump(slowNotFastArrayBlock, slowBlock);
 
-        currentBlock = baseSplitBlock;
+        EnterInternalBlock(baseSplitBlock);
         self->FinishBlockWithBranch<BranchIfBaseVertex>(
             currentBlock, {superCtor}, baseAdmissionBlock, derivedBlock);
 
-        currentBlock = baseAdmissionBlock;
+        EnterInternalBlock(baseAdmissionBlock);
         self->FinishBlockWithBranch<BranchIfNewTargetHClassReadyVertex>(
             currentBlock, {newTarget}, baseBlock, slowNotReadyBlock);
 
-        currentBlock = slowNotReadyBlock;
+        EnterInternalBlock(slowNotReadyBlock);
         slowNotReadyBlock->SetDeferred(true);
         self->FinishBlockWithJump(slowNotReadyBlock, slowBlock);
 
-        currentBlock = baseBlock;
+        EnterInternalBlock(baseBlock);
         auto *allocatedThis = AllocateSuperThis(newTarget);
         // The base arm keeps its allocated this (the same result-tail
         // and BASE_CTOR_THIS pseudo-vreg contract as the non-spread variant); the
@@ -5234,7 +5365,7 @@ struct GraphBuilder::BytecodeVisitor {
         LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, baseCall);
         self->FinishBlockWithJump(currentBlock, fastBlock);
 
-        currentBlock = derivedBlock;
+        EnterInternalBlock(derivedBlock);
         ChunkVector<ValueVertex *> derivedCallInputs(self->chunk_);
         derivedCallInputs.push_back(func);
         derivedCallInputs.push_back(superCtor);
@@ -5247,19 +5378,18 @@ struct GraphBuilder::BytecodeVisitor {
         LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, derivedCall);
         self->FinishBlockWithJump(derivedBlock, fastBlock);
 
-        currentBlock = fastBlock;
-        ValueVertex *fastResult = self->NewPhiVertexWith(
-            currentBlock, {baseCall, derivedCall}, self->AccIndex());
+        EnterInternalBlock(fastBlock);
+        ValueVertex *fastResult = BuildPhi({baseCall, derivedCall}, self->AccIndex());
         self->FinishBlockWithJump(fastBlock, mergeBlock);
 
-        currentBlock = slowBlock;
+        EnterInternalBlock(slowBlock);
         slowBlock->SetDeferred(true);
         ValueVertex *slowResult = RuntimeCallWithLazyDeopt(
             {func, newTarget, array}, RTSTUB_ID(SuperCallSpreadWithNewTarget));
         self->FinishBlockWithJump(slowBlock, mergeBlock);
 
-        currentBlock = mergeBlock;
-        return self->NewPhiVertexWith(currentBlock, {fastResult, slowResult}, self->AccIndex());
+        EnterInternalBlock(mergeBlock);
+        return BuildPhi({fastResult, slowResult}, self->AccIndex());
     }
 
     // The SUPERCALLFORWARDALLARGS variant of the fast path: the same super-ctor
@@ -5295,29 +5425,29 @@ struct GraphBuilder::BytecodeVisitor {
         self->FinishBlockWithBranch<BranchIfTaggedHeapObjectVertex>(
             currentBlock, {superCtor}, checkCtorBlock, slowNotHeapObjectBlock);
 
-        currentBlock = checkCtorBlock;
+        EnterInternalBlock(checkCtorBlock);
         self->FinishBlockWithBranch<BranchIfJSConstructorFunctionVertex>(
             currentBlock, {superCtor}, baseSplitBlock, slowNotJSConstructorBlock);
 
         for (BB *slowEntry : {slowNotHeapObjectBlock, slowNotJSConstructorBlock}) {
-            currentBlock = slowEntry;
+            EnterInternalBlock(slowEntry);
             slowEntry->SetDeferred(true);
             self->FinishBlockWithJump(slowEntry, slowBlock);
         }
 
-        currentBlock = baseSplitBlock;
+        EnterInternalBlock(baseSplitBlock);
         self->FinishBlockWithBranch<BranchIfBaseVertex>(
             currentBlock, {superCtor}, baseAdmissionBlock, derivedBlock);
 
-        currentBlock = baseAdmissionBlock;
+        EnterInternalBlock(baseAdmissionBlock);
         self->FinishBlockWithBranch<BranchIfNewTargetHClassReadyVertex>(
             currentBlock, {newTarget}, baseBlock, slowNotReadyBlock);
 
-        currentBlock = slowNotReadyBlock;
+        EnterInternalBlock(slowNotReadyBlock);
         slowNotReadyBlock->SetDeferred(true);
         self->FinishBlockWithJump(slowNotReadyBlock, slowBlock);
 
-        currentBlock = baseBlock;
+        EnterInternalBlock(baseBlock);
         auto *allocatedThis = AllocateSuperThis(newTarget);
         // The base arm keeps its allocated this (the same result-tail
         // and BASE_CTOR_THIS pseudo-vreg contract as the other variants); the
@@ -5334,7 +5464,7 @@ struct GraphBuilder::BytecodeVisitor {
         LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, baseCall);
         self->FinishBlockWithJump(currentBlock, fastBlock);
 
-        currentBlock = derivedBlock;
+        EnterInternalBlock(derivedBlock);
         ChunkVector<ValueVertex *> derivedCallInputs(self->chunk_);
         derivedCallInputs.push_back(superCtor);
         derivedCallInputs.push_back(newTarget);
@@ -5346,19 +5476,18 @@ struct GraphBuilder::BytecodeVisitor {
         LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, derivedCall);
         self->FinishBlockWithJump(derivedBlock, fastBlock);
 
-        currentBlock = fastBlock;
-        ValueVertex *fastResult = self->NewPhiVertexWith(currentBlock, {baseCall, derivedCall},
-                                                         self->AccIndex());
+        EnterInternalBlock(fastBlock);
+        ValueVertex *fastResult = BuildPhi({baseCall, derivedCall}, self->AccIndex());
         self->FinishBlockWithJump(fastBlock, mergeBlock);
 
-        currentBlock = slowBlock;
+        EnterInternalBlock(slowBlock);
         slowBlock->SetDeferred(true);
         ValueVertex *slowResult = RuntimeCallWithLazyDeopt(
             {superCtor, newTarget, TaggedActualArgc()}, RTSTUB_ID(OptSuperCallForwardAllArgs));
         self->FinishBlockWithJump(slowBlock, mergeBlock);
 
-        currentBlock = mergeBlock;
-        return self->NewPhiVertexWith(currentBlock, {fastResult, slowResult}, self->AccIndex());
+        EnterInternalBlock(mergeBlock);
+        return BuildPhi({fastResult, slowResult}, self->AccIndex());
     }
 
     void LowerSuperCallThisRange(const BytecodeInfo *bcInfo)
@@ -5854,7 +5983,7 @@ struct GraphBuilder::BytecodeVisitor {
                 ASSERT(access.cases[i].kind == AccessKind::TRANSITION);
                 ASSERT(!access.cases[i].isSharedStore);
             }
-            if (TryLowerNamedStoreAccessSet(bcIndex, access, receiver, value, PropertyKey::ConstDataId(constDataId))) {
+            if (TryLowerNamedStoreAccessSet(bcIndex, access, receiver, value, PropertyKeyForConstDataId(constDataId))) {
                 return;
             }
         }
@@ -5964,7 +6093,7 @@ struct GraphBuilder::BytecodeVisitor {
             return cached;
         }
 
-        ValueVertex *value = self->NewVertex<LoadTaggedFieldVertex>(currentBlock, {env}, offset);
+        ValueVertex *value = self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {env}, offset);
         if (isConstantField) {
             compileInfoFacts_->RecordEnvConstant(env, offset, value);
         } else {
@@ -5986,10 +6115,8 @@ struct GraphBuilder::BytecodeVisitor {
     {
         ValueVertex *parent = LoadRegister(bcInfo, 1);
         ValueVertex *numVars = self->graph_->GetInt32Constant(GetImmediate<int>(bcInfo, 0));
-        ValueVertex *newEnv =
-            CommonStubCall({parent, numVars}, CommonStubID::NewLexicalEnv, SideEffectKind::SAFE_CALL);
-
-        frameState.SetAcc(newEnv);
+        ValueVertex *newEnv = CommonStubCallToAccWithLazyDeopt(
+            {parent, numVars}, CommonStubID::NewLexicalEnv, SideEffectKind::SAFE_CALL);
         frameState.SetLexicalEnv(newEnv);
         compileInfoFacts_->RecordEnvConstant(newEnv, GetLexicalEnvParentOffset(), parent);
     }
@@ -6000,10 +6127,8 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *level = TaggedConstantFromInt32(GetImmediate<int>(bcInfo, 0));
         ValueVertex *slotId = TaggedConstantFromInt32(GetImmediate<int>(bcInfo, 1));
         ValueVertex *parent = LoadRegister(bcInfo, 2);  // 2: env register index
-        ValueVertex *newEnv = RuntimeCall({level, slotId, parent, jsFunc}, RTSTUB_ID(OptNewLexicalEnvWithName),
-                                          SideEffectKind::SAFE_CALL);
-
-        frameState.SetAcc(newEnv);
+        ValueVertex *newEnv = RuntimeCallToAccWithLazyDeopt(
+            {level, slotId, parent, jsFunc}, RTSTUB_ID(OptNewLexicalEnvWithName), SideEffectKind::SAFE_CALL);
         frameState.SetLexicalEnv(newEnv);
         compileInfoFacts_->RecordEnvConstant(newEnv, GetLexicalEnvParentOffset(), parent);
     }
@@ -6300,7 +6425,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *obj = frameState.GetAcc();
         TypeOfKind kind = ClassifyTypeOf(obj);
         if (kind == TypeOfKind::UNKNOWN) {
-            frameState.SetAcc(CommonStubCall({obj}, CommonStubID::TypeOf, SideEffectKind::SAFE_CALL));
+            CommonStubCallToAccWithLazyDeopt({obj}, CommonStubID::TypeOf, SideEffectKind::SAFE_CALL);
             return;
         }
         frameState.SetAcc(StringFromGlobalConstant(StringIndexOfTypeOfKind(kind)));
@@ -6616,11 +6741,7 @@ struct GraphBuilder::BytecodeVisitor {
             }
         }
         if (!access.canAssumeStableProtoChain) {
-            ChunkVector<ValueVertex *> guardInputs(self->chunk_);
-            guardInputs.emplace_back(target);
-            auto *guard = self->NewVertex<DeoptIfPrototypeChangedVertex>(
-                currentBlock, guardInputs, self->chunk_, true, false, self->preproc_->GetBytecodeOffset(bcIndex));
-            guard->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+            BuildDeoptIfPrototypeChanged(bcIndex, target, true, false);
         }
         return HClassCheckResult::SUCCESS;
     }
@@ -6662,10 +6783,16 @@ struct GraphBuilder::BytecodeVisitor {
                 walkObject = tail;
             }
         }
-        auto *walk = self->NewVertex<HasInPrototypeChainVertex>(
-            compileInfoFacts_, currentBlock, {walkObject, ctorProto, self->graph_->GetInt32Constant(0)}, self->chunk_,
-            self->preproc_->GetBytecodeOffset(bcIndex));
-        walk->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+        auto *walk = VertexBuilder<HasInPrototypeChainVertex>(*self, {compileInfoFacts_, currentBlock})
+                         .CreateWith([&]() {
+                             return self->NewVertexImpl<HasInPrototypeChainVertex>(
+                                 currentBlock, {walkObject, ctorProto, self->graph_->GetInt32Constant(0)}, self->chunk_,
+                                 self->preproc_->GetBytecodeOffset(bcIndex));
+                         })
+                         .WithEagerDeoptState([this, bcIndex](HasInPrototypeChainVertex *vertex) {
+                             vertex->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+                         })
+                         .Build();
         self->FinishBlockWithJump(currentBlock, blocks.doneBlock);
         return walk;
     }
@@ -6909,7 +7036,7 @@ struct GraphBuilder::BytecodeVisitor {
                                                                     notHeapObjectBlock);
 
         // Hot path: value is a heap object → check HClass type range inline.
-        currentBlock = isHeapObjectBlock;
+        EnterInternalBlock(isHeapObjectBlock);
 
         ValueVertex *hclass = self->NewVertex<LoadHClassAddressVertex>(compileInfoFacts_, currentBlock, {value});
         ValueVertex *bitField = self->NewVertex<LoadTaggedFromAddressVertex>(
@@ -6928,13 +7055,13 @@ struct GraphBuilder::BytecodeVisitor {
                                                                 checkLowerDoneBlock, checkLowerFailedBlock,
                                                                 Condition::GREATER_THAN_OR_EQUAL);
 
-        currentBlock = checkLowerDoneBlock;
+        EnterInternalBlock(checkLowerDoneBlock);
         ValueVertex *lastType = self->graph_->GetInt64Constant(static_cast<int64_t>(JSType::ECMA_OBJECT_LAST));
         self->FinishBlockWithBranch<BranchIfInt64CompareVertex>(currentBlock, {typeBits, lastType}, checkUpperDoneBlock,
                                                                 checkUpperFailedBlock, Condition::LESS_THAN_OR_EQUAL);
 
         for (BB *exceptionBlock : {notHeapObjectBlock, checkLowerFailedBlock, checkUpperFailedBlock}) {
-            currentBlock = exceptionBlock;
+            EnterInternalBlock(exceptionBlock);
             currentBlock->SetDeferred(true);
             if (!TryBuildColdCatchDeopt()) {
                 auto *vertex = self->FinishBlockWith<ThrowVertex>(currentBlock, {}, RTSTUB_ID(ThrowIfNotObject));
@@ -6943,7 +7070,7 @@ struct GraphBuilder::BytecodeVisitor {
         }
 
         // Success: value is an ECMA object.
-        currentBlock = checkUpperDoneBlock;
+        EnterInternalBlock(checkUpperDoneBlock);
         compileInfoFacts_->EnsureType(value, JS_RECEIVER);
         return LoweringResult::CONTINUE;
     }
@@ -6991,16 +7118,17 @@ struct GraphBuilder::BytecodeVisitor {
         BB *doneBlock = self->NewBlock();
 
         ValueVertex *hole = self->graph_->GetTaggedConstant(JSTaggedValue::VALUE_HOLE);
-        self->FinishBlockWith<BranchIfReferenceEqualVertex>(currentBlock, {receiver, hole}, throwBlock, doneBlock);
+        self->FinishBlockWithBranch<BranchIfReferenceEqualVertex>(currentBlock, {receiver, hole}, throwBlock,
+                                                                  doneBlock);
 
-        currentBlock = throwBlock;
+        EnterInternalBlock(throwBlock);
         currentBlock->SetDeferred(true);
         if (!TryBuildColdCatchDeopt()) {
             auto *throwVertex =
                 self->FinishBlockWith<ThrowVertex>(currentBlock, {obj}, RTSTUB_ID(ThrowUndefinedIfHole));
             UpdateCatchBlockData(throwVertex);
         }
-        currentBlock = doneBlock;
+        EnterInternalBlock(doneBlock);
         compileInfoFacts_->RecordNonHole(receiver);
         return LoweringResult::CONTINUE;
     }
@@ -7034,7 +7162,7 @@ struct GraphBuilder::BytecodeVisitor {
         self->FinishBlockWithBranch<BranchIfReferenceEqualVertex>(currentBlock, {receiver, hole}, throwBlock,
                                                                   doneBlock);
 
-        currentBlock = throwBlock;
+        EnterInternalBlock(throwBlock);
         currentBlock->SetDeferred(true);
         if (!TryBuildColdCatchDeopt()) {
             ValueVertex *strID = self->graph_->GetInt32Constant(GetICSlotId<int>(bcInfo, 0));
@@ -7044,7 +7172,7 @@ struct GraphBuilder::BytecodeVisitor {
             UpdateCatchBlockData(throwVertex);
         }
 
-        currentBlock = doneBlock;
+        EnterInternalBlock(doneBlock);
         compileInfoFacts_->RecordNonHole(receiver);
         return LoweringResult::CONTINUE;
     }
@@ -7082,7 +7210,7 @@ struct GraphBuilder::BytecodeVisitor {
             }
         };
 
-        currentBlock = notUndefinedBlock;
+        EnterInternalBlock(notUndefinedBlock);
         if (throwOnMatch) {
             self->FinishBlockWithBranch<BranchIfReferenceEqualVertex>(currentBlock, {thisValue, hole}, holeMatchBlock,
                                                                       okBlock);
@@ -7090,25 +7218,25 @@ struct GraphBuilder::BytecodeVisitor {
             BB *throwBlock = self->NewBlock();
             self->FinishBlockWithBranch<BranchIfReferenceEqualVertex>(currentBlock, {thisValue, hole}, holeMatchBlock,
                                                                       throwBlock);
-            currentBlock = throwBlock;
+            EnterInternalBlock(throwBlock);
             emitThrow();
         }
 
-        currentBlock = undefinedMatchBlock;
+        EnterInternalBlock(undefinedMatchBlock);
         if (throwOnMatch) {
             emitThrow();
         } else {
             self->FinishBlockWithJump(currentBlock, okBlock);
         }
 
-        currentBlock = holeMatchBlock;
+        EnterInternalBlock(holeMatchBlock);
         if (throwOnMatch) {
             emitThrow();
         } else {
             self->FinishBlockWithJump(currentBlock, okBlock);
         }
 
-        currentBlock = okBlock;
+        EnterInternalBlock(okBlock);
     }
 
     // -------- Category #16: Control Flow --------
@@ -7158,9 +7286,9 @@ struct GraphBuilder::BytecodeVisitor {
                 self->FinishLoopBackedge(currentBlock, frameState, compileInfoFacts_, loopHeaderRpo);
                 return;
             }
-            EagerDeoptFrameState phiUntaggingFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
+            const auto *phiUntaggingFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
             self->FinishLoopBackedge(currentBlock, frameState, compileInfoFacts_, loopHeaderRpo,
-                                     &phiUntaggingFrameState,
+                                     phiUntaggingFrameState,
                                      self->preproc_->GetBytecodeOffset(currentBcIndex));
             return;
         }
@@ -7211,7 +7339,18 @@ struct GraphBuilder::BytecodeVisitor {
                                  uint32_t inlineDepth)
     {
         ValueVertex *frameValue = value == nullptr ? self->undefinedValue_ : value;
-        AppendDeoptInputWithKindAtDepth(deoptFrameState, id, frameValue, GetDeoptValueKind(frameValue), inlineDepth);
+        DeoptTranslationKind valueKind = GetDeoptValueKind(frameValue);
+        if (auto *taggedInt = frameValue->TryCast<I32ToTaggedIntVertex>()) {
+            auto *input = taggedInt->GetInput(I32ToTaggedIntVertex::INPUT_INDEX);
+            if (input->GetValueRepresentation() == ValueRepresentation::INT32) {
+                frameValue = input;
+                valueKind = DeoptTranslationKind::INT32_TO_TAGGED;
+            }
+        } else if (auto *taggedDouble = frameValue->TryCast<F64ToTaggedDoubleVertex>()) {
+            frameValue = taggedDouble->GetInput(F64ToTaggedDoubleVertex::INPUT_INDEX);
+            valueKind = DeoptTranslationKind::FLOAT64_TO_TAGGED_DOUBLE;
+        }
+        AppendDeoptInputWithKindAtDepth(deoptFrameState, id, frameValue, valueKind, inlineDepth);
     }
 
     template <class DeoptFrameState>
@@ -7225,8 +7364,8 @@ struct GraphBuilder::BytecodeVisitor {
     template <class DeoptFrameState>
     void AppendDeoptInput(DeoptFrameState *deoptFrameState, int32_t id, ValueVertex *value)
     {
-        ValueVertex *frameValue = value == nullptr ? self->undefinedValue_ : value;
-        AppendDeoptInputWithKind(deoptFrameState, id, frameValue, GetDeoptValueKind(frameValue));
+        uint32_t inlineDepth = self->preproc_->GetCompilationUnit()->GetInlineDepth();
+        AppendDeoptInputAtDepth(deoptFrameState, id, value, inlineDepth);
     }
 
     template <class DeoptFrameState>
@@ -7426,38 +7565,49 @@ struct GraphBuilder::BytecodeVisitor {
         AppendLiveLocalsAndParams(deoptFrameState, 0, [&liveSet](VRegIDType index) { return liveSet.TestBit(index); });
     }
 
-    EagerDeoptFrameState BuildEagerDeoptFrameState(uint32_t bcIndex, const kungfu::BitSet &liveSet)
+    const EagerDeoptFrameState *BuildEagerDeoptFrameState(uint32_t bcIndex, const kungfu::BitSet &liveSet)
     {
-        EagerDeoptFrameState frameStateValues {self->chunk_};
+        auto *frameStateValues = self->chunk_->New<EagerDeoptFrameState>(self->chunk_);
         // Common inputs are variable: inlined units also carry the inline depth,
         // caller frame values and inlined actual arguments.
-        AppendEagerCommonDeoptInputs(bcIndex, &frameStateValues);
+        AppendEagerCommonDeoptInputs(bcIndex, frameStateValues);
         const size_t liveCount = liveSet.Count();
-        CHECK(liveCount <= frameStateValues.max_size() - frameStateValues.size());
+        CHECK(liveCount <= frameStateValues->max_size() - frameStateValues->size());
         // Other inputs are a subset of liveSet. Avoid retaining intermediate growth buffers in the chunk.
-        frameStateValues.reserve(frameStateValues.size() + liveCount);
+        frameStateValues->reserve(frameStateValues->size() + liveCount);
 
         if (liveSet.TestBit(self->AccIndex())) {
-            AppendDeoptInput(&frameStateValues, static_cast<int32_t>(SpecVregIndex::ACC_INDEX), frameState.GetAcc());
+            AppendDeoptInput(frameStateValues, static_cast<int32_t>(SpecVregIndex::ACC_INDEX), frameState.GetAcc());
         }
-        AppendLiveLocalsAndParams(&frameStateValues, FIXED_PARAM_VREG_COUNT,
+        AppendLiveLocalsAndParams(frameStateValues, FIXED_PARAM_VREG_COUNT,
                                   [&liveSet](VRegIDType index) { return liveSet.TestBit(index); });
         return frameStateValues;
     }
 
-    EagerDeoptFrameState BuildCurrentEagerDeoptFrameState(uint32_t bcIndex)
+    const EagerDeoptFrameState *BuildCurrentEagerDeoptFrameState(uint32_t bcIndex)
     {
+        if (lastEagerDeoptFrameState_ != nullptr && lastEagerBcIndex_ == bcIndex && lastEagerBlock_ == currentBlock &&
+            lastEagerFrameData_ == frameState.GetDataIdentity() &&
+            lastEagerFrameVersion_ == frameState.GetMutationVersion()) {
+            return lastEagerDeoptFrameState_;
+        }
+
         const auto &liveIn = self->analysis_->GetLiveInOfBytecode(bcIndex);
         if (blockInfo->catchBlock == nullptr) {
             // The analysis owns this set; frame construction only reads it.
-            return BuildEagerDeoptFrameState(bcIndex, liveIn);
+            lastEagerDeoptFrameState_ = BuildEagerDeoptFrameState(bcIndex, liveIn);
+        } else {
+            // Catch-only values must still be restored. Merge into a separate set, preserving analysis data.
+            kungfu::BitSet liveSet(self->chunk_, self->analysis_->GetNumVRegs());
+            liveSet.CopyFrom(liveIn);
+            liveSet.Union(self->analysis_->GetLiveInOfBlock(blockInfo->catchBlock->rpoIndex));
+            lastEagerDeoptFrameState_ = BuildEagerDeoptFrameState(bcIndex, liveSet);
         }
-
-        // Catch-only values must still be restored. Merge into a separate set, preserving analysis data.
-        kungfu::BitSet liveSet(self->chunk_, self->analysis_->GetNumVRegs());
-        liveSet.CopyFrom(liveIn);
-        liveSet.Union(self->analysis_->GetLiveInOfBlock(blockInfo->catchBlock->rpoIndex));
-        return BuildEagerDeoptFrameState(bcIndex, liveSet);
+        lastEagerBcIndex_ = bcIndex;
+        lastEagerBlock_ = currentBlock;
+        lastEagerFrameData_ = frameState.GetDataIdentity();
+        lastEagerFrameVersion_ = frameState.GetMutationVersion();
+        return lastEagerDeoptFrameState_;
     }
 
     template <class CallT>
@@ -7635,7 +7785,7 @@ struct GraphBuilder::BytecodeVisitor {
         }
     }
 
-    void LoadLazyDeoptFrameStateForThrowableCall(uint32_t bcIndex, Vertex *vertex)
+    void LoadLazyDeoptFrameStateForThrowableCall(uint32_t bcIndex, Vertex *vertex, bool allowDependencyDeopt = true)
     {
         if (!self->IsLazyDeoptEnabled()) {
             return;
@@ -7660,6 +7810,7 @@ struct GraphBuilder::BytecodeVisitor {
         } else if (auto *call = vertex->TryCast<CallRuntimeVertex>()) {
             needsD = !IsDependencySafeRuntimeCall(call);
         }
+        needsD = needsD && allowDependencyDeopt;
         if (!needsE && !needsD) {
             return;
         }
@@ -7687,6 +7838,39 @@ struct GraphBuilder::BytecodeVisitor {
     }
 
     // -------- Miscellaneous Helpers --------
+
+    void EnterInternalBlock(BB *block)
+    {
+        ASSERT(currentBlock->GetControlVertex() != nullptr);
+        ASSERT(internalExitFacts_.find(currentBlock) == internalExitFacts_.end());
+        internalExitFacts_.emplace(currentBlock, compileInfoFacts_);
+        CompileInfoFacts *facts = nullptr;
+        for (BB *predecessor : block->GetPredecessors()) {
+            auto it = internalExitFacts_.find(predecessor);
+            ASSERT(it != internalExitFacts_.end());
+            if (facts == nullptr) {
+                facts = it->second->Clone();
+            } else {
+                facts->Merge(*it->second);
+            }
+        }
+        ASSERT(facts != nullptr);
+        currentBlock = block;
+        compileInfoFacts_ = facts;
+    }
+
+    template <class InputRange = std::initializer_list<ValueVertex *>>
+    PhiVertex *BuildPhi(const InputRange &inputs, VRegIDType resultVreg)
+    {
+        PhiVertex *phi = self->NewPhiVertexWith(currentBlock, inputs, resultVreg);
+        ASSERT(phi->GetInputCount() == currentBlock->PredecessorCount());
+        RecordPhiType(compileInfoFacts_, phi, [this](uint32_t i) {
+            auto it = internalExitFacts_.find(currentBlock->GetPredecessor(i));
+            ASSERT(it != internalExitFacts_.end());
+            return it->second;
+        });
+        return phi;
+    }
 
     bool HasLocalCatchBlock() const
     {
@@ -7740,21 +7924,19 @@ struct GraphBuilder::BytecodeVisitor {
         BB *doneBlock = self->NewBlock();
         BB *branchBlock = currentBlock;
 
-        self->FinishBlockWith<BranchVertexT>(branchBlock, branchInputs, trueBlock, falseBlock,
-                                             std::forward<BranchArgs>(branchArgs)...);
-        trueBlock->AddPredecessor(branchBlock);
-        falseBlock->AddPredecessor(branchBlock);
+        self->FinishBlockWithBranch<BranchVertexT>(branchBlock, branchInputs, trueBlock, falseBlock,
+                                                   std::forward<BranchArgs>(branchArgs)...);
 
-        currentBlock = trueBlock;
+        EnterInternalBlock(trueBlock);
         ValueVertex *trueResult = buildTrue();
         self->FinishBlockWithJump(currentBlock, doneBlock);
 
-        currentBlock = falseBlock;
+        EnterInternalBlock(falseBlock);
         ValueVertex *falseResult = buildFalse();
         self->FinishBlockWithJump(currentBlock, doneBlock);
 
-        currentBlock = doneBlock;
-        return self->NewPhiVertexWith(currentBlock, {trueResult, falseResult}, resultVreg);
+        EnterInternalBlock(doneBlock);
+        return BuildPhi({trueResult, falseResult}, resultVreg);
     }
 
     template <class BranchVertexT, class BuildTrue, class BuildFalse, class... BranchArgs>
@@ -7912,6 +8094,12 @@ struct GraphBuilder::BytecodeVisitor {
             return false;
         }
         return IsEmptyStringRef(*stringRef);
+    }
+
+    PropertyKey PropertyKeyForConstDataId(uint32_t constDataId) const
+    {
+        // The owning method offset identifies the constant-pool scope within one JSPandaFile.
+        return PropertyKey::ConstDataId(constDataId, self->preproc_->GetMethod()->GetMethodId().GetOffset());
     }
 
     std::optional<ArkSteedNameRef> TryGetNameRefFromConstDataId(uint16_t constDataId) const
@@ -8239,29 +8427,64 @@ struct GraphBuilder::BytecodeVisitor {
         if (ValueVertex *alternative = compileInfoFacts_->TryGetAlternative(value, AlternativeNodes::Kind::INT32)) {
             return alternative;
         }
-        std::vector<ValueVertex *> inputs {value};
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
-        ValueVertex *i32 = self->NewVertex<CheckedTaggedIntToI32Vertex>(
-            currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex));
-        i32->Cast<CheckedTaggedIntToI32Vertex>()->SetEagerDeoptFrameState(std::move(deoptFrameState));
-        compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::INT);
-        compileInfoFacts_->SetAlternative(value, AlternativeNodes::Kind::INT32, i32);
-        return i32;
+        if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::INT)) {
+            return BuildTaggedIntToI32(value);
+        }
+        const uint32_t bcIndex = currentBcIndex;
+        auto inputs = std::initializer_list<ValueVertex *> {value};
+        auto query = MakeCseQuery<CheckedTaggedIntToI32Vertex>(inputs);
+        return VertexBuilder<CheckedTaggedIntToI32Vertex>(*self, {compileInfoFacts_, currentBlock})
+            .TryCse(query)
+            // Only create on a miss, retaining the standard eager constructor arguments.
+            .CreateWith([&]() {
+                return self->NewVertexImpl<CheckedTaggedIntToI32Vertex>(currentBlock, inputs, self->chunk_,
+                                                                        self->preproc_->GetBytecodeOffset(bcIndex));
+            })
+            // Capture the pre-operation eager state only for a new vertex.
+            .WithEagerDeoptState([this, bcIndex](CheckedTaggedIntToI32Vertex *vertex) {
+                vertex->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+            })
+            // Preserve the same result facts on both a cache hit and a new vertex.
+            .UpdateFacts([this, value](CheckedTaggedIntToI32Vertex *i32) {
+                compileInfoFacts_->UpdateInfoFor(value, [i32](NodeInfo &info) {
+                    info.IntersectType(NodeInfo::NodeType::INT);
+                    info.GetAlternatives().Set(AlternativeNodes::Kind::INT32, i32);
+                });
+            })
+            .Build();
     }
 
     ValueVertex *BuildCheckedTaggedString(ValueVertex *value)
     {
+        if (ValueVertex *checked = compileInfoFacts_->TryGetAlternative(value, AlternativeNodes::Kind::CHECKED_VALUE)) {
+            return checked;
+        }
         if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::STRING)) {
             return value;
         }
-        std::vector<ValueVertex *> inputs {value};
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
-        ValueVertex *checked = self->NewVertex<CheckedTaggedStringVertex>(
-            currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex));
-        checked->Cast<CheckedTaggedStringVertex>()->SetEagerDeoptFrameState(std::move(deoptFrameState));
-        compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::STRING);
-        compileInfoFacts_->EnsureType(checked, NodeInfo::NodeType::STRING);
-        return checked;
+        const uint32_t bcIndex = currentBcIndex;
+        auto inputs = std::initializer_list<ValueVertex *> {value};
+        auto query = MakeCseQuery<CheckedTaggedStringVertex>(inputs);
+        return VertexBuilder<CheckedTaggedStringVertex>(*self, {compileInfoFacts_, currentBlock})
+            .TryCse(query)
+            // Only create on a miss, retaining the standard eager constructor arguments.
+            .CreateWith([&]() {
+                return self->NewVertexImpl<CheckedTaggedStringVertex>(currentBlock, inputs, self->chunk_,
+                                                                      self->preproc_->GetBytecodeOffset(bcIndex));
+            })
+            // Capture the pre-operation eager state only for a new vertex.
+            .WithEagerDeoptState([this, bcIndex](CheckedTaggedStringVertex *vertex) {
+                vertex->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+            })
+            // Preserve the same result facts on both a cache hit and a new vertex.
+            .UpdateFacts([this, value](CheckedTaggedStringVertex *checked) {
+                compileInfoFacts_->UpdateInfoFor(value, [checked](NodeInfo &info) {
+                    info.IntersectType(NodeInfo::NodeType::STRING);
+                    info.GetAlternatives().Set(AlternativeNodes::Kind::CHECKED_VALUE, checked);
+                });
+                compileInfoFacts_->EnsureType(checked, NodeInfo::NodeType::STRING);
+            })
+            .Build();
     }
 
     void BuildDeoptIfNotNumber(ValueVertex *value)
@@ -8269,12 +8492,25 @@ struct GraphBuilder::BytecodeVisitor {
         if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::NUMBER)) {
             return;
         }
-        std::vector<ValueVertex *> inputs {value};
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
-        self->NewVertex<DeoptIfNotNumberVertex>(currentBlock, inputs, self->chunk_,
-                                                self->preproc_->GetBytecodeOffset(currentBcIndex))
-            ->SetEagerDeoptFrameState(std::move(deoptFrameState));
-        compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::NUMBER);
+        const uint32_t bcIndex = currentBcIndex;
+        auto inputs = std::initializer_list<ValueVertex *> {value};
+        auto query = MakeCseQuery<DeoptIfNotNumberVertex>(inputs);
+        VertexBuilder<DeoptIfNotNumberVertex>(*self, {compileInfoFacts_, currentBlock})
+            .TryCse(query)
+            // Only create on a miss, retaining the standard eager constructor arguments.
+            .CreateWith([&]() {
+                return self->NewVertexImpl<DeoptIfNotNumberVertex>(currentBlock, inputs, self->chunk_,
+                                                                   self->preproc_->GetBytecodeOffset(bcIndex));
+            })
+            // Capture the pre-operation eager state only for a new vertex.
+            .WithEagerDeoptState([this, bcIndex](DeoptIfNotNumberVertex *vertex) {
+                vertex->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+            })
+            // Preserve the same result facts on both a cache hit and a new vertex.
+            .UpdateFacts([this, value](DeoptIfNotNumberVertex *) {
+                compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::NUMBER);
+            })
+            .Build();
     }
 
     void BuildDeoptIfNotBoolean(ValueVertex *value)
@@ -8282,12 +8518,25 @@ struct GraphBuilder::BytecodeVisitor {
         if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::BOOLEAN)) {
             return;
         }
-        std::vector<ValueVertex *> inputs {value};
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
-        self->NewVertex<DeoptIfNotBooleanVertex>(
-            currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex))
-            ->SetEagerDeoptFrameState(std::move(deoptFrameState));
-        compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::BOOLEAN);
+        const uint32_t bcIndex = currentBcIndex;
+        auto inputs = std::initializer_list<ValueVertex *> {value};
+        auto query = MakeCseQuery<DeoptIfNotBooleanVertex>(inputs);
+        VertexBuilder<DeoptIfNotBooleanVertex>(*self, {compileInfoFacts_, currentBlock})
+            .TryCse(query)
+            // Only create on a miss, retaining the standard eager constructor arguments.
+            .CreateWith([&]() {
+                return self->NewVertexImpl<DeoptIfNotBooleanVertex>(currentBlock, inputs, self->chunk_,
+                                                                    self->preproc_->GetBytecodeOffset(bcIndex));
+            })
+            // Capture the pre-operation eager state only for a new vertex.
+            .WithEagerDeoptState([this, bcIndex](DeoptIfNotBooleanVertex *vertex) {
+                vertex->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+            })
+            // Preserve the same result facts on both a cache hit and a new vertex.
+            .UpdateFacts([this, value](DeoptIfNotBooleanVertex *) {
+                compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::BOOLEAN);
+            })
+            .Build();
     }
 
     void BuildDeoptIfNotBigInt(ValueVertex *value)
@@ -8295,12 +8544,25 @@ struct GraphBuilder::BytecodeVisitor {
         if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::BIGINT)) {
             return;
         }
-        std::vector<ValueVertex *> inputs {value};
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
-        self->NewVertex<DeoptIfNotBigIntVertex>(
-            currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex))
-            ->SetEagerDeoptFrameState(std::move(deoptFrameState));
-        compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::BIGINT);
+        const uint32_t bcIndex = currentBcIndex;
+        auto inputs = std::initializer_list<ValueVertex *> {value};
+        auto query = MakeCseQuery<DeoptIfNotBigIntVertex>(inputs);
+        VertexBuilder<DeoptIfNotBigIntVertex>(*self, {compileInfoFacts_, currentBlock})
+            .TryCse(query)
+            // Only create on a miss, retaining the standard eager constructor arguments.
+            .CreateWith([&]() {
+                return self->NewVertexImpl<DeoptIfNotBigIntVertex>(currentBlock, inputs, self->chunk_,
+                                                                   self->preproc_->GetBytecodeOffset(bcIndex));
+            })
+            // Capture the pre-operation eager state only for a new vertex.
+            .WithEagerDeoptState([this, bcIndex](DeoptIfNotBigIntVertex *vertex) {
+                vertex->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+            })
+            // Preserve the same result facts on both a cache hit and a new vertex.
+            .UpdateFacts([this, value](DeoptIfNotBigIntVertex *) {
+                compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::BIGINT);
+            })
+            .Build();
     }
 
     void BuildDeoptIfNotUndefinedOrNull(ValueVertex *value)
@@ -8308,19 +8570,30 @@ struct GraphBuilder::BytecodeVisitor {
         if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::NULL_OR_UNDEFINED)) {
             return;
         }
-        std::vector<ValueVertex *> inputs {value};
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
-        self->NewVertex<DeoptIfNotUndefinedOrNullVertex>(
-            currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex))
-            ->SetEagerDeoptFrameState(std::move(deoptFrameState));
-        compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::NULL_OR_UNDEFINED);
+        const uint32_t bcIndex = currentBcIndex;
+        auto inputs = std::initializer_list<ValueVertex *> {value};
+        auto query = MakeCseQuery<DeoptIfNotUndefinedOrNullVertex>(inputs);
+        VertexBuilder<DeoptIfNotUndefinedOrNullVertex>(*self, {compileInfoFacts_, currentBlock})
+            .TryCse(query)
+            // Only create on a miss, retaining the standard eager constructor arguments.
+            .CreateWith([&]() {
+                return self->NewVertexImpl<DeoptIfNotUndefinedOrNullVertex>(currentBlock, inputs, self->chunk_,
+                                                                            self->preproc_->GetBytecodeOffset(bcIndex));
+            })
+            // Capture the pre-operation eager state only for a new vertex.
+            .WithEagerDeoptState([this, bcIndex](DeoptIfNotUndefinedOrNullVertex *vertex) {
+                vertex->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+            })
+            // Preserve the same result facts on both a cache hit and a new vertex.
+            .UpdateFacts([this, value](DeoptIfNotUndefinedOrNullVertex *) {
+                compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::NULL_OR_UNDEFINED);
+            })
+            .Build();
     }
 
     ValueVertex *BuildNumberToStringCall(ValueVertex *value)
     {
-        auto *call = self->NewVertex<NumberToStringVertex>(compileInfoFacts_, currentBlock, {value});
-        UpdateCatchBlockData(call);
-        return call;
+        return BuildThrowableNode<NumberToStringVertex>(std::initializer_list<ValueVertex *> {value}, true, false, true);
     }
 
     ValueVertex *BuildNumberToString(ValueVertex *value)
@@ -8335,7 +8608,11 @@ struct GraphBuilder::BytecodeVisitor {
         }
 
         ValueVertex *result = BuildSelect<BranchIfTaggedStringVertex>(
-            {value}, self->AccIndex(), [&]() -> ValueVertex * { return value; },
+            {value}, self->AccIndex(),
+            [&]() -> ValueVertex * {
+                compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::STRING);
+                return value;
+            },
             [&]() -> ValueVertex * {
                 BuildDeoptIfNotNumber(value);
                 ValueVertex *numberResult = BuildNumberToStringCall(value);
@@ -8349,8 +8626,10 @@ struct GraphBuilder::BytecodeVisitor {
     ValueVertex *BuildTaggedI32Result(ValueVertex *rawResult)
     {
         ValueVertex *taggedResult = self->NewVertex<I32ToTaggedIntVertex>(compileInfoFacts_, currentBlock, {rawResult});
-        compileInfoFacts_->EnsureType(taggedResult, NodeInfo::NodeType::INT);
-        compileInfoFacts_->SetAlternative(taggedResult, AlternativeNodes::Kind::INT32, rawResult);
+        compileInfoFacts_->UpdateInfoFor(taggedResult, [rawResult](NodeInfo &info) {
+            info.IntersectType(NodeInfo::NodeType::INT);
+            info.GetAlternatives().Set(AlternativeNodes::Kind::INT32, rawResult);
+        });
         return taggedResult;
     }
 
@@ -8397,24 +8676,22 @@ struct GraphBuilder::BytecodeVisitor {
                       std::is_same_v<VertexT, CheckedI32ModVertex> ||
                       std::is_same_v<VertexT, I32DivByConstWithCheckVertex> ||
                       std::is_same_v<VertexT, I32IncWithOverflowVertex> ||
-                      std::is_same_v<VertexT, I32DecWithOverflowVertex>);
-        CompileInfoFacts::ExpressionInputs inputs(self->chunk_);
-        inputs.insert(inputs.end(), operands.begin(), operands.end());
-        CompileInfoFacts::ExpressionOptions options(self->chunk_);
-        CseBuildExpressionOptions(options, args...);
-        uint32_t hash = CseHashExpression(OpcodeOf<VertexT>, inputs, options);
-        if (ValueVertex *cached = compileInfoFacts_->FindExpression(
-                hash, OpcodeOf<VertexT>, inputs, options, false)) {
-            return cached;
-        }
-
-        // The dominating computation has already passed these checks for the same operands.
-        // Keep its frame state; only semantic options, not bytecode offsets, identify the result.
-        auto *result = self->NewVertex<VertexT>(
-            currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex), args...);
-        result->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(currentBcIndex));
-        compileInfoFacts_->AddExpression(hash, result, inputs, options, false);
-        return result;
+                      std::is_same_v<VertexT, I32DecWithOverflowVertex> ||
+            std::is_same_v<VertexT, I32NegWithOverflowVertex>);
+        auto query = MakeCseQuery<VertexT>(operands, args...);
+        auto factory = [&]() {
+            return self->NewVertexImpl<VertexT>(currentBlock, operands, self->chunk_,
+                                                self->preproc_->GetBytecodeOffset(currentBcIndex), args...);
+        };
+        return VertexBuilder<VertexT>(*self, {compileInfoFacts_, currentBlock})
+            .TryCse(query)
+            // Allocate the original arithmetic operation with unchanged operands.
+            .CreateWith(factory)
+            // Attach the current operation's eager snapshot before CSE publication.
+            .WithEagerDeoptState([this](VertexT *vertex) {
+                vertex->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(currentBcIndex));
+            })
+            .Build();
     }
 
     ValueVertex *BuildI32BinOpWithOverflow(BinaryOpKind kind, ValueVertex *leftI32, ValueVertex *rightI32)
@@ -8507,23 +8784,15 @@ struct GraphBuilder::BytecodeVisitor {
     void BuildDeoptIfInt32Condition(ValueVertex *leftI32, ValueVertex *rightI32, Condition condition,
                                     kungfu::DeoptType deoptType)
     {
-        std::vector<ValueVertex *> inputs {leftI32, rightI32};
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
-        self->NewVertex<DeoptIfInt32ConditionVertex>(currentBlock, inputs, self->chunk_,
-                                                     self->preproc_->GetBytecodeOffset(currentBcIndex), condition,
-                                                     deoptType)
-            ->SetEagerDeoptFrameState(std::move(deoptFrameState));
+        BuildEagerCseNode<DeoptIfInt32ConditionVertex>(
+            currentBcIndex, std::initializer_list<ValueVertex *> {leftI32, rightI32}, condition, deoptType);
     }
 
     void BuildDeoptIfFloat64Condition(ValueVertex *leftF64, ValueVertex *rightF64, Condition condition,
                                       kungfu::DeoptType deoptType)
     {
-        std::vector<ValueVertex *> inputs {leftF64, rightF64};
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
-        self->NewVertex<DeoptIfFloat64ConditionVertex>(currentBlock, inputs, self->chunk_,
-                                                       self->preproc_->GetBytecodeOffset(currentBcIndex), condition,
-                                                       deoptType)
-            ->SetEagerDeoptFrameState(std::move(deoptFrameState));
+        BuildEagerCseNode<DeoptIfFloat64ConditionVertex>(
+            currentBcIndex, std::initializer_list<ValueVertex *> {leftF64, rightF64}, condition, deoptType);
     }
 
     ValueVertex *BuildTaggedIntConstant(int32_t value)
@@ -8746,6 +9015,9 @@ struct GraphBuilder::BytecodeVisitor {
                 compileInfoFacts_->TryGetAlternative(value, AlternativeNodes::Kind::HOLEY_FLOAT64)) {
             return alternative;
         }
+        if (std::optional<double> constant = TryGetFloat64Value(value)) {
+            return self->graph_->GetFloat64Constant(*constant);
+        }
         if (std::optional<int32_t> constant = TryGetInt32Value(value)) {
             return self->graph_->GetFloat64Constant(static_cast<double>(*constant));
         }
@@ -8756,14 +9028,38 @@ struct GraphBuilder::BytecodeVisitor {
             compileInfoFacts_->SetAlternative(value, AlternativeNodes::Kind::HOLEY_FLOAT64, f64);
             return f64;
         }
-        std::vector<ValueVertex *> inputs {value};
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
-        ValueVertex *f64 = self->NewVertex<CheckedNumberToF64Vertex>(currentBlock, inputs, self->chunk_,
-                                                                     self->preproc_->GetBytecodeOffset(currentBcIndex));
-        f64->Cast<CheckedNumberToF64Vertex>()->SetEagerDeoptFrameState(std::move(deoptFrameState));
-        compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::NUMBER);
-        compileInfoFacts_->SetAlternative(value, AlternativeNodes::Kind::HOLEY_FLOAT64, f64);
-        return f64;
+        if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::DOUBLE)) {
+            ValueVertex *f64 = self->NewVertex<TaggedDoubleToF64Vertex>(compileInfoFacts_, currentBlock, {value});
+            compileInfoFacts_->SetAlternative(value, AlternativeNodes::Kind::HOLEY_FLOAT64, f64);
+            return f64;
+        }
+        if (compileInfoFacts_->CheckType(value, NodeInfo::NodeType::NUMBER)) {
+            ValueVertex *f64 = self->NewVertex<TaggedNumberToF64Vertex>(compileInfoFacts_, currentBlock, {value});
+            compileInfoFacts_->SetAlternative(value, AlternativeNodes::Kind::HOLEY_FLOAT64, f64);
+            return f64;
+        }
+        const uint32_t bcIndex = currentBcIndex;
+        auto inputs = std::initializer_list<ValueVertex *> {value};
+        auto query = MakeCseQuery<CheckedNumberToF64Vertex>(inputs);
+        return VertexBuilder<CheckedNumberToF64Vertex>(*self, {compileInfoFacts_, currentBlock})
+            .TryCse(query)
+            // Only create on a miss, retaining the standard eager constructor arguments.
+            .CreateWith([&]() {
+                return self->NewVertexImpl<CheckedNumberToF64Vertex>(currentBlock, inputs, self->chunk_,
+                                                                     self->preproc_->GetBytecodeOffset(bcIndex));
+            })
+            // Capture the pre-operation eager state only for a new vertex.
+            .WithEagerDeoptState([this, bcIndex](CheckedNumberToF64Vertex *vertex) {
+                vertex->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+            })
+            // Preserve the same result facts on both a cache hit and a new vertex.
+            .UpdateFacts([this, value](CheckedNumberToF64Vertex *f64) {
+                compileInfoFacts_->UpdateInfoFor(value, [f64](NodeInfo &info) {
+                    info.IntersectType(NodeInfo::NodeType::NUMBER);
+                    info.GetAlternatives().Set(AlternativeNodes::Kind::HOLEY_FLOAT64, f64);
+                });
+            })
+            .Build();
     }
 
     ValueVertex *BuildF64BinOpValue(BinaryOpKind kind, ValueVertex *leftF64, ValueVertex *rightF64)
@@ -8805,8 +9101,10 @@ struct GraphBuilder::BytecodeVisitor {
     {
         ValueVertex *taggedResult =
             self->NewVertex<F64ToTaggedDoubleVertex>(compileInfoFacts_, currentBlock, {rawResult});
-        compileInfoFacts_->EnsureType(taggedResult, NodeInfo::NodeType::DOUBLE);
-        compileInfoFacts_->SetAlternative(taggedResult, AlternativeNodes::Kind::HOLEY_FLOAT64, rawResult);
+        compileInfoFacts_->UpdateInfoFor(taggedResult, [rawResult](NodeInfo &info) {
+            info.IntersectType(NodeInfo::NodeType::DOUBLE);
+            info.GetAlternatives().Set(AlternativeNodes::Kind::HOLEY_FLOAT64, rawResult);
+        });
         return taggedResult;
     }
 
@@ -8847,9 +9145,39 @@ struct GraphBuilder::BytecodeVisitor {
         return BuildTaggedF64Value(rawResult);
     }
 
+    ValueVertex *TryReuseDoubleIdentity(BinaryOpKind kind, ValueVertex *left, ValueVertex *right)
+    {
+        if (!compileInfoFacts_->CheckType(left, NodeInfo::NodeType::DOUBLE)) {
+            return nullptr;
+        }
+        std::optional<double> constant = TryGetFloat64Value(right);
+        if (!constant.has_value()) {
+            if (std::optional<int32_t> integer = TryGetInt32Value(right)) {
+                constant = static_cast<double>(*integer);
+            }
+        }
+        if (!constant.has_value()) {
+            return nullptr;
+        }
+        switch (kind) {
+            case BinaryOpKind::ADD:
+                return *constant == 0.0 && std::signbit(*constant) ? left : nullptr;
+            case BinaryOpKind::SUB:
+                return *constant == 0.0 && !std::signbit(*constant) ? left : nullptr;
+            case BinaryOpKind::MUL:
+            case BinaryOpKind::DIV:
+                return *constant == 1.0 ? left : nullptr;
+            default:
+                return nullptr;
+        }
+    }
+
     ValueVertex *BuildF64NumberBinOp(BinaryOpKind kind, ValueVertex *left, ValueVertex *right)
     {
         ASSERT(SupportsF64BinOp(kind));
+        if (ValueVertex *identity = TryReuseDoubleIdentity(kind, left, right)) {
+            return identity;
+        }
         ValueVertex *leftF64 = BuildCheckedNumberToF64(left);
         ValueVertex *rightF64 = BuildCheckedNumberToF64(right);
         ValueVertex *taggedResult = BuildF64TaggedBinOpValue(kind, leftF64, rightF64);
@@ -8859,31 +9187,45 @@ struct GraphBuilder::BytecodeVisitor {
 
     ValueVertex *BuildCheckedNonNegativeI32ToTaggedInt(ValueVertex *rawResult)
     {
-        std::vector<ValueVertex *> inputs {rawResult};
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
-        ValueVertex *tagged = self->NewVertex<CheckedNonNegativeI32ToTaggedIntVertex>(
-            currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex));
-        tagged->Cast<CheckedNonNegativeI32ToTaggedIntVertex>()->SetEagerDeoptFrameState(std::move(deoptFrameState));
-        compileInfoFacts_->EnsureType(tagged, NodeInfo::NodeType::INT);
-        compileInfoFacts_->SetAlternative(tagged, AlternativeNodes::Kind::INT32, rawResult);
-        return tagged;
+        const uint32_t bcIndex = currentBcIndex;
+        auto inputs = std::initializer_list<ValueVertex *> {rawResult};
+        auto query = MakeCseQuery<CheckedNonNegativeI32ToTaggedIntVertex>(inputs);
+        return VertexBuilder<CheckedNonNegativeI32ToTaggedIntVertex>(*self, {compileInfoFacts_, currentBlock})
+            .TryCse(query)
+            // Only create on a miss, retaining the standard eager constructor arguments.
+            .CreateWith([&]() {
+                return self->NewVertexImpl<CheckedNonNegativeI32ToTaggedIntVertex>(
+                    currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(bcIndex));
+            })
+            // Capture the pre-operation eager state only for a new vertex.
+            .WithEagerDeoptState([this, bcIndex](CheckedNonNegativeI32ToTaggedIntVertex *vertex) {
+                vertex->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+            })
+            // Preserve the same result facts on both a cache hit and a new vertex.
+            .UpdateFacts([this, rawResult](CheckedNonNegativeI32ToTaggedIntVertex *tagged) {
+                compileInfoFacts_->UpdateInfoFor(tagged, [rawResult](NodeInfo &info) {
+                    info.IntersectType(NodeInfo::NodeType::INT);
+                    info.GetAlternatives().Set(AlternativeNodes::Kind::INT32, rawResult);
+                });
+            })
+            .Build();
     }
 
     ValueVertex *BuildGenericBitwiseBinOp(IntBitwiseKind kind, ValueVertex *left, ValueVertex *right)
     {
         switch (kind) {
             case IntBitwiseKind::BITWISE_AND:
-                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::And);
+                return CommonStubCallToAccWithLazyDeopt({left, right, GlobalEnv()}, CommonStubID::And);
             case IntBitwiseKind::BITWISE_OR:
-                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::Or);
+                return CommonStubCallToAccWithLazyDeopt({left, right, GlobalEnv()}, CommonStubID::Or);
             case IntBitwiseKind::BITWISE_XOR:
-                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::Xor);
+                return CommonStubCallToAccWithLazyDeopt({left, right, GlobalEnv()}, CommonStubID::Xor);
             case IntBitwiseKind::SHIFT_LEFT:
-                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::Shl);
+                return CommonStubCallToAccWithLazyDeopt({left, right, GlobalEnv()}, CommonStubID::Shl);
             case IntBitwiseKind::SHIFT_RIGHT_LOGICAL:
-                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::Shr);
+                return CommonStubCallToAccWithLazyDeopt({left, right, GlobalEnv()}, CommonStubID::Shr);
             case IntBitwiseKind::SHIFT_RIGHT_ARITHMETIC:
-                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::Ashr);
+                return CommonStubCallToAccWithLazyDeopt({left, right, GlobalEnv()}, CommonStubID::Ashr);
         }
         UNREACHABLE();
     }
@@ -9052,11 +9394,11 @@ struct GraphBuilder::BytecodeVisitor {
                                                                   checkUpperBlock, lowerOverflowBlock,
                                                                   Condition::GREATER_THAN_OR_EQUAL);
 
-        currentBlock = checkUpperBlock;
+        EnterInternalBlock(checkUpperBlock);
         self->FinishBlockWithBranch<BranchIfFloat64CompareVertex>(currentBlock, {doubleValue, maxInt64}, fastBlock,
                                                                   upperOverflowBlock, Condition::LESS_THAN);
 
-        currentBlock = fastBlock;
+        EnterInternalBlock(fastBlock);
         ValueVertex *fastValue = self->NewVertex<UnsafeF64ToI32Vertex>(
             compileInfoFacts_, currentBlock, std::initializer_list<ValueVertex *> {doubleValue});
         self->NewVertex<StoreIntTypedArrayElementVertex>(compileInfoFacts_, currentBlock, {receiver, index, fastValue},
@@ -9064,7 +9406,7 @@ struct GraphBuilder::BytecodeVisitor {
         self->FinishBlockWithJump(currentBlock, doneBlock);
 
         for (BB *overflowBlock : {lowerOverflowBlock, upperOverflowBlock}) {
-            currentBlock = overflowBlock;
+            EnterInternalBlock(overflowBlock);
             currentBlock->SetDeferred(true);
             ValueVertex *slowValue = self->NewVertex<DoubleToInt32CallVertex>(
                 compileInfoFacts_, currentBlock, std::initializer_list<ValueVertex *> {doubleValue});
@@ -9074,7 +9416,7 @@ struct GraphBuilder::BytecodeVisitor {
             self->FinishBlockWithJump(currentBlock, doneBlock);
         }
 
-        currentBlock = doneBlock;
+        EnterInternalBlock(doneBlock);
     }
 
     void BuildClampedUint8TypedArrayStore(ValueVertex *receiver, ValueVertex *index, ValueVertex *value,
@@ -9135,7 +9477,7 @@ struct GraphBuilder::BytecodeVisitor {
                 return BuildI32BitwiseTaggedValue(kind, leftI32, rightI32);
             }
             LogOperationFeedback(feedback, "Bitwise", "I32BitwiseBinOp");
-            return BuildI32BitwiseBinOp(kind, left, right, false, false);
+            return BuildI32BitwiseBinOp(kind, left, right, leftKnownInt, rightKnownInt);
         }
         if (feedback.hint == ArkSteedOperationHint::NUMBER) {
             LogOperationFeedback(feedback, "Bitwise", "TruncatingI32BitwiseBinOp");
@@ -9149,7 +9491,7 @@ struct GraphBuilder::BytecodeVisitor {
 
     ValueVertex *BuildStringAdd(ValueVertex *left, ValueVertex *right)
     {
-        ValueVertex *result = CommonStubCall(
+        ValueVertex *result = CommonStubCallToAccWithLazyDeopt(
             {left, right, self->graph_->GetInt32Constant(0), GlobalEnv()}, CommonStubID::StringAdd,
             SideEffectKind::SAFE_CALL);
         compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::STRING);
@@ -9264,7 +9606,8 @@ struct GraphBuilder::BytecodeVisitor {
         }
         SideEffectKind sideEffectKind = IsStrictEqualityCompare(kind)
             ? SideEffectKind::SAFE_CALL : SideEffectKind::UNKNOWN_CALL;
-        ValueVertex *result = CommonStubCall({left, right, GlobalEnv()}, stubId, sideEffectKind);
+        ValueVertex *result =
+            CommonStubCallToAccWithLazyDeopt({left, right, GlobalEnv()}, stubId, sideEffectKind);
         compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
         return result;
     }
@@ -9343,6 +9686,46 @@ struct GraphBuilder::BytecodeVisitor {
         return nullptr;
     }
 
+    std::optional<bool> TryGetFollowingCompareBranch() const
+    {
+        if (currentBcIndex + 1 != blockInfo->endBcIndex ||
+            self->analysis_->GetLiveOutOfBytecode(currentBcIndex + 1).TestBit(self->AccIndex())) {
+            return std::nullopt;
+        }
+        const BytecodeInfo *branch = self->preproc_->GetBytecode(currentBcIndex + 1);
+        if (self->GetOptions()->GetCompilerArkSteedDeoptOnInsufficientProfile() && branch->IsInsufficientProfile()) {
+            return std::nullopt;
+        }
+        switch (branch->GetOpcode()) {
+            case kungfu::EcmaOpcode::JEQZ_IMM8:
+            case kungfu::EcmaOpcode::JEQZ_IMM16:
+            case kungfu::EcmaOpcode::JEQZ_IMM32:
+                return false;
+            case kungfu::EcmaOpcode::JNEZ_IMM8:
+            case kungfu::EcmaOpcode::JNEZ_IMM16:
+            case kungfu::EcmaOpcode::JNEZ_IMM32:
+                return true;
+            default:
+                return std::nullopt;
+        }
+    }
+
+    template <class CompareVertex, class BranchVertex>
+    ValueVertex *BuildNumericCompare(JSCondition kind, ValueVertex *left, ValueVertex *right)
+    {
+        Condition condition = ToMachineCondition(kind);
+        if (std::optional<bool> jumpIfTrue = TryGetFollowingCompareBranch()) {
+            BB *jump = JumpTarget();
+            BB *fallthrough = FallthroughTarget();
+            self->FinishBlockWithBranch<BranchVertex>(currentBlock, {left, right}, *jumpIfTrue ? jump : fallthrough,
+                                                      *jumpIfTrue ? fallthrough : jump, condition);
+            return nullptr;
+        }
+        ValueVertex *result = self->NewVertex<CompareVertex>(compileInfoFacts_, currentBlock, {left, right}, condition);
+        compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
+        return result;
+    }
+
     ValueVertex *BuildI32CompareTaggedValue(JSCondition kind, ValueVertex *left, ValueVertex *right)
     {
         std::optional<int32_t> leftValue = TryGetInt32Value(left);
@@ -9353,10 +9736,7 @@ struct GraphBuilder::BytecodeVisitor {
 
         ValueVertex *leftI32 = BuildTaggedIntToI32(left);
         ValueVertex *rightI32 = BuildTaggedIntToI32(right);
-        ValueVertex *result = self->NewVertex<I32ConditionCheckVertex>(
-            compileInfoFacts_, currentBlock, {leftI32, rightI32}, ToMachineCondition(kind));
-        compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
-        return result;
+        return BuildNumericCompare<I32ConditionCheckVertex, BranchIfInt32CompareVertex>(kind, leftI32, rightI32);
     }
 
     ValueVertex *BuildI32CompareOp(JSCondition kind, ValueVertex *left, ValueVertex *right, bool leftKnownInt,
@@ -9368,10 +9748,7 @@ struct GraphBuilder::BytecodeVisitor {
 
         ValueVertex *leftI32 = leftKnownInt ? BuildTaggedIntToI32(left) : BuildCheckedTaggedIntToI32(left);
         ValueVertex *rightI32 = rightKnownInt ? BuildTaggedIntToI32(right) : BuildCheckedTaggedIntToI32(right);
-        ValueVertex *result = self->NewVertex<I32ConditionCheckVertex>(
-            compileInfoFacts_, currentBlock, {leftI32, rightI32}, ToMachineCondition(kind));
-        compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
-        return result;
+        return BuildNumericCompare<I32ConditionCheckVertex, BranchIfInt32CompareVertex>(kind, leftI32, rightI32);
     }
 
     ValueVertex *BuildF64CompareTaggedValue(JSCondition kind, ValueVertex *leftF64, ValueVertex *rightF64)
@@ -9382,10 +9759,7 @@ struct GraphBuilder::BytecodeVisitor {
             }
         }
 
-        ValueVertex *result = self->NewVertex<F64ConditionCheckVertex>(
-            compileInfoFacts_, currentBlock, {leftF64, rightF64}, ToMachineCondition(kind));
-        compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::BOOLEAN);
-        return result;
+        return BuildNumericCompare<F64ConditionCheckVertex, BranchIfFloat64CompareVertex>(kind, leftF64, rightF64);
     }
 
     ValueVertex *BuildF64CompareOp(JSCondition kind, ValueVertex *left, ValueVertex *right)
@@ -9475,7 +9849,7 @@ struct GraphBuilder::BytecodeVisitor {
         OperationFeedback feedback = self->pgoContext_.ReadOperationFeedback(currentBcInfo);
         if (feedback.hint == ArkSteedOperationHint::INT) {
             LogOperationFeedback(feedback, "Compare", "I32CompareOp");
-            return BuildI32CompareOp(kind, left, right, false, false);
+            return BuildI32CompareOp(kind, left, right, leftKnownInt, rightKnownInt);
         }
 
         bool leftKnownNumber = compileInfoFacts_->CheckType(left, NodeInfo::NodeType::NUMBER);
@@ -9507,17 +9881,17 @@ struct GraphBuilder::BytecodeVisitor {
     {
         switch (kind) {
             case BinaryOpKind::ADD:
-                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::Add);
+                return CommonStubCallToAccWithLazyDeopt({left, right, GlobalEnv()}, CommonStubID::Add);
             case BinaryOpKind::SUB:
-                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::Sub);
+                return CommonStubCallToAccWithLazyDeopt({left, right, GlobalEnv()}, CommonStubID::Sub);
             case BinaryOpKind::MUL:
-                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::Mul);
+                return CommonStubCallToAccWithLazyDeopt({left, right, GlobalEnv()}, CommonStubID::Mul);
             case BinaryOpKind::DIV:
-                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::Div);
+                return CommonStubCallToAccWithLazyDeopt({left, right, GlobalEnv()}, CommonStubID::Div);
             case BinaryOpKind::MOD:
-                return CommonStubCall({left, right, GlobalEnv()}, CommonStubID::Mod);
+                return CommonStubCallToAccWithLazyDeopt({left, right, GlobalEnv()}, CommonStubID::Mod);
             case BinaryOpKind::EXP:
-                return RuntimeCall({left, right}, RTSTUB_ID(Exp));
+                return RuntimeCallToAccWithLazyDeopt({left, right}, RTSTUB_ID(Exp));
             default:
                 break;
         }
@@ -9579,16 +9953,52 @@ struct GraphBuilder::BytecodeVisitor {
 
     ValueVertex *BuildGenericUnaryOp(CommonStubID stubId, ValueVertex *value)
     {
-        return CommonStubCall({value}, stubId);
+        return CommonStubCallToAccWithLazyDeopt({value}, stubId);
+    }
+
+    bool IncrementCannotOverflowInCurrentBlock(ValueVertex *valueI32) const
+    {
+        // A loop header may still receive a backedge after its body has been built.
+        if (currentBlock->IsLoopHeader() || currentBlock->PredecessorCount() != 1) {
+            return false;
+        }
+        auto *control = currentBlock->GetPredecessor(0)->GetControlVertex();
+        auto *branch = control->TryCast<BranchIfInt32CompareVertex>();
+        if (branch == nullptr) {
+            return false;
+        }
+        bool fromTrue = branch->IfTrue() == currentBlock;
+        bool fromFalse = branch->IfFalse() == currentBlock;
+        if (fromTrue == fromFalse) {
+            return false;
+        }
+        ValueVertex *left = branch->GetInput(BranchIfInt32CompareVertex::LEFT_INDEX);
+        ValueVertex *right = branch->GetInput(BranchIfInt32CompareVertex::RIGHT_INDEX);
+        // Each accepted edge proves valueI32 < another signed Int32, hence valueI32 < INT32_MAX.
+        switch (branch->GetCondition()) {
+            case Condition::LESS_THAN:
+                return fromTrue && left == valueI32;
+            case Condition::GREATER_THAN_OR_EQUAL:
+                return fromFalse && left == valueI32;
+            case Condition::GREATER_THAN:
+                return fromTrue && right == valueI32;
+            case Condition::LESS_THAN_OR_EQUAL:
+                return fromFalse && right == valueI32;
+            default:
+                return false;
+        }
     }
 
     ValueVertex *BuildIntUnaryOp(CommonStubID stubId, ValueVertex *value, bool valueKnownInt)
     {
         ValueVertex *valueI32 = valueKnownInt ? BuildTaggedIntToI32(value) : BuildCheckedTaggedIntToI32(value);
-        std::vector<ValueVertex *> inputs {valueI32};
 
         switch (stubId) {
             case CommonStubID::Inc: {
+                if (IncrementCannotOverflowInCurrentBlock(valueI32)) {
+                    ValueVertex *rawResult = self->NewVertex<I32IncVertex>(compileInfoFacts_, currentBlock, {valueI32});
+                    return BuildTaggedI32Result(rawResult);
+                }
                 ValueVertex *rawResult = BuildCheckedI32Arithmetic<I32IncWithOverflowVertex>({valueI32});
                 return BuildTaggedI32Result(rawResult);
             }
@@ -9597,10 +10007,7 @@ struct GraphBuilder::BytecodeVisitor {
                 return BuildTaggedI32Result(rawResult);
             }
             case CommonStubID::Neg: {
-                EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
-                ValueVertex *rawResult = self->NewVertex<I32NegWithOverflowVertex>(
-                    currentBlock, inputs, self->chunk_, self->preproc_->GetBytecodeOffset(currentBcIndex));
-                rawResult->Cast<I32NegWithOverflowVertex>()->SetEagerDeoptFrameState(std::move(deoptFrameState));
+                ValueVertex *rawResult = BuildCheckedI32Arithmetic<I32NegWithOverflowVertex>({valueI32});
                 return BuildTaggedI32Result(rawResult);
             }
             case CommonStubID::Not: {
@@ -9632,28 +10039,19 @@ struct GraphBuilder::BytecodeVisitor {
         switch (stubId) {
             case CommonStubID::Neg: {
                 ValueVertex *negF64 = self->NewVertex<F64NegVertex>(compileInfoFacts_, currentBlock, {valueF64});
-                ValueVertex *result =
-                    self->NewVertex<F64ToTaggedDoubleVertex>(compileInfoFacts_, currentBlock, {negF64});
-                compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::NUMBER);
-                return result;
+                return BuildTaggedF64Value(negF64);
             }
             case CommonStubID::Inc: {
                 ValueVertex *oneF64 = self->graph_->GetFloat64Constant(1.0);
                 ValueVertex *addF64 =
                     self->NewVertex<F64AddVertex>(compileInfoFacts_, currentBlock, {valueF64, oneF64});
-                ValueVertex *result =
-                    self->NewVertex<F64ToTaggedDoubleVertex>(compileInfoFacts_, currentBlock, {addF64});
-                compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::NUMBER);
-                return result;
+                return BuildTaggedF64Value(addF64);
             }
             case CommonStubID::Dec: {
                 ValueVertex *oneF64 = self->graph_->GetFloat64Constant(1.0);
                 ValueVertex *subF64 =
                     self->NewVertex<F64SubVertex>(compileInfoFacts_, currentBlock, {valueF64, oneF64});
-                ValueVertex *result =
-                    self->NewVertex<F64ToTaggedDoubleVertex>(compileInfoFacts_, currentBlock, {subF64});
-                compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::NUMBER);
-                return result;
+                return BuildTaggedF64Value(subF64);
             }
             case CommonStubID::Not:
                 return BuildTruncatingI32BNot(value);
@@ -9967,18 +10365,45 @@ struct GraphBuilder::BytecodeVisitor {
             }
             expectedHClassHandleIndices.push_back(handleIndex.value());
         }
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(bcIndex);
-        if (hclasses.size() == 1) {
-            auto *check = self->NewVertex<DeoptIfHClassMismatchVertex>(currentBlock, {object}, self->chunk_,
-                                                                       expectedHClassHandleIndices.front(),
-                                                                       self->preproc_->GetBytecodeOffset(bcIndex));
-            check->SetEagerDeoptFrameState(std::move(deoptFrameState));
+        std::sort(expectedHClassHandleIndices.begin(), expectedHClassHandleIndices.end());
+        expectedHClassHandleIndices.erase(
+            std::unique(expectedHClassHandleIndices.begin(), expectedHClassHandleIndices.end()),
+            expectedHClassHandleIndices.end());
+        if (expectedHClassHandleIndices.size() == 1) {
+            auto factory = [&](const auto &inputs) {
+                return self->NewVertexImpl<DeoptIfHClassMismatchVertex>(currentBlock, inputs, self->chunk_,
+                                                                        expectedHClassHandleIndices.front(),
+                                                                        self->preproc_->GetBytecodeOffset(bcIndex));
+            };
+            auto inputs = std::initializer_list<ValueVertex *> {object};
+            auto query = MakeCseQuery<DeoptIfHClassMismatchVertex>(inputs, expectedHClassHandleIndices.front());
+            VertexBuilder<DeoptIfHClassMismatchVertex>(*self, {compileInfoFacts_, currentBlock})
+                .TryCse(query)
+                // Retain the custom factory's constructor order, distinct from its CSE key.
+                .CreateWith([&]() { return factory(inputs); })
+                // Install the same bytecode's pre-operation snapshot on new vertices only.
+                .WithEagerDeoptState([this, bcIndex](DeoptIfHClassMismatchVertex *vertex) {
+                    vertex->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+                })
+                .Build();
             return HClassCheckResult::SUCCESS;
         }
-        auto *check =
-            self->NewVertex<DeoptIfHClassNotInVertex>(currentBlock, {object}, self->chunk_, expectedHClassHandleIndices,
-                                                      self->preproc_->GetBytecodeOffset(bcIndex));
-        check->SetEagerDeoptFrameState(std::move(deoptFrameState));
+        auto factory = [&](const auto &inputs) {
+            return self->NewVertexImpl<DeoptIfHClassNotInVertex>(currentBlock, inputs, self->chunk_,
+                                                                 expectedHClassHandleIndices,
+                                                                 self->preproc_->GetBytecodeOffset(bcIndex));
+        };
+        auto inputs = std::initializer_list<ValueVertex *> {object};
+        auto query = MakeCseQuery<DeoptIfHClassNotInVertex>(inputs, expectedHClassHandleIndices);
+        VertexBuilder<DeoptIfHClassNotInVertex>(*self, {compileInfoFacts_, currentBlock})
+            .TryCse(query)
+            // Retain the custom factory's constructor order, distinct from its CSE key.
+            .CreateWith([&]() { return factory(inputs); })
+            // Install the same bytecode's pre-operation snapshot on new vertices only.
+            .WithEagerDeoptState([this, bcIndex](DeoptIfHClassNotInVertex *vertex) {
+                vertex->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+            })
+            .Build();
         return HClassCheckResult::SUCCESS;
     }
 
@@ -10097,14 +10522,16 @@ struct GraphBuilder::BytecodeVisitor {
             return emissionResult;
         }
         if (merger.ExistingFreshHClassesFound()) {
-            bool narrowed = compileInfoFacts_->NarrowPossibleHClasses(object, checkedHClasses);
-            ASSERT(narrowed);
-            for (const NodeInfo::PossibleHClassInfo &info : resolvedHClasses) {
-                if (info.isStable) {
-                    bool marked = compileInfoFacts_->MarkPossibleHClassStable(object, info.hclass);
-                    ASSERT(marked);
+            compileInfoFacts_->UpdateInfoFor(object, [&](NodeInfo &current) {
+                bool narrowed = current.NarrowPossibleHClasses(checkedHClasses);
+                ASSERT(narrowed);
+                for (const NodeInfo::PossibleHClassInfo &info : resolvedHClasses) {
+                    if (info.isStable) {
+                        bool marked = current.MarkPossibleHClassStable(info.hclass);
+                        ASSERT(marked);
+                    }
                 }
-            }
+            });
         } else {
             compileInfoFacts_->RecordPossibleHClasses(object, resolvedHClasses);
         }
@@ -10304,25 +10731,48 @@ struct GraphBuilder::BytecodeVisitor {
         return convertHoleToUndefined(result);
     }
 
-    ValueVertex *BuildLoadFieldWithoutCse(ValueVertex *object, PropertyLookupResult plr)
-    {
-        if (plr.IsInlinedProps()) {
-            int32_t offset = static_cast<int32_t>(plr.GetOffset());
-            return self->NewVertex<LoadTaggedFieldVertex>(currentBlock, {object}, offset);
-        }
-        ValueVertex *properties = self->NewVertex<LoadTaggedFieldVertex>(
-            currentBlock, {object}, static_cast<int32_t>(JSObject::PROPERTIES_OFFSET));
-        int32_t offset =
-            static_cast<int32_t>(TaggedArray::DATA_OFFSET + plr.GetOffset() * JSTaggedValue::TaggedTypeSize());
-        return self->NewVertex<LoadTaggedFieldVertex>(currentBlock, {properties}, offset);
-    }
-
     void BuildDeoptIfNotHeapObject(ValueVertex *value)
     {
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
-        self->NewVertex<DeoptIfNotHeapObjectVertex>(currentBlock, {value}, self->chunk_,
-                                                    self->preproc_->GetBytecodeOffset(currentBcIndex))
-            ->SetEagerDeoptFrameState(std::move(deoptFrameState));
+        const uint32_t bcIndex = currentBcIndex;
+        auto inputs = std::initializer_list<ValueVertex *> {value};
+        auto query = MakeCseQuery<DeoptIfNotHeapObjectVertex>(inputs);
+        VertexBuilder<DeoptIfNotHeapObjectVertex>(*self, {compileInfoFacts_, currentBlock})
+            .TryCse(query)
+            // Only create on a miss, retaining the standard eager constructor arguments.
+            .CreateWith([&]() {
+                return self->NewVertexImpl<DeoptIfNotHeapObjectVertex>(currentBlock, inputs, self->chunk_,
+                                                                       self->preproc_->GetBytecodeOffset(bcIndex));
+            })
+            // Capture the pre-operation eager state only for a new vertex.
+            .WithEagerDeoptState([this, bcIndex](DeoptIfNotHeapObjectVertex *vertex) {
+                vertex->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+            })
+            // Preserve the same result facts on both a cache hit and a new vertex.
+            .UpdateFacts([this, value](DeoptIfNotHeapObjectVertex *) {
+                compileInfoFacts_->EnsureType(value, NodeInfo::NodeType::ANY_HEAP_OBJECT);
+            })
+            .Build();
+    }
+
+    void BuildDeoptIfPrototypeChanged(uint32_t bcIndex, ValueVertex *receiver, bool checkProtoChangeMarker,
+                                      bool checkNotPrototype)
+    {
+        auto factory = [&](const auto &inputs) {
+            return self->NewVertexImpl<DeoptIfPrototypeChangedVertex>(currentBlock, inputs, self->chunk_,
+                                                                      checkProtoChangeMarker, checkNotPrototype,
+                                                                      self->preproc_->GetBytecodeOffset(bcIndex));
+        };
+        auto inputs = std::initializer_list<ValueVertex *> {receiver};
+        auto query = MakeCseQuery<DeoptIfPrototypeChangedVertex>(inputs, checkProtoChangeMarker, checkNotPrototype);
+        VertexBuilder<DeoptIfPrototypeChangedVertex>(*self, {compileInfoFacts_, currentBlock})
+            .TryCse(query)
+            // Retain the custom factory's constructor order, distinct from its CSE key.
+            .CreateWith([&]() { return factory(inputs); })
+            // Install the same bytecode's pre-operation snapshot on new vertices only.
+            .WithEagerDeoptState([this, bcIndex](DeoptIfPrototypeChangedVertex *vertex) {
+                vertex->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+            })
+            .Build();
     }
 
     void BuildDeoptIfArrayBufferDetached(ValueVertex *receiver, OnHeapMode onHeapMode)
@@ -10330,26 +10780,19 @@ struct GraphBuilder::BytecodeVisitor {
         if (OnHeap::IsOnHeap(onHeapMode)) {
             return;
         }
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
-        self->NewVertex<DeoptIfArrayBufferDetachedVertex>(currentBlock, {receiver}, self->chunk_,
-                                                          self->preproc_->GetBytecodeOffset(currentBcIndex), onHeapMode)
-            ->SetEagerDeoptFrameState(std::move(deoptFrameState));
+        BuildEagerCseNode<DeoptIfArrayBufferDetachedVertex>(
+            currentBcIndex, std::initializer_list<ValueVertex *> {receiver}, onHeapMode);
     }
 
     void BuildDeoptIfCOWElements(ValueVertex *elements)
     {
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
-        self->NewVertex<DeoptIfCOWElementsVertex>(currentBlock, {elements}, self->chunk_,
-                                                  self->preproc_->GetBytecodeOffset(currentBcIndex))
-            ->SetEagerDeoptFrameState(std::move(deoptFrameState));
+        BuildEagerCseNode<DeoptIfCOWElementsVertex>(currentBcIndex, std::initializer_list<ValueVertex *> {elements});
     }
 
     void BuildDeoptIfElementsUnstable(ValueVertex *receiver)
     {
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(currentBcIndex);
-        self->NewVertex<DeoptIfElementsUnstableVertex>(currentBlock, {receiver}, self->chunk_,
-                                                       self->preproc_->GetBytecodeOffset(currentBcIndex))
-            ->SetEagerDeoptFrameState(std::move(deoptFrameState));
+        BuildEagerCseNode<DeoptIfElementsUnstableVertex>(currentBcIndex,
+                                                         std::initializer_list<ValueVertex *> {receiver});
     }
 
     void BuildStoreTaggedElement(ValueVertex *elements, ValueVertex *index, ValueVertex *value,
@@ -10502,11 +10945,32 @@ struct GraphBuilder::BytecodeVisitor {
                                        std::initializer_list<ValueVertex *> inputs, Args &&...args)
     {
         static_assert(CanWrite(VertexT::PROPERTIES));
-        VertexT *vertex = self->NewVertexImpl<VertexT>(currentBlock, inputs, std::forward<Args>(args)...);
-        SideEffectDescriptor effect {SideEffectKind::ELEMENTS_KIND_TRANSITION};
-        effect.transitionSources = &sourceHClasses;
-        compileInfoFacts_->MarkPossibleSideEffect(effect, self->CurrentLoopEffects());
-        return vertex;
+        auto factory = [&]() {
+            return self->NewVertexImpl<VertexT>(currentBlock, inputs, std::forward<Args>(args)...);
+        };
+        auto classify = [&sourceHClasses](VertexT *) {
+            SideEffectDescriptor effect {SideEffectKind::ELEMENTS_KIND_TRANSITION};
+            effect.transitionSources = &sourceHClasses;
+            return effect;
+        };
+        return VertexBuilder<VertexT>(*self, {compileInfoFacts_, currentBlock})
+            // Create this transition without enabling CSE.
+            .CreateWith(factory)
+            // Preserve the source HClasses; Build() performs invalidation once.
+            .WithEffectClassifier(classify)
+            // Merge the exceptional state after invalidation, before normal completion.
+            .WithCatchState([this](VertexT *vertex) {
+                if constexpr (std::is_base_of_v<ThrowableMixin, VertexT>) {
+                    UpdateCatchBlockData(vertex);
+                }
+            })
+            // Keep dependency deopt disabled for this transition's lazy state.
+            .WithLazyDeoptState([this](VertexT *vertex) {
+                if constexpr (std::is_base_of_v<LazyDeoptimizableMixin, VertexT>) {
+                    LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, vertex, false);
+                }
+            })
+            .Build();
     }
 
     void BuildTransitionElementsKind(ValueVertex *receiver, const ResolvedElementStoreTransitionGroup &group,
@@ -10529,10 +10993,9 @@ struct GraphBuilder::BytecodeVisitor {
             return;
         }
         // Mutant backing is rejected by the access-info factory, so changing to the canonical array HClass is enough.
-        auto *call = NewElementsKindTransition<CallRuntimeVertex>(
+        NewElementsKindTransition<CallRuntimeVertex>(
             sourceHClasses, {receiver, TaggedConstantFromInt32(static_cast<int32_t>(group.targetElementsKind))},
             RTSTUB_ID(UpdateHClassForElementsKind));
-        UpdateCatchBlockData(call);
         compileInfoFacts_->RecordHClass(receiver, group.target.ref, false);
     }
 
@@ -10607,7 +11070,6 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *capacity = self->NewVertex<LoadInt32FieldVertex>(
             compileInfoFacts_, currentBlock, {elements}, static_cast<int32_t>(TaggedArray::LENGTH_OFFSET));
 
-        CompileInfoFacts *entryFacts = compileInfoFacts_;
         BB *inlineBlock = self->NewBlock();
         BB *growBlock = self->NewBlock();
         BB *doneBlock = self->NewBlock();
@@ -10615,8 +11077,7 @@ struct GraphBuilder::BytecodeVisitor {
         self->FinishBlockWithBranch<BranchIfInt32CompareVertex>(
             currentBlock, {index, capacity}, inlineBlock, growBlock, Condition::BELOW);
 
-        currentBlock = inlineBlock;
-        compileInfoFacts_ = entryFacts->Clone();
+        EnterInternalBlock(inlineBlock);
         BuildDeoptIfCOWElements(elements);
         BuildStoreTaggedElement(elements, index, storedValue, provenValueKind);
         // Inline path performs the store in-place and updates the length itself.
@@ -10624,19 +11085,14 @@ struct GraphBuilder::BytecodeVisitor {
             compileInfoFacts_, currentBlock, {receiver, self->graph_->GetInt32Constant(*constantIndex + 1)},
             static_cast<int32_t>(JSArray::LENGTH_OFFSET));
         self->FinishBlockWithJump(currentBlock, doneBlock);
-        CompileInfoFacts *inlineExitFacts = compileInfoFacts_->Clone();
 
-        currentBlock = growBlock;
-        compileInfoFacts_ = entryFacts->Clone();
+        EnterInternalBlock(growBlock);
         // Hand off the entire store process (grow + element store + length update) to the
         // runtime stub. The stub matches the slow-path signature of the owning bytecode.
         CommonStubCallWithLazyDeopt({receiver, index, value, GlobalEnv()}, fallbackStubID);
         self->FinishBlockWithJump(currentBlock, doneBlock);
-        CompileInfoFacts *growExitFacts = compileInfoFacts_;
 
-        currentBlock = doneBlock;
-        compileInfoFacts_ = inlineExitFacts;
-        compileInfoFacts_->Merge(*growExitFacts);
+        EnterInternalBlock(doneBlock);
     }
 
     ValueVertex *BuildEnsureWritableElements(ValueVertex *receiver, ValueVertex *elements)
@@ -10759,7 +11215,6 @@ struct GraphBuilder::BytecodeVisitor {
             entry.hclassHandleIndex = handleIndex.value();
         }
 
-        CompileInfoFacts *entryFacts = compileInfoFacts_;
         std::vector<BB *> checkBlocks;
         checkBlocks.reserve(entries.size());
         for (uint32_t i = 0; i < entries.size(); ++i) {
@@ -10790,8 +11245,7 @@ struct GraphBuilder::BytecodeVisitor {
 
         ValueVertex *actualHClass = nullptr;
         for (uint32_t i = 0; i < entries.size(); ++i) {
-            currentBlock = checkBlocks[i];
-            compileInfoFacts_ = entryFacts;
+            EnterInternalBlock(checkBlocks[i]);
             if (actualHClass == nullptr) {
                 actualHClass = self->NewVertex<LoadHClassAddressVertex>(
                     compileInfoFacts_, currentBlock, std::initializer_list<ValueVertex *> {receiver});
@@ -10803,40 +11257,28 @@ struct GraphBuilder::BytecodeVisitor {
         }
 
         for (uint32_t i = 0; i < entries.size(); ++i) {
-            currentBlock = dispatchLandingBlocks[i];
-            compileInfoFacts_ = entryFacts;
+            EnterInternalBlock(dispatchLandingBlocks[i]);
             BB *destination = entries[i].needsTransition ? transitionBlocks[entries[i].groupIndex]
                                                          : actionBlocks[entries[i].groupIndex];
             self->FinishBlockWithJump(currentBlock, destination);
         }
 
-        CompileInfoFacts *mergedExitFacts = nullptr;
         for (uint32_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex) {
-            CompileInfoFacts *actionEntryFacts = entryFacts->Clone();
             if (transitionBlocks[groupIndex] != nullptr) {
-                currentBlock = transitionBlocks[groupIndex];
-                compileInfoFacts_ = entryFacts->Clone();
+                EnterInternalBlock(transitionBlocks[groupIndex]);
                 BuildTransitionElementsKind(receiver, groups[groupIndex]);
-                actionEntryFacts->Merge(*compileInfoFacts_);
                 self->FinishBlockWithJump(currentBlock, actionBlocks[groupIndex]);
             }
 
-            currentBlock = actionBlocks[groupIndex];
-            compileInfoFacts_ = actionEntryFacts;
+            EnterInternalBlock(actionBlocks[groupIndex]);
             // Both the target-map edge and the completed transition reach this block with the target HClass.
             compileInfoFacts_->RecordHClass(receiver, groups[groupIndex].target.ref, false);
             storeAction(receiver, index, value, groups[groupIndex].targetElementsKind);
             self->FinishBlockWithJump(currentBlock, doneBlock);
-            if (mergedExitFacts == nullptr) {
-                mergedExitFacts = compileInfoFacts_->Clone();
-            } else {
-                mergedExitFacts->Merge(*compileInfoFacts_);
-            }
         }
 
         auto buildDeoptBlock = [&](BB *deoptBlock) {
-            currentBlock = deoptBlock;
-            compileInfoFacts_ = entryFacts->Clone();
+            EnterInternalBlock(deoptBlock);
             auto *deopt =
                 self->FinishBlockWith<DeoptVertex>(currentBlock, {}, self->chunk_, kungfu::DeoptType::KEYMISSMATCH,
                                                    self->preproc_->GetBytecodeOffset(currentBcIndex));
@@ -10845,9 +11287,7 @@ struct GraphBuilder::BytecodeVisitor {
         buildDeoptBlock(primitiveDeoptBlock);
         buildDeoptBlock(hclassMissDeoptBlock);
 
-        ASSERT(mergedExitFacts != nullptr);
-        currentBlock = doneBlock;
-        compileInfoFacts_ = mergedExitFacts;
+        EnterInternalBlock(doneBlock);
         return true;
     }
 
@@ -10981,12 +11421,39 @@ struct GraphBuilder::BytecodeVisitor {
     VertexT *NewFieldStore(PropertyKey key, const InputRange &inputs, Args &&...args)
     {
         static_assert(CanWrite(VertexT::PROPERTIES));
-        VertexT *vertex = self->NewVertexImpl<VertexT>(currentBlock, inputs, std::forward<Args>(args)...);
-        SideEffectDescriptor effect = ArkSteedSideEffectClassifier::Classify(vertex);
-        ASSERT(effect.kind == SideEffectKind::FIELD_WRITE);
-        effect.propertyKey = key;
-        compileInfoFacts_->MarkPossibleSideEffect(effect, self->CurrentLoopEffects());
-        return vertex;
+        auto factory = [&]() {
+            return self->NewVertexImpl<VertexT>(currentBlock, inputs, std::forward<Args>(args)...);
+        };
+        auto classify = [key](VertexT *vertex) {
+            SideEffectDescriptor effect = ArkSteedSideEffectClassifier::Classify(vertex);
+            ASSERT(effect.kind == SideEffectKind::FIELD_WRITE);
+            effect.propertyKey = key;
+            return effect;
+        };
+        return VertexBuilder<VertexT>(*self, {compileInfoFacts_, currentBlock})
+            // Create the original store without enabling CSE.
+            .CreateWith(factory)
+            // Install any eager snapshot before the store invalidates facts.
+            .WithEagerDeoptState([this](VertexT *vertex) {
+                if constexpr (CanEagerDeopt(VertexT::PROPERTIES)) {
+                    vertex->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(currentBcIndex));
+                }
+            })
+            // Preserve property-key precision; Build() owns invalidation.
+            .WithEffectClassifier(classify)
+            // Merge catch state after invalidation and before normal completion.
+            .WithCatchState([this](VertexT *vertex) {
+                if constexpr (std::is_base_of_v<ThrowableMixin, VertexT>) {
+                    UpdateCatchBlockData(vertex);
+                }
+            })
+            // Preserve the existing exception-only lazy-deopt policy.
+            .WithLazyDeoptState([this](VertexT *vertex) {
+                if constexpr (std::is_base_of_v<LazyDeoptimizableMixin, VertexT>) {
+                    LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, vertex, false);
+                }
+            })
+            .Build();
     }
 
     void BuildStoreTaggedField(ValueVertex *object, int32_t offset, ValueVertex *value,
@@ -11035,11 +11502,18 @@ struct GraphBuilder::BytecodeVisitor {
         if (!GetHeapConstantHandleIndices(accessInfo.expectedPrototypeHClassRefs, &expectedHClassHandleIndices)) {
             return nullptr;
         }
-        auto *loadHolder = self->NewVertex<LoadPrototypeHolderByHClassVertex>(
-            compileInfoFacts_, currentBlock, {object}, self->chunk_, accessInfo.holderDepth,
-            expectedHClassHandleIndices, self->preproc_->GetBytecodeOffset(bcIndex));
-        loadHolder->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
-        return loadHolder;
+        return VertexBuilder<LoadPrototypeHolderByHClassVertex>(*self, {compileInfoFacts_, currentBlock})
+            // This holder lookup stays uncached and keeps its specialized constructor order.
+            .CreateWith([&]() {
+                return self->NewVertexImpl<LoadPrototypeHolderByHClassVertex>(
+                    currentBlock, {object}, self->chunk_, accessInfo.holderDepth, expectedHClassHandleIndices,
+                    self->preproc_->GetBytecodeOffset(bcIndex));
+            })
+            // Install the same bytecode's eager snapshot immediately after creation.
+            .WithEagerDeoptState([this, bcIndex](LoadPrototypeHolderByHClassVertex *vertex) {
+                vertex->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+            })
+            .Build();
     }
 
     bool TryResolveHClassRef(const ArkSteedHClassRef &ref, JSHClass **hclass) const
@@ -11140,10 +11614,8 @@ struct GraphBuilder::BytecodeVisitor {
             return false;
         }
 
-        auto *prepareField = self->NewVertex<PrepareSharedStoreFieldVertex>(
-            compileInfoFacts_, currentBlock, std::initializer_list<ValueVertex *> {value}, access.handlerInfo);
-        UpdateCatchBlockData(prepareField);
-        LoadLazyDeoptFrameStateForThrowableCall(bcIndex, prepareField);
+        auto *prepareField = BuildThrowableNode<PrepareSharedStoreFieldVertex>(
+            std::initializer_list<ValueVertex *> {value}, true, false, false, access.handlerInfo);
         NewFieldStore<StoreSharedFieldWithBarrierVertex>(
             key, std::initializer_list<ValueVertex *> {storeTarget, prepareField}, access.fieldOffset);
         return true;
@@ -11174,7 +11646,6 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *accessor = self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock,
                                                                        {accessorHolder}, access.fieldOffset);
 
-        CompileInfoFacts *entryFacts = compileInfoFacts_;
         BB *internalAccessorBlock = self->NewBlock();
         BB *loadSetterBlock = self->NewBlock();
         BB *undefinedSetterBlock = self->NewBlock();
@@ -11186,36 +11657,31 @@ struct GraphBuilder::BytecodeVisitor {
         self->FinishBlockWithBranch<BranchIfObjectTypeVertex>(currentBlock, {accessor}, internalAccessorBlock,
                                                               loadSetterBlock, JSType::INTERNAL_ACCESSOR);
 
-        currentBlock = internalAccessorBlock;
-        compileInfoFacts_ = entryFacts->Clone();
-        auto *internalCall = RuntimeCall({receiver, accessor, value}, RTSTUB_ID(CallInternalSetter));
-        LoadLazyDeoptFrameStateForThrowableCall(bcIndex, internalCall);
+        EnterInternalBlock(internalAccessorBlock);
+        RuntimeCallWithLazyDeopt({receiver, accessor, value}, RTSTUB_ID(CallInternalSetter));
         self->FinishBlockWithJump(currentBlock, doneBlock);
 
-        currentBlock = loadSetterBlock;
-        compileInfoFacts_ = entryFacts->Clone();
+        EnterInternalBlock(loadSetterBlock);
         ValueVertex *setter = self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {accessor},
                                                                      static_cast<int32_t>(AccessorData::SETTER_OFFSET));
-        CompileInfoFacts *setterFacts = compileInfoFacts_;
+
         self->FinishBlockWithBranch<BranchIfReferenceEqualVertex>(currentBlock, {setter, self->undefinedValue_},
                                                                   undefinedSetterBlock, callSetterBlock);
 
-        currentBlock = undefinedSetterBlock;
-        compileInfoFacts_ = setterFacts->Clone();
-        auto *throwCall = RuntimeCall({}, RTSTUB_ID(ThrowSetterIsUndefinedException));
-        LoadLazyDeoptFrameStateForThrowableCall(bcIndex, throwCall);
+        EnterInternalBlock(undefinedSetterBlock);
+        RuntimeCallWithLazyDeopt({}, RTSTUB_ID(ThrowSetterIsUndefinedException), SideEffectKind::UNKNOWN_CALL, false);
         self->FinishBlockWithJump(currentBlock, doneBlock);
 
-        currentBlock = callSetterBlock;
-        compileInfoFacts_ = setterFacts->Clone();
-        ValueVertex *call = BuildGenericCallVertex(
-            std::initializer_list<ValueVertex *> {setter, self->undefinedValue_, receiver, value}, 1);
-        LoadLazyDeoptFrameStateForThrowableCall(bcIndex, call);
-        self->FinishBlockWithJump(currentBlock, doneBlock);
+        EnterInternalBlock(callSetterBlock);
+        ValueVertex *call = BuildCallVertex(
+            std::initializer_list<ValueVertex *> {setter, self->undefinedValue_, receiver, value}, 1, nullptr, false);
+        // A terminating inline has consumed the call-setter path already:
+        // currentBlock is the inline terminal block and must not be finished again.
+        if (call != nullptr) {
+            self->FinishBlockWithJump(currentBlock, doneBlock);
+        }
 
-        currentBlock = doneBlock;
-        compileInfoFacts_ = entryFacts;
-        compileInfoFacts_->OnSideEffect();
+        EnterInternalBlock(doneBlock);
         return true;
     }
 
@@ -11229,12 +11695,7 @@ struct GraphBuilder::BytecodeVisitor {
         if (!needsProtoMarker && !checkNotPrototype) {
             return true;
         }
-        ChunkVector<ValueVertex *> guardInputs(self->chunk_);
-        guardInputs.emplace_back(receiver);
-        auto *guard = self->NewVertex<DeoptIfPrototypeChangedVertex>(currentBlock, guardInputs, self->chunk_,
-                                                                     needsProtoMarker, checkNotPrototype,
-                                                                     self->preproc_->GetBytecodeOffset(bcIndex));
-        guard->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+        BuildDeoptIfPrototypeChanged(bcIndex, receiver, needsProtoMarker, checkNotPrototype);
         return true;
     }
 
@@ -11321,11 +11782,9 @@ struct GraphBuilder::BytecodeVisitor {
 
         if (access.fieldStorage == AccessFieldStorage::PROPERTIES_ARRAY) {
             ValidateCommonStubCallArgs({receiver}, CommonStubID::EnsurePropertiesCapacity);
-            auto *properties = self->NewVertex<EnsurePropertiesCapacityVertex>(
-                compileInfoFacts_, currentBlock, std::initializer_list<ValueVertex *> {receiver},
+            auto *properties = BuildThrowableNode<EnsurePropertiesCapacityVertex>(
+                std::initializer_list<ValueVertex *> {receiver}, true, false, false,
                 static_cast<int32_t>(access.fieldIndex));
-            UpdateCatchBlockData(properties);
-            LoadLazyDeoptFrameStateForThrowableCall(bcIndex, properties);
             BuildPreparedNamedStoreField(properties, access.fieldOffset, preparedValue, access.fieldRepresentation);
         } else {
             BuildPreparedNamedStoreField(receiver, access.fieldOffset, preparedValue, access.fieldRepresentation);
@@ -11419,17 +11878,15 @@ struct GraphBuilder::BytecodeVisitor {
             ChunkVector<ValueVertex *> storeInputs(self->chunk_);
             storeInputs.emplace_back(storeTarget);
             storeInputs.emplace_back(value);
-            EagerDeoptimizableMixin *store = nullptr;
             if (access.fieldRepresentation == AccessFieldRepresentation::INT32) {
-                store = NewFieldStore<StoreInt32FieldWithRepVertex>(
+                NewFieldStore<StoreInt32FieldWithRepVertex>(
                     key, storeInputs, self->chunk_, access.fieldOffset,
                     self->preproc_->GetBytecodeOffset(bcIndex));
             } else {
-                store = NewFieldStore<StoreDoubleFieldWithRepVertex>(
+                NewFieldStore<StoreDoubleFieldWithRepVertex>(
                     key, storeInputs, self->chunk_, access.fieldOffset,
                     self->preproc_->GetBytecodeOffset(bcIndex));
             }
-            store->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
             return true;
         }
 
@@ -11585,10 +12042,9 @@ struct GraphBuilder::BytecodeVisitor {
         ChunkVector<ValueVertex *> storeInputs(self->chunk_);
         storeInputs.emplace_back(receiver);
         storeInputs.emplace_back(value);
-        auto *store = NewFieldStore<StoreTaggedFieldByHClassVertex>(
+        NewFieldStore<StoreTaggedFieldByHClassVertex>(
             key, storeInputs, self->chunk_, storeCases,
             ClassifyDirectWriteBarrierValueKind(value), self->preproc_->GetBytecodeOffset(bcIndex));
-        store->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
         compileInfoFacts_->RecordPossibleHClasses(receiver, provenHClasses);
         compileInfoFacts_->RecordLoadedProperty(receiver, key, value);
         return true;
@@ -11625,13 +12081,10 @@ struct GraphBuilder::BytecodeVisitor {
             }
         }
 
-        CompileInfoFacts *entryFacts = compileInfoFacts_;
         std::vector<BB *> checkBlocks;
         std::vector<BB *> caseBlocks;
-        std::vector<CompileInfoFacts *> caseExitFacts;
         checkBlocks.reserve(access.caseCount);
         caseBlocks.reserve(access.caseCount);
-        caseExitFacts.reserve(access.caseCount);
         for (uint32_t i = 0; i < access.caseCount; ++i) {
             checkBlocks.push_back(self->NewBlock());
             caseBlocks.push_back(self->NewBlock());
@@ -11658,19 +12111,17 @@ struct GraphBuilder::BytecodeVisitor {
 
         ValueVertex *actualHClass = nullptr;
         for (uint32_t i = 0; i < access.caseCount; ++i) {
-            currentBlock = checkBlocks[i];
-            compileInfoFacts_ = entryFacts;
+            EnterInternalBlock(checkBlocks[i]);
             if (actualHClass == nullptr) {
                 actualHClass = self->NewVertex<LoadHClassAddressVertex>(
-                    currentBlock, std::initializer_list<ValueVertex *> {receiver});
+                    compileInfoFacts_, currentBlock, std::initializer_list<ValueVertex *> {receiver});
             }
             BB *nextBlock = i + 1 < access.caseCount ? checkBlocks[i + 1] : hclassMissDeoptBlock;
             self->FinishBlockWithBranch<BranchIfHClassInVertex>(
                 currentBlock, {actualHClass}, caseBlocks[i], nextBlock, self->chunk_,
                 std::vector<uint32_t> {expectedHClassHandleIndices[i]}, true);
 
-            currentBlock = caseBlocks[i];
-            compileInfoFacts_ = entryFacts->Clone();
+            EnterInternalBlock(caseBlocks[i]);
             compileInfoFacts_->RecordHClass(
                 receiver, access.cases[i].expectedHClass,
                 IsHClassStableForFacts(access.cases[i].expectedHClass,
@@ -11680,13 +12131,11 @@ struct GraphBuilder::BytecodeVisitor {
             if (!lowered) {
                 UNREACHABLE();
             }
-            caseExitFacts.push_back(compileInfoFacts_);
             self->FinishBlockWithJump(currentBlock, doneBlock);
         }
 
         auto buildDeoptBlock = [&](BB *deoptBlock) {
-            currentBlock = deoptBlock;
-            compileInfoFacts_ = entryFacts->Clone();
+            EnterInternalBlock(deoptBlock);
             auto *deopt =
                 self->FinishBlockWith<DeoptVertex>(currentBlock, {}, self->chunk_, kungfu::DeoptType::KEYMISSMATCH,
                                                    self->preproc_->GetBytecodeOffset(bcIndex));
@@ -11695,12 +12144,7 @@ struct GraphBuilder::BytecodeVisitor {
         buildDeoptBlock(primitiveDeoptBlock);
         buildDeoptBlock(hclassMissDeoptBlock);
 
-        currentBlock = doneBlock;
-        ASSERT(!caseExitFacts.empty());
-        compileInfoFacts_ = caseExitFacts.front()->Clone();
-        for (size_t i = 1; i < caseExitFacts.size(); ++i) {
-            compileInfoFacts_->Merge(*caseExitFacts[i]);
-        }
+        EnterInternalBlock(doneBlock);
         return true;
     }
 
@@ -11767,9 +12211,7 @@ struct GraphBuilder::BytecodeVisitor {
     void BuildTypedArrayLengthGuards(uint32_t bcIndex, ValueVertex *object, const NamedLoadAccessInfo &accessInfo)
     {
         // Replacing an accessor in place need not change its holder's HClass.
-        auto *guard = self->NewVertex<DeoptIfPrototypeChangedVertex>(
-            currentBlock, {object}, self->chunk_, true, false, self->preproc_->GetBytecodeOffset(bcIndex));
-        guard->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+        BuildDeoptIfPrototypeChanged(bcIndex, object, true, false);
         BuildDeoptIfArrayBufferDetached(object, accessInfo.typedArrayOnHeapMode);
     }
 
@@ -11809,24 +12251,23 @@ struct GraphBuilder::BytecodeVisitor {
     ValueVertex *BuildPolymorphicPropertyLoad(uint32_t bcIndex, ValueVertex *object,
                                               const NamedLoadAccessInfo &accessInfo)
     {
-        // Internal case blocks share CompileInfoFacts. Do not let a load from one sibling case
-        // enter the property cache or available-expression table and leak into another case.
         if (accessInfo.isJSArrayLength) {
             ValueVertex *length = self->NewVertex<LoadInt32FieldVertex>(
-                currentBlock, {object}, static_cast<int32_t>(JSArray::LENGTH_OFFSET));
-            return self->NewVertex<U32ToTaggedNumberVertex>(currentBlock, {length});
+                compileInfoFacts_, currentBlock, {object},
+                                                                        static_cast<int32_t>(JSArray::LENGTH_OFFSET));
+            return self->NewVertex<U32ToTaggedNumberVertex>(compileInfoFacts_, currentBlock, {length});
         }
         if (accessInfo.typedArrayLengthType != JSType::INVALID) {
             BuildTypedArrayLengthGuards(bcIndex, object, accessInfo);
             ValueVertex *length = self->NewVertex<LoadInt32FieldVertex>(
-                currentBlock, {object}, static_cast<int32_t>(JSTypedArray::ARRAY_LENGTH_OFFSET));
-            return self->NewVertex<U32ToTaggedNumberVertex>(currentBlock, {length});
+                compileInfoFacts_, currentBlock, {object}, static_cast<int32_t>(JSTypedArray::ARRAY_LENGTH_OFFSET));
+            return self->NewVertex<U32ToTaggedNumberVertex>(compileInfoFacts_, currentBlock, {length});
         }
         ValueVertex *loadSource = BuildPropertyLoadSource(bcIndex, object, accessInfo);
-        return BuildLoadFieldWithoutCse(loadSource, accessInfo.plr);
+        return BuildLoadField(loadSource, accessInfo.plr);
     }
 
-    bool TryBuildPolymorphicNamedAccess(uint32_t bcIndex, ValueVertex *receiver,
+    bool TryBuildPolymorphicNamedAccess(uint32_t bcIndex, ValueVertex *receiver, PropertyKey propertyKey,
                                         const std::vector<NamedLoadAccessInfo> &accessInfos)
     {
         ASSERT(accessInfos.size() > 1);
@@ -11862,7 +12303,6 @@ struct GraphBuilder::BytecodeVisitor {
             }
         }
 
-        CompileInfoFacts *entryFacts = compileInfoFacts_;
         std::vector<BB *> checkBlocks;
         std::vector<BB *> caseBlocks;
         checkBlocks.reserve(accessInfos.size());
@@ -11882,8 +12322,7 @@ struct GraphBuilder::BytecodeVisitor {
 
         ValueVertex *actualHClass = nullptr;
         for (uint32_t i = 0; i < accessInfos.size(); ++i) {
-            currentBlock = checkBlocks[i];
-            compileInfoFacts_ = entryFacts;
+            EnterInternalBlock(checkBlocks[i]);
             if (actualHClass == nullptr) {
                 actualHClass = self->NewVertex<LoadHClassAddressVertex>(
                     compileInfoFacts_, currentBlock, std::initializer_list<ValueVertex *> {receiver});
@@ -11896,8 +12335,7 @@ struct GraphBuilder::BytecodeVisitor {
         std::vector<ValueVertex *> results;
         results.reserve(accessInfos.size());
         for (uint32_t i = 0; i < accessInfos.size(); ++i) {
-            currentBlock = caseBlocks[i];
-            compileInfoFacts_ = entryFacts;
+            EnterInternalBlock(caseBlocks[i]);
             ValueVertex *result = BuildPolymorphicPropertyLoad(bcIndex, receiver, accessInfos[i]);
             ASSERT(result != nullptr);
             if (result == nullptr) {
@@ -11908,8 +12346,7 @@ struct GraphBuilder::BytecodeVisitor {
         }
 
         auto buildDeoptBlock = [&](BB *deoptBlock) {
-            currentBlock = deoptBlock;
-            compileInfoFacts_ = entryFacts->Clone();
+            EnterInternalBlock(deoptBlock);
             auto *deopt =
                 self->FinishBlockWith<DeoptVertex>(currentBlock, {}, self->chunk_, kungfu::DeoptType::KEYMISSMATCH,
                                                    self->preproc_->GetBytecodeOffset(bcIndex));
@@ -11918,12 +12355,19 @@ struct GraphBuilder::BytecodeVisitor {
         buildDeoptBlock(primitiveDeoptBlock);
         buildDeoptBlock(hclassMissDeoptBlock);
 
-        currentBlock = doneBlock;
-        compileInfoFacts_ = entryFacts;
+        EnterInternalBlock(doneBlock);
         if (!allExpectedHClasses.empty()) {
             compileInfoFacts_->RecordPossibleHClasses(receiver, allExpectedHClassRefs, false);
         }
-        frameState.SetAcc(self->NewPhiVertexWith(currentBlock, results, self->AccIndex()));
+        ValueVertex *mergedResult = BuildPhi(results, self->AccIndex());
+        bool allDataFields = std::all_of(accessInfos.begin(), accessInfos.end(), [](const NamedLoadAccessInfo &info) {
+            return !info.isJSArrayLength && info.typedArrayLengthType == JSType::INVALID && info.plr.IsFound() &&
+                   !info.plr.IsAccessor() && !info.plr.IsFunction();
+        });
+        if (allDataFields) {
+            compileInfoFacts_->RecordLoadedProperty(receiver, propertyKey, mergedResult);
+        }
+        frameState.SetAcc(mergedResult);
         return true;
     }
 
@@ -11934,7 +12378,8 @@ struct GraphBuilder::BytecodeVisitor {
             return false;
         }
         if (accessInfos.size() > 1) {
-            return TryBuildPolymorphicNamedAccess(bcIndex, receiver, accessInfos);
+            return TryBuildPolymorphicNamedAccess(bcIndex, receiver, PropertyKeyForConstDataId(constDataId),
+                                                  accessInfos);
         }
         const NamedLoadAccessInfo &accessInfo = accessInfos.front();
         const std::vector<JSHClass *> &maps = accessInfo.lookupStartObjectHClasses;
@@ -11948,7 +12393,8 @@ struct GraphBuilder::BytecodeVisitor {
         if (checkResult != HClassCheckResult::SUCCESS) {
             return checkResult == HClassCheckResult::UNREACHABLE;
         }
-        LoadedPropertyKey propertyKey = LoadedPropertyKey::ConstDataId(receiver, constDataId, accessInfo.plr);
+        LoadedPropertyKey propertyKey = LoadedPropertyKey::ConstDataId(
+            receiver, constDataId, accessInfo.plr, self->preproc_->GetMethod()->GetMethodId().GetOffset());
         ValueVertex *result = TryBuildPropertyLoad(bcIndex, receiver, propertyKey, accessInfo);
         if (result == nullptr) {
             return false;
@@ -11961,8 +12407,8 @@ struct GraphBuilder::BytecodeVisitor {
                                    uint16_t constDataId)
     {
         // Successful own-field stores cache the JS value independently of the field's physical layout.
-        if (ValueVertex *stored = compileInfoFacts_->LookupLoadedProperty(
-                receiver, PropertyKey::ConstDataId(constDataId))) {
+        if (ValueVertex *stored =
+                compileInfoFacts_->LookupLoadedProperty(receiver, PropertyKeyForConstDataId(constDataId))) {
             frameState.SetAcc(stored);
             return true;
         }
@@ -11985,23 +12431,20 @@ struct GraphBuilder::BytecodeVisitor {
     ValueVertex *LoadValueFeedbackKey(uint32_t slotId)
     {
         ValueVertex *function = LoadParam(CALL_TARGET_PARAM_INDEX);
-        ValueVertex *profileCell = self->NewVertex<LoadTaggedFieldVertex>(
-            currentBlock, {function}, static_cast<int32_t>(JSFunction::RAW_PROFILE_TYPE_INFO_OFFSET));
-        ValueVertex *profile = self->NewVertex<LoadTaggedFieldVertex>(
-            currentBlock, {profileCell}, static_cast<int32_t>(ProfileTypeInfoCell::VALUE_OFFSET));
+        ValueVertex *profileCell = self->NewUncachedVertex<LoadTaggedFieldVertex>(
+            compileInfoFacts_, currentBlock, {function},
+            static_cast<int32_t>(JSFunction::RAW_PROFILE_TYPE_INFO_OFFSET));
+        ValueVertex *profile = self->NewUncachedVertex<LoadTaggedFieldVertex>(
+            compileInfoFacts_, currentBlock, {profileCell}, static_cast<int32_t>(ProfileTypeInfoCell::VALUE_OFFSET));
         int32_t slotOffset =
             static_cast<int32_t>(ProfileTypeInfo::DATA_OFFSET + slotId * JSTaggedValue::TaggedTypeSize());
-        return self->NewVertex<LoadTaggedFieldVertex>(currentBlock, {profile}, slotOffset);
+        return self->NewUncachedVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {profile}, slotOffset);
     }
 
     void BuildCheckValueKey(uint32_t bcIndex, ValueVertex *key, uint32_t slotId)
     {
         ValueVertex *cachedKey = LoadValueFeedbackKey(slotId);
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(bcIndex);
-        auto *check = self->NewVertex<DeoptIfTaggedConditionVertex>(
-            currentBlock, {key, cachedKey}, self->chunk_, self->preproc_->GetBytecodeOffset(bcIndex),
-            Condition::NOT_EQUAL, kungfu::DeoptType::KEYMISSMATCH);
-        check->SetEagerDeoptFrameState(std::move(deoptFrameState));
+        BuildCheckTaggedCondition(bcIndex, key, cachedKey, Condition::NOT_EQUAL, kungfu::DeoptType::KEYMISSMATCH);
     }
 
     bool TryBuildNamedAccessByValue(uint32_t bcIndex, ValueVertex *receiver, uint32_t propertyKeyHandleIndex,
@@ -12011,7 +12454,8 @@ struct GraphBuilder::BytecodeVisitor {
             return false;
         }
         if (accessInfos.size() > 1) {
-            return TryBuildPolymorphicNamedAccess(bcIndex, receiver, accessInfos);
+            return TryBuildPolymorphicNamedAccess(bcIndex, receiver, PropertyKey::HeapConstant(propertyKeyHandleIndex),
+                                                  accessInfos);
         }
 
         const NamedLoadAccessInfo &accessInfo = accessInfos.front();
@@ -12040,11 +12484,8 @@ struct GraphBuilder::BytecodeVisitor {
     void BuildCheckTaggedCondition(uint32_t bcIndex, ValueVertex *left, ValueVertex *right, Condition condition,
                                    kungfu::DeoptType deoptType)
     {
-        EagerDeoptFrameState deoptFrameState = BuildCurrentEagerDeoptFrameState(bcIndex);
-        auto *check = self->NewVertex<DeoptIfTaggedConditionVertex>(currentBlock, {left, right}, self->chunk_,
-                                                                    self->preproc_->GetBytecodeOffset(bcIndex),
-                                                                    condition, deoptType);
-        check->SetEagerDeoptFrameState(std::move(deoptFrameState));
+        BuildEagerCseNode<DeoptIfTaggedConditionVertex>(bcIndex, std::initializer_list<ValueVertex *> {left, right},
+                                                        condition, deoptType);
     }
 
     bool TryResolveNormalElementLoadHClass(const ElementLoadAccessInfo &accessInfo, JSHClass **receiverHClass)
@@ -12165,8 +12606,8 @@ struct GraphBuilder::BytecodeVisitor {
             compileInfoFacts_, currentBlock, {receiver}, static_cast<int32_t>(BaseString::LENGTH_AND_FLAGS_OFFSET));
         ValueVertex *lengthShift =
             self->graph_->GetInt32Constant(static_cast<int32_t>(BaseString::LengthBits::START_BIT));
-        ValueVertex *length = self->NewVertex<I32BitwiseBinaryVertex>(currentBlock, {lengthAndFlags, lengthShift},
-                                                                      IntBitwiseKind::SHIFT_RIGHT_LOGICAL);
+        ValueVertex *length = self->NewVertex<I32BitwiseBinaryVertex>(
+            compileInfoFacts_, currentBlock, {lengthAndFlags, lengthShift}, IntBitwiseKind::SHIFT_RIGHT_LOGICAL);
         BuildDeoptIfInt32Condition(index, length, Condition::ABOVE_OR_EQUAL, kungfu::DeoptType::RANGE_ERROR);
 
         ValueVertex *charCode = self->NewVertex<LineStringLoadElementVertex>(compileInfoFacts_, currentBlock,
@@ -12178,7 +12619,6 @@ struct GraphBuilder::BytecodeVisitor {
                                                                   LoadSingleCharTableElementVertex::MIN_CHAR_CODE);
         ValueVertex *adjustedCharCode = self->NewVertex<I32SubVertex>(compileInfoFacts_, currentBlock, {charCode, one});
 
-        CompileInfoFacts *entryFacts = compileInfoFacts_;
         BB *cachedCharBlock = self->NewBlock();
         BB *createCharBlock = self->NewBlock();
         BB *doneBlock = self->NewBlock();
@@ -12186,23 +12626,19 @@ struct GraphBuilder::BytecodeVisitor {
         self->FinishBlockWithBranch<BranchIfInt32CompareVertex>(
             currentBlock, {adjustedCharCode, cachedRange}, cachedCharBlock, createCharBlock, Condition::BELOW_OR_EQUAL);
 
-        currentBlock = cachedCharBlock;
-        compileInfoFacts_ = entryFacts->Clone();
+        EnterInternalBlock(cachedCharBlock);
         ValueVertex *cachedChar =
             self->NewVertex<LoadSingleCharTableElementVertex>(compileInfoFacts_, currentBlock, {charCode});
         self->FinishBlockWithJump(currentBlock, doneBlock);
-        CompileInfoFacts *cachedCharFacts = compileInfoFacts_;
 
-        currentBlock = createCharBlock;
-        compileInfoFacts_ = entryFacts->Clone();
+        EnterInternalBlock(createCharBlock);
         ValueVertex *createdChar =
             CommonStubCallToAccWithLazyDeopt(
             {charCode, GlobalEnv()}, CommonStubID::CreateStringBySingleCharCode, SideEffectKind::SAFE_CALL);
         self->FinishBlockWithJump(currentBlock, doneBlock);
 
-        currentBlock = doneBlock;
-        compileInfoFacts_->Merge(*cachedCharFacts);
-        frameState.SetAcc(self->NewPhiVertexWith(currentBlock, {cachedChar, createdChar}, self->AccIndex()));
+        EnterInternalBlock(doneBlock);
+        frameState.SetAcc(BuildPhi({cachedChar, createdChar}, self->AccIndex()));
         return true;
     }
 
@@ -12355,10 +12791,8 @@ struct GraphBuilder::BytecodeVisitor {
 
         ValueVertex *index = BuildCheckedTaggedIntToI32(key);
         BB *doneBlock = self->NewBlock();
-        CompileInfoFacts *entryFacts = compileInfoFacts_;
+
         ValueVertex *entryAcc = frameState.GetAcc();
-        std::vector<CompileInfoFacts *> caseExitFacts;
-        caseExitFacts.reserve(access.elementCount);
         std::vector<ValueVertex *> results;
         results.reserve(access.elementCount);
         for (uint32_t i = 0; i + 1 < access.elementCount; ++i) {
@@ -12372,34 +12806,25 @@ struct GraphBuilder::BytecodeVisitor {
                 currentBlock, {receiver}, caseBlock, nextCaseBlock, self->chunk_,
                 std::vector<uint32_t> {expectedHClassHandleIndex.value()});
 
-            currentBlock = caseBlock;
-            compileInfoFacts_ = entryFacts->Clone();
+            EnterInternalBlock(caseBlock);
             frameState.SetAcc(entryAcc);
             if (!TryBuildTypedArrayElementLoad(bcIndex, receiver, key, access.elements[i], index, false)) {
                 return false;
             }
             results.push_back(frameState.GetAcc());
-            caseExitFacts.push_back(compileInfoFacts_);
             self->FinishBlockWithJump(currentBlock, doneBlock);
-            currentBlock = nextCaseBlock;
-            compileInfoFacts_ = entryFacts;
+            EnterInternalBlock(nextCaseBlock);
         }
 
-        compileInfoFacts_ = entryFacts->Clone();
         frameState.SetAcc(entryAcc);
         if (!TryBuildTypedArrayElementLoad(bcIndex, receiver, key, access.elements[access.elementCount - 1], index,
                                            false)) {
             return false;
         }
         results.push_back(frameState.GetAcc());
-        caseExitFacts.push_back(compileInfoFacts_);
         self->FinishBlockWithJump(currentBlock, doneBlock);
-        currentBlock = doneBlock;
-        compileInfoFacts_ = caseExitFacts.front()->Clone();
-        for (size_t i = 1; i < caseExitFacts.size(); ++i) {
-            compileInfoFacts_->Merge(*caseExitFacts[i]);
-        }
-        frameState.SetAcc(self->NewPhiVertexWith(currentBlock, results, self->AccIndex()));
+        EnterInternalBlock(doneBlock);
+        frameState.SetAcc(BuildPhi(results, self->AccIndex()));
         return true;
     }
 
@@ -12595,11 +13020,7 @@ struct GraphBuilder::BytecodeVisitor {
             ASSERT(marked);
         }
         if (needsNotPrototypeGuard) {
-            ChunkVector<ValueVertex *> guardInputs(self->chunk_);
-            guardInputs.emplace_back(receiver);
-            auto *guard = self->NewVertex<DeoptIfPrototypeChangedVertex>(
-                currentBlock, guardInputs, self->chunk_, false, true, self->preproc_->GetBytecodeOffset(bcIndex));
-            guard->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+            BuildDeoptIfPrototypeChanged(bcIndex, receiver, false, true);
         }
 
         ValueVertex *preparedValue = BuildCheckedNamedStoreValue(fieldRepresentation, value);
@@ -12613,7 +13034,7 @@ struct GraphBuilder::BytecodeVisitor {
                 static_cast<int32_t>(TaggedArray::DATA_OFFSET + fieldOffset * JSTaggedValue::TaggedTypeSize());
         }
         BuildPreparedNamedStoreField(storeTarget, storeOffset, preparedValue, fieldRepresentation,
-                                     PropertyKey::ConstDataId(constDataId));
+                                     PropertyKeyForConstDataId(constDataId));
         return true;
     }
 
@@ -12737,35 +13158,63 @@ struct GraphBuilder::BytecodeVisitor {
         mixin->LoadCatchBlock(lazyCatchBlock, catchPredIndex);
     }
 
-    CallCommonStubVertex *CommonStubCall(std::initializer_list<ValueVertex *> inputs, CommonStubID id,
-                                         SideEffectKind sideEffectKind = SideEffectKind::UNKNOWN_CALL)
+    template <class VertexT, class InputRange, class... Args>
+    VertexT *BuildEagerCseNode(uint32_t bcIndex, const InputRange &inputs, const Args &...args)
     {
-        ValidateCommonStubCallArgs(inputs, id);
-        auto *vertex =
-            self->NewVertex<CallCommonStubVertex>(compileInfoFacts_, currentBlock, inputs, id, sideEffectKind);
-        UpdateCatchBlockData(vertex);
-        return vertex;
+        static_assert(CanEagerDeopt(VertexT::PROPERTIES));
+        auto query = MakeCseQuery<VertexT>(inputs, args...);
+        return VertexBuilder<VertexT>(*self, {compileInfoFacts_, currentBlock})
+            .TryCse(query)
+            // Standard eager nodes keep semantic key parameters separate from chunk and PC.
+            .CreateWith([&]() {
+                return self->NewVertexImpl<VertexT>(currentBlock, inputs, self->chunk_,
+                                                    self->preproc_->GetBytecodeOffset(bcIndex), args...);
+            })
+            // Only new nodes receive this bytecode's eager snapshot.
+            .WithEagerDeoptState([this, bcIndex](VertexT *vertex) {
+                vertex->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
+            })
+            .Build();
+    }
+
+    template <class VertexT, class InputRange, class... Args>
+    VertexT *BuildThrowableNode(const InputRange &inputs, bool withLazyDeopt, bool toAcc, bool allowDependencyDeopt,
+                                Args &&...args)
+    {
+        static_assert(std::is_base_of_v<ValueVertex, VertexT> && std::is_base_of_v<ThrowableMixin, VertexT>);
+        return VertexBuilder<VertexT>(*self, {compileInfoFacts_, currentBlock})
+            // Create the same throwable operation, without CSE.
+            .CreateWith(
+                [&]() { return self->NewVertexImpl<VertexT>(currentBlock, inputs, std::forward<Args>(args)...); })
+            // Exceptional state must not observe the normal result in ACC.
+            .WithCatchState([this](VertexT *vertex) { UpdateCatchBlockData(vertex); })
+            .StoreToAcc(frameState, toAcc)
+            // Capture normal completion after ACC, keeping both existing runtime policies.
+            .WithLazyDeoptState([this, withLazyDeopt, allowDependencyDeopt](VertexT *vertex) {
+                if (withLazyDeopt) {
+                    LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, vertex, allowDependencyDeopt);
+                }
+            })
+            .Build();
     }
 
     CallCommonStubVertex *CommonStubCallWithLazyDeopt(std::initializer_list<ValueVertex *> inputs, CommonStubID id,
-                                                      SideEffectKind sideEffectKind = SideEffectKind::UNKNOWN_CALL)
+                                                      SideEffectKind sideEffectKind = SideEffectKind::UNKNOWN_CALL,
+                                                      bool allowDependencyDeopt = true)
     {
-        auto *vertex = CommonStubCall(inputs, id, sideEffectKind);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, vertex);
-        return vertex;
+        ValidateCommonStubCallArgs(inputs, id);
+        return BuildThrowableNode<CallCommonStubVertex>(inputs, true, false, allowDependencyDeopt, id, sideEffectKind);
     }
 
     CallCommonStubVertex *CommonStubCallToAccWithLazyDeopt(std::initializer_list<ValueVertex *> inputs, CommonStubID id,
                                                            SideEffectKind sideEffectKind = SideEffectKind::UNKNOWN_CALL)
     {
-        auto *vertex = CommonStubCall(inputs, id, sideEffectKind);
-        frameState.SetAcc(vertex);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, vertex);
-        return vertex;
+        ValidateCommonStubCallArgs(inputs, id);
+        return BuildThrowableNode<CallCommonStubVertex>(inputs, true, true, true, id, sideEffectKind);
     }
 
     CallCommonStubVertex *CommonStubCallWithIC(const BytecodeInfo *bcInfo, std::initializer_list<ValueVertex *> inputs,
-                                               CommonStubID id)
+                                               CommonStubID id, bool withLazyDeopt, bool toAcc)
     {
         ChunkVector<ValueVertex *> allArgs(self->chunk_);
         allArgs.reserve(inputs.size() + CallVertex::FIRST_ARG_INDEX);
@@ -12776,55 +13225,35 @@ struct GraphBuilder::BytecodeVisitor {
 
         ValidateCommonStubCallArgs({allArgs.data(), allArgs.size()}, id);
 
-        auto *vertex = self->NewVertex<CallCommonStubVertex>(compileInfoFacts_, currentBlock, allArgs, id);
-        UpdateCatchBlockData(vertex);
-        return vertex;
+        return BuildThrowableNode<CallCommonStubVertex>(allArgs, withLazyDeopt, toAcc, true, id);
     }
 
     CallCommonStubVertex *CommonStubCallWithICAndLazyDeopt(const BytecodeInfo *bcInfo,
                                                            std::initializer_list<ValueVertex *> inputs, CommonStubID id)
     {
-        auto *vertex = CommonStubCallWithIC(bcInfo, inputs, id);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, vertex);
-        return vertex;
+        return CommonStubCallWithIC(bcInfo, inputs, id, true, false);
     }
 
     CallCommonStubVertex *CommonStubCallToAccWithICAndLazyDeopt(const BytecodeInfo *bcInfo,
                                                                 std::initializer_list<ValueVertex *> inputs,
                                                                 CommonStubID id)
     {
-        auto *vertex = CommonStubCallWithIC(bcInfo, inputs, id);
-        frameState.SetAcc(vertex);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, vertex);
-        return vertex;
-    }
-
-    template <class InputRange = std::initializer_list<ValueVertex *>>
-    CallRuntimeVertex *RuntimeCall(const InputRange &inputs, RuntimeStubID id,
-                                   SideEffectKind sideEffectKind = SideEffectKind::UNKNOWN_CALL)
-    {
-        auto *vertex = self->NewVertex<CallRuntimeVertex>(compileInfoFacts_, currentBlock, inputs, id, sideEffectKind);
-        UpdateCatchBlockData(vertex);
-        return vertex;
+        return CommonStubCallWithIC(bcInfo, inputs, id, true, true);
     }
 
     template <class InputRange = std::initializer_list<ValueVertex *>>
     CallRuntimeVertex *RuntimeCallToAccWithLazyDeopt(const InputRange &inputs, RuntimeStubID id,
                                                      SideEffectKind sideEffectKind = SideEffectKind::UNKNOWN_CALL)
     {
-        auto *vertex = RuntimeCall(inputs, id, sideEffectKind);
-        frameState.SetAcc(vertex);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, vertex);
-        return vertex;
+        return BuildThrowableNode<CallRuntimeVertex>(inputs, true, true, true, id, sideEffectKind);
     }
 
     template <class InputRange = std::initializer_list<ValueVertex *>>
     CallRuntimeVertex *RuntimeCallWithLazyDeopt(const InputRange &inputs, RuntimeStubID id,
-                                                SideEffectKind sideEffectKind = SideEffectKind::UNKNOWN_CALL)
+                                                SideEffectKind sideEffectKind = SideEffectKind::UNKNOWN_CALL,
+                                                bool allowDependencyDeopt = true)
     {
-        auto *vertex = RuntimeCall(inputs, id, sideEffectKind);
-        LoadLazyDeoptFrameStateForThrowableCall(currentBcIndex, vertex);
-        return vertex;
+        return BuildThrowableNode<CallRuntimeVertex>(inputs, true, false, allowDependencyDeopt, id, sideEffectKind);
     }
 
     ValueVertex *TaggedConstantFromInt32(int value)
@@ -12850,7 +13279,7 @@ struct GraphBuilder::BytecodeVisitor {
     ValueVertex *TaggedArrayFromValueIn(
         const BytecodeInfo *bcInfo, ValueVertex *taggedInputSize, uint32_t inputSize, uint32_t startIndex = 0)
     {
-        ValueVertex *taggedArray = RuntimeCall({taggedInputSize}, RTSTUB_ID(NewTaggedArray));
+        ValueVertex *taggedArray = RuntimeCallWithLazyDeopt({taggedInputSize}, RTSTUB_ID(NewTaggedArray));
         for (uint32_t idx = 0; idx < inputSize; ++idx) {
             ValueVertex *arg = LoadRegister(bcInfo, startIndex + idx);
             SetValueToTaggedArray(taggedArray, idx, arg);
@@ -12923,15 +13352,15 @@ struct GraphBuilder::BytecodeVisitor {
             }
         }
         ValueVertex *constpool = SharedConstPool();
-        return CommonStubCall({constpool, stringId}, CommonStubID::GetStringFromConstPool,
-                              SideEffectKind::SAFE_CALL);
+        return CommonStubCallWithLazyDeopt({constpool, stringId}, CommonStubID::GetStringFromConstPool,
+                                           SideEffectKind::SAFE_CALL);
     }
 
     ValueVertex *ObjectFromConstPool(ValueVertex *index)
     {
         ValueVertex *constpool = SharedConstPool();
         ValueVertex *module = ModuleFromFunction();
-        return CommonStubCall({constpool, index, module}, CommonStubID::GetObjectFromConstPool);
+        return CommonStubCallWithLazyDeopt({constpool, index, module}, CommonStubID::GetObjectFromConstPool);
     }
 
     ValueVertex *MethodFromConstPool(ValueVertex *index)
@@ -12948,7 +13377,7 @@ struct GraphBuilder::BytecodeVisitor {
             }
         }
         ValueVertex *constpool = SharedConstPool();
-        return RuntimeCall({constpool, index}, RTSTUB_ID(GetMethodFromCache));
+        return RuntimeCallWithLazyDeopt({constpool, index}, RTSTUB_ID(GetMethodFromCache));
     }
 
     GraphBuilder *self;
@@ -12957,7 +13386,13 @@ struct GraphBuilder::BytecodeVisitor {
     BB *currentBlock;    // Equivalent to self->blocks_[blockInfo->rpoIndex]. Cached for performance.
     BB *lazyCatchBlock;  // Equivalent to self->blocks_[blockInfo->catchBlock->rpoIndex]. Cached for performance.
     CompileInfoFacts *compileInfoFacts_;  // Equivalent to self->compileInfoFacts_[blockInfo->rpoIndex].
+    ChunkMap<BB *, CompileInfoFacts *> internalExitFacts_ {self->chunk_};
     SharedBCFrameState frameState;
+    const EagerDeoptFrameState *lastEagerDeoptFrameState_ {nullptr};
+    ValueVertex *const *lastEagerFrameData_ {nullptr};
+    uint64_t lastEagerFrameVersion_ {0};
+    BB *lastEagerBlock_ {nullptr};
+    uint32_t lastEagerBcIndex_ {0};
     CatchBlockInputData *lazyCatchBlockInputs;
     const BytecodeInfo *currentBcInfo {nullptr};
     uint32_t currentBcIndex {0};
@@ -12999,14 +13434,17 @@ void GraphBuilder::AttachLoopEntryCheckpoint(SharedBCFrameState frameState, uint
         .frameState = frameState,
         .lazyCatchBlockInputs = reinterpret_cast<CatchBlockInputData *>(NO_CATCH_BLOCK_TAG),
     };
-    auto checkpoint = visitor.BuildCurrentEagerDeoptFrameState(resume->startBcIndex);
-    for (auto &slot : checkpoint) {
+    const auto *source = visitor.BuildCurrentEagerDeoptFrameState(resume->startBcIndex);
+    EagerDeoptimizableMixin::EagerDeoptFrameState checkpoint(chunk_);
+    checkpoint.reserve(source->size());
+    for (auto slot : *source) {
         // The check executes before the header: use the incoming value, never
         // a Phi defined in the header that has not executed yet.
         if (auto *phi = slot.value->TryCast<PhiVertex>();
             phi != nullptr && static_cast<Vertex *>(phi)->GetOwner() == header) {
             slot.value = phi->GetInput(0);
         }
+        checkpoint.push_back(slot);
     }
     jump->SetPhiUntaggingFrameState(chunk_, checkpoint, preproc_->GetBytecodeOffset(resume->startBcIndex));
 }

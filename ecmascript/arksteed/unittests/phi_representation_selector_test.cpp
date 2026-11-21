@@ -115,11 +115,18 @@ protected:
         return Unary<F64ToTaggedDoubleVertex>(block, value);
     }
 
-    DeoptVertex *EagerFrame(BB *block, ValueVertex *value)
+    void SetGuardFrame(EagerDeoptimizableMixin *guard, ValueVertex *value)
+    {
+        EagerDeoptimizableMixin::EagerDeoptFrameState frame(&chunk_);
+        frame.emplace_back(0, value, DeoptTranslationKind::TAGGED);
+        guard->SetEagerDeoptFrameState(std::move(frame));
+    }
+
+    DeoptVertex *EagerFrame(BB *block, ValueVertex *value, DeoptTranslationKind kind = DeoptTranslationKind::TAGGED)
     {
         auto *deopt = Vertex::New<DeoptVertex>(&chunk_, size_t(0), &chunk_, kungfu::DeoptType::NOTINT1, 0);
         EagerDeoptimizableMixin::EagerDeoptFrameState frame(&chunk_);
-        frame.emplace_back(0, value, DeoptTranslationKind::TAGGED);
+        frame.emplace_back(0, value, kind);
         deopt->SetEagerDeoptFrameState(std::move(frame));
         deopt->SetOwner(block);
         block->SetControlVertex(deopt);
@@ -264,8 +271,7 @@ TEST_F(ArkSteedPhiRepresentationSelectorTest, TruncatedPhiOptionCanBeDisabledInd
     auto *phi = Phi(block, DynamicDouble(entry), Tagged(0));
     auto *number = NumberUse(block, phi, UseRepresentation::TRUNCATED_INT32);
     auto *trunc = Unary<DoubleToInt32Vertex>(block, number);
-    auto *deopt = EagerFrame(block, trunc);
-    deopt->SetDeoptFrameValue(0, trunc, DeoptTranslationKind::INT32_TO_TAGGED);
+    auto *deopt = EagerFrame(block, trunc, DeoptTranslationKind::INT32_TO_TAGGED);
     SelectRepresentations(false, false);
     EXPECT_TRUE(phi->IsFloat64());
     EXPECT_TRUE(trunc->Is<DoubleToInt32Vertex>());
@@ -831,8 +837,7 @@ TEST_F(ArkSteedPhiRepresentationSelectorTest, DeoptOfConvertedValueAlsoPreventsT
     auto *phi = Phi(merge, number, Tagged(0));
     auto *use = NumberUse(merge, phi, UseRepresentation::TRUNCATED_INT32);
     Unary<DoubleToInt32Vertex>(merge, use);
-    auto *deopt = EagerFrame(merge, use);
-    deopt->SetDeoptFrameValue(0, use, DeoptTranslationKind::FLOAT64_TO_TAGGED_DOUBLE);
+    auto *deopt = EagerFrame(merge, use, DeoptTranslationKind::FLOAT64_TO_TAGGED_DOUBLE);
     SelectRepresentations();
     EXPECT_TRUE(phi->IsFloat64());
     EXPECT_EQ(deopt->GetDeoptFrameValue(0), phi);
@@ -847,8 +852,7 @@ TEST_F(ArkSteedPhiRepresentationSelectorTest, TruncatedDeoptResultDoesNotBlockTr
     auto *phi = Phi(merge, number, Tagged(0));
     auto *use = NumberUse(merge, phi, UseRepresentation::TRUNCATED_INT32);
     auto *trunc = Unary<DoubleToInt32Vertex>(merge, use);
-    auto *deopt = EagerFrame(merge, trunc);
-    deopt->SetDeoptFrameValue(0, trunc, DeoptTranslationKind::INT32_TO_TAGGED);
+    auto *deopt = EagerFrame(merge, trunc, DeoptTranslationKind::INT32_TO_TAGGED);
     SelectRepresentations();
     EXPECT_TRUE(phi->IsInt32());
     EXPECT_EQ(deopt->GetDeoptFrameValue(0), phi);
@@ -1064,6 +1068,7 @@ TEST_F(ArkSteedPhiRepresentationSelectorTest, Int32DoubleBooleanBecomesUnconditi
     auto *phi = Phi(merge, Tagged(1), Tagged(2));
     Unary<TaggedIntToI32Vertex>(merge, phi);
     auto *boolean = Unary<TaggedDoubleToBooleanVertex>(merge, phi, &chunk_, 0, true);
+    SetGuardFrame(boolean, phi);
     merge->GetControlVertex()->SetInput(0, boolean);
     SelectRepresentations();
     ASSERT_TRUE(phi->IsInt32());
@@ -1493,6 +1498,7 @@ TEST_F(ArkSteedPhiRepresentationSelectorTest, UnconditionalDeoptRepairsMergeAndC
     auto *left = join->GetPredecessor(0);
     auto *right = join->GetPredecessor(1);
     auto *guard = Unary<TaggedDoubleToBooleanVertex>(left, numeric, &chunk_, guardBytecodeOffset, true);
+    SetGuardFrame(guard, numeric);
     auto *doomedCall = LazyFrame(left, Tagged(doomedValue));
     auto *remainingCall = LazyFrame(right, Tagged(survivingValue));
     auto *handler = Block();
@@ -1526,6 +1532,7 @@ TEST_F(ArkSteedPhiRepresentationSelectorTest, UnconditionalDeoptRemovesBackedge)
     auto *phi = Phi(header, Tagged(1), Tagged(2));
     Unary<TaggedIntToI32Vertex>(body, phi);
     auto *guard = Unary<TaggedDoubleToBooleanVertex>(body, phi, &chunk_, guardBytecodeOffset, true);
+    SetGuardFrame(guard, phi);
     auto *deadCall = LazyFrame(body, phi);
     exit->GetControlVertex()->SetInput(0, phi);
     SelectRepresentations();
@@ -1546,7 +1553,8 @@ TEST_F(ArkSteedPhiRepresentationSelectorTest, UnconditionalDeoptRemovesUnreachab
     auto *block = Diamond(Block());
     auto *phi = Phi(block, Tagged(1), Tagged(2));
     Unary<TaggedIntToI32Vertex>(block, phi);
-    Unary<TaggedDoubleToBooleanVertex>(block, phi, &chunk_, guardBytecodeOffset, true);
+    auto *guard = Unary<TaggedDoubleToBooleanVertex>(block, phi, &chunk_, guardBytecodeOffset, true);
+    SetGuardFrame(guard, phi);
     auto *tail = Diamond(block);
     LazyFrame(tail, Tagged(unreachableValue));
     SelectRepresentations();

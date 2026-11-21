@@ -124,7 +124,6 @@ void ArkSteedDisassembler::InitializeDisassemblerTarget()
 
 void ArkSteedDisassembler::Disassemble(std::ostream &os)
 {
-    LOG_JIT(ERROR) << "ArkSteed disassembler is not available when DISABLE_LLVM_BACKEND";
     CommentList::Iterator cit(commentsData_, commentsSize_);
     while (cit.HasCurrent()) {
         os << "                  \033[34m[ArkSteed] " << cit.GetComment() << "\033[0m\n";

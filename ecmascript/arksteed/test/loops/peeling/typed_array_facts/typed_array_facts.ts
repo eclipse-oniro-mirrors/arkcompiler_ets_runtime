@@ -34,7 +34,11 @@
 //! METHOD aroundCall
 //! COUNT LoadInt32Field 1
 //! COUNT TypedArrayIntLoadElement 1
-//! COUNT DeoptIfTaggedCondition 3
+// The warmed no-op callback is folded; its identity guard remains.
+//! COUNT DeoptIfTaggedCondition 2
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallKnownJSFunction
+//! HAS_NOT Call
 //! METHOD polymorphic
 //! HAS BranchIfHClassIn
 //! COUNT_GE TypedArrayIntLoadElement 2

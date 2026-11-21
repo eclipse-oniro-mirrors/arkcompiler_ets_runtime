@@ -166,6 +166,7 @@ public:
     void Jnp(Label *target, Distance distance = Distance::Far);
     void Leaq(const Operand &src, Register dst);
     void Leal(const Operand &src, Register dst);
+    void Movl(Immediate src, const Operand &dst);
     void Movl(Register src, Register dst);
     void Movsxd(Register src, Register dst);
     void Movl(const Operand &src, Register dst);

@@ -14,6 +14,7 @@
  */
 
 #include "ecmascript/arksteed/unittests/dce_test_fixture.h"
+#include "ecmascript/base/bit_helper.h"
 #include "ecmascript/frames.h"
 #include "ecmascript/js_array.h"
 #include "securec.h"
@@ -172,8 +173,9 @@ std::string SnapshotRegistriesText(Graph *graph)
             ":" << DescribeConstantPayload(entry.second);
     }
     for (const auto &entry : graph->GetFloat64Constants()) {
-        out << " f64(" << entry.first << ")=" << static_cast<const void *>(entry.second) <<
-            ":" << DescribeConstantPayload(entry.second);
+        const uint64_t bits = entry.first;
+        out << " f64(" << bits << ")=" << static_cast<const void *>(entry.second) << ":"
+            << DescribeConstantPayload(entry.second);
     }
     for (const auto &entry : graph->GetTaggedConstants()) {
         out << " tg(" << entry.first << ")=" << static_cast<const void *>(entry.second) <<

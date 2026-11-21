@@ -81,6 +81,7 @@ const std::string PUBLIC_API HELP_OPTION_MSG =
     "Default: '16'\n"
     "--compiler-arksteed-small-inline-bytecode-size: Bytecode size under which a callee counts as "
     "small (exempt from the frequency gate, deeper inline allowed). Default: '30'\n"
+    "--compiler-arksteed-enable-cse:      Enable ArkSteed CSE lookup and registration. Default: 'true'\n"
     "--compiler-type-threshold:            enable to skip methods whose type is no more than threshold. Default: -1\n"
     "--compiler-log-snapshot:              Enable to print snapshot information. Default: 'false'\n"
     "--compiler-log-time:                  Enable to print pass compiler time. Default: 'false'\n"

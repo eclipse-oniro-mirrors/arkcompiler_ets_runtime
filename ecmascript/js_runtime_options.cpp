@@ -76,6 +76,7 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
          OPTION_COMPILER_ARKSTEED_MAX_INLINE_ACTUAL_ARGS},
         {"compiler-arksteed-small-inline-bytecode-size", required_argument, nullptr,
          OPTION_COMPILER_ARKSTEED_SMALL_INLINE_BYTECODE_SIZE},
+        {"compiler-arksteed-enable-cse", required_argument, nullptr, OPTION_COMPILER_ARKSTEED_ENABLE_CSE},
         {"compiler-log-snapshot", required_argument, nullptr, OPTION_COMPILER_LOG_SNAPSHOT},
         {"compiler-log-time", required_argument, nullptr, OPTION_COMPILER_LOG_TIME},
         {"compiler-log-all-methods-time", required_argument, nullptr, OPTION_COMPILER_LOG_ALL_METHODS_TIME},
@@ -810,6 +811,14 @@ bool JSRuntimeOptions::ParseCommand(const int argc, const char **argv)
                 ret = ParseBoolParam(&argBool);
                 if (ret) {
                     SetCompilerArkSteedInlineLoopCallee(argBool);
+                } else {
+                    return false;
+                }
+                break;
+            case OPTION_COMPILER_ARKSTEED_ENABLE_CSE:
+                ret = ParseBoolParam(&argBool);
+                if (ret) {
+                    SetCompilerArkSteedEnableCse(argBool);
                 } else {
                     return false;
                 }

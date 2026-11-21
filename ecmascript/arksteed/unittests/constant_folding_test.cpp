@@ -29,6 +29,7 @@
 
 #include "ecmascript/arksteed/arksteed_graph.h"
 #include "ecmascript/arksteed/arksteed_opcode.h"
+#include "ecmascript/base/bit_helper.h"
 #include "ecmascript/base/number_helper.h"
 #include "ecmascript/mem/native_area_allocator.h"
 #include "ecmascript/tests/test_helper.h"
@@ -559,6 +560,59 @@ HWTEST_F_L0(ArkSteedConstantFoldingTest, RejectNonFoldableInputsAndPreserveState
     EXPECT_EQ(add->GetInput(0), input0Before);
     EXPECT_EQ(add->GetInput(1), input1Before);
     EXPECT_TRUE(add->TryCast<I32AddVertex>() != nullptr);
+}
+
+HWTEST_F_L0(ArkSteedConstantFoldingTest, Float64ConstantCacheDistinguishesZeroSigns)
+{
+    ConstantFoldingFixture fixture;
+    auto *positiveZero = fixture.graph.GetFloat64Constant(0.0);
+    auto *negativeZero = fixture.graph.GetFloat64Constant(-0.0);
+
+    ASSERT_NE(positiveZero, negativeZero);
+    EXPECT_EQ(positiveZero, fixture.graph.GetFloat64Constant(0.0));
+    EXPECT_EQ(negativeZero, fixture.graph.GetFloat64Constant(-0.0));
+    EXPECT_EQ(base::bit_cast<uint64_t>(positiveZero->Cast<Float64ConstantVertex>()->GetValue()), 0ULL);
+    EXPECT_EQ(base::bit_cast<uint64_t>(negativeZero->Cast<Float64ConstantVertex>()->GetValue()), 0x8000000000000000ULL);
+
+    ConstantFoldingFixture reverseFixture;
+    auto *reverseNegativeZero = reverseFixture.graph.GetFloat64Constant(-0.0);
+    auto *reversePositiveZero = reverseFixture.graph.GetFloat64Constant(0.0);
+    ASSERT_NE(reverseNegativeZero, reversePositiveZero);
+    EXPECT_TRUE(std::signbit(reverseNegativeZero->Cast<Float64ConstantVertex>()->GetValue()));
+    EXPECT_FALSE(std::signbit(reversePositiveZero->Cast<Float64ConstantVertex>()->GetValue()));
+}
+
+HWTEST_F_L0(ArkSteedConstantFoldingTest, Float64ConstantCachePreservesNaNBits)
+{
+    constexpr uint64_t firstNaNBits = 0x7FF8000000000001ULL;
+    constexpr uint64_t secondNaNBits = 0x7FF8000000000002ULL;
+    constexpr uint64_t negativeNaNBits = 0xFFF8000000000001ULL;
+    ConstantFoldingFixture fixture;
+    auto *finite = fixture.graph.GetFloat64Constant(0.1);
+    auto *firstNaN = fixture.graph.GetFloat64Constant(base::bit_cast<double>(firstNaNBits));
+    auto *secondNaN = fixture.graph.GetFloat64Constant(base::bit_cast<double>(secondNaNBits));
+    auto *negativeNaN = fixture.graph.GetFloat64Constant(base::bit_cast<double>(negativeNaNBits));
+
+    ASSERT_NE(finite, firstNaN);
+    ASSERT_NE(firstNaN, secondNaN);
+    ASSERT_NE(firstNaN, negativeNaN);
+    EXPECT_EQ(finite, fixture.graph.GetFloat64Constant(0.1));
+    EXPECT_EQ(firstNaN, fixture.graph.GetFloat64Constant(base::bit_cast<double>(firstNaNBits)));
+    EXPECT_EQ(base::bit_cast<uint64_t>(firstNaN->Cast<Float64ConstantVertex>()->GetValue()), firstNaNBits);
+    EXPECT_EQ(base::bit_cast<uint64_t>(secondNaN->Cast<Float64ConstantVertex>()->GetValue()), secondNaNBits);
+    EXPECT_EQ(base::bit_cast<uint64_t>(negativeNaN->Cast<Float64ConstantVertex>()->GetValue()), negativeNaNBits);
+
+    ConstantFoldingFixture reverseFixture;
+    auto *reverseNaN = reverseFixture.graph.GetFloat64Constant(base::bit_cast<double>(firstNaNBits));
+    auto *reverseFinite = reverseFixture.graph.GetFloat64Constant(0.1);
+    ASSERT_NE(reverseNaN, reverseFinite);
+    EXPECT_EQ(reverseFinite->Cast<Float64ConstantVertex>()->GetValue(), 0.1);
+
+    auto *positiveInfinity = fixture.graph.GetFloat64Constant(std::numeric_limits<double>::infinity());
+    auto *negativeInfinity = fixture.graph.GetFloat64Constant(-std::numeric_limits<double>::infinity());
+    ASSERT_NE(positiveInfinity, negativeInfinity);
+    EXPECT_EQ(positiveInfinity->Cast<Float64ConstantVertex>()->GetValue(), std::numeric_limits<double>::infinity());
+    EXPECT_EQ(negativeInfinity->Cast<Float64ConstantVertex>()->GetValue(), -std::numeric_limits<double>::infinity());
 }
 
 }  // namespace panda::ecmascript::arksteed

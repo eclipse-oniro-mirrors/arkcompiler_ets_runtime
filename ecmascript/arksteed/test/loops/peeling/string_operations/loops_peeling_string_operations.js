@@ -16,13 +16,13 @@
 //! PARAMS --compiler-jit-hotness-threshold=60000 --compiler-arksteed-enable-inline=false
 //! METHOD concatFacts
 //! HAS CallCommonStub StringAdd
-//! COUNT LoadTaggedField 3 # GlobalEnv, holder.value once, packing function and its environment.
+//! COUNT LoadTaggedField 4 # GlobalEnv, two holder.value loads, and packing function.
 //! METHOD numberStringFacts
 //! HAS NumberToString
 //! HAS_NOT CallRuntime NumberToString
 //! HAS CallCommonStub StringAdd
 //! HAS BranchIfTaggedString
-//! COUNT LoadTaggedField 3
+//! COUNT LoadTaggedField 4 # StringAdd invalidates the cached holder.value load.
 //! METHOD knownNumberStringFacts
 //! HAS NumberToString
 //! HAS_NOT CallRuntime NumberToString
@@ -31,7 +31,7 @@
 //! METHOD peelConcatFacts
 //! HAS CallCommonStub StringAdd
 //! COUNT JumpLoop 1
-//! COUNT LoadTaggedField 3
+//! COUNT LoadTaggedField 6 # GlobalEnv, two holder.value loads per loop copy, and packing function.
 
 // Keep result-array initialization outside the methods whose loads are counted.
 function packResults(before, text, after) {

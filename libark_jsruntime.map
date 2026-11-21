@@ -461,6 +461,7 @@
       panda::ecmascript::arksteed::DeoptLiteralTableBuilder::GetOrAdd*;
       panda::ecmascript::arksteed::DeoptTranslationBuilder::AddTranslation*;
       panda::ecmascript::arksteed::DeoptTranslationBuilder::Encode*;
+      panda::ecmascript::arksteed::DeoptTranslationBuilder::GetOrAddBody*;
       panda::ecmascript::arksteed::GetFloat64RawBits*;
       panda::ecmascript::ohos::DecrypRemoveKey*;
       panda::ecmascript::ohos::DecryptAssociateKey*;

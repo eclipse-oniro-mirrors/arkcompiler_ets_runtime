@@ -258,6 +258,7 @@ if (ets_runtime_enable_ark_steed) {
     "${ARK_STEED_ROOT}/arksteed_assembler.cpp",
     "${ARK_STEED_ROOT}/arksteed_bytecode_analysis.cpp",
     "${ARK_STEED_ROOT}/arksteed_bytecode_preprocessor.cpp",
+    "${ARK_STEED_ROOT}/arksteed_cse.cpp",
     "${ARK_STEED_ROOT}/arksteed_codegen.cpp",
     "${ARK_STEED_ROOT}/arksteed_comment.cpp",
     "${ARK_STEED_ROOT}/arksteed_compilation_unit.cpp",

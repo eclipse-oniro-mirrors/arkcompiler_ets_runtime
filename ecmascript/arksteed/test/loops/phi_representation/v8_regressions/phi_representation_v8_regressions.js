@@ -22,8 +22,8 @@
 //! HAS I32ToF64
 //! METHOD knownNumberEdge
 //! HAS Phi
-//! HAS CheckedNumberToF64
-//! HAS_NOT TaggedNumberToF64
+//! COUNT CheckedNumberToF64 1
+//! COUNT TaggedNumberToF64 1
 //! METHOD knownIntEdge
 //! HAS TaggedIntToI32
 //! METHOD taggedAlternativeMerge

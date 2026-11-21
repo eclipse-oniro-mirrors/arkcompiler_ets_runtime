@@ -21,6 +21,7 @@
 #include "ecmascript/arksteed/arksteed_graph.h"
 #include "ecmascript/arksteed/arksteed_opcode.h"
 
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -91,6 +92,14 @@ private:
 
         explicit EagerDeoptTarget(DeoptId translationId) : deoptId(translationId) {}
     };
+
+    // Emit original IR inputs and return the condition for the emitted operand order.
+    Condition EmitTaggedCompare(const Vertex *vertex, Condition condition);
+    Condition EmitInt64Compare(const Vertex *vertex, Condition condition);
+    void EmitInt32Arithmetic(const ValueVertex *vertex, bool isAdd, bool setFlags);
+    void EmitInt32Branch(const Vertex *vertex, Condition condition, Label *target);
+    void EmitInt64Branch(const Vertex *vertex, Condition condition, Label *target);
+    Condition EmitInt32Compare(const Vertex *vertex, Condition condition);
 
     Label *RecordEagerDeoptTarget(const EagerDeoptimizableMixin *vertex, kungfu::DeoptType type);
     void BranchToEagerDeoptTarget(Condition condition, const EagerDeoptimizableMixin *vertex, kungfu::DeoptType type);
@@ -251,6 +260,8 @@ private:
     ChunkVector<InlineSiteKey> inlineSiteUnits_;
     Label entryLabel_;
     ChunkVector<EagerDeoptTarget *> eagerDeoptTargetsById_;
+    // Locations are final after register allocation; each guard has one body.
+    std::unordered_map<const EagerDeoptimizableMixin *, uint32_t> eagerDeoptBodies_;
     int currentBlockColorIndex_ = 0;
     BB *currentLayoutNextBlock_ = nullptr;
     const ArkSteedCompilationUnit *prevInlineUnit_ {nullptr};

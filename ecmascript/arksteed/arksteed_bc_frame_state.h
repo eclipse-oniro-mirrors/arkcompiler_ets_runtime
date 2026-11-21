@@ -16,6 +16,8 @@
 #ifndef ECMASCRIPT_ARKSTEED_BC_FRAME_STATE_H
 #define ECMASCRIPT_ARKSTEED_BC_FRAME_STATE_H
 
+#include <cstdint>
+
 #include "ecmascript/arksteed/arksteed_vreg.h"
 #include "ecmascript/compiler/base/bit_set.h"
 
@@ -28,6 +30,7 @@ public:
     SharedBCFrameState(VRegIDType numVRegs, ValueVertex *initial, Chunk *chunk)
     {
         data_ = chunk->NewArray<ValueVertex *>(numVRegs);
+        mutationVersion_ = chunk->New<uint64_t>(0);
         numVRegs_ = numVRegs;
         std::fill_n(data_, numVRegs_, initial);
     }
@@ -38,6 +41,7 @@ public:
     void Reset(ValueVertex *initial)
     {
         std::fill_n(data_, numVRegs_, initial);
+        ++*mutationVersion_;
     }
 
     SharedBCFrameState Snapshot(Chunk *chunk) const
@@ -50,6 +54,16 @@ public:
     VRegIDType NumVRegs() const
     {
         return numVRegs_;
+    }
+
+    uint64_t GetMutationVersion() const
+    {
+        return *mutationVersion_;
+    }
+
+    ValueVertex *const *GetDataIdentity() const
+    {
+        return data_;
     }
 
     ValueVertex *Get(VRegIDType index) const
@@ -69,20 +83,26 @@ public:
     void Set(VRegIDType index, ValueVertex *vertex)
     {
         ASSERT(index < numVRegs_);
+        if (data_[index] == vertex) {
+            return;
+        }
         data_[index] = vertex;
+        ++*mutationVersion_;
     }
     void SetLexicalEnv(ValueVertex *vertex)
     {
-        data_[numVRegs_ - EXTRA_VREG_COUNT + LEXICAL_ENV_EXTRA_INDEX] = vertex;
+        Set(numVRegs_ - EXTRA_VREG_COUNT + LEXICAL_ENV_EXTRA_INDEX, vertex);
     }
     void SetAcc(ValueVertex *vertex)
     {
-        data_[numVRegs_ - EXTRA_VREG_COUNT + ACC_EXTRA_INDEX] = vertex;
+        Set(numVRegs_ - EXTRA_VREG_COUNT + ACC_EXTRA_INDEX, vertex);
     }
 
 private:
     // Layout: [Locals] [Params] [LexicalEnv] [Acc]
     ValueVertex **data_ = nullptr;
+    // Copies share both the backing values and their invalidation version.
+    uint64_t *mutationVersion_ = nullptr;
     VRegIDType numVRegs_ = 0;
 };
 

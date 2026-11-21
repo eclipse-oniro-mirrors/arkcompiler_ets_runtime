@@ -194,6 +194,10 @@ enum LoadStoreOpCode {
     LDR_Register = 0xb8600800,
     LDRB_Register = 0x38600800,
     LDRH_Register = 0x78600800,
+    LDRSB_W_Register = 0x38e00800,
+    LDRSH_W_Register = 0x78e00800,
+    LDR_S_Register = 0xbc600800,
+    LDR_D_Register = 0xfc600800,
     LDUR_Offset   = 0xb8400000,
     STUR_Offset   = 0xb8000000,
 };
@@ -234,6 +238,9 @@ enum FloatingPointOpCode {
     FNEG = 0x1E214000,
     FCVTZS = 0x1E380000,
     SCVTF = 0x1E220000,
+    UCVTF = 0x1E230000,
+    FJCVTZS = 0x1E7E0000,
+    FRINTN = 0x1E244000,
 };
 
 enum NopOpCode {

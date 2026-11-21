@@ -974,6 +974,14 @@ void AssemblerX64::EmitOperand(int32_t reg, Operand rm)
     }
 }
 
+void AssemblerX64::Movl(Immediate src, const Operand &dst)
+{
+    EmitRexPrefixl(rax, dst);
+    EmitU8(0xC7);  // MOV r/m32, imm32; /0 selects the opcode and REX.W remains clear.
+    EmitOperand(0, dst);
+    EmitI32(src.Value());
+}
+
 void AssemblerX64::Movl(Register src, Register dst)
 {
     EmitRexPrefixl(src, dst);

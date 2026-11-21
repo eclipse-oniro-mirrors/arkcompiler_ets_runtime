@@ -34,6 +34,7 @@
 #include "ecmascript/arksteed/arksteed_compile_info_facts.h"
 
 #include "ecmascript/arksteed/arksteed_bb.h"
+#include "ecmascript/arksteed/arksteed_cse.h"
 #include "ecmascript/arksteed/arksteed_graph.h"
 #include "ecmascript/arksteed/arksteed_heap_broker.h"
 #include "ecmascript/arksteed/arksteed_loop_effects.h"
@@ -52,10 +53,12 @@
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
+#include <map>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace panda::ecmascript::arksteed {
 
@@ -173,6 +176,11 @@ struct GraphFixture {
         return graph.GetTaggedConstant(static_cast<uint64_t>(value.GetRawData()));
     }
 
+    std::vector<ValueVertex *> Inputs(std::initializer_list<ValueVertex *> values)
+    {
+        return std::vector<ValueVertex *>(values);
+    }
+
     ValueVertex *NewPhi()
     {
         return Vertex::New<PhiVertex>(&chunk, 1, VirtualRegister(0));
@@ -183,7 +191,7 @@ struct GraphFixture {
         return Vertex::New<InitialValueVertex>(&chunk, 0, 0);
     }
 
-    ValueVertex *NewAdd(ValueVertex *lhs, ValueVertex *rhs)
+    I32AddVertex *NewAdd(ValueVertex *lhs, ValueVertex *rhs)
     {
         auto *vertex = Vertex::New<I32AddVertex>(&chunk, 2);
         vertex->SetInput(0, lhs);
@@ -191,25 +199,32 @@ struct GraphFixture {
         return vertex;
     }
 
-    CompileInfoFacts::ExpressionInputs Inputs(std::initializer_list<ValueVertex *> values)
+    LoadTaggedFieldVertex *NewFieldLoad(ValueVertex *receiver, int32_t offset)
     {
-        CompileInfoFacts::ExpressionInputs inputs(&chunk);
-        for (ValueVertex *value : values) {
-            inputs.push_back(value);
-        }
-        return inputs;
-    }
-
-    CompileInfoFacts::ExpressionOptions Options(uint64_t option)
-    {
-        CompileInfoFacts::ExpressionOptions options(&chunk);
-        options.push_back(option);
-        return options;
+        auto *vertex = Vertex::New<LoadTaggedFieldVertex>(&chunk, 1, offset);
+        vertex->SetInput(0, receiver);
+        return vertex;
     }
 };
 
-constexpr uint32_t kCseHash = 0x1234ABCDU;
-constexpr uint32_t kPureCseHash = 0x0F0F0F0FU;
+struct HamtTestKey {
+    uint64_t hash;
+    uint32_t id;
+};
+
+struct HamtTestHash {
+    uint64_t operator()(const HamtTestKey &key) const
+    {
+        return key.hash;
+    }
+};
+
+struct HamtTestEqual {
+    bool operator()(const HamtTestKey &left, const HamtTestKey &right) const
+    {
+        return left.hash == right.hash && left.id == right.id;
+    }
+};
 
 }  // namespace
 
@@ -763,75 +778,161 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, MutationControlForTypePairAndHClassSet
 
 // --- CompileInfoFacts: CSE -------------------------------------------------
 
+HWTEST_F_L0(ArkSteedCompileInfoFactsTest, FixedInputConstructionAndHashKeepTheirDynamicContracts)
+{
+    static_assert(HasFixedInputCount<Int32ConstantVertex>::value);
+    static_assert(HasFixedInputCount<LoadTaggedFieldVertex>::value);
+    static_assert(HasFixedInputCount<I32SubWithOverflowVertex>::value);
+    static_assert(!HasFixedInputCount<PhiVertex>::value);
+
+    GraphFixture fixture;
+    ValueVertex *receiver = fixture.NewInitialValue();
+    ValueVertex *lhs = fixture.Int32(3);
+    ValueVertex *rhs = fixture.Int32(4);
+    std::array<ValueVertex *, 0> noInputs {};
+    std::array<ValueVertex *, 1> loadInputs {receiver};
+    ChunkVector<ValueVertex *> subInputs(&fixture.chunk);
+    subInputs.push_back(lhs);
+    subInputs.push_back(rhs);
+
+    auto *constant = Vertex::New<Int32ConstantVertex>(&fixture.chunk, noInputs, 17);
+    auto *load = Vertex::New<LoadTaggedFieldVertex>(&fixture.chunk, loadInputs, 16);
+    auto *sub = Vertex::New<I32SubWithOverflowVertex>(&fixture.chunk, subInputs, &fixture.chunk, 0);
+    auto *phi = Vertex::New<PhiVertex>(&fixture.chunk, std::initializer_list<ValueVertex *> {lhs, rhs, receiver},
+                                       VirtualRegister(0));
+    ASSERT_NE(constant, nullptr);
+    ASSERT_NE(load, nullptr);
+    ASSERT_NE(sub, nullptr);
+    ASSERT_NE(phi, nullptr);
+    EXPECT_EQ(static_cast<Vertex *>(constant)->GetInputCount(), 0U);
+    EXPECT_EQ(static_cast<Vertex *>(load)->GetInputCount(), 1U);
+    EXPECT_EQ(static_cast<Vertex *>(sub)->GetInputCount(), 2U);
+    EXPECT_EQ(phi->GetInputCount(), 3U);
+    EXPECT_EQ(load->GetInput(0), receiver);
+    EXPECT_EQ(sub->GetInput(0), lhs);
+    EXPECT_EQ(sub->GetInput(1), rhs);
+    EXPECT_EQ(phi->GetInput(0), lhs);
+    EXPECT_EQ(phi->GetInput(1), rhs);
+    EXPECT_EQ(phi->GetInput(2), receiver);
+
+    // The unchanged dynamic hash remains the reference for all fixed loop bounds.
+    EXPECT_EQ(CseHashInputs<0>(VertexOpcode::Int32Constant, MakeCseInputView(noInputs)),
+              CseHashInputs(VertexOpcode::Int32Constant, MakeCseInputView(noInputs)));
+    EXPECT_EQ(CseHashInputs<1>(VertexOpcode::LoadTaggedField, MakeCseInputView(loadInputs)),
+              CseHashInputs(VertexOpcode::LoadTaggedField, MakeCseInputView(loadInputs)));
+    EXPECT_EQ(CseHashInputs<2>(VertexOpcode::I32SubWithOverflow, MakeCseInputView(subInputs)),
+              CseHashInputs(VertexOpcode::I32SubWithOverflow, MakeCseInputView(subInputs)));
+
+    std::array<ValueVertex *, 2> ordered {lhs, rhs};
+    std::array<ValueVertex *, 2> reversed {rhs, lhs};
+    EXPECT_EQ(CseHashQuery(MakeCseQuery<I32AddVertex>(ordered)), CseHashQuery(MakeCseQuery<I32AddVertex>(reversed)));
+    EXPECT_NE(CseHashQuery(MakeCseQuery<I32SubVertex>(ordered)), CseHashQuery(MakeCseQuery<I32SubVertex>(reversed)));
+}
+
+HWTEST_F_L0(ArkSteedCompileInfoFactsTest, PrecomputedHashKeepsCollisionMatchingAndEpochChecks)
+{
+    GraphFixture fixture;
+    ValueVertex *receiver = fixture.NewInitialValue();
+    ValueVertex *otherReceiver = fixture.NewInitialValue();
+    std::array<ValueVertex *, 1> inputs {receiver};
+    std::array<ValueVertex *, 1> otherInputs {otherReceiver};
+    auto firstQuery = MakeCseQuery<LoadTaggedFieldVertex>(inputs, 16);
+    auto secondQuery = MakeCseQuery<LoadTaggedFieldVertex>(inputs, 24);
+    auto absentQuery = MakeCseQuery<LoadTaggedFieldVertex>(otherInputs, 16);
+    auto *first = fixture.NewFieldLoad(receiver, 16);
+    auto *second = fixture.NewFieldLoad(receiver, 24);
+    CompileInfoFacts facts(&fixture.chunk);
+
+    // Put distinct valid queries in one bucket, independently of the hash distribution.
+    constexpr uint64_t collidingHash = 42;
+    facts.GetCse().AddExpression(firstQuery, first, collidingHash, facts.GetEffectEpoch());
+    facts.GetCse().AddExpression(secondQuery, second, collidingHash, facts.GetEffectEpoch());
+    EXPECT_EQ(facts.GetCse().Find(firstQuery, collidingHash, facts.GetEffectEpoch()), first);
+    EXPECT_EQ(facts.GetCse().Find(secondQuery, collidingHash, facts.GetEffectEpoch()), second);
+    EXPECT_EQ(facts.GetCse().Find(absentQuery, collidingHash, facts.GetEffectEpoch()), nullptr);
+    facts.IncrementEffectEpoch();
+    EXPECT_EQ(facts.GetCse().Find(firstQuery, collidingHash, facts.GetEffectEpoch()), nullptr);
+    EXPECT_EQ(facts.GetCse().Find(secondQuery, collidingHash, facts.GetEffectEpoch()), nullptr);
+}
+
 HWTEST_F_L0(ArkSteedCompileInfoFactsTest, CompileInfoFactsCseLifecycle)
 {
     GraphFixture fixture;
+    ValueVertex *receiver = fixture.NewInitialValue();
+    ValueVertex *otherReceiver = fixture.NewInitialValue();
     ValueVertex *lhs = fixture.Int32(3);
     ValueVertex *rhs = fixture.Int32(4);
-    ValueVertex *first = fixture.NewAdd(lhs, rhs);
-    ValueVertex *second = fixture.NewAdd(lhs, rhs);
-    ValueVertex *tagged = fixture.Tagged(JSTaggedValue(1));
-    CompileInfoFacts::ExpressionInputs inputs = fixture.Inputs({lhs, rhs});
-    CompileInfoFacts::ExpressionOptions options = fixture.Options(7);
-    CompileInfoFacts::ExpressionInputs otherInputs = fixture.Inputs({lhs, first});
-    CompileInfoFacts::ExpressionOptions otherOptions = fixture.Options(8);
+    std::array<ValueVertex *, 1> loadInputs {receiver};
+    std::array<ValueVertex *, 1> otherInputs {otherReceiver};
+    std::array<ValueVertex *, 2> addInputs {lhs, rhs};
+    auto loadQuery = MakeCseQuery<LoadTaggedFieldVertex>(loadInputs, 16);
+    auto otherOffset = MakeCseQuery<LoadTaggedFieldVertex>(loadInputs, 24);
+    auto otherObject = MakeCseQuery<LoadTaggedFieldVertex>(otherInputs, 16);
+    auto pureQuery = MakeCseQuery<I32AddVertex>(addInputs);
+    auto *first = fixture.NewFieldLoad(receiver, 16);
+    auto *second = fixture.NewFieldLoad(receiver, 16);
+    auto *otherField = fixture.NewFieldLoad(receiver, 24);
+    auto *pure = fixture.NewAdd(lhs, rhs);
 
     CompileInfoFacts facts(&fixture.chunk);
-    ASSERT_EQ(facts.FindExpression(kCseHash, first->GetOpcode(), inputs, options, true), nullptr);
-    facts.AddExpression(kCseHash, first, inputs, options, true);
-    ASSERT_EQ(facts.FindExpression(kCseHash, first->GetOpcode(), inputs, options, true), first);
-    // A different hash, opcode, input list or option list must not match.
-    ASSERT_EQ(facts.FindExpression(kCseHash + 1U, first->GetOpcode(), inputs, options, true), nullptr);
-    ASSERT_EQ(facts.FindExpression(kCseHash, tagged->GetOpcode(), inputs, options, true), nullptr);
-    ASSERT_EQ(facts.FindExpression(kCseHash, first->GetOpcode(), otherInputs, options, true), nullptr);
-    ASSERT_EQ(facts.FindExpression(kCseHash, first->GetOpcode(), inputs, otherOptions, true), nullptr);
+    ASSERT_EQ(facts.GetCse().Find(loadQuery, CseHashQuery(loadQuery), facts.GetEffectEpoch()), nullptr);
+    facts.GetCse().AddExpression(loadQuery, first, CseHashQuery(loadQuery), facts.GetEffectEpoch());
+    facts.GetCse().AddExpression(otherOffset, otherField, CseHashQuery(otherOffset), facts.GetEffectEpoch());
+    ASSERT_EQ(facts.GetCse().Find(loadQuery, CseHashQuery(loadQuery), facts.GetEffectEpoch()), first);
+    ASSERT_EQ(facts.GetCse().Find(otherOffset, CseHashQuery(otherOffset), facts.GetEffectEpoch()), otherField);
+    ASSERT_EQ(facts.GetCse().Find(otherObject, CseHashQuery(otherObject), facts.GetEffectEpoch()), nullptr);
 
-    // An effect advances the epoch: the epoch-dependent expression is no longer
-    // available and the erase is observable through a re-recorded node.
-    const uint32_t epochBeforeEffect = facts.GetEffectEpoch();
+    SideEffectDescriptor safeCall {SideEffectKind::SAFE_CALL};
+    safeCall.advancesEffectEpoch = false;
+    const uint32_t epochBeforeCall = facts.GetEffectEpoch();
+    facts.MarkPossibleSideEffect(safeCall);
+    ASSERT_EQ(facts.GetEffectEpoch(), epochBeforeCall);
+    ASSERT_EQ(facts.GetCse().Find(loadQuery, CseHashQuery(loadQuery), facts.GetEffectEpoch()), first);
+
+    safeCall.advancesEffectEpoch = true;
+    facts.MarkPossibleSideEffect(safeCall);
+    ASSERT_EQ(facts.GetCse().Find(loadQuery, CseHashQuery(loadQuery), facts.GetEffectEpoch()), nullptr);
+    ASSERT_EQ(facts.GetCse().Find(otherOffset, CseHashQuery(otherOffset), facts.GetEffectEpoch()), nullptr);
+    facts.GetCse().AddExpression(loadQuery, second, CseHashQuery(loadQuery), facts.GetEffectEpoch());
+    ASSERT_EQ(facts.GetCse().Find(loadQuery, CseHashQuery(loadQuery), facts.GetEffectEpoch()), second);
+
+    facts.GetCse().AddExpression(pureQuery, pure, CseHashQuery(pureQuery), facts.GetEffectEpoch());
     facts.IncrementEffectEpoch();
-    ASSERT_EQ(facts.GetEffectEpoch(), epochBeforeEffect + 1U);
-    ASSERT_EQ(facts.FindExpression(kCseHash, first->GetOpcode(), inputs, options, true), nullptr);
-    facts.AddExpression(kCseHash, second, inputs, options, true);
-    ASSERT_EQ(facts.FindExpression(kCseHash, second->GetOpcode(), inputs, options, true), second);
+    ASSERT_EQ(facts.GetCse().Find(pureQuery, CseHashQuery(pureQuery), facts.GetEffectEpoch()), pure);
+    ASSERT_EQ(facts.GetCse().Find(loadQuery, CseHashQuery(loadQuery), facts.GetEffectEpoch()), nullptr);
 
-    // A pure expression does not depend on the effect epoch and survives it.
-    facts.AddExpression(kPureCseHash, first, inputs, options, false);
-    facts.IncrementEffectEpoch();
-    ASSERT_EQ(facts.FindExpression(kPureCseHash, first->GetOpcode(), inputs, options, false), first);
-    ASSERT_EQ(facts.FindExpression(kCseHash, second->GetOpcode(), inputs, options, true), nullptr)
-        << "the epoch-dependent expression must not survive a second effect";
-
-    // Clearing the CSE map drops both kinds of expression.
-    CompileInfoFacts::ExpressionOptions unusedOptions = fixture.Options(11);
-    facts.AddExpression(kPureCseHash, first, inputs, unusedOptions, false);
-    facts.ClearAvailableExpressions();
-    ASSERT_EQ(facts.FindExpression(kPureCseHash, first->GetOpcode(), inputs, unusedOptions, false), nullptr);
-    ASSERT_EQ(facts.FindExpression(kCseHash, first->GetOpcode(), inputs, options, true), nullptr);
+    facts.GetCse().Clear();
+    ASSERT_EQ(facts.GetCse().Find(pureQuery, CseHashQuery(pureQuery), facts.GetEffectEpoch()), nullptr);
 }
 
-HWTEST_F_L0(ArkSteedCompileInfoFactsTest, CompileInfoFactsCseMutationControlIsDetected)
+HWTEST_F_L0(ArkSteedCompileInfoFactsTest, CompileInfoFactsCseMergeIntersectsNodeIdentity)
 {
     GraphFixture fixture;
+    ValueVertex *receiver = fixture.NewInitialValue();
     ValueVertex *lhs = fixture.Int32(5);
     ValueVertex *rhs = fixture.Int32(6);
-    ValueVertex *first = fixture.NewAdd(lhs, rhs);
-    ValueVertex *second = fixture.NewAdd(lhs, rhs);
-    CompileInfoFacts::ExpressionInputs inputs = fixture.Inputs({lhs, rhs});
-    CompileInfoFacts::ExpressionOptions options = fixture.Options(9);
+    std::array<ValueVertex *, 1> loadInputs {receiver};
+    std::array<ValueVertex *, 2> addInputs {lhs, rhs};
+    auto loadQuery = MakeCseQuery<LoadTaggedFieldVertex>(loadInputs, 16);
+    auto pureQuery = MakeCseQuery<I32AddVertex>(addInputs);
+    auto *pure = fixture.NewAdd(lhs, rhs);
 
     CompileInfoFacts facts(&fixture.chunk);
-    facts.AddExpression(kCseHash, first, inputs, options, true);
-    const auto lookupIs = [&](ValueVertex *expected) {
-        return facts.FindExpression(kCseHash, first->GetOpcode(), inputs, options, true) == expected;
-    };
-    ASSERT_TRUE(lookupIs(first));
-    EXPECT_FALSE(lookupIs(second)) << "a wrong expected node must make the lookup red";
-    // After a write the epoch-checked expression must be gone: expecting the
-    // old node is the wrong-invalidation mutation and must be detected.
-    facts.IncrementEffectEpoch();
-    EXPECT_FALSE(lookupIs(first)) << "a stale expectation after a write must be detected";
-    EXPECT_TRUE(lookupIs(nullptr));
+    facts.GetCse().AddExpression(pureQuery, pure, CseHashQuery(pureQuery), facts.GetEffectEpoch());
+    CompileInfoFacts *left = facts.Clone();
+    CompileInfoFacts *right = facts.Clone();
+    left->GetCse().AddExpression(loadQuery, fixture.NewFieldLoad(receiver, 16), CseHashQuery(loadQuery),
+                                 left->GetEffectEpoch());
+    right->GetCse().AddExpression(loadQuery, fixture.NewFieldLoad(receiver, 16), CseHashQuery(loadQuery),
+                                  right->GetEffectEpoch());
+    left->Merge(*right);
+    ASSERT_EQ(left->GetCse().Find(loadQuery, CseHashQuery(loadQuery), left->GetEffectEpoch()), nullptr);
+    ASSERT_EQ(left->GetCse().Find(pureQuery, CseHashQuery(pureQuery), left->GetEffectEpoch()), pure);
+
+    CompileInfoFacts *withWrite = facts.Clone();
+    withWrite->IncrementEffectEpoch();
+    facts.Merge(*withWrite);
+    ASSERT_EQ(facts.GetCse().Find(pureQuery, CseHashQuery(pureQuery), facts.GetEffectEpoch()), pure);
 }
 
 // --- CompileInfoFacts: cached env slots ------------------------------------
@@ -971,6 +1072,96 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, ModuleLocationMergeRequiresBothPaths)
     EXPECT_EQ(entry.LookupLoadedConstantProperty(function, PropertyKey::ExternalModuleDictionary(0)), nullptr);
 }
 
+// Fixed result types are available without builder-side facts. Querying them
+// must not create NodeInfo entries or infer a raw representation alternative.
+HWTEST_F_L0(ArkSteedCompileInfoFactsTest, FixedResultTypesWithoutDynamicFacts)
+{
+    GraphFixture fixture;
+    ValueVertex *i32 = fixture.Int32(65);
+    ValueVertex *f64 = fixture.graph.GetFloat64Constant(1.25);
+    ValueVertex *tagged = fixture.NewInitialValue();
+    auto i32Inputs = fixture.Inputs({i32});
+    auto f64Inputs = fixture.Inputs({f64});
+    auto taggedInputs = fixture.Inputs({tagged});
+    ValueVertex *checkedString =
+        Vertex::New<CheckedTaggedStringVertex>(&fixture.chunk, taggedInputs, &fixture.chunk, 0);
+    ValueVertex *actualArgc = Vertex::New<ActualArgcVertex>(&fixture.chunk, 0);
+
+    struct TypedResult {
+        ValueVertex *node;
+        NodeType type;
+    };
+    const std::array<TypedResult, 14> results {{
+        {Vertex::New<I32ToTaggedIntVertex>(&fixture.chunk, i32Inputs), NodeType::INT},
+        {Vertex::New<CheckedNonNegativeI32ToTaggedIntVertex>(&fixture.chunk, i32Inputs, &fixture.chunk, 0),
+         NodeType::INT},
+        {Vertex::New<F64ToTaggedDoubleVertex>(&fixture.chunk, f64Inputs), NodeType::DOUBLE},
+        {Vertex::New<I32ConditionCheckVertex>(&fixture.chunk, fixture.Inputs({i32, i32}), Condition::EQUAL),
+         NodeType::BOOLEAN},
+        {Vertex::New<F64ConditionCheckVertex>(&fixture.chunk, fixture.Inputs({f64, f64}), Condition::EQUAL),
+         NodeType::BOOLEAN},
+        {Vertex::New<TaggedEqualVertex>(&fixture.chunk, fixture.Inputs({tagged, tagged})), NodeType::BOOLEAN},
+        {Vertex::New<TaggedNotEqualVertex>(&fixture.chunk, fixture.Inputs({tagged, tagged})), NodeType::BOOLEAN},
+        {Vertex::New<StringEqualVertex>(&fixture.chunk, fixture.Inputs({checkedString, checkedString, tagged})),
+         NodeType::BOOLEAN},
+        {Vertex::New<Float64ToBooleanVertex>(&fixture.chunk, f64Inputs, true), NodeType::BOOLEAN},
+        {Vertex::New<TaggedNumberToBooleanVertex>(&fixture.chunk, taggedInputs, &fixture.chunk, 0, true),
+         NodeType::BOOLEAN},
+        {Vertex::New<TaggedDoubleToBooleanVertex>(&fixture.chunk, taggedInputs, &fixture.chunk, 0, false),
+         NodeType::BOOLEAN},
+        {checkedString, NodeType::STRING},
+        {Vertex::New<LoadSingleCharTableElementVertex>(&fixture.chunk, i32Inputs), NodeType::STRING},
+        {Vertex::New<I32ToTaggedIntVertex>(&fixture.chunk, fixture.Inputs({actualArgc})), NodeType::INT},
+    }};
+
+    CompileInfoFacts facts(&fixture.chunk);
+    const CompileInfoFacts &readOnlyFacts = facts;
+    for (const auto &result : results) {
+        EXPECT_TRUE(readOnlyFacts.TryGetInfoFor(result.node) == nullptr);
+        EXPECT_EQ(readOnlyFacts.GetKnownType(result.node), result.type);
+        EXPECT_TRUE(readOnlyFacts.CheckType(result.node, result.type));
+        EXPECT_EQ(readOnlyFacts.TryGetAlternative(result.node, AlternativeNodes::Kind::INT32), nullptr);
+        EXPECT_EQ(readOnlyFacts.TryGetAlternative(result.node, AlternativeNodes::Kind::HOLEY_FLOAT64), nullptr);
+        EXPECT_TRUE(readOnlyFacts.TryGetInfoFor(result.node) == nullptr);
+    }
+    EXPECT_TRUE(facts.Empty());
+
+    // A broad dynamic NUMBER fact retains the more precise encoding type.
+    // Conflicting dynamic facts produce an empty type, never a usable proof.
+    for (const auto &result : results) {
+        NodeType dynamicType =
+            result.type == NodeType::INT || result.type == NodeType::DOUBLE ? NodeType::NUMBER : NodeType::UNKNOWN;
+        facts.EnsureType(result.node, dynamicType);
+        EXPECT_EQ(facts.GetKnownType(result.node), result.type);
+        EXPECT_TRUE(facts.CheckType(result.node, dynamicType));
+        EXPECT_TRUE(facts.TryGetInfoFor(result.node)->GetAlternatives().Empty());
+        NodeType conflictingType = result.type == NodeType::STRING ? NodeType::BOOLEAN : NodeType::STRING;
+        facts.EnsureType(result.node, conflictingType);
+        EXPECT_EQ(facts.GetKnownType(result.node), NodeType::NONE);
+        EXPECT_FALSE(facts.CheckType(result.node, result.type));
+    }
+}
+
+HWTEST_F_L0(ArkSteedCompileInfoFactsTest, GenericTaggedResultsDoNotProveInt32)
+{
+    GraphFixture fixture;
+    ValueVertex *u32 = Vertex::New<U32ToTaggedNumberVertex>(&fixture.chunk, fixture.Inputs({fixture.Int32(-1)}));
+    ValueVertex *raw =
+        Vertex::New<RawI64ToTaggedVertex>(&fixture.chunk, fixture.Inputs({fixture.graph.GetInt64Constant(0)}));
+    CompileInfoFacts facts(&fixture.chunk);
+
+    EXPECT_EQ(facts.GetKnownType(u32), NodeType::NUMBER);
+    EXPECT_TRUE(facts.CheckType(u32, NodeType::NUMBER));
+    EXPECT_FALSE(facts.CheckType(u32, NodeType::INT));
+    EXPECT_FALSE(facts.CheckType(u32, NodeType::DOUBLE));
+    EXPECT_EQ(facts.GetKnownType(raw), NodeType::UNKNOWN);
+    EXPECT_FALSE(facts.CheckType(raw, NodeType::INT));
+    EXPECT_FALSE(facts.CheckType(raw, NodeType::NUMBER));
+    EXPECT_EQ(facts.TryGetAlternative(u32, AlternativeNodes::Kind::INT32), nullptr);
+    EXPECT_EQ(facts.TryGetAlternative(raw, AlternativeNodes::Kind::INT32), nullptr);
+    EXPECT_TRUE(facts.Empty());
+}
+
 // --- CompileInfoFacts: clone variants --------------------------------------
 
 HWTEST_F_L0(ArkSteedCompileInfoFactsTest, CompileInfoFactsCloneVariants)
@@ -981,19 +1172,23 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, CompileInfoFactsCloneVariants)
     ValueVertex *receiver = fixture.Int32(9);
     ValueVertex *value = fixture.Int32(10);
     ValueVertex *env = fixture.NewInitialValue();
-    CompileInfoFacts::ExpressionInputs inputs = fixture.Inputs({receiver, value});
-    CompileInfoFacts::ExpressionOptions options = fixture.Options(1);
+    std::array<ValueVertex *, 1> readInputs {env};
+    std::array<ValueVertex *, 2> pureInputs {receiver, value};
+    auto readQuery = MakeCseQuery<LoadTaggedFieldVertex>(readInputs, 16);
+    auto pureQuery = MakeCseQuery<I32AddVertex>(pureInputs);
+    auto *read = fixture.NewFieldLoad(env, 16);
+    auto *pure = fixture.NewAdd(receiver, value);
 
     CompileInfoFacts facts(&fixture.chunk);
-    facts.GetOrCreateInfoFor(node)->SetType(NodeType::INT);
-    facts.GetOrCreateInfoFor(withoutInfo);
+    facts.UpdateInfoFor(node, [](NodeInfo &info) { info.SetType(NodeType::INT); });
+    facts.UpdateInfoFor(withoutInfo, [](NodeInfo &) {});
     facts.RecordNonHole(node);
     facts.RecordLoadedProperty(receiver, PropertyKey::Named(1), value);
     facts.RecordLoadedConstantProperty(receiver, PropertyKey::Named(2), value);
     facts.RecordEnvSlot(env, 5, value);
     facts.RecordEnvConstant(env, 6, value);
-    facts.AddExpression(kCseHash, node, inputs, options, true);
-    facts.AddExpression(kPureCseHash, node, inputs, options, false);
+    facts.GetCse().AddExpression(readQuery, read, CseHashQuery(readQuery), facts.GetEffectEpoch());
+    facts.GetCse().AddExpression(pureQuery, pure, CseHashQuery(pureQuery), facts.GetEffectEpoch());
     ASSERT_TRUE(facts.TryGetInfoFor(withoutInfo)->NoInfoAvailable());
 
     // Plain clone: every kind of fact is copied and the copy is independent.
@@ -1006,9 +1201,9 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, CompileInfoFactsCloneVariants)
     ASSERT_EQ(clone->LookupLoadedConstantProperty(receiver, PropertyKey::Named(2)), value);
     ASSERT_EQ(clone->LookupEnvSlot(env, 5), value);
     ASSERT_EQ(clone->LookupEnvConstant(env, 6), value);
-    ASSERT_NE(clone->TryGetInfoFor(withoutInfo), nullptr);
-    ASSERT_EQ(clone->FindExpression(kCseHash, node->GetOpcode(), inputs, options, true), node);
-    clone->TryGetInfoFor(node)->SetType(NodeType::NONE);
+    ASSERT_TRUE(clone->TryGetInfoFor(withoutInfo) != nullptr);
+    ASSERT_EQ(clone->GetCse().Find(readQuery, CseHashQuery(readQuery), clone->GetEffectEpoch()), read);
+    clone->UpdateInfoFor(node, [](NodeInfo &info) { info.SetType(NodeType::NONE); });
     ASSERT_EQ(facts.GetKnownType(node), NodeType::INT) << "the copy must be independent of the original";
     ASSERT_TRUE(NodeInfo::IsEmptyNodeType(clone->GetKnownType(node)));
 
@@ -1018,24 +1213,24 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, CompileInfoFactsCloneVariants)
     ASSERT_NE(header, nullptr);
     ASSERT_EQ(header->GetKnownType(node), NodeType::INT);
     ASSERT_TRUE(header->IsKnownNonHole(node));
-    ASSERT_NE(header->TryGetInfoFor(node), nullptr);
-    ASSERT_EQ(header->TryGetInfoFor(withoutInfo), nullptr) << "entries without information are dropped";
-    ASSERT_NE(facts.TryGetInfoFor(withoutInfo), nullptr);
+    ASSERT_TRUE(header->TryGetInfoFor(node) != nullptr);
+    ASSERT_TRUE(header->TryGetInfoFor(withoutInfo) == nullptr) << "entries without information are dropped";
+    ASSERT_TRUE(facts.TryGetInfoFor(withoutInfo) != nullptr);
     ASSERT_EQ(header->LookupLoadedProperty(receiver, PropertyKey::Named(1)), nullptr);
     ASSERT_EQ(header->LookupLoadedConstantProperty(receiver, PropertyKey::Named(2)), value);
     ASSERT_EQ(header->LookupEnvSlot(env, 5), nullptr);
     ASSERT_EQ(header->LookupEnvConstant(env, 6), value);
     ASSERT_GT(header->GetEffectEpoch(), facts.GetEffectEpoch());
     ASSERT_EQ(header->GetEnvSlotAliasMode(), EnvSlotAliasMode::NONE);
-    ASSERT_EQ(header->FindExpression(kCseHash, node->GetOpcode(), inputs, options, true), nullptr);
-    ASSERT_EQ(header->FindExpression(kPureCseHash, node->GetOpcode(), inputs, options, false), node);
+    ASSERT_EQ(header->GetCse().Find(readQuery, CseHashQuery(readQuery), header->GetEffectEpoch()), nullptr);
+    ASSERT_EQ(header->GetCse().Find(pureQuery, CseHashQuery(pureQuery), header->GetEffectEpoch()), pure);
 
     // Optimistic loop-header clone without effects: ordinary loaded facts stay.
     LoopEffects noEffects(&fixture.chunk);
     CompileInfoFacts *optimistic = facts.CloneForOptimisticLoopHeader(noEffects);
     ASSERT_NE(optimistic, nullptr);
     ASSERT_EQ(optimistic->GetKnownType(node), NodeType::INT);
-    ASSERT_NE(optimistic->TryGetInfoFor(withoutInfo), nullptr);
+    ASSERT_TRUE(optimistic->TryGetInfoFor(withoutInfo) != nullptr);
     ASSERT_EQ(optimistic->LookupLoadedProperty(receiver, PropertyKey::Named(1)), value);
     ASSERT_EQ(optimistic->LookupEnvSlot(env, 5), value);
     ASSERT_EQ(optimistic->LookupLoadedConstantProperty(receiver, PropertyKey::Named(2)), value);
@@ -1052,12 +1247,85 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, CompileInfoFactsCloneVariants)
     ASSERT_TRUE(unknownCallEffects.InvalidatesAllEnvSlots());
     CompileInfoFacts *clearedClone = facts.CloneForOptimisticLoopHeader(unknownCallEffects);
     ASSERT_NE(clearedClone, nullptr);
-    ASSERT_NE(clearedClone->TryGetInfoFor(node), nullptr);
-    ASSERT_EQ(clearedClone->TryGetInfoFor(withoutInfo), nullptr);
+    ASSERT_TRUE(clearedClone->TryGetInfoFor(node) != nullptr);
+    ASSERT_TRUE(clearedClone->TryGetInfoFor(withoutInfo) == nullptr);
     ASSERT_EQ(clearedClone->LookupLoadedProperty(receiver, PropertyKey::Named(1)), nullptr);
     ASSERT_EQ(clearedClone->LookupEnvSlot(env, 5), nullptr);
     ASSERT_EQ(clearedClone->LookupLoadedConstantProperty(receiver, PropertyKey::Named(2)), value);
     ASSERT_EQ(clearedClone->LookupEnvConstant(env, 6), value);
+}
+
+HWTEST_F_L0(ArkSteedCompileInfoFactsTest, InlinedPropertyCachesDistinguishConstantPoolScopes)
+{
+    GraphFixture fixture;
+    ValueVertex *receiver = fixture.NewInitialValue();
+    ValueVertex *callerValue = fixture.Int32(7);
+    ValueVertex *calleeValue = fixture.Int32(9);
+    PropertyKey callerKey = PropertyKey::ConstDataId(7, 100);
+    PropertyKey calleeKey = PropertyKey::ConstDataId(7, 200);
+    CompileInfoFacts caller(&fixture.chunk);
+    caller.RecordLoadedProperty(receiver, callerKey, callerValue);
+    caller.RecordLoadedConstantProperty(receiver, callerKey, callerValue);
+
+    // An inlined callee receives the same receiver and a clone of the caller facts.
+    CompileInfoFacts *callee = caller.Clone();
+    EXPECT_EQ(callee->LookupLoadedProperty(receiver, calleeKey), nullptr);
+    EXPECT_EQ(callee->LookupLoadedConstantProperty(receiver, calleeKey), nullptr);
+    callee->RecordLoadedProperty(receiver, calleeKey, calleeValue);
+    callee->RecordLoadedConstantProperty(receiver, calleeKey, calleeValue);
+
+    CompileInfoFacts *returned = callee->Clone();
+    EXPECT_EQ(returned->LookupLoadedProperty(receiver, callerKey), callerValue);
+    EXPECT_EQ(returned->LookupLoadedProperty(receiver, calleeKey), calleeValue);
+    EXPECT_EQ(returned->LookupLoadedConstantProperty(receiver, callerKey), callerValue);
+    EXPECT_EQ(returned->LookupLoadedConstantProperty(receiver, calleeKey), calleeValue);
+}
+
+HWTEST_F_L0(ArkSteedCompileInfoFactsTest, InlinedPropertyWritesInvalidateOtherConstantPoolScopes)
+{
+    GraphFixture fixture;
+    ValueVertex *receiver = fixture.NewInitialValue();
+    ValueVertex *value = fixture.Int32(7);
+    PropertyKey callerKey = PropertyKey::ConstDataId(7, 100);
+    PropertyKey writtenKey = PropertyKey::ConstDataId(9, 200);
+    PropertyKey otherCalleeKey = PropertyKey::ConstDataId(8, 200);
+    CompileInfoFacts facts(&fixture.chunk);
+    facts.RecordLoadedProperty(receiver, callerKey, value);
+    facts.RecordLoadedProperty(receiver, writtenKey, value);
+    facts.RecordLoadedProperty(receiver, otherCalleeKey, value);
+
+    // Different indices in different pools can still identify the same property name.
+    facts.ClearLoadedPropertiesForKey(writtenKey);
+    EXPECT_EQ(facts.LookupLoadedProperty(receiver, callerKey), nullptr);
+    EXPECT_EQ(facts.LookupLoadedProperty(receiver, writtenKey), nullptr);
+    EXPECT_EQ(facts.LookupLoadedProperty(receiver, otherCalleeKey), value);
+
+    facts.RecordLoadedProperty(receiver, callerKey, value);
+    facts.ClearLoadedPropertiesForKey(callerKey);
+    EXPECT_EQ(facts.LookupLoadedProperty(receiver, otherCalleeKey), nullptr);
+}
+
+HWTEST_F_L0(ArkSteedCompileInfoFactsTest, LoopPropertyWritesInvalidateOtherConstantPoolScopes)
+{
+    GraphFixture fixture;
+    ValueVertex *receiver = fixture.NewInitialValue();
+    ValueVertex *value = fixture.Int32(7);
+    PropertyKey callerKey = PropertyKey::ConstDataId(7, 100);
+    PropertyKey writtenKey = PropertyKey::ConstDataId(9, 200);
+    PropertyKey otherCalleeKey = PropertyKey::ConstDataId(8, 200);
+    LoopEffects effects(&fixture.chunk);
+    effects.RecordPropertyWrite(writtenKey);
+    EXPECT_TRUE(effects.InvalidatesPropertyKey(callerKey));
+    EXPECT_TRUE(effects.InvalidatesPropertyKey(writtenKey));
+    EXPECT_FALSE(effects.InvalidatesPropertyKey(otherCalleeKey));
+
+    // The caller's cached read need not have existed while the loop summary was recorded.
+    CompileInfoFacts facts(&fixture.chunk);
+    facts.RecordLoadedProperty(receiver, callerKey, value);
+    facts.RecordLoadedProperty(receiver, otherCalleeKey, value);
+    CompileInfoFacts *header = facts.CloneForOptimisticLoopHeader(effects);
+    EXPECT_EQ(header->LookupLoadedProperty(receiver, callerKey), nullptr);
+    EXPECT_EQ(header->LookupLoadedProperty(receiver, otherCalleeKey), value);
 }
 
 // --- CompileInfoFacts: loop-header compatibility ---------------------------
@@ -1073,8 +1341,8 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, CompileInfoFactsLoopHeaderCompatibilit
     ValueVertex *envValue = fixture.Int32(5);
 
     CompileInfoFacts facts(&fixture.chunk);
-    facts.GetOrCreateInfoFor(intNode)->SetType(NodeType::INT);
-    facts.GetOrCreateInfoFor(doubleNode)->SetType(NodeType::DOUBLE);
+    facts.UpdateInfoFor(intNode, [](NodeInfo &info) { info.SetType(NodeType::INT); });
+    facts.UpdateInfoFor(doubleNode, [](NodeInfo &info) { info.SetType(NodeType::DOUBLE); });
     facts.RecordLoadedProperty(receiver, PropertyKey::Named(1), loaded);
     facts.RecordEnvSlot(env, 5, envValue);
     ASSERT_EQ(facts.GetEnvSlotAliasMode(), EnvSlotAliasMode::CURRENT_ENV_ONLY);
@@ -1089,13 +1357,13 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, CompileInfoFactsLoopHeaderCompatibilit
 
     // A header entry that lost type information is incompatible.
     CompileInfoFacts *narrowedHeader = facts.CloneForLoopHeader();
-    narrowedHeader->GetOrCreateInfoFor(doubleNode)->SetType(NodeType::INT);
+    narrowedHeader->UpdateInfoFor(doubleNode, [](NodeInfo &info) { info.SetType(NodeType::INT); });
     ASSERT_FALSE(body->IsCompatibleWithLoopHeader(*narrowedHeader, headerBlock));
 
     // A header entry the body does not have is incompatible.
     CompileInfoFacts *extendedHeader = facts.CloneForLoopHeader();
     ValueVertex *extra = fixture.Int32(6);
-    extendedHeader->GetOrCreateInfoFor(extra)->SetType(NodeType::INT);
+    extendedHeader->UpdateInfoFor(extra, [](NodeInfo &info) { info.SetType(NodeType::INT); });
     ASSERT_FALSE(body->IsCompatibleWithLoopHeader(*extendedHeader, headerBlock));
 
     // Phi vertices owned by the loop header are skipped: their value is
@@ -1104,7 +1372,7 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, CompileInfoFactsLoopHeaderCompatibilit
     PhiVertex *phi = Vertex::New<PhiVertex>(&fixture.chunk, 1, VirtualRegister(0));
     phi->SetInput(0, intNode);
     phi->SetOwner(headerBlock);
-    headerWithPhi->GetOrCreateInfoFor(phi)->SetType(NodeType::INT);
+    headerWithPhi->UpdateInfoFor(phi, [](NodeInfo &info) { info.SetType(NodeType::INT); });
     ASSERT_TRUE(body->IsCompatibleWithLoopHeader(*headerWithPhi, headerBlock));
     BB *otherBlock = BB::New(&fixture.chunk);
     otherBlock->SetId(8);
@@ -1113,10 +1381,10 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, CompileInfoFactsLoopHeaderCompatibilit
     // Equal epochs compare types only (subset relation), never HClasses.
     CompileInfoFacts *sameEpochHeader = facts.Clone();
     CompileInfoFacts *sameEpochBody = facts.Clone();
-    sameEpochHeader->GetOrCreateInfoFor(doubleNode)->SetType(NodeType::INT);
+    sameEpochHeader->UpdateInfoFor(doubleNode, [](NodeInfo &info) { info.SetType(NodeType::INT); });
     ASSERT_FALSE(sameEpochBody->IsCompatibleWithLoopHeader(*sameEpochHeader, headerBlock));
-    sameEpochBody->GetOrCreateInfoFor(doubleNode)->SetType(NodeType::INT);
-    sameEpochHeader->GetOrCreateInfoFor(doubleNode)->SetType(NodeType::NUMBER);
+    sameEpochBody->UpdateInfoFor(doubleNode, [](NodeInfo &info) { info.SetType(NodeType::INT); });
+    sameEpochHeader->UpdateInfoFor(doubleNode, [](NodeInfo &info) { info.SetType(NodeType::NUMBER); });
     ASSERT_TRUE(sameEpochBody->IsCompatibleWithLoopHeader(*sameEpochHeader, headerBlock));
 
     // Cached env slots of the header interact with the aliasing mode of the
@@ -1130,6 +1398,267 @@ HWTEST_F_L0(ArkSteedCompileInfoFactsTest, CompileInfoFactsLoopHeaderCompatibilit
     ASSERT_TRUE(aliasingBody->IsCompatibleWithLoopHeader(*optimisticHeader, headerBlock));
     aliasingBody->SetEnvSlotAliasMode(EnvSlotAliasMode::CONSTANT_ENV_ONLY);
     ASSERT_FALSE(aliasingBody->IsCompatibleWithLoopHeader(*optimisticHeader, headerBlock));
+}
+
+HWTEST_F_L0(ArkSteedCompileInfoFactsTest, HamtSnapshotsCollisionsAndIntersection)
+{
+    GraphFixture fixture;
+    using Map = FactsHamt<HamtTestKey, int *, HamtTestHash, HamtTestEqual>;
+    Map original(&fixture.chunk);
+    Map left(&fixture.chunk);
+    Map right(&fixture.chunk);
+    std::array<int, 66> values {};
+    auto key = [](uint32_t id) { return HamtTestKey {static_cast<uint64_t>(id % 32U) << 40U, id}; };
+    for (uint32_t i = 0; i < 64U; ++i) {
+        values[i] = static_cast<int>(i);
+        original.InsertOrAssign(key(i), &values[i]);
+    }
+    left.CopyFrom(original);
+    right.CopyFrom(original);
+
+    // Mutating the original and both clones must not affect any other version.
+    original.InsertOrAssign(key(0), &values[64]);
+    left.Erase(key(1));
+    right.InsertOrAssign(key(2), &values[65]);
+    left.InsertOrAssign(key(64), &values[64]);
+    right.InsertOrAssign(key(65), &values[65]);
+    EXPECT_EQ(left.Find(key(0)), &values[0]);
+    EXPECT_EQ(right.Find(key(0)), &values[0]);
+    EXPECT_EQ(original.Find(key(1)), &values[1]);
+    EXPECT_EQ(left.Find(key(2)), &values[2]);
+    EXPECT_EQ(original.Find(key(64)), nullptr);
+
+    left.IntersectWith(
+        right, [](const HamtTestKey &, int *a, int *b) { return a == b ? a : nullptr; },
+        [](const auto &) { return true; });
+    for (uint32_t i = 0; i < 64U; ++i) {
+        EXPECT_EQ(left.Find(key(i)), (i == 1U || i == 2U) ? nullptr : &values[i]) << "key " << i;
+        EXPECT_EQ(original.Find(key(i)), i == 0U ? &values[64] : &values[i]) << "original key " << i;
+    }
+    EXPECT_EQ(left.Find(key(64)), nullptr);
+    EXPECT_EQ(left.Find(key(65)), nullptr);
+    EXPECT_EQ(right.Find(key(2)), &values[65]);
+
+    left.Transform([](const HamtTestKey &entry, int *value) { return entry.id % 2U == 0 ? nullptr : value; });
+    EXPECT_EQ(left.Find(key(4)), nullptr);
+    EXPECT_EQ(left.Find(key(5)), &values[5]);
+    EXPECT_EQ(right.Find(key(4)), &values[4]);
+}
+
+HWTEST_F_L0(ArkSteedCompileInfoFactsTest, HamtMatchesReferenceMapAcrossEditsAndForks)
+{
+    GraphFixture fixture;
+    using Map = FactsHamt<HamtTestKey, int *, HamtTestHash, HamtTestEqual>;
+    Map actual(&fixture.chunk);
+    std::map<uint32_t, int *> expected;
+    std::array<int, 256> values {};
+    auto key = [](uint32_t id) { return HamtTestKey {MixFactsHash(id % 17U), id}; };
+    uint32_t state = 0x12345678U;
+    for (uint32_t step = 0; step < 1024U; ++step) {
+        state = state * 1664525U + 1013904223U;
+        uint32_t id = (state >> 8U) % 256U;
+        if ((state & 3U) == 0) {
+            actual.Erase(key(id));
+            expected.erase(id);
+        } else {
+            actual.InsertOrAssign(key(id), &values[id]);
+            expected[id] = &values[id];
+        }
+        if (step % 41U != 0) {
+            continue;
+        }
+        Map snapshot(&fixture.chunk);
+        snapshot.CopyFrom(actual);
+        snapshot.Erase(key(id));
+        for (uint32_t candidate = 0; candidate < values.size(); ++candidate) {
+            auto it = expected.find(candidate);
+            int *expectedValue = it == expected.end() ? nullptr : it->second;
+            EXPECT_EQ(actual.Find(key(candidate)), expectedValue) << "step " << step << " key " << candidate;
+            EXPECT_EQ(snapshot.Find(key(candidate)), candidate == id ? nullptr : expectedValue)
+                << "snapshot step " << step << " key " << candidate;
+        }
+    }
+}
+
+HWTEST_F_L0(ArkSteedCompileInfoFactsTest, HamtUpdateUsesCurrentValueAndKeepsSnapshotsIsolated)
+{
+    GraphFixture fixture;
+    using Map = FactsHamt<HamtTestKey, int *, HamtTestHash, HamtTestEqual>;
+    Map original(&fixture.chunk);
+    Map snapshot(&fixture.chunk);
+    std::array<int, 4> values {};
+    const HamtTestKey first {42, 1};
+    const HamtTestKey collision {42, 2};
+    const HamtTestKey absent {42, 3};
+    original.InsertOrAssign(first, &values[0]);
+    original.InsertOrAssign(collision, &values[1]);
+    snapshot.CopyFrom(original);
+
+    uint32_t calls = 0;
+    original.Update(first, [&](int *previous) {
+        EXPECT_EQ(previous, &values[0]);
+        ++calls;
+        return &values[2];
+    });
+    original.Update(first, [&](int *previous) {
+        EXPECT_EQ(previous, &values[2]);
+        ++calls;
+        return previous;
+    });
+    original.Update(absent, [&](int *previous) {
+        EXPECT_EQ(previous, nullptr);
+        ++calls;
+        return &values[3];
+    });
+    EXPECT_EQ(calls, 3U);
+    EXPECT_EQ(original.Find(first), &values[2]);
+    EXPECT_EQ(original.Find(collision), &values[1]);
+    EXPECT_EQ(original.Find(absent), &values[3]);
+    EXPECT_EQ(snapshot.Find(first), &values[0]);
+    EXPECT_EQ(snapshot.Find(collision), &values[1]);
+    EXPECT_EQ(snapshot.Find(absent), nullptr);
+
+    // Missing keys at the leaf, hash, and branch levels leave both versions intact.
+    original.Erase(HamtTestKey {42, 4});
+    original.Erase(HamtTestKey {43, 4});
+    snapshot.Erase(HamtTestKey {44, 4});
+    original.Erase(first);
+    EXPECT_EQ(original.Find(first), nullptr);
+    EXPECT_EQ(original.Find(collision), &values[1]);
+    EXPECT_EQ(snapshot.Find(first), &values[0]);
+}
+
+HWTEST_F_L0(ArkSteedCompileInfoFactsTest, HamtMetadataStaysExactAcrossInPlaceAndSharedEdits)
+{
+    struct Value {
+        uint32_t epoch;
+        bool empty;
+    };
+    struct Traits {
+        static uint32_t MinEpoch(Value *value)
+        {
+            return value->epoch;
+        }
+        static bool HasEmptyInfo(Value *value)
+        {
+            return value->empty;
+        }
+    };
+    GraphFixture fixture;
+    using Map = FactsHamt<HamtTestKey, Value *, HamtTestHash, HamtTestEqual, Traits>;
+    Map original(&fixture.chunk);
+    Map snapshot(&fixture.chunk);
+    Value fresh {20, false};
+    Value stale {1, true};
+    auto key = [](uint32_t id) { return HamtTestKey {static_cast<uint64_t>(id % 8U) << 20U, id}; };
+    for (uint32_t id = 0; id < 16U; ++id) {
+        original.InsertOrAssign(key(id), &fresh);
+    }
+    original.InsertOrAssign(key(0), &stale);
+    snapshot.CopyFrom(original);
+    original.InsertOrAssign(key(0), &fresh);
+    // Replacing a child can mutate the same pointer; metadata must be captured first.
+    original.InsertOrAssign(key(1), &stale);
+    original.InsertOrAssign(key(1), &fresh);
+
+    uint32_t visited = 0;
+    original.TransformWithReuse(
+        [&](const HamtTestKey &, Value *value) {
+            ++visited;
+            return value->epoch < 10U || value->empty ? nullptr : value;
+        },
+        [](const auto &metadata) { return metadata.minEpoch >= 10U && !metadata.hasEmptyInfo; });
+    EXPECT_EQ(visited, 0U);
+    snapshot.TransformWithReuse(
+        [](const HamtTestKey &, Value *value) { return value->epoch < 10U || value->empty ? nullptr : value; },
+        [](const auto &metadata) { return metadata.minEpoch >= 10U && !metadata.hasEmptyInfo; });
+    EXPECT_EQ(snapshot.Find(key(0)), nullptr);
+    for (uint32_t id = 0; id < 16U; ++id) {
+        EXPECT_EQ(original.Find(key(id)), &fresh);
+        if (id != 0) {
+            EXPECT_EQ(snapshot.Find(key(id)), &fresh);
+        }
+    }
+}
+
+HWTEST_F_L0(ArkSteedCompileInfoFactsTest, CseSnapshotMergeRetainsCandidateOrderAfterEpochFilter)
+{
+    GraphFixture fixture;
+    ValueVertex *receiver = fixture.NewInitialValue();
+    ValueVertex *lhs = fixture.Int32(3);
+    ValueVertex *rhs = fixture.Int32(4);
+    std::array<ValueVertex *, 1> loadInputs {receiver};
+    std::array<ValueVertex *, 2> addInputs {lhs, rhs};
+    auto loadQuery = MakeCseQuery<LoadTaggedFieldVertex>(loadInputs, 16);
+    auto addQuery = MakeCseQuery<I32AddVertex>(addInputs);
+    auto *oldAdd = fixture.NewAdd(lhs, rhs);
+    auto *load = fixture.NewFieldLoad(receiver, 16);
+    auto *newAdd = fixture.NewAdd(lhs, rhs);
+    constexpr uint64_t hash = 42;
+
+    CompileInfoFacts facts(&fixture.chunk);
+    facts.GetCse().AddExpression(addQuery, oldAdd, hash, facts.GetEffectEpoch());
+    facts.GetCse().AddExpression(loadQuery, load, hash, facts.GetEffectEpoch());
+    facts.GetCse().AddExpression(addQuery, newAdd, hash, facts.GetEffectEpoch());
+    CompileInfoFacts *fast = facts.Clone();
+    CompileInfoFacts *slow = facts.Clone();
+    slow->OnSideEffect();
+    slow->Merge(*fast);
+
+    EXPECT_EQ(slow->GetEffectEpoch(), 2U);
+    EXPECT_EQ(slow->GetCse().Find(loadQuery, hash, slow->GetEffectEpoch()), nullptr);
+    // Advancing the memory epoch preserves the independent pure candidate order.
+    EXPECT_EQ(slow->GetCse().Find(addQuery, hash, slow->GetEffectEpoch()), newAdd);
+    EXPECT_EQ(fast->GetCse().Find(addQuery, hash, fast->GetEffectEpoch()), newAdd);
+    EXPECT_EQ(facts.GetCse().Find(addQuery, hash, facts.GetEffectEpoch()), newAdd);
+}
+
+HWTEST_F_L0(ArkSteedCompileInfoFactsTest, HClassGenerationStaysLocalAndMergesEffectiveFacts)
+{
+    ScopedEcmaVm scope;
+    ASSERT_TRUE(scope.IsValid());
+    WithHClassRefs(scope.GetVm(), scope.GetThread(), [](ArkSteedHClassRef hclass, ArkSteedHClassRef) {
+        ASSERT_TRUE(hclass.IsJSHClass());
+        GraphFixture fixture;
+        ValueVertex *unstable = fixture.NewInitialValue();
+        ValueVertex *stable = fixture.NewInitialValue();
+        CompileInfoFacts facts(&fixture.chunk);
+        facts.RecordHClass(unstable, hclass, false);
+        facts.RecordHClass(stable, hclass, true);
+
+        CompileInfoFacts *fast = facts.Clone();
+        CompileInfoFacts *slow = facts.Clone();
+        slow->OnSideEffect();
+        EXPECT_TRUE(fast->TryGetHClass(unstable).Equals(hclass));
+        EXPECT_FALSE(slow->TryGetHClass(unstable).IsJSHClass());
+        EXPECT_TRUE(slow->TryGetHClass(stable).Equals(hclass));
+        CompileInfoFacts *sharedSlow = slow->Clone();
+        sharedSlow->Merge(*fast);
+        EXPECT_TRUE(sharedSlow->PossibleHClassesAreStale(unstable));
+        EXPECT_TRUE(sharedSlow->TryGetHClass(stable).Equals(hclass));
+        // Updating a different field must preserve the lazily stale HClass.
+        slow->EnsureType(unstable, NodeType::OTHER_JS_RECEIVER);
+        EXPECT_TRUE(slow->PossibleHClassesAreStale(unstable));
+        slow->RecordNonHole(unstable);
+        EXPECT_TRUE(slow->PossibleHClassesAreStale(unstable));
+        slow->Merge(*fast);
+        EXPECT_TRUE(slow->PossibleHClassesAreStale(unstable));
+        EXPECT_TRUE(slow->TryGetHClass(stable).Equals(hclass));
+        EXPECT_TRUE(facts.TryGetHClass(unstable).Equals(hclass));
+
+        // Independent calls get distinct generations; fresh facts on both paths
+        // remain fresh after each path explicitly revalidates its HClass.
+        CompileInfoFacts *left = facts.Clone();
+        CompileInfoFacts *right = facts.Clone();
+        left->OnSideEffect();
+        right->OnSideEffect();
+        left->MarkPossibleHClassesFresh(unstable);
+        right->MarkPossibleHClassesFresh(unstable);
+        left->Merge(*right);
+        EXPECT_TRUE(left->TryGetHClass(unstable).Equals(hclass));
+        EXPECT_FALSE(left->PossibleHClassesAreStale(unstable));
+        EXPECT_TRUE(facts.TryGetHClass(unstable).Equals(hclass));
+    });
 }
 
 }  // namespace panda::ecmascript::arksteed

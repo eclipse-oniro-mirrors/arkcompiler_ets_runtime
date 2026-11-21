@@ -307,6 +307,33 @@ void AssemblerAarch64::Ldrb(const Register &rt, const MemoryOperand &operand)
     Ldr(rt, operand, Scale::B);
 }
 
+void AssemblerAarch64::EmitLoadRegisterOffset(uint32_t opcode, uint32_t rt, const MemoryOperand &operand,
+                                              uint32_t scale)
+{
+    ASSERT(!operand.IsImmediateOffset() && operand.GetRegBase().IsX());
+    ASSERT(operand.GetAddrMode() == AddrMode::OFFSET);
+    Extend extend = operand.GetExtendOption();
+    ASSERT(extend == UXTW || extend == UXTX || extend == SXTW || extend == SXTX);
+    uint32_t shift = operand.GetShiftAmount();
+    ASSERT(shift == 0 || shift == scale);
+    uint32_t extendField = (static_cast<uint32_t>(extend) << LDR_STR_Extend_LOWBITS) & LDR_STR_Extend_MASK;
+    uint32_t shiftField = ((shift != 0 ? 1U : 0U) << LDR_STR_S_LOWBITS) & LDR_STR_S_MASK;
+    EmitU32(opcode | Rm(operand.GetRegisterOffset().GetId()) | extendField | shiftField |
+            Rn(operand.GetRegBase().GetId()) | Rt(rt));
+}
+
+void AssemblerAarch64::Ldrsb(const Register &rt, const MemoryOperand &operand)
+{
+    ASSERT(rt.IsW());
+    EmitLoadRegisterOffset(LDRSB_W_Register, rt.GetId(), operand, 0);
+}
+
+void AssemblerAarch64::Ldrsh(const Register &rt, const MemoryOperand &operand)
+{
+    ASSERT(rt.IsW());
+    EmitLoadRegisterOffset(LDRSH_W_Register, rt.GetId(), operand, 1);
+}
+
 void AssemblerAarch64::Str(const Register &rt, const MemoryOperand &operand)
 {
     uint32_t op = 0;
@@ -978,6 +1005,11 @@ void AssemblerAarch64::Scvtf(const VRegister &vd, const Register &rn)
     EmitU32(code);
 }
 
+void AssemblerAarch64::Ucvtf(const VRegister &vd, const Register &rn)
+{
+    EmitU32(Sf(!rn.IsW()) | FPType(vd) | UCVTF | Rn(rn.GetId()) | Rd(vd.GetId()));
+}
+
 void AssemblerAarch64::Fcvt(const VRegister &vd, const VRegister &vn)
 {
     ASSERT(vd.IsD() && vn.IsS());
@@ -1025,6 +1057,18 @@ void AssemblerAarch64::Fcvtzs(const Register &rd, const VRegister &vn)
 {
     uint32_t code = Sf(!rd.IsW()) | FPType(vn) | FCVTZS | Rn(vn.GetId()) | Rd(rd.GetId());
     EmitU32(code);
+}
+
+void AssemblerAarch64::Fjcvtzs(const Register &rd, const VRegister &vn)
+{
+    ASSERT(rd.IsW() && vn.IsD());
+    EmitU32(FJCVTZS | Rn(vn.GetId()) | Rd(rd.GetId()));
+}
+
+void AssemblerAarch64::Frintn(const VRegister &vd, const VRegister &vn)
+{
+    ASSERT(vd.IsD() == vn.IsD());
+    EmitU32(FPType(vd) | FRINTN | Rn(vn.GetId()) | Rd(vd.GetId()));
 }
 
 void AssemblerAarch64::FcvtFloat32(const VRegister &vd, const VRegister &vn)
@@ -1090,6 +1134,21 @@ void AssemblerAarch64::AddSubReg(AddSubOpCode op, const Register &rd, const Regi
 void AssemblerAarch64::Cmp(const Register &rd, const Operand &operand)
 {
     Subs(rd.IsW() ? wzr : xzr, rd, operand);
+}
+
+void AssemblerAarch64::Ccmn(const Register &rn, uint32_t immediate, uint32_t nzcv, Condition cond)
+{
+    ASSERT(immediate < 32U && nzcv < 16U);
+    constexpr uint32_t CCMN_IMMEDIATE = 0x3A400800U;
+    EmitU32(Sf(!rn.IsW()) | CCMN_IMMEDIATE | Rm(immediate) | (static_cast<uint32_t>(cond) << CSEL_Cond_LOWBITS) |
+            Rn(rn.GetId()) | nzcv);
+}
+
+void AssemblerAarch64::Cset(const Register &rd, Condition cond)
+{
+    ASSERT(cond != AL && cond != NV);
+    uint32_t inverse = static_cast<uint32_t>(cond) ^ 1U;
+    EmitU32(Sf(!rd.IsW()) | CSET | (inverse << CSEL_Cond_LOWBITS) | Rd(rd.GetId()));
 }
 
 void AssemblerAarch64::CMov(const Register &rd, const Register &rn, const Operand &operand, Condition cond)
@@ -1570,6 +1629,11 @@ void AssemblerAarch64::EmitLoadStoreD(const VRegister &vt, const MemoryOperand &
 
 void AssemblerAarch64::Ldr(const VRegister &vt, const MemoryOperand &operand)
 {
+    if (!operand.IsImmediateOffset()) {
+        ASSERT(vt.IsS() || vt.IsD());
+        EmitLoadRegisterOffset(vt.IsD() ? LDR_D_Register : LDR_S_Register, vt.GetId(), operand, vt.IsD() ? 3U : 2U);
+        return;
+    }
     if (vt.IsD()) {
         EmitLoadStoreD(vt, operand, LoadStoreOpCode::LDR_D_Offset, LoadStoreOpCode::LDR_D_Pre,
                        LoadStoreOpCode::LDR_D_Post);

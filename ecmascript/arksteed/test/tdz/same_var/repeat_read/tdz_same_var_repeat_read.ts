@@ -13,17 +13,18 @@
  * limitations under the License.
  */
 
+//! PARAMS --compiler-jit-hotness-threshold=60000
 //! METHOD      compute
 //! COUNT_LE    BranchIfReferenceEqual  1
 //! COUNT_LE    CallCommonStub   GetStringFromConstPool  1
-//! METHOD compute
+//! HAS_NOT CallCommonStub Add
 //! HAS LoadTaggedField
 //! COMPILE_COUNT_GE *compute* 1
 //! EXEC_COUNT_GE *compute* 1
 //! DEOPT_COUNT *Deoptimize* 0
-// Note: the frontend (ets_frontend f0bcbe524b) eliminates the redundant hole-checks for
-// the repeated reads of the same non-hole lexical var in one basic block, so at most
-// one throw.undefinedifholewithname reaches the JIT (COUNT_LE tolerates further elimination).
+// Warm the arithmetic before synchronous compilation so additions use numeric
+// IR. A generic Add can invoke user code and must invalidate lexical-load facts;
+// this case checks redundant hole checks without that side effect.
 
 declare function print(arg: number): string;
 
@@ -37,6 +38,7 @@ function tdz_same_var_repeat_read(offset: number): number {
     function compute(): number {
         return x + x + x;  // three ldlexvar + three throw.undefinedifholewithname on one value
     }
+    for (let i = 0; i < 100; i++) { compute(); }
     ArkTools.arkSteedCompileSync(compute);
 
     return compute() + offset;

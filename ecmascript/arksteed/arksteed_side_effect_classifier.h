@@ -73,15 +73,14 @@ public:
 
     static SideEffectDescriptor Classify(PrepareSharedStoreFieldVertex *vertex)
     {
-        // Only validates the value, flattens a string, or throws a type error.
-        // The following StoreSharedFieldWithBarrier records the property write.
+        // Flattening a TreeString can update its existing first and second fields.
         (void)vertex;
         return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
     }
 
     static SideEffectDescriptor Classify(StringEqualVertex *vertex)
     {
-        // Flattening strings may allocate, but does not modify JS properties.
+        // SlowFlattenString can update an existing TreeString.
         (void)vertex;
         return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
     }
@@ -102,7 +101,7 @@ public:
     static SideEffectDescriptor Classify(InitializeEmptyObjectVertex* vertex)
     {
         (void)vertex;
-        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+        return SideEffectDescriptor {SideEffectKind::SAFE_CALL, /* advancesEffectEpoch */ false};
     }
 
     static SideEffectDescriptor Classify(InitializeEmptyObjectWithSizeVertex* vertex)
@@ -114,31 +113,31 @@ public:
     static SideEffectDescriptor Classify(InitializeObjectWithBufferVertex* vertex)
     {
         (void)vertex;
-        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+        return SideEffectDescriptor {SideEffectKind::SAFE_CALL, /* advancesEffectEpoch */ false};
     }
 
     static SideEffectDescriptor Classify(InitializeEmptyArrayVertex* vertex)
     {
         (void)vertex;
-        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+        return SideEffectDescriptor {SideEffectKind::SAFE_CALL, /* advancesEffectEpoch */ false};
     }
 
     static SideEffectDescriptor Classify(InitializeArrayWithBufferVertex* vertex)
     {
         (void)vertex;
-        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+        return SideEffectDescriptor {SideEffectKind::SAFE_CALL, /* advancesEffectEpoch */ false};
     }
 
     static SideEffectDescriptor Classify(InitializeUnmappedArgumentsVertex *vertex)
     {
         (void)vertex;
-        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+        return SideEffectDescriptor {SideEffectKind::SAFE_CALL, /* advancesEffectEpoch */ false};
     }
 
     static SideEffectDescriptor Classify(InitializeUnmappedArgumentsElementsVertex *vertex)
     {
         (void)vertex;
-        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+        return SideEffectDescriptor {SideEffectKind::SAFE_CALL, /* advancesEffectEpoch */ false};
     }
 
     static SideEffectDescriptor Classify(StoreArraySpreadFastVertex *vertex)
@@ -248,7 +247,7 @@ public:
 
     static SideEffectDescriptor Classify(NumberToStringVertex *)
     {
-        return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+        return SideEffectDescriptor {SideEffectKind::SAFE_CALL, false};
     }
 
     static SideEffectDescriptor Classify(CallRuntimeVertex *vertex)
@@ -266,9 +265,70 @@ public:
         return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
     }
 
+    static SideEffectDescriptor Classify(CallRuntimeVertex *vertex, const CompileInfoFacts &facts)
+    {
+        if (vertex->GetSideEffectKind() != SideEffectKind::SAFE_CALL) {
+            return SideEffectDescriptor {vertex->GetSideEffectKind()};
+        }
+        switch (vertex->GetRuntimeStubID()) {
+            case RuntimeStubID::ID_NumberToString:
+                if (vertex->GetInputCount() == 1 && facts.CheckType(vertex->GetInput(0), NodeInfo::NodeType::NUMBER)) {
+                    // The result cache is private to the runtime; ArkSteed does not CSE its entries.
+                    return SideEffectDescriptor {SideEffectKind::SAFE_CALL, false};
+                }
+                return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
+            case RuntimeStubID::ID_OptNewLexicalEnvWithName:
+                // Scope-info creation can populate constant-pool caches.
+                return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+            default:
+                return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
+        }
+    }
+
     static SideEffectDescriptor Classify(CallCommonStubVertex *vertex)
     {
         return SideEffectDescriptor {vertex->GetSideEffectKind()};
+    }
+
+    static SideEffectDescriptor Classify(CallCommonStubVertex *vertex, const CompileInfoFacts &facts)
+    {
+        if (vertex->GetSideEffectKind() != SideEffectKind::SAFE_CALL) {
+            return SideEffectDescriptor {vertex->GetSideEffectKind()};
+        }
+        switch (vertex->GetCommonStubID()) {
+            case CommonStubID::ToBooleanTrue:
+            case CommonStubID::ToBooleanFalse:
+            case CommonStubID::CreateEmptyArray:
+            case CommonStubID::NewLexicalEnv:
+            case CommonStubID::TypeOf:
+            case CommonStubID::CreateStringBySingleCharCode:
+                // These targets read old values or initialize a fresh result.
+                return SideEffectDescriptor {SideEffectKind::SAFE_CALL, false};
+            case CommonStubID::StrictEqual:
+            case CommonStubID::StrictNotEqual: {
+                constexpr size_t LEFT_INPUT_INDEX = 0;
+                constexpr size_t RIGHT_INPUT_INDEX = 1;
+                // String comparison can flatten an existing TreeString.
+                if (vertex->GetInputCount() <= RIGHT_INPUT_INDEX) {
+                    return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+                }
+                const auto leftType = facts.GetKnownType(vertex->GetInput(LEFT_INPUT_INDEX));
+                if (!NodeInfo::NodeTypeCanBe(leftType, NodeInfo::NodeType::STRING)) {
+                    return SideEffectDescriptor {SideEffectKind::SAFE_CALL, false};
+                }
+                const auto rightType = facts.GetKnownType(vertex->GetInput(RIGHT_INPUT_INDEX));
+                const bool mayFlattenString = NodeInfo::NodeTypeCanBe(rightType, NodeInfo::NodeType::STRING);
+                return SideEffectDescriptor {SideEffectKind::SAFE_CALL, mayFlattenString};
+            }
+            case CommonStubID::StringAdd:
+                // The sliced-string fast path can extend an existing string.
+                return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
+            case CommonStubID::GetStringFromConstPool:
+                // A cache miss can write an existing constant-pool slot.
+                return SideEffectDescriptor {SideEffectKind::SAFE_CALL};
+            default:
+                return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
+        }
     }
 
     static SideEffectDescriptor Classify(CallKnownJSFunctionVertex *vertex)
@@ -343,6 +403,13 @@ public:
         static_assert(CanWrite(VertexT::PROPERTIES));
         LOG_COMPILER(WARN) << "ArkSteed side-effect classifier fallback for " << OpcodeToString(vertex->GetOpcode());
         return SideEffectDescriptor {SideEffectKind::UNKNOWN_CALL};
+    }
+
+    template <typename VertexT>
+    static SideEffectDescriptor Classify(VertexT *vertex, const CompileInfoFacts &facts)
+    {
+        (void)facts;
+        return Classify(vertex);
     }
 
 private:

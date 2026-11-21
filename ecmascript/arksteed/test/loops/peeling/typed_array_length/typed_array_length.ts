@@ -16,7 +16,11 @@
 //! PARAMS --compiler-jit-hotness-threshold=10000 --compiler-arksteed-enable-inline=false
 //! METHOD repeatedLength
 //! COUNT LoadInt32Field 1
-//! COUNT DeoptIfArrayBufferDetached 2
+// The warmed no-op callback permits reusing the length and detach check.
+//! COUNT DeoptIfArrayBufferDetached 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallKnownJSFunction
+//! HAS_NOT Call
 //! HAS_NOT CallCommonStub GetPropertyByName
 //! METHOD lengthAndElement
 //! COUNT LoadInt32Field 1
@@ -40,7 +44,11 @@
 //! HAS_NOT CallCommonStub GetPropertyByName
 //! METHOD getterAroundCall
 //! COUNT LoadInt32Field 1
-//! COUNT DeoptIfPrototypeChanged 2
+// Reuse the prototype check across the guarded no-op callback.
+//! COUNT DeoptIfPrototypeChanged 1
+//! COUNT DeoptIfReferenceNotEqual 1
+//! HAS_NOT CallKnownJSFunction
+//! HAS_NOT Call
 //! HAS_NOT CallCommonStub GetPropertyByName
 //! METHOD customLength
 //! HAS_NOT LoadInt32Field

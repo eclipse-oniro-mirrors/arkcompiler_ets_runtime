@@ -422,6 +422,44 @@ HWTEST_F_L0(ArkSteedSideEffectClassifierTest, CallCommonStubSafe)
     ExpectEffectWithoutLocation(Classifier::Classify(vertex), SideEffectKind::SAFE_CALL);
 }
 
+HWTEST_F_L0(ArkSteedSideEffectClassifierTest, SafeCallEpochDependsOnTargetAndFacts)
+{
+    CompileInfoFacts facts(&chunk_);
+    auto *booleanCall = Vertex::New<CallCommonStubVertex>(&chunk_, static_cast<size_t>(0), CommonStubID::ToBooleanTrue,
+                                                          SideEffectKind::SAFE_CALL);
+    auto *stringAdd = Vertex::New<CallCommonStubVertex>(&chunk_, static_cast<size_t>(0), CommonStubID::StringAdd,
+                                                        SideEffectKind::SAFE_CALL);
+    auto *constPool = Vertex::New<CallCommonStubVertex>(
+        &chunk_, static_cast<size_t>(0), CommonStubID::GetStringFromConstPool, SideEffectKind::SAFE_CALL);
+    auto *unreviewed = Vertex::New<CallCommonStubVertex>(&chunk_, static_cast<size_t>(0), CommonStubID::Add,
+                                                         SideEffectKind::SAFE_CALL);
+
+    EXPECT_FALSE(Classifier::Classify(booleanCall, facts).advancesEffectEpoch);
+    EXPECT_EQ(Classifier::Classify(stringAdd, facts).kind, SideEffectKind::UNKNOWN_CALL);
+    EXPECT_TRUE(Classifier::Classify(constPool, facts).advancesEffectEpoch);
+    EXPECT_EQ(Classifier::Classify(unreviewed, facts).kind, SideEffectKind::UNKNOWN_CALL);
+
+    auto *left = Vertex::New<InitialValueVertex>(&chunk_, 0, 0);
+    auto *right = Vertex::New<InitialValueVertex>(&chunk_, 0, 1);
+    auto *globalEnv = Vertex::New<InitialValueVertex>(&chunk_, 0, 2);
+    auto *strictEqual = Vertex::New<CallCommonStubVertex>(&chunk_, static_cast<size_t>(3), CommonStubID::StrictEqual,
+                                                          SideEffectKind::SAFE_CALL);
+    strictEqual->SetInput(0, left);
+    strictEqual->SetInput(1, right);
+    strictEqual->SetInput(2, globalEnv);
+    EXPECT_TRUE(Classifier::Classify(strictEqual, facts).advancesEffectEpoch);
+    facts.EnsureType(left, NodeInfo::NodeType::INT);
+    EXPECT_FALSE(Classifier::Classify(strictEqual, facts).advancesEffectEpoch);
+
+    auto *number = Vertex::New<InitialValueVertex>(&chunk_, 0, 0);
+    auto *numberToString = Vertex::New<CallRuntimeVertex>(&chunk_, static_cast<size_t>(1),
+                                                          RuntimeStubID::ID_NumberToString, SideEffectKind::SAFE_CALL);
+    numberToString->SetInput(0, number);
+    EXPECT_EQ(Classifier::Classify(numberToString, facts).kind, SideEffectKind::UNKNOWN_CALL);
+    facts.EnsureType(number, NodeInfo::NodeType::NUMBER);
+    EXPECT_FALSE(Classifier::Classify(numberToString, facts).advancesEffectEpoch);
+}
+
 HWTEST_F_L0(ArkSteedSideEffectClassifierTest, AllocateInYoungHasNoSideEffect)
 {
     auto* vertex

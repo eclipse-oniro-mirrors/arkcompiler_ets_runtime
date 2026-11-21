@@ -24,13 +24,95 @@
 #include "ecmascript/arksteed/arksteed_vertex.h"
 #include "ecmascript/compiler/common_stub_csigns.h"
 #include "ecmascript/compiler/rt_call_signature.h"
+#include "ecmascript/js_tagged_value.h"
 #include <ios>
 #include <sstream>
 #include <type_traits>
 
 namespace panda::ecmascript::arksteed {
 
+std::optional<int32_t> TryGetInt32Constant(const ValueVertex *value)
+{
+    if (value != nullptr) {
+        if (auto *constant = value->TryCast<Int32ConstantVertex>()) {
+            return constant->GetValue();
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<int64_t> TryGetInt64Constant(const ValueVertex *value)
+{
+    if (value != nullptr) {
+        if (auto *constant = value->TryCast<Int64ConstantVertex>()) {
+            return constant->GetValue();
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<uint64_t> TryGetTaggedConstant(const ValueVertex *value)
+{
+    if (value != nullptr) {
+        if (auto *constant = value->TryCast<TaggedConstantVertex>()) {
+            uint64_t bits = constant->GetValue();
+            if (!JSTaggedValue(bits).IsHeapObject()) {
+                return bits;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 namespace {
+template <typename T>
+void SetCompareInputConstraints(Vertex *vertex, Condition condition, std::optional<T> left, std::optional<T> right)
+{
+    constexpr uint32_t leftIndex = 0;
+    constexpr uint32_t rightIndex = 1;
+    UseRegister(vertex->Arg(leftIndex));
+    UseRegister(vertex->Arg(rightIndex));
+    if (right && ArkSteedAssembler::CanUseCompareImmediate(*right)) {
+        UseAny(vertex->Arg(rightIndex));
+    } else if (left && ArkSteedAssembler::CanUseCompareImmediate(*left) && SwapCompareCondition(condition)) {
+        UseAny(vertex->Arg(leftIndex));
+    }
+}
+
+void SetInt32ArithmeticConstraints(ValueVertex *vertex, bool isAdd, bool withOverflow)
+{
+    constexpr uint32_t leftIndex = 0;
+    constexpr uint32_t rightIndex = 1;
+    UseRegister(vertex->Arg(leftIndex));
+    UseRegister(vertex->Arg(rightIndex));
+    auto right = TryGetInt32Constant(vertex->GetInput(rightIndex));
+    bool constantLeft = false;
+    if (right && ArkSteedAssembler::CanUseAddSubImmediate(*right)) {
+        UseAny(vertex->Arg(rightIndex));
+    } else {
+        auto left = TryGetInt32Constant(vertex->GetInput(leftIndex));
+        if (left && ((isAdd && ArkSteedAssembler::CanUseAddSubImmediate(*left)) || (!isAdd && *left == 0))) {
+            UseAny(vertex->Arg(leftIndex));
+            constantLeft = true;
+        }
+    }
+#if defined(PANDA_TARGET_AMD64)
+    if (constantLeft) {
+        DefineAsRegisterReusingInputs(vertex);
+    } else {
+        DefineSameAsFirst(vertex);
+    }
+    (void)withOverflow;
+#else
+    if (withOverflow) {
+        DefineAsRegister(vertex);
+    } else {
+        DefineAsRegisterReusingInputs(vertex);
+    }
+    (void)constantLeft;
+#endif
+}
+
 void UseDeoptFrameSlot(InputLocation *location)
 {
     location->GetOperand() = UnallocatedState(UnallocatedState::ExtendedPolicy::MUST_HAVE_SLOT,
@@ -570,8 +652,8 @@ void LineStringLoadElementVertex::SetValueLocationConstraints()
 
 void DeoptIfReferenceNotEqualVertex::SetValueLocationConstraints()
 {
-    UseRegister(Arg(LEFT_INDEX));
-    UseRegister(Arg(RIGHT_INDEX));
+    SetCompareInputConstraints(this, Condition::NOT_EQUAL, TryGetTaggedConstant(GetInput(LEFT_INDEX)),
+                               TryGetTaggedConstant(GetInput(RIGHT_INDEX)));
 }
 
 void DeoptIfHClassMismatchVertex::SetValueLocationConstraints()
@@ -595,15 +677,15 @@ void DeoptIfPrototypeChangedVertex::SetValueLocationConstraints()
 
 void DeoptIfTaggedConditionVertex::SetValueLocationConstraints()
 {
-    UseRegister(Arg(LEFT_INDEX));
-    UseRegister(Arg(RIGHT_INDEX));
+    SetCompareInputConstraints(this, GetCondition(), TryGetTaggedConstant(GetInput(LEFT_INDEX)),
+                               TryGetTaggedConstant(GetInput(RIGHT_INDEX)));
     UseEagerDeoptFrameSlots(this);
 }
 
 void DeoptIfInt32ConditionVertex::SetValueLocationConstraints()
 {
-    UseRegister(Arg(LEFT_INDEX));
-    UseRegister(Arg(RIGHT_INDEX));
+    SetCompareInputConstraints(this, GetCondition(), TryGetInt32Constant(GetInput(LEFT_INDEX)),
+                               TryGetInt32Constant(GetInput(RIGHT_INDEX)));
 }
 
 void DeoptIfFloat64ConditionVertex::SetValueLocationConstraints()
@@ -739,13 +821,23 @@ void LoadTaggedElementVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
     UseRegister(Arg(ELEMENTS_INDEX));
-    UseRegister(Arg(INDEX_INDEX));
+    auto index = TryGetInt32Constant(GetInput(INDEX_INDEX));
+    if (index && ArkSteedAssembler::TryGetTaggedElementOffset(*index)) {
+        UseAny(Arg(INDEX_INDEX));
+    } else {
+        UseRegister(Arg(INDEX_INDEX));
+    }
 }
 
 void LoadSingleCharTableElementVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
-    UseRegister(Arg(CHAR_CODE_INDEX));
+    auto index = TryGetInt32Constant(GetInput(CHAR_CODE_INDEX));
+    if (index && ArkSteedAssembler::TryGetTaggedElementOffset(*index)) {
+        UseAny(Arg(CHAR_CODE_INDEX));
+    } else {
+        UseRegister(Arg(CHAR_CODE_INDEX));
+    }
     SetTemporariesNeeded(1);
 }
 
@@ -805,13 +897,23 @@ void LoadHClassAddressVertex::SetValueLocationConstraints()
 void StoreTaggedToAddressVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(OBJECT_INDEX));
-    UseRegister(Arg(VALUE_INDEX));
+    auto constant = TryGetTaggedConstant(GetInput(VALUE_INDEX));
+    if (constant && ArkSteedAssembler::CanStoreConstant(*constant)) {
+        UseAny(Arg(VALUE_INDEX));
+    } else {
+        UseRegister(Arg(VALUE_INDEX));
+    }
 }
 
 void StoreI32ToAddressVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(OBJECT_INDEX));
-    UseRegister(Arg(VALUE_INDEX));
+    auto constant = TryGetInt32Constant(GetInput(VALUE_INDEX));
+    if (constant && ArkSteedAssembler::CanStoreConstant(*constant)) {
+        UseAny(Arg(VALUE_INDEX));
+    } else {
+        UseRegister(Arg(VALUE_INDEX));
+    }
 }
 
 void StoreI64ToAddressVertex::SetValueLocationConstraints()
@@ -829,7 +931,12 @@ void StoreF64ToAddressVertex::SetValueLocationConstraints()
 void StoreTaggedFieldVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(OBJECT_INDEX));
-    UseRegister(Arg(VALUE_INDEX));
+    auto constant = TryGetTaggedConstant(GetInput(VALUE_INDEX));
+    if (constant && ArkSteedAssembler::CanStoreConstant(*constant)) {
+        UseAny(Arg(VALUE_INDEX));
+    } else {
+        UseRegister(Arg(VALUE_INDEX));
+    }
 }
 
 void StoreTaggedFieldWithBarrierVertex::SetValueLocationConstraints()
@@ -842,9 +949,24 @@ void StoreTaggedFieldWithBarrierVertex::SetValueLocationConstraints()
 void StoreTaggedElementVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(OBJECT_INDEX));
-    UseRegister(Arg(INDEX_INDEX));
-    UseRegister(Arg(VALUE_INDEX));
-    SetTemporariesNeeded(1);
+    auto index = TryGetInt32Constant(GetInput(INDEX_INDEX));
+    auto offset = index ? ArkSteedAssembler::TryGetTaggedElementOffset(*index) : std::nullopt;
+    if (offset) {
+        UseAny(Arg(INDEX_INDEX));
+    } else {
+        UseRegister(Arg(INDEX_INDEX));
+    }
+    auto constant = TryGetTaggedConstant(GetInput(VALUE_INDEX));
+    if (constant && ArkSteedAssembler::CanStoreConstant(*constant)) {
+        UseAny(Arg(VALUE_INDEX));
+    } else {
+        UseRegister(Arg(VALUE_INDEX));
+    }
+#if defined(PANDA_TARGET_ARM64)
+    SetTemporariesNeeded(offset ? 0 : 1);
+#else
+    SetTemporariesNeeded(0);
+#endif
 }
 
 void StoreTaggedElementWithBarrierVertex::SetValueLocationConstraints()
@@ -961,7 +1083,12 @@ void InitializeObjectWithBufferVertex::SetValueLocationConstraints()
 void StoreInt32FieldVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(STORE_TARGET_INDEX));
-    UseRegister(Arg(VALUE_INDEX));
+    auto constant = TryGetInt32Constant(GetInput(VALUE_INDEX));
+    if (constant && ArkSteedAssembler::CanStoreConstant(*constant)) {
+        UseAny(Arg(VALUE_INDEX));
+    } else {
+        UseRegister(Arg(VALUE_INDEX));
+    }
 }
 
 void StoreDoubleFieldVertex::SetValueLocationConstraints()
@@ -1032,8 +1159,8 @@ void CheckedTaggedStringVertex::SetValueLocationConstraints()
 void I32ConditionCheckVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
-    UseRegister(Arg(LEFT_INDEX));
-    UseRegister(Arg(RIGHT_INDEX));
+    SetCompareInputConstraints(this, GetCondition(), TryGetInt32Constant(GetInput(LEFT_INDEX)),
+                               TryGetInt32Constant(GetInput(RIGHT_INDEX)));
 }
 
 void F64ConditionCheckVertex::SetValueLocationConstraints()
@@ -1058,6 +1185,27 @@ void TaggedNumberToBooleanVertex::SetValueLocationConstraints()
     UseEagerDeoptFrameSlots(this);
 }
 
+void NumberToBooleanVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+    SetTemporariesNeeded(2);
+}
+
+void DoubleToBooleanVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+    SetTemporariesNeeded(2);
+}
+
+void StringToBooleanVertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+    SetTemporariesNeeded(1);
+}
+
 void TaggedDoubleToBooleanVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
@@ -1069,15 +1217,15 @@ void TaggedDoubleToBooleanVertex::SetValueLocationConstraints()
 void TaggedEqualVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
-    UseRegister(Arg(LEFT_INDEX));
-    UseRegister(Arg(RIGHT_INDEX));
+    SetCompareInputConstraints(this, Condition::EQUAL, TryGetTaggedConstant(GetInput(LEFT_INDEX)),
+                               TryGetTaggedConstant(GetInput(RIGHT_INDEX)));
 }
 
 void TaggedNotEqualVertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
-    UseRegister(Arg(LEFT_INDEX));
-    UseRegister(Arg(RIGHT_INDEX));
+    SetCompareInputConstraints(this, Condition::NOT_EQUAL, TryGetTaggedConstant(GetInput(LEFT_INDEX)),
+                               TryGetTaggedConstant(GetInput(RIGHT_INDEX)));
 }
 
 void StringEqualVertex::SetValueLocationConstraints()
@@ -1086,24 +1234,15 @@ void StringEqualVertex::SetValueLocationConstraints()
     SetCommonStubArgConstraints(this, GetInputCount());
 }
 
-#if defined(PANDA_TARGET_AMD64)
-#define DEFINE_I32_WITH_OVERFLOW_RESULT_CONSTRAINT() DefineSameAsFirst(this)
-#else
-#define DEFINE_I32_WITH_OVERFLOW_RESULT_CONSTRAINT() DefineAsRegister(this)
-#endif
+void I32AddWithOverflowVertex::SetValueLocationConstraints()
+{
+    SetInt32ArithmeticConstraints(this, true, true);
+}
 
-#define DEFINE_I32_WITH_OVERFLOW_CONSTRAINTS(Name)                     \
-    void I32##Name##WithOverflowVertex::SetValueLocationConstraints()  \
-    {                                                                  \
-        UseRegister(Arg(LEFT_INDEX));                                  \
-        UseRegister(Arg(RIGHT_INDEX));                                 \
-        DEFINE_I32_WITH_OVERFLOW_RESULT_CONSTRAINT();                   \
-    }
-
-DEFINE_I32_WITH_OVERFLOW_CONSTRAINTS(Add)
-DEFINE_I32_WITH_OVERFLOW_CONSTRAINTS(Sub)
-#undef DEFINE_I32_WITH_OVERFLOW_CONSTRAINTS
-#undef DEFINE_I32_WITH_OVERFLOW_RESULT_CONSTRAINT
+void I32SubWithOverflowVertex::SetValueLocationConstraints()
+{
+    SetInt32ArithmeticConstraints(this, false, true);
+}
 
 void I32MulWithOverflowVertex::SetValueLocationConstraints()
 {
@@ -1150,24 +1289,12 @@ void I32DivByConstWithCheckVertex::SetValueLocationConstraints()
 
 void I32AddVertex::SetValueLocationConstraints()
 {
-    UseRegister(Arg(LEFT_INDEX));
-    if (GetInput(RIGHT_INDEX)->Is<Int32ConstantVertex>()) {
-        UseAny(Arg(RIGHT_INDEX));
-    } else {
-        UseRegister(Arg(RIGHT_INDEX));
-    }
-    DefineSameAsFirst(this);
+    SetInt32ArithmeticConstraints(this, true, false);
 }
 
 void I32SubVertex::SetValueLocationConstraints()
 {
-    UseRegister(Arg(LEFT_INDEX));
-    if (GetInput(RIGHT_INDEX)->Is<Int32ConstantVertex>()) {
-        UseAny(Arg(RIGHT_INDEX));
-    } else {
-        UseRegister(Arg(RIGHT_INDEX));
-    }
-    DefineSameAsFirst(this);
+    SetInt32ArithmeticConstraints(this, false, false);
 }
 
 void I32MulVertex::SetValueLocationConstraints()
@@ -1178,7 +1305,11 @@ void I32MulVertex::SetValueLocationConstraints()
     } else {
         UseRegister(Arg(RIGHT_INDEX));
     }
+#if defined(PANDA_TARGET_ARM64)
+    DefineAsRegisterReusingInputs(this);
+#else
     DefineSameAsFirst(this);
+#endif
 }
 
 void I32DivVertex::SetValueLocationConstraints()
@@ -1225,7 +1356,11 @@ void I32BitwiseBinaryVertex::SetValueLocationConstraints()
     } else {
         UseRegister(Arg(RIGHT_INDEX));
     }
+#if defined(PANDA_TARGET_ARM64)
+    DefineAsRegisterReusingInputs(this);
+#else
     DefineSameAsFirst(this);
+#endif
 }
 
 void CheckedNonNegativeI32ToTaggedIntVertex::SetValueLocationConstraints()
@@ -1271,6 +1406,23 @@ void I32ToI64Vertex::SetValueLocationConstraints()
     UseRegister(Arg(INPUT_INDEX));
 }
 
+void I32IncVertex::SetValueLocationConstraints()
+{
+    UseRegister(Arg(VALUE_INDEX));
+#if defined(PANDA_TARGET_AMD64)
+    DefineSameAsFirst(this);
+#else
+    DefineAsRegister(this);
+#endif
+}
+
+void TaggedDoubleToF64Vertex::SetValueLocationConstraints()
+{
+    DefineAsRegister(this);
+    UseRegister(Arg(INPUT_INDEX));
+    SetTemporariesNeeded(2);
+}
+
 void U32ToF64Vertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
@@ -1309,7 +1461,6 @@ void DoubleToInt32Vertex::SetValueLocationConstraints()
 {
     DefineAsRegister(this);
     UseRegister(Arg(INPUT_INDEX));
-    SetTemporariesNeeded(1);
 }
 
 void I32ToUint8ClampedVertex::SetValueLocationConstraints()
@@ -1322,7 +1473,11 @@ void F64ToUint8ClampedVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(INPUT_INDEX));
     DefineAsRegister(this);
-    SetTemporariesNeeded(2);  // 2: immediate and half-bits scratches for the clamp sequence
+#if defined(PANDA_TARGET_ARM64)
+    SetTemporariesNeeded(1);
+#else
+    SetTemporariesNeeded(2);
+#endif
     SetDoubleTemporariesNeeded(1);
 }
 
@@ -1356,12 +1511,18 @@ void F64NegVertex::SetValueLocationConstraints()
 #endif
 }
 
+#if defined(PANDA_TARGET_ARM64)
+#define DEFINE_F64_BINOP_RESULT_CONSTRAINT() DefineAsRegisterReusingInputs(this)
+#else
+#define DEFINE_F64_BINOP_RESULT_CONSTRAINT() DefineSameAsFirst(this)
+#endif
+
 #define DEFINE_F64_BINOP_CONSTRAINTS(Name)       \
     void F64##Name##Vertex::SetValueLocationConstraints() \
     {                                           \
         UseRegister(Arg(LEFT_INDEX));           \
         UseRegister(Arg(RIGHT_INDEX));          \
-        DefineSameAsFirst(this);                \
+        DEFINE_F64_BINOP_RESULT_CONSTRAINT();   \
     }
 
 DEFINE_F64_BINOP_CONSTRAINTS(Add)
@@ -1369,6 +1530,7 @@ DEFINE_F64_BINOP_CONSTRAINTS(Sub)
 DEFINE_F64_BINOP_CONSTRAINTS(Mul)
 DEFINE_F64_BINOP_CONSTRAINTS(Div)
 #undef DEFINE_F64_BINOP_CONSTRAINTS
+#undef DEFINE_F64_BINOP_RESULT_CONSTRAINT
 
 // ========================================= Control Opcode =========================================
 
@@ -1408,18 +1570,14 @@ void BranchIfHClassInVertex::SetValueLocationConstraints()
 
 void BranchIfInt32CompareVertex::SetValueLocationConstraints()
 {
-    UseRegister(Arg(LEFT_INDEX));
-    if (GetInput(RIGHT_INDEX)->Is<Int32ConstantVertex>()) {
-        UseAny(Arg(RIGHT_INDEX));
-    } else {
-        UseRegister(Arg(RIGHT_INDEX));
-    }
+    SetCompareInputConstraints(this, GetCondition(), TryGetInt32Constant(GetInput(LEFT_INDEX)),
+                               TryGetInt32Constant(GetInput(RIGHT_INDEX)));
 }
 
 void BranchIfInt64CompareVertex::SetValueLocationConstraints()
 {
-    UseRegister(Arg(LEFT_INDEX));
-    UseRegister(Arg(RIGHT_INDEX));
+    SetCompareInputConstraints(this, GetCondition(), TryGetInt64Constant(GetInput(LEFT_INDEX)),
+                               TryGetInt64Constant(GetInput(RIGHT_INDEX)));
 }
 
 void BranchIfFloat64CompareVertex::SetValueLocationConstraints()
@@ -1430,8 +1588,8 @@ void BranchIfFloat64CompareVertex::SetValueLocationConstraints()
 
 void BranchIfReferenceEqualVertex::SetValueLocationConstraints()
 {
-    UseRegister(Arg(LEFT_INDEX));
-    UseRegister(Arg(RIGHT_INDEX));
+    SetCompareInputConstraints(this, Condition::EQUAL, TryGetTaggedConstant(GetInput(LEFT_INDEX)),
+                               TryGetTaggedConstant(GetInput(RIGHT_INDEX)));
 }
 
 void BranchIfObjectTypeVertex::SetValueLocationConstraints()
@@ -1563,9 +1721,18 @@ void I64ShiftRightLogicalVertex::SetValueLocationConstraints()
 
 void I64BitwiseBinaryVertex::SetValueLocationConstraints()
 {
-    DefineAsRegister(this);
+    DefineAsRegisterReusingInputs(this);
     UseRegister(Arg(LEFT_INDEX));
     UseRegister(Arg(RIGHT_INDEX));
+    auto right = TryGetInt64Constant(GetInput(RIGHT_INDEX));
+    if (right && ArkSteedAssembler::CanUseLogicalImmediate(static_cast<uint64_t>(*right))) {
+        UseAny(Arg(RIGHT_INDEX));
+    } else {
+        auto left = TryGetInt64Constant(GetInput(LEFT_INDEX));
+        if (left && ArkSteedAssembler::CanUseLogicalImmediate(static_cast<uint64_t>(*left))) {
+            UseAny(Arg(LEFT_INDEX));
+        }
+    }
 }
 
 namespace {
@@ -1883,6 +2050,21 @@ DUMP_EXTRA(I32DivByConstWithCheck)
 DUMP_EXTRA(I32BitwiseBinary)
 {
     out << "  kind = " << IntBitwiseKindName(vertex->GetKind());
+}
+
+DUMP_EXTRA(NumberToBoolean)
+{
+    out << "  true_if_truthy = " << vertex->IsTrueIfNonZero();
+}
+
+DUMP_EXTRA(DoubleToBoolean)
+{
+    out << "  true_if_truthy = " << vertex->IsTrueIfNonZero();
+}
+
+DUMP_EXTRA(StringToBoolean)
+{
+    out << "  true_if_truthy = " << vertex->IsTrueIfNonZero();
 }
 
 DUMP_EXTRA(BranchIfHClassIn)
