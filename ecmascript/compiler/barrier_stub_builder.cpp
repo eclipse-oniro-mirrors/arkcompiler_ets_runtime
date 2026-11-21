@@ -68,17 +68,14 @@ void BarrierStubBuilder::DoBatchBarrierInternal()
     Label entry(env);
     env->SubCfgEntry(&entry);
     Label exit(env);
-    if constexpr (G_USE_CMS_GC && !G_USE_STICKY_CMS_GC) {
+    // fixme: refactor and adapt to sticky
+    if constexpr (G_USE_CMS_GC) {
         BarrierBatchBitSet(LocalToShared);
         Jump(&exit);
     } else {
         Label inYoung(env);
         Label notInYoung(env);
-        if constexpr (G_USE_STICKY_CMS_GC) {
-            BRANCH_NO_WEIGHT(InYoungGenerationForCMSObj(dstObj_, objectRegion_), &inYoung, &notInYoung);
-        } else {
-            BRANCH_NO_WEIGHT(InYoungGeneration(objectRegion_), &inYoung, &notInYoung);
-        }
+        BRANCH_NO_WEIGHT(InYoungGeneration(objectRegion_), &inYoung, &notInYoung);
         Bind(&notInYoung);
         {
             BarrierBatchBitSet(LocalToShared | OldToNew);
@@ -251,13 +248,7 @@ void BarrierStubBuilder::BarrierBatchBitSet(uint8_t bitSetSelect)
                     Bind(&checkLocalRegion);
                 }
                 if ((bitSetSelect & OldToNew) != 0) {
-                    if constexpr (G_USE_STICKY_CMS_GC) {
-                        GateRef newValue = RemoveTaggedWeakTag(value);
-                        BRANCH_NO_WEIGHT(InYoungGenerationForCMSObj(newValue, valueRegion), &updateOldToNew, &endLoop);
-                    } else {
-                        ASSERT(!G_USE_CMS_GC);
-                        BRANCH_NO_WEIGHT(InYoungGeneration(valueRegion), &updateOldToNew, &endLoop);
-                    }
+                    BRANCH_NO_WEIGHT(InYoungGeneration(valueRegion), &updateOldToNew, &endLoop);
                     Bind(&updateOldToNew);
                     {
                         oldToNewBitSet = Int64Or(*oldToNewBitSet, mask);
@@ -341,24 +332,16 @@ void BarrierStubBuilder::DoMoveBarrierCrossRegion(GateRef srcAddr, GateRef srcOb
         BRANCH_UNLIKELY(InSharedHeap(srcRegion), &batchBarrier, &srcNotInSharedHeap);
         Bind(&srcNotInSharedHeap);
         {
-            if constexpr (G_USE_CMS_GC && !G_USE_STICKY_CMS_GC) {
+            // fixme: refactor and adapt to sticky
+            if constexpr (G_USE_CMS_GC) {
                 // dst and src are in same kind region, copy the bitset of them.
                 DoMoveBarrierSameRegionKind(srcAddr, srcRegion, CrossRegion);
                 Jump(&handleMark);
             } else {
-#if USE_STICKY_CMS_GC
                 GateRef sameKind = LogicOrBuilder(env)
-                                   .Or(BitAnd(InYoungGenerationForCMSObj(dstObj_, objectRegion_),
-                                              InYoungGenerationForCMSObj(srcObj, srcRegion)))
-                                   .Or(BitAnd(InOldGenerationForCMSObj(dstObj_, objectRegion_),
-                                              InOldGenerationForCMSObj(srcObj, srcRegion)))
-                                   .Done();
-#else
-                GateRef sameKind = LogicOrBuilder(env)
-                                   .Or(BitAnd(InYoungGeneration(objectRegion_), InYoungGeneration(srcRegion)))
-                                   .Or(BitAnd(InGeneralOldGeneration(objectRegion_), InGeneralOldGeneration(srcRegion)))
-                                   .Done();
-#endif
+                                .Or(BitAnd(InYoungGeneration(objectRegion_), InYoungGeneration(srcRegion)))
+                                .Or(BitAnd(InGeneralOldGeneration(objectRegion_), InGeneralOldGeneration(srcRegion)))
+                                .Done();
                 Label sameRegionKind(env);
                 Label crossRegion(env);
                 BRANCH_NO_WEIGHT(sameKind, &sameRegionKind, &crossRegion);
@@ -388,11 +371,7 @@ void BarrierStubBuilder::DoMoveBarrierCrossRegion(GateRef srcAddr, GateRef srcOb
                         BitSetRangeMoveForward(srcLocalToShareBitSetAddr, localToShareBitSetAddr, srcBitStartIdx,
                                                dstBitStartIdx, ZExtInt32ToInt64(slotCount_));
                         Label inOld(env);
-                        if constexpr (G_USE_STICKY_CMS_GC) {
-                            BRANCH_NO_WEIGHT(InYoungGenerationForCMSObj(dstObj_, objectRegion_), &handleMark, &inOld);
-                        } else {
-                            BRANCH_NO_WEIGHT(InYoungGeneration(objectRegion_), &handleMark, &inOld);
-                        }
+                        BRANCH_NO_WEIGHT(InYoungGeneration(objectRegion_), &handleMark, &inOld);
                         Bind(&inOld);
                         {
                             // copy young object to old region, do BarrierBatchBitSet bitset for oldToNew bitset.
@@ -471,7 +450,8 @@ void BarrierStubBuilder::DoMoveBarrierSameRegionKind(GateRef srcAddr, GateRef sr
         srcLocalToShareBitSetAddr = GetBitSetDataAddr(srcRegion, localToShareOffset, RTSTUB_ID(CreateLocalToShare));
     }
     GateRef localToShareSwapped = IsLocalToShareSwapped(srcRegion);
-    if constexpr (G_USE_CMS_GC && !G_USE_STICKY_CMS_GC) {
+    // fixme: refactor and adapt to sticky
+    if constexpr (G_USE_CMS_GC) {
         Label batchBarrier(env);
         Label copyLocalToShare(env);
         BRANCH_UNLIKELY(localToShareSwapped, &batchBarrier, &copyLocalToShare);
@@ -488,11 +468,7 @@ void BarrierStubBuilder::DoMoveBarrierSameRegionKind(GateRef srcAddr, GateRef sr
             Jump(&copyBitSet);
         }
     } else {
-        if constexpr (G_USE_STICKY_CMS_GC) {
-            BRANCH_NO_WEIGHT(InYoungGenerationForCMSObj(dstObj_, objectRegion_), &inYoung, &inOld);
-        } else {
-            BRANCH_NO_WEIGHT(InYoungGeneration(objectRegion_), &inYoung, &inOld);
-        }
+        BRANCH_NO_WEIGHT(InYoungGeneration(objectRegion_), &inYoung, &inOld);
         Bind(&inYoung);
         {
             Label batchBarrier(env);
@@ -927,7 +903,8 @@ void BarrierStubBuilder::DoReverseBarrierInternal()
         GetBitSetDataAddr(objectRegion_, localToShareOffset, RTSTUB_ID(CreateLocalToShare));
 
     GateRef localToShareSwapped = IsLocalToShareSwapped(objectRegion_);
-    if constexpr (G_USE_CMS_GC && !G_USE_STICKY_CMS_GC) {
+    // fixme: refactor and adapt to sticky
+    if constexpr (G_USE_CMS_GC) {
         Label batchBarrier(env);
         Label reverseLocalToShare(env);
         BRANCH_UNLIKELY(localToShareSwapped, &batchBarrier, &reverseLocalToShare);
@@ -943,11 +920,7 @@ void BarrierStubBuilder::DoReverseBarrierInternal()
             Jump(&copyBitSet);
         }
     } else {
-        if constexpr (G_USE_STICKY_CMS_GC) {
-            BRANCH_NO_WEIGHT(InYoungGenerationForCMSObj(dstObj_, objectRegion_), &inYoung, &inOld);
-        } else {
-            BRANCH_NO_WEIGHT(InYoungGeneration(objectRegion_), &inYoung, &inOld);
-        }
+        BRANCH_NO_WEIGHT(InYoungGeneration(objectRegion_), &inYoung, &inOld);
         Bind(&inYoung);
         {
             Label batchBarrier(env);

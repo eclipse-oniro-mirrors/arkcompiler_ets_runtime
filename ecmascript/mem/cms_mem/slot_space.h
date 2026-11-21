@@ -66,21 +66,9 @@ public:
 
     void IterateOverObjects(const std::function<void(TaggedObject *object)> &visitor);
 
-    template <bool isSticky>
-    void PrepareSweeping();
+    void PrepareSweeping() override;
 
-    void PrepareSweeping() override
-    {
-        LOG_GC(FATAL) << "should not call this function";
-    }
-
-    template <bool isSticky>
-    void Sweep();
-
-    void Sweep() override
-    {
-        LOG_GC(FATAL) << "should not call this function";
-    }
+    void Sweep() override;
 
     void AsyncSweep(bool isMain, bool releaseMemory = false) override;
 

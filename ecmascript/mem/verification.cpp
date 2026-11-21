@@ -66,29 +66,6 @@ void LogErrorForObj(const BaseHeap *heap, const char *headerInfo, TaggedObject *
     UNREACHABLE();
 } // LCOV_EXCL_STOP
 
-template <ReferenceType refType>
-void LogErrorForObjSlotCMS(const BaseHeap *heap, const char *headerInfo, TaggedObject *object,
-                           ObjectSlotBase<refType> slot, TaggedObject *value)
-{
-    Region *objectRegion = Region::ObjectAddressToRange(object);
-    Region *valueRegion = Region::ObjectAddressToRange(value);
-    LOG_GC(FATAL) << headerInfo
-                  << "gc type: " << heap->GetGCType()
-                  << ", object address: " << object
-                  << ", object type: " << static_cast<int>(object->GetClass()->GetObjectType())
-                  << ", object space type: " << static_cast<int>(objectRegion->GetSpaceType())
-                  << ", object mark bit: " << objectRegion->Test(object)
-                  << ", object is young: " << object->IsInYoung()
-                  << ", slot address" << slot.SlotAddress()
-                  << ", value address: " << value
-                  << ", value type: " << static_cast<int>(value->GetClass()->GetObjectType())
-                  << ", value space type: " << static_cast<int>(valueRegion->GetSpaceType())
-                  << ", value mark bit: " << valueRegion->Test(value)
-                  << ", value is young: " << value->IsInYoung()
-                  << ", old to new rset bit: " << objectRegion->TestOldToNew<refType>(slot.SlotAddress());
-    UNREACHABLE();
-} // LCOV_EXCL_STOP
-
 // Only used for verify InactiveSemiSpace
 void VerifyObjectVisitor::VerifyInactiveSemiSpaceMarkedObject(const BaseHeap *heap, void *addr)
 {
@@ -187,13 +164,7 @@ void VerifyObjectVisitor::VerifyHeapObjectSlotLegal(ObjectSlotBase<refType> slot
     } // LCOV_EXCL_STOP
     switch (verifyKind_) {
         case VerifyKind::VERIFY_PRE_GC:
-        case VerifyKind::VERIFY_NO_SLOT_CHECK:
-            break;
-        case VerifyKind::VERIFY_PRE_STICKY_GC:
         case VerifyKind::VERIFY_POST_GC:
-            if constexpr (G_USE_STICKY_CMS_GC) {
-                VerifyStickyObjectReference(object, slot, slotValue.GetTaggedObject());
-            }
             break;
         case VerifyKind::VERIFY_MARK_YOUNG:
             VerifyMarkYoung(object, slot, slotValue.GetTaggedObject());
@@ -226,22 +197,6 @@ void VerifyObjectVisitor::VerifyHeapObjectSlotLegal(ObjectSlotBase<refType> slot
         default: // LCOV_EXCL_START
             LOG_GC(FATAL) << "unknown verify kind:" << static_cast<size_t>(verifyKind_);
             UNREACHABLE(); // LCOV_EXCL_STOP
-    }
-}
-
-template <ReferenceType refType>
-void VerifyObjectVisitor::VerifyStickyObjectReference(TaggedObject *object, ObjectSlotBase<refType> slot,
-                                                      TaggedObject *value) const
-{
-    Region *valueRegion = Region::ObjectAddressToRange(value);
-    if (valueRegion->InSlotSpace() && !valueRegion->Test(value)) {
-        Region *objectRegion = Region::ObjectAddressToRange(object);
-        if (value->IsInOld()) {
-            LogErrorForObjSlotCMS(heap_, "value in old but not marked", object, slot, value);
-        } else if (value->IsInYoung() && object->IsInOld() &&
-                   !Region::ObjectAddressToRange(object)->TestOldToNew<refType>(slot.SlotAddress())) {
-            LogErrorForObjSlotCMS(heap_, "old to new reference not marked in rset", object, slot, value);
-        }
     }
 }
 
@@ -1034,9 +989,9 @@ size_t SharedHeapVerification::VerifyHeap() const
     }
     VerifyKind localVerifyKind = VerifyKind::VERIFY_END;
     if (verifyKind_ == VerifyKind::VERIFY_PRE_SHARED_GC) {
-        localVerifyKind = G_USE_STICKY_CMS_GC ? VerifyKind::VERIFY_NO_SLOT_CHECK : VerifyKind::VERIFY_PRE_GC;
+        localVerifyKind = VerifyKind::VERIFY_PRE_GC;
     } else if (verifyKind_ == VerifyKind::VERIFY_POST_SHARED_GC) {
-        localVerifyKind = G_USE_STICKY_CMS_GC ? VerifyKind::VERIFY_NO_SLOT_CHECK : VerifyKind::VERIFY_POST_GC;
+        localVerifyKind = VerifyKind::VERIFY_POST_GC;
     }
 
     Runtime::GetInstance()->GCIterateThreadList([&, localVerifyKind](JSThread *thread) {

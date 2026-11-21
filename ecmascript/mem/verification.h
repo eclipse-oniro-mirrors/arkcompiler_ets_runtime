@@ -76,14 +76,13 @@ public:
 private:
     VERIFYOBJECTVISITOR_PRIVATE_HYBRID_EXTENSION();
     void VisitAllObjects(TaggedObject *obj);
+
     template <ReferenceType refType>
     void VerifyObjectSlotLegal(ObjectSlotBase<refType> slot, TaggedObject *obj) const;
     template <ReferenceType refType>
     void VerifyHeapObjectSlotLegal(ObjectSlotBase<refType> slot, JSTaggedValue value, TaggedObject *obj) const;
     template <ReferenceType refType>
     void VerifyWeakRef(ObjectSlotBase<refType> slot, TaggedObject *object) const;
-    template <ReferenceType refType>
-    void VerifyStickyObjectReference(TaggedObject *object, ObjectSlotBase<refType> slot, TaggedObject *value) const;
     template <ReferenceType refType>
     void VerifyMarkYoung(TaggedObject *obj, ObjectSlotBase<refType> slot, TaggedObject *value) const;
     template <ReferenceType refType>

@@ -41,7 +41,7 @@ enum class GCType : int {
     SHARED_FULL_GC,
     SHARED_CC,
     GLOBAL_GC,
-    STICKY_CMS_GC,
+    // fixme: support sticky
     CMS_GC,
     OTHER,
     START,
@@ -182,8 +182,6 @@ public:
                 return "GlobalGC";
             case GCType::CMS_GC:
                 return "CMSGC";
-            case GCType::STICKY_CMS_GC:
-                return "StickyCMSGC";
             default:
                 return "UnknownType";
         }

@@ -338,9 +338,7 @@ public:
     GateRef RegionInSpace(GateRef region, RegionSpaceFlag spaceBegin, RegionSpaceFlag spaceEnd);
     GateRef InFromSpace(GateRef region);
     GateRef InYoungGeneration(GateRef region);
-    GateRef InYoungGenerationForCMSObj(GateRef object, GateRef region);
     GateRef InGeneralOldGeneration(GateRef region);
-    GateRef InOldGenerationForCMSObj(GateRef object, GateRef region);
     GateRef InSharedHeap(GateRef region);
     GateRef InSharedSweepableSpace(GateRef region);
     GateRef TaggedIsGeneratorObject(GateRef glue, GateRef x);
@@ -474,11 +472,11 @@ public:
     GateRef CreateDataProperty(GateRef glue, GateRef obj, GateRef proKey, GateRef value);
     GateRef CreateDataPropertyOrThrow(GateRef glue, GateRef onj, GateRef proKey, GateRef value);
     GateRef DefineField(GateRef glue, GateRef obj, GateRef proKey, GateRef value);
-    void StoreHClass(GateRef glue, GateRef object, GateRef hClass, RegionSpaceFlag spaceType,
+    void StoreHClass(GateRef glue, GateRef object, GateRef hClass,
                      MemoryAttribute mAttr = MemoryAttribute::NeedBarrier());
     void TransitionHClass(GateRef glue, GateRef object, GateRef hClass,
                           MemoryAttribute mAttr = MemoryAttribute::NeedBarrier());
-    void StoreBuiltinHClass(GateRef glue, GateRef object, GateRef hClass, RegionSpaceFlag spaceType);
+    void StoreBuiltinHClass(GateRef glue, GateRef object, GateRef hClass);
     void StorePrototype(GateRef glue, GateRef hclass, GateRef prototype);
     void CopyAllHClass(GateRef glue, GateRef dstHClass, GateRef scrHClass);
     void FuncOrHClassCompare(GateRef glue, GateRef funcOrHClass,

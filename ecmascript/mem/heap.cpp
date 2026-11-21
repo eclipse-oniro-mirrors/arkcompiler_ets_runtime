@@ -24,8 +24,6 @@
 #include "common_components/taskpool/taskpool.h"
 #include "ecmascript/cross_vm/unified_gc/unified_gc.h"
 #include "ecmascript/cross_vm/unified_gc/unified_gc_marker.h"
-#include "ecmascript/js_native_pointer.h"
-#include "ecmascript/mem/cms_mem/sticky_sweep_gc.h"
 #include "ecmascript/mem/cms_mem/sweep_gc.h"
 #include "ecmascript/mem/global_cc/global_cc.h"
 #include "ecmascript/mem/global_cc/global_concurrent_marker.h"
@@ -1377,9 +1375,6 @@ void Heap::Initialize()
     fullGC_ = new FullGC(this);
     ccGC_ = new ConcurrentCopyGC(this);
     if constexpr (G_USE_CMS_GC) {
-        if constexpr (G_USE_STICKY_CMS_GC) {
-            stickySweepGC_ = new StickySweepGC(this);
-        }
         sweepGC_ = new SweepGC(this);
     } else {
         partialGC_ = new PartialGC(this);
@@ -1730,10 +1725,6 @@ void Heap::Destroy()
         delete partialGC_;
         partialGC_ = nullptr;
     }
-    if (stickySweepGC_ != nullptr) {
-        delete stickySweepGC_;
-        stickySweepGC_ = nullptr;
-    }
     if (sweepGC_ != nullptr) {
         delete sweepGC_;
         sweepGC_ = nullptr;
@@ -1866,28 +1857,13 @@ void Heap::ResumeForAppSpawn()
         oldSpace_->Reset();
     }
     auto cb = [] (Region *region) {
-        if constexpr (!G_USE_STICKY_CMS_GC) {
-            region->ClearMarkGCBitset();
-        }
+        region->ClearMarkGCBitset();
         // fixme: refactor?
         if constexpr (G_USE_CMS_GC) {
             region->ResetAliveObject();
         }
     };
     EnumerateNonNewSpaceRegions(cb);
-}
-
-void Heap::ClearGCBitSetForCMS()
-{
-    auto cb = [] (Region *region) {
-        region->ClearMarkGCBitset();
-    };
-    slotSpace_->EnumerateRegions(cb);
-    snapshotSpace_->EnumerateRegions(cb);
-    nonMovableSpace_->EnumerateRegions(cb);
-    hugeObjectSpace_->EnumerateRegions(cb);
-    machineCodeSpace_->EnumerateRegions(cb);
-    hugeMachineCodeSpace_->EnumerateRegions(cb);
 }
 
 void Heap::CompactHeapBeforeFork()
@@ -1974,19 +1950,7 @@ TriggerGCType Heap::SelectGCType() const
 void Heap::CollectGarbageImpl(TriggerGCType gcType, GCReason reason)
 {
     // fixme: check gc type outside
-    if constexpr (G_USE_STICKY_CMS_GC) {
-        if (gcType != FULL_GC && concurrentMarker_->IsEnabled() && concurrentMarker_->IsTriggeredConcurrentMark()) {
-            if (IsFullMark()) {
-                gcType = TriggerGCType::CMS_GC;
-            } else {
-                gcType = TriggerGCType::STICKY_CMS_GC;
-            }
-        } else if (gcType == TriggerGCType::YOUNG_GC) {
-            gcType = TriggerGCType::STICKY_CMS_GC;
-        } else if (gcType == TriggerGCType::OLD_GC || gcType == TriggerGCType::CMS_GC) {
-            gcType = TriggerGCType::CMS_GC;
-        }
-    } else if constexpr (G_USE_CMS_GC) {
+    if constexpr (G_USE_CMS_GC) {
         if (gcType == TriggerGCType::YOUNG_GC || gcType == TriggerGCType::OLD_GC) {
             gcType = TriggerGCType::CMS_GC;
         }
@@ -2015,11 +1979,7 @@ void Heap::CollectGarbageImpl(TriggerGCType gcType, GCReason reason)
             // pre gc heap verify
             LOG_ECMA(DEBUG) << "pre gc heap verify";
             ProcessSharedGCRSetWorkList();
-            if (gcType == TriggerGCType::STICKY_CMS_GC && !thread_->IsMarking()) {
-                Verification(this, VerifyKind::VERIFY_PRE_STICKY_GC).VerifyAll();
-            } else {
-                Verification(this, VerifyKind::VERIFY_PRE_GC).VerifyAll();
-            }
+            Verification(this, VerifyKind::VERIFY_PRE_GC).VerifyAll();
         }
 
 #if ECMASCRIPT_SWITCH_GC_MODE_TO_FULL_GC
@@ -2105,9 +2065,6 @@ void Heap::CollectGarbageImpl(TriggerGCType gcType, GCReason reason)
                     partialGC_->RunPhases();
                     break;
                 }
-                case TriggerGCType::STICKY_CMS_GC:
-                    stickySweepGC_->RunPhases();
-                    break;
                 case TriggerGCType::CMS_GC:
                     sweepGC_->RunPhases();
                     break;
@@ -2934,16 +2891,6 @@ bool Heap::TryTriggerConcurrentMarking(MarkReason markReason)
                 TriggerConcurrentMarking(markReason);
                 OPTIONAL_LOG(ecmaVm_, INFO) << "Trigger full mark";
                 return true;
-            }
-
-            if constexpr (G_USE_STICKY_CMS_GC) {
-                if (slotSpace_->GetAllocateAfterLastGC() >= std::max(double(config_.GetMinSlotSpaceSize()),
-                                                                     slotSpaceHeapObjectSize * 0.1)) { // 0.1: factor
-                    markType_ = MarkType::MARK_YOUNG;
-                    TriggerConcurrentMarking(markReason);
-                    OPTIONAL_LOG(ecmaVm_, INFO) << "Trigger young mark";
-                    return true;
-                }
             }
         }
         return false;
@@ -4378,9 +4325,6 @@ void Heap::UpdateWorkManager(WorkManager *workManager)
     }
     // fixme: refactor?
     if constexpr (G_USE_CMS_GC) {
-        if constexpr (G_USE_STICKY_CMS_GC) {
-            stickySweepGC_->workManager_ = workManager;
-        }
         sweepGC_->workManager_ = workManager;
     } else {
         partialGC_->workManager_ = workManager;

@@ -53,34 +53,6 @@ static ARK_INLINE void WriteBarrier(const JSThread *thread, void *obj, size_t of
     }
 #endif
     uintptr_t slotAddr = ToUintPtr(obj) + offset;
-#if USE_STICKY_CMS_GC
-    TaggedObject *heapValue = JSTaggedValue(value).GetHeapObject();
-#ifndef NDEBUG
-    if constexpr (writeType == WriteBarrierType::NORMAL) {
-        if (offset != 0) {
-            Barriers::CheckObjectForCMS(thread, obj, offset, JSTaggedValue(value), true);
-        } else {
-            if (!valueRegion->InSharedHeap() && !heapValue->IsInOld()) {
-                LOG_ECMA(FATAL) << "value hclass is not old";
-            }
-        }
-    }
-#endif
-    if (thread->IsReadyToConcurrentMark() && !valueRegion->InSharedHeap() &&
-        static_cast<TaggedObject *>(obj)->IsInOld() && heapValue->IsInYoung()) {
-        ASSERT(!objectRegion->InSharedHeap());
-        ASSERT((slotAddr % static_cast<uint8_t>(MemAlignment::MEM_ALIGN_OBJECT)) == 0);
-        objectRegion->InsertOldToNewRSet(slotAddr);
-    } else if (!objectRegion->InSharedHeap() && valueRegion->InSharedSweepableSpace()) {
-#ifndef NDEBUG
-        if (UNLIKELY(JSTaggedValue(value).IsWeakForHeapObject())) {
-            CHECK_NO_LOCAL_TO_SHARE_WEAK_REF_HANDLE;
-        }
-#endif
-        objectRegion->InsertLocalToShareRSet(slotAddr);
-    }
-#else
-    // !USE_STICKY_CMS_GC
     ASSERT(!valueRegion->IsFromRegion());
     if (objectRegion->InGeneralOldSpace() && valueRegion->InYoungSpace()) {
         if constexpr (ReferenceIsCompressed<refType>) {
@@ -100,8 +72,6 @@ static ARK_INLINE void WriteBarrier(const JSThread *thread, void *obj, size_t of
 #endif
         objectRegion->InsertLocalToShareRSet<refType>(slotAddr);
     }
-#endif
-
     ASSERT(!objectRegion->InSharedHeap() || valueRegion->InSharedHeap());
     if (!valueRegion->InSharedHeap() && thread->IsConcurrentMarkingOrFinished()) {
         Barriers::Update<refType>(thread, slotAddr, objectRegion, reinterpret_cast<TaggedObject *>(value),
@@ -268,13 +238,6 @@ void Barriers::CopyObject(const JSThread *thread, const TaggedObject *dstObj, JS
     Region* objectRegion = Region::ObjectAddressToRange(ToUintPtr(dstObj));
     if (!objectRegion->InSharedHeap()) {
         bool allValueNotHeap = false;
-#if USE_STICKY_CMS_GC
-        if (thread->IsReadyToConcurrentMark() && dstObj->IsInOld()) {
-            allValueNotHeap = BatchBitSet<Region::InGeneralOld>(thread, objectRegion, dstAddr, count);
-        } else {
-            allValueNotHeap = BatchBitSet<Region::InYoung>(thread, objectRegion, dstAddr, count);
-        }
-#else
         if (objectRegion->InYoungSpace()) {
             allValueNotHeap = BatchBitSet<Region::InYoung>(thread, objectRegion, dstAddr, count);
         } else if (objectRegion->InGeneralOldSpace()) {
@@ -282,8 +245,6 @@ void Barriers::CopyObject(const JSThread *thread, const TaggedObject *dstObj, JS
         } else {
             allValueNotHeap = BatchBitSet<Region::Other>(thread, objectRegion, dstAddr, count);
         }
-#endif
-
         if (allValueNotHeap) {
             return;
         }

@@ -28,10 +28,6 @@ PUBLIC_API JSTaggedType ReadBarrierForStringTableSlotImpl(JSTaggedType value, co
 static ARK_INLINE JSTaggedType ReadBarrier(const JSThread *thread, const void *obj, size_t offset,
                                            const JSTaggedValue &value)
 {
-    // If sticky CMS-GC is enabled, hclass value with object state may not be regareded as heap object and
-    // will skip ReadBarrierImpl. This is fine because hclass must be allocated in non-movable space which
-    // does not participate in concurrent copying, therefore ReadBarrierImpl is not required. Moreover,
-    // ReadBarrier should only be called by js thread and loading hclass value should use specific getter.
     if (value.IsHeapObject()) {
         return ReadBarrierImpl(thread, ToUintPtr(obj) + offset, value);
     }
@@ -97,11 +93,6 @@ inline ARK_INLINE JSTaggedType Barriers::ReadBarrierForStringTableSlot(JSTaggedT
 inline ARK_INLINE JSTaggedType Barriers::GetTaggedValue(const JSThread *thread, const void *obj, size_t offset)
 {
     JSTaggedValue value = *reinterpret_cast<JSTaggedValue *>(ToUintPtr(obj) + offset);
-#ifndef NDEBUG
-    if constexpr (G_USE_STICKY_CMS_GC) {
-        CheckObjectForCMS(thread, const_cast<void *>(obj), offset, value);
-    }
-#endif
     ASSERT(thread != nullptr);
     if (UNLIKELY(thread->NeedReadBarrier())) {
         return ReadBarrier(thread, obj, offset, value);
@@ -125,11 +116,6 @@ inline ARK_INLINE TemporaryJSTaggedValue Barriers::GetFromCompressedTaggedValue(
 inline ARK_INLINE JSTaggedType Barriers::GetTaggedValue(const JSThread *thread, uintptr_t slotAddress)
 {
     JSTaggedValue value = *reinterpret_cast<JSTaggedValue *>(slotAddress);
-#ifndef NDEBUG
-    if constexpr (G_USE_STICKY_CMS_GC) {
-        CheckValueForCMS(thread, value);
-    }
-#endif
     ASSERT(thread != nullptr);
     if (UNLIKELY(thread->NeedReadBarrier())) {
         return ReadBarrier(thread, slotAddress, value);
@@ -153,11 +139,6 @@ inline ARK_INLINE JSTaggedType Barriers::GetTaggedValueAtomic(const JSThread *th
 {
     JSTaggedValue value =  reinterpret_cast<volatile std::atomic<JSTaggedValue> *>(ToUintPtr(obj) +
         offset)->load(std::memory_order_acquire);
-#ifndef NDEBUG
-    if constexpr (G_USE_STICKY_CMS_GC) {
-        CheckObjectForCMS(thread, const_cast<void *>(obj), offset, value);
-    }
-#endif
     ASSERT(thread != nullptr);
     if (UNLIKELY(thread->NeedReadBarrier())) {
         return AtomicReadBarrier(thread, obj, offset, value);
@@ -169,11 +150,6 @@ template <RBMode mode>
 inline ARK_INLINE JSTaggedType Barriers::GetTaggedValue(const JSThread *thread, const void *obj, size_t offset)
 {
     JSTaggedValue value = *reinterpret_cast<JSTaggedValue *>(ToUintPtr(obj) + offset);
-#ifndef NDEBUG
-    if (G_USE_STICKY_CMS_GC && thread != nullptr) {
-        CheckObjectForCMS(thread, const_cast<void *>(obj), offset, value);
-    }
-#endif
     if constexpr (mode == RBMode::DEFAULT_RB) {
         ASSERT(thread != nullptr);
         if (UNLIKELY(thread->NeedReadBarrier())) {
@@ -209,11 +185,6 @@ template <RBMode mode>
 inline ARK_INLINE JSTaggedType Barriers::GetTaggedValue(const JSThread *thread, uintptr_t slotAddress)
 {
     JSTaggedValue value = *reinterpret_cast<JSTaggedValue *>(slotAddress);
-#ifndef NDEBUG
-    if (G_USE_STICKY_CMS_GC && thread != nullptr) {
-        CheckValueForCMS(thread, value);
-    }
-#endif
     if constexpr (mode == RBMode::DEFAULT_RB) {
         ASSERT(thread != nullptr);
         if (UNLIKELY(thread->NeedReadBarrier())) {
@@ -231,11 +202,6 @@ inline ARK_INLINE JSTaggedType Barriers::GetTaggedValueAtomic(const JSThread *th
 {
     JSTaggedValue value =  reinterpret_cast<volatile std::atomic<JSTaggedValue> *>(ToUintPtr(obj) +
         offset)->load(std::memory_order_acquire);
-#ifndef NDEBUG
-    if (G_USE_STICKY_CMS_GC && thread != nullptr) {
-        CheckObjectForCMS(thread, const_cast<void *>(obj), offset, value);
-    }
-#endif
     if constexpr (mode == RBMode::DEFAULT_RB) {
         ASSERT(thread != nullptr);
         if (UNLIKELY(thread->NeedReadBarrier())) {
@@ -263,13 +229,6 @@ inline ARK_INLINE JSTaggedType Barriers::UpdateSlot(const JSThread *thread, void
 {
     JSTaggedType value = GetTaggedValue(thread, obj, offset);
     *reinterpret_cast<JSTaggedType *>(ToUintPtr(obj) + offset) = value;
-    return value;
-}
-
-inline ARK_INLINE JSTaggedType Barriers::UpdateSlot(const JSThread *thread, uintptr_t slotAddress)
-{
-    JSTaggedType value = GetTaggedValue(thread, slotAddress);
-    *reinterpret_cast<JSTaggedType *>(slotAddress) = value;
     return value;
 }
 } // namespace panda::ecmascript

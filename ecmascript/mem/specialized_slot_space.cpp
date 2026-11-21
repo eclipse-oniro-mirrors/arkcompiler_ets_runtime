@@ -171,14 +171,14 @@ void SpecializedSlotSpace::DrainSweptChainManagers()
 void SpecializedSlotSpace::PrepareSweeping()
 {
     allocator_.Discard();
-    survivalObjectSize_ = regionChainManager_.PrepareSweeping<false>(pendingReclaimFromRegions_);
+    survivalObjectSize_ = regionChainManager_.PrepareSweeping(pendingReclaimFromRegions_);
     allocateAfterLastGC_ = 0;
 }
 
 void SpecializedSlotSpace::Sweep()
 {
     allocator_.Discard();
-    survivalObjectSize_ = regionChainManager_.Sweep<false>(pendingReclaimFromRegions_);
+    survivalObjectSize_ = regionChainManager_.Sweep(pendingReclaimFromRegions_);
     allocateAfterLastGC_ = 0;
 }
 

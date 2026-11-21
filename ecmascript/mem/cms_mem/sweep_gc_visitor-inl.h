@@ -165,49 +165,5 @@ void SweepGCMarkObjectVisitor::RecordWeakReference(JSTaggedType *weak)
     workNodeHolder_->PushWeakReference(weak);
 }
 
-StickyMarkOldToNewRSetVisitor::StickyMarkOldToNewRSetVisitor(WorkNodeHolder *workNodeHolder)
-    : workNodeHolder_(workNodeHolder) {}
-
-void StickyMarkOldToNewRSetVisitor::operator()(Region *region) const
-{
-    region->IterateAllOldToNewBits([this](void *mem, auto referenceTypeWrapper) -> bool {
-        constexpr ReferenceType refType = decltype(referenceTypeWrapper)::value;
-        ObjectSlotBase<refType> slot(ToUintPtr(mem));
-        return HandleSlot(slot);
-    });
-}
-
-template <ReferenceType refType>
-bool StickyMarkOldToNewRSetVisitor::HandleSlot(ObjectSlotBase<refType> slot) const
-{
-    TaggedValueType<refType> value = slot.GetTaggedValue();
-    if (!value.IsHeapObject()) {
-        return false;
-    }
-
-    if constexpr (ReferenceIsCompressed<refType>) {
-        ASSERT(!value.IsWeakForHeapObject());
-        TaggedObject *object = value.GetTaggedObject();
-        Region *objectRegion = Region::ObjectAddressToRange(object);
-        if (!objectRegion->InSharedHeap()) {
-            if (objectRegion->AtomicMark(object)) {
-                workNodeHolder_->Push(object);
-            }
-        }
-    } else {
-        if (!value.IsWeakForHeapObject()) {
-            TaggedObject *object = value.GetTaggedObject();
-            Region *objectRegion = Region::ObjectAddressToRange(object);
-            if (!objectRegion->InSharedHeap()) {
-                if (objectRegion->AtomicMark(object)) {
-                    workNodeHolder_->Push(object);
-                }
-            }
-        } else {
-            workNodeHolder_->PushWeakReference((reinterpret_cast<JSTaggedType*>(slot.SlotAddress())));
-        }
-    }
-    return true;
-}
 }  // namespace panda::ecmascript
 #endif  // ECMASCRIPT_MEM_CMS_MEM_SWEEP_GC_VISITOR_INL_H

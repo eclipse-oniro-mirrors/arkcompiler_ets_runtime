@@ -39,7 +39,6 @@ public:
 
     TaggedObject* Copy(TaggedObject *fromObj, const MarkWord &markWord);
 private:
-    TaggedObject* CopyObject(TaggedObject *fromObj, const MarkWord &markWord);
     Heap *heap_ {nullptr};
     SlotGCAllocator *tlab_ {nullptr};
 };
@@ -60,7 +59,6 @@ public:
 
     TaggedObject* Copy(TaggedObject *fromObj, const MarkWord &markWord);
 private:
-    TaggedObject* CopyObject(TaggedObject *fromObj, const MarkWord &markWord);
     Heap *heap_ {nullptr};
     CCTlabAllocator *tlab_ {nullptr};
 };

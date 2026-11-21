@@ -78,7 +78,7 @@ public:
                   uint64_t rootObjSize);
     void RelocateSpaceObject(std::vector<std::pair<uintptr_t, size_t>> &regions, SnapshotType type,
         MethodLiteral* methods, size_t methodNums, size_t rootObjSize);
-    void RelocateSpaceObject(MonoSpace* space, MemSpaceType spaceType, SnapshotType type, MethodLiteral* methods,
+    void RelocateSpaceObject(MonoSpace* space, SnapshotType type, MethodLiteral* methods,
                              size_t methodNums, size_t rootObjSize);
     void SerializePandaFileMethod();
     AllocResult GetNewObj(size_t objectSize, TaggedObject *objectHeader);
@@ -189,7 +189,7 @@ private:
     void DeserializeTaggedField(uint64_t *value, TaggedObject *root);
     void DeserializeCompressedTaggedField(CompressedJSTaggedType *value, TaggedObject *root);
     void DeserializeNativePointer(uint64_t *value);
-    void DeserializeClassWord(TaggedObject *object, MemSpaceType spaceType = MemSpaceType::SPACE_TYPE_LAST);
+    void DeserializeClassWord(TaggedObject *object);
     void DeserializePandaMethod(uintptr_t begin, uintptr_t end, MethodLiteral *methods,
                                 size_t &methodNums, size_t &others);
     void DeserializeSpaceObject(uintptr_t beginAddr, size_t objSize, SerializedObjectSpace spaceType);

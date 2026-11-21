@@ -28,7 +28,6 @@ void CMSRegionChainManager::Initialize(Heap *localHeap, size_t slotSize, Space *
     slotSize_ = slotSize;
 }
 
-template <bool isSticky>
 size_t CMSRegionChainManager::Sweep(std::vector<Region *> &pendingReclaimFromRegions)
 {
     ASSERT(TryTakeSweepingRegion() == nullptr);
@@ -38,11 +37,7 @@ size_t CMSRegionChainManager::Sweep(std::vector<Region *> &pendingReclaimFromReg
     usableSlotFreeList_.clear();
     size_t survivalObjectSize = 0;
     EnumerateRegions([this, &pendingReclaimFromRegions, &survivalObjectSize](Region *region) {
-        if constexpr (isSticky) {
-            region->IncreaseAliveObject(region->GetGCAliveSize());
-        }
         size_t survivalSize = region->AliveObject();
-        region->SetGCAliveSize();
         region->ResetAliveObject();
         survivalObjectSize += survivalSize;
         if (survivalSize == 0) {
@@ -61,10 +56,6 @@ size_t CMSRegionChainManager::Sweep(std::vector<Region *> &pendingReclaimFromReg
     return survivalObjectSize;
 }
 
-template size_t CMSRegionChainManager::Sweep<true>(std::vector<Region *> &pendingReclaimFromRegions);
-template size_t CMSRegionChainManager::Sweep<false>(std::vector<Region *> &pendingReclaimFromRegions);
-
-template <bool isSticky>
 size_t CMSRegionChainManager::PrepareSweeping(std::vector<Region *> &pendingReclaimFromRegions)
 {
     ASSERT(TryTakeSweepingRegion() == nullptr);
@@ -76,11 +67,7 @@ size_t CMSRegionChainManager::PrepareSweeping(std::vector<Region *> &pendingRecl
     size_t survivalObjectSize = 0;
     EnumerateRegions([this, &pendingReclaimFromRegions, &survivalObjectSize](Region *region) {
         ASSERT(!region->IsGCFlagSet(RegionGCFlags::HAS_BEEN_SWEPT));
-        if constexpr (isSticky) {
-            region->IncreaseAliveObject(region->GetGCAliveSize());
-        }
         size_t survivalSize = region->AliveObject();
-        region->SetGCAliveSize();
         region->ResetAliveObject();
         survivalObjectSize += survivalSize;
         if (survivalSize == 0) {
@@ -102,9 +89,6 @@ size_t CMSRegionChainManager::PrepareSweeping(std::vector<Region *> &pendingRecl
     }
     return survivalObjectSize;
 }
-
-template size_t CMSRegionChainManager::PrepareSweeping<true>(std::vector<Region *> &pendingReclaimFromRegions);
-template size_t CMSRegionChainManager::PrepareSweeping<false>(std::vector<Region *> &pendingReclaimFromRegions);
 
 void CMSRegionChainManager::ConcurrentSweep(const SweepMode sweepMode)
 {
@@ -224,8 +208,6 @@ void CMSRegionChainManager::PrepareCompact(std::vector<Region *> &pendingReclaim
     EnumerateRegions([&pendingReclaimFromRegions](Region *region) {
         pendingReclaimFromRegions.emplace_back(region);
         region->SetRegionTypeFlag(RegionTypeFlag::FROM);
-        // The survival size needs to be reset here for compact, but no need to do this for copy
-        region->ResetGCAliveSize();
     });
     regionList_.Clear();
     recordRegion_ = nullptr;

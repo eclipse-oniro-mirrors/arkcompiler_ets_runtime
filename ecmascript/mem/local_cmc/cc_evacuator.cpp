@@ -21,7 +21,7 @@
 #include "ecmascript/free_object.h"
 
 namespace panda::ecmascript {
-TaggedObject *CCEvacuator::CopyObject(TaggedObject *fromObj, const MarkWord &markWord)
+TaggedObject *CCEvacuator::Copy(TaggedObject *fromObj, const MarkWord &markWord)
 {
     JSHClass *klass = markWord.GetJSHClass();
     size_t size = klass->SizeFromJSHClass(fromObj);
@@ -57,19 +57,4 @@ TaggedObject *CCEvacuator::CopyObject(TaggedObject *fromObj, const MarkWord &mar
     }
     return MarkWord::ToForwardingAddress(result);
 }
-
-TaggedObject *CCEvacuator::Copy(TaggedObject *fromObj, const MarkWord &markWord)
-{
-    TaggedObject *toObject = CopyObject(fromObj, markWord);
-    if constexpr (G_USE_STICKY_CMS_GC) {
-        Region *toRegion = Region::ObjectAddressToRange(toObject);
-        toRegion->AtomicMark(toObject);
-        toObject->SetObjectState(ObjectState::OLD);
-        JSHClass *klass = toObject->GetClass();
-        size_t size = klass->SizeFromJSHClass(toObject);
-        toRegion->IncreaseGCAliveSize(size);
-    }
-    return toObject;
-}
-
 }  // namespace panda::ecmascript
