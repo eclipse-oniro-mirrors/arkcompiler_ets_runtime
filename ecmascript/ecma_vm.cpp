@@ -617,7 +617,7 @@ EcmaVM::~EcmaVM()
     }
 #endif
 #if ENABLE_LOCALCC_OPTIMIZATION
-    heap_->WaitAndHandleCCFinished();
+    heap_->WaitAndHandleCCFinished(true);
     heap_->WaitLocalCCNativePointerCallbacks();
 #endif  // ENABLE_LOCALCC_OPTIMIZATION
     initialized_ = false;
@@ -1105,9 +1105,9 @@ void EcmaVM::PushToNativePointerList(JSNativePointer* pointer, Concurrent isConc
     heap_->PushToNativePointerList(pointer, isConcurrent == Concurrent::YES);
 }
 
-void EcmaVM::RemoveFromNativePointerList(JSNativePointer* pointer)
+void EcmaVM::DestroyNativePointer(JSNativePointer* pointer)
 {
-    heap_->RemoveFromNativePointerList(pointer);
+    heap_->DestroyNativePointer(pointer);
 }
 
 void EcmaVM::PushToDeregisterModuleList(const CString &module)

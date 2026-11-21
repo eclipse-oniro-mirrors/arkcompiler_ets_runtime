@@ -20,8 +20,8 @@
 #include "ecmascript/mem/specialized_slot_space-inl.h"
 
 namespace panda::ecmascript {
-template <typename Callback>
-void NativePointerSpace::CollectDeadCallbacksFromRegion(Region *region, const Callback &liveObjectCallback)
+template <bool checkForwarding, typename Callback>
+void NativePointerSpace::ProcessObjectsImpl(Region *region, const Callback &liveObjectCallback)
 {
     void *env = localHeap_->GetJSThread()->GetEnv();
     std::vector<NativePointerCallbackData> concurrentCallbacks;
@@ -30,8 +30,13 @@ void NativePointerSpace::CollectDeadCallbacksFromRegion(Region *region, const Ca
     size_t asyncBindingSize = 0;
     IterateSlotObjectsInRegion(region, [this, region, &concurrentCallbacks, &asyncCallbacks, &totalBindingSize,
                                         &asyncBindingSize, env, &liveObjectCallback](TaggedObject *taggedObject) {
-        MarkWord markWord(taggedObject, RELAXED_LOAD);
-        if (markWord.IsForwardingAddress() || region->Test(taggedObject)) {
+        if constexpr (checkForwarding) {
+            MarkWord markWord(taggedObject, RELAXED_LOAD);
+            if (markWord.IsForwardingAddress()) {
+                liveObjectCallback(taggedObject);
+                return;
+            }
+        } else if (region->Test(taggedObject)) {
             liveObjectCallback(taggedObject);
             return;
         }
@@ -52,6 +57,12 @@ void NativePointerSpace::CollectDeadCallbacksFromRegion(Region *region, const Ca
         localHeap_->DecreaseNativeBindingSize(totalBindingSize);
     }
     localHeap_->AddNativePointerCallbacks(concurrentCallbacks, asyncCallbacks, asyncBindingSize);
+}
+
+template <typename Callback>
+void NativePointerSpace::CollectDeadCallbacksFromRegion(Region *region, const Callback &liveObjectCallback)
+{
+    ProcessObjectsImpl<false>(region, liveObjectCallback);
 }
 }  // namespace panda::ecmascript
 

@@ -1334,7 +1334,7 @@ public:
     NO_MOVE_SEMANTIC(Heap);
     void Initialize();
     void Destroy() override;
-    void Prepare();
+    void Prepare(bool cleanCallback = false);
     void GetHeapPrepare(JSThread *thread);
     void PrepareForIteration() const;
     void ResetLargeCapacity(size_t heapSize);
@@ -1739,7 +1739,7 @@ public:
     void WaitAllTasksFinished();
     void WaitConcurrentMarkingFinished();
     PUBLIC_API void WaitCCFinished() const;
-    void WaitAndHandleCCFinished(bool cleanCallback = true);
+    void WaitAndHandleCCFinished(bool cleanCallback = false);
 
     MemGrowingType GetMemGrowingType() const
     {
@@ -2131,7 +2131,7 @@ public:
     inline void ProcessReferences(const WeakRootVisitor& visitor);
     void ProcessReferencesForLocalCC(const WeakRootVisitor &visitor);
     inline void PushToNativePointerList(JSNativePointer* pointer, bool isConcurrent);
-    inline void RemoveFromNativePointerList(const JSNativePointer* pointer);
+    inline void DestroyNativePointer(const JSNativePointer* pointer);
     inline void ClearNativePointerList();
     inline void IteratorNativePointerList(WeakVisitor &vistor);
     void WaitLocalCCNativePointerCallbacks();
@@ -2165,6 +2165,8 @@ public:
 
 private:
     void InitializeSpaces();
+    inline JSNativePointer *RemoveFromNativePointerList(const JSNativePointer* pointer);
+    inline void CleanNativePointer(JSNativePointer* pointer);
     void CollectGarbageImpl(TriggerGCType gcType, GCReason reason = GCReason::OTHER);
 
     static constexpr int MIN_JSDUMP_THRESHOLDS = 85;

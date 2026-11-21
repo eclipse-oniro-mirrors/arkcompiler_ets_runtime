@@ -3339,7 +3339,7 @@ void ECMAObject::SetNativePointerFieldOnHashField(const JSThread *thread, const 
             JSHandle<JSTaggedValue> current = JSHandle<JSTaggedValue>(thread, array->Get(thread, index));
             if (!current->IsHole() && nativePointer == nullptr) {
                 // Try to remove native pointer if exists.
-                vm->RemoveFromNativePointerList(*JSHandle<JSNativePointer>(current));
+                vm->DestroyNativePointer(*JSHandle<JSNativePointer>(current));
                 array->Set(thread, index, JSTaggedValue::Hole());
             } else if (obj->IsJSShared()) {
                 JSHandle<JSNativePointer> pointer =
@@ -3551,7 +3551,7 @@ void JSObject::SetNativePointerField(const JSThread *thread, const JSHandle<JSOb
             JSHandle<JSTaggedValue> current = JSHandle<JSTaggedValue>(thread, array->Get(thread, index));
             if (!current->IsHole() && nativePointer == nullptr) {
                 // Try to remove native pointer if exists.
-                vm->RemoveFromNativePointerList(*JSHandle<JSNativePointer>(current));
+                vm->DestroyNativePointer(*JSHandle<JSNativePointer>(current));
                 array->Set(thread, index, JSTaggedValue::Hole());
             } else if (obj->IsJSShared()) {
                 JSHandle<JSNativePointer> pointer =

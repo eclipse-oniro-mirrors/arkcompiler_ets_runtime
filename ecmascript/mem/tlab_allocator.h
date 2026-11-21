@@ -32,6 +32,7 @@ public:
     inline uintptr_t Allocate();
     inline void Reset(SpecializedSlotSpace *space);
     inline void Finalize();
+    inline void Release(uintptr_t address);
 
     size_t GetSlotSize() const
     {
@@ -39,6 +40,7 @@ public:
     }
 
 private:
+    inline void Decrease(uintptr_t address);
     inline void Discard();
     inline uintptr_t Refill();
 
@@ -70,6 +72,7 @@ public:
     NO_MOVE_SEMANTIC(TlabAllocator);
 
     inline void Finalize();
+    inline void ReleaseNativePointer(uintptr_t address);
 
     inline uintptr_t Allocate(size_t size, MemSpaceType space);
 
@@ -109,6 +112,7 @@ public:
     inline void Setup(Heap *heap);
     inline void Initialize();
     inline void Finalize();
+    inline void ReleaseNativePointer(uintptr_t address);
 
     NO_COPY_SEMANTIC(CCTlabAllocator);
     NO_MOVE_SEMANTIC(CCTlabAllocator);

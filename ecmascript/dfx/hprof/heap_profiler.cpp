@@ -186,7 +186,7 @@ void HeapProfiler::MoveEventLocked(uintptr_t address, TaggedObject *forwardAddre
 void HeapProfiler::UpdateHeapObjects(HeapSnapshot *snapshot)
 {
     SharedHeap::GetInstance()->GetSweeper()->WaitAllTaskFinished();
-    const_cast<Heap*>(vm_->GetHeap())->WaitAndHandleCCFinished();
+    const_cast<Heap*>(vm_->GetHeap())->WaitAndHandleCCFinished(false);
     snapshot->UpdateNodes();
 }
 

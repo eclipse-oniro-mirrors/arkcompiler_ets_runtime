@@ -221,10 +221,6 @@ void FullGCRunner<evacuateNonMovableSpace>::EvacuateObject(ObjectSlotBase<refTyp
                                                        MarkWord::FromForwardingAddress(forwardAddress));
     if (result == oldValue) {
         TaggedObject *toObject = reinterpret_cast<TaggedObject*>(forwardAddress);
-        Region* toRegion = Region::ObjectAddressToRange(toObject);
-        if (toRegion->InNativePointerSpace()) {
-            heap_->GetNativePointerSpace()->AddSurvivalObjectSize(size);
-        }
         UpdateForwardAddressIfSuccess(slot, object, klass, size, toObject);
         if (objectRegion->HasLocalToShareRememberedSet()) {
             ObjectXRay::VisitObjectBody<VisitType::OLD_GC_VISIT>(toObject, klass, updateLocalToShareRSetVisitor_);
@@ -239,7 +235,7 @@ void FullGCRunner<evacuateNonMovableSpace>::EvacuateObject(ObjectSlotBase<refTyp
         return;
     }
     ASSERT(MarkWord::IsForwardingAddress(result));
-    UpdateForwardAddressIfFailed(slot, size, forwardAddress, MarkWord::ToForwardingAddress(result));
+    UpdateForwardAddressIfFailed(slot, size, forwardAddress, MarkWord::ToForwardingAddress(result), space);
 }
 
 template <bool evacuateNonMovableSpace>
@@ -317,10 +313,10 @@ void FullGCRunner<evacuateNonMovableSpace>::UpdateForwardAddressIfSuccess(Object
 template <bool evacuateNonMovableSpace>
 template <ReferenceType refType>
 void FullGCRunner<evacuateNonMovableSpace>::UpdateForwardAddressIfFailed(ObjectSlotBase<refType> slot, size_t size,
-    uintptr_t toAddress, TaggedObject *dst)
+    uintptr_t toAddress, TaggedObject *dst, MemSpaceType space)
 {
-    if (Region::ObjectAddressToRange(toAddress)->InNativePointerSpace()) {
-        SlotFreeSegment::FillFreeSegment(toAddress, size);
+    if (space == MemSpaceType::NATIVE_POINTER_SPACE) {
+        workNodeHolder_->GetTlabAllocator()->ReleaseNativePointer(toAddress);
     } else {
         FreeObject::FillFreeObject(heap_, toAddress, size);
     }

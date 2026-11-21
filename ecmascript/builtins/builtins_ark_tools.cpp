@@ -1865,7 +1865,7 @@ JSTaggedValue BuiltinsArkTools::TriggerLocalCCGC(EcmaRuntimeCallInfo *info)
     if (heap->IsCCMark()) {
         heap->CollectGarbageFromCCMark(GCReason::IDLE);
     } else if (thread->IsConcurrentCopying()) {
-        heap->WaitAndHandleCCFinished();
+        heap->WaitAndHandleCCFinished(true);
     } else {
         if (heap->CheckOngoingConcurrentMarking()) {
             heap->GetConcurrentMarker()->Reset();

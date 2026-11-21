@@ -168,7 +168,7 @@ private:
 
     template <ReferenceType refType>
     inline void UpdateForwardAddressIfFailed(ObjectSlotBase<refType> slot, size_t size, uintptr_t toAddress,
-        TaggedObject *dst);
+        TaggedObject *dst, MemSpaceType space);
 
     inline void PushObject(TaggedObject *object);
 

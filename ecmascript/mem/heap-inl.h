@@ -1226,8 +1226,7 @@ size_t Heap::GetCommittedSize() const
                     hugeMachineCodeSpace_->GetCommittedSize() +
                     readOnlySpace_->GetCommittedSize() +
                     appSpawnSpace_->GetCommittedSize() +
-                    snapshotSpace_->GetCommittedSize() +
-                    moduleSpace_->GetCommittedSize();
+                    snapshotSpace_->GetCommittedSize();
     if constexpr (G_USE_CMS_GC) {
         result += slotSpace_->GetCommittedSize();
     } else {
@@ -1246,8 +1245,7 @@ size_t Heap::GetHeapObjectSize() const
                     hugeMachineCodeSpace_->GetCommittedSize() +
                     readOnlySpace_->GetCommittedSize() +
                     appSpawnSpace_->GetHeapObjectSize() +
-                    snapshotSpace_->GetHeapObjectSize() +
-                    moduleSpace_->GetHeapObjectSize();
+                    snapshotSpace_->GetHeapObjectSize();
     if constexpr (G_USE_CMS_GC) {
         result += slotSpace_->GetHeapObjectSize();
     } else {
@@ -2022,24 +2020,48 @@ void Heap::IteratorNativePointerList(WeakVisitor &visitor)
     ShrinkWithFactor(concurrentNativePointerList_);
 }
 
-void Heap::RemoveFromNativePointerList(const JSNativePointer* pointer)
+void Heap::DestroyNativePointer(const JSNativePointer* pointer)
+{
+    if (pointer->IsInSharedHeap()) {
+        return;
+    }
+    if constexpr (!G_USE_CMS_GC) {
+        auto region = Region::ObjectAddressToRange(const_cast<JSNativePointer *>(pointer));
+        ASSERT(region->InNativePointerSpace());
+        CleanNativePointer(const_cast<JSNativePointer *>(pointer));
+        return;
+    }
+    JSNativePointer *object = RemoveFromNativePointerList(pointer);
+    if (object != nullptr) {
+        CleanNativePointer(object);
+    }
+}
+
+JSNativePointer *Heap::RemoveFromNativePointerList(const JSNativePointer* pointer)
 {
     auto iter = std::find_if(nativePointerList_.begin(), nativePointerList_.end(),
                              [pointer](JSTaggedValue item) { return item.GetTaggedObject() == pointer; });
     if (iter != nativePointerList_.end()) {
         JSNativePointer *object = reinterpret_cast<JSNativePointer *>((*iter).GetTaggedObject());
-        nativeAreaAllocator_->DecreaseNativeSizeStats(object->GetBindingSize(), object->GetNativeFlag());
-        object->Destroy(thread_);
         SwapBackAndPop(nativePointerList_, iter);
+        return object;
     }
     auto newIter = std::find_if(concurrentNativePointerList_.begin(), concurrentNativePointerList_.end(),
                                 [pointer](JSTaggedValue item) { return item.GetTaggedObject() == pointer; });
     if (newIter != concurrentNativePointerList_.end()) {
         JSNativePointer *object = reinterpret_cast<JSNativePointer *>((*newIter).GetTaggedObject());
-        nativeAreaAllocator_->DecreaseNativeSizeStats(object->GetBindingSize(), object->GetNativeFlag());
-        object->Destroy(thread_);
         SwapBackAndPop(concurrentNativePointerList_, newIter);
+        return object;
     }
+    return nullptr;
+}
+
+void Heap::CleanNativePointer(JSNativePointer *object)
+{
+    size_t bindingSize = object->GetBindingSize();
+    nativeAreaAllocator_->DecreaseNativeSizeStats(bindingSize, object->GetNativeFlag());
+    DecreaseNativeBindingSize(bindingSize);
+    object->Destroy(thread_);
 }
 
 void Heap::ClearNativePointerList()

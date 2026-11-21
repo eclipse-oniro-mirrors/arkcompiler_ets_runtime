@@ -1784,10 +1784,10 @@ void Heap::Destroy()
     }
 }
 
-void Heap::Prepare()
+void Heap::Prepare(bool cleanCallback)
 {
     MEM_ALLOCATE_AND_GC_TRACE(ecmaVm_, HeapPrepare);
-    WaitAndHandleCCFinished();
+    WaitAndHandleCCFinished(cleanCallback);
     WaitAllMarkTaskFinished();
     sweeper_->EnsureAllTaskFinished();
     WaitClearTaskFinished();
@@ -1795,7 +1795,7 @@ void Heap::Prepare()
 
 void Heap::PrepareForIteration() const
 {
-    const_cast<Heap*>(this)->WaitAndHandleCCFinished();
+    const_cast<Heap*>(this)->WaitAndHandleCCFinished(false);
     sweeper_->EnsureAllTaskFinished();
 }
 
@@ -2253,7 +2253,7 @@ void Heap::CollectGarbage(TriggerGCType gcType, GCReason reason)
         return;
     }
     if (thread_->IsConcurrentCopying()) {
-        WaitAndHandleCCFinished();
+        WaitAndHandleCCFinished(false);
     } else if (IsCCMark()) {
         if (gcType != TriggerGCType::FULL_GC && !shouldThrowOOMError_) {
             CollectGarbageFromCCMark(reason);
@@ -3024,7 +3024,7 @@ bool Heap::TryTriggerCCMarking(MarkReason markReason)
     if (!LocalCCEnabled()) {
         return false;
     }
-    if (CheckCanTriggerConcurrentMarking()&& !thread_->IsConcurrentCopying() &&
+    if (CheckCanTriggerConcurrentMarking() && !thread_->IsConcurrentCopying() &&
         !fullGCRequested_ && ConcurrentMarker::TryIncreaseTaskCounts()) {
         GetEcmaGCStats()->SetMarkReason(markReason);
         SetMarkType(MarkType::MARK_FOR_CC);
@@ -3072,7 +3072,7 @@ bool Heap::TryTriggerFullMarkBySharedLimit()
         if (!CheckCanTriggerConcurrentMarking()) {
             return keepFullMarkRequest;
         }
-        WaitAndHandleCCFinished();
+        WaitAndHandleCCFinished(false);
         markType_ = MarkType::MARK_FULL;
         if (ConcurrentMarker::TryIncreaseTaskCounts()) {
             GetEcmaGCStats()->SetMarkReason(MarkReason::SHARED_LIMIT);
@@ -3187,7 +3187,7 @@ void Heap::PrepareRecordNonmovableRegions()
 void Heap::TriggerConcurrentMarking(MarkReason markReason)
 {
     if (concurrentMarker_->IsEnabled() && !fullGCRequested_ && ConcurrentMarker::TryIncreaseTaskCounts()) {
-        WaitAndHandleCCFinished();
+        WaitAndHandleCCFinished(false);
         GetEcmaGCStats()->SetMarkReason(markReason);
         concurrentMarker_->Mark();
     }
@@ -3195,7 +3195,7 @@ void Heap::TriggerConcurrentMarking(MarkReason markReason)
 
 void Heap::WaitAllTasksFinished()
 {
-    WaitAndHandleCCFinished();
+    WaitAndHandleCCFinished(false);
     WaitAllMarkTaskFinished();
     sweeper_->EnsureAllTaskFinished();
     WaitClearTaskFinished();

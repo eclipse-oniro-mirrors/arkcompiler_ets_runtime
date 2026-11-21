@@ -116,7 +116,7 @@ void NativePointerSpace::CollectDeadCallbacks()
 
 void NativePointerSpace::CollectDeadCallbacksFromRegion(Region* region)
 {
-    CollectDeadCallbacksFromRegion(region, []([[maybe_unused]] TaggedObject *object) {});
+    ProcessObjectsImpl<true>(region, []([[maybe_unused]] TaggedObject *object) {});
 }
 
 uint32_t NativePointerSpace::CalculateCollectTaskCount() const

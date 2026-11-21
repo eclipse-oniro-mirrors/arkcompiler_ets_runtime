@@ -105,7 +105,7 @@ void SharedCC::ReMarkAndPrepare(GCReason gcReason)
         // ResetTlab must precede Sweep/PostTask to avoid racing with free-object construction.
         Runtime::GetInstance()->GCIterateThreadList([](JSThread *thread) {
             Heap *heap = thread->GetEcmaVM()->GetHeap();
-            heap->WaitAndHandleCCFinished();
+            heap->WaitAndHandleCCFinished(false);
             heap->WaitRunningMarkTaskFinished();
             heap->ResetTlab();
         });

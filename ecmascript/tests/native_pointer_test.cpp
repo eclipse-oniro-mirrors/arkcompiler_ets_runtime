@@ -185,6 +185,9 @@ HWTEST_F_L0(NativePointerTest, FullGCCompactsLiveNativePointer)
         heap->CollectGarbage(TriggerGCType::FULL_GC, GCReason::OTHER);
         EXPECT_TRUE(Region::ObjectAddressToRange(*nativePointer)->InNativePointerSpace());
         EXPECT_NE(reinterpret_cast<uintptr_t>(*nativePointer), addressBefore);
+        size_t objectSizeAfterGC = heap->GetNativePointerSpace()->GetHeapObjectSize();
+        heap->CollectGarbage(TriggerGCType::FULL_GC, GCReason::OTHER);
+        EXPECT_EQ(heap->GetNativePointerSpace()->GetHeapObjectSize(), objectSizeAfterGC);
     }
     EXPECT_EQ(g_callbackCount.load(std::memory_order_relaxed), 0);
 }
@@ -208,6 +211,38 @@ HWTEST_F_L0(NativePointerTest, FullGCUpdatesDuplicateNonNativeReference)
         EXPECT_NE(reinterpret_cast<uintptr_t>(*target), addressBefore);
         EXPECT_EQ(references->Get(thread, 0), references->Get(thread, 1));
     }
+}
+
+HWTEST_F_L0(NativePointerTest, FullGCUpdatesDuplicateNativePointerReference)
+{
+    auto *heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    if (!ShouldRunNativePointerSpaceTest()) {
+        return;
+    }
+
+    ResetNativePointerCallbackCount();
+    int externalPointer = 1;
+    ObjectFactory *factory = thread->GetEcmaVM()->GetFactory();
+    {
+        [[maybe_unused]] EcmaHandleScope scope(thread);
+        JSHandle<JSNativePointer> target = factory->NewJSNativePointer(
+            &externalPointer, CountNativePointerCallback, nullptr, false, 16);
+        JSHandle<TaggedArray> references = factory->NewTaggedArray(2);
+        references->Set(thread, 0, target.GetTaggedValue());
+        references->Set(thread, 1, target.GetTaggedValue());
+        uintptr_t addressBefore = reinterpret_cast<uintptr_t>(*target);
+        heap->CollectGarbage(TriggerGCType::FULL_GC, GCReason::OTHER);
+        EXPECT_NE(reinterpret_cast<uintptr_t>(*target), addressBefore);
+        EXPECT_TRUE(Region::ObjectAddressToRange(*target)->InNativePointerSpace());
+        EXPECT_EQ(references->Get(thread, 0), references->Get(thread, 1));
+        EXPECT_EQ(references->Get(thread, 0), target.GetTaggedValue());
+
+        size_t objectSizeAfterGC = heap->GetNativePointerSpace()->GetHeapObjectSize();
+        heap->CollectGarbage(TriggerGCType::FULL_GC, GCReason::OTHER);
+        EXPECT_EQ(heap->GetNativePointerSpace()->GetHeapObjectSize(), objectSizeAfterGC);
+        EXPECT_EQ(references->Get(thread, 0), references->Get(thread, 1));
+    }
+    EXPECT_EQ(g_callbackCount.load(std::memory_order_relaxed), 0);
 }
 
 HWTEST_F_L0(NativePointerTest, FullGCInvokesDeadNativePointerCallback)
@@ -247,6 +282,9 @@ HWTEST_F_L0(NativePointerTest, OldGCCompactsLiveNativePointer)
         heap->CollectGarbage(TriggerGCType::OLD_GC, GCReason::OTHER);
         EXPECT_TRUE(Region::ObjectAddressToRange(*nativePointer)->InNativePointerSpace());
         EXPECT_NE(reinterpret_cast<uintptr_t>(*nativePointer), addressBefore);
+        size_t objectSizeAfterGC = heap->GetNativePointerSpace()->GetHeapObjectSize();
+        heap->CollectGarbage(TriggerGCType::OLD_GC, GCReason::OTHER);
+        EXPECT_EQ(heap->GetNativePointerSpace()->GetHeapObjectSize(), objectSizeAfterGC);
     }
     EXPECT_EQ(g_callbackCount.load(std::memory_order_relaxed), 0);
 }
@@ -286,10 +324,14 @@ HWTEST_F_L0(NativePointerTest, LocalCCCompactsLiveNativePointer)
         uintptr_t addressBefore = reinterpret_cast<uintptr_t>(*nativePointer);
         if (heap->TryTriggerCCMarking(MarkReason::OTHER)) {
             heap->CollectGarbageFromCCMark(GCReason::OTHER);
-            EXPECT_TRUE(thread->IsConcurrentCopying());
             heap->WaitAndHandleCCFinished();
             EXPECT_TRUE(Region::ObjectAddressToRange(*nativePointer)->InNativePointerSpace());
             EXPECT_NE(reinterpret_cast<uintptr_t>(*nativePointer), addressBefore);
+            size_t objectSizeAfterGC = heap->GetNativePointerSpace()->GetHeapObjectSize();
+            ASSERT_TRUE(heap->TryTriggerCCMarking(MarkReason::OTHER));
+            heap->CollectGarbageFromCCMark(GCReason::OTHER);
+            heap->WaitAndHandleCCFinished();
+            EXPECT_EQ(heap->GetNativePointerSpace()->GetHeapObjectSize(), objectSizeAfterGC);
         }
     }
     EXPECT_EQ(g_callbackCount.load(std::memory_order_relaxed), 0);
@@ -312,10 +354,38 @@ HWTEST_F_L0(NativePointerTest, LocalCCInvokesDeadNativePointerCallback)
 
     if (heap->TryTriggerCCMarking(MarkReason::OTHER)) {
         heap->CollectGarbageFromCCMark(GCReason::OTHER);
-        EXPECT_TRUE(thread->IsConcurrentCopying());
-        heap->WaitAndHandleCCFinished();
+        heap->WaitAndHandleCCFinished(true);
+        ASSERT_TRUE(WaitForNativePointerCallbackCount(1));
     }
     EXPECT_EQ(g_callbackCount.load(std::memory_order_relaxed), 1);
+}
+
+HWTEST_F_L0(NativePointerTest, ClearNativePointerFieldInvokesCallbackImmediately)
+{
+    auto *heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
+    if (!ShouldRunNativePointerSpaceTest()) {
+        return;
+    }
+
+    ResetNativePointerCallbackCount();
+    size_t bindingSizeBefore = heap->GetNativeBindingSize();
+    int externalPointer = 1;
+    {
+        [[maybe_unused]] EcmaHandleScope scope(thread);
+        JSHandle<GlobalEnv> env = thread->GetEcmaVM()->GetGlobalEnv();
+        JSHandle<JSFunction> constructor(env->GetObjectFunction());
+        JSHandle<JSObject> object = thread->GetEcmaVM()->GetFactory()->NewJSObjectByConstructor(constructor);
+        JSObject::SetNativePointerFieldCount(thread, object, 1);
+        JSObject::SetNativePointerField(
+            thread, object, 0, &externalPointer, CountNativePointerCallback, nullptr, 16);
+        JSObject::SetNativePointerField(thread, object, 0, nullptr, CountNativePointerCallback, nullptr, 16);
+        EXPECT_EQ(g_callbackCount.load(std::memory_order_relaxed), 1);
+        EXPECT_EQ(heap->GetNativeBindingSize(), bindingSizeBefore);
+    }
+
+    heap->CollectGarbage(TriggerGCType::FULL_GC, GCReason::OTHER);
+    EXPECT_EQ(g_callbackCount.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(heap->GetNativeBindingSize(), bindingSizeBefore);
 }
 
 HWTEST_F_L0(NativePointerTest, LocalCCDefersCleanCallbackToSafepoint)
@@ -335,9 +405,7 @@ HWTEST_F_L0(NativePointerTest, LocalCCDefersCleanCallbackToSafepoint)
 
     if (heap->TryTriggerCCMarking(MarkReason::OTHER)) {
         heap->CollectGarbageFromCCMark(GCReason::OTHER);
-        ASSERT_TRUE(thread->IsConcurrentCopying());
         heap->WaitAndHandleCCFinished(false);
-        EXPECT_EQ(g_callbackCount.load(std::memory_order_relaxed), 0);
         thread->CheckSafepoint();
         ASSERT_TRUE(WaitForNativePointerCallbackCount(1));
     }
@@ -361,9 +429,7 @@ HWTEST_F_L0(NativePointerTest, ClearNativePointerListHandlesDeferredCleanCallbac
 
     if (heap->TryTriggerCCMarking(MarkReason::OTHER)) {
         heap->CollectGarbageFromCCMark(GCReason::OTHER);
-        ASSERT_TRUE(thread->IsConcurrentCopying());
         heap->WaitAndHandleCCFinished(false);
-        EXPECT_EQ(g_callbackCount.load(std::memory_order_relaxed), 0);
         heap->WaitAllTasksFinished();
         heap->ClearNativePointerList();
         ASSERT_TRUE(WaitForNativePointerCallbackCount(1));

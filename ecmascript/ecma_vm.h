@@ -459,7 +459,7 @@ public:
     }
 
     void PushToNativePointerList(JSNativePointer *pointer, Concurrent isConcurrent = Concurrent::NO);
-    void RemoveFromNativePointerList(JSNativePointer *pointer);
+    void DestroyNativePointer(JSNativePointer *pointer);
     void PushToDeregisterModuleList(const CString &module);
     void RemoveFromDeregisterModuleList(CString module);
     bool ContainInDeregisterModuleList(CString module);
