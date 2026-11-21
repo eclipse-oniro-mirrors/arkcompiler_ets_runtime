@@ -22,6 +22,7 @@
 #include "ecmascript/platform/aot_crash_info.h"
 #include "ecmascript/platform/file.h"
 #include "ecmascript/platform/os.h"
+#include "ecmascript/runtime.h"
 #include "ecmascript/snapshot/common/modules_snapshot_helper.h"
 #include "ecmascript/stubs/runtime_stubs-inl.h"
 #include "ecmascript/jit/jit.h"
@@ -204,6 +205,14 @@ std::string JsStackInfo::BuildJsStackTrace(JSThread *thread, bool needNative, co
         return data;
     }
     data.reserve(InitialDeeps * InitialLength);
+
+#ifdef PANDA_JS_ETS_HYBRID_MODE
+    data = DynamicStaticStack(thread, data);
+    if (!data.empty()) {
+        return data;
+    }
+#endif
+
     JSTaggedType *current = const_cast<JSTaggedType *>(thread->GetCurrentFrame());
     FrameIterator it(current, thread);
     uintptr_t baselineNativePc = 0;
@@ -260,6 +269,87 @@ std::string JsStackInfo::BuildJsStackTrace(JSThread *thread, bool needNative, co
 #endif
     return data;
 }
+
+#ifdef PANDA_JS_ETS_HYBRID_MODE
+void JsStackInfo::ProcessDynamicFrame(const void *frame, JSThread *thread, std::string &data)
+{
+    if (frame == nullptr) {
+        LOG_ECMA(ERROR) << "JsStackInfo::ProcessDynamicFrame, frame is nullptr";
+        return;
+    }
+
+    auto *frameHandler = static_cast<FrameHandler *>(const_cast<void *>(frame));
+    FrameIterator it(frameHandler->GetSp(), thread);
+    uintptr_t baselineNativePc = 0;
+    LastBuilderCache lastCache;
+    if (!it.IsJSFrame()) {
+        return;
+    }
+    auto method = it.CheckAndGetMethod();
+    if (method == nullptr) {
+        return;
+    }
+    if (!method->IsNativeWithCallField()) {
+        uint32_t pcOffset = 0;
+        bool needBaselineSpecialHandling =
+            (it.GetFrameType() == FrameType::ASM_INTERPRETER_FRAME && baselineNativePc != 0);
+        if (needBaselineSpecialHandling) {
+            JSHandle<JSFunction> function(thread, it.GetFunction());
+            pcOffset = RuntimeStubs::RuntimeGetBytecodePcOfstForBaseline(thread, function, baselineNativePc);
+            baselineNativePc = 0;
+        }
+        JSHandle<JSObject> jsErrorObj;
+        AppendJsStackTraceInfo(data, thread, method, it, jsErrorObj, lastCache, needBaselineSpecialHandling, pcOffset);
+    }
+}
+
+std::string JsStackInfo::DynamicStaticStack(JSThread *thread, std::string &data)
+{
+    if (thread == nullptr) {
+        return "";
+    }
+
+    EcmaVM *vm = thread->GetEcmaVM();
+    if (vm == nullptr) {
+        return "";
+    }
+
+    // Checks whether the stack is empty.
+    bool isEmpty = true;
+    auto *crossVMOperator = vm->GetCrossVMOperator();
+    if (crossVMOperator != nullptr) {
+        crossVMOperator->UnionStackIsEmpty(&isEmpty);
+    }
+    
+    if (isEmpty) {
+        return "";
+    }
+    
+    Runtime::GetInstance()->ForEachFrameInUnionStack(vm, [vm, &data]
+        (const void *frame, bool isStaticFrame) {
+        if (isStaticFrame) {
+            arkplatform::HybridFrameInfo frameInfo;
+            auto *crossVMOperator = vm->GetCrossVMOperator();
+            if (crossVMOperator == nullptr || !crossVMOperator->GetStaticFrameInfo(frame, frameInfo)) {
+                LOG_ECMA(ERROR) << "JsStackInfo::DynamicStaticStack, GetStaticFrameInfo failed";
+                return;
+            }
+            data.append("\tat ")
+                .append(frameInfo.GetClassName())
+                .append(".")
+                .append(frameInfo.GetFunctionName().empty() ? "<unknown>" : frameInfo.GetFunctionName())
+                .append(" (")
+                .append(frameInfo.GetUrl())
+                .append(":")
+                .append(std::to_string(frameInfo.lineNumber))
+                .append(":0)\n");
+        } else {
+            ProcessDynamicFrame(frame, vm->GetJSThread(), data);
+        }
+    });
+    return data;
+}
+#endif
 
 void JsStackInfo::AppendJsStackTraceInfo(std::string &data, JSThread *thread, Method *method, FrameIterator &it,
                                          const JSHandle<JSObject> &jsErrorObj,
@@ -335,6 +425,57 @@ void JsStackInfo::BuildCrashInfo(bool isJsCrash, uintptr_t pc, JSThread *thread)
         DumpJitCode(thread);
 #endif
     }
+}
+
+std::vector<struct JsFrameInfo> JsStackInfo::BuildJsFrameInfo(JSThread *thread, const void *frame)
+{
+    std::vector<struct JsFrameInfo> jsFrame;
+    auto *frameHandler = static_cast<FrameHandler *>(const_cast<void *>(frame));
+    FrameIterator it(frameHandler->GetSp(), thread);
+    if (!it.IsJSFrame()) {
+        return jsFrame;
+    }
+    auto method = it.CheckAndGetMethod();
+    if (method == nullptr) {
+        return jsFrame;
+    }
+    struct JsFrameInfo frameInfo;
+    if (!method->IsNativeWithCallField()) {
+        std::string name = method->ParseFunctionName(thread);
+        if (name.empty()) {
+            frameInfo.functionName = "anonymous";
+        } else {
+            frameInfo.functionName = name;
+        }
+        // source file
+        DebugInfoExtractor *debugExtractor =
+            JSPandaFileManager::GetInstance()->GetJSPtExtractor(method->GetJSPandaFile(thread));
+        const std::string &sourceFile = debugExtractor->GetSourceFile(method->GetMethodId());
+        if (sourceFile.empty()) {
+            frameInfo.fileName = "?";
+        } else {
+            frameInfo.fileName = sourceFile;
+        }
+        // line number and column number
+        int lineNumber = 0;
+        auto callbackLineFunc = [&frameInfo, &lineNumber](int32_t line) -> bool {
+            lineNumber = line + 1;
+            frameInfo.pos = std::to_string(lineNumber) + ":";
+            return true;
+        };
+        auto callbackColumnFunc = [&frameInfo](int32_t column) -> bool {
+            frameInfo.pos += std::to_string(column + 1);
+            return true;
+        };
+        panda_file::File::EntityId methodId = method->GetMethodId();
+        uint32_t offset = it.GetBytecodeOffset();
+        if (!debugExtractor->MatchLineWithOffset(callbackLineFunc, methodId, offset) ||
+            !debugExtractor->MatchColumnWithOffset(callbackColumnFunc, methodId, offset)) {
+            frameInfo.pos = "?";
+        }
+        jsFrame.push_back(std::move(frameInfo));
+        }
+    return jsFrame;
 }
 
 JsFrameInfo JsStackInfo::BuildJsFrameInfoForSource(const JSPandaFile *pandaFile,

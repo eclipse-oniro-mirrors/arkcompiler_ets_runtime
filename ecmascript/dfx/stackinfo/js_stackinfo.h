@@ -242,6 +242,7 @@ public:
     static std::string BuildJsStackTrace(JSThread *thread, bool needNative, const JSHandle<JSObject> &jsErrorObj,
                                          bool needNativeStack, uint32_t depth = UINT32_MAX);
     static std::vector<JsFrameInfo> BuildJsStackInfo(JSThread *thread, bool currentStack = false);
+    static std::vector<JsFrameInfo> BuildJsFrameInfo(JSThread *thread, const void *frame);
     static void AppendMethodTrace(std::string &data, const JSThread *thread, Method *method, uint32_t pcOffset,
                                  LastBuilderCache &lastCache, bool enableStackSourceFile = true);
     static AOTFileManager *loader;
@@ -254,6 +255,7 @@ public:
     static std::unordered_map<EntityId, std::string> nameMap;
     static std::unordered_map<EntityId, std::vector<uint8>> machineCodeMap;
     static void DumpJitCode(JSThread *thread);
+    static std::string DynamicStaticStack(JSThread *thread, std::string &data);
 
 private:
     static void AppendMethodTraceDetails(std::string &data, const std::string &name,
@@ -270,6 +272,7 @@ private:
                                        LastBuilderCache &lastCache,
                                        bool needBaselineSpecialHandling,
                                        uint32_t pcOffset);
+    static void ProcessDynamicFrame(const void *frame, JSThread *thread, std::string &data);
     static constexpr int32_t InitialLength = 50;
     static constexpr int32_t InitialDeeps = 5;
 };
