@@ -55,8 +55,10 @@ public:
     }
 
     bool UnionStackIsEmpty(bool *isEmpty) const;
-    bool ForEachFrameInUnionStack(const std::function<void(const void *frame, bool isStaticFrame)> &callback) const;
+    bool ForEachFrameInUnionStack(void (*callback)(const void *frame, bool isStaticFrame, void *data),
+                                  void *data) const;
     bool GetStaticFrameInfo(const void *frame, arkplatform::HybridFrameInfo &frameInfo) const;
+    bool GetDynamicFrameInfo(const void *frame, arkplatform::HybridFrameInfo &frameInfo) const;
 
     void MarkFromObject(JSTaggedType value, std::function<void(uintptr_t)> &visitor);
     void MarkFromObject(JSTaggedType value);
@@ -74,15 +76,23 @@ private:
         bool StartXRefMarking() override;
         void NotifyXGCInterruption() override;
         bool GetDynamicFrameInfo(const void *dynamicFramePtr, arkplatform::HybridFrameInfo &frameInfo) override;
+        bool GetSourceMappedFrameInfo(const void *dynamicFramePtr, arkplatform::HybridFrameInfo &frameInfo) override;
         JSTaggedType *GetTopFrameSPFromDynamic() const override;
         bool ForEachDynamicFrame(void *currFrameSP, void *toFrameSP,
-                                 const std::function<void(const void *)> &cb) const override;
+                                 void (*cb)(const void *frame, void *data),
+                                 void *data) const override;
         const void *GetEcmaVM() const override;
+        bool DynamicTopFrameIsValid(void *signalContextPtr) override;
+        bool IsJSGCRunning() override;
         std::string GetArkTSMode() const override;
         std::unique_ptr<AbstractDumper> CreateHeapDumper(const DumpRequest &request) override;
 
     private:
         [[maybe_unused]] EcmaVM *vm_ {nullptr};
+        // Replaces thread_local g_dynamicFrameOverride to avoid __emutls_get_address
+        // deadlocks in the SIGPROF handler. Written by DynamicTopFrameIsValid,
+        // read by GetTopFrameSPFromDynamic within the same signal handler invocation.
+        mutable void *dynamicFrameOverride_ {nullptr};
     };
 
     EcmaVM *vm_ {nullptr};

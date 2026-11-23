@@ -129,7 +129,8 @@ public:
     // here temporarily (see CollectSampleInto).
     void ProcessHybridStack(JSThread *thread);
     void ProcessStaticFrame(const void *frame);
-    void ProcessDynamicFrame(const void *frame, JSThread *thread);
+    void ProcessDynamicFrame(const void *frame);
+    void AddHybridFrameToRecord(const arkplatform::HybridFrameInfo &frameInfo);
 #endif
 
     bool StartCpuProfilerForInfo();

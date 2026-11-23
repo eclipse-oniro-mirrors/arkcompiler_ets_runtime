@@ -30,6 +30,7 @@
 #include "ecmascript/jobs/micro_job_queue.h"
 #include "ecmascript/module/module_resolver.h"
 #include "ecmascript/module/module_value_accessor.h"
+#include "ecmascript/module/module_path_helper.h"
 #include "ecmascript/runtime.h"
 
 namespace panda::ecmascript::tooling {
@@ -374,9 +375,9 @@ void DebuggerApi::RemoveSymbolicBreakpoint(JSDebugger* debugger, const std::stri
 }
 
 bool DebuggerApi::ForEachFrameInHybridStack(const EcmaVM *ecmaVm,
-    const std::function<void(const void *frame, bool isStaticFrame)> &callback)
+    void (*callback)(const void *frame, bool isStaticFrame, void *data), void *data)
 {
-    return Runtime::GetInstance()->ForEachFrameInUnionStack(ecmaVm, callback);
+    return Runtime::GetInstance()->ForEachFrameInUnionStack(ecmaVm, callback, data);
 }
 
 bool DebuggerApi::HybridStackIsEmpty(const EcmaVM *ecmaVm, bool *isEmpty)

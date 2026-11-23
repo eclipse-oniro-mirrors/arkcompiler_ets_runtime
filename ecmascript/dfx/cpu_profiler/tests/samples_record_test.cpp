@@ -75,9 +75,9 @@ public:
         return true;
     }
 
-    void PostHybridStackFrameTest(const arkplatform::HybridFrameInfo &frameInfo)
+    void PushHybridStackFrameTest(const arkplatform::HybridFrameInfo &frameInfo)
     {
-        samples_record.PostHybridStackFrame(frameInfo);
+        samples_record.PushHybridStackFrame(frameInfo);
     }
 
     void AddSampleTest(const FrameStackAndInfo &frame)
@@ -341,12 +341,12 @@ HWTEST_F_L0(SamplesRecordTest, NapiFrameInfoTempToMapTest)
 }
 
 /**
- * @tc.name: PostHybridStackFrameTest_Normal
- * @tc.desc: Test normal PostHybridStackFrame behavior.
- *           Verifies normal frame info can be pushed into the frame stack.
- * @tc.type: FUNC
- */
-HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_Normal)
+* @tc.name: PushHybridStackFrameTest_Normal
+* @tc.desc: Test normal PushHybridStackFrame behavior.
+*           Verifies normal frame info can be pushed into the frame stack.
+* @tc.type: FUNC
+*/
+HWTEST_F_L0(SamplesRecordTest, PushHybridStackFrameTest_Normal)
 {
     SamplesRecord record;
     record.NodeInit();
@@ -359,18 +359,18 @@ HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_Normal)
     frameInfo.columnNumber = 5;
     frameInfo.isStaticFrame = true;
 
-    record.PostHybridStackFrame(frameInfo);
+    record.PushHybridStackFrame(frameInfo);
 
     EXPECT_EQ(record.GetframeStackLength(), 1);
 }
 
 /**
- * @tc.name: PostHybridStackFrameTest_EmptyFunctionName
- * @tc.desc: Test PostHybridStackFrame with empty function name
- *           empty function name should use default value "anonymous"
- * @tc.type: FUNC
- */
-HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_EmptyFunctionName)
+* @tc.name: PushHybridStackFrameTest_EmptyFunctionName
+* @tc.desc: Test PushHybridStackFrame with empty function name
+*           empty function name should use default value "anonymous"
+* @tc.type: FUNC
+*/
+HWTEST_F_L0(SamplesRecordTest, PushHybridStackFrameTest_EmptyFunctionName)
 {
     SamplesRecordFriendTest samplesRecord;
     samplesRecord.NodeInit();
@@ -382,7 +382,7 @@ HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_EmptyFunctionName)
     frameInfo.lineNumber = 10;
     frameInfo.columnNumber = 5;
 
-    samplesRecord.PostHybridStackFrameTest(frameInfo);
+    samplesRecord.PushHybridStackFrameTest(frameInfo);
 
     EXPECT_EQ(samplesRecord.GetFrameStackLengthTest(), 1);
 
@@ -392,12 +392,12 @@ HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_EmptyFunctionName)
 }
 
 /**
- * @tc.name: PostHybridStackFrameTest_EmptyUrl
- * @tc.desc: Test PostHybridStackFrame with empty URL
- *           empty URL should use default value "ets:static"
- * @tc.type: FUNC
- */
-HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_EmptyUrl)
+* @tc.name: PushHybridStackFrameTest_EmptyUrl
+* @tc.desc: Test PushHybridStackFrame with empty URL
+*           empty URL should use default value "ets:static"
+* @tc.type: FUNC
+*/
+HWTEST_F_L0(SamplesRecordTest, PushHybridStackFrameTest_EmptyUrl)
 {
     SamplesRecordFriendTest samplesRecord;
     samplesRecord.NodeInit();
@@ -409,7 +409,7 @@ HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_EmptyUrl)
     frameInfo.lineNumber = 10;
     frameInfo.columnNumber = 5;
 
-    samplesRecord.PostHybridStackFrameTest(frameInfo);
+    samplesRecord.PushHybridStackFrameTest(frameInfo);
 
     EXPECT_EQ(samplesRecord.GetFrameStackLengthTest(), 1);
 
@@ -419,12 +419,12 @@ HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_EmptyUrl)
 }
 
 /**
- * @tc.name: PostHybridStackFrameTest_MultipleFrames
- * @tc.desc: Test PostHybridStackFrame with multiple frames
- *           multiple frames can be pushed into frame stack correctly
- * @tc.type: FUNC
- */
-HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_MultipleFrames)
+* @tc.name: PushHybridStackFrameTest_MultipleFrames
+* @tc.desc: Test PushHybridStackFrame with multiple frames
+*           multiple frames can be pushed into frame stack correctly
+* @tc.type: FUNC
+*/
+HWTEST_F_L0(SamplesRecordTest, PushHybridStackFrameTest_MultipleFrames)
 {
     SamplesRecordFriendTest samplesRecord;
     samplesRecord.NodeInit();
@@ -437,19 +437,19 @@ HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_MultipleFrames)
         frameInfo.lineNumber = i * 10;
         frameInfo.columnNumber = i;
 
-        samplesRecord.PostHybridStackFrameTest(frameInfo);
+        samplesRecord.PushHybridStackFrameTest(frameInfo);
     }
 
     EXPECT_EQ(samplesRecord.GetFrameStackLengthTest(), 5);
 }
 
 /**
- * @tc.name: PostHybridStackFrameTest_MaxStackSize
- * @tc.desc: Test PostHybridStackFrame max stack depth
- *           pushing up to MAX_STACK_SIZE should not crash
- * @tc.type: FUNC
- */
-HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_MaxStackSize)
+* @tc.name: PushHybridStackFrameTest_MaxStackSize
+* @tc.desc: Test PushHybridStackFrame max stack depth
+*           pushing up to MAX_STACK_SIZE should not crash
+* @tc.type: FUNC
+*/
+HWTEST_F_L0(SamplesRecordTest, PushHybridStackFrameTest_MaxStackSize)
 {
     SamplesRecordFriendTest samplesRecord;
     samplesRecord.NodeInit();
@@ -462,19 +462,19 @@ HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_MaxStackSize)
         frameInfo.lineNumber = i;
         frameInfo.columnNumber = i;
 
-        samplesRecord.PostHybridStackFrameTest(frameInfo);
+        samplesRecord.PushHybridStackFrameTest(frameInfo);
     }
 
     EXPECT_EQ(samplesRecord.GetFrameStackLengthTest(), MAX_STACK_SIZE);
 }
 
 /**
- * @tc.name: PostHybridStackFrameTest_LongFunctionName
- * @tc.desc: Test PostHybridStackFrame with long function name
- *           overlong function name should be truncated without crash
- * @tc.type: FUNC
- */
-HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_LongFunctionName)
+* @tc.name: PushHybridStackFrameTest_LongFunctionName
+* @tc.desc: Test PushHybridStackFrame with long function name
+*           overlong function name should be truncated without crash
+* @tc.type: FUNC
+*/
+HWTEST_F_L0(SamplesRecordTest, PushHybridStackFrameTest_LongFunctionName)
 {
     SamplesRecordFriendTest samplesRecord;
     samplesRecord.NodeInit();
@@ -486,7 +486,7 @@ HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_LongFunctionName)
     frameInfo.lineNumber = 10;
     frameInfo.columnNumber = 5;
 
-    samplesRecord.PostHybridStackFrameTest(frameInfo);
+    samplesRecord.PushHybridStackFrameTest(frameInfo);
 
     EXPECT_EQ(samplesRecord.GetFrameStackLengthTest(), 1);
 
@@ -496,12 +496,12 @@ HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_LongFunctionName)
 }
 
 /**
- * @tc.name: PostHybridStackFrameTest_LongUrl
- * @tc.desc: Test PostHybridStackFrame with long URL
- *           overlong URL should be truncated without crash
- * @tc.type: FUNC
- */
-HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_LongUrl)
+* @tc.name: PushHybridStackFrameTest_LongUrl
+* @tc.desc: Test PushHybridStackFrame with long URL
+*           overlong URL should be truncated without crash
+* @tc.type: FUNC
+*/
+HWTEST_F_L0(SamplesRecordTest, PushHybridStackFrameTest_LongUrl)
 {
     SamplesRecordFriendTest samplesRecord;
     samplesRecord.NodeInit();
@@ -513,7 +513,7 @@ HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_LongUrl)
     frameInfo.lineNumber = 10;
     frameInfo.columnNumber = 5;
 
-    samplesRecord.PostHybridStackFrameTest(frameInfo);
+    samplesRecord.PushHybridStackFrameTest(frameInfo);
 
     EXPECT_EQ(samplesRecord.GetFrameStackLengthTest(), 1);
 
@@ -523,12 +523,12 @@ HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_LongUrl)
 }
 
 /**
- * @tc.name: PostHybridStackFrameTest_EmptyBoth
- * @tc.desc: Test PostHybridStackFrame with both empty function name and URL
- *           both default values should be set correctly
- * @tc.type: FUNC
- */
-HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_EmptyBoth)
+* @tc.name: PushHybridStackFrameTest_EmptyBoth
+* @tc.desc: Test PushHybridStackFrame with both empty function name and URL
+*           both default values should be set correctly
+* @tc.type: FUNC
+*/
+HWTEST_F_L0(SamplesRecordTest, PushHybridStackFrameTest_EmptyBoth)
 {
     SamplesRecordFriendTest samplesRecord;
     samplesRecord.NodeInit();
@@ -540,7 +540,7 @@ HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_EmptyBoth)
     frameInfo.lineNumber = 10;
     frameInfo.columnNumber = 5;
 
-    samplesRecord.PostHybridStackFrameTest(frameInfo);
+    samplesRecord.PushHybridStackFrameTest(frameInfo);
 
     EXPECT_EQ(samplesRecord.GetFrameStackLengthTest(), 1);
 
@@ -551,12 +551,12 @@ HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_EmptyBoth)
 }
 
 /**
- * @tc.name: PostHybridStackFrameTest_NullNativePtr
- * @tc.desc: Test PostHybridStackFrame with nativePtr as nullptr
- *           should not crash when nativePtr is nullptr
- * @tc.type: FUNC
- */
-HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_NullNativePtr)
+* @tc.name: PushHybridStackFrameTest_NullNativePtr
+* @tc.desc: Test PushHybridStackFrame with nativePtr as nullptr
+*           should not crash when nativePtr is nullptr
+* @tc.type: FUNC
+*/
+HWTEST_F_L0(SamplesRecordTest, PushHybridStackFrameTest_NullNativePtr)
 {
     SamplesRecordFriendTest samplesRecord;
     samplesRecord.NodeInit();
@@ -569,18 +569,18 @@ HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_NullNativePtr)
     frameInfo.columnNumber = 5;
     frameInfo.nativePtr = nullptr;
 
-    samplesRecord.PostHybridStackFrameTest(frameInfo);
+    samplesRecord.PushHybridStackFrameTest(frameInfo);
 
     EXPECT_EQ(samplesRecord.GetFrameStackLengthTest(), 1);
 }
 
 /**
- * @tc.name: PostHybridStackFrameTest_Overflow
- * @tc.desc: Test PostHybridStackFrame push after stack is full
- *           no crash and frame count remains MAX_STACK_SIZE
- * @tc.type: FUNC
- */
-HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_Overflow)
+* @tc.name: PushHybridStackFrameTest_Overflow
+* @tc.desc: Test PushHybridStackFrame push after stack is full
+*           no crash and frame count remains MAX_STACK_SIZE
+* @tc.type: FUNC
+*/
+HWTEST_F_L0(SamplesRecordTest, PushHybridStackFrameTest_Overflow)
 {
     SamplesRecordFriendTest samplesRecord;
     samplesRecord.NodeInit();
@@ -593,19 +593,19 @@ HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_Overflow)
         frameInfo.lineNumber = i;
         frameInfo.columnNumber = i;
 
-        samplesRecord.PostHybridStackFrameTest(frameInfo);
+        samplesRecord.PushHybridStackFrameTest(frameInfo);
     }
 
     EXPECT_EQ(samplesRecord.GetFrameStackLengthTest(), MAX_STACK_SIZE);
 }
 
 /**
- * @tc.name: PostHybridStackFrameTest_NegativeLineColumn
- * @tc.desc: Test PostHybridStackFrame with negative line and column numbers
- *           negative line and column numbers are preserved correctly
- * @tc.type: FUNC
- */
-HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_NegativeLineColumn)
+* @tc.name: PushHybridStackFrameTest_NegativeLineColumn
+* @tc.desc: Test PushHybridStackFrame with negative line and column numbers
+*           negative line and column numbers are preserved correctly
+* @tc.type: FUNC
+*/
+HWTEST_F_L0(SamplesRecordTest, PushHybridStackFrameTest_NegativeLineColumn)
 {
     SamplesRecordFriendTest samplesRecord;
     samplesRecord.NodeInit();
@@ -617,7 +617,7 @@ HWTEST_F_L0(SamplesRecordTest, PostHybridStackFrameTest_NegativeLineColumn)
     frameInfo.lineNumber = -100;
     frameInfo.columnNumber = -50;
 
-    samplesRecord.PostHybridStackFrameTest(frameInfo);
+    samplesRecord.PushHybridStackFrameTest(frameInfo);
 
     EXPECT_EQ(samplesRecord.GetFrameStackLengthTest(), 1);
 

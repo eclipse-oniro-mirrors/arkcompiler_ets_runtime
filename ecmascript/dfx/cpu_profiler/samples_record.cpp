@@ -625,7 +625,7 @@ void SamplesRecord::PostNapiFrame()
     samplesQueue_->PostNapiFrame(napiFrameInfoTemps_, napiFrameStack_);
 }
 
-void SamplesRecord::PostHybridStackFrame(const arkplatform::HybridFrameInfo &frameInfo)
+void SamplesRecord::PushHybridStackFrame(const arkplatform::HybridFrameInfo &frameInfo)
 {
     struct MethodKey methodKey = {};
     methodKey.methodIdentifier = frameInfo.nativePtr;
@@ -649,11 +649,7 @@ void SamplesRecord::PostHybridStackFrame(const arkplatform::HybridFrameInfo &fra
         }
     }
 
-    if (UNLIKELY(!PushFrameStack(methodKey))) {
-        return;
-    }
-
-    PostFrame();
+    PushFrameStack(methodKey);
 }
 
 void SamplesRecord::ResetFrameLength()

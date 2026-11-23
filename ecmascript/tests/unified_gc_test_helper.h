@@ -99,15 +99,26 @@ public:
         return !func || func();
     }
     void FinishXGCBarrier() override {}
-    bool UnionStackIsEmpty(bool *isEmpty) override
-    {
-        return isEmpty;
-    }
-    bool ForEachFrameInUnionStack(const std::function<void(const void *frame, bool isStaticFrame)> &callback) override
-    {
-        (void)callback;
-        return true;
-    }
+
+    bool UnionStackIsEmpty(bool *) override { return true; }
+    bool ForEachFrameInUnionStack(void (*)(const void *, bool, void *), void *) override { return true; }
+    bool GetStaticFrameInfo(const void *, arkplatform::HybridFrameInfo &) override { return false; }
+    bool TriggerXGC() override { return true; }
+    void NotifyWaiters() override {}
+    bool TriggerXGCAndWait() override { return true; }
+    void EtsForceFullGC() override {}
+    void SuspendEtsThreads() override {}
+    void ResumeEtsThreads() override {}
+    std::vector<arkplatform::NodeInfo> GetEtsVMRoots() override { return {}; }
+    void GetEtsNodeEdges(uint64_t, std::vector<arkplatform::EdgeInfo> &) override {}
+    arkplatform::NodeInfo GetEtsNodeInfo(uint64_t) override { return {}; }
+    std::vector<arkplatform::NodeInfo> GetAllEtsObjects() override { return {}; }
+    void IterateEtsObjects(const std::function<void(uint64_t)> &) override {}
+    void GetXRefMaps(uintptr_t, std::unordered_map<uint64_t, uint64_t> &,
+                     std::unordered_map<uint64_t, uint64_t> &) override {}
+    bool AttachCurrentThread() override { return true; }
+    bool DetachCurrentThread() override { return true; }
+    bool IsCurrentThreadAttached() override { return true; }
 };
 
 // Fake Cross Reference Object for Unified GC test

@@ -891,7 +891,8 @@ void Runtime::IterateSendableGlobalStorage(RootVisitor &visitor)
 }
 
 bool Runtime::ForEachFrameInUnionStack([[maybe_unused]] const EcmaVM *vm,
-    [[maybe_unused]] const std::function<void(const void *frame, bool isStaticFrame)> &callback)
+    [[maybe_unused]] void (*callback)(const void *frame, bool isStaticFrame, void *data),
+    [[maybe_unused]] void *data)
 {
 #ifdef PANDA_JS_ETS_HYBRID_MODE
     auto vmOperator = vm->GetCrossVMOperator();
@@ -904,7 +905,7 @@ bool Runtime::ForEachFrameInUnionStack([[maybe_unused]] const EcmaVM *vm,
         LOG_ECMA(ERROR) << "Get stsVMInterface failed";
         return false;
     }
-    return stsVMInterface->ForEachFrameInUnionStack(callback);
+    return stsVMInterface->ForEachFrameInUnionStack(callback, data);
 #else
     LOG_ECMA(ERROR) << "Not in hybrid mode";
     return false;

@@ -1,4 +1,4 @@
-/*
+/**
  * Copyright (c) 2024-2026 Huawei Device Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -325,16 +325,21 @@ std::string JsStackInfo::DynamicStaticStack(JSThread *thread, std::string &data)
         return "";
     }
     
-    Runtime::GetInstance()->ForEachFrameInUnionStack(vm, [vm, &data]
-        (const void *frame, bool isStaticFrame) {
+    struct HybridStackCallbackData {
+        EcmaVM *vm;
+        std::string &data;
+    } callbackData {vm, data};
+    Runtime::GetInstance()->ForEachFrameInUnionStack(vm,
+        [](const void *frame, bool isStaticFrame, void *userData) {
+        auto *callbackData = static_cast<HybridStackCallbackData *>(userData);
         if (isStaticFrame) {
             arkplatform::HybridFrameInfo frameInfo;
-            auto *crossVMOperator = vm->GetCrossVMOperator();
+            auto *crossVMOperator = callbackData->vm->GetCrossVMOperator();
             if (crossVMOperator == nullptr || !crossVMOperator->GetStaticFrameInfo(frame, frameInfo)) {
                 LOG_ECMA(ERROR) << "JsStackInfo::DynamicStaticStack, GetStaticFrameInfo failed";
                 return;
             }
-            data.append("\tat ")
+            callbackData->data.append("\tat ")
                 .append(frameInfo.GetClassName())
                 .append(".")
                 .append(frameInfo.GetFunctionName().empty() ? "<unknown>" : frameInfo.GetFunctionName())
@@ -344,9 +349,9 @@ std::string JsStackInfo::DynamicStaticStack(JSThread *thread, std::string &data)
                 .append(std::to_string(frameInfo.lineNumber))
                 .append(":0)\n");
         } else {
-            ProcessDynamicFrame(frame, vm->GetJSThread(), data);
+            ProcessDynamicFrame(frame, callbackData->vm->GetJSThread(), callbackData->data);
         }
-    });
+    }, &callbackData);
     return data;
 }
 #endif
@@ -524,6 +529,7 @@ bool JsStackInfo::AppendSteedSourceFrames(JSThread *thread, Method *method, Fram
     return true;
 }
 #endif
+
 
 std::vector<struct JsFrameInfo> JsStackInfo::BuildJsStackInfo(JSThread *thread, bool currentStack)
 {

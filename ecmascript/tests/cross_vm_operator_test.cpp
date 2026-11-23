@@ -65,7 +65,8 @@ public:
                          [[maybe_unused]] bool dumpStaticHeap) override { return false; }
     bool UnionStackIsEmpty([[maybe_unused]] bool *isEmpty) override { return true; }
     bool ForEachFrameInUnionStack(
-        [[maybe_unused]] const std::function<void(const void *frame, bool isStaticFrame)> &callback) override
+        [[maybe_unused]] void (*callback)(const void *frame, bool isStaticFrame, void *data),
+        [[maybe_unused]] void *data) override
     {
         return true;
     }

@@ -393,7 +393,8 @@ public:
 #endif
 
     bool ForEachFrameInUnionStack([[maybe_unused]] const EcmaVM *vm,
-        [[maybe_unused]] const std::function<void(const void *frame, bool isStaticFrame)> &callback);
+        [[maybe_unused]] void (*callback)(const void *frame, bool isStaticFrame, void *data),
+        [[maybe_unused]] void *data);
 
     bool UnionStackIsEmpty([[maybe_unused]] const EcmaVM *vm, [[maybe_unused]] bool *isEmpty);
 
