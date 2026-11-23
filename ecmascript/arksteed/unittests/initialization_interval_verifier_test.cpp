@@ -193,13 +193,9 @@ protected:
             entry->GetVertices().insert(entry->GetVertices().end() - 1, vertex);
         }
 
-        RawI64ToTaggedVertex* EncodeSize(ValueVertex* bytes)
+        I64ToTaggedIntVertex* EncodeSize(ValueVertex* bytes)
         {
-            auto* bits = New<I64BitwiseBinaryVertex>(
-                {bytes, graph.GetInt64Constant(static_cast<int64_t>(JSTaggedValue::TAG_INT))},
-                IntBitwiseKind::BITWISE_OR);
-            auto* tagged = New<RawI64ToTaggedVertex>({bits});
-            BeforeCheck(bits);
+            auto* tagged = New<I64ToTaggedIntVertex>({bytes});
             BeforeCheck(tagged);
             return tagged;
         }
@@ -797,10 +793,6 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, AcceptsConstantArgumentsSizes
         auto* tagged = f.EncodeSize(f.size);
         f.slowAllocation->SetInput(0, tagged);
         f.Verify();
-        tagged->SetInput(
-            0,
-            f.graph.GetInt64Constant(static_cast<int64_t>(static_cast<uint64_t>(bytes) | JSTaggedValue::TAG_INT)));
-        f.Verify();
         f.Verify(true);
     }
 }
@@ -837,13 +829,10 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsMismatchedDynamicSlowS
     auto* argc = f.ActualArgc();
     f.SetSize(f.ArgumentsSize(argc));
     f.InitializeElements(argc);
-    auto* tagged = f.slowAllocation->GetInput(0)->Cast<RawI64ToTaggedVertex>();
-    auto* encoding = tagged->GetInput(0)->Cast<I64BitwiseBinaryVertex>();
-    encoding->SetInput(I64BitwiseBinaryVertex::LEFT_INDEX, argc);
+    auto* tagged = f.slowAllocation->GetInput(0)->Cast<I64ToTaggedIntVertex>();
+    tagged->SetInput(I64ToTaggedIntVertex::INPUT_INDEX, argc);
     f.ExpectRejectedInBothPhases("Allocation must match the checked size");
-    encoding->SetInput(I64BitwiseBinaryVertex::LEFT_INDEX, f.size);
-    encoding->SetInput(I64BitwiseBinaryVertex::RIGHT_INDEX, f.graph.GetInt64Constant(0));
-    f.ExpectRejectedInBothPhases("IsInt64Constant");
+    tagged->SetInput(I64ToTaggedIntVertex::INPUT_INDEX, f.size);
     auto* unencoded = f.New<InitialValueVertex>({}, 0);
     Fixture::PrependVertex(f.entry, unencoded);
     f.slowAllocation->SetInput(0, unencoded);
@@ -948,13 +937,10 @@ TEST_F(ArkSteedInitializationIntervalVerifierTest, RejectsSizeConversionBetweenC
     auto* argc = f.ActualArgc();
     f.SetSize(f.ArgumentsSize(argc));
     f.InitializeElements(argc);
-    auto* tagged = f.slowAllocation->GetInput(0)->Cast<RawI64ToTaggedVertex>();
-    auto* bits = tagged->GetInput(0)->Cast<I64BitwiseBinaryVertex>();
+    auto* tagged = f.slowAllocation->GetInput(0)->Cast<I64ToTaggedIntVertex>();
     auto& scheduled = f.entry->GetVertices();
     scheduled.erase(std::find(scheduled.begin(), scheduled.end(), tagged));
-    scheduled.erase(std::find(scheduled.begin(), scheduled.end(), bits));
     f.slowBlock->GetVertices().clear();
-    Fixture::AddVertex(f.slowBlock, bits);
     Fixture::AddVertex(f.slowBlock, tagged);
     Fixture::AddVertex(f.slowBlock, f.slowAllocation);
     f.ExpectRejectedInBothPhases("Only register moves may separate the check and allocation");

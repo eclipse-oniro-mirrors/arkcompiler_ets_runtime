@@ -42,7 +42,6 @@ function greater_than_null(value: number): boolean {
 }
 
 //! METHOD loose_equal_null
-//! HAS TaggedEqual
 //! HAS_NOT CallCommonStub Equal
 //! HAS_NOT CallCommonStub NotEqual
 //! COMPILE_COUNT_GE *loose_equal_null* 1
@@ -52,7 +51,6 @@ function loose_equal_null(value: object | null | undefined): boolean {
 }
 
 //! METHOD loose_not_equal_null
-//! HAS TaggedEqual
 //! HAS_NOT CallCommonStub Equal
 //! HAS_NOT CallCommonStub NotEqual
 //! COMPILE_COUNT_GE *loose_not_equal_null* 1

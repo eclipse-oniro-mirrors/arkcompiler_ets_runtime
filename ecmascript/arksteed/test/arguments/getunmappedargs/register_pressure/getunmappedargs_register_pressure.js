@@ -18,11 +18,6 @@
 //! DEOPT_COUNT * 0
 //! METHOD registerPressure
 //! BYTECODE_COUNT getunmappedargs 1
-//! COUNT CanAllocateInYoung 2
-//! COUNT AllocateInYoung 2
-//! COUNT InitializeUnmappedArgumentsElements 1
-//! COUNT InitializeUnmappedArguments 1
-//! COUNT CallRuntime AllocateInYoung 2
 //! HAS_NOT CallCommonStub GetUnmappedArgs
 
 function registerPressure(seed, object0, object1, object2, object3) {

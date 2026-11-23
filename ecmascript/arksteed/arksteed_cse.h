@@ -191,6 +191,7 @@ ARKSTEED_CSE_KEY_1(LoadF64FromAddressVertex, int32_t, GetOffset)
 ARKSTEED_CSE_KEY_1(LoadTaggedFieldVertex, int32_t, GetOffset)
 ARKSTEED_CSE_KEY_1(LoadInt32FieldVertex, int32_t, GetOffset)
 ARKSTEED_CSE_KEY_1(I32ConditionCheckVertex, Condition, GetCondition)
+ARKSTEED_CSE_KEY_1(I64ConditionCheckVertex, Condition, GetCondition)
 ARKSTEED_CSE_KEY_1(F64ConditionCheckVertex, Condition, GetCondition)
 ARKSTEED_CSE_KEY_1(Float64ToBooleanVertex, bool, IsTrueIfNonZero)
 ARKSTEED_CSE_KEY_1(NumberToBooleanVertex, bool, IsTrueIfNonZero)
@@ -303,7 +304,8 @@ struct CseCommutativity {
     static constexpr bool BITWISE =
         std::is_same_v<VertexT, I32BitwiseBinaryVertex> || std::is_same_v<VertexT, I64BitwiseBinaryVertex>;
     static constexpr bool CONDITION =
-        std::is_same_v<VertexT, I32ConditionCheckVertex> || std::is_same_v<VertexT, F64ConditionCheckVertex> ||
+        std::is_same_v<VertexT, I32ConditionCheckVertex> || std::is_same_v<VertexT, I64ConditionCheckVertex> ||
+        std::is_same_v<VertexT, F64ConditionCheckVertex> ||
         std::is_same_v<VertexT, DeoptIfInt32ConditionVertex> ||
         std::is_same_v<VertexT, DeoptIfFloat64ConditionVertex> || std::is_same_v<VertexT, DeoptIfTaggedConditionVertex>;
     static constexpr bool HAS_COMMUTATIVE_INPUTS = ALWAYS || BITWISE || CONDITION;

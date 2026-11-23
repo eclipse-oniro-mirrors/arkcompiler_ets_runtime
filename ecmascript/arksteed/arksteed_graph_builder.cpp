@@ -2975,10 +2975,7 @@ struct GraphBuilder::BytecodeVisitor {
         ValueVertex *maskOne = self->graph_->GetInt64Constant(1);
         ValueVertex *masked = self->NewVertex<I64BitwiseBinaryVertex>(
             compileInfoFacts_, currentBlock, {raw, maskOne}, IntBitwiseKind::BITWISE_AND);
-        ValueVertex *tagInt = self->graph_->GetInt64Constant(static_cast<int64_t>(JSTaggedValue::TAG_INT));
-        ValueVertex *taggedIntRaw = self->NewVertex<I64BitwiseBinaryVertex>(
-            compileInfoFacts_, currentBlock, {masked, tagInt}, IntBitwiseKind::BITWISE_OR);
-        ValueVertex *result = self->NewVertex<RawI64ToTaggedVertex>(compileInfoFacts_, currentBlock, {taggedIntRaw});
+        ValueVertex *result = self->NewVertex<I64ToTaggedIntVertex>(compileInfoFacts_, currentBlock, {masked});
         compileInfoFacts_->EnsureType(result, NodeInfo::NodeType::INT);
         return result;
     }
@@ -3644,11 +3641,8 @@ struct GraphBuilder::BytecodeVisitor {
             static_cast<int64_t>((1ULL << MethodLiteral::MethodIdBits::SIZE) - 1));
         ValueVertex *actualMethodId = self->NewVertex<I64BitwiseBinaryVertex>(
             compileInfoFacts_, currentBlock, {shiftedLiteralInfo, methodIdMask}, IntBitwiseKind::BITWISE_AND);
-        ValueVertex *tagInt = self->graph_->GetInt64Constant(static_cast<int64_t>(JSTaggedValue::TAG_INT));
-        ValueVertex *taggedMethodId = self->NewVertex<I64BitwiseBinaryVertex>(
-            compileInfoFacts_, currentBlock, {actualMethodId, tagInt}, IntBitwiseKind::BITWISE_OR);
-        ValueVertex *actualMethodIdTagged = self->NewVertex<RawI64ToTaggedVertex>(
-            compileInfoFacts_, currentBlock, {taggedMethodId});
+        ValueVertex *actualMethodIdTagged = self->NewVertex<I64ToTaggedIntVertex>(
+            compileInfoFacts_, currentBlock, {actualMethodId});
         BuildCheckTaggedCondition(currentBcIndex, actualMethodIdTagged,
                                   TaggedConstantFromInt32(static_cast<int32_t>(expectedMethodId)),
                                   Condition::NOT_EQUAL, kungfu::DeoptType::NOTCALLTARGETHEAPOBJECT);
@@ -5596,10 +5590,7 @@ struct GraphBuilder::BytecodeVisitor {
             taggedSize = self->graph_->GetTaggedConstant(static_cast<uint64_t>(constant->GetValue())
                                                          | JSTaggedValue::TAG_INT);
         } else {
-            auto* tag = self->graph_->GetInt64Constant(static_cast<int64_t>(JSTaggedValue::TAG_INT));
-            auto* bits = self->NewVertex<I64BitwiseBinaryVertex>(
-                compileInfoFacts_, currentBlock, {size, tag}, IntBitwiseKind::BITWISE_OR);
-            taggedSize = self->NewVertex<RawI64ToTaggedVertex>(compileInfoFacts_, currentBlock, {bits});
+            taggedSize = self->NewVertex<I64ToTaggedIntVertex>(compileInfoFacts_, currentBlock, {size});
         }
         // Encode the full size before the capacity check, keeping both allocation
         // edges and the raw-storage initialization interval free of conversions.
@@ -9643,11 +9634,11 @@ struct GraphBuilder::BytecodeVisitor {
             ValueVertex *one = self->graph_->GetInt64Constant(1);
             ValueVertex *normalizedRaw = self->NewVertex<I64BitwiseBinaryVertex>(
                 compileInfoFacts_, currentBlock, {raw, one}, IntBitwiseKind::BITWISE_OR);
-            ValueVertex *normalized = self->NewVertex<RawI64ToTaggedVertex>(
-                compileInfoFacts_, currentBlock, {normalizedRaw});
-            ValueVertex *nullRoot = self->graph_->GetTaggedConstant(
-                static_cast<uint64_t>(JSTaggedValue::VALUE_NULL));
-            ValueVertex *isEqual = BuildTaggedEqual(normalized, nullRoot);
+
+            ValueVertex *nullRaw = self->graph_->GetInt64Constant(static_cast<int64_t>(JSTaggedValue::VALUE_NULL));
+            ValueVertex *isEqual = self->NewVertex<I64ConditionCheckVertex>(
+                compileInfoFacts_, currentBlock, {normalizedRaw, nullRaw}, Condition::EQUAL);
+            compileInfoFacts_->EnsureType(isEqual, NodeInfo::NodeType::BOOLEAN);
             if (IsPositiveEqualityCompare(kind)) {
                 return isEqual;
             }

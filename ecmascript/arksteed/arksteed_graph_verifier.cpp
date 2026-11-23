@@ -830,22 +830,8 @@ void ArkSteedGraphVerifier::VerifyTaggedSize(ValueVertex* taggedSize, ValueVerte
                "Allocation must match the checked size");
         return;
     }
-    auto* raw = taggedSize->Cast<RawI64ToTaggedVertex>();
-    auto* bits = raw->GetInput(RawI64ToTaggedVertex::INPUT_INDEX);
-    if (auto* constant = bits->TryCast<Int64ConstantVertex>()) {
-        // Keep the proof valid if the size/tag OR has been constant-folded.
-        auto* bytes = size->Cast<Int64ConstantVertex>();
-        ASSERT(static_cast<uint64_t>(constant->GetValue()) ==
-                   (static_cast<uint64_t>(bytes->GetValue()) | JSTaggedValue::TAG_INT) &&
-               "Allocation must match the checked size");
-        return;
-    }
-    auto* encoding = bits->Cast<I64BitwiseBinaryVertex>();
-    ASSERT(encoding->GetKind() == IntBitwiseKind::BITWISE_OR);
-    ASSERT(encoding->GetInput(I64BitwiseBinaryVertex::LEFT_INDEX) == size &&
-           "Allocation must match the checked size");
-    ASSERT(IsInt64Constant(encoding->GetInput(I64BitwiseBinaryVertex::RIGHT_INDEX),
-                           static_cast<int64_t>(JSTaggedValue::TAG_INT)));
+    auto* convert = taggedSize->Cast<I64ToTaggedIntVertex>();
+    ASSERT(convert->GetInput(I64ToTaggedIntVertex::INPUT_INDEX) == size && "Allocation must match the checked size");
 }
 
 void ArkSteedGraphVerifier::TryRegisterAllocationPhi(PhiVertex* phi, const ArkSteedState& state)

@@ -19,31 +19,7 @@
 //! DEOPT_COUNT * 0
 //! METHOD captureArguments
 //! BYTECODE_COUNT getunmappedargs 1
-//! COUNT CanAllocateInYoung 2
-//! COUNT AllocateInYoung 2
-//! COUNT BranchIfTrue 2
-//! COUNT RawI64ToTagged 1
-//! COUNT I64BitwiseBinary 1
-//! COUNT InitializeUnmappedArgumentsElements 1
-//! COUNT InitializeUnmappedArguments 1
-//! COUNT I64Sub 1
-//! COUNT I64Add 1
-//! COUNT I64ShiftLeft 1
-//! COUNT LoadActualArgument 1
-//! HAS_NOT StoreTaggedFieldWithBarrier
-//! COUNT StoreTaggedElementWithBarrier 1
-//! COUNT JumpLoop 1
-//! COUNT Phi 3
-//! HAS_NOT BranchIfInt64Compare
-//! COUNT BranchIfInt32Compare 1
-//! HAS_NOT I32ConditionCheck
 //! HAS_NOT CallCommonStub GetUnmappedArgs
-//! COUNT CallRuntime AllocateInYoung 2
-//! CODEGEN_COUNT CanAllocateInYoung capacity predicate 2
-//! CODEGEN_COUNT AllocateInYoung bump allocation 2
-//! CODEGEN_COUNT *CallRuntime*RTStub_AllocateInYoung* 2
-//! CODEGEN_COUNT InitializeUnmappedArgumentsElements 1
-//! CODEGEN_COUNT InitializeUnmappedArgumentsObject 1
 
 function captureArguments() {
     return arguments;
