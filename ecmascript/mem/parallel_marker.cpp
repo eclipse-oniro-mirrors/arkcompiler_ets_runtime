@@ -61,32 +61,6 @@ void NonMovableMarker::ProcessOldToNewNoMarkStack(uint32_t threadId)
     }
 }
 
-void NonMovableMarker::ProcessOldToNewForSticky(uint32_t threadId)
-{
-    StickyMarkOldToNewRSetVisitor stickyOldToNewVisitor(workManager_->GetWorkNodeHolder(threadId));
-    heap_->EnumerateOldSpaceRegions(stickyOldToNewVisitor);
-    ProcessMarkStack(threadId);
-}
-
-void NonMovableMarker::ProcessOldToNewNoMarkStackForSticky(uint32_t threadId)
-{
-    StickyMarkOldToNewRSetVisitor stickyOldToNewVisitor(workManager_->GetWorkNodeHolder(threadId));
-    heap_->EnumerateOldSpaceRegions(stickyOldToNewVisitor);
-}
-
-void NonMovableMarker::ProcessSnapshotRSetForSticky(uint32_t threadId)
-{
-    StickyMarkOldToNewRSetVisitor stickyOldToNewVisitor(workManager_->GetWorkNodeHolder(threadId));
-    heap_->EnumerateSnapshotSpaceRegions(stickyOldToNewVisitor);
-    ProcessMarkStack(threadId);
-}
-
-void NonMovableMarker::ProcessSnapshotRSetNoMarkStackForSticky(uint32_t threadId)
-{
-    StickyMarkOldToNewRSetVisitor stickyOldToNewVisitor(workManager_->GetWorkNodeHolder(threadId));
-    heap_->EnumerateSnapshotSpaceRegions(stickyOldToNewVisitor);
-}
-
 void NonMovableMarker::ProcessSnapshotRSet(uint32_t threadId)
 {
     ASSERT(heap_->IsYoungMark());
@@ -267,10 +241,6 @@ void NonMovableMarker::ProcessCMSGCMarkStack(uint32_t threadId)
         JSHClass *jsHclass = obj->SynchronizedGetClass();
         size_t size = jsHclass->SizeFromJSHClass(obj);
         region->IncreaseAliveObject(size);
-
-        if constexpr (G_USE_STICKY_CMS_GC) {
-            obj->SetObjectState(ObjectState::OLD);
-        }
 
         sweepGCMarkObjectVisitor.VisitHClass(obj, jsHclass);
         ObjectXRay::VisitObjectBody<VisitType::OLD_GC_VISIT>(obj, jsHclass, sweepGCMarkObjectVisitor);

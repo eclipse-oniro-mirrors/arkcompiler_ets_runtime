@@ -412,8 +412,7 @@ public:
 
     inline JSTaggedValue GetConstantIndexInfo(const JSThread *thread) const
     {
-        return JSTaggedValue(Barriers::GetTaggedValue(thread, this, TaggedArray::DATA_OFFSET +
-                                                                    GetConstantIndexInfoOffset()));
+        return JSTaggedValue(Barriers::GetTaggedValue(thread, GetData(), GetConstantIndexInfoOffset()));
     }
 
     inline void SetAotArrayInfo(const JSThread *thread, JSTaggedValue info)
@@ -423,20 +422,17 @@ public:
 
     inline JSTaggedValue GetAotArrayInfo(const JSThread *thread) const
     {
-        return JSTaggedValue(Barriers::GetTaggedValue(thread, this, TaggedArray::DATA_OFFSET +
-                                                                    GetAotArrayInfoOffset()));
+        return JSTaggedValue(Barriers::GetTaggedValue(thread, GetData(), GetAotArrayInfoOffset()));
     }
 
     inline JSTaggedValue GetAotSymbolInfo(const JSThread *thread) const
     {
-        return JSTaggedValue(Barriers::GetTaggedValue(thread, this, TaggedArray::DATA_OFFSET +
-                                                                    GetAotSymbolInfoOffset()));
+        return JSTaggedValue(Barriers::GetTaggedValue(thread, GetData(), GetAotSymbolInfoOffset()));
     }
 
     inline JSTaggedValue GetProtoTransTableInfo(const JSThread *thread) const
     {
-        return JSTaggedValue(Barriers::GetTaggedValue(thread, this, TaggedArray::DATA_OFFSET +
-                                                                    GetProtoTransTableInfoOffset()));
+        return JSTaggedValue(Barriers::GetTaggedValue(thread, GetData(), GetProtoTransTableInfoOffset()));
     }
 
     static JSTaggedValue GetSymbolFromSymbolInfo(const JSThread *thread, JSHandle<TaggedArray> symbolInfoHandler,
@@ -474,8 +470,7 @@ public:
 
     inline JSTaggedValue GetAotHClassInfo(const JSThread *thread) const
     {
-        return JSTaggedValue(Barriers::GetTaggedValue(thread, this, TaggedArray::DATA_OFFSET +
-                                                                    GetAotHClassInfoOffset()));
+        return JSTaggedValue(Barriers::GetTaggedValue(thread, GetData(), GetAotHClassInfoOffset()));
     }
 
     inline void SetAotSymbolInfo(const JSThread *thread, JSTaggedValue info)

@@ -35,7 +35,6 @@ void SweepGC::RunPhases()
 {
     ASSERT("SweepGC should be disabled" && !g_isEnableCMCGC);
     ASSERT("SweepGC should be disabled" && G_USE_CMS_GC);
-    LOG_GC(INFO) << "SweepGC triggered, mark status " << static_cast<int>(heap_->GetJSThread()->GetMarkStatus());
     GCStats *gcStats = heap_->GetEcmaVM()->GetEcmaGCStats();
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK,
         ("SweepGC::RunPhases" + std::to_string(heap_->IsConcurrentFullMark())
@@ -80,9 +79,6 @@ void SweepGC::Initialize()
     if (!markingInProgress_) {
         LOG_GC(DEBUG) << "No ongoing Concurrent marking. Initializing...";
         heap_->Prepare();
-        if constexpr (G_USE_STICKY_CMS_GC) {
-            heap_->ClearGCBitSetForCMS();
-        }
         heap_->GetAppSpawnSpace()->EnumerateRegions([](Region *current) {
             current->ClearMarkGCBitset();
         });
@@ -113,6 +109,7 @@ void SweepGC::Finish()
 
 void SweepGC::MarkRoots()
 {
+    // fixme: support sticky gc
     SweepGCMarkRootVisitor sweepGCMarkRootVisitor(workManager_->GetWorkNodeHolder(MAIN_THREAD_INDEX));
     heap_->GetNonMovableMarker()->MarkRoots(sweepGCMarkRootVisitor);
 }
@@ -136,21 +133,10 @@ void SweepGC::Mark()
 void SweepGC::Sweep()
 {
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "SweepGC::Sweep", "");
-    if constexpr (G_USE_CMS_GC) {
-        ProcessNativeDelete();
-    }
-    if constexpr (G_USE_STICKY_CMS_GC) {
-        heap_->EnumerateRegions([](Region *current) {
-            current->ClearOldToNewRSet();
-        });
-    }
+    ProcessNativeDelete();
     TRACE_GC(GCStats::Scope::ScopeId::Sweep, heap_->GetEcmaVM()->GetEcmaGCStats());
     heap_->GetSweeper()->Sweep(TriggerGCType::CMS_GC);
     heap_->GetSweeper()->PostTask(TriggerGCType::CMS_GC);
-    if constexpr (G_USE_STICKY_CMS_GC) {
-        heap_->GetJSThread()->ClearYoungGlobalList();
-        heap_->GetJSThread()->ClearToBeDeletedNodes();
-    }
 }
 
 void SweepGC::ProcessNativeDelete()

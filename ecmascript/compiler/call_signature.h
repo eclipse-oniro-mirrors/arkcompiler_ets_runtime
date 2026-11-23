@@ -794,7 +794,6 @@ private:
     V(BatchMarkInBuffer)                             \
     V(LoadBarrierCopyBack)                           \
     V(CMCSetValueWithBarrier)                        \
-    V(CheckObjectForCMS)                             \
     V(ArkSteedStringToNumber)                        \
     V(ArkSteedNewObjectFromPrimitive)                \
     V(ArkSteedCallConstructorBody)

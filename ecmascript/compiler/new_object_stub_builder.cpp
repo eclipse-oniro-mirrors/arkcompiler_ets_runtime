@@ -48,7 +48,7 @@ void NewObjectStubBuilder::NewLexicalEnv(Variable *result, Label *exit, GateRef 
     AllocateInYoung(result, &hasPendingException, &noException, hclass);
     Bind(&noException);
     {
-        StoreHClass(glue_, result->ReadVariable(), hclass, RegionSpaceFlag::IN_YOUNG_SPACE);
+        StoreHClass(glue_, result->ReadVariable(), hclass);
         Label afterInitialize(env);
         InitializeTaggedArrayWithSpeicalValue(&afterInitialize,
             result->ReadVariable(), Hole(), Int32(LexicalEnv::RESERVED_ENV_LENGTH), length);
@@ -176,12 +176,12 @@ GateRef NewObjectStubBuilder::NewJSArrayWithSize(GateRef hclass, GateRef size)
             GateRef holeKindArrayClass =
                 GetGlobalEnvValue(VariableType::JS_ANY(), glue_, globalEnv,
                     static_cast<size_t>(GlobalEnvField::ELEMENT_HOLE_TAGGED_HCLASS_INDEX));
-            StoreHClass(glue_, result, holeKindArrayClass, RegionSpaceFlag::IN_YOUNG_SPACE);
+            StoreHClass(glue_, result, holeKindArrayClass);
             #else
             GateRef holeKindArrayClass =
                 GetGlobalEnvValue(VariableType::JS_ANY(), glue_, globalEnv,
                     static_cast<size_t>(GlobalEnvField::ELEMENT_HOLE_HCLASS_INDEX));
-            StoreHClass(glue_, result, holeKindArrayClass, RegionSpaceFlag::IN_YOUNG_SPACE);
+            StoreHClass(glue_, result, holeKindArrayClass);
             #endif
             Jump(&initObj);
         }
@@ -336,7 +336,7 @@ GateRef NewObjectStubBuilder::CloneProperties(GateRef glue, GateRef currentEnv,
     Bind(&initialize);
     {
         GateRef hclass = LoadHClass(glue, elements);
-        StoreHClass(glue, result.ReadVariable(), hclass, RegionSpaceFlag::IN_YOUNG_SPACE);
+        Store(VariableType::JS_POINTER(), glue, result.ReadVariable(), IntPtr(0), hclass);
         InitializeTaggedArrayWithSpeicalValue(&afterInitialize, result.ReadVariable(), Hole(), Int32(0), length);
     }
     Bind(&afterInitialize);
@@ -394,7 +394,7 @@ GateRef NewObjectStubBuilder::NewAccessorData(GateRef glue)
     HeapAlloc(&result, &noException, RegionSpaceFlag::IN_YOUNG_SPACE, hclass);
     Bind(&noException);
     {
-        StoreBuiltinHClass(glue, *result, hclass, RegionSpaceFlag::IN_YOUNG_SPACE);
+        StoreBuiltinHClass(glue, *result, hclass);
         StoreWithoutBarrier(VariableType::JS_ANY(), *result, IntPtr(AccessorData::GETTER_OFFSET), Undefined());
         StoreWithoutBarrier(VariableType::JS_ANY(), *result, IntPtr(AccessorData::SETTER_OFFSET), Undefined());
         Jump(&exit);
@@ -553,7 +553,7 @@ void NewObjectStubBuilder::NewJSObject(Variable *result, Label *exit, GateRef hc
     AllocateInYoung(result, &hasPendingException, &noException, hclass);
     Bind(&noException);
     {
-        StoreHClass(glue_, result->ReadVariable(), hclass, RegionSpaceFlag::IN_YOUNG_SPACE);
+        StoreHClass(glue_, result->ReadVariable(), hclass);
         DEFVARIABLE(initValue, VariableType::JS_ANY(), Undefined());
         Label isAOT(env);
         Label initialize(env);
@@ -619,7 +619,7 @@ void NewObjectStubBuilder::NewSObject(Variable *result, Label *exit, GateRef hcl
     AllocateInSOld(result, &afterAllocate, hclass);
     Bind(&afterAllocate);
     {
-        StoreHClass(glue_, result->ReadVariable(), hclass, RegionSpaceFlag::IN_SHARED_OLD_SPACE);
+        StoreHClass(glue_, result->ReadVariable(), hclass);
         DEFVARIABLE(initValue, VariableType::JS_ANY(), Undefined());
         Label isAOT(env);
         Label initialize(env);
@@ -695,7 +695,7 @@ GateRef NewObjectStubBuilder::NewJSProxy(GateRef glue, GateRef target, GateRef h
         Store(VariableType::INT64(), glue, *result, hashOffset, Int64(JSTaggedValue(0).GetRawData()));
         GateRef proxyMethod = GetGlobalConstantValue(
             VariableType::JS_POINTER(), glue, ConstantIndex::PROXY_METHOD_INDEX);
-        StoreHClass(glue_, *result, *hclass, RegionSpaceFlag::IN_YOUNG_SPACE, MemoryAttribute::NoBarrier());
+        StoreHClass(glue_, *result, *hclass, MemoryAttribute::NoBarrier());
         BuiltinsProxyStubBuilder builtinsProxyStubBuilder(this, globalEnv);
         builtinsProxyStubBuilder.SetMethod(glue, *result, proxyMethod);
         builtinsProxyStubBuilder.SetTarget(glue, *result, target);
@@ -764,7 +764,7 @@ void NewObjectStubBuilder::NewJSObject(Variable *result, Label *exit, GateRef hc
     Label initialize(env);
     HeapAlloc(result, &initialize, RegionSpaceFlag::IN_YOUNG_SPACE, hclass);
     Bind(&initialize);
-    StoreHClass(glue_, result->ReadVariable(), hclass, RegionSpaceFlag::IN_YOUNG_SPACE, MemoryAttribute::NoBarrier());
+    StoreHClass(glue_, result->ReadVariable(), hclass, MemoryAttribute::NoBarrier());
     DEFVARIABLE(initValue, VariableType::JS_ANY(), Undefined());
     Label afterInitialize(env);
     InitializeWithSpeicalValue(&afterInitialize,
@@ -856,7 +856,7 @@ void NewObjectStubBuilder::NewTaggedArrayChecked(Variable *result, GateRef len, 
 
     Bind(&noException);
     {
-        StoreBuiltinHClass(glue_, result->ReadVariable(), hclass, RegionSpaceFlag::IN_YOUNG_SPACE);
+        StoreBuiltinHClass(glue_, result->ReadVariable(), hclass);
         Label afterInitialize(env);
         InitializeTaggedArrayWithSpeicalValue(&afterInitialize,
             result->ReadVariable(), Hole(), Int32(0), len);
@@ -879,7 +879,7 @@ void NewObjectStubBuilder::NewMutantTaggedArrayChecked(Variable *result, GateRef
     BRANCH(TaggedIsException(result->ReadVariable()), exit, &noException);
     Bind(&noException);
     {
-        StoreHClass(glue_, result->ReadVariable(), hclass, RegionSpaceFlag::IN_YOUNG_SPACE);
+        StoreHClass(glue_, result->ReadVariable(), hclass);
         Label afterInitialize(env);
         InitializeTaggedArrayWithSpeicalValue(&afterInitialize,
             result->ReadVariable(), SpecialHole(), Int32(0), len);
@@ -1024,7 +1024,7 @@ void NewObjectStubBuilder::ExtendArray(Variable *res, GateRef glue, GateRef elem
         isMutantArray ? ConstantIndex::MUTANT_TAGGED_ARRAY_CLASS_INDEX : ConstantIndex::TAGGED_ARRAY_CLASS_INDEX);
     HeapAlloc(&array, &allocArray, spaceType, hclass);
     Bind(&allocArray);
-    StoreBuiltinHClass(glue_, array.ReadVariable(), hclass, RegionSpaceFlag::IN_YOUNG_SPACE);
+    StoreBuiltinHClass(glue_, array.ReadVariable(), hclass);
     Store(VariableType::INT32(), glue_, *array, IntPtr(TaggedArray::LENGTH_OFFSET), newLen);
     GateRef oldExtractLen = GetExtraLengthOfTaggedArray(elements);
     Store(VariableType::INT32(), glue, *array, IntPtr(TaggedArray::EXTRA_LENGTH_OFFSET), oldExtractLen);
@@ -1685,7 +1685,7 @@ GateRef NewObjectStubBuilder::NewArgumentsListObj(GateRef numArgs)
                                                 ConstantIndex::TAGGED_ARRAY_CLASS_INDEX);
     AllocateInYoung(&result, &exit, &setHClass, arrayClass);
     Bind(&setHClass);
-    StoreHClass(glue_, *result, arrayClass, RegionSpaceFlag::IN_YOUNG_SPACE);
+    StoreHClass(glue_, *result, arrayClass);
     Store(VariableType::INT32(), glue_, *result, IntPtr(TaggedArray::LENGTH_OFFSET), numArgs);
     Store(VariableType::INT32(), glue_, *result, IntPtr(TaggedArray::EXTRA_LENGTH_OFFSET), Int32(0));
     Jump(&exit);
@@ -1787,7 +1787,7 @@ void NewObjectStubBuilder::NewJSArrayLiteral(Variable *result, Label *exit, Regi
     Label afterInitialize(env);
     HeapAlloc(result, &initializeArray, spaceType, hclass);
     Bind(&initializeArray);
-    StoreHClass(glue_, result->ReadVariable(), hclass, spaceType);
+    Store(VariableType::JS_POINTER(), glue_, result->ReadVariable(), IntPtr(0), hclass);
     InitializeWithSpeicalValue(&afterInitialize, result->ReadVariable(), Undefined(), Int32(JSArray::SIZE),
                                TruncInt64ToInt32(size_), MemoryAttribute::NoBarrier());
     Bind(&afterInitialize);
@@ -2141,7 +2141,8 @@ GateRef NewObjectStubBuilder::NewTrackInfo(GateRef glue, GateRef cachedHClass, G
     SetParameters(glue, size);
     HeapAlloc(&result, &initialize, RegionSpaceFlag::IN_YOUNG_SPACE, hclass);
     Bind(&initialize);
-    StoreBuiltinHClass(glue, *result, hclass, RegionSpaceFlag::IN_YOUNG_SPACE);
+    StoreBuiltinHClass(glue, *result, hclass);
+    Store(VariableType::JS_POINTER(), glue_, *result, IntPtr(0), hclass);
     GateRef cachedHClassOffset = IntPtr(TrackInfo::CACHED_HCLASS_OFFSET);
     Store(VariableType::JS_POINTER(), glue, *result, cachedHClassOffset, cachedHClass);
     GateRef cachedFuncOffset = IntPtr(TrackInfo::CACHED_FUNC_OFFSET);
@@ -2245,7 +2246,7 @@ void NewObjectStubBuilder::AllocLineStringObject(Variable *result, Label *exit, 
     AllocateInSOld(result, &afterAllocate, stringClass);
 
     Bind(&afterAllocate);
-    StoreBuiltinHClass(glue_, result->ReadVariable(), stringClass, RegionSpaceFlag::IN_SHARED_OLD_SPACE);
+    StoreBuiltinHClass(glue_, result->ReadVariable(), stringClass);
     InitStringLengthAndFlags(glue_, result->ReadVariable(), length, compressed);
     SetMixHashcode(glue_, result->ReadVariable(), Int32(0));
     Jump(exit);
@@ -2263,7 +2264,7 @@ void NewObjectStubBuilder::AllocSlicedStringObject(Variable *result, Label *exit
     AllocateInSOld(result, &afterAllocate, stringClass);
 
     Bind(&afterAllocate);
-    StoreBuiltinHClass(glue_, result->ReadVariable(), stringClass, RegionSpaceFlag::IN_SHARED_OLD_SPACE);
+    StoreBuiltinHClass(glue_, result->ReadVariable(), stringClass);
     GateRef mixLength = LoadPrimitive(VariableType::INT32(), flatString->GetFlatString(),
                                       IntPtr(BaseString::LENGTH_AND_FLAGS_OFFSET));
     GateRef compressedStatus = TruncInt32ToInt1(Int32And(Int32((1 << BaseString::CompressedStatusBit::SIZE) - 1),
@@ -2292,7 +2293,7 @@ void NewObjectStubBuilder::AllocTreeStringObject(Variable *result, Label *exit, 
     AllocateInSOld(result, &afterAllocate, stringClass);
 
     Bind(&afterAllocate);
-    StoreBuiltinHClass(glue_, result->ReadVariable(), stringClass, RegionSpaceFlag::IN_SHARED_OLD_SPACE);
+    StoreBuiltinHClass(glue_, result->ReadVariable(), stringClass);
     InitStringLengthAndFlags(glue_, result->ReadVariable(), length, compressed);
     SetMixHashcode(glue_, result->ReadVariable(), Int32(0));
     Store(VariableType::JS_POINTER(), glue_, result->ReadVariable(), IntPtr(TreeString::LEFT_OFFSET), first);
@@ -2730,7 +2731,7 @@ void NewObjectStubBuilder::CreateJSCollectionIterator(
     AllocateInYoung(result, exit, &noException, iteratorHClass);
     Bind(&noException);
     {
-        StoreBuiltinHClass(glue_, result->ReadVariable(), iteratorHClass, RegionSpaceFlag::IN_YOUNG_SPACE);
+        StoreBuiltinHClass(glue_, result->ReadVariable(), iteratorHClass);
         InitializeObject(result);
 
         // GetLinked
@@ -2771,7 +2772,7 @@ void NewObjectStubBuilder::CreateJSSharedMapIterator(
     AllocateInYoung(result, exit, &noException, iteratorHClass);
     Bind(&noException);
     {
-        StoreBuiltinHClass(glue_, result->ReadVariable(), iteratorHClass, RegionSpaceFlag::IN_YOUNG_SPACE);
+        StoreBuiltinHClass(glue_, result->ReadVariable(), iteratorHClass);
         InitializeObject(result);
 
         // SetIterated
@@ -2808,7 +2809,7 @@ void NewObjectStubBuilder::CreateJSSharedSetIterator(
     AllocateInYoung(result, exit, &noException, iteratorHClass);
     Bind(&noException);
     {
-        StoreBuiltinHClass(glue_, result->ReadVariable(), iteratorHClass, RegionSpaceFlag::IN_YOUNG_SPACE);
+        StoreBuiltinHClass(glue_, result->ReadVariable(), iteratorHClass);
         InitializeObject(result);
 
         // SetIteratedSet
@@ -2854,7 +2855,7 @@ void NewObjectStubBuilder::CreateJSTypedArrayIterator(Variable *result, Label *e
     AllocateInYoung(result, exit, &noException, iteratorHClass);
     Bind(&noException);
     {
-        StoreBuiltinHClass(glue_, result->ReadVariable(), iteratorHClass, RegionSpaceFlag::IN_YOUNG_SPACE);
+        StoreBuiltinHClass(glue_, result->ReadVariable(), iteratorHClass);
         InitializeObject(result);
 
         GateRef iteratorOffset = IntPtr(JSArrayIterator::ITERATED_ARRAY_OFFSET);
@@ -2992,7 +2993,7 @@ GateRef NewObjectStubBuilder::NewTypedArray(GateRef glue, GateRef srcTypedArray,
             Bind(&sameObjectSize);
             NewByteArray(&buffer, &newByteArrayExit, elementSize, length);
             Bind(&newByteArrayExit);
-            StoreHClass(glue, obj, onHeapHClass, RegionSpaceFlag::IN_YOUNG_SPACE);
+            StoreHClass(glue, obj, onHeapHClass);
             Store(VariableType::JS_POINTER(), glue, obj, IntPtr(JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET), *buffer);
             Store(VariableType::INT32(), glue, obj, IntPtr(JSTypedArray::BYTE_LENGTH_OFFSET), newByteLength);
             Store(VariableType::INT32(), glue, obj, IntPtr(JSTypedArray::BYTE_OFFSET_OFFSET), Int32(0));
@@ -3058,7 +3059,7 @@ GateRef NewObjectStubBuilder::NewTypedArraySameType(GateRef glue, GateRef srcTyp
         Bind(&passFastGuard);
         NewByteArray(&buffer, &newByteArrayExit, elementSize, length);
         Bind(&newByteArrayExit);
-        StoreHClass(glue, obj, onHeapHClass, RegionSpaceFlag::IN_YOUNG_SPACE);
+        StoreHClass(glue, obj, onHeapHClass);
         Store(VariableType::JS_POINTER(), glue, obj, IntPtr(JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET), *buffer);
         Store(VariableType::INT32(), glue, obj, IntPtr(JSTypedArray::BYTE_LENGTH_OFFSET), newByteLength);
         Store(VariableType::INT32(), glue, obj, IntPtr(JSTypedArray::BYTE_OFFSET_OFFSET), Int32(0));
@@ -3175,7 +3176,7 @@ GateRef NewObjectStubBuilder::NewFloat32ArrayWithSize(GateRef glue, GateRef size
         Bind(&newByteArrayExit);
         GateRef onHeapHClass = GetGlobalEnvValue(VariableType::JS_ANY(), glue,  GetCurrentGlobalEnv(),
                                                  GlobalEnv::FLOAT32_ARRAY_ROOT_HCLASS_ON_HEAP_INDEX);
-        StoreHClass(glue, obj, onHeapHClass, RegionSpaceFlag::IN_YOUNG_SPACE);
+        StoreHClass(glue, obj, onHeapHClass);
         Store(VariableType::JS_POINTER(), glue, obj, IntPtr(JSTypedArray::VIEWED_ARRAY_BUFFER_OFFSET), *buffer);
         Store(VariableType::INT32(), glue, obj, IntPtr(JSTypedArray::BYTE_LENGTH_OFFSET),
               newByteLength, MemoryAttribute::NoBarrier());
@@ -3246,7 +3247,7 @@ void NewObjectStubBuilder::NewByteArray(Variable *result, Label *exit, GateRef e
     AllocateInYoung(result, exit, &noError, hclass);
     Bind(&noError);
     {
-        StoreBuiltinHClass(glue_, result->ReadVariable(), hclass, RegionSpaceFlag::IN_YOUNG_SPACE);
+        StoreBuiltinHClass(glue_, result->ReadVariable(), hclass);
         auto startOffset = Int32(ByteArray::DATA_OFFSET);
         static_assert(static_cast<size_t>(MemAlignment::MEM_ALIGN_OBJECT) == 8);
         InitializeWithSpeicalValue(&initializeExit, result->ReadVariable(), Int64(0), startOffset,
@@ -3277,7 +3278,7 @@ GateRef NewObjectStubBuilder::NewSByteArray(GateRef glue, GateRef elementSize, G
     AllocateInSOld(&result, &noError, hclass);
     Bind(&noError);
     {
-        StoreBuiltinHClass(glue, *result, hclass, RegionSpaceFlag::IN_SHARED_OLD_SPACE);
+        StoreBuiltinHClass(glue, *result, hclass);
         auto startOffset = Int32(ByteArray::DATA_OFFSET);
         static_assert(static_cast<size_t>(MemAlignment::MEM_ALIGN_OBJECT) == 8);
         InitializeWithSpeicalValue(&initializeExit, *result, Int64(0), startOffset,
@@ -3308,7 +3309,7 @@ GateRef NewObjectStubBuilder::NewProfileTypeInfoCell(GateRef glue, GateRef value
     SetParameters(glue, size);
     HeapAlloc(&result, &initialize, RegionSpaceFlag::IN_YOUNG_SPACE, hclass);
     Bind(&initialize);
-    StoreHClass(glue, *result, hclass, RegionSpaceFlag::IN_YOUNG_SPACE, MemoryAttribute::NoBarrier());
+    StoreHClass(glue, *result, hclass, MemoryAttribute::NoBarrier());
     SetValueToProfileTypeInfoCell(glue, *result, value);
     GateRef machineCodeOffset = IntPtr(ProfileTypeInfoCell::MACHINE_CODE_OFFSET);
     Store(VariableType::JS_POINTER(), glue, *result, machineCodeOffset, Hole());
@@ -3336,7 +3337,7 @@ GateRef NewObjectStubBuilder::NewEnumCache(GateRef glue)
     SetParameters(glue, size);
     HeapAlloc(&result, &initialize, RegionSpaceFlag::IN_YOUNG_SPACE, hclass);
     Bind(&initialize);
-    StoreBuiltinHClass(glue, *result, hclass, RegionSpaceFlag::IN_YOUNG_SPACE);
+    StoreBuiltinHClass(glue, *result, hclass);
     GateRef enumCacheKindOffset = IntPtr(EnumCache::ENUM_CACHE_KIND_OFFSET);
     Store(VariableType::INT32(), glue, *result, enumCacheKindOffset,
         Int32(static_cast<uint32_t>(EnumCacheKind::NONE)));

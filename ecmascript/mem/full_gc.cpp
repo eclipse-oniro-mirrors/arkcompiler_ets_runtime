@@ -105,9 +105,6 @@ void FullGC::Initialize()
     // fixme: refactor?
     if constexpr (G_USE_CMS_GC) {
         heap_->GetSlotSpace()->PrepareCompact();
-        if constexpr (G_USE_STICKY_CMS_GC) {
-            heap_->ClearGCBitSetForCMS();
-        }
     } else {
         heap_->SwapNewSpace();
         heap_->GetModuleSpace()->PrepareEvacuation();

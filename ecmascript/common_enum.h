@@ -55,7 +55,7 @@ enum TriggerGCType {
     SHARED_CC,
     APPSPAWN_SHARED_FULL_GC,
     UNIFIED_GC,
-    STICKY_CMS_GC,
+    // fixme: support sticky
     CMS_GC,
     GC_TYPE_LAST,
 };

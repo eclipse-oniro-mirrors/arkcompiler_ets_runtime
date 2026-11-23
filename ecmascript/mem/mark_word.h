@@ -49,11 +49,7 @@ public:
 
     static TaggedObject *ToForwardingAddress(MarkWordType value)
     {
-#if USE_STICKY_CMS_GC
-        return reinterpret_cast<TaggedObject *>(value & (~TAG_MARK_BIT) & TaggedStateWord::ADDRESS_MASK);
-#else
         return reinterpret_cast<TaggedObject *>(value & (~TAG_MARK_BIT));
-#endif
     }
 
     explicit MarkWord(TaggedObject *header, [[maybe_unused]] RelaxedLoad relaxedLoad)
@@ -75,11 +71,7 @@ public:
 
     TaggedObject *ToForwardingAddress()
     {
-#if USE_STICKY_CMS_GC
-        return reinterpret_cast<TaggedObject *>(value_ & (~TAG_MARK_BIT) & TaggedStateWord::ADDRESS_MASK);
-#else
         return reinterpret_cast<TaggedObject *>(value_ & (~TAG_MARK_BIT));
-#endif
     }
 
     static MarkWordType FromForwardingAddress(MarkWordType forwardAddress)
@@ -94,11 +86,7 @@ public:
 
     JSHClass *GetJSHClass() const
     {
-#if USE_STICKY_CMS_GC
-        return reinterpret_cast<JSHClass *>(value_ & (~TAG_MARK_BIT) & TaggedStateWord::ADDRESS_MASK);
-#else
         return reinterpret_cast<JSHClass *>(value_ & (~TAG_MARK_BIT));
-#endif
     }
 private:
     MarkWordType value_ {0};

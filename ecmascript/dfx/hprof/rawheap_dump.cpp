@@ -961,13 +961,7 @@ void RawHeapDumpV1::DumpNonCMGCObject(JSTaggedType addr, size_t size,
         WriteChunk(reinterpret_cast<char *>(addr + 2 * sizeof(JSTaggedType)),
             size - 2 * sizeof(JSTaggedType));  // 2 : Skip the addresses of hclass and externalData
     } else {
-        if constexpr (G_USE_STICKY_CMS_GC) {
-            WriteU64(reinterpret_cast<JSTaggedType>(reinterpret_cast<TaggedObject *>(addr)->GetClass()));
-            WriteChunk(reinterpret_cast<char *>(addr + sizeof(JSTaggedType)),
-                size - sizeof(JSTaggedType));
-        } else {
-            WriteChunk(reinterpret_cast<char *>(addr), size);
-        }
+        WriteChunk(reinterpret_cast<char *>(addr), size);
     }
 }
 

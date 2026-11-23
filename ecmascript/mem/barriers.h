@@ -64,10 +64,6 @@ public:
     template<bool needWriteBarrier = true>
     static void SetObject(const JSThread *thread, void *obj, size_t offset, JSTaggedType value);
 
-    static void PUBLIC_API CheckObjectForCMS(const JSThread *thread, void *obj, size_t offset, JSTaggedValue value,
-                                             bool writeBarrierCheck = false);
-    static void PUBLIC_API CheckValueForCMS(const JSThread *thread, JSTaggedValue value);
-
     template<bool needWriteBarrier = true>
     static void SetCompressedObject(const JSThread *thread, void *obj, size_t offset, JSTaggedType value);
 
@@ -113,7 +109,6 @@ public:
     static TemporaryJSTaggedValue GetFromCompressedTaggedValue(const JSThread *thread,
                                                                uintptr_t slotAddress);
     static JSTaggedType UpdateSlot(const JSThread *thread, void *obj, size_t offset);
-    static JSTaggedType UpdateSlot(const JSThread *thread, uintptr_t slotAddress);
 
     template <RBMode mode = RBMode::DEFAULT_RB>
     static TaggedObject *GetTaggedObject(const JSThread *thread, const void *obj, size_t offset);

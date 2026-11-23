@@ -2000,15 +2000,6 @@ void StubBuilder::Store(VariableType type, GateRef glue, GateRef base, GateRef o
     if (!env_->IsAsmInterp()) {
         env_->GetBuilder()->Store(type, glue, base, offset, value, mAttr);
     } else {
-        if (G_USE_STICKY_CMS_GC && (type == VariableType::JS_ANY() || type == VariableType::JS_POINTER())) {
-            if (GateAccessor(env_->GetCircuit()).IsConstant(offset) &&
-                static_cast<int>(GateAccessor(env_->GetCircuit()).GetConstantValue(offset)) == 0) {
-                LOG_ECMA(FATAL) << "store with zero offset should use StoreHClass";
-            }
-#ifndef NDEBUG
-            CallNGCRuntime(glue, RTSTUB_ID(CheckObjectForCMS), { glue, base, offset, value, Boolean(true) });
-#endif
-        }
         auto depend = env_->GetCurrentLabel()->GetDepend();
         auto bit = LoadStoreAccessor::ToValue(mAttr);
         GateRef result = env_->GetCircuit()->NewGate(
@@ -2588,36 +2579,11 @@ void StubBuilder::SetNonSValueWithBarrier(GateRef glue, GateRef obj, GateRef off
     env->SubCfgEntry(&entry);
     Label exit(env);
 
-    Label isOldToYoung(env);
-#if USE_STICKY_CMS_GC
-    Label CMSmarking(env);
-    Label NotCMSMarking(env);
-    bool isArch32 = GetEnvironment()->Is32Bit();
-    GateRef stateBitField = LoadPrimitive(VariableType::INT64(), glue,
-                                    Int64(JSThread::GlueData::GetGCStateBitFieldOffset(isArch32)));
-    GateRef state = Int64And(stateBitField, Int64(JSThread::CONCURRENT_MARKING_BITFIELD_MASK));
-    BRANCH_LIKELY(Int64Equal(state, Int64(static_cast<int64_t>(MarkStatus::READY_TO_MARK))),
-                  &NotCMSMarking, &CMSmarking);
-    Bind(&NotCMSMarking);
-    {
-        GateRef objectNotInYoung = InOldGenerationForCMSObj(obj, objectRegion);
-        ASSERT(BoolNot(TaggedIsWeak(obj)));
-        GateRef newValue = RemoveTaggedWeakTag(value);
-        GateRef valueRegionInYoung = InYoungGenerationForCMSObj(newValue, valueRegion);
-        BRANCH_UNLIKELY(BitAnd(objectNotInYoung, valueRegionInYoung), &isOldToYoung, &exit);
-    }
-    Bind(&CMSmarking);
-    {
-        // Check fresh region, and directly mark value instead of call runtime.
-        CallNGCRuntime(glue, RTSTUB_ID(MarkingBarrier), {glue, obj, offset, value});
-        Jump(&exit);
-    }
-#else
     Label checkMarkStatus(env);
+    Label isOldToYoung(env);
     GateRef objectNotInYoung = BoolNot(InYoungGeneration(objectRegion));
     GateRef valueRegionInYoung = InYoungGeneration(valueRegion);
     BRANCH_UNLIKELY(BitAnd(objectNotInYoung, valueRegionInYoung), &isOldToYoung, &checkMarkStatus);
-#endif
 
     Bind(&isOldToYoung);
     {
@@ -2643,23 +2609,14 @@ void StubBuilder::SetNonSValueWithBarrier(GateRef glue, GateRef obj, GateRef off
             GateRef newmapValue = Int32Or(oldsetValue, GetBitMask(bitOffset));
 
             Store(VariableType::INT32(), glue, bitsetData, byteIndex, newmapValue);
-#if USE_STICKY_CMS_GC
-            Jump(&exit);
-#else
             Jump(&checkMarkStatus);
-#endif
         }
         Bind(&isNullPtr);
         {
             CallNGCRuntime(glue, RTSTUB_ID(InsertOldToNewRSet), { glue, obj, offset });
-#if USE_STICKY_CMS_GC
-            Jump(&exit);
-#else
             Jump(&checkMarkStatus);
-#endif
         }
     }
-#if !USE_STICKY_CMS_GC
     Bind(&checkMarkStatus);
     {
         Label marking(env);
@@ -2676,7 +2633,6 @@ void StubBuilder::SetNonSValueWithBarrier(GateRef glue, GateRef obj, GateRef off
             Jump(&exit);
         }
     }
-#endif
     Bind(&exit);
     env->SubCfgExit();
 }

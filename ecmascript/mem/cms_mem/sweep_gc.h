@@ -47,8 +47,11 @@ protected:
     void Mark() override;
     void Sweep() override;
     void Finish() override;
-    virtual void ProcessNativeDelete();
+
+private:
+    void MarkRoots();
     void ProcessSharedGCRSetWorkList();
+    void ProcessNativeDelete();
     void ClearDeadReferences();
     void UpdateRecordWeakReference(uint32_t threadId);
     void UpdateRecordWeakLinkedHashMap(uint32_t threadId);
@@ -57,9 +60,6 @@ protected:
     bool markingInProgress_ {false};
     // Obtained from the shared heap instance.
     WorkManager *workManager_ {nullptr};
-
-private:
-    void MarkRoots();
 
     friend class WorkManager;
     friend class Heap;

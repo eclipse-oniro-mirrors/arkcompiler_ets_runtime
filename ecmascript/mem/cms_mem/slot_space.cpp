@@ -90,17 +90,7 @@ void SlotSpace::TryTriggerGCIfNeed()
 
 void SlotSpace::RequestGC()
 {
-    if constexpr (G_USE_STICKY_CMS_GC) {
-        // fixme: trigger condition needs to be refined
-        static int num = 0;
-        if (num++ % 2) { // 2: alternatively trigger non-sticky and sticky CMS-GC
-            localHeap_->CollectGarbage(TriggerGCType::CMS_GC, GCReason::ALLOCATION_FAILED);
-        } else {
-            localHeap_->CollectGarbage(TriggerGCType::STICKY_CMS_GC, GCReason::ALLOCATION_FAILED);
-        }
-    } else {
-        localHeap_->CollectGarbage(TriggerGCType::CMS_GC, GCReason::ALLOCATION_FAILED);
-    }
+    localHeap_->CollectGarbage(TriggerGCType::CMS_GC, GCReason::ALLOCATION_FAILED);
 }
 
 bool SlotSpace::TryExpandAllocator(SlotAllocator *allocator, MemoryCheckerKind checkerKind)
@@ -201,7 +191,6 @@ void SlotSpace::IterateOverObjects(const std::function<void(TaggedObject *object
     }
 }
 
-template <bool isSticky>
 void SlotSpace::PrepareSweeping()
 {
     for (SlotAllocator *allocator : allocatorInstances_) {
@@ -209,15 +198,11 @@ void SlotSpace::PrepareSweeping()
     }
     size_t survivalObjectSize = 0;
     for (CMSRegionChainManager *regionChainManager : regionChainManagerInstances_) {
-        survivalObjectSize += regionChainManager->PrepareSweeping<isSticky>(pendingReclaimFromRegions_);
+        survivalObjectSize += regionChainManager->PrepareSweeping(pendingReclaimFromRegions_);
     }
     SetSurvivalObjectSize(survivalObjectSize);
 }
 
-template void SlotSpace::PrepareSweeping<true>();
-template void SlotSpace::PrepareSweeping<false>();
-
-template <bool isSticky>
 void SlotSpace::Sweep()
 {
     for (SlotAllocator *allocator : allocatorInstances_) {
@@ -225,13 +210,10 @@ void SlotSpace::Sweep()
     }
     size_t survivalObjectSize = 0;
     for (CMSRegionChainManager *regionChainManager : regionChainManagerInstances_) {
-        survivalObjectSize += regionChainManager->Sweep<isSticky>(pendingReclaimFromRegions_);
+        survivalObjectSize += regionChainManager->Sweep(pendingReclaimFromRegions_);
     }
     SetSurvivalObjectSize(survivalObjectSize);
 }
-
-template void SlotSpace::Sweep<true>();
-template void SlotSpace::Sweep<false>();
 
 void SlotSpace::AsyncSweep([[maybe_unused]] bool isMain, [[maybe_unused]] bool releaseMemory)
 {

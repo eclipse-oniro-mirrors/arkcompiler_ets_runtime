@@ -43,7 +43,6 @@ void ConcurrentSweeper::PostTask(TriggerGCType gcType)
                 common::Taskpool::GetCurrentTaskpool()->PostTask(std::make_unique<SweeperTask>(
                     tid, this, MemSpaceType::OLD_SPACE, startSpaceType_, endSpaceType_, isFullGC));
                 break;
-            case TriggerGCType::STICKY_CMS_GC:
             case TriggerGCType::CMS_GC:
                 common::Taskpool::GetCurrentTaskpool()->PostTask(std::make_unique<SweeperTask>(
                     tid, this, MemSpaceType::SLOT_SPACE, startSpaceType_, endSpaceType_, isFullGC));
@@ -55,10 +54,8 @@ void ConcurrentSweeper::PostTask(TriggerGCType gcType)
                 LOG_ECMA(FATAL) << "this branch is unreachable, " << static_cast<int>(gcType);
                 UNREACHABLE();
         }
-        if (gcType != TriggerGCType::STICKY_CMS_GC) {
-            common::Taskpool::GetCurrentTaskpool()->PostTask(std::make_unique<SweeperTask>(
-                tid, this, MemSpaceType::NON_MOVABLE, startSpaceType_, endSpaceType_, isFullGC));
-        }
+        common::Taskpool::GetCurrentTaskpool()->PostTask(std::make_unique<SweeperTask>(
+            tid, this, MemSpaceType::NON_MOVABLE, startSpaceType_, endSpaceType_, isFullGC));
         common::Taskpool::GetCurrentTaskpool()->PostTask(std::make_unique<SweeperTask>(
             tid, this, MemSpaceType::MACHINE_CODE_SPACE, startSpaceType_, endSpaceType_, isFullGC));
         // Every task sweeps every type in the range exactly once, so the task
@@ -96,15 +93,10 @@ void ConcurrentSweeper::Sweep(TriggerGCType gcType)
                     heap_->GetModuleSpace()->PrepareSweeping();
                 }
                 break;
-            case TriggerGCType::STICKY_CMS_GC:
-                startSpaceType_ = MemSpaceType::MACHINE_CODE_SPACE;
-                endSpaceType_ = MemSpaceType::SLOT_SPACE;
-                heap_->GetSlotSpace()->PrepareSweeping<true>();
-                break;
             case TriggerGCType::CMS_GC:
                 startSpaceType_ = MemSpaceType::NON_MOVABLE;
                 endSpaceType_ = MemSpaceType::SLOT_SPACE;
-                heap_->GetSlotSpace()->PrepareSweeping<false>();
+                heap_->GetSlotSpace()->PrepareSweeping();
                 break;
             case TriggerGCType::LOCAL_CC:
                 startSpaceType_ = MemSpaceType::MODULE_SPACE;
@@ -120,7 +112,7 @@ void ConcurrentSweeper::Sweep(TriggerGCType gcType)
                 UNREACHABLE();
         }
         if (gcType != TriggerGCType::YOUNG_GC) {
-            if (!heap_->GetEvacuateNonMovableSpace() && gcType != TriggerGCType::STICKY_CMS_GC) {
+            if (!heap_->GetEvacuateNonMovableSpace()) {
                 heap_->GetNonMovableSpace()->PrepareSweeping();
             }
             heap_->GetMachineCodeSpace()->PrepareSweeping();
@@ -143,11 +135,8 @@ void ConcurrentSweeper::Sweep(TriggerGCType gcType)
                 heap_->GetOldSpace()->Sweep();
                 heap_->GetModuleSpace()->Sweep();
                 break;
-            case TriggerGCType::STICKY_CMS_GC:
-                heap_->GetSlotSpace()->Sweep<true>();
-                break;
             case TriggerGCType::CMS_GC:
-                heap_->GetSlotSpace()->Sweep<false>();
+                heap_->GetSlotSpace()->Sweep();
                 break;
             case TriggerGCType::LOCAL_CC:
                 heap_->GetModuleSpace()->Sweep();
@@ -159,7 +148,7 @@ void ConcurrentSweeper::Sweep(TriggerGCType gcType)
                 UNREACHABLE();
         }
         if (gcType != TriggerGCType::YOUNG_GC) {
-            if (!heap_->GetEvacuateNonMovableSpace() && gcType != TriggerGCType::STICKY_CMS_GC) {
+            if (!heap_->GetEvacuateNonMovableSpace()) {
                 heap_->GetNonMovableSpace()->Sweep();
             }
             heap_->GetMachineCodeSpace()->Sweep();
