@@ -215,6 +215,13 @@ std::optional<int32_t> ArkSteedAssembler::TryGetTaggedElementOffset(int32_t inde
     return static_cast<int32_t>(offset);
 }
 
+void ArkSteedAssembler::LoadObjectType(ArkSteedRegister dst, ArkSteedRegister object)
+{
+    LoadHClassFromObject(dst, object);
+    static_assert(JSHClass::ObjectTypeBits::START_BIT == 0 && JSHClass::ObjectTypeBits::SIZE == 8);
+    LoadUint8Field(dst, dst, static_cast<int32_t>(JSHClass::BIT_FIELD_OFFSET));
+}
+
 void ArkSteedAssembler::LoadTaggedElement(ArkSteedRegister dst, ArkSteedRegister elements, ArkSteedRegister index)
 {
     constexpr uint8_t TAGGED_SIZE_SHIFT = static_cast<uint8_t>(TAGGED_TYPE_SIZE_LOG);
@@ -227,6 +234,40 @@ void ArkSteedAssembler::StoreTaggedElement(ArkSteedRegister elements, ArkSteedRe
 {
     ASSERT(value == 0);
     StoreTaggedElement(elements, index, aarch64::xzr, scratch);
+}
+
+std::optional<int32_t> ArkSteedAssembler::TryGetScaledElementOffset(std::optional<int32_t> index,
+                                                                    uint32_t elementShift, int32_t headerOffset)
+{
+    ASSERT(elementShift <= TAGGED_TYPE_SIZE_LOG);
+    if (!index || *index < 0) {
+        return std::nullopt;
+    }
+    const int64_t scale = int64_t {1} << elementShift;
+    const int64_t byteOffset = static_cast<int64_t>(*index) * scale + headerOffset;
+    if (!FitsScaledImmediateOffset(byteOffset, scale)) {
+        return std::nullopt;
+    }
+    return static_cast<int32_t>(byteOffset);
+}
+
+std::optional<int32_t> ArkSteedAssembler::TryGetTaggedElementBarrierOffset(std::optional<int32_t> index)
+{
+    if (!index || *index < 0) {
+        return std::nullopt;
+    }
+    const int64_t byteOffset = (static_cast<int64_t>(*index) << TAGGED_TYPE_SIZE_LOG) + TaggedArray::DATA_OFFSET;
+    // A non-negative int32 offset materializes in at most two instructions, matching or beating shift + add.
+    if (byteOffset > std::numeric_limits<int32_t>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<int32_t>(byteOffset);
+}
+
+void ArkSteedAssembler::ComputeTaggedElementByteOffset(ArkSteedRegister dst, ArkSteedRegister index)
+{
+    ShiftLeft(dst, index, TAGGED_TYPE_SIZE_LOG);
+    Add(dst, static_cast<int32_t>(TaggedArray::DATA_OFFSET));
 }
 
 void ArkSteedAssembler::StoreTaggedElement(ArkSteedRegister elements, ArkSteedRegister index,
@@ -259,8 +300,7 @@ void ArkSteedAssembler::LoadTypedArrayDataPointer(ArkSteedRegister dst, ArkSteed
                                                   ArkSteedRegister storage, ArkSteedRegister scratch, bool isOnHeap)
 {
     if (isOnHeap) {
-        Move(dst, storage);
-        Add(dst, static_cast<int32_t>(ByteArray::DATA_OFFSET));
+        assembler_.Add(dst, storage, aarch64::Operand(static_cast<int64_t>(ByteArray::DATA_OFFSET)));
         return;
     }
     LoadInt32Field(scratch, receiver, static_cast<int32_t>(JSTypedArray::BYTE_OFFSET_OFFSET));
@@ -514,6 +554,42 @@ void ArkSteedAssembler::Add(ArkSteedRegister dst, ArkSteedRegister src)
     assembler_.Add(arm64Dst, arm64Dst, aarch64::Operand(src));
 }
 
+void ArkSteedAssembler::Add(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right)
+{
+    assembler_.Add(dst, left, aarch64::Operand(right));
+}
+
+void ArkSteedAssembler::EncodeTaggedDouble(ArkSteedRegister dst, ArkSteedDoubleRegister input)
+{
+    Label pureDouble;
+    Label done;
+
+    Move(dst, input);
+    static_assert(JSTaggedValue::TAG_INT == 0ULL - JSTaggedValue::DOUBLE_ENCODE_OFFSET);
+    TemporaryRegisterScope scope(this);
+    auto offset = scope.AcquireScratch();
+    Move(offset, static_cast<uint64_t>(JSTaggedValue::DOUBLE_ENCODE_OFFSET));
+    TestDoubleEncodeOverflow(dst, offset);
+    JumpIf(Condition::BELOW, &pureDouble);
+    LoadTaggedValue(dst, JSTaggedValue(base::NAN_VALUE).GetRawData());
+    Jump(&done);
+    Bind(&pureDouble);
+    Add(dst, offset);
+    Bind(&done);
+}
+
+void ArkSteedAssembler::DecodeTaggedDouble(ArkSteedRegister dst, ArkSteedRegister value,
+                                           ArkSteedRegister tagMarkScratch)
+{
+    static_assert(JSTaggedValue::TAG_MARK == 0ULL - JSTaggedValue::DOUBLE_ENCODE_OFFSET);
+    Add(dst, value, tagMarkScratch);
+}
+
+void ArkSteedAssembler::TestDoubleEncodeOverflow(ArkSteedRegister raw, ArkSteedRegister encodeOffset)
+{
+    assembler_.Adds(aarch64::xzr, raw, aarch64::Operand(encodeOffset, aarch64::LSL, 1U));
+}
+
 void ArkSteedAssembler::Add(ArkSteedRegister dst, int32_t immediate)
 {
     int64_t value = immediate;
@@ -692,9 +768,97 @@ void ArkSteedAssembler::Int32MulHigh(ArkSteedRegister dst, ArkSteedRegister left
     assembler_.Asr(dst, dst, 32U);  // 32: signed high half of the 64-bit product.
 }
 
+void ArkSteedAssembler::Int32MulWithOverflow(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right,
+                                             Label *overflowExit, Label *negativeZeroExit)
+{
+    ASSERT(dst != left && dst != right);
+    Label success;
+    Int32MulWide(dst, left, right);
+    // Compare the full product against the sign extension of its low word.
+    assembler_.Cmp(dst, aarch64::Operand(dst.W(), aarch64::SXTW));
+    JumpIf(Condition::NOT_EQUAL, overflowExit);
+    JumpIfNotZero(dst.W(), &success);
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister signs = scope.AcquireScratch();
+    Int32Or(signs, left, right);
+    CompareInt32(signs, 0);
+    JumpIf(Condition::LESS_THAN, negativeZeroExit);
+    Bind(&success);
+}
+
+std::optional<int32_t> ArkSteedAssembler::TryGetInt32PowerOfTwoMask(std::optional<int32_t> divisor)
+{
+    if (divisor && *divisor > 1 && (*divisor & (*divisor - 1)) == 0) {
+        return *divisor - 1;
+    }
+    return std::nullopt;
+}
+
+void ArkSteedAssembler::Int32DivByConstWithCheck(ArkSteedRegister dst, ArkSteedRegister dividend, int32_t divisor,
+                                                 int32_t magic, uint32_t shift, Label *negativeZeroExit,
+                                                 Label *notIntExit)
+{
+    if (auto mask = TryGetInt32PowerOfTwoMask(divisor)) {
+        TestInt32Mask(dividend, static_cast<uint32_t>(*mask));
+        JumpIf(Condition::NOT_EQUAL, notIntExit);
+        assembler_.Asr(dst.W(), dividend.W(),
+                       static_cast<uint32_t>(__builtin_ctz(static_cast<uint32_t>(divisor))));
+        return;
+    }
+
+    ASSERT(dst != dividend);
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister work = scope.Acquire();
+    if (divisor < 0) {
+        JumpIfZero(dividend.W(), negativeZeroExit);
+    }
+
+    Move(work, magic);
+    Int32MulHigh(work, dividend, work);
+    if (divisor > 0 && magic < 0) {
+        Int32Add(work, work, dividend);
+    } else if (divisor < 0 && magic > 0) {
+        Int32Sub(work, work, dividend);
+    }
+    if (shift != 0) {
+        Int32ShiftRightArithmetic(work, shift);
+    }
+
+    assembler_.Add(dst.W(), work.W(),
+                   aarch64::Operand(work.W(), aarch64::LSR, std::numeric_limits<int32_t>::digits));
+
+    Move(work, divisor);
+    Int32Mul(work, dst);
+    CompareInt32(work, dividend);
+    JumpIf(Condition::NOT_EQUAL, notIntExit);
+}
+
 void ArkSteedAssembler::Int32Div(ArkSteedRegister dst, ArkSteedRegister dividend, ArkSteedRegister divisor)
 {
     assembler_.Sdiv(dst.W(), dividend.W(), divisor.W());
+}
+
+void ArkSteedAssembler::CheckedInt32Div(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right,
+                                        Label *divideZeroExit, Label *overflowExit, Label *notIntExit,
+                                        Label *negativeZeroExit)
+{
+    Label divisorReady;
+    Label done;
+
+    JumpIfZero(right.W(), divideZeroExit);
+    CompareInt32(left, std::numeric_limits<int32_t>::min());
+    JumpIf(Condition::NOT_EQUAL, &divisorReady);
+    CompareInt32(right, -1);
+    JumpIf(Condition::EQUAL, overflowExit);
+    Bind(&divisorReady);
+    TemporaryRegisterScope scope(this);
+    ArkSteedRegister remainder = scope.AcquireScratch();
+    Int32DivAndRemainder(dst, remainder, left, right);
+    JumpIfNotZero(remainder.W(), notIntExit);
+    JumpIfNotZero(dst.W(), &done);
+    CompareInt32(right, 0);
+    JumpIf(Condition::LESS_THAN, negativeZeroExit);
+    Bind(&done);
 }
 
 void ArkSteedAssembler::Int32DivAndRemainder(ArkSteedRegister quotient, ArkSteedRegister remainder,
@@ -710,6 +874,56 @@ void ArkSteedAssembler::PositiveInt32Mod(ArkSteedRegister dst, ArkSteedRegister 
     ArkSteedRegister quotient = scope.AcquireScratch();
     assembler_.Sdiv(quotient.W(), dividend.W(), divisor.W());
     assembler_.Msub(dst.W(), quotient.W(), divisor.W(), dividend.W());
+}
+
+void ArkSteedAssembler::CheckedInt32Mod(ArkSteedRegister dst, ArkSteedRegister left,
+                                        std::optional<ArkSteedRegister> right, std::optional<int32_t> mask,
+                                        Label *divideZeroExit, Label *overflowExit, Label *negativeZeroExit)
+{
+    ASSERT(right.has_value() != mask.has_value());
+    if (mask) {
+        Label leftNeg;
+        Label done;
+        CompareInt32(left, 0);
+        JumpIf(Condition::LESS_THAN, &leftNeg);
+        Int32And(dst, left, *mask);
+        Jump(&done);
+
+        Bind(&leftNeg);
+        Int32Neg(dst, left);
+        Int32And(dst, *mask);
+        Int32Neg(dst, dst);
+        JumpIfZero(dst.W(), negativeZeroExit);
+        Bind(&done);
+        return;
+    }
+
+    Label divisorReady;
+    Label done;
+    JumpIfZero(right->W(), divideZeroExit);
+    CompareInt32(left, std::numeric_limits<int32_t>::min());
+    JumpIf(Condition::NOT_EQUAL, &divisorReady);
+    CompareInt32(*right, -1);
+    JumpIf(Condition::EQUAL, overflowExit);
+    Bind(&divisorReady);
+
+    // Test the dividend sign before writing dst (which can alias left); SDIV and MSUB preserve NZCV.
+    CompareInt32(left, 0);
+    PositiveInt32Mod(dst, left, *right);
+    JumpIf(Condition::GREATER_THAN_OR_EQUAL, &done);
+    JumpIfZero(dst.W(), negativeZeroExit);
+    Bind(&done);
+}
+
+void ArkSteedAssembler::Int32UnaryWithOverflow(
+    ArkSteedRegister dst, ArkSteedRegister input,
+    void (ArkSteedAssembler::*operation)(ArkSteedRegister, ArkSteedRegister), bool checkZero, Label *deoptExit)
+{
+    if (checkZero) {
+        JumpIfZero(input.W(), deoptExit);
+    }
+    (this->*operation)(dst, input);
+    JumpIf(Condition::OVERFLOWS, deoptExit);
 }
 
 void ArkSteedAssembler::Int32ToFloat64(ArkSteedDoubleRegister dst, ArkSteedRegister src)
@@ -902,6 +1116,37 @@ void ArkSteedAssembler::And(ArkSteedRegister dst, ArkSteedRegister src)
     assembler_.And(arm64Dst, arm64Dst, aarch64::Operand(src));
 }
 
+void ArkSteedAssembler::AndSetZeroCondition(ArkSteedRegister dst, ArkSteedRegister src)
+{
+    assembler_.Ands(dst, dst, aarch64::Operand(src));
+}
+
+void ArkSteedAssembler::AndSetZeroCondition(ArkSteedRegister dst, int32_t immediate)
+{
+    AndSetZeroCondition(dst, static_cast<int64_t>(immediate));
+}
+
+void ArkSteedAssembler::TestInt32Mask(ArkSteedRegister value, uint32_t mask)
+{
+    auto immediate = aarch64::LogicalImmediate::Create(mask, aarch64::W_REG_SIZE);
+    ASSERT(immediate.IsValid());
+    assembler_.Ands(aarch64::wzr, value.W(), immediate);
+}
+
+void ArkSteedAssembler::AndSetZeroCondition(ArkSteedRegister dst, int64_t immediate)
+{
+    auto encoded = aarch64::LogicalImmediate::Create(static_cast<uint64_t>(immediate),
+                                                     dst.IsW() ? aarch64::W_REG_SIZE : aarch64::X_REG_SIZE);
+    if (encoded.IsValid()) {
+        assembler_.Ands(dst, dst, encoded);
+        return;
+    }
+    TemporaryRegisterScope scope(this);
+    auto scratch = scope.AcquireScratch();
+    Move(scratch, immediate);
+    AndSetZeroCondition(dst, scratch);
+}
+
 void ArkSteedAssembler::Lsr(ArkSteedRegister dst, uint32_t shift)
 {
     ArkSteedRegister arm64Dst = dst;
@@ -916,6 +1161,11 @@ void ArkSteedAssembler::ShiftRightLogical(ArkSteedRegister dst, uint32_t shift)
 void ArkSteedAssembler::ShiftLeft(ArkSteedRegister dst, uint32_t shift)
 {
     assembler_.Orr(dst, aarch64::xzr, aarch64::Operand(dst, aarch64::Shift::LSL, shift));
+}
+
+void ArkSteedAssembler::ShiftLeft(ArkSteedRegister dst, ArkSteedRegister src, uint32_t shift)
+{
+    assembler_.Orr(dst, aarch64::xzr, aarch64::Operand(src, aarch64::Shift::LSL, shift));
 }
 
 void ArkSteedAssembler::ShiftRightLogical32(ArkSteedRegister dst, uint32_t shift)
@@ -1168,6 +1418,11 @@ void ArkSteedAssembler::CompareInt32(ArkSteedRegister lhs, int32_t immediate)
     ArkSteedRegister scratch = scope.AcquireScratch();
     Move(scratch, static_cast<int64_t>(immediate));
     assembler_.Cmp(lhs.W(), aarch64::Operand(scratch.W()));
+}
+
+void ArkSteedAssembler::CompareTaggedTrue(ArkSteedRegister value)
+{
+    Compare(value, static_cast<int64_t>(JSTaggedValue::VALUE_TRUE));
 }
 
 void ArkSteedAssembler::CompareField(ArkSteedRegister base, int32_t offset, ArkSteedRegister rhs)
@@ -1553,6 +1808,59 @@ void ArkSteedAssembler::JumpIfNotZero(ArkSteedRegister value, Label *target)
     }
 }
 
+
+bool ArkSteedAssembler::TryJumpOnBoundBit(ArkSteedRegister value, int32_t bit, bool whenSet, Label *target)
+{
+    if (!target->IsBound()) {
+        return false;
+    }
+    const auto displacement = static_cast<int64_t>(target->GetPos()) - GetPcOffset();
+    auto opcode = whenSet ? aarch64::BranchOpCode::TBNZ : aarch64::BranchOpCode::TBZ;
+    if (!IsVeneerBranchInRange(opcode, displacement)) {
+        return false;
+    }
+    const uint32_t branchPc = GetPcOffset();
+    if (whenSet) {
+        assembler_.Tbnz(value, bit, 0);
+    } else {
+        assembler_.Tbz(value, bit, 0);
+    }
+    PatchVeneerBranchTarget(branchPc, target->GetPos());
+    return true;
+}
+
+void ArkSteedAssembler::JumpOnInt32Sign(ArkSteedRegister value, bool negative, Label *target)
+{
+    constexpr int32_t SIGN_BIT = 31;
+    if (TryJumpOnBoundBit(value.W(), SIGN_BIT, negative, target)) {
+        return;
+    }
+    // Preserve fallthrough and use the wider conditional branch range when
+    // a short test branch cannot be proven to reach the target.
+    CompareInt32(value, 0);
+    JumpIf(negative ? Condition::LESS_THAN : Condition::GREATER_THAN_OR_EQUAL, target);
+}
+
+void ArkSteedAssembler::BranchOnBitSet(ArkSteedRegister value, uint32_t bit, Label *ifTrue, bool trueFallsThrough,
+                                       Label *ifFalse, bool falseFallsThrough)
+{
+    ASSERT(bit < aarch64::X_REG_SIZE);
+    if (trueFallsThrough && falseFallsThrough) {
+        ASSERT(ifTrue == ifFalse);
+        return;
+    }
+    // Keep unbound targets on the ordinary conditional branch and its existing veneer path.
+    auto *target = falseFallsThrough ? ifTrue : ifFalse;
+    if (TryJumpOnBoundBit(value, static_cast<int32_t>(bit), falseFallsThrough, target)) {
+        if (!trueFallsThrough && !falseFallsThrough) {
+            Jump(ifTrue);
+        }
+        return;
+    }
+    AndSetZeroCondition(value, static_cast<int64_t>(uint64_t {1} << bit));
+    Branch(Condition::NOT_EQUAL, ifTrue, trueFallsThrough, ifFalse, falseFallsThrough);
+}
+
 void ArkSteedAssembler::TestAndBranchIfZero(ArkSteedRegister value, int32_t bit, Label *target)
 {
     if (target->IsBound()) {
@@ -1593,13 +1901,70 @@ void ArkSteedAssembler::TestAndBranchIfNotZero(ArkSteedRegister value, int32_t b
     RecordVeneerBranch(branchPc, target);
 }
 
+static_assert(JSTaggedValue::TAG_INT == JSTaggedValue::TAG_MARK);
+static_assert(JSTaggedValue::TAG_MARK == (0xFFFFULL << 48U));
+
+void ArkSteedAssembler::JumpIfNotTaggedInt(ArkSteedRegister value, ArkSteedRegister scratch, Label *target)
+{
+    ASSERT(value != scratch);
+    // The upper 16 bits are all ones iff their signed value is -1.
+    assembler_.Asr(scratch, value, 48U);
+    assembler_.Adds(aarch64::xzr, scratch, aarch64::Operand(aarch64::Immediate(1)));
+    JumpIf(Condition::NOT_EQUAL, target);
+}
+
+void ArkSteedAssembler::TestTaggedNumber(ArkSteedRegister value)
+{
+    static_assert(JSTaggedValue::TAG_OBJECT == 0);
+    static_assert(JSTaggedValue::TAG_MARK == (0xFFFFULL << 48U));
+    static_assert(JSTaggedValue::TAG_INT == JSTaggedValue::TAG_MARK);
+    static_assert(JSTaggedValue::DOUBLE_ENCODE_OFFSET == (1ULL << 48U));
+    auto mask = aarch64::LogicalImmediate::Create(JSTaggedValue::TAG_MARK, aarch64::X_REG_SIZE);
+    ASSERT(mask.IsValid());
+    assembler_.Tst(value, mask);
+}
+
+void ArkSteedAssembler::CheckTaggedNumber(ArkSteedRegister value, Label *deopt)
+{
+    TestTaggedNumber(value);
+    JumpIf(Condition::EQUAL, deopt);
+}
+
+void ArkSteedAssembler::TestMask(ArkSteedRegister value, ArkSteedRegister mask)
+{
+    assembler_.Tst(value, aarch64::Operand(mask));
+}
+
+void ArkSteedAssembler::CheckHClass(ArkSteedRegister receiver, uint32_t expectedHandleIndex, Label *deopt)
+{
+    TemporaryRegisterScope scope(this);
+    auto actual = scope.Acquire();
+    auto expected = scope.Acquire();
+    Move(expected, static_cast<uint64_t>(JSTaggedValue::TAG_HEAPOBJECT_MASK));
+    TestMask(receiver, expected);
+    JumpIf(Condition::NOT_EQUAL, deopt);
+    LoadHClassFromObject(actual, receiver);
+    MoveEmbeddedTagged(expected, expectedHandleIndex);
+    Compare(actual, expected);
+    JumpIf(Condition::NOT_EQUAL, deopt);
+}
+
+void ArkSteedAssembler::CheckStableElements(ArkSteedRegister receiver, Label *deopt)
+{
+    TemporaryRegisterScope scope(this);
+    auto bitField = scope.Acquire();
+    LoadHClassFromObject(bitField, receiver);
+    LoadField(bitField, bitField, static_cast<int32_t>(JSHClass::BIT_FIELD_OFFSET));
+    AndSetZeroCondition(bitField, static_cast<int64_t>(1U << JSHClass::IsStableElementsBit::START_BIT));
+    JumpIf(Condition::EQUAL, deopt);
+}
+
 void ArkSteedAssembler::JumpIfNotTaggedHeapObject(ArkSteedRegister value, Label *target)
 {
     TemporaryRegisterScope scope(this);
     ArkSteedRegister scratch = scope.Acquire();
-    Move(scratch, value);
-    And(scratch, static_cast<int64_t>(JSTaggedValue::TAG_HEAPOBJECT_MASK));
-    Compare(scratch, 0);
+    Move(scratch, static_cast<int64_t>(JSTaggedValue::TAG_HEAPOBJECT_MASK));
+    TestMask(value, scratch);
     JumpIf(Condition::NOT_EQUAL, target);
 }
 
@@ -1675,9 +2040,8 @@ void ArkSteedAssembler::JumpIfNewTargetHClassNotReady(ArkSteedRegister value, La
     Compare(scratch, static_cast<int32_t>(JSType::JS_FUNCTION_LAST));
     JumpIf(Condition::GREATER_THAN, target);
     LoadField(protoOrHClass, value, JSFunction::PROTO_OR_DYNCLASS_OFFSET);
-    Move(scratch, protoOrHClass);
-    And(scratch, static_cast<int64_t>(JSTaggedValue::TAG_HEAPOBJECT_MASK));
-    Compare(scratch, 0);
+    Move(scratch, static_cast<int64_t>(JSTaggedValue::TAG_HEAPOBJECT_MASK));
+    TestMask(protoOrHClass, scratch);
     JumpIf(Condition::NOT_EQUAL, target);
     LoadHClassFromObject(scratch, protoOrHClass);
     LoadField(scratch, scratch, JSHClass::BIT_FIELD_OFFSET);
@@ -1810,7 +2174,9 @@ void ArkSteedAssembler::JumpIfConstructorIsBase(ArkSteedRegister jsFunc, Label *
     // extra literal info; derived and builtin constructors sort above it.
     LoadField(method, jsFunc, JSFunctionBase::METHOD_OFFSET);
     LoadField(kind, method, Method::EXTRA_LITERAL_INFO_OFFSET);
-    Lsr(kind, Method::FunctionKindBits::START_BIT);
+    if constexpr (Method::FunctionKindBits::START_BIT != 0) {
+        Lsr(kind, Method::FunctionKindBits::START_BIT);
+    }
     And(kind, static_cast<int64_t>(
         Method::FunctionKindBits::Mask() >> Method::FunctionKindBits::START_BIT));
     Compare(kind, static_cast<int32_t>(FunctionKind::CLASS_CONSTRUCTOR));
@@ -1907,6 +2273,83 @@ void ArkSteedAssembler::Pop(ArkSteedRegister reg)
     PopPair(reg, aarch64::xzr);
 }
 
+namespace {
+constexpr int32_t MIN_PAIR_SLOT = -64;
+constexpr int32_t MAX_PAIR_SLOT = 63;
+constexpr int32_t PAIR_SLOT_COUNT = 2;
+constexpr uint32_t PAIR_REGISTER_COUNT = 2;
+
+bool FitsWord64PairOffset(int32_t byteOffset)
+{
+    constexpr int32_t SLOT_SIZE = ArkSteedAssembler::FRAME_SLOT_SIZE;
+    return byteOffset % SLOT_SIZE == 0 &&
+           byteOffset / SLOT_SIZE >= MIN_PAIR_SLOT && byteOffset / SLOT_SIZE <= MAX_PAIR_SLOT;
+}
+}  // namespace
+
+bool ArkSteedAssembler::CanStoreCallArgumentPair(int32_t firstCallSlot)
+{
+    return firstCallSlot >= 0 && firstCallSlot <= MAX_PAIR_SLOT;
+}
+
+bool ArkSteedAssembler::TryStoreCallArgumentPair(ArkSteedRegister first, ArkSteedRegister second, int32_t firstCallSlot)
+{
+    if (!CanStoreCallArgumentPair(firstCallSlot)) {
+        return false;
+    }
+    assembler_.Stp(first, second, GetCallArgSlot(firstCallSlot));
+    return true;
+}
+
+bool ArkSteedAssembler::TryCopyCallArgumentPair(const InstructionOperand &first, const InstructionOperand &second,
+                                                int32_t firstCallSlot)
+{
+    if (!CanStoreCallArgumentPair(firstCallSlot) || !first.IsStackSlot() || !second.IsStackSlot()) {
+        return false;
+    }
+    auto firstState = AllocatedState::Cast(first);
+    auto secondState = AllocatedState::Cast(second);
+    if (firstState.GetRepresentation() != MachineRepresentation::Tagged ||
+        secondState.GetRepresentation() != MachineRepresentation::Tagged) {
+        return false;
+    }
+    int32_t firstOffset = GetFramePointerOffsetForStackSlot(firstState.GetIndex(), firstState.GetRepresentation());
+    int32_t secondOffset = GetFramePointerOffsetForStackSlot(secondState.GetIndex(), secondState.GetRepresentation());
+    const int64_t distance = static_cast<int64_t>(secondOffset) - firstOffset;
+    const bool reversed = distance == -FRAME_SLOT_SIZE;
+    if ((distance != FRAME_SLOT_SIZE && !reversed) ||
+        !FitsWord64PairOffset(std::min(firstOffset, secondOffset))) {
+        return false;
+    }
+    TemporaryRegisterScope scope(this);
+    if (!scope.HasScratchRegisters(PAIR_REGISTER_COUNT)) {
+        return false;
+    }
+    ArkSteedRegister firstScratch = scope.AcquireScratch();
+    ArkSteedRegister secondScratch = scope.AcquireScratch();
+    if (reversed) {
+        assembler_.Ldp(secondScratch, firstScratch, GetStackSlot(secondState));
+    } else {
+        assembler_.Ldp(firstScratch, secondScratch, GetStackSlot(firstState));
+    }
+    assembler_.Stp(firstScratch, secondScratch, GetCallArgSlot(firstCallSlot));
+    return true;
+}
+
+bool ArkSteedAssembler::TryFillCallArgumentPairWithUndefined(int32_t firstSlot)
+{
+    if (!CanStoreCallArgumentPair(firstSlot)) {
+        return false;
+    }
+    TemporaryRegisterScope scope(this);
+    if (!scope.HasScratchRegisters(1)) {
+        return false;
+    }
+    auto scratch = scope.AcquireScratch();
+    LoadTaggedValue(scratch, JSTaggedValue::VALUE_UNDEFINED);
+    return TryStoreCallArgumentPair(scratch, scratch, firstSlot);
+}
+
 void ArkSteedAssembler::PushPair(ArkSteedRegister reg1, ArkSteedRegister reg2)
 {
     // -16: space for two 64-bit registers (16 bytes)
@@ -1996,6 +2439,25 @@ void ArkSteedAssembler::PopAll(const ArkDoubleRegList &registerList)
         ArkSteedDoubleRegister reg1 = registers.PopLast();
         PopPair(reg1, reg2);
     }
+}
+
+bool ArkSteedAssembler::TryReserveCallArgSlotsWithHeader(int32_t slotCount, int32_t first, int32_t second)
+{
+    // Pair pre-index uses a signed 7-bit slot displacement; SP must remain 16-byte aligned.
+    if (slotCount < PAIR_SLOT_COUNT || slotCount > -MIN_PAIR_SLOT || slotCount % PAIR_SLOT_COUNT != 0) {
+        return false;
+    }
+    TemporaryRegisterScope scope(this);
+    if (!scope.HasScratchRegisters(PAIR_REGISTER_COUNT)) {
+        return false;
+    }
+    auto firstRegister = scope.AcquireScratch();
+    auto secondRegister = scope.AcquireScratch();
+    Move(firstRegister, first);
+    Move(secondRegister, second);
+    assembler_.Stp(firstRegister, secondRegister,
+                   aarch64::MemoryOperand(aarch64::sp, -slotCount * FRAME_SLOT_SIZE, aarch64::AddrMode::PREINDEX));
+    return true;
 }
 
 void ArkSteedAssembler::ReserveCallArgSlots(int32_t slotCount)
@@ -2271,6 +2733,84 @@ aarch64::Condition ArkSteedAssembler::ToPhysicalCondition(Condition condition) c
         default:
             UNREACHABLE();
     }
+}
+
+bool ArkSteedAssembler::TryJumpOnZeroCompare(ArkSteedRegister value, Condition condition, Label *target, bool isInt32)
+{
+    constexpr int32_t INT64_SIGN_BIT_INDEX = 63;
+    if (isInt32) {
+        value = value.W();
+    }
+    switch (condition) {
+        case Condition::EQUAL:
+        case Condition::ZERO:
+        case Condition::BELOW_OR_EQUAL:
+            JumpIfZero(value, target);
+            return true;
+        case Condition::NOT_EQUAL:
+        case Condition::NOT_ZERO:
+        case Condition::ABOVE:
+            JumpIfNotZero(value, target);
+            return true;
+        case Condition::LESS_THAN:
+            if (isInt32) {
+                JumpOnInt32Sign(value, true, target);
+            } else {
+                TestAndBranchIfNotZero(value, INT64_SIGN_BIT_INDEX, target);
+            }
+            return true;
+        case Condition::GREATER_THAN_OR_EQUAL:
+            if (isInt32) {
+                JumpOnInt32Sign(value, false, target);
+            } else {
+                TestAndBranchIfZero(value, INT64_SIGN_BIT_INDEX, target);
+            }
+            return true;
+        default:
+            return false;
+    }
+}
+
+void ArkSteedAssembler::Int32BitwiseBinary(ArkSteedRegister dst, ArkSteedRegister left, int32_t right,
+                                           IntBitwiseKind kind)
+{
+    constexpr uint32_t INT32_SHIFT_MASK = 31U;
+    constexpr uint32_t INT64_BITS = 64U;
+    const uint32_t shift = static_cast<uint32_t>(right) & INT32_SHIFT_MASK;
+    if (kind == IntBitwiseKind::SHIFT_RIGHT_ARITHMETIC) {
+        assembler_.Sbfm(dst, left, shift, INT32_SHIFT_MASK);
+        return;
+    }
+    if (kind == IntBitwiseKind::SHIFT_LEFT && shift != 0) {
+        assembler_.Sbfm(dst, left, INT64_BITS - shift, INT32_SHIFT_MASK - shift);
+        return;
+    }
+    if (kind == IntBitwiseKind::SHIFT_RIGHT_LOGICAL && shift != 0) {
+        Int32ShiftRightLogical(dst, left, shift);
+        return;
+    }
+    if (kind == IntBitwiseKind::BITWISE_AND && right >= 0) {
+        Int32And(dst, left, right);
+        return;
+    }
+    switch (kind) {
+        case IntBitwiseKind::BITWISE_AND:
+            Int32And(dst, left, right);
+            break;
+        case IntBitwiseKind::BITWISE_OR:
+            Int32Or(dst, left, right);
+            break;
+        case IntBitwiseKind::BITWISE_XOR:
+            Int32Xor(dst, left, right);
+            break;
+        case IntBitwiseKind::SHIFT_LEFT:
+        case IntBitwiseKind::SHIFT_RIGHT_LOGICAL:
+            SignExtendInt32ToInt64(dst, left);
+            return;
+        default:
+            UNREACHABLE();
+    }
+    SignExtendInt32ToInt64(dst, dst);
 }
 
 #endif
