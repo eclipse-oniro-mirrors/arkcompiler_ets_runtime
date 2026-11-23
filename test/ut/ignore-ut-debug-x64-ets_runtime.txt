@@ -7,3 +7,6 @@ obj/arkcompiler/ets_runtime/ecmascript/arksteed/unittests/ArkSteedInitialization
 
 #workitem 50
 obj/arkcompiler/ets_runtime/ecmascript/containers/tests/Containers_003_Test
+
+#workitem 52
+obj/arkcompiler/ets_runtime/ecmascript/arksteed/unittests/ArkSteedRegisterAllocatorTest
