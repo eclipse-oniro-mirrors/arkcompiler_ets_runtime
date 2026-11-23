@@ -46,7 +46,12 @@ constexpr size_t GARBAGE_LEN = 256;
 constexpr size_t GARBAGE_PER_ROUND = 4;
 constexpr int WORKER_COUNT = 2;
 constexpr int32_t NON_STRING_TAG_VALUE = 42;
-constexpr int EXPECTED_TAG_GETTER_CALLS = 2;
+// Asm interpreter (builtin IR stub): the fast-path pre-lookup invokes an accessor getter
+// once and the slow path re-runs the @@toStringTag [[Get]], so the getter runs twice.
+constexpr int ASM_EXPECTED_TAG_GETTER_CALLS = 2;
+// C interpreter: the builtin call goes straight to the C++ entry (EcmaInterpreter::
+// ExecuteNative), which performs a single @@toStringTag [[Get]].
+constexpr int CPP_EXPECTED_TAG_GETTER_CALLS = 1;
 constexpr uint32_t SHARED_OBJ_FIELD_COUNT = 2;
 
 // Counts @@toStringTag getter invocations for the toString compat test (single-threaded body).
@@ -435,8 +440,9 @@ static JSTaggedValue ToStringOnSharedWithTag(EcmaVM *vm, const JSHandle<JSTagged
 
  /*
   * with an accessor @@toStringTag (getter returns
-  * String), the pre-lookup invokes the getter once and the C++ slow path invokes it a
-  * second time - the result comes from that second call.
+  * String), the asm interpreter invokes the getter twice (IR pre-lookup + C++ slow path
+  * re-lookup) and composes the second result; the C interpreter invokes the getter once
+  * (C++ entry only) and composes the first result.
   */
 HWTEST_F_L0(SendableBuiltinsIRStressTest, ToStringSharedAccessorTagMatchesPreChangeBehavior)
 {
@@ -449,8 +455,11 @@ HWTEST_F_L0(SendableBuiltinsIRStressTest, ToStringSharedAccessorTagMatchesPreCha
     JSTaggedValue r = ToStringOnSharedWithTag(instance, JSNApiHelper::ToJSHandle(accessor));
     ASSERT_FALSE(thread->HasPendingException());
     ASSERT_TRUE(r.IsString());
-    ASSERT_EQ(g_toStringTagGetterCalls.load(), EXPECTED_TAG_GETTER_CALLS);
-    JSHandle<EcmaString> expected = instance->GetFactory()->NewFromUtf8("[object Tag2]");
+    bool isAsmInterpreter = thread->IsAsmInterpreter();
+    ASSERT_EQ(g_toStringTagGetterCalls.load(),
+              isAsmInterpreter ? ASM_EXPECTED_TAG_GETTER_CALLS : CPP_EXPECTED_TAG_GETTER_CALLS);
+    JSHandle<EcmaString> expected = instance->GetFactory()->NewFromUtf8(
+        isAsmInterpreter ? "[object Tag2]" : "[object Tag1]");
     ASSERT_TRUE(JSTaggedValue::StrictEqual(thread, JSHandle<JSTaggedValue>(thread, r),
                                            JSHandle<JSTaggedValue>(expected)));
 }
@@ -472,8 +481,8 @@ HWTEST_F_L0(SendableBuiltinsIRStressTest, ToStringSharedDataTagComposesCustomTag
 
  /*
   * with an accessor @@toStringTag whose getter returns a
-  * NON-string, the getter runs twice (pre-lookup + second [[Get]]) and the output
-  * is "[object Object]".
+  * NON-string, the asm interpreter runs the getter twice (pre-lookup + second [[Get]])
+  * while the C interpreter runs it once; both compose "[object Object]".
   */
 HWTEST_F_L0(SendableBuiltinsIRStressTest, ToStringSharedAccessorTagNonStringKeepsPreChangeBehavior)
 {
@@ -486,7 +495,9 @@ HWTEST_F_L0(SendableBuiltinsIRStressTest, ToStringSharedAccessorTagNonStringKeep
     JSTaggedValue r = ToStringOnSharedWithTag(instance, JSNApiHelper::ToJSHandle(accessor));
     ASSERT_FALSE(thread->HasPendingException());
     ASSERT_TRUE(r.IsString());
-    ASSERT_EQ(g_nonStringTagGetterCalls.load(), EXPECTED_TAG_GETTER_CALLS);
+    bool isAsmInterpreter = thread->IsAsmInterpreter();
+    ASSERT_EQ(g_nonStringTagGetterCalls.load(),
+              isAsmInterpreter ? ASM_EXPECTED_TAG_GETTER_CALLS : CPP_EXPECTED_TAG_GETTER_CALLS);
     JSHandle<EcmaString> expected = instance->GetFactory()->NewFromUtf8("[object Object]");
     ASSERT_TRUE(JSTaggedValue::StrictEqual(thread, JSHandle<JSTaggedValue>(thread, r),
                                            JSHandle<JSTaggedValue>(expected)));
@@ -494,8 +505,9 @@ HWTEST_F_L0(SendableBuiltinsIRStressTest, ToStringSharedAccessorTagNonStringKeep
 
  /*
   * an accessor @@toStringTag whose getter returns a NON-string
-  * on the first call and a String on the second - the pre-lookup result is dropped and
-  * the second [[Get]] result is composed.
+  * on the first call and a String on the second: the asm interpreter drops the pre-lookup
+  * result and composes the second [[Get]] result; the C interpreter only runs the first
+  * call (NON-string) and composes the default tag.
   */
 HWTEST_F_L0(SendableBuiltinsIRStressTest, ToStringSharedAccessorTagFlipKeepsPreChangeBehavior)
 {
@@ -508,8 +520,11 @@ HWTEST_F_L0(SendableBuiltinsIRStressTest, ToStringSharedAccessorTagFlipKeepsPreC
     JSTaggedValue r = ToStringOnSharedWithTag(instance, JSNApiHelper::ToJSHandle(accessor));
     ASSERT_FALSE(thread->HasPendingException());
     ASSERT_TRUE(r.IsString());
-    ASSERT_EQ(g_flipTagGetterCalls.load(), EXPECTED_TAG_GETTER_CALLS);
-    JSHandle<EcmaString> expected = instance->GetFactory()->NewFromUtf8("[object Flip2]");
+    bool isAsmInterpreter = thread->IsAsmInterpreter();
+    ASSERT_EQ(g_flipTagGetterCalls.load(),
+              isAsmInterpreter ? ASM_EXPECTED_TAG_GETTER_CALLS : CPP_EXPECTED_TAG_GETTER_CALLS);
+    JSHandle<EcmaString> expected = instance->GetFactory()->NewFromUtf8(
+        isAsmInterpreter ? "[object Flip2]" : "[object Object]");
     ASSERT_TRUE(JSTaggedValue::StrictEqual(thread, JSHandle<JSTaggedValue>(thread, r),
                                            JSHandle<JSTaggedValue>(expected)));
 }
