@@ -33,6 +33,7 @@
 //! HAS         HasInPrototypeChain
 //! METHOD      checkProxy
 //! HAS         HasInPrototypeChain
+//! DEOPT_COUNT checkProxy 0
 //! METHOD      checkDeep
 //! HAS         HasInPrototypeChain
 

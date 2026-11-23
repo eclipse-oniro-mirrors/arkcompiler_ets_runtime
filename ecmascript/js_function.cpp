@@ -292,13 +292,6 @@ bool JSFunction::PrototypeSetter(JSThread *thread, const JSHandle<JSObject> &sel
 {
     JSHandle<JSFunction> func(self);
     JSTaggedValue protoOrHClass = func->GetProtoOrHClass(thread);
-    bool protoIdentityChanged = false;
-    if (!protoOrHClass.IsHole()) {
-        JSTaggedValue oldProto = protoOrHClass.IsJSHClass()
-            ? JSHClass::Cast(protoOrHClass.GetTaggedObject())->GetPrototype(thread)
-            : protoOrHClass;
-        protoIdentityChanged = value->GetRawData() != oldProto.GetRawData();
-    }
     if (protoOrHClass.IsJSHClass()) {
         // need transition
         JSHandle<JSHClass> hclass(thread, JSHClass::Cast(protoOrHClass.GetTaggedObject()));
@@ -315,9 +308,6 @@ bool JSFunction::PrototypeSetter(JSThread *thread, const JSHandle<JSObject> &sel
     } else {
         if (!value->IsECMAObject()) {
             func->SetProtoOrHClass(thread, value.GetTaggedValue());
-            if (protoIdentityChanged) {
-                thread->GetEcmaVM()->GetGlobalEnv()->NotifyFunctionPrototypeChangedDetector(thread);
-            }
             return true;
         }
 
@@ -335,9 +325,6 @@ bool JSFunction::PrototypeSetter(JSThread *thread, const JSHandle<JSObject> &sel
             thread->GetEcmaVM()->GetPGOProfiler()->ProfileProtoTransitionPrototype(func, value, oldPrototype, baseIhc);
 #endif
         }
-    }
-    if (protoIdentityChanged) {
-        thread->GetEcmaVM()->GetGlobalEnv()->NotifyFunctionPrototypeChangedDetector(thread);
     }
     return true;
 }

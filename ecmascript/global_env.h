@@ -183,19 +183,9 @@ public:
     void InitializeGuardians()
     {
         SetArrayPrototypeChangedGuardians(true);
-        SetFunctionPrototypeChangedDetector(true);
     }
 
     void NotifyArrayPrototypeChangedGuardians(JSThread *thread, JSHandle<JSObject> receiver);
-
-    void NotifyFunctionPrototypeChangedDetector(JSThread *thread)
-    {
-        if (!GetFunctionPrototypeChangedDetector()) {
-            return;
-        }
-        NotifyDetectorDeoptimize(thread, FunctionPrototypeChangedDetectorBits::START_BIT);
-        SetFunctionPrototypeChangedDetector(false);
-    }
 
     void SetBuiltinFunction(const JSThread *thread, kungfu::BuiltinsStubCSigns::ID builtinId,
                             JSHandle<JSFunction> function)
@@ -347,8 +337,7 @@ public:
     NEXT_BIT_FIELD(BitField, RegExpFlagsDetector, bool, DETECTOR_BITS, NumberStringNotRegexpLikeDetector)
     NEXT_BIT_FIELD(BitField, RegExpSpeciesDetector, bool, DETECTOR_BITS, RegExpFlagsDetector)
     NEXT_BIT_FIELD(BitField, StringWrapperToPrimitiveDetector, bool, DETECTOR_BITS, RegExpSpeciesDetector)
-    NEXT_BIT_FIELD(BitField, FunctionPrototypeChangedDetector, bool, DETECTOR_BITS, StringWrapperToPrimitiveDetector)
-    NEXT_BIT_FIELD(BitField, LastBitField, bool, DETECTOR_BITS, FunctionPrototypeChangedDetector)
+    NEXT_BIT_FIELD(BitField, LastBitField, bool, DETECTOR_BITS, StringWrapperToPrimitiveDetector)
 
     bool GetDetectorValue(uint32_t detectorID)
     {

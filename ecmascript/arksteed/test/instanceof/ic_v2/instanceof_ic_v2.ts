@@ -25,22 +25,30 @@
 //! HAS_NOT     DeoptIfHClassMismatch
 //! HAS         CallCommonStub InstanceofJit
 
-// check_rebind_runtime is compiled with the constant-target form; the test then
-// reassigns RebindV2.prototype, flipping FunctionPrototypeChangedDetector: the
-// compiled code is lazily deoptimized and later executions observe the new
-// prototype through the interpreter's generic resolution.
+// check_rebind_runtime is compiled with the constant-target form. Rebinding its
+// prototype changes ProtoOrHClass and routes only this site through InstanceofJit.
 //! METHOD      check_rebind_runtime
 //! HAS         BranchIfReferenceEqual
 //! HAS         CallCommonStub InstanceofJit
+//! DEOPT_COUNT check_rebind_runtime 0
+//! DEOPT_COUNT check_array 0
 
-// check_poly keeps the first recorded target and specializes on it. An identity
-// mismatch branches directly to InstanceofJit for full semantics instead of
-// repeatedly deoptimizing back to the interpreter.
+// check_poly is compiled with the first target. A later target mismatch writes
+// Hole without deoptimizing the installed code, and keeps the generic fallback.
 //! METHOD      check_poly
 //! HAS         BranchIfReferenceEqual
 //! HAS         CallCommonStub InstanceofJit
 //! HAS_NOT     DeoptIfHClassMismatch
 //! DEOPT_COUNT check_poly 0
+
+// Once a different target is observed before compilation, the slot is Hole and
+// later compilation uses the generic path instead of a constant-target guard.
+//! METHOD      check_poly_generic
+//! COUNT       BranchIfReferenceEqual 1  # Only the boolean result conversion, not a target guard.
+//! HAS_NOT     HasInPrototypeChain
+//! COUNT       CallCommonStub InstanceofJit 1
+//! HAS_NOT     DeoptIfHClassMismatch
+//! DEOPT_COUNT check_poly_generic 0
 
 class OtherV2 {
     x: number;
@@ -69,31 +77,34 @@ function check_poly(o: Object, t: Object): number {
     return o instanceof t ? 1 : 0;
 }
 
+function check_poly_generic(o: Object, t: Object): number {
+    return o instanceof t ? 1 : 0;
+}
+
 let arr = [1, 2, 3];
 for (let i = 0; i < 50; i++) {
     check_array(arr);
     check_rebind_runtime(new RebindV2(i));
     check_poly(new RebindV2(i), RebindV2);
+    check_poly_generic(new RebindV2(i), RebindV2);
 }
-// Second constructor at the same site: the slot keeps the first target (no
-// rewrite for a different constructor); executions fall back to generic
-// resolution while the recorded feedback stays monomorphic.
+// A different constructor marks the slot Hole before compilation.
 for (let i = 0; i < 50; i++) {
-    check_poly(new OtherV2(i), OtherV2);
+    check_poly_generic(new OtherV2(i), OtherV2);
 }
 
 ArkTools.arkSteedCompileSync(check_array);
 ArkTools.arkSteedCompileSync(check_rebind_runtime);
 ArkTools.arkSteedCompileSync(check_poly);
+ArkTools.arkSteedCompileSync(check_poly_generic);
 const boundOtherV2 = OtherV2.bind(null);
 
-// Runtime invalidation: F.prototype = x flips the detector and lazily deopts the
-// code compiled above; results must stay correct afterwards.
+// Prototype rebinding must preserve semantics without invalidating other sites.
 print("arrayHit=" + check_array(arr));
 print("arrayMiss=" + check_array({}));
 print("rebindBefore=" + check_rebind_runtime(new RebindV2(7)));
 
-// Execute all constant-target and mismatch paths before flipping the detector.
+// Execute all constant-target and mismatch paths before the prototype rebind.
 const polyResult = check_poly(new RebindV2(1), RebindV2);
 const polyOtherResult = check_poly(new OtherV2(2), OtherV2);
 const polyCustomResult = check_poly(new CustomV2(), CustomV2);
@@ -107,4 +118,5 @@ print("poly=" + polyResult);
 print("polyOther=" + polyOtherResult);
 print("polyCustom=" + polyCustomResult);
 print("polyBound=" + polyBoundResult);
+print("polyGeneric=" + check_poly_generic(new OtherV2(5), OtherV2));
 print("arrayAfter=" + check_array(arr));

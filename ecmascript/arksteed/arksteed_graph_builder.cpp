@@ -6575,6 +6575,7 @@ struct GraphBuilder::BytecodeVisitor {
         BB *trueBlock {nullptr};
         BB *falseBlock {nullptr};
         BB *targetMismatchBlock {nullptr};
+        BB *prototypeMismatchBlock {nullptr};
         BB *doneBlock {nullptr};
     };
 
@@ -6602,11 +6603,19 @@ struct GraphBuilder::BytecodeVisitor {
             resultInputs.emplace_back(inlineResult);
         }
 
-        enterBlock(blocks.targetMismatchBlock);
-        CallCommonStubVertex *mismatchCall =
-            CommonStubCallWithICAndLazyDeopt(bcInfo, {object, target, GlobalEnv()}, CommonStubID::InstanceofJit);
-        self->FinishBlockWithJump(blocks.targetMismatchBlock, blocks.doneBlock);
-        resultInputs.emplace_back(mismatchCall);
+        auto buildMismatchResult = [&]() {
+            enterBlock(currentBlock);
+            CallCommonStubVertex *mismatchCall =
+                CommonStubCallWithICAndLazyDeopt(bcInfo, {object, target, GlobalEnv()}, CommonStubID::InstanceofJit);
+            self->FinishBlockWithJump(currentBlock, blocks.doneBlock);
+            resultInputs.emplace_back(mismatchCall);
+        };
+        currentBlock = blocks.targetMismatchBlock;
+        buildMismatchResult();
+        if (blocks.prototypeMismatchBlock != nullptr) {
+            currentBlock = blocks.prototypeMismatchBlock;
+            buildMismatchResult();
+        }
 
         enterBlock(blocks.doneBlock);
         compileInfoFacts_->OnSideEffect();
@@ -6626,14 +6635,14 @@ struct GraphBuilder::BytecodeVisitor {
     struct InstanceofConstantTargetPlan {
         ArkSteedFunctionRef ctorFunc {};
         ArkSteedObjectRef ctorProto {};
+        ArkSteedObjectRef protoOrDyn {};
         ValueVertex *ctorFuncConstant {nullptr};
         ValueVertex *ctorProtoConstant {nullptr};
+        ValueVertex *protoOrDynConstant {nullptr};
         bool useConstantTarget {false};
     };
 
-    bool TryPlanInstanceofConstantTarget(const ArkSteedAccessInfoFactory &factory,
-                                         const InstanceofAccessInfo &access,
-                                         InstanceofConstantTargetPlan *plan)
+    bool TryPlanInstanceofConstantTarget(const InstanceofAccessInfo &access, InstanceofConstantTargetPlan *plan)
     {
         *plan = {};
         ArkSteedHeapBroker *broker = self->pgoContext_.GetBroker();
@@ -6641,15 +6650,14 @@ struct GraphBuilder::BytecodeVisitor {
             return false;
         }
         plan->ctorFunc = access.ctorFunc;
-        if (!broker->TryGetInstanceofCtorProto(access.ctorFunc, &plan->ctorProto)) {
-            return false;
-        }
-        if (!factory.InstallFunctionPrototypeDetector()) {
+        if (!broker->TryGetInstanceofCtorProto(access.ctorFunc, &plan->ctorProto, &plan->protoOrDyn)) {
             return false;
         }
         plan->ctorFuncConstant = GetHeapConstant(plan->ctorFunc);
         plan->ctorProtoConstant = GetHeapConstant(plan->ctorProto);
-        plan->useConstantTarget = plan->ctorFuncConstant != nullptr && plan->ctorProtoConstant != nullptr;
+        plan->protoOrDynConstant = GetHeapConstant(plan->protoOrDyn);
+        plan->useConstantTarget = plan->ctorFuncConstant != nullptr && plan->ctorProtoConstant != nullptr &&
+                                  plan->protoOrDynConstant != nullptr;
         return plan->useConstantTarget;
     }
 
@@ -6724,6 +6732,13 @@ struct GraphBuilder::BytecodeVisitor {
                                                                   constantTargetBlock, blocks.targetMismatchBlock);
         currentBlock = constantTargetBlock;
 
+        auto *protoOrDyn = self->NewVertex<LoadTaggedFieldVertex>(compileInfoFacts_, currentBlock, {target},
+                                                                   JSFunction::PROTO_OR_DYNCLASS_OFFSET);
+        BB *constantProtoBlock = self->NewBlock();
+        self->FinishBlockWithBranch<BranchIfReferenceEqualVertex>(currentBlock, {protoOrDyn, plan.protoOrDynConstant},
+                                                                  constantProtoBlock, blocks.prototypeMismatchBlock);
+        currentBlock = constantProtoBlock;
+
         if (!access.canAssumeStableHClass) {
             HClassCheckResult checkResult =
                 BuildCheckSingleHClass(bcIndex, target, expectedHClass, access.ctorHClass, true, false);
@@ -6784,6 +6799,14 @@ struct GraphBuilder::BytecodeVisitor {
                              vertex->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(bcIndex));
                          })
                          .Build();
+        BB *fallbackBlock = self->NewBlock();
+        BB *walkResultBlock = self->NewBlock();
+        self->FinishBlockWithBranch<BranchIfReferenceEqualVertex>(
+            currentBlock,
+            {walk, self->graph_->GetTaggedConstant(JSTaggedValue::VALUE_HOLE)},
+            fallbackBlock, walkResultBlock);
+        self->FinishBlockWithJump(fallbackBlock, blocks.targetMismatchBlock);
+        currentBlock = walkResultBlock;
         self->FinishBlockWithJump(currentBlock, blocks.doneBlock);
         return walk;
     }
@@ -6802,7 +6825,7 @@ struct GraphBuilder::BytecodeVisitor {
         uint32_t bcIndex = currentBcIndex;
 
         InstanceofConstantTargetPlan constTarget;
-        TryPlanInstanceofConstantTarget(factory, access, &constTarget);
+        TryPlanInstanceofConstantTarget(access, &constTarget);
         if (!constTarget.useConstantTarget) {
             return false;
         }
@@ -6817,6 +6840,8 @@ struct GraphBuilder::BytecodeVisitor {
         CompileInfoFacts *entryFacts = compileInfoFacts_;
         blocks.targetMismatchBlock = self->NewBlock();
         blocks.targetMismatchBlock->SetDeferred(true);
+        blocks.prototypeMismatchBlock = self->NewBlock();
+        blocks.prototypeMismatchBlock->SetDeferred(true);
         ValueVertex *ctorProto = nullptr;
         HClassCheckResult guardResult = BuildInstanceofConstantTargetGuards(bcIndex, access, blocks, expectedHClass,
                                                                             target, constTarget, &ctorProto);

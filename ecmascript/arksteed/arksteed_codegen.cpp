@@ -3756,6 +3756,7 @@ struct ArkSteedCodeGenerator::HasInPrototypeChainContext {
     Label loop;
     Label returnFalse;
     Label returnTrue;
+    Label returnFallback;
     Label pass;
     Label *deopt;
 };
@@ -3796,6 +3797,9 @@ void ArkSteedCodeGenerator::VisitNonControlVertex<HasInPrototypeChainVertex>(Has
     __ Jump(&done);
     __ Bind(&context.returnFalse);
     __ Move(context.result, static_cast<int64_t>(JSTaggedValue::VALUE_FALSE));
+    __ Jump(&done);
+    __ Bind(&context.returnFallback);
+    __ Move(context.result, static_cast<int64_t>(JSTaggedValue::VALUE_HOLE));
     __ Bind(&done);
 }
 
@@ -3813,9 +3817,10 @@ void ArkSteedCodeGenerator::EmitHasInPrototypeChainLoop(HasInPrototypeChainConte
     __ Compare(context.typeBits, static_cast<int64_t>(JSType::JS_PROXY) - static_cast<int64_t>(JSType::JS_OBJECT));
     __ JumpIf(Condition::ABOVE, &context.returnFalse);
 #if defined(PANDA_TARGET_AMD64)
-    __ JumpIf(Condition::EQUAL, context.deopt);
+    __ JumpIf(Condition::EQUAL, &context.returnFallback);
 #else
     __ JumpIf(Condition::BELOW, &context.pass);
+    __ Jump(&context.returnFallback);
     __ Bind(context.deopt);
     EmitEagerDeoptExit(context.walk, kungfu::DeoptType::KEYMISSMATCH);
     __ Bind(&context.pass);

@@ -1017,22 +1017,23 @@ bool ArkSteedHeapBroker::TryGetInstanceofCtorHClass(ArkSteedFunctionRef ctorFunc
 }
 
 bool ArkSteedHeapBroker::TryGetInstanceofCtorProto(ArkSteedFunctionRef ctorFunc,
-                                                   ArkSteedObjectRef *ctorProto) const
+                                                   ArkSteedObjectRef *ctorProto,
+                                                   ArkSteedObjectRef *protoOrDyn) const
 {
     NoGCScope scope(this);
     JSTaggedValue ctorFuncValue;
     if (!TryResolveRef(ctorFunc, &ctorFuncValue) || !ctorFuncValue.IsJSFunction()) {
         return false;
     }
-    JSTaggedValue protoOrDyn = JSTaggedValue(Barriers::GetTaggedValue(
+    JSTaggedValue protoOrDynValue = JSTaggedValue(Barriers::GetTaggedValue(
         compilerThread_, ctorFuncValue.GetTaggedObject(),
         static_cast<size_t>(JSFunction::PROTO_OR_DYNCLASS_OFFSET)));
-    if (!protoOrDyn.IsHeapObject()) {
+    if (!protoOrDynValue.IsHeapObject()) {
         return false;
     }
-    JSTaggedValue ctorProtoValue = protoOrDyn;
-    if (protoOrDyn.IsJSHClass()) {
-        ctorProtoValue = JSHClass::Cast(protoOrDyn.GetTaggedObject())->GetPrototype(compilerThread_);
+    JSTaggedValue ctorProtoValue = protoOrDynValue;
+    if (protoOrDynValue.IsJSHClass()) {
+        ctorProtoValue = JSHClass::Cast(protoOrDynValue.GetTaggedObject())->GetPrototype(compilerThread_);
         if (!ctorProtoValue.IsHeapObject()) {
             return false;
         }
@@ -1041,7 +1042,8 @@ bool ArkSteedHeapBroker::TryGetInstanceofCtorProto(ArkSteedFunctionRef ctorFunc,
         return false;
     }
     *ctorProto = MakeObjectRef(ctorProtoValue);
-    return ctorProto->IsSafeForCompile();
+    *protoOrDyn = MakeObjectRef(protoOrDynValue);
+    return ctorProto->IsSafeForCompile() && protoOrDyn->IsSafeForCompile();
 }
 
 bool ArkSteedHeapBroker::SameHeapObject(const ArkSteedHeapRef &lhs, const ArkSteedHeapRef &rhs) const

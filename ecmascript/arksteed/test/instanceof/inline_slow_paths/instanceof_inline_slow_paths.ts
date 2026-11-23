@@ -28,15 +28,16 @@
 //! HAS         HasInPrototypeChain
 //! HAS_NOT     CallCommonStub OrdinaryHasInstance
 //! HAS         CallCommonStub InstanceofJit
+//! DEOPT_COUNT check_proxy 0
 
-// InstanceofSlowReplaced.prototype is reassigned before this compile, flipping
-// FunctionPrototypeChangedDetector. Without a constant target the whole site
-// falls back to the full-semantics InstanceofJit stub.
+// Rebinding before compilation does not disable later constant-target sites.
 //! METHOD      check_replaced_proto
+//! HAS         BranchIfReferenceEqual
+//! HAS         HasInPrototypeChain
 //! HAS_NOT     DeoptIfHClassMismatch
-//! HAS_NOT     HasInPrototypeChain
 //! HAS_NOT     CallCommonStub OrdinaryHasInstance
 //! HAS         CallCommonStub InstanceofJit
+//! DEOPT_COUNT check_replaced_proto 0
 
 // An arrow function has no instance prototype, so it also uses the generic stub.
 //! METHOD      check_arrow_target
@@ -93,20 +94,17 @@ for (let i = 0; i < 50; i++) {
     check_arrow_target(new Object());
 }
 
-// Compile while the detector is still intact: constant-target form.
+// Compile the constant-target forms before changing an unrelated prototype.
 ArkTools.arkSteedCompileSync(check_deep);
 ArkTools.arkSteedCompileSync(check_proxy);
 ArkTools.arkSteedCompileSync(check_arrow_target);
 
-// Run the new chain-walk node before the detector flip deoptimizes this code.
 const deepHitResult = check_deep(new InstanceofSlowPoint());
 const deepMissResult = check_deep(new InstanceofSlowDeep());
 const proxyResult = check_proxy(proxied);
 const proxyHitResult = check_proxy(new InstanceofSlowProxyTarget());
 
-// Replace the whole prototype after warmup: flips FunctionPrototypeChangedDetector
-// (lazily deoptimizing the code compiled above) and disables the constant-target
-// path for sites compiled from now on.
+// Prototype rebinding does not disable constant-target compilation at this site.
 InstanceofSlowReplaced.prototype = { marker: 1 };
 
 ArkTools.arkSteedCompileSync(check_replaced_proto);

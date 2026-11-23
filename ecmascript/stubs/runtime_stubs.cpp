@@ -1056,12 +1056,19 @@ DEF_RUNTIME_STUBS(InstanceofIC)
     JSHandle<JSTaggedValue> profileHandle = GetHArg<JSTaggedValue>(argv, argc, 2);  // 2: means the second parameter
     JSTaggedValue slotId = GetArg(argv, argc, 3);  // 3: means the third parameter
 
-    if (!target->IsECMAObject() || profileHandle->IsUndefined() || !profileHandle->IsProfileTypeInfo()) {
+    if (!target->IsECMAObject()) {
         return RuntimeInstanceof(thread, obj, target).GetRawData();
     }
-    ProfileTypeInfo *profileTypeInfo = ProfileTypeInfo::Cast(profileHandle.GetTaggedValue().GetTaggedObject());
-    ICRuntimeStub::RecordInstanceofIC(thread, profileTypeInfo, target.GetTaggedValue(), slotId.GetInt());
-    return RuntimeInstanceof(thread, obj, target).GetRawData();
+    if (!profileHandle->IsUndefined() && profileHandle->IsProfileTypeInfo()) {
+        ProfileTypeInfo *profileTypeInfo = ProfileTypeInfo::Cast(profileHandle.GetTaggedValue().GetTaggedObject());
+        ICRuntimeStub::RecordInstanceofIC(thread, profileTypeInfo, target.GetTaggedValue(), slotId.GetInt());
+    }
+    JSHandle<JSTaggedValue> instOfHandler =
+        JSObject::FastGetMethodForJit(thread, target, thread->GlobalConstants()->GetHandledHasInstanceSymbol());
+    RETURN_VALUE_IF_ABRUPT_COMPLETION(thread, JSTaggedValue::Exception().GetRawData());
+    JSTaggedValue result = RuntimeInstanceofByHandler(thread, target, obj, instOfHandler);
+    RETURN_VALUE_IF_ABRUPT_COMPLETION(thread, JSTaggedValue::Exception().GetRawData());
+    return JSTaggedValue(result.ToBoolean()).GetRawData();
 }
 
 DEF_RUNTIME_STUBS(DumpObject)
