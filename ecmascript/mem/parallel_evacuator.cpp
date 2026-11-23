@@ -473,7 +473,7 @@ void ParallelEvacuator::UpdateReference()
             workloadSet.Add(std::make_unique<UpdateNewToOldEvacuationWorkload>(
                 this, current, heap_->IsYoungMark(), heap_->GetEvacuateNonMovableSpace()));
         } else {
-            if (evacuateNonMovableSpace && current->InNonMovableSpace()) {
+            if (evacuateNonMovableSpace && current->InNonMovableSpace() && !current->IsPinned()) {
                 workloadSet.Add(std::make_unique<UpdateNonMovableRegionWorkload>(this, current));
             } else {
                 workloadSet.Add(std::make_unique<UpdateRSetWorkload<false>>(this, current));

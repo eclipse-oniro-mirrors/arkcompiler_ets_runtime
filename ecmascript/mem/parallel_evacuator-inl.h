@@ -263,7 +263,7 @@ void ParallelEvacuator::UpdateHClassSlot(ObjectSlot slot, TaggedObject *hClass)
     ASSERT(heap_->GetEvacuateNonMovableSpace());
     Region *region = Region::ObjectAddressToRange(hClass);
     if (!region->InCollectSet()) {
-        ASSERT(region->InSharedHeap() || region->InReadOnlySpace());
+        ASSERT(region->InSharedHeap() || region->InReadOnlySpace() || region->InNonMovableSpace());
         return;
     }
     ASSERT(region->InNonMovableSpace());

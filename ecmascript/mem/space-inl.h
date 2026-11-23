@@ -56,7 +56,7 @@ RegionSpaceFlag Space::GetRegionFlag() const
             flags = RegionSpaceFlag::IN_READ_ONLY_SPACE;
             break;
         case MemSpaceType::APPSPAWN_SPACE:
-            flags = RegionSpaceFlag::IN_APPSPAWN_SPACE;
+            flags = RegionSpaceFlag::IN_OLD_SPACE;
             break;
         case MemSpaceType::SLOT_SPACE:
             flags = RegionSpaceFlag::IN_SLOT_SPACE;

@@ -154,6 +154,70 @@ HWTEST_F_L0(ReadOnlySpaceTest, CompactHeapBeforeForkTest)
     }
 }
 
+HWTEST_F_L0(ReadOnlySpaceTest, NonMovableRegionsAttachedToAppSpawnSpace)
+{
+    if (g_isEnableCMCGC) {
+        return;
+    }
+    auto *heap = const_cast<panda::ecmascript::Heap *>(thread->GetEcmaVM()->GetHeap());
+    JSHandle<TaggedArray> array = factory->NewTaggedArray(16, JSTaggedValue::Hole(),
+                                                          MemSpaceType::NON_MOVABLE);
+    Region *regionBefore = Region::ObjectAddressToRange(array.GetTaggedValue().GetTaggedObject());
+    ASSERT_TRUE(regionBefore->InNonMovableSpace());
+
+    heap->CompactHeapBeforeFork();
+    Region *attachedRegion = Region::ObjectAddressToRange(array.GetTaggedValue().GetTaggedObject());
+    ASSERT_TRUE(attachedRegion->InNonMovableSpace());
+    EXPECT_TRUE(attachedRegion->IsPinned());
+    size_t nonMovableRegionCount = heap->GetNonMovableSpace()->GetRegionCount();
+    EXPECT_EQ(nonMovableRegionCount, 0);
+
+    heap->CollectGarbage(TriggerGCType::OLD_GC);
+    heap->CollectGarbage(TriggerGCType::FULL_GC);
+    Region *regionAfter = Region::ObjectAddressToRange(array.GetTaggedValue().GetTaggedObject());
+    EXPECT_EQ(attachedRegion, regionAfter);
+    EXPECT_TRUE(regionAfter->IsPinned());
+}
+
+HWTEST_F_L0(ReadOnlySpaceTest, AppSpawnSpaceRegionsPinned)
+{
+    if (g_isEnableCMCGC) {
+        return;
+    }
+    auto *heap = const_cast<panda::ecmascript::Heap *>(thread->GetEcmaVM()->GetHeap());
+    heap->CompactHeapBeforeFork();
+    bool foundOldTyped = false;
+    bool foundNonMovableTyped = false;
+    heap->GetAppSpawnSpace()->EnumerateRegions([&](Region *region) {
+        EXPECT_TRUE(region->IsPinned());
+        foundOldTyped |= region->InOldSpace();
+        foundNonMovableTyped |= region->InNonMovableSpace();
+    });
+    EXPECT_TRUE(foundOldTyped);
+    EXPECT_TRUE(foundNonMovableTyped);
+}
+
+HWTEST_F_L0(ReadOnlySpaceTest, OldTypedAppSpawnRegionsNotEvacuatedByFullGC)
+{
+    if (g_isEnableCMCGC) {
+        return;
+    }
+    auto *heap = const_cast<panda::ecmascript::Heap *>(thread->GetEcmaVM()->GetHeap());
+    // A young object survives the prefork GC and is compacted into an AppSpawnSpace region
+    // (IN_OLD_SPACE typed), which must then be stable across later full GCs.
+    JSHandle<JSObject> obj = factory->NewEmptyJSObject();
+    heap->CompactHeapBeforeFork();
+    TaggedObject *objBefore = obj.GetTaggedValue().GetTaggedObject();
+    Region *regionBefore = Region::ObjectAddressToRange(objBefore);
+    ASSERT_TRUE(regionBefore->InOldSpace());
+    ASSERT_TRUE(regionBefore->IsPinned());
+
+    heap->CollectGarbage(TriggerGCType::FULL_GC);
+    TaggedObject *objAfter = obj.GetTaggedValue().GetTaggedObject();
+    EXPECT_EQ(objBefore, objAfter);
+    EXPECT_TRUE(Region::ObjectAddressToRange(objAfter)->IsPinned());
+}
+
 HWTEST_F_L0(ReadOnlySpaceTest, GCTest)
 {
     auto *heap = const_cast<panda::ecmascript::Heap *>(thread->GetEcmaVM()->GetHeap());

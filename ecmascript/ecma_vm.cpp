@@ -272,7 +272,6 @@ void EcmaVM::PreFork()
     auto sHeap = SharedHeap::GetInstance();
     if (!g_isEnableCMCGC) {
         heap_->CompactHeapBeforeFork();
-        heap_->AdjustSpaceSizeForAppSpawn();
         heap_->GetReadOnlySpace()->SetReadOnly();
         sHeap->CompactHeapBeforeFork(thread_);
     }

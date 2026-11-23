@@ -48,7 +48,6 @@ enum RegionSpaceFlag {
     IN_NON_MOVABLE_SPACE = 0x0C,
     IN_MACHINE_CODE_SPACE = 0x0D,
     IN_READ_ONLY_SPACE = 0X0E,
-    IN_APPSPAWN_SPACE = 0x0F,
     IN_HUGE_MACHINE_CODE_SPACE = 0x10,
     IN_MODULE_SPACE = 0x11,
     IN_NATIVE_POINTER_SPACE = 0x12,
@@ -90,6 +89,9 @@ enum RegionGCFlags {
     IN_INACTIVE_SEMI_SPACE = 1 << 13,
     IN_NEW_TO_OLD_SET = 1 << 14,
     IN_SHARED_COLLECT_SET = 1 << 15,
+    // Bits 16 to 18 (the lower 3 bits for the next byte) are also excluded for the sake of
+    // INVALID_VALUE in ZAP_MEM.
+    PINNED = 1 << 19,
 };
 
 // Currently only use for region in LinearSpace, to check if the region is allocated during concurrent marking.
@@ -150,8 +152,6 @@ static inline std::string ToSpaceTypeName(uint8_t space)
             return "machine code space";
         case RegionSpaceFlag::IN_READ_ONLY_SPACE:
             return "read only space";
-        case RegionSpaceFlag::IN_APPSPAWN_SPACE:
-            return "appspawn space";
         case RegionSpaceFlag::IN_HUGE_MACHINE_CODE_SPACE:
             return "huge machine code space";
         case RegionSpaceFlag::IN_SHARED_NON_MOVABLE:
@@ -550,11 +550,6 @@ public:
         return packedData_.flags_.spaceFlag_ == RegionSpaceFlag::IN_SHARED_APPSPAWN_SPACE;
     }
 
-    bool InAppSpawnSpace() const
-    {
-        return packedData_.flags_.spaceFlag_ == RegionSpaceFlag::IN_APPSPAWN_SPACE;
-    }
-
     // Not including shared read only space.
     bool InSharedSweepableSpace() const
     {
@@ -577,7 +572,6 @@ public:
             case RegionSpaceFlag::IN_OLD_SPACE:
             case RegionSpaceFlag::IN_NON_MOVABLE_SPACE:
             case RegionSpaceFlag::IN_MACHINE_CODE_SPACE:
-            case RegionSpaceFlag::IN_APPSPAWN_SPACE:
             case RegionSpaceFlag::IN_SHARED_NON_MOVABLE:
             case RegionSpaceFlag::IN_SHARED_OLD_SPACE:
                 return true;
@@ -600,6 +594,16 @@ public:
     bool InCollectSet() const
     {
         return IsGCFlagSet(RegionGCFlags::IN_COLLECT_SET);
+    }
+
+    bool IsPinned() const
+    {
+        return IsGCFlagSet(RegionGCFlags::PINNED);
+    }
+
+    void SetPinned()
+    {
+        SetGCFlag(RegionGCFlags::PINNED);
     }
 
     bool InSCollectSet() const
@@ -864,11 +868,11 @@ public:
 
     struct alignas(JSTaggedValue::TaggedTypeSize()) PackedPtr : public base::AlignedPointer {
         uint8_t spaceFlag_;
-        uint16_t  gcFlags_;
+        uint32_t gcFlags_;
     };
 
     struct PackedData : public base::AlignedStruct<JSTaggedValue::TaggedTypeSize(),
-                                                 base::AlignedPointer,
+                                                 base::AlignedUint64,
                                                  base::AlignedPointer,
                                                  base::AlignedPointer,
                                                  base::AlignedPointer,

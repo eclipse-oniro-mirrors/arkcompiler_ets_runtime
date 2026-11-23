@@ -61,6 +61,7 @@ void SparseSpace::Reset()
     allocator_->RebuildFreeList();
     ReclaimRegions();
     liveObjectSize_ = 0;
+    objectSize_ = 0;
 }
 
 void SparseSpace::ResetTopPointer(uintptr_t top)
@@ -852,12 +853,6 @@ void NonMovableSpace::PrepareCompact()
 AppSpawnSpace::AppSpawnSpace(Heap *heap, size_t initialCapacity)
     : SparseSpace(heap, MemSpaceType::APPSPAWN_SPACE, initialCapacity, initialCapacity)
 {
-}
-
-uintptr_t AppSpawnSpace::AllocateSync(size_t size)
-{
-    LockHolder holder(mutex_);
-    return Allocate(size);
 }
 
 void AppSpawnSpace::IterateOverMarkedObjects(const std::function<void(TaggedObject *object)> &visitor) const

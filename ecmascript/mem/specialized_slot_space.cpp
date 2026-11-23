@@ -131,6 +131,18 @@ void SpecializedSlotSpace::PrepareEvacuation()
     allocateAfterLastGC_ = 0;
 }
 
+void SpecializedSlotSpace::Reset()
+{
+    ASSERT(gcRegionChainManager_.IsEmpty());
+    ASSERT(pendingReclaimFromRegions_.empty());
+    regionChainManager_.ClearRegionList();
+    committedSize_ = 0;
+    objectSize_ = 0;
+    SetSurvivalObjectSize(0);
+    allocateAfterLastGC_ = 0;
+    allocator_.Discard();
+}
+
 void SpecializedSlotSpace::MergeToGCRegions()
 {
     gcRegionChainManager_.EnumerateRegions([this](Region *toRegion) {

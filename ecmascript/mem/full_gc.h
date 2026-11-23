@@ -154,11 +154,7 @@ private:
     template <ReferenceType refType>
     inline void EvacuateObject(ObjectSlotBase<refType> slot, TaggedObject *object, const MarkWord &markWord);
 
-    inline uintptr_t AllocateForwardAddress(size_t size, MemSpaceType space);
-
     inline uintptr_t AllocateDstSpace(size_t size, MemSpaceType space);
-
-    inline uintptr_t AllocateAppSpawnSpace(size_t size);
 
     inline void RawCopyObject(uintptr_t fromAddress, uintptr_t toAddress, size_t size, const MarkWord &markWord);
 
