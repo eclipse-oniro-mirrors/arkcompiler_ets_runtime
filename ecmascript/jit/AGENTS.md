@@ -78,7 +78,7 @@ python ark.py x64.debug unittest   # all unit tests (includes JIT tests)
 
 Full OHOS tree:
 ```bash
-./build.sh --product-name <product-name> --build-target ecmascript/jit/tests:host_unittest
+./build.sh --product-name <product-name> --build-target arkcompiler/ets_runtime/ecmascript/jit/tests:host_unittest
 ```
 
 - `tests/jit_test.cpp` — JIT compilation flow tests

@@ -30,7 +30,7 @@ Implements the microtask queue for asynchronous operations:
 - **HiTraceScope** — Performance tracing integration
 
 ## Reference Source
-- `arkcompiler/ets_runtime/ecmascript/jobs/micro_job_queue.h` (1-100行) - Microtask queue interface
+- [micro_job_queue.h](micro_job_queue.h), `MicroJobQueue` - Microtask queue interface
 
 ## Key Files
 
@@ -61,7 +61,7 @@ python ark.py x64.debug unittest   # includes jobs tests
 
 Full OHOS tree:
 ```bash
-./build.sh --product-name <product-name> --build-target ecmascript/jobs/tests:host_unittest
+./build.sh --product-name <product-name> --build-target arkcompiler/ets_runtime/ecmascript/jobs/tests:host_unittest
 ```
 
 ## Boundaries

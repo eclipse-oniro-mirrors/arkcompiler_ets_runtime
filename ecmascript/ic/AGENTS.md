@@ -64,7 +64,7 @@ Implements inline cache with three kinds of states for fast property access:
 - **PropertyBox** — Property value storage
 
 ## Reference Source
-- `arkcompiler/ets_runtime/ecmascript/ic/ic_runtime.h` (1-100行) - IC runtime interface
+- [ic_runtime.h](ic_runtime.h), `ICRuntime` - IC runtime interface
 - `arkcompiler/ets_runtime/ecmascript/ic/ic_handler.h` - IC handler definitions
 
 ## Key Files
@@ -101,7 +101,7 @@ python ark.py x64.debug unittest   # includes IC tests
 
 Full OHOS tree:
 ```bash
-./build.sh --product-name <product-name> --build-target ecmascript/ic/tests:host_unittest
+./build.sh --product-name <product-name> --build-target arkcompiler/ets_runtime/ecmascript/ic/tests:host_unittest
 ```
 
 ## Boundaries
@@ -111,4 +111,4 @@ Full OHOS tree:
 - Prototype chain changes must invalidate relevant ICs via ProtoChangeDetails.
 - ICHandler values must fit within JSTaggedValue size for inline fast path; complex cases use TaggedObject.
 - IC slots are indexed by bytecode slot ID; ensure frontend and runtime slot numbering consistency.
-- 修改属性访问逻辑（LoadIC/StoreIC/ElementIC/GlobalIC）时，须检查属性加载结果是否做了有效性校验（如 `JSTaggedValue` 非空、`HClass`/形状未失效、未命中后是否正确回退而非直接使用缓存值）。
+- When changing LoadIC, StoreIC, element or global property access, validate the tagged result and the cached shape. Check the fallback on a miss.

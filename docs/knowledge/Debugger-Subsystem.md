@@ -1,5 +1,7 @@
 # Debugger 子系统知识
 
+[调试器指南](../../ecmascript/debugger/AGENTS.md)
+
 本文只记录 `ecmascript/debugger/` 全量调试器组件：断点管理、单步执行、栈检查、热重载、调用帧操作、事件通知。CPU 采样分析见 `docs/knowledge/DFX-Subsystem.md`「性能采样」部分，tracing 见 DFX tracing 部分。已有子模块 AGENTS.md：`ecmascript/debugger/AGENTS.md`。
 
 ## 概述
@@ -17,7 +19,7 @@ Debugger 子系统在解释器执行路径上插入**断点检查、单步控制
 | JSDebugger / 核心调试器 | 实现 `JSDebugInterface` + `RuntimeListener`，管理 3 类断点集（breakpoints/smartBreakpoints/symbolicBreakpoints），条件断点求值，单步决策 | `ecmascript/debugger/js_debugger.h` | 断点匹配性能敏感；条件断点求值需在安全线程上下文中执行 |
 | breakpoint / 断点设置/移除/匹配 | 3 种断点类型匹配逻辑不同：普通断点精确 offset 匹配、smart breakpoint 基于 PC 范围匹配、symbolic breakpoint 按函数名匹配 | `js_debugger.h` — `FindBreakpoint` | 断点集合 `CUnorderedSet`，遍历 O(n)；断点数量 < 1000 可接受，不要无限增长而不提供清理机制 |
 | single step / 单步执行 / HandleStep | 每条 bytecode 执行后检查：`BytecodePcChanged` → `HandleStep`（O(1) 判断，不遍历断点集） | `js_debugger.h` — `HandleStep()` + `BytecodePcChanged()` | **这是最热的路径**——不要在此添加 O(n) 操作、堆分配、或可能触发 GC 的调用 |
-| JsDebuggerManager / 调试器总协调器 | 持有 `DropframeManager`、`NotificationManager`、`HotReloadManager`。管理全局调试状态（debugMode、mixedDebug、signalInterrupt 等）| `ecmascript/debugger/js_debugger_manager.h` | 多状态标志位一致性；`jsDebuggerManagerMap_`（thread-local map）受 `shared_mutex` 保护；`DebuggerNativeScope`/`DebuggerManagedScope` 必须严格配对 |
+| JsDebuggerManager / 调试器总协调器 | 持有 `DropframeManager`、`NotificationManager`、`HotReloadManager`，管理调试状态 | [js_debugger_manager.cpp](../../ecmascript/debugger/js_debugger_manager.cpp) | `jsDebuggerManagerMap_` 是按线程 ID 索引的进程级静态表，由 `shared_mutex` 保护。线程状态切换遵循现有 RAII scope |
 | DebuggerApi / 调试公共 API | 静态方法：栈深度、帧遍历、变量/作用域读写、方法/bytecode 访问 | `ecmascript/debugger/debugger_api.h` | `DebuggerNativeScope`/`DebuggerManagedScope` 是 RAII scope，切换 `JSThread` 状态——必须严格配对，否则线程状态泄漏 |
 
 ### 帧操作与热重载
@@ -27,7 +29,7 @@ Debugger 子系统在解释器执行路径上插入**断点检查、单步控制
 | dropframe / 丢帧 / DropframeManager | 在每次 `MethodEntry`/`MethodExit` 记录词法变量修改和 Promise 队列大小，支持 "Drop Last Frame" 操作 | `ecmascript/debugger/dropframe_manager.h` | `MethodEntry`/`MethodExit` 必须配对——漏掉清理会导致词法变量记录泄漏；Promise 状态恢复正确性 |
 | hot reload / 热重载 / HotReloadManager | 维护 base↔patch JSPandaFile 映射，管理 patch 文件的 DebugInfo 提取器 | `ecmascript/debugger/hot_reload_manager.h` | patch 加载/卸载与 GC/代码执行的时序；不要持有 JSPandaFile 裸指针跨越 GC |
 | PauseReason / 暂停原因 | 枚举定义暂停原因（16 个值），由 `PtHooks` 回调传递给外部协议层 | `ecmascript/debugger/js_debugger_interface.h` | **只能末尾追加，不能删除/重排**——原因：外部调试协议依赖枚举序数 |
-| PtHooks / 调试协议回调 | 16 个纯虚回调，由外部 `ProtocolHandler` 实现（在独立调试服务中，ets_runtime 仅 forward-declare）| `ecmascript/debugger/js_debugger_interface.h` | 新增纯虚方法=不向后兼容，需协调协议层同步发布；新增非纯虚方法（带默认实现）=向后兼容 |
+| PtHooks / 调试协议回调 | 运行时调试事件回调，声明以 `PtHooks` 为准 | [js_debugger_interface.h](../../ecmascript/debugger/js_debugger_interface.h) | 新增纯虚方法需同步更新实现者。带默认实现的虚方法可减少重编译时所需的源码改动，仍需单独核对既有下游二进制的 vtable ABI |
 | NotificationManager / RuntimeListener | listener 模式分发 VM 事件。`JSDebugger` 和 `Tracing` 都注册为 listener | `ecmascript/debugger/notification_manager.h` | listener 生命周期管理（AddListener/RemoveListener 野指针）；不要假设 debugger 是唯一 listener |
 
 ### 调试线程模型
@@ -66,7 +68,7 @@ Debugger 子系统在解释器执行路径上插入**断点检查、单步控制
 - **禁止**修改 `PauseReason` 枚举值的前向兼容性（只能末尾追加）
 - **禁止**在 `hot_reload_manager` 中持有 JSPandaFile 裸指针跨越 GC
 - **禁止**对 `jsDebuggerManagerMap_` 在未持有 `shared_mutex` 的情况下访问——多线程读/单线程写
-- **必须**保证非调试模式（`isDebugMode_ == false`）下零开销或仅一次条件分支——`interpreter-inl.h:168` 处仅 1 次 bool 检查
+- **必须**保证非调试模式（`isDebugMode_ == false`）下零开销或仅一次条件分支。参见 `interpreter-inl.h` 的 `CHECK_SWITCH_TO_DEBUGGER_TABLE`。
 - `NotificationManager::listeners_` 有 2 个实现者（`JSDebugger` + `Tracing`）——不要假设只有 debugger 是唯一的 RuntimeListener
 - `PtHooks` 变更前必须确认协议层有对应改动并同步合入
 
@@ -76,7 +78,7 @@ Debugger 子系统在解释器执行路径上插入**断点检查、单步控制
 - 改 `js_debugger_interface.h` 前，确认 `PauseReason` 是否只末尾追加、`PtHooks` 是否保持向后兼容 → 协议层同步
 - 改 `dropframe_manager.*` 前，确认 `MethodEntry`/`MethodExit` 配对完整
 - 改 `debugger_api.*` 前，确认 `DebuggerNativeScope`/`DebuggerManagedScope` 配对
-- 改 `js_debugger_manager.*` 前，确认多状态标志位一致性和 thread-local map 的 `shared_mutex` 保护
+- 改 `js_debugger_manager.*` 前，核对状态标志的一致性，以及静态管理表的查找、注册和移除是否持有正确的锁。
 - 涉及跨线程操作前，确认线程安全（`isSignalInterrupt_` 单写/多读、`jsDebuggerManagerMap_` shared_mutex）
 - 非调试模式下的性能回归验证：debug mode 关闭时，`interpreter-inl.h` 处仅 1 次 bool 检查 + 1 次条件分支
 
@@ -93,21 +95,20 @@ Debugger 子系统在解释器执行路径上插入**断点检查、单步控制
 | 热重载 | `ecmascript/debugger/hot_reload_manager.cpp` |
 | 事件通知 | `ecmascript/debugger/notification_manager.h` |
 | 调试接口定义 | `ecmascript/debugger/js_debugger_interface.h` |
-| 解释器入口（热路径） | `ecmascript/interpreter/interpreter-inl.h:168` — `IsDebugMode()` 检查 |
+| 解释器入口（热路径） | `ecmascript/interpreter/interpreter-inl.h` 中的 `CHECK_SWITCH_TO_DEBUGGER_TABLE` |
 
 ### 测试锚点
 
 | 变更类型 | 测试目标 |
 |---|---|
-| 断点/单步/Debugger 语句 | `RuntimeDebuggerTest` |
-| Drop Frame | `DropframeManagerTest` |
-| Hot Reload | `HotReloadManagerTest` + 确认 `tests/single_file/patch/` 固件兼容 |
-| 调试 API / 接口定义 | `RuntimeDebuggerTest` + 全量 debugger 测试 |
+| 断点/单步/Debugger 语句 | `RuntimeDebuggerTestAction` 中的 `js_debugger_test.cpp` |
+| Drop Frame | `RuntimeDebuggerTestAction` 中的 `dropframe_manager_test.cpp` |
+| Hot Reload | `RuntimeDebuggerTestAction` 中的 `hot_reload_manager_test.cpp`，核对 `ecmascript/debugger/tests/single_file/` 样例 |
+| 调试 API / 接口定义 | `RuntimeDebuggerTestAction` |
 | `PauseReason`/`PtHooks` 变更 | 全量 debugger 测试 + 确认外部调试器兼容性 |
 
-构建从 workspace root 执行：
+以下命令从 OpenHarmony 源码根目录执行。调试器的相关测试文件由同一个 host action 运行。 [测试目标定义](../../ecmascript/debugger/tests/BUILD.gn)
+
 ```bash
-cd /home/xiongkang/workspace/ark_standalone_build
-ninja -C out/x64.release arkcompiler/ets_runtime:libark_jsruntime
-ninja -C out/x64.release arkcompiler/ets_runtime:ark_unittest
+./build.sh --product-name rk3568 --build-target RuntimeDebuggerTestAction
 ```

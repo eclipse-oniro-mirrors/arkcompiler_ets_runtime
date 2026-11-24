@@ -114,7 +114,7 @@ python ark.py x64.debug unittest   # all unit tests (includes compiler tests)
 
 Full OHOS tree:
 ```bash
-./build.sh --product-name <product-name> --build-target ecmascript/compiler/tests:host_unittest
+./build.sh --product-name <product-name> --build-target arkcompiler/ets_runtime/ecmascript/compiler/tests:host_unittest
 ```
 
 - Compiler pass tests: `tests/`

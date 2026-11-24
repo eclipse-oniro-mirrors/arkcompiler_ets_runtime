@@ -213,7 +213,7 @@ Child process exit codes are mapped via `RetInfoOfCompiler` in `aot_compiler_con
 
 Full OHOS tree only (depends on `samgr`, `ipc`, `code_signature`, `common_event_service`, etc.):
 ```bash
-./build.sh --product-name <product-name> --build-target compiler_service:compiler_service
+./build.sh --product-name <product-name> --build-target arkcompiler/ets_runtime/compiler_service:compiler_service
 ```
 
 Conditional build flags:
@@ -224,8 +224,8 @@ Conditional build flags:
 
 Full OHOS tree only:
 ```bash
-./build.sh --product-name <product-name> --build-target compiler_service/test:compiler_service_unittest
-./build.sh --product-name <product-name> --build-target compiler_service/test:compiler_service_fuzztest
+./build.sh --product-name <product-name> --build-target arkcompiler/ets_runtime/compiler_service/test:compiler_service_unittest
+./build.sh --product-name <product-name> --build-target arkcompiler/ets_runtime/compiler_service/test:compiler_service_fuzztest
 ```
 
 - Unit tests: `test/unittest/` — aotcompilerservice_unit, aotcompilerproxy_unit, aotcompilerclient_unit, aotcompilerstub_unit, aotcompilererrorutils_unit, aotcompilerimpl_unit, aotcompilerargshandler_unit, aotargsverify_unit

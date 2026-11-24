@@ -78,10 +78,10 @@ python ark.py x64.debug unittest   # all unit tests (includes codegen tests)
 Full OHOS tree:
 ```bash
 # Maple backend tests
-./build.sh --product-name <product-name> --build-target ecmascript/compiler/codegen/maple/test:host_unittest
+./build.sh --product-name <product-name> --build-target arkcompiler/ets_runtime/ecmascript/compiler/codegen/maple/test:host_unittest
 
 # Full compiler tests (includes backend integration)
-./build.sh --product-name <product-name> --build-target ecmascript/compiler/tests:host_unittest
+./build.sh --product-name <product-name> --build-target arkcompiler/ets_runtime/ecmascript/compiler/tests:host_unittest
 ```
 
 ## Boundaries

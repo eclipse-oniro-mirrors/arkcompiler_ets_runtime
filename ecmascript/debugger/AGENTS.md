@@ -1,5 +1,8 @@
  # AGENTS
 
+Read [Debugger internals and tests](../../docs/knowledge/Debugger-Subsystem.md).
+
+
 This file provides guidance for AI agents when working with code in the debugger component.
 
 ## Overview
@@ -55,17 +58,16 @@ python ark.py x64.release ark_js_vm
 
 ### Test Structure
 
-Tests are organized in `tests/BUILD.gn`:
+The [RuntimeDebuggerTest target](tests/BUILD.gn) includes three test files:
 
-- **RuntimeDebuggerTest** (`js_debugger_test.cpp`) - Main debugger functionality tests
-- **DropframeManagerTest** (`dropframe_manager_test.cpp`) - Drop frame manipulation tests
-- **HotReloadManagerTest** (`hot_reload_manager_test.cpp`) - Hot reload tests
+- `js_debugger_test.cpp` covers debugger functionality.
+- `dropframe_manager_test.cpp` covers drop frame operations.
+- `hot_reload_manager_test.cpp` covers hot reload.
 
 ### Running Tests
 
-From the `ark_standalone_build` directory, you can use the standalone build commands without pulling the full OpenHarmony code:
+Run `RuntimeDebuggerTestAction` from the OpenHarmony source root to execute all three suites.
 
 ```bash
-# Compile and run specific test (debug build)
-python ark.py x64.debug RuntimeDebuggerTestAction
+./build.sh --product-name rk3568 --build-target RuntimeDebuggerTestAction
 ```

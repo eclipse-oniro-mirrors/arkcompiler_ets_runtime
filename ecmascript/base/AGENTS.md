@@ -86,7 +86,7 @@ python ark.py x64.debug unittest   # includes base tests
 
 Full OHOS tree:
 ```bash
-./build.sh --product-name <product-name> --build-target ecmascript/base/tests:host_unittest
+./build.sh --product-name <product-name> --build-target arkcompiler/ets_runtime/ecmascript/base/tests:host_unittest
 ```
 
 ## Boundaries

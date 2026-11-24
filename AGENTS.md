@@ -1,12 +1,16 @@
 # ArkTS AGENTS.md (ets_runtime)
 
-## 1. 代码地图
+> 使用 agent 修改代码时，新增目录、功能或特性开关，或改变接口、架构边界时，必须同步更新本指南及受影响的子目录指南和知识页。
+
+## 1. 项目定位
 
 本 AGENTS.md 适用于 `arkcompiler/ets_runtime`。
 本仓库实现 ArkTS 运行时——OpenHarmony 上执行 ArkTS/TS/JS 的默认运行时。
 提供字节码解释执行、AOT/JIT 编译、模块加载，并发共享，内存管理（GC）、NAPI C++ 互操作及 ES2021 标准库。
 
-### 关键目录（按修改频率与风险分级）
+## 2. 代码地图
+
+### 2.1 关键目录（按修改频率与风险分级）
 
 | 目录 | 风险 | 原因 |
 |-----------|------|-----|
@@ -22,60 +26,56 @@
 | `ecmascript/ts_types/` | 🟡 中 | 类型元数据；影响 AOT 编译质量 |
 | `ecmascript/dfx/` | 🟡 中 | 诊断/观测/性能分析（CPU 采样、堆快照、栈追踪、tracing） |
 | `ecmascript/debugger/` | 🟡 中 | JS调试器（断点/单步/热重载/DropFrame） |
-| `ecmascript/extractortool/` | 🟡 中 | HAP/ZIP文件提取与SourceMap解析 |
+| `ecmascript/extractortool/` | 🟡 中 | SourceMap 解析与 HAP 提取集成 |
 | `ecmascript/patch/` | 🟡 中 | Quick Fix/Hot Reload/Cold Patch方法替换 |
 | `common_components/` | 🟢 低 | 共享基础设施；稳定，较少变更 |
 | `test/` | 🟢 低 | 测试相关 |
 | `docs/` | 🟢 低 | 仅文档 |
 
-### 任务-路径快速索引
+### 2.2 嵌套指南
 
-- 新增/修改字节码指令 → `ecmascript/interpreter/` + `ecmascript/ic/`
-- 新增 NAPI C++ API → `ecmascript/napi/` + `test/`
-- GC 或内存变更 → `ecmascript/mem/` + `common_components/heap/`
-- AOT/JIT 编译器变更 → `ecmascript/compiler/` + `ecmascript/stubs/`
-- 轻量化JIT编译器变更 → `ecmascript/arksteed/`
-- ES 标准库变更 → `ecmascript/builtins/` + 对照 ECMA2021 规范
-- 模块加载器变更 → `ecmascript/module/` + `ecmascript/require/`
-- 调试器变更 → `ecmascript/debugger/` + `docs/knowledge/Debugger-Subsystem.md`
-- DFX/Profiling/堆快照变更 → `ecmascript/dfx/` + `docs/knowledge/DFX-Subsystem.md`
-- ExtractorTool/HAP提取/SourceMap变更 → `ecmascript/extractortool/` + `docs/knowledge/ExtractorTool-Subsystem.md`
-- Quick Fix/热重载/Patch变更 → `ecmascript/patch/` + `docs/knowledge/Patch-Subsystem.md`
-- 构建系统变更 → 根目录 `BUILD.gn` + `bundle.json`
+按实际修改路径查阅 [嵌套指南和补充入口](docs/knowledge/README.md)。新增或移动指南时，在仓根运行 `git ls-files --cached --others --exclude-standard '*/AGENTS.md'` 核对清单。
 
-## 2. 知识路由
+## 3. 知识路由
 
-在规划或编辑代码之前，先对任务进行分类并阅读相应的文档。
-在计划中说明：任务类别、已读文档、发现的约束条件。
+在规划或编辑代码前，说明任务类别、已读文档、适用约束和验证计划。
 
-### 基于任务的路由
+### 3.1 基于任务的路由
 
-- 公共 API 或 NAPI 行为变更 → 阅读 `ecmascript/napi/AGENTS.md`
-- 架构或模块边界变更 → 阅读 `docs/overview.md`
-- GC、内存或分配变更 → 阅读 `docs/knowledge/ArkTS-GC.md`
-- DFX、profiling、堆快照、栈追踪、tracing 变更 → 阅读 `docs/knowledge/DFX-Subsystem.md` + 子模块 AGENTS.md
-- 调试、断点、dropframe、debugger hot reload 变更 → 阅读 `docs/knowledge/Debugger-Subsystem.md` + `ecmascript/debugger/AGENTS.md`
-- HAP文件提取、SourceMap、ZIP解析变更 → 阅读 `docs/knowledge/ExtractorTool-Subsystem.md`
-- Quick Fix、热重载、冷补丁、Patch 变更 → 阅读 `docs/knowledge/Patch-Subsystem.md`
-- AOT 编译变更 → 阅读 `docs/aot-guide_zh.md` + `compiler_service/AGENTS.md`
-- 模块化变更 -> 阅读 `docs/knowledge/ArkTS-Module.md`
+| 任务 | 代码起点 | 先读 |
+|---|---|---|
+| 公共 API 或 NAPI 行为 | `ecmascript/napi/` | [NAPI 指南](ecmascript/napi/AGENTS.md) |
+| 架构或模块边界 | `BUILD.gn`、`bundle.json` | [架构概览](docs/overview.md) |
+| 字节码执行和属性访问 | `ecmascript/interpreter/`、`ecmascript/ic/` | [解释器](ecmascript/interpreter/AGENTS.md)、[IC](ecmascript/ic/AGENTS.md) |
+| GC、内存或分配 | `ecmascript/mem/`、`common_components/heap/` | [GC](docs/knowledge/ArkTS-GC.md) |
+| 并发、共享堆与线程切换 | `ecmascript/checkpoint/`、`ecmascript/cross_vm/` | [并发](docs/knowledge/ArkTS-Concurrency.md) |
+| DFX、采样、堆快照或追踪 | `ecmascript/dfx/` | [DFX](docs/knowledge/DFX-Subsystem.md) |
+| 断点、单步、Drop Frame | `ecmascript/debugger/` | [Debugger](docs/knowledge/Debugger-Subsystem.md)、[子目录指南](ecmascript/debugger/AGENTS.md) |
+| 压缩包集成或 SourceMap | `ecmascript/extractortool/` | [SourceMap 与 HAP 集成](docs/knowledge/ExtractorTool-Subsystem.md) |
+| Quick Fix、热重载和冷补丁 | `ecmascript/patch/`、`ecmascript/quick_fix/` | [Patch](docs/knowledge/Patch-Subsystem.md) |
+| AOT 编译或服务 | `ecmascript/compiler/`、`compiler_service/` | [AOT](docs/aot-guide_zh.md)、[编译服务](compiler_service/AGENTS.md) |
+| ArkSteed 或 JIT | `ecmascript/arksteed/`、`ecmascript/jit/` | [ArkSteed](ecmascript/arksteed/AGENTS.md)、[JIT](ecmascript/jit/AGENTS.md) |
+| TypeScript 类型标识 | `ecmascript/ts_types/` | [类型标识指南](ecmascript/ts_types/AGENTS.md) |
+| 模块加载或 CommonJS | `ecmascript/module/`、`ecmascript/require/` | [模块](docs/knowledge/ArkTS-Module.md) |
+| ES 标准库 | `ecmascript/builtins/` | [Builtins](ecmascript/builtins/AGENTS.md)及适用的 ECMAScript 规范 |
+| 非 Sendable 的 `util.Collections` 容器（`JSAPIHashMap`、`JSAPIVector`、`JSAPITreeMap` 等） | `ecmascript/containers/`（容器注册与 JS 方法入口）、`ecmascript/js_api/`（容器对象与迭代器实现） | [容器接口测试](ecmascript/containers/tests/BUILD.gn)、[容器对象与迭代器测试](ecmascript/tests/BUILD.gn) |
+| 构建选项或测试接线 | `BUILD.gn`、`js_runtime_config.gni`、`test/test_helper.gni` | [构建环境](docs/environment-setup-and-compilation.md) |
 
-### 基于路径的路由
+### 3.2 基于路径的路由
 
-- `ecmascript/napi/` → 运行时能力封装，为napi接口inner接口；变更签名前须检查兼容性
-- `ecmascript/mem/` → 变更影响所有内存管理
-- `ecmascript/compiler/` → AOT 代码生成；必须与 `compiler_service/` 保持同步
-- `ecmascript/interpreter/` → 解释器相关修改，须进行性能回归测试
-- `common_components/heap/` → 共享GC基础设施；同时影响 ets_runtime 和 runtime_core
-- `ecmascript/module/` → 模块加载相关
-- `ecmascript/dfx/` → 诊断/观测/性能分析子系统；先读 `docs/knowledge/DFX-Subsystem.md`
-- `ecmascript/debugger/` → 调试器子系统；先读 `docs/knowledge/Debugger-Subsystem.md`
-- `ecmascript/extractortool/` → 文件提取与SourceMap；先读 `docs/knowledge/ExtractorTool-Subsystem.md`
-- `ecmascript/patch/` → Quick Fix/Hot Reload/Patch；先读 `docs/knowledge/Patch-Subsystem.md`
-- `ecmascript/builtins/` -> ES 标准库相关
-- `ecmascript/mem/` → 并发 barrier/原子操作；涉及多线程或共享堆时先读 `docs/knowledge/ArkTS-Concurrency.md`
+| 修改路径 | 先读 | 注意事项 |
+|---|---|---|
+| `ecmascript/napi/` | [NAPI 指南](ecmascript/napi/AGENTS.md) | 签名与生命周期兼容性 |
+| `ecmascript/mem/`、`common_components/heap/` | [GC](docs/knowledge/ArkTS-GC.md)、[并发](docs/knowledge/ArkTS-Concurrency.md) | 屏障、共享堆和 runtime_core ABI |
+| `ecmascript/compiler/` | [编译器](ecmascript/compiler/AGENTS.md)、[编译服务](compiler_service/AGENTS.md) | AOT 变更须与编译服务保持同步 |
+| `ecmascript/interpreter/`、`ecmascript/ic/` | [解释器](ecmascript/interpreter/AGENTS.md)、[IC](ecmascript/ic/AGENTS.md) | 字节码语义与性能回归 |
+| `ecmascript/module/` | [模块](docs/knowledge/ArkTS-Module.md) | 模块身份与加载时序 |
+| `ecmascript/dfx/`、`ecmascript/debugger/` | [DFX](docs/knowledge/DFX-Subsystem.md)、[Debugger](docs/knowledge/Debugger-Subsystem.md) | 热路径、采样和回调 |
+| `ecmascript/extractortool/` | [SourceMap 与 HAP 集成](docs/knowledge/ExtractorTool-Subsystem.md) | 缓冲区和构建条件 |
+| `ecmascript/patch/`、`ecmascript/quick_fix/` | [Patch](docs/knowledge/Patch-Subsystem.md) | 方法替换和补丁生命周期 |
+| `ecmascript/builtins/` | [Builtins](ecmascript/builtins/AGENTS.md) | 标准库可观察行为 |
 
-### 基于术语的路由
+### 3.3 基于术语的路由
 
 当任务、issue、日志、API 或变更文件涉及以下术语时，在规划前阅读对应文档：
 
@@ -87,30 +87,29 @@
 | DFX / HiLog / heapsnapshot / CPU profiling / SIGPROF / tracing | 诊断/观测/性能分析；旁路路径不得影响主链路性能 | `docs/knowledge/DFX-Subsystem.md` |
 | debugger / 调试器 / 断点 / dropframe / single step | 调试器子系统；BytecodePcChanged是热路径，非调试模式须零开销 | `docs/knowledge/Debugger-Subsystem.md` |
 | interpreter / IC / 内联缓存 | 与解释器紧密耦合；性能敏感 | `ecmascript/ic/AGENTS.md` + `ecmascript/interpreter/AGENTS.md` |
-| PGO | 配置文件引导优化；与 AOT 关联 | `ecmascript/` 下 PGO 子模块 AGENTS.md + `docs/aot-guide_zh.md` |
-| TaskPool / Actor / Sendable| 并发模型；影响启动性能 | `docs/knowledge/ArkTS-Sendable.md` |
+| PGO | 配置文件引导优化；与 AOT 关联 | [PGO 子模块指南](ecmascript/pgo_profiler/AGENTS.md) + `docs/aot-guide_zh.md` |
+| TaskPool / Actor / Sendable | 并发模型；影响启动性能 | `docs/knowledge/ArkTS-Sendable.md` |
 | 并发 / CAS / 原子操作 / 锁 / 内存序 / fence / write barrier / shared heap / 多线程 / Worker | 并发编程；涉及锁、原子操作、内存序、写屏障、共享堆 | `docs/knowledge/ArkTS-Concurrency.md` |
 | .abc / 字节码 / jspandafile | 字节码格式；须保持向后兼容 | `ecmascript/jspandafile/AGENTS.md` |
 | Stub / StubCompiler | 运行时桩代码；必须匹配解释器调用约定 | `ecmascript/stubs/AGENTS.md` |
 | Module | 模块加载器 | `docs/knowledge/ArkTS-Module.md` |
-| HAP / SourceMap / VLQ / Extractor / extractortool | 文件提取层，纯I/O层不得依赖JS运行时 | `docs/knowledge/ExtractorTool-Subsystem.md` |
+| HAP / SourceMap / VLQ / Extractor / extractortool | SourceMap 翻译和 ability_base 提取集成，留意缓冲区生命周期 | `docs/knowledge/ExtractorTool-Subsystem.md` |
 | Quick Fix / Hot Reload / Cold Patch / patch / 热重载 / 补丁 | 运行时代码替换，方法不在调用栈上才能替换 | `docs/knowledge/Patch-Subsystem.md` |
 
+## 4. 约束与边界
 
-## 3. 约束与边界
+### 4.1 架构不变量
 
-### 架构不变量
+1. 仅可执行由 ts2abc/es2abc 生成的 ArkCompiler 字节码（.abc 文件）。
+2. 仅支持 ES2021 strict 模式；不支持 sloppy 模式。
+3. 不支持动态代码执行（`eval`、`new Function()`）。
+4. NAPI 是唯一支持的 C++ 互操作路径。
+5. .abc 中的类型元数据须保持编译器工具链与运行时版本之间的向后兼容。
+6. GC 堆布局变更须保持与 runtime_core 的 ABI 兼容性。
+7. DFX 代码必须是旁路观测路径，采样/追踪开关关闭时须零开销或仅一次条件分支。
+8. Patch 方法替换必须在方法不在当前调用栈上时进行。`StageOfHotReload` 枚举的当前值存于 `JSThread::GlueData`，变更枚举或状态转换时检查所有读取点。
 
-- 仅可执行由 ts2abc/es2abc 生成的 ArkCompiler 字节码（.abc 文件）。
-- 仅支持 ES2021 strict 模式；不支持 sloppy 模式。
-- 不支持动态代码执行（`eval`、`new Function()`）。
-- NAPI 是唯一支持的 C++ 互操作路径。
-- .abc 中的类型元数据须保持编译器工具链与运行时版本之间的向后兼容。
-- GC 堆布局变更须保持与 runtime_core 的 ABI 兼容性。
-- DFX 代码必须是旁路观测路径，采样/追踪开关关闭时须零开销或仅一次条件分支。
-- Patch 方法替换必须在方法不在当前调用栈上时进行，`StageOfHotReload` 是全局状态，变更需检查所有读取点。
-
-### 开发注意事项
+### 4.2 开发注意事项
 
 - 修改 `TaggedObject` 派生类布局时，需注意不同数据类型在 32/64 位平台上的宽度差异；`JSTaggedValue` 或 GC 访问的 tagged 字段需按 `JSTaggedValue::TaggedTypeSize()` 对齐，`SIZE` 也应为该粒度的倍数，避免 `HClass` object size 截断或字段越界。
 - 修改 `StringTable`/`Method`/`Module` 等虚拟机常驻基础数据结构时，须检查结构体 `SIZE` 是否增长，并提醒用户：此类变更影响进程级常驻内存（随 VM/Isolate 实例数量线性放大），需评估常驻内存与启动开销。
@@ -119,18 +118,40 @@
 - 使用位域或 tag pointer 时，须检查标记位是否占用指针高位（57-64 位），与 HWAsan 的 shadow 地址空间冲突。
 - 修改 IR 或 C++ 解释器任一路径的字节码语义时，须检查另一路径是否存在相同逻辑并保持行为一致（见 `ecmascript/interpreter/AGENTS.md` 与 `ecmascript/compiler/AGENTS.md`）。
 - 修改对象布局、删除字段或变更字段语义时，须判定是否构成不兼容变更（影响 `.abc` 类型元数据/`.so` AOT 产物/堆快照/补丁兼容），并显式提醒用户其影响范围。
-- 涉及多线程并发（CAS、原子操作、锁、共享堆写屏障、内存序 fence）的开发，须先阅读 `docs/knowledge/ArkTS-Concurrency.md` 并对照检查清单逐项确认；多字段写必须原子化（打包单对象 + CAS 发布），CAS 失败不破坏赢家数据，发布可见性需 acquire fence 配对。
+- 涉及多线程并发（CAS、原子操作、锁、共享堆写屏障、内存序 fence）开发，须先阅读 `docs/knowledge/ArkTS-Concurrency.md` 并对照检查清单。对无锁复合状态发布，使用单一原子槽发布完整且初始化后的状态；读者从同一原子槽取得该发布值，再用 acquire 语义访问其内容。锁保护的多字段更新沿用既有锁协议，托管堆字段遵守 GC barrier 与对象生命周期要求。
 
-### 不要做
+### 4.3 不要做
 
 - 除非明确要求，不要修改公共 NAPI 签名、错误码或生命周期语义。
 - 未经批准，不要引入新的第三方生产依赖。
 - 不要修改自动生成的文件（如 builtins stubs）；应修改源码生成器后重新生成。
 - 不要移除或变更错误码而不更新 `docs/`。
+- 不要只更新 C++ 或 IR 解释器一侧的共有字节码语义。
 
-## 4. 编译构建
-### standalone 构建（最常用）
-构建命令从OpenHarmony源码根目录执行（通常是本项目上两层路径）
+### 4.4 需先确认的事项
+
+以下事项涉及现有的兼容性或授权边界。用户尚未明确授权时，先确认影响范围。
+
+- 变更公共 NAPI 签名、错误码或生命周期。
+- 引入新的第三方生产依赖。
+- 改变 `.abc` 或 AOT 产物的兼容性约定。
+- 改变与 `runtime_core` 共享的堆布局或 ABI。
+- 引入解释器、模块加载或补丁协议的行为不兼容。
+
+### 4.5 常见反模式
+
+- ❌ 直接编辑生成的桩代码。修改生成输入后重新生成。
+- ❌ 只检查改动的解释器路径。追踪 C++ 和 IR 路径中对应的字节码逻辑。
+- ❌ 把测试可执行文件的构建当作测试运行。核对目标定义，并记录实际执行结果。
+
+## 5. 构建与验证
+
+构建命令从 OpenHarmony 源码根目录执行。按 [构建环境](docs/environment-setup-and-compilation.md) 选择产品和工具链。
+
+### 5.1 standalone 构建
+
+以下 standalone 示例仅适用于已配置的 standalone 构建树。标准 OpenHarmony 产品构建见 §5.4。
+
 ```bash
 # Linux
 python ark.py x64.debug
@@ -139,45 +160,82 @@ python ark.py x64.debug
 python ark.py arm64.debug --gn-args="run_with_qemu=true"
 ```
 
-### arm64测试补充说明
-arm64构建不会自动生成host侧的es2abc, 跑测试前需单独构建
+### 5.2 standalone ARM64 测试补充说明
+
+如果已有的 ARM64 standalone 构建目录缺少 host 侧 `es2abc`，可单独构建。
+
 ```bash
 ninja -C out/arm64.release arm64.release/arkcompiler/ets_frontend/es2abc
 ```
 
-### 快速构建方法
-构建命令从OpenHarmony源码根目录执行
-#### 只重编运行时so（只编译后改动的arksteed_*.cpp）
+### 5.3 快速构建方法
+
+以下命令使用已有的 `out/x64.debug` standalone 构建目录。
+
+#### 5.3.1 增量构建运行时库
+
 ```bash
 # Linux
 ninja -C out/x64.debug libark_jsruntime
 ```
-#### 跑abc/test262 需要VM可执行文件（会自动带上so依赖）
+
+#### 5.3.2 跑abc/test262 需要VM可执行文件（会自动带上so依赖）
+
 ```bash
 # Linux
 ninja -C out/x64.debug ark_js_vm
 ```
-#### 单元测试
+
+#### 5.3.3 构建单测依赖库
+
 ```bash
 # Linux
 ninja -C out/x64.debug libark_jsruntime_test
 ```
 
-### 完整编译命令
+### 5.4 完整编译命令
 
 ```bash
-# 构建（在 openharmony/ 目录下执行）
-../../build.sh --product-name rk3568 --build-target ark_js_host_linux_tools_packages
+# 构建 Linux host 工具
+./build.sh --product-name rk3568 --build-target ark_js_host_linux_tools_packages
 
 # 带调试符号构建
-../../build.sh --product-name rk3568 --build-target ark_js_host_linux_tools_packages --gn-args is_debug=true
+./build.sh --product-name rk3568 --build-target ark_js_host_linux_tools_packages --gn-args is_debug=true
 ```
 
-## 5. 提交与 PR 规范
+### 5.5 按变更类型验证
+
+| 变更 | 最小验证 |
+|---|---|
+| Builtins 或运行时内部行为 | 构建受影响目标，运行对应单测或模块回归 |
+| 解释器、IC、Stub | 检查两条解释路径的语义，运行受影响的用例及性能回归 |
+| GC、对象布局或并发 | 运行对应的 [GC 测试](docs/knowledge/ArkTS-GC.md#测试与验证)，检查受影响的布局和工具链 |
+| 公共 NAPI | 检查下游签名及生命周期兼容性，运行对应 JSNAPI 用例 |
+| AOT、JIT 或 PGO | 编译受影响组件，运行相关编译器及运行时回归 |
+| 编译服务 IPC 或权限 | 核对接口与代理/Stub、服务配置，执行相关服务测试 |
+| 模块加载和补丁 | 运行对应的模块或 [Quick Fix 回归](docs/knowledge/Patch-Subsystem.md#代码和测试) |
+| DFX、Debugger、SourceMap | 运行对应知识页登记的测试，检查受影响的诊断路径 |
+| 构建配置或特性开关 | 核对 GN 目标、产品条件及 `bundle.json`，构建受影响产物 |
+| 仅测试变更 | 运行改动与受影响的相邻测试 |
+| 仅文档变更 | 检查 diff、引用路径、源码符号和列出的 GN 目标 |
+
+### 5.6 完成判据
+
+- 差异符合任务范围，且 `git diff --check` 通过。
+- 变更行为及相关失败路径有验证证据。
+- 已记录适用验证的命令、配置和真实结果。
+- 已核对被影响的 API、ABI 或产物格式兼容性。
+- 受影响的文档路由、链接、符号与目标和当前源码一致。
+
+**不得将未执行、执行失败或被跳过的验证描述为已通过。** 记录未验证项、原因、应执行的命令及预期结果。有替代证据时注明来源和覆盖范围。修复验证失败后，复跑原检查并记录结果。
+
+交付说明应包含改动摘要、实际验证结果、兼容性影响和剩余事项。
+
+## 6. 提交与 PR 规范
 
 向 openharmony 主仓提交代码时，commit message 与 PR 必须符合以下规范。可参考近期格式规范的 AI 辅助提交，如 `5d6dc99d2`（`fix(ic): handle JSProxy holder in LoadMiss`）。
 
-### 5.1 Commit message 格式
+### 6.1 Commit message 格式
 
 ```
 <type>: <简短描述>                      # 第一行标题，必须 ≤48 字符（含 type 与空格）
@@ -205,15 +263,15 @@ Change-Id: Ixxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 - **Change-Id**：由 `.git/hooks/commit-msg`（repo 钩子）在首次提交时自动注入。**`git commit --amend` 时务必保留原 Change-Id**——删掉会被钩子生成新的，导致同一改动产生新评审、PR/CR 关联断裂。
 - **字段顺序**：标题 →（空行）→ 正文 →（空行）→ `Issue:` → `Signed-off-by:` →（空行）→ `AI[..]` → `Co-Authored-By:` →（空行）→ `Change-Id:`。
 
-### 5.2 推送到 fork 与创建 PR
+### 6.2 推送到 fork 与创建 PR
 
 1. **推到自己的 fork**：`git push <fork-remote> HEAD:master`，`<fork-remote>` 指向你名下的 fork（`gitcode.com/<you>/arkcompiler_ets_runtime`）。若已 amend 改写历史，用 `--force-with-lease`。
 2. **创建 PR**：源 `fork:master` → 目标 `openharmony:master`。可用 gitcode API（无需网页）：
    - 取 token：`printf 'protocol=https\nhost=gitcode.com\n\n' | git credential fill` 中的 `password=` 即 personal access token（若已配置 credential helper 可直接取到缓存 token）。
    - `POST https://gitcode.com/api/v5/repos/openharmony/arkcompiler_ets_runtime/pulls`，头 `Authorization: Bearer <token>`，JSON body：`{"title","body","head":"<you>:master","base":"master"}`。返回 `number` 即 PR 号。
-3. **PR 描述**：**必须用本仓模板** `.gitee/PULL_REQUEST_TEMPLATE.zh-CN.md` 填写（关联的 Issue / 修改原因 / 修改描述 / 自测试项 / 是否已执行 L0 用例）。纯测试或文档类改动，性能与 IR 自检项勾"不涉及，无需验证"；L0 用例勾"已验证"并贴构建/执行结果。可用 `PATCH .../pulls/<N>`（同上鉴权）更新 title/body；更新后若 GET 仍见旧值多为 CDN 缓存，带 `?_t=<ms>` 与 `Cache-Control: no-cache` 复查即可。
+3. **PR 描述**：**必须用本仓模板**填写关联 Issue、修改原因、修改描述及自测结果。按实际适用范围勾选性能和 IR 自检项。L0 通过后勾选「已验证」并附结果。确实不涉及 L0 时勾选「不涉及」并说明理由。适用的 L0 如未执行或失败，记录其状态和原因。可用 `PATCH .../pulls/<N>` 更新 title/body。更新后若 GET 仍见旧值，可带 `?_t=<ms>` 与 `Cache-Control: no-cache` 复查。 [PR 模板](.gitee/PULL_REQUEST_TEMPLATE.zh-CN.md)
 
-### 5.3 常用 API 速查
+### 6.3 常用 API 速查
 
 | 操作 | 方法 | URL |
 |------|------|-----|
@@ -223,7 +281,7 @@ Change-Id: Ixxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 鉴权统一用 `Authorization: Bearer <token>`（Gitee 风格 v5 API）。
 
-### 5.4 端到端提交流程（AI 辅助）
+### 6.4 端到端提交流程（AI 辅助）
 
 以下描述 AI 辅助提交的完整端到端流程，从改动到门禁触发：
 
@@ -266,9 +324,11 @@ Change-Id: Ixxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | `检测到同仓同分支存在2个或以上PR` | 需先关闭旧 PR |
 | `你因提交次数过多被限制提交` | 触发频率超限，需等冷却或申请恢复 |
 
-### 5.5 Push 前强制检查清单
+### 6.5 Push 前强制检查清单
 
 **每次 push 前必须逐项检查，缺一不可。不检查不 push。**
+
+§5.5 用于选择本地验证范围。准备向上游推送时，同时执行本节的提交检查。
 
 ```
 □ 1. Commit message 标题 ≤48 字符（含 type: 和空格）
@@ -278,11 +338,12 @@ Change-Id: Ixxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 □ 5. Change-Id 保留（amend 时未删）
 □ 6. 本地编译通过（gn gen 0 ERROR + ninja target 编译 0 FAILED）
 □ 7. PR 描述使用 .gitee/PULL_REQUEST_TEMPLATE.zh-CN.md 模板
-□ 8. PR 描述自测试项全部勾选（不涉及的勾"不涉及，无需验证"）
-□ 9. PR 描述含测试结果（贴 GN gen / ninja 输出摘要）
-□ 10. 触发编译用 "start build draft"（AI 生成代码）或 "start build"（人工确认）
+□ 8. PR 描述的自测项按 §6.2 记录实际结果和适用范围
+□ 9. PR 描述记录实际测试结果；未运行的测试注明原因
 ```
 
-### 5.6 示例
+创建 PR 后，按 §6.4 触发远端门禁并检查结果。
+
+### 6.6 示例
 
 格式范本见本仓近期 commit `5d6dc99d2`（含 Issue / Signed-off-by / AI 行 / Co-Authored-By / Change-Id 完整字段）。

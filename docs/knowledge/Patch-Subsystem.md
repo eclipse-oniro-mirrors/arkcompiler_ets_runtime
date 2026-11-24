@@ -1,10 +1,12 @@
 # Patch 子系统知识
 
+[补丁运行时指南](../../ecmascript/patch/AGENTS.md) · [Quick Fix 命令行指南](../../ecmascript/quick_fix/AGENTS.md)
+
 本文只记录 `ecmascript/patch/` 全量热重载和冷补丁机制：方法替换、常量池更新、Quick Fix 生命周期管理。模块加载机制见 `ecmascript/module/`，Hot Reload Manager 见 `docs/knowledge/Debugger-Subsystem.md`，JSPandaFile 解析见 `ecmascript/jspandafile/`。已有子模块 AGENTS.md：`ecmascript/patch/AGENTS.md`。
 
 ## 概述
 
-Patch 子系统允许在应用不重启的情况下，用补丁 .abc 文件中的 `MethodLiteral` 替换正在运行的方法，覆盖 callField、codeEntryPoint、nativePointer、constantPool。最关键的架构边界：**方法替换必须在方法不在当前调用栈上时进行**——替换正在执行的方法会导致崩溃。`StageOfHotReload` 是存储在 `JSThread` 上的全局状态，影响模块加载和编译器代码生成路径。
+Patch 子系统用补丁 .abc 文件中的 `MethodLiteral` 替换方法，更新 callField、codeEntryPoint、nativePointer 和 constantPool。**方法替换必须在方法不在当前调用栈上时进行**。当前热重载阶段存于各 `JSThread` 的 `GlueData::stageOfHotReload_`，模块加载和生成的代码均可能读取该字段。
 
 ## 核心模型和主链路
 
@@ -41,9 +43,10 @@ QuickFixManager::UnloadPatch(thread, patchFileName)
 | 触发词或任务 | 主链路/运行时模型 | 优先入口 | 不变式/维护点 |
 |---|---|---|---|
 | Quick Fix / patch / 补丁 / 方法替换 | `PatchLoader::ReplaceMethod` 执行 callField/literalInfo/codeEntryPoint/nativePointer/constpool 五项替换 | `ecmascript/patch/patch_loader.h` — `ReplaceMethod()` | **严格禁止在方法可能正在执行时替换**——必须先确保线程安全点；五项替换字段变更需全量验证 Hot Reload + Cold Reload 两个路径 |
-| LoadPatch / 补丁加载 | `QuickFixManager::LoadPatch` → `LoadPatchInternal` → GeneratePatchInfo → FindAndReplaceSameMethod → ExecuteFuncOrPatchMain | `ecmascript/patch/quick_fix_manager.h` + `patch_loader.h` | **必须先在 `LoadPatch` 前调用 `RegisterQuickFixQueryFunc`**——否则 `callBack_` 为空，patch 文件查询失败（历史坑：静默失败无报错） |
+| 显式加载 | `QuickFixManager::LoadPatch` 接收文件名或缓冲区，再调用 `LoadPatchInternal` | [quick_fix_manager.cpp](../../ecmascript/patch/quick_fix_manager.cpp) | 检查文件读取、重复加载和返回的错误码 |
+| 冷补丁自动查询 | `LoadPatchIfNeeded` 调用通过 `RegisterQuickFixQueryFunc` 注册的回调 | [quick_fix_manager.cpp](../../ecmascript/patch/quick_fix_manager.cpp) | 未注册回调时直接返回，已检查的 base 文件会跳过查询 |
 | UnloadPatch / 补丁卸载 | `ClearPatchInfo` 清理 `patchMethodLiterals`、`baseMethodInfo`、`baseConstpools`、`replacedRecordNames` | `patch_loader.h` — `UnloadPatchInternal()` | **卸载后不要持有 PatchInfo 裸指针**——`ClearPatchInfo` 已清理，继续使用=use-after-free |
-| StageOfHotReload / 热重载阶段 | 全局状态（存储在 `JSThread`），影响模块加载、变量获取、编译器（CircuitBuilder/StubBuilder）行为 | `ecmascript/js_thread.h` | **不能在状态机中间状态执行模块操作**；新增阶段需检查所有读取该状态的代码路径（module/、compiler/） |
+| StageOfHotReload / 热重载阶段 | 每个 `JSThread` 的 glue 字段，影响模块加载、变量获取和编译器生成的代码 | [js_thread.h](../../ecmascript/js_thread.h) | 保持现有状态转换时序，变更阶段时核对 module 和 compiler 中的读取点 |
 | Cold Patch / 冷补丁 | 启动时替换方法，`StageOfColdReload` 标记 | `patch_loader.h` — `UpdateModuleForColdPatch()` | 与 Hot Reload 路径不同，需分别验证 |
 | QuickFixHelper | 轻量工具：`CreateMainFuncWithPatch` — 为 patch 入口函数创建 JSFunction | `ecmascript/patch/quick_fix_helper.h` | 仅一个方法，边界清晰 |
 | PatchInfo | 单个 patch 的完整元数据：`patchMethodLiterals`、`baseMethodInfo`、`baseConstpools`、`replacedRecordNames` | `patch_loader.h` | `baseMethodInfo` 保存原始数据用于卸载恢复——卸载时泄漏会导致内存持续增长；`baseConstpools` 用 **JSHandle** 保存（不能弱化为裸指针——GC 后野指针） |
@@ -63,7 +66,7 @@ QuickFixManager::UnloadPatch(thread, patchFileName)
 
 - **禁止**在方法可能正在执行时调用 `ReplaceMethod()`——必须先确保线程安全点
 - **禁止**在 `UnloadPatchInternal` 后仍持有 `PatchInfo` 中的裸指针
-- **禁止**忘记在 `LoadPatch` 前调用 `RegisterQuickFixQueryFunc`——callBack_ 为空导致 Load 静默失败
+- 依赖自动查询冷补丁时，在 `LoadPatchIfNeeded` 执行前注册回调。
 - **禁止**假设 patch 文件和 base 文件中的方法一一对应——`FindSameMethod` 可能返回 nullptr
 - **禁止**在 `StageOfHotReload` 中间状态下执行模块操作——状态值有特定语义
 - **禁止**让 `methodInfos_` 无限累积——`LoadPatch` 追加，需 `UnloadPatch` 清理
@@ -90,7 +93,7 @@ QuickFixManager::UnloadPatch(thread, patchFileName)
 | 补丁加载/卸载引擎 | `ecmascript/patch/patch_loader.cpp` |
 | Quick Fix 生命周期 | `ecmascript/patch/quick_fix_manager.cpp` |
 | Patch 入口函数创建 | `ecmascript/patch/quick_fix_helper.cpp` |
-| StageOfHotReload 定义 | `ecmascript/js_thread.h` |
+| StageOfHotReload 枚举与状态字段 | [patch_loader.h](../../ecmascript/patch/patch_loader.h)、[js_thread.h](../../ecmascript/js_thread.h) |
 | 模块系统交互（HotReload 分支） | `ecmascript/module/js_module_source_text.cpp` |
 | 编译器交互（StageOfHotReload 读取） | `ecmascript/compiler/`（CircuitBuilder/StubBuilder） |
 
@@ -103,9 +106,8 @@ QuickFixManager::UnloadPatch(thread, patchFileName)
 | Quick Fix API | `ark_quickfix_test` + NAPI 测试（`Jsnapi_001_Test` 等） |
 | 跨模块影响（module/compiler） | 对应模块的测试目标 |
 
-构建从 workspace root 执行。Patch 模块自身无 `tests/` 目录，测试位于项目顶层：
+以下命令从 OpenHarmony 源码根目录执行。Patch 模块的回归用例位于 `test/quickfix/`。 [测试目标定义](../../test/quickfix/BUILD.gn)
+
 ```bash
-cd /home/xiongkang/workspace/ark_standalone_build
-ninja -C out/x64.release arkcompiler/ets_runtime:libark_jsruntime
-python ark.py x64.release ark_quickfix_test
+./build.sh --product-name rk3568 --build-target ark_quickfix_test
 ```

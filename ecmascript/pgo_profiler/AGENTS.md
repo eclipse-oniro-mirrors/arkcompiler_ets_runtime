@@ -100,8 +100,9 @@ python ark.py x64.debug
 Full OHOS tree:
 ```bash
 ./build.sh --product-name <product-name> --build-target ark_js_host_linux_tools_packages
-./build.sh --product-name <product-name> --build-target ecmascript/pgo_profiler/prof_dump:profdump   # profdump tool only
 ```
+
+The Linux host tools package builds `profdump` with the host toolchain.
 
 ## Tests
 
@@ -112,7 +113,7 @@ python ark.py x64.debug unittest   # all unit tests (includes PGO profiler tests
 
 Full OHOS tree:
 ```bash
-./build.sh --product-name <product-name> --build-target ecmascript/pgo_profiler/tests:host_unittest
+./build.sh --product-name <product-name> --build-target arkcompiler/ets_runtime/ecmascript/pgo_profiler/tests:host_unittest
 ```
 
 - C++ tests: `tests/*_test.cpp`

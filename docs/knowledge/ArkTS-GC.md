@@ -1,5 +1,7 @@
 # GC 领域知识
 
+[内存管理指南](../../ecmascript/mem/AGENTS.md)
+
 本文记录 ets_runtime GC 子系统的核心架构与专家经验，覆盖 LocalHeap GC 和 SharedHeap GC。
 枚举值、空间列表等可从代码中直接获取的细节不在此重复。
 
@@ -105,12 +107,12 @@ GC 从轻到重逐级升级，`ALLOCATION_FAILED` 是 OOM 前最后一次尝试�
 
 ## 测试与验证
 
-GC 测试入口在 `ecmascript/tests/` 目录，关键测试目标：
+从 OpenHarmony 源码根目录执行。测试目标及产品条件见 [ecmascript/tests/BUILD.gn](../../ecmascript/tests/BUILD.gn)。以下 `Action` 目标运行 host 测试，对应的同名目标去掉 `Action` 后可用于构建测试可执行文件。
 
 ```bash
-./build.sh --product-name rk3568 --build-target GC_First_Test --build-target GC_Second_Test \
-  --build-target GC_Third_Test --build-target GC_Verify_Test --build-target GC_SharedPartial_Test \
-  --build-target Shared_Heap_Test --build-target Unified_GC_Test --build-target Weak_Ref_Old_GC_Test
+./build.sh --product-name rk3568 --build-target GC_First_TestAction --build-target GC_Second_TestAction \
+  --build-target GC_Third_TestAction --build-target GC_Verify_TestAction --build-target GC_SharedPartialGC_TestAction \
+  --build-target GC_SharedHeap_TestAction --build-target Unified_GC_TestAction --build-target GC_WeakRefOldGC_TestAction
 ```
 
 - 堆验证（`VerifyKind`）：GC 各阶段可开启验证（`VERIFY_PRE_GC`/`VERIFY_POST_GC`、`VERIFY_MARK_*`、`VERIFY_EVACUATE_*`、`VERIFY_WEAK_REF`），debug 构建下不要禁用。

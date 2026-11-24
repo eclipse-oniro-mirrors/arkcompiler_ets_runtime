@@ -2,6 +2,8 @@
 
 This file provides guidance for AI agents when working with code in the extractortool component.
 
+Read the [SourceMap and HAP integration notes](../../docs/knowledge/ExtractorTool-Subsystem.md) for code and test entry points.
+
 ## Overview
 
 ExtractorTool is a C++ component that provides source map processing for JavaScript debugging in the ArkCompiler ETS Runtime. The core extraction functionality (Extractor, ZipFile, FileMapper, etc.) is provided by the `foundation/ability/ability_base:extractortool` shared library (`OHOS::AbilityBase` namespace). This directory only retains arkcompiler-specific components.
@@ -10,9 +12,9 @@ ExtractorTool is a C++ component that provides source map processing for JavaScr
 
 ### Local Components
 
-- **`source_map.h/cpp`**: Processes JavaScript source maps for debugging support. Translates generated positions back to original source locations. Handles VQL (Variable-Length Quantity) encoded mappings. Manages source map data from multiple packages. Uses the foundation Extractor internally for HAP file access.
+- **`source_map.h/cpp`**: Processes JavaScript source maps for debugging support. Translates generated positions back to original source locations. Handles VLQ (Variable-Length Quantity) encoded mappings. Manages source map data from multiple packages. Uses the foundation Extractor internally for HAP file access.
 
-> **Note**: The `extractor_adapter.h/cpp` adapter layer that bridges `OHOS::AbilityBase` types into the `panda::ecmascript` namespace now lives at `adapter/ohos/extractortool/` (outside the `ecmascript/` tree). See that directory's BUILD.gn and the `adapter/ohos/tests/extractor_adapter_test.cpp` for details.
+The adapter layer in [adapter/ohos/extractortool/](../../adapter/ohos/extractortool/) bridges `OHOS::AbilityBase` types into the `panda::ecmascript` namespace. The adapter host test target is declared in [adapter/ohos/BUILD.gn](../../adapter/ohos/BUILD.gn).
 
 ### External Dependencies (from foundation/ability/ability_base)
 
@@ -36,14 +38,7 @@ This project uses the **GN (Generate Ninja)** build system, integrated with the 
 
 The `ENABLE_ABILITY_EXTRACTOR` define gates all code that depends on `ability_base:extractortool`. It is controlled at the GN level — no `#if` guards inside `adapter/ohos/extractortool/extractor_adapter.h` or `extractor_adapter.cpp`.
 
-**Production builds** (`js_runtime_config.gni`, `libark_jsruntime_common_set` template):
-```gn
-if (!ark_standalone_build && !(defined(is_arkui_x) && is_arkui_x) &&
-    is_ohos && is_standard_system) {
-  external_deps += [ "ability_base:extractortool" ]
-  defines += [ "ENABLE_ABILITY_EXTRACTOR" ]
-}
-```
+For dependency and macro conditions, see `enable_ecma_stackinfo` and the `ability_base:extractortool` dependency in [js_runtime_config.gni](../../js_runtime_config.gni) and [BUILD.gn](../../BUILD.gn).
 
 **Source file inclusion** (`BUILD.gn`):
 ```gn
@@ -58,7 +53,7 @@ Consumer files (`js_stackinfo.cpp/h`, `source_map.cpp/h`) still use `#if defined
 
 ### Build Commands
 
-Full OpenHarmony build (from repository root):
+Run from the OpenHarmony source root.
 ```bash
 # Host tools (Linux x64)
 ./build.sh --product-name rk3568 --build-target ark_js_host_linux_tools_packages
@@ -93,12 +88,4 @@ Tests are organized in `tests/BUILD.gn`:
 
 ### Running Tests
 
-From the `ark_standalone_build` directory, you can use the standalone build commands:
-
-```bash
-# Compile and run specific test (release build)
-python ark.py x64.release ExtractorToolTestAction
-
-# Compile and run specific test (debug build)
-python ark.py x64.debug ExtractorToolTestAction
-```
+See the [SourceMap test commands](../../docs/knowledge/ExtractorTool-Subsystem.md#2-测试与验证).

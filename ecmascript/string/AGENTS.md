@@ -32,7 +32,7 @@ Multiple string representations for memory efficiency:
 - **IntegerCache** — Cached integer string representations
 
 ## Reference Source
-- `arkcompiler/ets_runtime/ecmascript/string/base_string.h` (1-300行) - Base string interface
+- [base_string.h](base_string.h), `BaseString` - Base string interface
 - `arkcompiler/ets_runtime/ecmascript/string/tree_string.h` - Tree string implementation
 
 ## Key Files
@@ -69,7 +69,7 @@ python ark.py x64.debug unittest   # includes string tests
 
 Full OHOS tree:
 ```bash
-./build.sh --product-name <product-name> --build-target ecmascript/string/tests:host_unittest
+./build.sh --product-name <product-name> --build-target arkcompiler/ets_runtime/ecmascript/string/tests:host_unittest
 ```
 
 ## Boundaries

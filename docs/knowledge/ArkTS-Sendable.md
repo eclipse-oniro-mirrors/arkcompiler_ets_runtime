@@ -1,5 +1,7 @@
 # ArkTS Sendable 知识
 
+[Builtins 指南](../../ecmascript/builtins/AGENTS.md)
+
 本文只记录 `arkcompiler/ets_runtime` 仓内 Sendable 的知识，涉及 Sendable 对象、Sendable class/function/env、Sendable 并发容器/共享容器、NAPI 暴露、共享内存、编译/解释器入口和测试锚点。
 
 ## Sendable背景
