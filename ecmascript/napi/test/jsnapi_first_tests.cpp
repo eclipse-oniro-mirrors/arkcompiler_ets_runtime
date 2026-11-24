@@ -84,18 +84,15 @@ static constexpr int32_t TEST_DATAVIEW_BYTEOFFSET = 5;
 static constexpr int32_t TEST_DATAVIEW_BYTELENGTH = 10;
 static constexpr int32_t TEST_BUFFER_LENGTH = 15;
 static constexpr int32_t TEST_DATAVIEW_LENGTH = 20;
-static const char TEST_SYMBOL_DESCRIPTION[] = "testSymbol";
-static constexpr int32_t TEST_STRING_LENGTH = 10;
 static const char16_t TEST_UTF16_STRING[] = u"testUtf16";
 static constexpr int32_t TEST_STRING_LENGTH_FOUR = 4;
-static constexpr int32_t TEST_STRING_LENGTH_MINUS_ONE = -1;
+static constexpr int32_t TEST_NEG_INT_ONE = -1;
 static const char TEST_EMPTY_STRING[] = "";
 static const char TEST_ERROR_INFO[] = "test error info";
 static constexpr uint64_t TEST_BIGINT_VALUE = 12345678901234ULL;
 static constexpr uint32_t TEST_BIGINT_WORDS_SIZE = 1;
 static const char TEST_PROPERTY_KEY[] = "propertyKey";
 static constexpr int32_t TEST_INDEX_VALUE = 1;
-
 
 namespace panda::test {
 using BuiltinsFunction = ecmascript::builtins::BuiltinsFunction;
@@ -3326,7 +3323,7 @@ HWTEST_F_L0(JSNApiTests, DetachedArraybuffer_AlreadyDetached)
     // Try to detach again - should return early without modifying isArrayBuffer
     isArrayBuffer = false;
     arrayBuffer->DetachedArraybuffer(vm_, isArrayBuffer);
-    // When already detached, returns early at line 1222 without setting isArrayBuffer
+    // When already detached, returns without setting isArrayBuffer
     ASSERT_FALSE(isArrayBuffer);
 }
 
@@ -3351,7 +3348,7 @@ HWTEST_F_L0(JSNApiTests, DetachedArraybuffer_SendableAlreadyDetached)
     // Try to detach again - should return early without modifying isArrayBuffer
     isArrayBuffer = false;
     sendableArrayBuffer->DetachedArraybuffer(vm_, isArrayBuffer);
-    // When already detached, returns early at line 1229 without setting isArrayBuffer
+    // When already detached, returns without setting isArrayBuffer
     ASSERT_FALSE(isArrayBuffer);
 }
 
@@ -3728,7 +3725,7 @@ HWTEST_F_L0(JSNApiTests, StringRef_GetBufferUtf16)
 HWTEST_F_L0(JSNApiTests, StringRef_NewFromUtf8Replacement)
 {
     LocalScope scope(vm_);
-    Local<StringRef> str = StringRef::NewFromUtf8Replacement(vm_, TEST_STRING, TEST_STRING_LENGTH_MINUS_ONE);
+    Local<StringRef> str = StringRef::NewFromUtf8Replacement(vm_, TEST_STRING, TEST_NEG_INT_ONE);
     ASSERT_TRUE(str->IsString(vm_));
     Local<StringRef> strWithLength = StringRef::NewFromUtf8Replacement(vm_, TEST_STRING, TEST_STRING_LENGTH_FOUR);
     ASSERT_TRUE(strWithLength->IsString(vm_));
@@ -3744,7 +3741,7 @@ HWTEST_F_L0(JSNApiTests, StringRef_NewFromUtf8Replacement)
 HWTEST_F_L0(JSNApiTests, StringRef_NewFromUtf16WithoutStringTable)
 {
     LocalScope scope(vm_);
-    Local<StringRef> str = StringRef::NewFromUtf16WithoutStringTable(vm_, TEST_UTF16_STRING, -1);
+    Local<StringRef> str = StringRef::NewFromUtf16WithoutStringTable(vm_, TEST_UTF16_STRING, TEST_NEG_INT_ONE);
     ASSERT_TRUE(str->IsString(vm_));
 }
 
@@ -3811,7 +3808,7 @@ HWTEST_F_L0(JSNApiTests, ObjectRef_Set_NonHeapObject)
     Local<ObjectRef> obj = ObjectRef::New(vm_);
     ASSERT_TRUE(obj->IsObject(vm_));
     Local<JSValueRef> key = NumberRef::New(vm_, 1);
-    Local<JSValueRef> value = StringRef::NewFromUtf8(vm_, "test");
+    Local<JSValueRef> value = StringRef::NewFromUtf8(vm_, TEST_STRING);
     bool result = obj->Set(vm_, key, value);
     EXPECT_TRUE(result);
 }
@@ -3982,7 +3979,7 @@ HWTEST_F_L0(JSNApiTests, ObjectRef_SetWithoutSwitchState_NumberKey)
     Local<ObjectRef> obj = ObjectRef::New(vm_);
     ASSERT_TRUE(obj->IsObject(vm_));
     Local<JSValueRef> value = StringRef::NewFromUtf8(vm_, TEST_STRING);
-    bool result = obj->SetWithoutSwitchState(vm_, "123", value);
+    bool result = obj->SetWithoutSwitchState(vm_, TEST_ORIGINAL_SOURCE, value);
     EXPECT_TRUE(result);
 }
 
