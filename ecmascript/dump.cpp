@@ -5192,6 +5192,8 @@ void ProfileTypeInfoCell::DumpForSnapshot(const JSThread *thread, std::vector<Re
     vec.emplace_back(CString("Value"), GetValue(thread));
 #ifndef REMOVE_PGO_HANDLE
     vec.emplace_back(CString("Handle"), GetHandle(thread));
+#else
+    vec.emplace_back(CString("Handle"), JSTaggedValue::Undefined());
 #endif
 }
 
