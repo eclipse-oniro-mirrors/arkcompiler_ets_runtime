@@ -100,6 +100,14 @@ void Jit::SwitchProfileStubs(EcmaVM *vm)
     JSThread *thread = vm->GetAssociatedJSThread();
     JSRuntimeOptions &options = vm->GetJSOptions();
     std::shared_ptr<PGOProfiler> pgoProfiler = vm->GetPGOProfiler();
+    if (!thread->IsMainThreadFast()) {
+        // Worker tiering is disabled: force the profiler off so worker runtimes stay on
+        // the baseline interpreter stubs even if PGO was switched on during stub loading.
+        LOG_JIT(DEBUG) << "worker tiering disabled, force profiler off for worker VM";
+        thread->SetPGOProfilerEnable(false);
+        thread->CheckOrSwitchPGOStubs();
+        return;
+    }
     if (!options.IsEnableJITPGO() || pgoProfiler == nullptr) {
         thread->SwitchJitProfileStubs(false);
     } else {
@@ -163,7 +171,8 @@ void Jit::ConfigOptions(EcmaVM *vm) const
         ", call threshold:" << static_cast<int>(jitCallThreshold) <<
         ", hotness threshold:" << jitHotnessThreshold <<
         ", ic feedback threshold:" << jitIcFeedbackThreshold <<
-        ", disable codesigner:" << jitDisableCodeSign;
+        ", disable codesigner:" << jitDisableCodeSign <<
+        ", main vm:" << vm->GetAssociatedJSThread()->IsMainThreadFast();
 }
 
 void Jit::ConfigJit(EcmaVM *vm)
@@ -592,6 +601,14 @@ void Jit::CompileArkSteed(EcmaVM *vm, JSHandle<JSFunction> &jsFunction,
                           CompilerTier tier, int32_t osrOffset, JitCompileMode mode)
 {
     auto jit = Jit::GetInstance();
+    if (!vm->GetJSThread()->IsMainThreadFast()) {
+        JSThread *hostThread = vm->GetJSThread();
+        CString methodName =
+            Method::Cast(jsFunction->GetMethod(hostThread).GetTaggedObject())->GetMethodName(hostThread);
+        LOG_JIT(INFO) << "skip arksteed compile on worker VM (worker tiering disabled), method: " << methodName <<
+            ", osrOffset: " << osrOffset;
+        return;
+    }
     if (!jit->IsEnableFastJit() || jit->GetJitBackend() != JitBackend::ARKSTEED) {
         return;
     }
