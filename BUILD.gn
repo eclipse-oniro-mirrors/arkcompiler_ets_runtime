@@ -409,6 +409,11 @@ config("ark_jsruntime_public_config") {
   defines = []
   ldflags = []
 
+  # The runtime, host stub generator, optimizer, and tests share this object layout.
+  if (defined(ets_runtime_feature_remove_pgo_handle) && ets_runtime_feature_remove_pgo_handle) {
+    defines += [ "REMOVE_PGO_HANDLE" ]
+  }
+
   if (compile_baseline_stub) {
     defines += [ "ECMASCRIPT_ENABLE_BASELINE_STUB" ]
   }
