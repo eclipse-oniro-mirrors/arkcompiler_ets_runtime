@@ -36,7 +36,7 @@ HeapSampling::HeapSampling(const EcmaVM *vm, Heap *const heap, uint64_t interval
 HeapSampling::~HeapSampling()
 {
     heap_->ClearAllocationInspectorFromAllSpaces();
-    if (!Runtime::GetInstance()->IsHiProfilerEnabled()) {
+    if (!Runtime::IsHiProfilerEnabled()) {
         vm_->GetJSThread()->SetIsStartHeapSampling(false);
     }
 }

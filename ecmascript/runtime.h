@@ -462,12 +462,16 @@ public:
         return enableEvacuateNonMovableSpace_;
     }
 
-    void SetHiProfilerEnabled(bool enabled)
+    // Process-level flag: not reset when Runtime is destroyed/recreated.
+    // Callers must ensure Enable/Disable are strictly paired; otherwise a
+    // newly created Runtime will inherit the sampling state from the
+    // previous Runtime instance.
+    static void SetHiProfilerEnabled(bool enabled)
     {
         hiProfilerEnabled_.store(enabled, std::memory_order_release);
     }
 
-    bool IsHiProfilerEnabled() const
+    static bool IsHiProfilerEnabled()
     {
         return hiProfilerEnabled_.load(std::memory_order_acquire);
     }
@@ -658,8 +662,7 @@ private:
     bool enableEvacuateNonMovableSpace_ {true};
     CString entryAbilityName_;
 
-    std::atomic<bool> hiProfilerEnabled_ {false};
-
+    static std::atomic<bool> hiProfilerEnabled_;
     static bool isFork_;
 
     friend class EcmaVM;
