@@ -16,7 +16,6 @@
 #ifndef ECMASCRIPT_MEM_GC_STATS_H
 #define ECMASCRIPT_MEM_GC_STATS_H
 
-#include "ecmascript/base/config.h"
 #include <chrono>
 #include <cstring>
 #include <ctime>
@@ -111,7 +110,6 @@ public:
     virtual void PrintGCMemoryStatistic();
     bool CheckIfLongTimePause();
     virtual void PrintGCStatistic();
-    void RefreshLongGCNativeStatsAfterConcurrentGC();
     virtual bool EnableGCTracer() const
     {
         return false;
@@ -378,7 +376,6 @@ protected:
         DEFAULT_OLD_EVACUATE_SPACE_SPEED, DEFAULT_YOUNG_CLEAR_NATIVE_OBJ_SPEED};
     float recordDuration_[(uint8_t)RecordDuration::NUM_OF_DURATION] {0.0f};
     bool concurrentMark_ {false};
-    bool currentGCIsLong_ {false};
 
     static constexpr uint32_t THOUSAND = 1000;
 
