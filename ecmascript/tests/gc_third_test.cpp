@@ -156,7 +156,7 @@ HWTEST_F_L0(GCTest, LargeOverShootSizeTest)
         size_t newCapacity = heap->GetNewSpace()->GetInitialCapacity();
         EXPECT_TRUE(originalYoungSize < newYoungSize);
         EXPECT_TRUE(originalOverShootSize < newOverShootSize);
-        EXPECT_TRUE(0 < newOverShootSize);
+        EXPECT_TRUE(newOverShootSize > 0);
         EXPECT_TRUE(originalCapacity < newCapacity);
         EXPECT_TRUE(heap->GetNewSpace()->GetMaximumCapacity() == newCapacity);
     }

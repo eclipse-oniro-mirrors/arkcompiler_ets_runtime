@@ -129,11 +129,11 @@ static constexpr double IDLE_PATIAL_GC_SPACE_SIZE_LIMIT_RATE = 0.65f;
 static constexpr double IDLE_SPACE_SIZE_LIMIT_RATE = 0.8f;
 static constexpr double IDLE_SPACE_SIZE_MIN_INC_RATIO = 1.1f;
 static constexpr double IDLE_FRAGMENT_SIZE_RATIO = 0.1f;
-static constexpr double IDLE_BINDING_NATIVE_MIN_INC_RATIO = 0.2f;
+static constexpr double IDLE_BINDING_NATIVE_MIN_INC_RATIO = 0.25f;
 static constexpr size_t IDLE_SPACE_SIZE_MIN_INC_STEP = 5_MB;
 static constexpr size_t IDLE_SPACE_SIZE_MIN_INC_STEP_FULL = 1_MB;
 static constexpr size_t IDLE_MIN_EXPECT_RECLAIM_SIZE = 1_MB;
-static constexpr size_t IDLE_BINDING_NATIVE_MIN_INC_SIZE = 10_MB;
+static constexpr size_t IDLE_BINDING_NATIVE_MIN_INC_SIZE = 30_MB;
 static constexpr size_t IDLE_LOCAL_CC_LIMIT = 200_MB;
 
 // cold start
@@ -176,9 +176,8 @@ constexpr inline T AlignDown(T x, size_t alignment)
 template<typename T>
 constexpr inline T AlignUp(T x, size_t alignment)
 {
-    ASSERT(std::is_integral<T>::value && (x + alignment) > 0);
-    // alignment must be a power of two.
-    ASSERT(alignment != 0 && ((alignment & (alignment - 1U)) == 0));
+    ASSERT(std::is_integral<T>::value);
+    ASSERT((x + alignment) > 0);
     return AlignDown<T>(static_cast<T>(x + alignment - 1U), alignment);
 }
 

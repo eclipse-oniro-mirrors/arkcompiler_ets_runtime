@@ -16,7 +16,6 @@
 #include "ecmascript/mem/mem_controller.h"
 #include "ecmascript/mem/concurrent_marker.h"
 #include "ecmascript/mem/parallel_evacuator.h"
-#include "ecmascript/mem/mem_controller_utils.h"
 
 namespace panda::ecmascript {
 MemController::MemController(Heap *heap) : heap_(heap), allocTimeMs_(GetSystemTimeInMs())

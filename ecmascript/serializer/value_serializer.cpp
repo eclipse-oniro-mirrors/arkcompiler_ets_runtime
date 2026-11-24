@@ -188,7 +188,7 @@ bool ValueSerializer::WriteValue(JSThread *thread,
     return true;
 }
 
-bool ValueSerializer::SerializeSharedObj([[maybe_unused]] TaggedObject *object)
+bool ValueSerializer::SerializeSharedObj(TaggedObject *object)
 {
     [[maybe_unused]] Region *region = Region::ObjectAddressToRange(object);
     JSHClass *objClass = object->GetClass();
@@ -372,7 +372,7 @@ void ValueSerializer::SerializeObjectImpl(TaggedObject *object, bool isWeak, boo
         arrayBuffer->Detach(thread_, arrayBuffer->GetWithNativeAreaAllocator(), true);
     }
 }
-
+ 
 void ValueSerializer::SerializeJSError(TaggedObject *object)
 {
     [[maybe_unused]] EcmaHandleScope scope(thread_);
@@ -520,7 +520,8 @@ void ValueSerializer::SerializeJSSendableArrayBufferPrologue(TaggedObject *objec
     if (arrayLength > 0) {
         bool nativeAreaAllocated = arrayBuffer->GetWithNativeAreaAllocator();
         if (!nativeAreaAllocated) {
-            std::string errorMessage =  "Serialize don't support clone sendablearraybuffer has external allocated buffer";
+            std::string errorMessage =
+                "Serialize don't support clone sendablearraybuffer has external allocated buffer";
             PrintAndRecordErrorMessage(errorMessage);
             notSupport_ = true;
             return;

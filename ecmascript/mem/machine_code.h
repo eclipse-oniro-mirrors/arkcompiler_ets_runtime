@@ -273,7 +273,7 @@ public:
         return GetInstructionsSize();
     }
 
-    bool SetData(JSThread *thread, const MachineCodeDesc &desc, JSHandle<Method> &method, size_t dataSize);
+    bool SetData(JSThread *thread, const MachineCodeDesc& desc, JSHandle<Method>& method, size_t dataSize);
     bool SetText(const MachineCodeDesc &desc);
     bool SetNonText(const MachineCodeDesc &desc, EntityId methodId);
 #if ECMASCRIPT_ENABLE_ARK_STEED

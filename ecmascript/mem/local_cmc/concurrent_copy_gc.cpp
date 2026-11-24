@@ -156,6 +156,7 @@ void ConcurrentCopyGC::PreGC()
 
 void ConcurrentCopyGC::ProcessWeakReference()
 {
+    ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "ConcurrentCopyGC::ProcessWeakReference", "");
     TRACE_GC(GCStats::Scope::ScopeId::UpdateWeekRef, heap_->GetEcmaVM()->GetEcmaGCStats());
     ASSERT(heap_->IsParallelGCEnabled());
 #if ENABLE_LOCALCC_OPTIMIZATION

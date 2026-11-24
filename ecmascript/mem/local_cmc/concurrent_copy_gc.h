@@ -35,6 +35,18 @@ public:
     {
         return heap_;
     }
+    //Shared with GlobalCC's copy tasks for local-heap T0 allocation.
+#if USE_CMS_GC
+    SlotGCAllocator *GetTlabAllocator(uint32_t threadIndex)
+    {
+        return &tlabAllocators_.at(threadIndex);
+    }
+#else
+    CCTlabAllocator *GetTlabAllocator(uint32_t threadIndex)
+    {
+        return &tlabAllocators_.at(threadIndex);
+    }
+#endif
     void HandleUpdateFinished(bool cleanCallback = true);
     PUBLIC_API void WaitFinished();
     static WeakRootVisitor CreateUpdateWeakVisitor(CCEvacuator *evacuator);
@@ -74,16 +86,8 @@ private:
     JSThread *thread_ {nullptr};
     bool ccUpdateFinished_{false};
 #if USE_CMS_GC
-    SlotGCAllocator *GetTlabAllocator(uint32_t threadIndex)
-    {
-        return &tlabAllocators_.at(threadIndex);
-    }
     std::array<SlotGCAllocator, common::MAX_TASKPOOL_THREAD_NUM + 1> tlabAllocators_;
 #else
-    CCTlabAllocator *GetTlabAllocator(uint32_t threadIndex)
-    {
-        return &tlabAllocators_.at(threadIndex);
-    }
     std::array<CCTlabAllocator, common::MAX_TASKPOOL_THREAD_NUM + 1> tlabAllocators_;
 #endif
     std::atomic<size_t> runningTaskCount_ {0};
