@@ -44,6 +44,10 @@ static constexpr NodeType ARRAY_NODETYPE = 1;   // 1: "array" in node_types
 static constexpr NodeType OBJECT_NODETYPE = 3;  // 3: "object" in node_types
 static constexpr NodeType CLOSURE_NODETYPE = 5;  // 5: "closure" in node_types (synthetic method node)
 static constexpr NodeType CLASS_NODETYPE = 16;  // 16: "class" appended to node_types
+// Creation purpose is independent of the type exported in the heap snapshot.
+// Only primitive values and their synthetic array wrappers are eligible for pruning.
+enum class NodeRole { RETAINED, PRIMITIVE_VALUE, PRIMITIVE_WRAPPER };
+
 enum class EdgeType { CONTEXT, ELEMENT, PROPERTY, INTERNAL, HIDDEN, SHORTCUT, WEAK, XREF, DEFAULT = PROPERTY };
 
 static constexpr int VIRTUAL_NODE_SIZE = 1; // The virtual node size is fixed at 1

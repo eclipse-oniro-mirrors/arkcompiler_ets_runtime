@@ -19,6 +19,7 @@
 #include "utils.h"
 
 #include <cstdlib>
+#include <vector>
 
 namespace rawheap_translate {
 // Argument index constants for argv positional access.
@@ -43,7 +44,12 @@ std::string RAWHEAP_TRANSLATE_HELPER =
     "In single-file mode, the input .rawheap is translated to a .heapsnapshot.\n"
     "In two-file mode, a dynamic (V1/V2) rawheap and a static binary snapshot\n"
     "are merged into a single .heapsnapshot.\n"
-    "If the output file name is not provided, an automatic one will be generated.";
+    "If the output file name is not provided, an automatic one will be generated.\n"
+    "\n"
+    "Options:\n"
+    "  --prune          Prune basic-type primitive value nodes from the output.\n"
+    "  --version, -v    Print the translator version.\n"
+    "  --help, -h       Print this help.";
 
 // Parse single-file arguments: 1 .rawheap + optional .heapsnapshot.
 bool ParseArgsSingle(const int argc, const char **argv, std::string &input, std::string &output)
@@ -80,32 +86,21 @@ bool ParseArgsTwoFile(const int argc, const char **argv, std::string &dynamicInp
     return true;
 }
 
-int Main(const int argc, const char **argv)
+namespace {
+constexpr int EXIT_CODE_UNKNOWN_OPTION = 2;
+
+// Translate the positional inputs in two-file mode first, then fall back to the
+// single-file path. Mirrors the argv[1..3] indexing contract of the parse helpers.
+int RunTranslation(const int argc, const char **argv)
 {
-    if (argc < MIN_ARGC_SINGLE) {
-        std::cout << "Input error!\n" << RAWHEAP_TRANSLATE_HELPER << std::endl;
-        return 0;
-    }
-
     std::string firstArg = argv[ARG_INDEX_INPUT];
-    if (firstArg == "--version" || firstArg == "-v") {
-        std::cout << VERSION.ToString() << std::endl;
-        return 0;
-    }
-    if (firstArg == "--help" || firstArg == "-h") {
-        std::cout << RAWHEAP_TRANSLATE_HELPER << std::endl;
-        return 0;
-    }
-
-    // Try two-file mode first (two .rawheap inputs).
     std::string dynamicInput;
     std::string staticInput;
     std::string outputPath;
     if (ParseArgsTwoFile(argc, argv, dynamicInput, staticInput, outputPath)) {
-        return RawHeap::TranslateRawheap(dynamicInput, staticInput, outputPath) ? EXIT_SUCCESS : EXIT_FAILURE;
+        return RawHeap::TranslateRawheap(dynamicInput, staticInput, outputPath)
+            ? EXIT_SUCCESS : EXIT_FAILURE;
     }
-
-    // Fall back to single-file mode.
     if (!EndsWith(firstArg, ".rawheap")) {
         std::cout << "Input error!\n" << RAWHEAP_TRANSLATE_HELPER << std::endl;
         return 0;
@@ -115,8 +110,47 @@ int Main(const int argc, const char **argv)
         std::cout << "Input error!\n" << RAWHEAP_TRANSLATE_HELPER << std::endl;
         return 0;
     }
-    RawHeap::TranslateRawheap(singleInput, outputPath);
-    return 0;
+    return RawHeap::TranslateRawheap(singleInput, outputPath) ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+}  // namespace
+
+int Main(const int argc, const char **argv)
+{
+    RawHeap::SetPruneMode(PruneMode::DISABLED);
+    if (argc < MIN_ARGC_SINGLE) {
+        std::cout << "Input error!\n" << RAWHEAP_TRANSLATE_HELPER << std::endl;
+        return 0;
+    }
+    std::vector<const char *> positional {argv[0]};
+    positional.reserve(static_cast<size_t>(argc));
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--prune") {
+            RawHeap::SetPruneMode(PruneMode::ENABLED);
+            continue;
+        }
+        if (arg == "--version" || arg == "-v") {
+            std::cout << VERSION.ToString() << std::endl;
+            return 0;
+        }
+        if (arg == "--help" || arg == "-h") {
+            std::cout << RAWHEAP_TRANSLATE_HELPER << std::endl;
+            return 0;
+        }
+        if (!arg.empty() && arg[0] == '-') {
+            std::cout << "Input error!\n" << RAWHEAP_TRANSLATE_HELPER << std::endl;
+            return EXIT_CODE_UNKNOWN_OPTION;
+        }
+        positional.push_back(argv[i]);
+    }
+
+    const int cleanArgc = static_cast<int>(positional.size());
+    if (cleanArgc < MIN_ARGC_SINGLE) {
+        std::cout << "Input error!\n" << RAWHEAP_TRANSLATE_HELPER << std::endl;
+        return 0;
+    }
+    return RunTranslation(cleanArgc, positional.data());
 }
 
 }  // namespace rawheap_translate

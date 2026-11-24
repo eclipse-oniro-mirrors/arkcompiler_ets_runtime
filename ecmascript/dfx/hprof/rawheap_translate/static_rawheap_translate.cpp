@@ -22,6 +22,7 @@
 #include <iomanip>
 #include <sstream>
 #include <string_view>
+#include <unordered_set>
 
 namespace rawheap_translate {
 
@@ -273,8 +274,8 @@ bool StaticRawheapTranslate::ParseRecord(uint64_t &offset, uint64_t fileSize)
 bool StaticRawheapTranslate::Translate()
 {
     // Graph (including single-file synthetic root) is built during Parse().
-    // Add the trailing primitive nodes the serializer expects.
-    AddPrimitiveNodes();
+    // Append any deferred auxiliary nodes after the object graph.
+    AppendDeferredNodes();
     return true;
 }
 
@@ -782,6 +783,14 @@ bool StaticRawheapTranslate::CollectHeapSummary(uint32_t length)
 
 void StaticRawheapTranslate::BuildGraph(bool withRootFramework)
 {
+    // Root records describe slots; expose each valid target only once, including
+    // when repeated slots were written in different record batches.
+    std::unordered_set<uint32_t> rootIds;
+    auto uniqueRootsEnd = std::remove_if(roots_.begin(), roots_.end(), [&rootIds](uint32_t id) {
+        return id == 0 || !rootIds.insert(id).second;
+    });
+    roots_.erase(uniqueRootsEnd, roots_.end());
+
     Node *syntheticRoot = nullptr;
     Node *staticRoot = nullptr;
     if (withRootFramework) {
@@ -923,6 +932,8 @@ void StaticRawheapTranslate::CreateRootEdges(Node *syntheticRoot, Node *staticRo
         }
         InsertEdge(staticRoot, root, index++, EdgeType::ELEMENT);
         staticRoot->edgeCount++;
+        InsertEdge(syntheticRoot, root, subrootStrId, EdgeType::SHORTCUT);
+        syntheticRoot->edgeCount++;
     }
 }
 
@@ -986,7 +997,11 @@ bool StaticRawheapTranslate::EmitFieldValueEdge(Node *from, const FieldValue &va
         InsertEdge(from, GetOrCreateNode(static_cast<uint32_t>(value.value)), nameId, edgeType);
         return true;
     }
-    InsertEdge(from, GetOrCreateValueNode(value.type, value.value), nameId, EdgeType::PROPERTY);
+    Node *target = GetOrCreateValueNode(value.type, value.value);
+    if (target == nullptr) {
+        return false;
+    }
+    InsertEdge(from, target, nameId, EdgeType::PROPERTY);
     return true;
 }
 
@@ -1193,7 +1208,12 @@ void StaticRawheapTranslate::EmitTaggedArrayElementEdges(Node *buffer, const Arr
             StringId nameId = InsertAndGetStringId(std::to_string(index));
             InsertEdge(buffer, GetOrCreateNode(static_cast<uint32_t>(value.value)), nameId, EdgeType::WEAK);
         } else {
-            InsertEdge(buffer, GetOrCreateValueNode(value.type, value.value), index, EdgeType::ELEMENT);
+            Node *target = GetOrCreateValueNode(value.type, value.value);
+            if (target == nullptr) {
+                ++index;
+                continue;
+            }
+            InsertEdge(buffer, target, index, EdgeType::ELEMENT);
         }
         buffer->edgeCount++;
         ++index;
@@ -1208,22 +1228,25 @@ void StaticRawheapTranslate::EmitArrayBoxedPrimitiveEdges(Node *buffer, const Ar
     if (esz == 0 || rec.length == 0 || rec.primData.size() < static_cast<size_t>(rec.length) * esz) {
         return;
     }
-    StringId wrapperNameId = InsertAndGetStringId(BoxedWrapperName(static_cast<StaFieldType>(rec.elementType)));
-    uint32_t index = 0;
+    StringId wrapperNameId = 0;
     for (uint32_t j = 0; j < rec.length; ++j) {
-        uint64_t val = ReadPrimitiveFromBuffer(rec.primData.data(), j, esz);
         uint32_t wSynId = 0x40000000 + valueNodeCounter_++;
-        Node *wrapper = GetOrCreateNode(wSynId);
-        wrapper->nodeId = wSynId;
-        wrapper->type = OBJECT_NODETYPE;
+        Node *wrapper = GetOrCreateNode(wSynId, OBJECT_NODETYPE, NodeRole::PRIMITIVE_WRAPPER);
+        if (wrapper == nullptr) {
+            ++valueNodeCounter_;  // Reserve the omitted element's value-node ID.
+            continue;
+        }
+        if (wrapperNameId == 0) {
+            wrapperNameId = InsertAndGetStringId(BoxedWrapperName(static_cast<StaFieldType>(rec.elementType)));
+        }
         wrapper->strId = wrapperNameId;
         wrapper->size = 0;
+        uint64_t val = ReadPrimitiveFromBuffer(rec.primData.data(), j, esz);
         Node *valueNode = GetOrCreateValueNode(rec.elementType, val);
-        InsertEdge(buffer, wrapper, index, EdgeType::ELEMENT);
+        InsertEdge(buffer, wrapper, j, EdgeType::ELEMENT);
         buffer->edgeCount++;
         InsertEdge(wrapper, valueNode, valueNameId, EdgeType::PROPERTY);
         wrapper->edgeCount++;
-        ++index;
     }
 }
 
@@ -1247,21 +1270,18 @@ void StaticRawheapTranslate::CreateStringEdges()
 
 Node *StaticRawheapTranslate::GetOrCreateValueNode(uint8_t fieldType, uint64_t value)
 {
-    // Synthetic nodeId in a high range so it cannot collide with real heap
-    // addresses (which are even, low u32 nodeIds). The merger's duplicate-nodeId
-    // detection is the backstop if a collision ever occurs.
+    // Reserve IDs even for omitted values so retained synthetic IDs stay stable.
     uint32_t synId = 0x40000000 + valueNodeCounter_++;
-    Node *node = GetOrCreateNode(synId);
-    node->nodeId = synId;
+    NodeType type = HEAP_NUMBER;
     if (fieldType == static_cast<uint8_t>(StaFieldType::CHAR)) {
-        node->type = STRING;
+        type = STRING;
     } else if (fieldType == static_cast<uint8_t>(StaFieldType::TAGGED)) {
-        node->type = SYNTHETIC_NODETYPE;
-    } else {
-        node->type = HEAP_NUMBER;
+        type = SYNTHETIC_NODETYPE;
     }
-    node->strId = InsertAndGetStringId(MakeValueNodeName(fieldType, value));
-    node->size = 0;
+    Node *node = GetOrCreateNode(synId, type, NodeRole::PRIMITIVE_VALUE);
+    if (node != nullptr) {
+        node->strId = InsertAndGetStringId(MakeValueNodeName(fieldType, value));
+    }
     return node;
 }
 
@@ -1339,15 +1359,17 @@ std::string StaticRawheapTranslate::MakeTaggedValueNodeName(uint64_t value) cons
     }
 }
 
-Node *StaticRawheapTranslate::GetOrCreateNode(uint32_t nodeId)
+Node *StaticRawheapTranslate::GetOrCreateNode(uint32_t nodeId, NodeType type, NodeRole role)
 {
     auto it = nodeIdToNode_.find(nodeId);
     if (it != nodeIdToNode_.end()) {
         return it->second;
     }
-    Node *node = CreateNode();
-    node->nodeId = nodeId;
-    nodeIdToNode_.emplace(nodeId, node);
+    Node *node = CreateNode(type, role);
+    if (node != nullptr) {
+        node->nodeId = nodeId;
+        nodeIdToNode_.emplace(nodeId, node);
+    }
     return node;
 }
 

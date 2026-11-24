@@ -14,12 +14,27 @@
  */
 
 #include "ecmascript/tests/test_helper.h"
+#include "ecmascript/dfx/hprof/heap_profiler.h"
 #include "ecmascript/dfx/hprof/rawheap_translate/metadata_parse.h"
 #include "ecmascript/dfx/hprof/rawheap_translate/rawheap_translate.h"
 #include "ecmascript/dfx/hprof/rawheap_translate/static_rawheap_translate.h"
 #include "ecmascript/dfx/hprof/rawheap_translate/utils.h"
+#include "ecmascript/napi/include/jsnapi.h"
+#include "ecmascript/runtime.h"
 
+#include <algorithm>
+#include <cstdio>
+#include <cstdint>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
+#include <memory>
+#include <random>
+#include <set>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 // Forward declarations for the rawheap_translator CLI entry functions
 // (defined in main.cpp, compiled into this test binary via the BUILD.gn
@@ -166,11 +181,13 @@ public:
 
     void SetUp() override
     {
+        rawheap_translate::RawHeap::SetPruneMode(rawheap_translate::PruneMode::DISABLED);
         metaParser = std::make_unique<rawheap_translate::MetaParser>();
     }
 
     void TearDown() override
     {
+        rawheap_translate::RawHeap::SetPruneMode(rawheap_translate::PruneMode::DISABLED);
     }
 
     std::unique_ptr<rawheap_translate::MetaParser> metaParser {nullptr};
@@ -618,12 +635,12 @@ HWTEST_F_L0(RawHeapTranslateTest, ProfileTypeInfoV1UsesOwnLayoutAndKeepsFixedRef
     rawheap_translate::RawHeapTranslateV1 rawheap(metaParser.get());
     RawHeapTranslateV1TestHelper helper(&rawheap);
 
-    constexpr uint64_t EXTRA_INFO_ADDR = 0x2000;
-    constexpr uint64_t JIT_OSR_ADDR = 0x3000;
-    constexpr uint64_t IC_SLOT_ADDR = 0x4000;
-    rawheap_translate::Node *extraInfo = helper.FindOrCreateNode(EXTRA_INFO_ADDR);
-    rawheap_translate::Node *jitOsr = helper.FindOrCreateNode(JIT_OSR_ADDR);
-    rawheap_translate::Node *icSlot = helper.FindOrCreateNode(IC_SLOT_ADDR);
+    constexpr uint64_t extraInfoAddr = 0x2000;
+    constexpr uint64_t jitOsrAddr = 0x3000;
+    constexpr uint64_t icSlotAddr = 0x4000;
+    rawheap_translate::Node *extraInfo = helper.FindOrCreateNode(extraInfoAddr);
+    rawheap_translate::Node *jitOsr = helper.FindOrCreateNode(jitOsrAddr);
+    rawheap_translate::Node *icSlot = helper.FindOrCreateNode(icSlotAddr);
     ASSERT_NE(extraInfo, nullptr);
     ASSERT_NE(jitOsr, nullptr);
     ASSERT_NE(icSlot, nullptr);
@@ -631,8 +648,8 @@ HWTEST_F_L0(RawHeapTranslateTest, ProfileTypeInfoV1UsesOwnLayoutAndKeepsFixedRef
     rawheap_translate::JSType type = metaParser->GetJSTypeFromTypeName("PROFILE_TYPE_INFO");
     std::vector<uint64_t> zeroLengthData(7, 0);
     zeroLengthData[1] = 0;
-    zeroLengthData[5] = EXTRA_INFO_ADDR;
-    zeroLengthData[6] = JIT_OSR_ADDR;
+    zeroLengthData[5] = extraInfoAddr;
+    zeroLengthData[6] = jitOsrAddr;
     rawheap_translate::Node *zeroLengthNode = helper.FindOrCreateNode(0x1000);
     zeroLengthNode->jsType = type;
     zeroLengthNode->data = reinterpret_cast<char *>(zeroLengthData.data());
@@ -652,9 +669,9 @@ HWTEST_F_L0(RawHeapTranslateTest, ProfileTypeInfoV1UsesOwnLayoutAndKeepsFixedRef
 
     std::vector<uint64_t> clampedData(8, 0);
     clampedData[1] = 100;
-    clampedData[5] = EXTRA_INFO_ADDR;
-    clampedData[6] = JIT_OSR_ADDR;
-    clampedData[7] = IC_SLOT_ADDR | 1U;
+    clampedData[5] = extraInfoAddr;
+    clampedData[6] = jitOsrAddr;
+    clampedData[7] = icSlotAddr | 1U;
     rawheap_translate::Node *clampedNode = helper.FindOrCreateNode(0x5000);
     clampedNode->jsType = type;
     clampedNode->data = reinterpret_cast<char *>(clampedData.data());
@@ -865,8 +882,8 @@ HWTEST_F_L0(RawHeapTranslateTest, CheckVersion)
 
 HWTEST_F_L0(RawHeapTranslateTest, RawHeapTranslateV1)
 {
-    const std::string rawheap_v1_for_test_filename = "rawheap_v1_for_test.rawheap";
-    int fd = open(rawheap_v1_for_test_filename.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0666);
+    const std::string rawheapV1ForTestFilename = "rawheap_v1_for_test.rawheap";
+    int fd = open(rawheapV1ForTestFilename.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0666);
     ASSERT_FALSE(fd == -1);
 
     FileDescriptorStream stream(fd);
@@ -877,7 +894,7 @@ HWTEST_F_L0(RawHeapTranslateTest, RawHeapTranslateV1)
     rawheapHelper.WriteTestData(writer);
 
     rawheap_translate::FileReader file;
-    ASSERT_TRUE(file.Initialize(rawheap_v1_for_test_filename));
+    ASSERT_TRUE(file.Initialize(rawheapV1ForTestFilename));
     ASSERT_TRUE(rawheapHelper.ReadRootTable(file));
     ASSERT_TRUE(rawheapHelper.ReadStringTable(file));
 
@@ -917,8 +934,8 @@ HWTEST_F_L0(RawHeapTranslateTest, RawHeapTranslateV1)
 
 HWTEST_F_L0(RawHeapTranslateTest, RawHeapTranslateV2)
 {
-    const std::string rawheap_v2_for_test_filename = "rawheap_v2_for_test.rawheap";
-    int fd = open(rawheap_v2_for_test_filename.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0666);
+    const std::string rawheapV2ForTestFilename = "rawheap_v2_for_test.rawheap";
+    int fd = open(rawheapV2ForTestFilename.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0666);
     ASSERT_FALSE(fd == -1);
 
     FileDescriptorStream stream(fd);
@@ -929,7 +946,7 @@ HWTEST_F_L0(RawHeapTranslateTest, RawHeapTranslateV2)
     rawheapHelper.WriteTestData(writer);
 
     rawheap_translate::FileReader file;
-    ASSERT_TRUE(file.Initialize(rawheap_v2_for_test_filename));
+    ASSERT_TRUE(file.Initialize(rawheapV2ForTestFilename));
     ASSERT_TRUE(rawheapHelper.ReadObjectTable(file));
     ASSERT_TRUE(rawheapHelper.ReadRootTable(file));
     ASSERT_TRUE(rawheapHelper.ReadStringTable(file));
@@ -1581,6 +1598,17 @@ HWTEST_F_L0(RawHeapTranslateTest, RawHeapTranslateV2TranslateWithGlobalRef)
     auto nodes = *helper.GetNodes();
     ASSERT_EQ(GetGlobalHandleObjectNodeName(nodes, helper.GetStringTable()), "GlobalHandleObject[1]");
     ASSERT_TRUE(HasNodeWithName(nodes, helper.GetStringTable(), "ReferenceAddress:0xaaa0"));
+    size_t edgeCount = 0;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        EXPECT_EQ(nodes[i]->index, i);
+        edgeCount += nodes[i]->edgeCount;
+    }
+    EXPECT_EQ(edgeCount, rawheap.GetEdgeCount());
+    for (const auto *edge : *rawheap.GetEdges()) {
+        ASSERT_NE(edge->to, nullptr);
+        ASSERT_LT(edge->to->index, nodes.size());
+        EXPECT_EQ(nodes[edge->to->index], edge->to);
+    }
 }
 
 // Focused regression: a rawheap with NO GlobalHandleObject data — whether because
@@ -1654,6 +1682,30 @@ HWTEST_F_L0(RawHeapTranslateTest, ParseRawheapWithoutGlobalHandleObjectData)
 // main.cpp inspects the input format, selects a parser, then runs either the
 // merge path or the single-file path through these entry functions.
 // ============================================================================
+
+// Check exit codes for missing input, help/version combinations, unknown options, and invalid extensions.
+// Reject --prune=true as an unknown option while preserving existing help and input-error exit codes.
+HWTEST_F_L0(RawHeapTranslateTest, CLI_Main_ArgumentValidation)
+{
+    constexpr int unknownOptionExitCode = 2;
+    // A missing argv must be handled before accessing the program name.
+    EXPECT_EQ(rawheap_translate::Main(0, nullptr), 0);
+    std::vector<std::pair<std::vector<const char *>, int>> cases {
+        {{"rawheap_translator", "--prune"}, 0},
+        {{"rawheap_translator", "--prune", "--help"}, 0},
+        {{"rawheap_translator", "--prune", "-h"}, 0},
+        {{"rawheap_translator", "--prune", "--version"}, 0},
+        {{"rawheap_translator", "--prune", "-v"}, 0},
+        {{"rawheap_translator", "--unknown"}, unknownOptionExitCode},
+        {{"rawheap_translator", "--prune=true", "input.rawheap"}, unknownOptionExitCode},
+        {{"rawheap_translator", "input.rawheap", "--unknown", "out.heapsnapshot"}, unknownOptionExitCode},
+        {{"rawheap_translator", "--prune", "input.txt"}, 0}
+    };
+    for (auto &[argv, expected] : cases) {
+        SCOPED_TRACE(testing::PrintToString(argv));
+        EXPECT_EQ(rawheap_translate::Main(argv.size(), argv.data()), expected);
+    }
+}
 
 HWTEST_F_L0(RawHeapTranslateTest, CLI_ParseArgsSingle_Basic)
 {
@@ -1790,12 +1842,34 @@ HWTEST_F_L0(RawHeapTranslateTest, CLI_Main_TwoFileTranslationFailure)
     const char *argv[] = {"rawheap_translator", dynamicPath, staticPath, outputPath};
 
     EXPECT_EQ(rawheap_translate::Main(4, argv), EXIT_FAILURE);
+
+    // Check failure propagation with pruning enabled in both conversion modes.
+    const char *prunedArgv[] = {"rawheap_translator", dynamicPath, staticPath, outputPath, "--prune"};
+    EXPECT_EQ(rawheap_translate::Main(std::size(prunedArgv), prunedArgv), EXIT_FAILURE);
+    const char *singleArgv[] = {"rawheap_translator", dynamicPath, outputPath, "--prune"};
+    EXPECT_EQ(rawheap_translate::Main(std::size(singleArgv) - 1, singleArgv), EXIT_FAILURE);
+    EXPECT_EQ(rawheap_translate::Main(std::size(singleArgv), singleArgv), EXIT_FAILURE);
+    EXPECT_FALSE(std::ifstream(outputPath).good());
 }
 
 // ============================================================================
 // TranslateRawheap error paths: malformed input and merge-failure scenarios
 // must return false rather than crashing.
 // ============================================================================
+
+HWTEST_F_L0(RawHeapTranslateTest, CLI_Main_ResetsPruneModeBetweenInvocations)
+{
+    const char *enabled[] = {"rawheap_translator", "--prune"};
+    EXPECT_EQ(rawheap_translate::Main(std::size(enabled), enabled), EXIT_SUCCESS);
+    rawheap_translate::RawHeapTranslateV1 heap(nullptr);
+    EXPECT_EQ(heap.CreateNode(rawheap_translate::HEAP_NUMBER, rawheap_translate::NodeRole::PRIMITIVE_VALUE), nullptr);
+    const char *disabled[] = {"rawheap_translator", "--help"};
+    EXPECT_EQ(rawheap_translate::Main(std::size(disabled), disabled), EXIT_SUCCESS);
+    auto *node = heap.CreateNode(rawheap_translate::HEAP_NUMBER, rawheap_translate::NodeRole::PRIMITIVE_VALUE);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->type, rawheap_translate::HEAP_NUMBER);
+    EXPECT_EQ(heap.GetNodeCount(), 1U);
+}
 
 HWTEST_F_L0(RawHeapTranslateTest, TranslateRawheap_BadMagic_ReturnsFalse)
 {
@@ -1874,5 +1948,439 @@ HWTEST_F_L0(RawHeapTranslateTest, TranslateRawheap_TwoFileMergeFails_ReturnsFals
     std::remove(outPath.c_str());
 }
 
+// The production binary dumper does not support ARM32.
+#if !defined(PANDA_TARGET_ARM32)
+namespace {
+// Creates uniquely named temporary files for a test and removes them on teardown.
+class TempFiles {
+public:
+    ~TempFiles()
+    {
+        for (const auto &path : paths_) {
+            std::remove(path.c_str());
+        }
+    }
+
+    std::string Path(const std::string &suffix)
+    {
+        paths_.push_back(prefix_ + std::to_string(paths_.size()) + suffix);
+        return paths_.back();
+    }
+
+private:
+    std::string prefix_ = "rawheap_translate_test_" + std::to_string(std::random_device{}()) + "_";
+    std::vector<std::string> paths_;
+};
+
+using HeapNode = rawheap_translate::Node;
+using HeapEdge = rawheap_translate::Edge;
+using rawheap_translate::EdgeType;
+using rawheap_translate::PruneMode;
+using rawheap_translate::RawHeap;
+
+// .heapsnapshot node/edge column widths and per-field column offsets, mirroring
+// HeapSnapshotJSONSerializer::SerializeNodes / SerializeEdges.
+constexpr size_t NODE_FIELDS = 8;
+constexpr size_t EDGE_FIELDS = 3;
+constexpr size_t NODE_NAME_FIELD = 1;
+constexpr size_t NODE_EDGE_COUNT_FIELD = 4;
+constexpr size_t EDGE_TYPE_FIELD = 0;
+constexpr size_t EDGE_TARGET_FIELD = 2;
+
+constexpr size_t NODE_TYPE_FIELD = 0;
+constexpr size_t NODE_ID_FIELD = 2;
+constexpr int BUSINESS_INT_VALUE = 42;
+constexpr double BUSINESS_DOUBLE_VALUE = 2.5;
+const std::vector<std::string> PRIMITIVE_NAMES {
+    "Int", "Double", "Null", "Boolean:true", "Boolean:false", "Exception", "Undefined", "Illegal_Primitive"
+};
+
+bool IsPrimitiveName(const std::string &name)
+{
+    return std::find(PRIMITIVE_NAMES.begin(), PRIMITIVE_NAMES.end(), name) != PRIMITIVE_NAMES.end();
+}
+
+// Complete-file fixtures and snapshot graph assertions for conversion entry points.
+std::string ReadSnapshotFile(const std::string &path)
+{
+    std::ifstream file(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+}
+
+// Create normal JS objects and let the production dumper and generated metadata describe their layout.
+class RuntimeRawheap {
+public:
+    ~RuntimeRawheap()
+    {
+        if (vm_ != nullptr) {
+            Runtime::GetInstance()->SetRawHeapDumpCropLevel(previousLevel_);
+            HeapProfilerInterface::Destroy(vm_);
+            TestHelper::DestroyEcmaVMWithScope(vm_, scope_);
+        }
+    }
+
+    void Initialize()
+    {
+        TestHelper::CreateEcmaVMWithScope(vm_, thread_, scope_);
+        ASSERT_NE(vm_, nullptr);
+        vm_->SetEnableForceGC(false);
+        previousLevel_ = Runtime::GetInstance()->GetRawHeapDumpCropLevel();
+        business_ = panda::ObjectRef::New(vm_);
+        child_ = panda::ObjectRef::New(vm_);
+        ASSERT_TRUE(business_->Set(vm_, "pruneChild", child_));
+        ASSERT_TRUE(child_->Set(vm_, "pruneParent", business_));
+        ASSERT_TRUE(business_->Set(vm_, "pruneInt", panda::NumberRef::New(vm_, BUSINESS_INT_VALUE)));
+        ASSERT_TRUE(business_->Set(vm_, "pruneDouble", panda::NumberRef::New(vm_, BUSINESS_DOUBLE_VALUE)));
+        ASSERT_TRUE(business_->Set(vm_, "pruneNull", panda::JSValueRef::Null(vm_)));
+        ASSERT_TRUE(business_->Set(vm_, "pruneTrue", panda::BooleanRef::New(vm_, true)));
+        ASSERT_TRUE(business_->Set(vm_, "pruneFalse", panda::BooleanRef::New(vm_, false)));
+        ASSERT_TRUE(business_->Set(vm_, "pruneUndefined", panda::JSValueRef::Undefined(vm_)));
+        auto text = panda::StringRef::NewFromUtf8(vm_, "Int");
+        ASSERT_TRUE(business_->Set(vm_, text, text));
+        auto map = panda::MapRef::New(vm_);
+        map->Set(vm_, business_, child_);
+        ASSERT_TRUE(business_->Set(vm_, "pruneMap", map));
+        auto weakMap = panda::WeakMapRef::New(vm_);
+        weakMap->Set(vm_, child_, business_);
+        ASSERT_TRUE(business_->Set(vm_, "pruneWeakMap", weakMap));
+    }
+
+    bool Dump(const std::string &path, bool cropped = false)
+    {
+        Runtime::GetInstance()->SetRawHeapDumpCropLevel(cropped ? RawHeapDumpCropLevel::LEVEL_V2
+                                                             : RawHeapDumpCropLevel::LEVEL_V1);
+        int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd < 0) {
+            return false;
+        }
+        FileDescriptorStream stream(fd);
+        DumpSnapShotOption option;
+        option.dumpFormat = DumpFormat::BINARY;
+        option.isFullGC = false;
+        option.isJSLeakWatcher = true;
+        auto *profiler = HeapProfilerInterface::GetInstance(vm_);
+        if (!profiler->DumpHeapSnapshot(&stream, option)) {
+            return false;
+        }
+        stream.EndOfStream();
+        auto ids = profiler->GetHandleNodeIdMap();
+        businessId_ = ids.at(reinterpret_cast<uintptr_t>(*business_));
+        childId_ = ids.at(reinterpret_cast<uintptr_t>(*child_));
+        // The CLI format bundles the generated production metadata after the real dump.
+        uint32_t offset = rawheap_translate::FileReader::GetFileSize(path);
+        const auto metadata = ReadSnapshotFile(HPROF_TEST_METADATA_JSON_DIR "metadata.json");
+        if (metadata.empty()) {
+            return false;
+        }
+        uint32_t size = metadata.size();
+        std::ofstream output(path, std::ios::app | std::ios::binary);
+        output.write(metadata.data(), metadata.size());
+        output.write(reinterpret_cast<const char *>(&offset), sizeof(offset));
+        output.write(reinterpret_cast<const char *>(&size), sizeof(size));
+        return output.good();
+    }
+
+    uint64_t GetBusinessId() const
+    {
+        return businessId_;
+    }
+
+    uint64_t GetChildId() const
+    {
+        return childId_;
+    }
+
+private:
+    uint64_t businessId_ {0};
+    uint64_t childId_ {0};
+    EcmaVM *vm_ {nullptr};
+    EcmaHandleScope *scope_ {nullptr};
+    JSThread *thread_ {nullptr};
+    panda::Local<panda::ObjectRef> business_;
+    panda::Local<panda::ObjectRef> child_;
+    RawHeapDumpCropLevel previousLevel_ {RawHeapDumpCropLevel::DEFAULT};
+};
+
+using SnapshotEdge = std::tuple<uint64_t, uint64_t, EdgeType>;
+struct Snapshot {
+    size_t primitiveCount {0};
+    std::vector<uint64_t> ids;
+    std::vector<SnapshotEdge> edges;
+
+    bool HasEdge(uint64_t from, uint64_t to, EdgeType type = EdgeType::PROPERTY) const
+    {
+        return std::find(edges.begin(), edges.end(), SnapshotEdge(from, to, type)) != edges.end();
+    }
+};
+
+std::vector<cJSON *> SnapshotArray(cJSON *array)
+{
+    std::vector<cJSON *> items;
+    cJSON *item = nullptr;
+    cJSON_ArrayForEach(item, array) {
+        items.push_back(item);
+    }
+    return items;
+}
+
+// Read the real snapshot in linear time and validate edge ownership and target indices.
+void ReadSnapshot(const std::string &path, Snapshot &snapshot)
+{
+    const auto content = ReadSnapshotFile(path);
+    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> json(cJSON_Parse(content.c_str()), cJSON_Delete);
+    ASSERT_NE(json, nullptr);
+    auto nodes = SnapshotArray(cJSON_GetObjectItem(json.get(), "nodes"));
+    auto edges = SnapshotArray(cJSON_GetObjectItem(json.get(), "edges"));
+    auto strings = SnapshotArray(cJSON_GetObjectItem(json.get(), "strings"));
+    ASSERT_FALSE(nodes.empty());
+    ASSERT_EQ(nodes.size() % NODE_FIELDS, 0U);
+    ASSERT_EQ(edges.size() % EDGE_FIELDS, 0U);
+    std::vector<size_t> outgoing;
+    for (size_t offset = 0; offset < nodes.size(); offset += NODE_FIELDS) {
+        size_t stringId = cJSON_GetNumberValue(nodes[offset + NODE_NAME_FIELD]);
+        ASSERT_LT(stringId, strings.size());
+        auto *name = cJSON_GetStringValue(strings[stringId]);
+        ASSERT_NE(name, nullptr);
+        if (cJSON_GetNumberValue(nodes[offset + NODE_TYPE_FIELD]) == rawheap_translate::HEAP_NUMBER &&
+            IsPrimitiveName(name)) {
+            ++snapshot.primitiveCount;
+        }
+        snapshot.ids.push_back(cJSON_GetNumberValue(nodes[offset + NODE_ID_FIELD]));
+        outgoing.push_back(cJSON_GetNumberValue(nodes[offset + NODE_EDGE_COUNT_FIELD]));
+    }
+    size_t edge = 0;
+    for (size_t n = 0; n < outgoing.size(); ++n) {
+        for (size_t i = 0; i < outgoing[n]; ++i, ++edge) {
+            size_t offset = edge * EDGE_FIELDS;
+            ASSERT_LT(offset + EDGE_TARGET_FIELD, edges.size());
+            size_t target = cJSON_GetNumberValue(edges[offset + EDGE_TARGET_FIELD]);
+            ASSERT_EQ(target % NODE_FIELDS, 0U);
+            ASSERT_LT(target / NODE_FIELDS, snapshot.ids.size());
+            auto type = static_cast<EdgeType>(cJSON_GetNumberValue(edges[offset + EDGE_TYPE_FIELD]));
+            snapshot.edges.emplace_back(snapshot.ids[n], snapshot.ids[target / NODE_FIELDS], type);
+        }
+    }
+    ASSERT_EQ(edge * EDGE_FIELDS, edges.size());
+}
+
+std::string NodeName(RawHeap &heap, const HeapNode *node)
+{
+    auto *strings = heap.GetStringTable();
+    return strings->GetStringByKey(strings->GetKeyByStringId(node->strId));
+}
+
+void ReadRawheap(const std::string &path, rawheap_translate::MetaParser &metadata, std::unique_ptr<RawHeap> &heap)
+{
+    rawheap_translate::FileReader file;
+    ASSERT_TRUE(file.Initialize(path));
+    ASSERT_TRUE(file.CheckAndGetHeaderAt(rawheap_translate::FileReader::GetFileSize(path) - sizeof(uint64_t), 0));
+    ASSERT_TRUE(RawHeap::ParseMetaData(file, &metadata));
+    rawheap_translate::Version version;
+    ASSERT_TRUE(version.Parse(RawHeap::ReadVersion(file)));
+    heap.reset(RawHeap::ParseRawheap(version, &metadata));
+    ASSERT_NE(heap, nullptr);
+    ASSERT_TRUE(heap->Parse(file, file.GetHeaderLeft()));
+    ASSERT_TRUE(heap->Translate());
+}
+
+void CheckPrunedGraph(RawHeap &heap, uint64_t businessId, uint64_t childId)
+{
+    const auto &nodes = *heap.GetNodes();
+    const auto &edges = *heap.GetEdges();
+    size_t cursor = 0;
+    bool childReference = false;
+    bool parentReference = false;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        auto *node = nodes[i];
+        EXPECT_EQ(node->index, i);
+        EXPECT_FALSE(node->type == rawheap_translate::HEAP_NUMBER && IsPrimitiveName(NodeName(heap, node)));
+        for (uint32_t j = 0; j < node->edgeCount; ++j, ++cursor) {
+            ASSERT_LT(cursor, edges.size());
+            auto *edge = edges[cursor];
+            ASSERT_NE(edge, nullptr);
+            ASSERT_NE(edge->to, nullptr);
+            ASSERT_LT(edge->to->index, nodes.size());
+            EXPECT_EQ(nodes[edge->to->index], edge->to);
+            EXPECT_TRUE(edge->from == nullptr || edge->from == node);
+            childReference |= node->nodeId == businessId && edge->to->nodeId == childId;
+            parentReference |= node->nodeId == childId && edge->to->nodeId == businessId;
+        }
+    }
+    EXPECT_EQ(cursor, edges.size());
+    EXPECT_TRUE(childReference);
+    EXPECT_TRUE(parentReference);
+}
+
+}  // namespace
+
+// Run every --prune position and repeated flags against an actual VM dump.
+// Preserve the input file and both directions of the real business-object reference cycle.
+HWTEST_F_L0(RawHeapTranslateTest, CLI_Main_OptionPositionsAndRepeatedFlags)
+{
+    TempFiles files;
+    RuntimeRawheap runtime;
+    ASSERT_NO_FATAL_FAILURE(runtime.Initialize());
+    auto input = files.Path(".rawheap");
+    auto output = files.Path(".heapsnapshot");
+    ASSERT_TRUE(runtime.Dump(input));
+    const auto original = ReadSnapshotFile(input);
+    std::vector<std::vector<const char *>> cases {
+        {"rawheap_translator", "--prune", input.c_str(), output.c_str()},
+        {"rawheap_translator", input.c_str(), "--prune", output.c_str()},
+        {"rawheap_translator", input.c_str(), output.c_str(), "--prune"},
+        {"rawheap_translator", "--prune", input.c_str(), output.c_str(), "--prune"}
+    };
+    for (auto &args : cases) {
+        SCOPED_TRACE(testing::PrintToString(args));
+        std::remove(output.c_str());
+        ASSERT_EQ(rawheap_translate::Main(args.size(), args.data()), EXIT_SUCCESS);
+        Snapshot actual;
+        ASSERT_NO_FATAL_FAILURE(ReadSnapshot(output, actual));
+        EXPECT_EQ(actual.primitiveCount, 0U);
+        EXPECT_TRUE(actual.HasEdge(runtime.GetBusinessId(), runtime.GetChildId()));
+        EXPECT_TRUE(actual.HasEdge(runtime.GetChildId(), runtime.GetBusinessId()));
+    }
+    EXPECT_EQ(ReadSnapshotFile(input), original);
+}
+
+// Generate V1/V2 inputs through the real dumper and check default, disabled, and enabled modes.
+// Remove actual primitive nodes while preserving business IDs and cyclic references.
+HWTEST_F_L0(RawHeapTranslateTest, TranslateRawheap_DynamicVersionsAndPruneModes)
+{
+    TempFiles files;
+    RuntimeRawheap runtime;
+    ASSERT_NO_FATAL_FAILURE(runtime.Initialize());
+    for (bool cropped : {false, true}) {
+        SCOPED_TRACE(cropped);
+        auto input = files.Path(".rawheap");
+        auto baselinePath = files.Path(".heapsnapshot");
+        auto disabledPath = files.Path(".heapsnapshot");
+        auto prunedPath = files.Path(".heapsnapshot");
+        ASSERT_TRUE(runtime.Dump(input, cropped));
+        RawHeap::SetPruneMode(PruneMode::DISABLED);
+        ASSERT_TRUE(RawHeap::TranslateRawheap(input, baselinePath));
+        ASSERT_TRUE(RawHeap::TranslateRawheap(input, disabledPath));
+        RawHeap::SetPruneMode(PruneMode::ENABLED);
+        ASSERT_TRUE(RawHeap::TranslateRawheap(input, prunedPath));
+        Snapshot baseline;
+        Snapshot disabled;
+        Snapshot pruned;
+        ASSERT_NO_FATAL_FAILURE(ReadSnapshot(baselinePath, baseline));
+        ASSERT_NO_FATAL_FAILURE(ReadSnapshot(disabledPath, disabled));
+        ASSERT_NO_FATAL_FAILURE(ReadSnapshot(prunedPath, pruned));
+        EXPECT_EQ(disabled.ids, baseline.ids);
+        EXPECT_EQ(disabled.edges, baseline.edges);
+        EXPECT_EQ(pruned.primitiveCount, 0U);
+        EXPECT_EQ(pruned.ids.size() + baseline.primitiveCount, baseline.ids.size());
+        EXPECT_TRUE(pruned.HasEdge(runtime.GetBusinessId(), runtime.GetChildId()));
+        EXPECT_TRUE(pruned.HasEdge(runtime.GetChildId(), runtime.GetBusinessId()));
+        if (cropped) {
+            EXPECT_EQ(pruned.ids, baseline.ids);
+            EXPECT_EQ(pruned.edges, baseline.edges);
+        } else {
+            EXPECT_GT(baseline.primitiveCount, 0U);
+            EXPECT_LT(pruned.edges.size(), baseline.edges.size());
+        }
+    }
+}
+
+// An empty optional static path must use the real dynamic dump through the two-file API as well.
+// Both overloads must retain the same business graph for each pruning mode and dump version.
+HWTEST_F_L0(RawHeapTranslateTest, TranslateRawheap_EmptyStaticPathUsesRealDynamicHeap)
+{
+    TempFiles files;
+    RuntimeRawheap runtime;
+    ASSERT_NO_FATAL_FAILURE(runtime.Initialize());
+    for (bool cropped : {false, true}) {
+        SCOPED_TRACE(cropped);
+        auto input = files.Path(".rawheap");
+        ASSERT_TRUE(runtime.Dump(input, cropped));
+        for (auto mode : {PruneMode::DISABLED, PruneMode::ENABLED}) {
+            SCOPED_TRACE(static_cast<int>(mode));
+            auto singlePath = files.Path(".heapsnapshot");
+            auto optionalPath = files.Path(".heapsnapshot");
+            RawHeap::SetPruneMode(mode);
+            ASSERT_TRUE(RawHeap::TranslateRawheap(input, singlePath));
+            ASSERT_TRUE(RawHeap::TranslateRawheap(input, "", optionalPath));
+            Snapshot single;
+            Snapshot optional;
+            ASSERT_NO_FATAL_FAILURE(ReadSnapshot(singlePath, single));
+            ASSERT_NO_FATAL_FAILURE(ReadSnapshot(optionalPath, optional));
+            EXPECT_EQ(optional.ids, single.ids);
+            EXPECT_EQ(optional.edges, single.edges);
+            EXPECT_EQ(optional.primitiveCount, single.primitiveCount);
+            EXPECT_TRUE(optional.HasEdge(runtime.GetBusinessId(), runtime.GetChildId()));
+            EXPECT_TRUE(optional.HasEdge(runtime.GetChildId(), runtime.GetBusinessId()));
+        }
+    }
+}
+
 // ============================================================================
+// The same input must retain the same business objects when values are omitted at creation.
+HWTEST_F_L0(RawHeapTranslateTest, CreationPruning_PreservesBusinessGraph)
+{
+    for (bool cropped : {false, true}) {
+        TempFiles files;
+        RuntimeRawheap runtime;
+        ASSERT_NO_FATAL_FAILURE(runtime.Initialize());
+        auto input = files.Path(".rawheap");
+        ASSERT_TRUE(runtime.Dump(input, cropped));
+        rawheap_translate::MetaParser metadata;
+        rawheap_translate::MetaParser baselineMetadata;
+        std::unique_ptr<RawHeap> heap;
+        std::unique_ptr<RawHeap> baseline;
+        RawHeap::SetPruneMode(PruneMode::DISABLED);
+        ASSERT_NO_FATAL_FAILURE(ReadRawheap(input, baselineMetadata, baseline));
+        RawHeap::SetPruneMode(PruneMode::ENABLED);
+        ASSERT_NO_FATAL_FAILURE(ReadRawheap(input, metadata, heap));
+        size_t primitiveCount = 0;
+        std::vector<uint64_t> retainedIds;
+        for (auto *node : *baseline->GetNodes()) {
+            if (node->type == rawheap_translate::HEAP_NUMBER && IsPrimitiveName(NodeName(*baseline, node))) {
+                ++primitiveCount;
+            } else {
+                retainedIds.push_back(node->nodeId);
+            }
+        }
+        std::vector<uint64_t> actualIds;
+        for (auto *node : *heap->GetNodes()) {
+            actualIds.push_back(node->nodeId);
+        }
+        EXPECT_EQ(heap->GetNodeCount() + primitiveCount, baseline->GetNodeCount());
+        EXPECT_EQ(actualIds, retainedIds);
+        EXPECT_EQ(primitiveCount == 0, cropped);
+        ASSERT_NO_FATAL_FAILURE(CheckPrunedGraph(*heap, runtime.GetBusinessId(), runtime.GetChildId()));
+    }
+}
+
+// Hashes, weak references and a real string named "Int" must survive creation-time filtering.
+HWTEST_F_L0(RawHeapTranslateTest, CreationPruning_PreservesHashesWeakRefsAndStrings)
+{
+    TempFiles files;
+    RuntimeRawheap runtime;
+    ASSERT_NO_FATAL_FAILURE(runtime.Initialize());
+    auto input = files.Path(".rawheap");
+    ASSERT_TRUE(runtime.Dump(input));
+    rawheap_translate::MetaParser metadata;
+    std::unique_ptr<RawHeap> heap;
+    RawHeap::SetPruneMode(PruneMode::ENABLED);
+    ASSERT_NO_FATAL_FAILURE(ReadRawheap(input, metadata, heap));
+    size_t hashCount = 0;
+    size_t stringCount = 0;
+    size_t weakCount = 0;
+    for (auto *node : *heap->GetNodes()) {
+        const auto name = NodeName(*heap, node);
+        hashCount += name.rfind("Int:", 0) == 0;
+        stringCount += node->type == rawheap_translate::STRING && name == "Int";
+    }
+    for (auto *edge : *heap->GetEdges()) {
+        weakCount += edge->type == EdgeType::WEAK;
+    }
+    EXPECT_GT(hashCount, 0U);
+    EXPECT_GT(stringCount, 0U);
+    EXPECT_GT(weakCount, 0U);
+    ASSERT_NO_FATAL_FAILURE(CheckPrunedGraph(*heap, runtime.GetBusinessId(), runtime.GetChildId()));
+}
+#endif  // !defined(PANDA_TARGET_ARM32)
+
 }  // namespace panda::test

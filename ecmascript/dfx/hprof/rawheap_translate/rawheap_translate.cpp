@@ -25,6 +25,8 @@
 #include "utils.h"
 
 namespace rawheap_translate {
+PruneMode RawHeap::pruneMode_ = PruneMode::DISABLED;
+
 namespace {
 bool IsArrayFixedField(const Field &field, const ArrayLayout &layout)
 {
@@ -45,6 +47,9 @@ RawHeap::~RawHeap()
     }
     for (auto edge : edges_) {
         delete edge;
+    }
+    for (auto node : deferredNodes_) {
+        delete node;
     }
     delete strTable_;
 }
@@ -353,17 +358,34 @@ std::string RawHeap::GetVersion()
     return version_;
 }
 
-Node *RawHeap::CreateNode()
+Node *RawHeap::AllocateNode(NodeType type, uint32_t index, NodeRole role)
 {
-    Node *node = new Node(nodeIndex_++);
-    nodes_.push_back(node);
+    if (pruneMode_ == PruneMode::ENABLED &&
+        (role == NodeRole::PRIMITIVE_VALUE || role == NodeRole::PRIMITIVE_WRAPPER)) {
+        return nullptr;
+    }
+    Node *node = new Node(index);
+    node->type = type;
+    return node;
+}
+
+Node *RawHeap::CreateNode(NodeType type, NodeRole role)
+{
+    Node *node = AllocateNode(type, nodeIndex_, role);
+    if (node != nullptr) {
+        nodes_.push_back(node);
+        ++nodeIndex_;
+    }
     return node;
 }
 
 Node *RawHeap::CreateNodeAt(size_t pos)
 {
-    Node *node = new Node(nodeIndex_++);
+    Node *node = AllocateNode(DEFAULT_NODETYPE, nodeIndex_++);
     nodes_.insert(nodes_.begin() + pos, node);
+    for (size_t i = pos; i < nodes_.size(); ++i) {
+        nodes_[i]->index = static_cast<uint32_t>(i);
+    }
     return node;
 }
 
@@ -413,22 +435,23 @@ void RawHeap::CreateHashEdge(Node *node)
         return;
     }
 
-    Node *hashNode = new Node(0);
+    Node *hashNode = AllocateNode(HEAP_NUMBER, 0);
     hashNode->nodeId = 0;
-    hashNode->type = 7;  // 7: means HEAPNUMBER
     hashNode->strId = InsertAndGetStringId("Int:" + std::to_string(hash));
     InsertEdge(hashNode, hashStrId, EdgeType::DEFAULT);
-    primitiveNodes_.push_back(hashNode);
+    deferredNodes_.push_back(hashNode);
     node->edgeCount++;
 }
 
-void RawHeap::AddPrimitiveNodes()
+void RawHeap::AppendDeferredNodes()
 {
     uint32_t index = static_cast<uint32_t>(nodes_.size());
-    for (auto &node : primitiveNodes_) {
+    for (auto &node : deferredNodes_) {
         node->index = index++;
     }
-    nodes_.insert(nodes_.end(), primitiveNodes_.begin(), primitiveNodes_.end());
+    nodes_.insert(nodes_.end(), deferredNodes_.begin(), deferredNodes_.end());
+    nodeIndex_ = index;
+    deferredNodes_.clear();
 }
 
 void RawHeap::CreateRootNode(Node *root, const std::string &name, size_t count)
@@ -451,12 +474,12 @@ void RawHeap::CreateMetadataNode(Node *metadataNode)
 
 void RawHeap::AddMetadataPropertyNode(Node *metadataNode, const std::string &value, const std::string &propertyName)
 {
-    Node *propertyNode = new Node(0);
+    Node *propertyNode = AllocateNode(HEAP_NUMBER, 0);
     propertyNode->nodeId = 0;
     propertyNode->type = HEAP_NUMBER;
     propertyNode->strId = InsertAndGetStringId(value);
     propertyNode->size = VIRTUAL_NODE_SIZE;
-    primitiveNodes_.push_back(propertyNode);
+    deferredNodes_.push_back(propertyNode);
 
     StringId propertyStrId = InsertAndGetStringId(propertyName);
     Edge *propertyEdge = new Edge(propertyNode, propertyStrId, EdgeType::PROPERTY);
@@ -549,7 +572,7 @@ bool RawHeapTranslateV1::Translate()
         }
     }
 
-    AddPrimitiveNodes();
+    AppendDeferredNodes();
     RecomputeNodeSize();
 
     LOG_INFO_ << "success!";
@@ -1070,14 +1093,16 @@ void RawHeapTranslateV1::SetNodeStringId(const std::vector<uint64_t> &objects, S
     }
 }
 
-Node *RawHeapTranslateV1::FindOrCreateNode(uint64_t addr)
+Node *RawHeapTranslateV1::FindOrCreateNode(uint64_t addr, NodeType type, NodeRole role)
 {
     Node *node = FindNode(addr);
     if (node != nullptr) {
         return node;
     }
-    node = CreateNode();
-    nodesMap_.emplace(addr, node);
+    node = CreateNode(type, role);
+    if (node != nullptr) {
+        nodesMap_.emplace(addr, node);
+    }
     return node;
 }
 
@@ -1438,7 +1463,10 @@ Node* RawHeapTranslateV1::CreatePrimitiveNode(uint64_t addr)
         return nullptr;
     }
 
-    Node *to = FindOrCreateNode(addr);
+    Node *to = FindOrCreateNode(addr, HEAP_NUMBER, NodeRole::PRIMITIVE_VALUE);
+    if (to == nullptr) {
+        return nullptr;
+    }
     to->nodeId = 0;
     to->type = HEAP_NUMBER;
     if ((addr & TAG_MARK) == TAG_INT) {
@@ -1585,7 +1613,7 @@ bool RawHeapTranslateV2::Translate()
         BuildEdges(node);
     }
 
-    AddPrimitiveNodes();
+    AppendDeferredNodes();
     RecomputeNodeSize();
 
     LOG_INFO_ << "success!";

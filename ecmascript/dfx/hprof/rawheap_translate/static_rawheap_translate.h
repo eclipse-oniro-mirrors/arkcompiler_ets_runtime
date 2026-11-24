@@ -266,7 +266,7 @@ private:
     std::string MakeValueNodeName(uint8_t fieldType, uint64_t value) const;
     std::string MakeTaggedValueNodeName(uint64_t value) const;
 
-    Node *GetOrCreateNode(uint32_t nodeId);
+    Node *GetOrCreateNode(uint32_t nodeId, NodeType type = DEFAULT_NODETYPE, NodeRole role = NodeRole::RETAINED);
     std::string GetString(uint32_t stringId) const;
     StringId GetOrCreateStringId(uint32_t stringId);
 

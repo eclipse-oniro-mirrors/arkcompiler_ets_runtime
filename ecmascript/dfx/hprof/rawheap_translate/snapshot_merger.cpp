@@ -125,6 +125,8 @@ void SnapshotMerger::WireStaticRoot(RawHeap &dynamic, StaticRawheapTranslate &sp
         }
         bucket[staticRoot].push_back(new Edge(root, index++, EdgeType::ELEMENT));
         staticRoot->edgeCount++;
+        bucket[syntheticRoot].push_back(new Edge(syntheticRoot, root, subrootStrId, EdgeType::SHORTCUT));
+        syntheticRoot->edgeCount++;
     }
     if (skipped > 0) {
         LOG_INFO_ << "WireStaticRoot: " << skipped << " root nodeIds had no matching node";

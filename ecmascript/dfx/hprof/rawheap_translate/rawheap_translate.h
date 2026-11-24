@@ -32,6 +32,9 @@ namespace rawheap_translate {
 class SnapshotMerger;
 class StaticRawheapTranslate;
 
+// Process-wide creation policy for the standalone translator.
+enum class PruneMode { DISABLED, ENABLED };
+
 // Heap objects are 8-byte aligned; sizes must stay aligned after dividing the
 // expanded (non-compressed pointer) CONSTANT_POOL size by the compressed factor.
 static constexpr uint32_t MEM_ALIGN_OBJECT = 8U;
@@ -53,6 +56,8 @@ public:
     }
 
     virtual ~RawHeap();
+
+    static void SetPruneMode(PruneMode mode) { pruneMode_ = mode; }
 
     virtual bool Parse(FileReader &file, uint32_t rawheapFileSize) = 0;
     virtual bool Translate() = 0;
@@ -90,7 +95,7 @@ public:
     // Graph-construction primitives. Declared public so that the merger and
     // tests can build/extend a graph without subclassing; the V1/V2 parsers
     // and the static parser also use them internally.
-    Node *CreateNode();
+    Node *CreateNode(NodeType type = DEFAULT_NODETYPE, NodeRole role = NodeRole::RETAINED);
     StringId InsertAndGetStringId(const std::string &str);
 
     std::string spaceType_;
@@ -109,7 +114,7 @@ protected:
     void SortEdgesByFrom();
     void SetVersion(const std::string &version);
     void CreateHashEdge(Node *node);
-    void AddPrimitiveNodes();
+    void AppendDeferredNodes();
     // Post-translate fixup: restore CONSTANT_POOL sizes from the expanded
     // (non-compressed pointer) form recorded in rawheap files. The base
     // implementation is a no-op; V1/V2 translators override it. The halved
@@ -145,12 +150,15 @@ protected:
     std::unordered_map<StringId, uint64_t> refAddrStrIdMap_ {};  // strId -> refAddr (virtual nodes)
 
 private:
+    Node *AllocateNode(NodeType type, uint32_t index, NodeRole role = NodeRole::RETAINED);
+
     StringHashMap *strTable_ {nullptr};
-    std::vector<Node *> primitiveNodes_ {};
+    std::vector<Node *> deferredNodes_ {};
     std::vector<Node *> nodes_ {};
     std::vector<Edge *> edges_ {};
     std::string version_;
     uint32_t nodeIndex_ {0};
+    static PruneMode pruneMode_;
 
     friend class panda::test::HeapDumpTestHelper;
     friend class SnapshotMerger;
@@ -183,7 +191,7 @@ private:
     bool ReadFrameRoots(FileReader &file);
     void AddSyntheticRootNode(std::vector<uint64_t> &roots);
     void SetNodeStringId(const std::vector<uint64_t> &objects, StringId strId);
-    Node* FindOrCreateNode(uint64_t addr);
+    Node* FindOrCreateNode(uint64_t addr, NodeType type = DEFAULT_NODETYPE, NodeRole role = NodeRole::RETAINED);
     Node* FindNode(uint64_t addr);
     void AddHandleRootEdges(const std::vector<uint64_t> &handleRoots);
 
