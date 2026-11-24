@@ -905,7 +905,7 @@ JSHandle<JSHClass> ObjectFactory::CreateJSArrayInstanceClass(const JSHandle<Glob
 
     uint32_t fieldOrder = 0;
     ASSERT(JSArray::LENGTH_INLINE_PROPERTY_INDEX == fieldOrder);
-    JSHandle<LayoutInfo> layoutInfoHandle = CreateLayoutInfo(1);
+    JSHandle<LayoutInfo> layoutInfoHandle = CreateLayoutInfo(inlinedProps, SEMI_SPACE, GrowMode::KEEP);
     {
         PropertyAttributes attributes = PropertyAttributes::DefaultAccessor(true, false, false);
         attributes.SetIsInlinedProps(true);
@@ -2032,7 +2032,7 @@ JSHandle<JSHClass> ObjectFactory::CreateFunctionClass(FunctionKind kind, uint32_
     ASSERT(JSFunction::LENGTH_INLINE_PROPERTY_INDEX == fieldOrder);
     JSHandle<LayoutInfo> layoutInfoHandle;
     if (inlinedProps == JSHClass::DEFAULT_CAPACITY_OF_IN_OBJECTS) {
-        layoutInfoHandle = CreateLayoutInfo(JSFunction::LENGTH_OF_INLINE_PROPERTIES);
+        layoutInfoHandle = CreateLayoutInfo(JSFunction::LENGTH_OF_INLINE_PROPERTIES, SEMI_SPACE, GrowMode::KEEP);
     } else {
         layoutInfoHandle = CreateLayoutInfo(static_cast<int>(inlinedProps));
     }
@@ -5912,7 +5912,8 @@ JSHandle<JSHClass> ObjectFactory::CreateClassFuncProtoHClass(const JSThread *thr
     JSHandle<JSTaggedValue> objFuncProto = env->GetObjectFunctionPrototype();
     JSHandle<JSHClass> classPrototypeHClass =
         NewEcmaHClass(JSObject::SIZE, inlinedProps, JSType::JS_OBJECT, objFuncProto);
-    JSHandle<LayoutInfo> layoutInfoHandle = CreateLayoutInfo(static_cast<int>(inlinedProps));
+    JSHandle<LayoutInfo> layoutInfoHandle = CreateLayoutInfo(static_cast<int>(inlinedProps),
+        SEMI_SPACE, GrowMode::KEEP);
     // Check if need grow LayoutInfo capacity
     classPrototypeHClass->SetLayout(thread_, layoutInfoHandle);
     return classPrototypeHClass;
