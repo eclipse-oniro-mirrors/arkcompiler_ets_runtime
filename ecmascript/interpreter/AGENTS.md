@@ -33,7 +33,7 @@ The interpreter provides execution of ark bytecode with C++ implementation:
 - `templates/` contains assembly template files for bytecode handler generation
 
 ## Reference Source
-- `arkcompiler/ets_runtime/ecmascript/interpreter/interpreter.h` (1-90行) - Interpreter interface
+- [interpreter.h](interpreter.h), `EcmaInterpreter::Execute` - Interpreter interface
 - `arkcompiler/ets_runtime/ecmascript/interpreter/interpreter-inl.h` - C++ interpreter implementation
 
 ## Key Files
@@ -69,7 +69,7 @@ python ark.py x64.debug unittest   # includes interpreter tests
 
 Full OHOS tree:
 ```bash
-./build.sh --product-name <product-name> --build-target ecmascript/tests:host_unittest
+./build.sh --product-name <product-name> --build-target arkcompiler/ets_runtime/ecmascript/tests:host_unittest
 ```
 
 ## Boundaries
@@ -77,5 +77,5 @@ Full OHOS tree:
 - Assembly interpreter code is in `ecmascript/compiler/interpreter_stub.cpp`; this directory only provides call entry points.
 - C++ interpreter and assembly interpreter must maintain consistent semantics.
 - Hotness counter updates trigger JIT compilation; ensure correct threshold management.
-- C++ 解释器与 IR/汇编解释器（`ecmascript/compiler/interpreter_stub.cpp`）的字节码语义须保持一致；修改任一路径时检查另一路径是否存在相同逻辑。详见根 `AGENTS.md` 开发注意事项。
-- `CallRuntime`/`SlowRuntimeStub` 路径可能触发 GC，栈上参数须保证 GC 安全；详见 `ecmascript/stubs/AGENTS.md`。
+- Keep bytecode semantics aligned between the C++ and IR/assembly interpreters. Check the equivalent handler in [interpreter_stub.cpp](../compiler/interpreter_stub.cpp) when changing the C++ path, and the C++ handler when changing the IR path.
+- Check GC-visible stack arguments on CallRuntime and SlowRuntimeStub paths, which may trigger GC. See the [stubs guide](../stubs/AGENTS.md).

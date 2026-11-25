@@ -25,7 +25,7 @@ Primary Language: C++
 - Various runtime and debugging flags
 
 ## Reference Source
-- `arkcompiler/ets_runtime/ecmascript/js_vm/main.cpp` (1-300行) - CLI entry point
+- [main.cpp](main.cpp), `main` - CLI entry point
 
 ## Key Files
 

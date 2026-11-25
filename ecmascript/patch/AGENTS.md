@@ -1,5 +1,8 @@
  # AGENTS
 
+Read [Patch lifecycle and regression tests](../../docs/knowledge/Patch-Subsystem.md).
+
+
 This file provides guidance for AI agents when working with code in the patch component.
 
 ## Overview

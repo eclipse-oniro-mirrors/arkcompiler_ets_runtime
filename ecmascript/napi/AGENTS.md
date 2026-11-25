@@ -9,9 +9,7 @@ This file provides guidelines for AI coding agents working on the Node-API (NAPI
 | **参数名称** | **描述** | **示例** |
 | --- | --- | --- |
 | `--product-name` | 指定产品名称 | rk3568 |
-| `--build-target` | 指定构建编译对象 | ark_js_host_unittest：单元测试
-ark_js_host_linux_tools_packages：工具包
-ets_frontend_build：前端编译 |
+| `--build-target` | 指定构建目标 | `ark_js_host_linux_tools_packages`、`Jsnapi_001_TestAction` |
 | `--gn-args` | 传递编译参数 | is_debug=true：启用调试模式 |
 
 ### 常用编译命令
@@ -22,7 +20,6 @@ ets_frontend_build：前端编译 |
 
 ```bash
 ./build.sh --product-name rk3568 \
-           --build-target ark_js_host_unittest \
            --build-target ark_js_unittest \
            --build-target ark_js_host_linux_tools_packages
 ```
@@ -33,7 +30,6 @@ ets_frontend_build：前端编译 |
 
 ```bash
 ./build.sh --product-name rk3568 \
-           --build-target ark_js_host_unittest \
            --build-target ark_js_unittest \
            --build-target ark_js_host_linux_tools_packages \
            --gn-args is_debug=true
@@ -45,18 +41,14 @@ ets_frontend_build：前端编译 |
 # 运行所有 NAPI 测试
 ./build.sh --product-name rk3568 --build-target Jsnapi_001_TestAction
 
-# 运行单个测试
-./build.sh --product-name rk3568 --build-target Jsnapi_001_TestAction --gn-args target_test_filters="JSNApiSampleTest.TestName"
-
-# 运行测试文件中的所有测试
-./build.sh --product-name rk3568 --build-target Jsnapi_001_TestAction --gn-args target_test_filters="JSNApiSampleTest.*"
-
 # 运行 sendable 测试
 ./build.sh --product-name rk3568 --build-target Jsnapi_Sendable_TestAction
 
 # 运行 NAPI sample 测试
 ./build.sh --product-name rk3568 --build-target JsnapiSampleAction
 ```
+
+筛选用例时，在已配置依赖的 host 环境中直接运行对应的 JSNAPI 测试可执行文件，并传递 GoogleTest 的 `--gtest_filter` 参数。
 
 **NOTE:** Run all commands from **OpenHarmony root directory**.
 

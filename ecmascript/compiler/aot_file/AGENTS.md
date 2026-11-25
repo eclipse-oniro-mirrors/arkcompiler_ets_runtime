@@ -83,7 +83,7 @@ python ark.py x64.debug unittest   # all unit tests (includes aot_file tests)
 
 Full OHOS tree:
 ```bash
-./build.sh --product-name <product-name> --build-target ecmascript/compiler/aot_file/tests:host_unittest
+./build.sh --product-name <product-name> --build-target arkcompiler/ets_runtime/ecmascript/compiler/aot_file/tests:host_unittest
 ```
 
 - C++ tests: `tests/aot_file_test.cpp`, `an_file_info_test.cpp`, `binary_buffer_parser_test.cpp`, `elf_reader_test.cpp`

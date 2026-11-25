@@ -1,5 +1,8 @@
 # ecmascript/builtins
 
+Read [Sendable semantics](../../docs/knowledge/ArkTS-Sendable.md) for shared builtins.
+
+
 ECMAScript standard library implementation providing all built-in objects and functions (Array, Object, String, Promise, etc.) per ECMA-262 specification.
 Primary Language: C++
 
@@ -49,7 +52,7 @@ Implements ECMAScript 2021 standard library through builtin functions:
 - **Sendable objects** — ArkTS extension for cross-thread shared objects (SharedArray, SharedMap, SharedSet, SharedTypedArray)
 
 ## Reference Source
-- `arkcompiler/ets_runtime/ecmascript/builtins/builtins.h` (1-500行) - Builtin ID system
+- [builtins.h](builtins.h), `Builtins` - Builtin ID system
 - `arkcompiler/ets_runtime/ecmascript/builtins/builtins_array.cpp` - Array methods
 - `arkcompiler/ets_runtime/ecmascript/builtins/builtins_promise.cpp` - Promise implementation
 
@@ -90,7 +93,7 @@ python ark.py x64.debug unittest   # includes builtins tests
 
 Full OHOS tree:
 ```bash
-./build.sh --product-name <product-name> --build-target ecmascript/builtins/tests:host_unittest
+./build.sh --product-name <product-name> --build-target arkcompiler/ets_runtime/ecmascript/builtins/tests:host_unittest
 ```
 
 ## Boundaries
@@ -99,4 +102,4 @@ Full OHOS tree:
 - ArkTS extensions (SharedArray, SharedMap, SharedSet, SharedTypedArray) are non-standard but documented.
 - Sendable objects require thread-safe implementations.
 - Intl features depend on ICU library version.
-- 修改 `Proxy`/`Reflect` 相关逻辑时，须检查 `receiver` 参数传递是否与 ECMA-262 规范一致（如 `[[Get]]`/`[[Set]]` 的 Receiver 入参），避免 receiver 丢失或被替换为 holder。
+- When changing Proxy or Reflect, preserve the ECMA-262 Receiver argument to `[[Get]]` and `[[Set]]`. Check how the receiver and holder are passed through the property access path.

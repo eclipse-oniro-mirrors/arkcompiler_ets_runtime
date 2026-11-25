@@ -30,7 +30,7 @@ Primary Language: C++
 - **RegExpParserCache** — Caches compiled regex patterns
 
 ## Reference Source
-- `arkcompiler/ets_runtime/ecmascript/regexp/regexp_parser.h` (1-200行) - Parser interface
+- [regexp_parser.h](regexp_parser.h), `RegExpParser` - Parser interface
 - `arkcompiler/ets_runtime/ecmascript/regexp/regexp_executor.h` - Executor interface
 
 ## Key Files
@@ -63,7 +63,7 @@ python ark.py x64.debug unittest   # includes regexp tests
 
 Full OHOS tree:
 ```bash
-./build.sh --product-name <product-name> --build-target ecmascript/regexp/tests:host_unittest
+./build.sh --product-name <product-name> --build-target arkcompiler/ets_runtime/ecmascript/regexp/tests:host_unittest
 ```
 
 ## Boundaries

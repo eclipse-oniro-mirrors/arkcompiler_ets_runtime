@@ -1,5 +1,7 @@
 # ArkTS模块化知识库
 
+[模块指南](../../ecmascript/module/AGENTS.md)
+
 模块化是将ArkTS/TS/JS/so模块（一个文件对应一个模块）通过编译工具或运行时机制将这些模块加载、解析、组合并执行的过程。
 本文只记录模块加载、模块类型差异、加载场景约束、快照恢复的知识，并沉淀模块领域变更引发的历史坑。Sendable 函数、模块环境与跨线程取值见 `docs/knowledge/ArkTS-Sendable.md`。
 

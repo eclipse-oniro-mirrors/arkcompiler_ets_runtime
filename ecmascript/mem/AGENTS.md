@@ -1,4 +1,7 @@
 # AGENTS
+
+Read [GC](../../docs/knowledge/ArkTS-GC.md) and [Concurrency](../../docs/knowledge/ArkTS-Concurrency.md).
+
 **Name**: Memory Management (mem)
 **Purpose**: Memory Management is the core garbage collection and memory allocation subsystem for the ArkTS runtime. It provides comprehensive memory management capabilities including:
 - Multiple garbage collection algorithms (FullGC, PartialGC, SharedGC, ConcurrentCopyGC, SweepGC)
@@ -125,51 +128,7 @@ The mem module is built as part of the ecmascript module in the GN build system:
 ```
 
 ## Test Suite
-The mem module has extensive unit tests in the ecmascript/tests/ directory:
-```bash
-# Build and generate an executable file
-./build.sh --product-name rk3568 --build-target GC_First_Test --build-target GC_Second_Test --build-target GC_Third_Test --build-target GC_NewToOldPromotion_Test --build-target GC_SharedHeapOOM_Test --build-target GC_SharedPartial_Test --build-target GC_Verify_Test --build-target ECMA_VM_Heap_Test --build-target Mem_Controller_Test --build-target Shared_Heap_Test --build-target Unified_GC_Test --build-target Weak_Ref_Old_GC_Test
-# Send the executable file to the device using hdc
-hdc shell send ./out/rk3568/tests/unittest/ets_runtime/GC_First_Test /data/local/tmp/
-hdc shell send ./out/rk3568/tests/unittest/ets_runtime/GC_Second_Test /data/local/tmp/
-hdc shell send ./out/rk3568/tests/unittest/ets_runtime/GC_Third_Test /data/local/tmp/
-hdc shell send ./out/rk3568/tests/unittest/ets_runtime/GC_NewToOldPromotion_Test /data/local/tmp/
-hdc shell send ./out/rk3568/tests/unittest/ets_runtime/GC_SharedHeapOOM_Test /data/local/tmp/
-hdc shell send ./out/rk3568/tests/unittest/ets_runtime/GC_SharedPartial_Test /data/local/tmp/
-hdc shell send ./out/rk3568/tests/unittest/ets_runtime/GC_Verify_Test /data/local/tmp/
-hdc shell send ./out/rk3568/tests/unittest/ets_runtime/ECMA_VM_Heap_Test /data/local/tmp/
-hdc shell send ./out/rk3568/tests/unittest/ets_runtime/Mem_Controller_Test /data/local/tmp/
-hdc shell send ./out/rk3568/tests/unittest/ets_runtime/Shared_Heap_Test /data/local/tmp/
-hdc shell send ./out/rk3568/tests/unittest/ets_runtime/Unified_GC_Test /data/local/tmp/
-hdc shell send ./out/rk3568/tests/unittest/ets_runtime/Weak_Ref_Old_GC_Test /data/local/tmp/    
-# Run specific memory/GC tests
-hdc shell
-cd /data/local/tmp/
-chmod 777 ./GC_First_Test
-./GC_First_Test
-chmod 777 ./GC_Second_Test
-./GC_Second_Test
-chmod 777 ./GC_Third_Test
-./GC_Third_Test
-chmod 777 ./GC_NewToOldPromotion_Test
-./GC_NewToOldPromotion_Test
-chmod 777 ./GC_SharedHeapOOM_Test
-./GC_SharedHeapOOM_Test
-chmod 777 ./GC_SharedPartial_Test
-./GC_SharedPartial_Test
-chmod 777 ./GC_Verify_Test
-./GC_Verify_Test
-chmod 777 ./ECMA_VM_Heap_Test
-./ECMA_VM_Heap_Test
-chmod 777 ./Mem_Controller_Test
-./Mem_Controller_Test
-chmod 777 ./Shared_Heap_Test
-./Shared_Heap_Test
-chmod 777 ./Unified_GC_Test
-./Unified_GC_Test
-chmod 777 ./Weak_Ref_Old_GC_Test
-./Weak_Ref_Old_GC_Test
-```
+Choose the test action for the affected collector or heap path. For device runs, check the executable target and its output in [the runtime test definitions](../tests/BUILD.gn). See [GC test selection](../../docs/knowledge/ArkTS-GC.md#测试与验证) for current host actions.
 
 Test coverage includes:
 - **gc_first_test.cpp**: Basic GC functionality tests

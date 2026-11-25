@@ -73,7 +73,7 @@ python ark.py x64.debug unittest   # all unit tests (includes assembler tests)
 
 Full OHOS tree:
 ```bash
-./build.sh --product-name <product-name> --build-target ecmascript/compiler/tests:host_unittest
+./build.sh --product-name <product-name> --build-target arkcompiler/ets_runtime/ecmascript/compiler/tests:host_unittest
 ```
 
 Test files: `tests/assembler_aarch64_test.cpp`, `tests/assembler_x64_test.cpp`, `tests/extended_assembler_x64_test.cpp`, `tests/macro_assembler_x64_test.cpp`.
