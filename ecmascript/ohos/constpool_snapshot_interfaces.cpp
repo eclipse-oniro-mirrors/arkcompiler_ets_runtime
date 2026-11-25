@@ -28,7 +28,7 @@ void ConstPoolSnapshotInterfaces::Serialize(const EcmaVM *vm, const CString &pat
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "ConstPoolSnapshotInterfaces::Serialize", "");
     // follow policy of module snapshot
     if (ModulesSnapshotHelper::IsConstPoolSnapshotDisabled(path)) {
-        LOG_ECMA(WARN) << "Serialize: ConstPool Snapshot is not enabled";
+        LOG_ECMA(DEBUG) << "Serialize: ConstPool Snapshot is not enabled";
         ModulesSnapshotHelper::HandleCorruptedFile(path, CString(ConstPoolSnapshot::CONSTPOOL_SNAPSHOT_FILE_SUFFIX));
         return;
     }
