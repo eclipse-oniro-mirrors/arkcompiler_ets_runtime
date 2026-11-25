@@ -378,7 +378,6 @@ void JSGCCallback(void *ecmaVM)
     if (thread != nullptr && thread->ReadyForGCIterating()) {
         panda::ecmascript::Heap *heap = const_cast<panda::ecmascript::Heap*>(vm->GetHeap());
         heap->ProcessGCCallback();
-        heap->ProcessGCListeners();
     }
 }
 

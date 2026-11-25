@@ -122,6 +122,8 @@ public:
         }
     }
 
+    void IterateXRef(const BaseObject *object, const common::RefFieldVisitor &visitor) const override;
+
     size_t ForEachRefFieldAndGetSize(const BaseObject *object, const common::RefFieldVisitor &visitor) const override
     {
         // Only used in the MarkingPhase phase.
@@ -132,8 +134,6 @@ public:
         refFieldObjectVisitor.VisitAllRefFields(obj);
         return size;
     }
-
-    void IterateXRef(const BaseObject *object, const common::RefFieldVisitor &visitor) const override;
 
     size_t GetSize(const BaseObject *object) const override
     {

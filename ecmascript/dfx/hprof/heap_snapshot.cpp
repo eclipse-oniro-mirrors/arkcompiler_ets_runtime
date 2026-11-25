@@ -1403,8 +1403,8 @@ HprofNode *HeapSnapshot::CreateSpecificSyntheticRoot(const CUnorderedSet<HprofNo
                                                      const CString &rootNamePrefix, size_t insertPosition)
 {
     CString specificRootName = CString(rootNamePrefix) + "[" + ToCString(specificRootSet.size()) + "]";
-    HprofNode *specificSyntheticRoot = HprofNode::NewNode(chunk_, 0, nodeCount_, GetString(specificRootName),
-        NodeType::ROOT, 1, 0, 0);
+    HprofNode *specificSyntheticRoot = HprofNode::NewNode(chunk_, 0, nodeCount_,
+        GetString(specificRootName), NodeType::ROOT, 1, 0, 0);
     InsertNodeAt(insertPosition, specificSyntheticRoot);
     return specificSyntheticRoot;
 }

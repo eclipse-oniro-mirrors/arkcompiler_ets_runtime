@@ -834,7 +834,7 @@ bool BaseDeserializer::AllocateToDifferentLocalSpaces(bool isFirstAllocate)
     }
     size_t machineCodeSpaceSize = data_->GetMachineCodeSpaceSize();
     if (machineCodeSpaceSize > 0) {
-        if (!AllocateToMachineCodeSpace(machineCodeSpaceSize, isFirstAllocate)) {
+        if (!AllocateToMachineCodeSpace(machineCodeSpaceSize, isFirstAllocate)) { // LOCV_EXCL_BR_LINE
             return false;
         }
     }
@@ -973,8 +973,7 @@ bool BaseDeserializer::AllocateMultiRegion(SparseSpace *space, size_t spaceObjSi
 }
 
 bool BaseDeserializer::AllocateMultiNonmovableRegion(SparseSpace *space, size_t spaceObjSize, size_t &regionIndex,
-                                                     [[maybe_unused]] SerializedObjectSpace spaceType,
-                                                     bool isFirstAllocate)
+                                                     SerializedObjectSpace spaceType, bool isFirstAllocate)
 {
     ASSERT(spaceType == SerializedObjectSpace::NON_MOVABLE_SPACE);
     regionIndex = regionVector_.size();
@@ -1048,7 +1047,7 @@ bool BaseDeserializer::AllocateToOldSpace(size_t oldSpaceSize, bool isFirstAlloc
     OldSpace *space = heap_->GetOldSpace();
     uintptr_t object = space->AllocateSlow(oldSpaceSize, true);
     if (UNLIKELY(object == 0U)) {
-        if (space->CommittedSizeExceed()) {
+        if (space->CommittedSizeExceed()) { // LOCV_EXCL_BR_LINE
             if (!isFirstAllocate) {
                 DeserializeFatalOutOfMemory(ToSpaceTypeName(space->GetSpaceType()), oldSpaceSize);
             }
@@ -1081,7 +1080,7 @@ bool BaseDeserializer::AllocateToMachineCodeSpace(size_t machineCodeSpaceSize, b
 {
     SparseSpace *space = heap_->GetMachineCodeSpace();
     uintptr_t object = space->Allocate(machineCodeSpaceSize, false);
-    if (UNLIKELY(object == 0U)) {
+    if (UNLIKELY(object == 0U)) { // LOCV_EXCL_BR_LINE
         if (space->CommittedSizeExceed()) {
             if (!isFirstAllocate) {
                 DeserializeFatalOutOfMemory(ToSpaceTypeName(space->GetSpaceType()), machineCodeSpaceSize);

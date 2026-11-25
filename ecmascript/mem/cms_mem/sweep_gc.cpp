@@ -133,7 +133,9 @@ void SweepGC::Mark()
 void SweepGC::Sweep()
 {
     ECMA_BYTRACE_NAME(HITRACE_LEVEL_COMMERCIAL, HITRACE_TAG_ARK, "SweepGC::Sweep", "");
-    ProcessNativeDelete();
+    if constexpr (G_USE_CMS_GC) {
+        ProcessNativeDelete();
+    }
     TRACE_GC(GCStats::Scope::ScopeId::Sweep, heap_->GetEcmaVM()->GetEcmaGCStats());
     heap_->GetSweeper()->Sweep(TriggerGCType::CMS_GC);
     heap_->GetSweeper()->PostTask(TriggerGCType::CMS_GC);

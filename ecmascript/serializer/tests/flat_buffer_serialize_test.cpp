@@ -451,7 +451,7 @@ HWTEST_F_L0(FlatBufferSerializeTest, UnpackNullBufferReturnsNull)
 
 HWTEST_F_L0(FlatBufferSerializeTest, DefaultTransferTrue_ArrayBufferTransferSemantics)
 {
-    // 创建包含 ArrayBuffer 的对象
+    // Create an object containing an ArrayBuffer
     Local<ObjectRef> obj = ObjectRef::New(ecmaVm);
     Local<ArrayBufferRef> ab = ArrayBufferRef::New(ecmaVm, 16);
     obj->Set(ecmaVm, StringRef::NewFromUtf8(ecmaVm, "buf"), ab);
@@ -467,10 +467,10 @@ HWTEST_F_L0(FlatBufferSerializeTest, DefaultTransferTrue_ArrayBufferTransferSema
     ASSERT_NE(buf, nullptr);
     EXPECT_GT(outSize, static_cast<size_t>(0));
 
-    // 验证：默认转移语义下原始 ArrayBuffer 应被 detach
+    // Verify：with default transfer semantics, the original ArrayBuffer shoult be detached
     EXPECT_EQ(ab->ByteLength(ecmaVm), 0);
 
-    // 反序列化验证：重建的 ArrayBuffer 内容完整
+    // Deserialize verification: the reconstructed ArrayBuffer content is intact
     Local<JSValueRef> result = JSNApi::DeserializeValue(ecmaVm, buf, nullptr);
     ASSERT_TRUE(result->IsObject(ecmaVm));
     Local<ObjectRef> resultObj = result->ToObject(ecmaVm);
@@ -483,18 +483,18 @@ HWTEST_F_L0(FlatBufferSerializeTest, DefaultTransferTrue_ArrayBufferTransferSema
 
 HWTEST_F_L0(FlatBufferSerializeTest, ExplicitTransferAndCloneList)
 {
-    // 创建对象含两个 ArrayBuffer
+    // Create an object containing two ArrayBuffer
     Local<ObjectRef> obj = ObjectRef::New(ecmaVm);
     Local<ArrayBufferRef> abTransfer = ArrayBufferRef::New(ecmaVm, 8);
     Local<ArrayBufferRef> abKeep = ArrayBufferRef::New(ecmaVm, 16);
     obj->Set(ecmaVm, StringRef::NewFromUtf8(ecmaVm, "buf1"), abTransfer);
     obj->Set(ecmaVm, StringRef::NewFromUtf8(ecmaVm, "buf2"), abKeep);
 
-    // transfer 数组仅包含 abTransfer
+    // Transfer list contains only abTransfer
     Local<ArrayRef> transferArr = ArrayRef::New(ecmaVm, 1);
     ArrayRef::SetValueAt(ecmaVm, transferArr, 0, abTransfer);
 
-    // cloneList 为空数组
+    // cloneList is an empty array
     Local<ArrayRef> cloneListArr = ArrayRef::New(ecmaVm, 0);
 
     size_t outSize = 0;
@@ -506,12 +506,12 @@ HWTEST_F_L0(FlatBufferSerializeTest, ExplicitTransferAndCloneList)
     ASSERT_NE(buf, nullptr);
     EXPECT_GT(outSize, static_cast<size_t>(0));
 
-    // 验证：transfer 中指定的 abTransfer 被 detach
+    // Verify：abTransfer in the transfer list is detached
     EXPECT_EQ(abTransfer->ByteLength(ecmaVm), 0);
-    // 验证：不在 transfer 中的 abKeep 未被 detach
+    // Verify：abKeep not in the transfer list is not detached
     EXPECT_EQ(abKeep->ByteLength(ecmaVm), 16);
 
-    // 反序列化验证
+    // Deserialize verification
     Local<JSValueRef> result = JSNApi::DeserializeValue(ecmaVm, buf, nullptr);
     ASSERT_TRUE(result->IsObject(ecmaVm));
     Local<ObjectRef> resultObj = result->ToObject(ecmaVm);
@@ -528,7 +528,7 @@ HWTEST_F_L0(FlatBufferSerializeTest, TransferCloneListMutualExclusion_ReturnsNul
     Local<ArrayBufferRef> ab = ArrayBufferRef::New(ecmaVm, 8);
     obj->Set(ecmaVm, StringRef::NewFromUtf8(ecmaVm, "buf"), ab);
 
-    // transfer 和 cloneList 都包含同一个 ArrayBuffer
+    // Both transfer and cloneList contain the same ArrayBuffer
     Local<ArrayRef> transferArr = ArrayRef::New(ecmaVm, 1);
     ArrayRef::SetValueAt(ecmaVm, transferArr, 0, ab);
     Local<ArrayRef> cloneListArr = ArrayRef::New(ecmaVm, 1);
@@ -537,17 +537,17 @@ HWTEST_F_L0(FlatBufferSerializeTest, TransferCloneListMutualExclusion_ReturnsNul
     size_t outSize = 0;
     uint8_t *buf = JSNApi::SerializeValue(ecmaVm, obj, transferArr, cloneListArr,
                                           false, false, false, outSize);
-    // 互斥冲突：返回 nullptr，outSize 为 0
+    // Mutual exclusion conflict：return nullptr，outSize is 0
     EXPECT_EQ(buf, nullptr);
     EXPECT_EQ(outSize, static_cast<size_t>(0));
 
-    // ArrayBuffer 未被 detach（序列化失败不应有副作用）
+    // ArrayBuffer is not detached（serialization failure should have no side effects）
     EXPECT_EQ(ab->ByteLength(ecmaVm), 8);
 }
 
 HWTEST_F_L0(FlatBufferSerializeTest, TruncatedBuffer_DeserializeReturnsUndefinedOrNoCrash)
 {
-    // 先正常序列化获取合法缓冲区
+    // First serialize normally to get a valid buffer
     Local<StringRef> value = StringRef::NewFromUtf8(ecmaVm, "hello");
     size_t outSize = 0;
     Local<JSValueRef> transfer(JSValueRef::Undefined(ecmaVm));
@@ -555,17 +555,17 @@ HWTEST_F_L0(FlatBufferSerializeTest, TruncatedBuffer_DeserializeReturnsUndefined
     uint8_t *fullBuf = JSNApi::SerializeValue(ecmaVm, value, transfer, cloneList,
                                               false, true, false, outSize);
     ASSERT_NE(fullBuf, nullptr);
-    EXPECT_GT(outSize, static_cast<size_t>(4));  // 确保足够长以便截断
+    EXPECT_GT(outSize, static_cast<size_t>(4));  // Ensure long enough for truncation
 
-    // 创建截断缓冲区：只复制前 4 字节
+    // Create a truncated buffer：copy only the first 4 bytes
     size_t truncatedSize = 4;
     uint8_t *truncatedBuf = static_cast<uint8_t *>(malloc(truncatedSize));
     ASSERT_EQ(memcpy_s(truncatedBuf, truncatedSize, fullBuf, truncatedSize), EOK);
     free(fullBuf);
 
-    // 反序列化截断缓冲区：应返回 Undefined 且不崩溃
+    // Deserialize truncated buffer: should return Undefined without crashing
     Local<JSValueRef> result = JSNApi::DeserializeValue(ecmaVm, truncatedBuf, nullptr);
-    // 预期行为：返回 Undefined（无法从截断数据重建有效值）
+    // Expected behavior: returns Undefined (cannot reconstruct a valid value from truncated data)
     EXPECT_TRUE(result->IsUndefined());
 
     free(truncatedBuf);
@@ -582,12 +582,12 @@ HWTEST_F_L0(FlatBufferSerializeTest, UndefinedOriginalValue_AmbiguityRoundTrip)
     Local<JSValueRef> cloneList(JSValueRef::Undefined(ecmaVm));
     uint8_t *buf = JSNApi::SerializeValue(ecmaVm, undefValue, transfer, cloneList,
                                           false, true, false, outSize);
-    // undefined 可正常序列化
+    // undefined can be serialized normally
     ASSERT_NE(buf, nullptr);
     EXPECT_GT(outSize, static_cast<size_t>(0));
 
     Local<JSValueRef> result = JSNApi::DeserializeValue(ecmaVm, buf, nullptr);
-    // 反序列化返回 Undefined（与错误场景返回相同，存在歧义）
+    // Deserialization return Undefined（same as error case, ambiguous）
     EXPECT_TRUE(result->IsUndefined());
 
     free(buf);
@@ -599,7 +599,7 @@ HWTEST_F_L0(FlatBufferSerializeTest, EmptyTransferArray_NoArrayBufferTransferred
     Local<ArrayBufferRef> ab = ArrayBufferRef::New(ecmaVm, 8);
     obj->Set(ecmaVm, StringRef::NewFromUtf8(ecmaVm, "buf"), ab);
 
-    // transfer 为空数组
+    // transfer is an empty array
     Local<ArrayRef> transferArr = ArrayRef::New(ecmaVm, 0);
     Local<JSValueRef> cloneList(JSValueRef::Undefined(ecmaVm));
 
@@ -608,7 +608,7 @@ HWTEST_F_L0(FlatBufferSerializeTest, EmptyTransferArray_NoArrayBufferTransferred
                                           false, true, false, outSize);
     ASSERT_NE(buf, nullptr);
 
-    // 空 transfer 数组：ArrayBuffer 未被转移（按值克隆）
+    // Empty transfer array: ArrayBuffer is not transfered (cloned by value)
     EXPECT_EQ(ab->ByteLength(ecmaVm), 8);
 
     Local<JSValueRef> result = JSNApi::DeserializeValue(ecmaVm, buf, nullptr);
@@ -658,12 +658,12 @@ HWTEST_F_L0(FlatBufferSerializeTest, DefaultTransferTrue_MultipleArrayBuffer_All
                                           true, false, outSize);
     ASSERT_NE(buf, nullptr);
 
-    // 默认转移语义下所有 ArrayBuffer 都应被 detach
+    // With default transfer semantics, all ArrayBuffers should be detached
     EXPECT_EQ(ab1->ByteLength(ecmaVm), 0);
     EXPECT_EQ(ab2->ByteLength(ecmaVm), 0);
     EXPECT_EQ(ab3->ByteLength(ecmaVm), 0);
 
-    // 反序列化验证所有 ArrayBuffer 重建完整
+    // Deserialize verification: all ArrayBuffers are fully reconstructed
     Local<JSValueRef> result = JSNApi::DeserializeValue(ecmaVm, buf, nullptr);
     ASSERT_TRUE(result->IsObject(ecmaVm));
     Local<ObjectRef> resultObj = result->ToObject(ecmaVm);
@@ -692,12 +692,12 @@ HWTEST_F_L0(FlatBufferSerializeTest, DeserializeAfterBufferFreed_NoUseAfterFree)
                                           false, true, false, outSize);
     ASSERT_NE(buf, nullptr);
 
-    // 复制缓冲区内容
+    // Copy buffer contents
     uint8_t *copy = static_cast<uint8_t *>(malloc(outSize));
     ASSERT_EQ(memcpy_s(copy, outSize, buf, outSize), EOK);
-    free(buf);  // 释放原始缓冲区
+    free(buf);  // Free thre original buffer
 
-    // 从副本反序列化
+    // Deserialize from the copy
     Local<JSValueRef> result = JSNApi::DeserializeValue(ecmaVm, copy, nullptr);
     ASSERT_TRUE(result->IsString(ecmaVm));
     EXPECT_EQ(Local<StringRef>(result)->ToString(ecmaVm), "independent");
@@ -708,7 +708,7 @@ HWTEST_F_L0(FlatBufferSerializeTest, DeserializeAfterBufferFreed_NoUseAfterFree)
 HWTEST_F_L0(FlatBufferSerializeTest, TransferArrayBuffer_OriginalDetachedAndReconstructed)
 {
     Local<ArrayBufferRef> ab = ArrayBufferRef::New(ecmaVm, 8);
-    // 写入测试数据
+    // Write test data
     uint8_t *data = static_cast<uint8_t*>(ab->GetBuffer(ecmaVm));
     for (int i = 0; i < 8; i++) {
         data[i] = static_cast<uint8_t>(0xA0 + i);
@@ -723,10 +723,10 @@ HWTEST_F_L0(FlatBufferSerializeTest, TransferArrayBuffer_OriginalDetachedAndReco
                                           false, true, false, outSize);
     ASSERT_NE(buf, nullptr);
 
-    // ArrayBuffer 被转移（detach）
+    // ArrayBuffer is transferred（detach）
     EXPECT_EQ(ab->ByteLength(ecmaVm), 0);
 
-    // 反序列化验证：重建的 ArrayBuffer 包含原始数据
+    // Deserialize verification：the reconstructed ArrayBuffer contains the original data
     Local<JSValueRef> result = JSNApi::DeserializeValue(ecmaVm, buf, nullptr);
     ASSERT_TRUE(result->IsArrayBuffer(ecmaVm));
     Local<ArrayBufferRef> resultAb = Local<ArrayBufferRef>(result);
@@ -749,7 +749,7 @@ HWTEST_F_L0(FlatBufferSerializeTest, DefaultCloneSharedFalse_WithoutCloneList)
                                           false,
                                           false,  /* defaultCloneShared=false */
                                           false, outSize);
-    // 无共享对象时 defaultCloneShared=false 应仍能正常序列化
+    // Without shared objects, defaultCloneShared=false should still serialize normally
     ASSERT_NE(buf, nullptr);
     EXPECT_GT(outSize, static_cast<size_t>(0));
 
@@ -762,7 +762,7 @@ HWTEST_F_L0(FlatBufferSerializeTest, DefaultCloneSharedFalse_WithoutCloneList)
 
 HWTEST_F_L0(FlatBufferSerializeTest, ZeroSizeArrayBuffer_SerializeAndDeserialize)
 {
-    Local<ArrayBufferRef> ab = ArrayBufferRef::New(ecmaVm, 0);  // 零长度
+    Local<ArrayBufferRef> ab = ArrayBufferRef::New(ecmaVm, 0);  // Zero-length
     size_t outSize = 0;
     Local<JSValueRef> transfer(JSValueRef::Undefined(ecmaVm));
     Local<JSValueRef> cloneList(JSValueRef::Undefined(ecmaVm));
@@ -785,7 +785,7 @@ HWTEST_F_L0(FlatBufferSerializeTest, MultipleRoundTrips_DataConsistency)
     obj->Set(ecmaVm, StringRef::NewFromUtf8(ecmaVm, "y"),
              StringRef::NewFromUtf8(ecmaVm, "hello"));
 
-    // 第一次 round-trip
+    // First round-trip
     size_t size1 = 0;
     Local<JSValueRef> transfer(JSValueRef::Undefined(ecmaVm));
     Local<JSValueRef> cloneList(JSValueRef::Undefined(ecmaVm));
@@ -795,7 +795,7 @@ HWTEST_F_L0(FlatBufferSerializeTest, MultipleRoundTrips_DataConsistency)
     Local<JSValueRef> result1 = JSNApi::DeserializeValue(ecmaVm, buf1, nullptr);
     free(buf1);
 
-    // 第二次 round-trip（对第一次反序列化结果再序列化）
+    // Second round-trip（serialize the first deserialization result again）
     size_t size2 = 0;
     uint8_t *buf2 = JSNApi::SerializeValue(ecmaVm, result1, transfer, cloneList,
                                            false, true, false, size2);
@@ -803,7 +803,7 @@ HWTEST_F_L0(FlatBufferSerializeTest, MultipleRoundTrips_DataConsistency)
     Local<JSValueRef> result2 = JSNApi::DeserializeValue(ecmaVm, buf2, nullptr);
     free(buf2);
 
-    // 验证两次 round-trip 结果一致
+    // Verify that two round-trips produce consistent results
     ASSERT_TRUE(result2->IsObject(ecmaVm));
     Local<ObjectRef> resultObj2 = result2->ToObject(ecmaVm);
     Local<JSValueRef> x2 = resultObj2->Get(ecmaVm,

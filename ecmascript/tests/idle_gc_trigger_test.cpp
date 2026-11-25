@@ -59,6 +59,11 @@ public:
     }
 };
 
+/**
+ * @tc.name: TryTriggerIdleSharedOldGCTest001
+ * @tc.desc: TryTriggerIdleSharedOldGCTest001
+ * @tc.type: FUNC
+ */
 HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleSharedOldGCTest001)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
@@ -69,6 +74,11 @@ HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleSharedOldGCTest001)
     delete trigger;
 }
 
+/**
+ * @tc.name: TryTriggerIdleSharedOldGCTest002
+ * @tc.desc: TryTriggerIdleSharedOldGCTest002
+ * @tc.type: FUNC
+ */
 HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleSharedOldGCTest002)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
@@ -81,6 +91,11 @@ HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleSharedOldGCTest002)
     delete trigger;
 }
 
+/**
+ * @tc.name: TryTriggerIdleSharedOldGCTest003
+ * @tc.desc: TryTriggerIdleSharedOldGCTest003
+ * @tc.type: FUNC
+ */
 HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleSharedOldGCTest003)
 {
     constexpr size_t LIVE_SIZE = 5242889;
@@ -95,6 +110,11 @@ HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleSharedOldGCTest003)
     delete trigger;
 }
 
+/**
+ * @tc.name: TryTriggerIdleSharedOldGCTest004
+ * @tc.desc: TryTriggerIdleSharedOldGCTest004
+ * @tc.type: FUNC
+ */
 HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleSharedOldGCTest004)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
@@ -122,6 +142,11 @@ HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleLocalOldGCTest001)
     delete trigger;
 }
 
+/**
+ * @tc.name: TryTriggerIdleLocalOldGCTest002
+ * @tc.desc: TryTriggerIdleLocalOldGCTest002
+ * @tc.type: FUNC
+ */
 HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleLocalOldGCTest002)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
@@ -170,6 +195,11 @@ HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleLocalOldGCTest004)
     delete trigger;
 }
 
+/**
+ * @tc.name: TryTriggerIdleLocalOldGCTest005
+ * @tc.desc: TryTriggerIdleLocalOldGCTest005
+ * @tc.type: FUNC
+ */
 HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleLocalOldGCTest005)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
@@ -203,6 +233,11 @@ HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleLocalOldGCTest006)
     delete trigger;
 }
 
+/**
+ * @tc.name: ReachIdleLocalOldGCThresholdsTest001
+ * @tc.desc: ReachIdleLocalOldGCThresholdsTest001
+ * @tc.type: FUNC
+ */
 HWTEST_F_L0(IdleGCTriggerTest, ReachIdleLocalOldGCThresholdsTest001)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
@@ -231,6 +266,11 @@ HWTEST_F_L0(IdleGCTriggerTest, ReachIdleLocalOldGCThresholdsTest002)
     delete trigger;
 }
 
+/**
+ * @tc.name: TryPostHandleMarkFinishedTest001
+ * @tc.desc: TryPostHandleMarkFinishedTest001
+ * @tc.type: FUNC
+ */
 HWTEST_F_L0(IdleGCTriggerTest, TryPostHandleMarkFinishedTest001)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
@@ -241,6 +281,11 @@ HWTEST_F_L0(IdleGCTriggerTest, TryPostHandleMarkFinishedTest001)
     delete trigger;
 }
 
+/**
+ * @tc.name: TryPostHandleMarkFinishedTest002
+ * @tc.desc: TryPostHandleMarkFinishedTest002
+ * @tc.type: FUNC
+ */
 HWTEST_F_L0(IdleGCTriggerTest, TryPostHandleMarkFinishedTest002)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
@@ -248,21 +293,6 @@ HWTEST_F_L0(IdleGCTriggerTest, TryPostHandleMarkFinishedTest002)
     IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
     trigger->TryPostHandleMarkFinished();
     delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleGCTest002)
-{
-    // fixme: adapt to cms
-    if constexpr (G_USE_CMS_GC) {
-        return;
-    }
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    sheap->NotifyHeapAliveSizeAfterGC(1);
-    sheap->GetOldSpace()->SetInitialCapacity(10000);
-    sheap->GetOldSpace()->IncreaseLiveObjectSize(5242889);
-    auto idleGCTrigger = heap->GetIdleGCTrigger();
-    idleGCTrigger->TryTriggerIdleGC(TRIGGER_IDLE_GC_TYPE::SHARED_CONCURRENT_MARK);
 }
 
 HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleGCTest003)
@@ -279,6 +309,11 @@ HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleGCTest003)
     idleGCTrigger->TryTriggerIdleGC(TRIGGER_IDLE_GC_TYPE::LOCAL_CONCURRENT_FULL_MARK);
 }
 
+/**
+ * @tc.name: TryTriggerIdleGCTest004
+ * @tc.desc: TryTriggerIdleGCTest004
+ * @tc.type: FUNC
+ */
 HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleGCTest004)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
@@ -288,6 +323,11 @@ HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleGCTest004)
     delete trigger;
 }
 
+/**
+ * @tc.name: TryTriggerIdleGCTest011
+ * @tc.desc: TryTriggerIdleGCTest011
+ * @tc.type: FUNC
+ */
 HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleGCTest011)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
@@ -346,6 +386,11 @@ HWTEST_F_L0(IdleGCTriggerTest, ShouldCheckIdleOldGCTest001)
     delete trigger;
 }
 
+/**
+ * @tc.name: TryTriggerIdleGCTest014
+ * @tc.desc: TryTriggerIdleGCTest014
+ * @tc.type: FUNC
+ */
 HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleGCTest014)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
@@ -358,6 +403,11 @@ HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleGCTest014)
     delete trigger;
 }
 
+/**
+ * @tc.name: TryTriggerIdleGCTest015
+ * @tc.desc: TryTriggerIdleGCTest015
+ * @tc.type: FUNC
+ */
 HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleGCTest015)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
@@ -368,6 +418,11 @@ HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleGCTest015)
     delete trigger;
 }
 
+/**
+ * @tc.name: TryTriggerIdleGCTest016
+ * @tc.desc: TryTriggerIdleGCTest016
+ * @tc.type: FUNC
+ */
 HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleGCTest016)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
@@ -380,6 +435,11 @@ HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleGCTest016)
     delete trigger;
 }
 
+/**
+ * @tc.name: TryTriggerIdleGCTest017
+ * @tc.desc: TryTriggerIdleGCTest017
+ * @tc.type: FUNC
+ */
 HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleGCTest017)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
@@ -393,6 +453,11 @@ HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleGCTest017)
     delete trigger;
 }
 
+/**
+ * @tc.name: TryTriggerIdleGCTest018
+ * @tc.desc: TryTriggerIdleGCTest018
+ * @tc.type: FUNC
+ */
 HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleGCTest018)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
@@ -406,6 +471,11 @@ HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleGCTest018)
     delete trigger;
 }
 
+/**
+ * @tc.name: TryTriggerIdleGCTest019
+ * @tc.desc: TryTriggerIdleGCTest019
+ * @tc.type: FUNC
+ */
 HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleGCTest019)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
@@ -418,6 +488,11 @@ HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleGCTest019)
     delete trigger;
 }
 
+/**
+ * @tc.name: TryTriggerIdleGCTest020
+ * @tc.desc: TryTriggerIdleGCTest020
+ * @tc.type: FUNC
+ */
 HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleGCTest020)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
@@ -430,6 +505,11 @@ HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleGCTest020)
     delete trigger;
 }
 
+/**
+ * @tc.name: NotifyNeedFreeze001
+ * @tc.desc: NotifyNeedFreeze001
+ * @tc.type: FUNC
+ */
 HWTEST_F_L0(IdleGCTriggerTest, NotifyNeedFreeze001)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
@@ -447,6 +527,11 @@ HWTEST_F_L0(IdleGCTriggerTest, NotifyNeedFreeze001)
     delete trigger;
 }
 
+/**
+ * @tc.name: NotifyNeedFreeze002
+ * @tc.desc: NotifyNeedFreeze002
+ * @tc.type: FUNC
+ */
 HWTEST_F_L0(IdleGCTriggerTest, NotifyNeedFreeze002)
 {
     auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
@@ -1304,282 +1389,6 @@ HWTEST_F_L0(IdleGCTriggerTest, GetGCTypeNameTest001)
         trigger->GetGCTypeName(TRIGGER_IDLE_GC_TYPE::LOCAL_CONCURRENT_FULL_MARK), "local concurrent full mark");
     EXPECT_STREQ(trigger->GetGCTypeName(TRIGGER_IDLE_GC_TYPE::LOCAL_REMARK), "local remark");
     EXPECT_STREQ(trigger->GetGCTypeName(static_cast<TRIGGER_IDLE_GC_TYPE>(999)), "UnknownType");
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, NotifyLooperIdleStartTest001)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    int64_t timestamp = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-    bool result = trigger->NotifyLooperIdleStart(timestamp, 100);
-    EXPECT_FALSE(result);
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, NotifyLooperIdleEndTest001)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    int64_t timestamp = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-    trigger->NotifyLooperIdleEnd(timestamp);
-    EXPECT_FALSE(trigger->IsIdleState());
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, GetExpectedMemoryReclamationSizeTest001)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    size_t size = trigger->GetExpectedMemoryReclamationSize();
-    EXPECT_GE(size, 0);
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, ReachIdleSharedPartialGCThresholdsTest001)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    EXPECT_FALSE(trigger->ReachIdleSharedPartialGCThresholds());
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, ReachIdleSharedGCThresholdsTest001)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    EXPECT_FALSE(trigger->ReachIdleSharedGCThresholds());
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, CheckLocalBindingNativeTriggerOldGCTest001)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    EXPECT_FALSE(trigger->CheckLocalBindingNativeTriggerOldGC());
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, NotifyVsyncIdleStartTest001)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    trigger->NotifyVsyncIdleStart();
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, IsPossiblePostGCTaskTest001)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    EXPECT_TRUE(trigger->IsPossiblePostGCTask(TRIGGER_IDLE_GC_TYPE::LOCAL_CC_GC));
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, IsPossiblePostGCTaskTest002)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    EXPECT_TRUE(trigger->IsPossiblePostGCTask(TRIGGER_IDLE_GC_TYPE::LOCAL_REMARK));
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, SetPostGCTaskTest001)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    trigger->SetPostGCTask(TRIGGER_IDLE_GC_TYPE::LOCAL_CC_GC);
-    EXPECT_FALSE(trigger->IsPossiblePostGCTask(TRIGGER_IDLE_GC_TYPE::LOCAL_CC_GC));
-    trigger->ClearPostGCTask(TRIGGER_IDLE_GC_TYPE::LOCAL_CC_GC);
-    EXPECT_TRUE(trigger->IsPossiblePostGCTask(TRIGGER_IDLE_GC_TYPE::LOCAL_CC_GC));
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, SetPostGCTaskTest002)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    trigger->SetPostGCTask(TRIGGER_IDLE_GC_TYPE::LOCAL_REMARK);
-    EXPECT_FALSE(trigger->IsPossiblePostGCTask(TRIGGER_IDLE_GC_TYPE::LOCAL_REMARK));
-    trigger->ClearPostGCTask(TRIGGER_IDLE_GC_TYPE::LOCAL_REMARK);
-    EXPECT_TRUE(trigger->IsPossiblePostGCTask(TRIGGER_IDLE_GC_TYPE::LOCAL_REMARK));
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, ClearPostGCTaskTest001)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    trigger->SetPostGCTask(TRIGGER_IDLE_GC_TYPE::SHARED_CC);
-    trigger->ClearPostGCTask(TRIGGER_IDLE_GC_TYPE::SHARED_CC);
-    EXPECT_TRUE(trigger->IsPossiblePostGCTask(TRIGGER_IDLE_GC_TYPE::SHARED_CC));
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, GetExpectedMemoryReclamationSizeTest002)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    size_t size = trigger->GetExpectedMemoryReclamationSize();
-    EXPECT_GE(size, 0);
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleYoungGCTest002)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    EXPECT_FALSE(trigger->TryTriggerIdleYoungGC());
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, IsPossiblePostGCTaskTest003)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    EXPECT_TRUE(trigger->IsPossiblePostGCTask(TRIGGER_IDLE_GC_TYPE::SHARED_CC));
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, SetPostGCTaskTest003)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    trigger->SetPostGCTask(TRIGGER_IDLE_GC_TYPE::SHARED_CC);
-    EXPECT_FALSE(trigger->IsPossiblePostGCTask(TRIGGER_IDLE_GC_TYPE::SHARED_CC));
-    trigger->ClearPostGCTask(TRIGGER_IDLE_GC_TYPE::SHARED_CC);
-    EXPECT_TRUE(trigger->IsPossiblePostGCTask(TRIGGER_IDLE_GC_TYPE::SHARED_CC));
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, GetExpectedMemoryReclamationSizeTest003)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    size_t size = trigger->GetExpectedMemoryReclamationSize();
-    EXPECT_GE(size, 0);
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, ReachIdleSharedPartialGCThresholdsTest002)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    EXPECT_FALSE(trigger->ReachIdleSharedPartialGCThresholds());
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, CheckLocalBindingNativeTriggerOldGCTest002)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    EXPECT_FALSE(trigger->CheckLocalBindingNativeTriggerOldGC());
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, NotifyLooperIdleStartTest002)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    trigger->NotifyLooperIdleStart(1000, 500);
-    EXPECT_TRUE(trigger->IsIdleState());
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, SetPostGCTaskTest004)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    trigger->SetPostGCTask(TRIGGER_IDLE_GC_TYPE::LOCAL_CC_GC);
-    EXPECT_FALSE(trigger->IsPossiblePostGCTask(TRIGGER_IDLE_GC_TYPE::LOCAL_CC_GC));
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, ClearPostGCTaskTest003)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    trigger->SetPostGCTask(TRIGGER_IDLE_GC_TYPE::LOCAL_REMARK);
-    trigger->ClearPostGCTask(TRIGGER_IDLE_GC_TYPE::LOCAL_REMARK);
-    EXPECT_TRUE(trigger->IsPossiblePostGCTask(TRIGGER_IDLE_GC_TYPE::LOCAL_REMARK));
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, NotifyVsyncIdleStartTest002)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    trigger->NotifyVsyncIdleStart();
-    EXPECT_FALSE(trigger->IsIdleState());
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, GetExpectedMemoryReclamationSizeTest004)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    size_t size = trigger->GetExpectedMemoryReclamationSize();
-    EXPECT_GE(size, 0);
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, ReachIdleSharedGCThresholdsTest002)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    EXPECT_FALSE(trigger->ReachIdleSharedGCThresholds());
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, ReachIdleSharedPartialGCThresholdsTest003)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    EXPECT_FALSE(trigger->ReachIdleSharedPartialGCThresholds());
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, CheckLocalBindingNativeTriggerOldGCTest003)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    EXPECT_FALSE(trigger->CheckLocalBindingNativeTriggerOldGC());
-    delete trigger;
-}
-
-HWTEST_F_L0(IdleGCTriggerTest, TryTriggerIdleYoungGCTest003)
-{
-    auto heap = const_cast<Heap *>(thread->GetEcmaVM()->GetHeap());
-    SharedHeap *sheap = SharedHeap::GetInstance();
-    IdleGCTrigger *trigger = new IdleGCTrigger(heap, sheap, thread);
-    EXPECT_FALSE(trigger->TryTriggerIdleYoungGC());
     delete trigger;
 }
 }  // namespace panda::test
