@@ -177,7 +177,7 @@ enum class FreeListType {
 // |----------------------------------------------------------------------------------------------|
 // |                                   Region (256 kb)                                            |
 // |----------------------------------------|--------------------------------|--------------------|
-// | Head (sizeof(DefaultRegion/CMSRegion)) |         Mark bitset (4kb)      |      Data          |
+// | Head (sizeof(DefaultRegion/CMSRegion)) |   Mark bitset (4kb, huge: 8b)  |      Data          |
 // |----------------------------------------|--------------------------------|--------------------|
 
 class Region {
@@ -385,6 +385,8 @@ public:
     void AtomicInsertLocalToShareRSet(uintptr_t addr);
     void ClearLocalToShareRSetInRange(uintptr_t start, uintptr_t end);
     void AtomicClearSweepingLocalToShareRSetInRange(uintptr_t start, uintptr_t end);
+    void AtomicClearCollectedLocalToShareRSetInRange(uintptr_t start, uintptr_t end);
+    void RecordReTrimRangesIfNeededForCC(uintptr_t start, uintptr_t end);
     template <typename Visitor>
     void IterateAllLocalToShareBits(Visitor &&visitor);
     void DeleteLocalToShareRSet();
@@ -435,6 +437,7 @@ public:
     void Invalidate()
     {
         ASAN_UNPOISON_MEMORY_REGION(reinterpret_cast<void *>(GetBegin()), GetSize());
+        ASSERT(pendingReTrimRangesForCC_ == nullptr);
         packedData_.flags_.spaceFlag_ = RegionSpaceFlag::UNINITIALIZED;
         if (lock_ != nullptr) {
             delete lock_;
@@ -848,13 +851,28 @@ public:
         // const pool do not support copy, so do not need support for batch barrier
     }
 
+    void SwapLocalToShareRSetForCC()
+    {
+        SwapLocalToShareRSetForCS();
+        ASSERT(pendingReTrimRangesForCC_ == nullptr);
+        pendingReTrimRangesForCC_ = new std::vector<std::pair<uintptr_t, uintptr_t>>();
+    }
+
     // should call in js-thread
     void MergeOldToNewRSetForCS();
     void MergeLocalToShareRSetForCS();
+    void MergeLocalToShareRSetForCC();
 
     // should call in daemon-thread, or in js-thread in RUNNING state
     template <ReferenceType refType>
     void MergeLocalToShareRSetForCM(RememberedSetBase<refType> *set);
+
+    // Mark bitset size for huge-object regions. A huge region holds a single object, so the
+    // bitset only needs to cover the mark bit of that object's header (bit index = header
+    // offset / TYPE_SIZE, see AtomicMark / Test / IterateAllMarkedBits). The size is coupled
+    // with the region layout built in HeapRegionAllocator::AllocateAlignedRegion and PackedData:
+    // keep the static_asserts next to DefaultRegion below in sync when Region grows.
+    static constexpr size_t HUGE_REGION_MARK_BITSET_SIZE = 2 * GCBitset::BYTE_PER_WORD;
 
     struct alignas(JSTaggedValue::TaggedTypeSize()) PackedPtr : public base::AlignedPointer {
         uint8_t spaceFlag_;
@@ -899,10 +917,14 @@ public:
             bitsetSize_ = (spaceType == RegionSpaceFlag::IN_HUGE_OBJECT_SPACE ||
                            spaceType == RegionSpaceFlag::IN_HUGE_MACHINE_CODE_SPACE ||
                            spaceType == RegionSpaceFlag::IN_SHARED_HUGE_OBJECT_SPACE) ?
-                GCBitset::BYTE_PER_WORD : GCBitset::SizeOfGCBitset(end - allocateBase);
+                HUGE_REGION_MARK_BITSET_SIZE : GCBitset::SizeOfGCBitset(end - allocateBase);
             markGCBitset_ = new (ToVoidPtr(begin)) GCBitset();
             markGCBitset_->Clear(bitsetSize_);
             begin_ = AlignUp(begin + bitsetSize_, static_cast<size_t>(MemAlignment::MEM_ALIGN_OBJECT));
+            // The mark bit of the first object must be inside the bitset: huge regions
+            // allocate a minimal bitset that barely covers the single object header.
+            ASSERT(((begin_ - allocateBase) >> GCBitset::TYPE_SIZE_LOG) <
+                   (bitsetSize_ * GCBitset::BIT_PER_BYTE));
             // The object region marked with poison until it is allocated if is_asan is true
 #ifdef ARK_ASAN_ON
             ASAN_POISON_MEMORY_REGION(reinterpret_cast<void *>(begin_), (end - begin_));
@@ -1030,6 +1052,9 @@ protected:
     CompressedRememberedSet *compressedSweepingOldToNewRSet_ {nullptr};
     RememberedSet *sweepingLocalToShareRSet_ {nullptr};
     CompressedRememberedSet *compressedSweepingLocalToShareRSet_ {nullptr};
+    RememberedSet *collectedLocalToShareRSet_ {nullptr};
+    CompressedRememberedSet *collectedCompressedLocalToShareRSet_ {nullptr};
+    std::vector<std::pair<uintptr_t, uintptr_t>> *pendingReTrimRangesForCC_ {nullptr};
     Mutex *lock_ {nullptr};
     uint64_t wasted_;
     // snapshotdata_ is used to encode the region for snapshot. Its upper 32 bits are used to store the size of
@@ -1042,6 +1067,7 @@ protected:
     friend class ToSpace;
     friend class SlotSpace;
     friend class SpecializedSlotSpace;
+    friend class GlobalCC;
 };
 
 class BumpPointerFreeListWrapper {
@@ -1178,6 +1204,18 @@ public:
 
 using DefaultRegion = FreeListBasedRegion<FreeListType::BUMP_POINTER_FREE_LIST>;
 using CMSRegion = FreeListBasedRegion<FreeListType::SLOT_FREE_LIST>;
+
+// Huge-object regions (all huge spaces allocate DefaultRegion in
+// HeapRegionAllocator::AllocateAlignedRegion) only need the mark bit of the single object
+// header. If the region header grows so that this bit falls outside the minimal bitset,
+// AtomicMark silently writes into the padding and the mark becomes invisible to
+// Clear / IterateAllMarkedBits, so the layout must satisfy:
+//   bitIndexOf(begin_) = (begin_ - allocateBase) >> TYPE_SIZE_LOG  <  bitsetSize_ * BIT_PER_BYTE
+static_assert((AlignUp(AlignUp(sizeof(DefaultRegion), static_cast<size_t>(MemAlignment::MEM_ALIGN_REGION)) +
+                       Region::HUGE_REGION_MARK_BITSET_SIZE,
+                       static_cast<size_t>(MemAlignment::MEM_ALIGN_OBJECT)) >>
+               GCBitset::TYPE_SIZE_LOG) <
+              (Region::HUGE_REGION_MARK_BITSET_SIZE * GCBitset::BIT_PER_BYTE));
 }  // namespace ecmascript
 }  // namespace panda
 #endif  // ECMASCRIPT_MEM_REGION_H

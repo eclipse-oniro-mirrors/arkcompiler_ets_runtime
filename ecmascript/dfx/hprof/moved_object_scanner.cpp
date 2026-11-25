@@ -27,6 +27,7 @@
 #include "ecmascript/mem/heap-inl.h"
 #include "ecmascript/mem/mark_word.h"
 #include "ecmascript/mem/region.h"
+#include "ecmascript/mem/specialized_slot_space-inl.h"
 #include "ecmascript/platform/mutex.h"
 
 namespace panda::ecmascript {
@@ -170,6 +171,19 @@ MoveScanStats MovedObjectScanner::ScanLocalCC(Heap *heap)
 {
     return RunLocalAnchor("LocalCC", heap, [](Heap *h, MoveScanStats &s, HeapProfiler *p) {
         h->EnumerateLocalCCFromRegions([&s, p](Region *region) { ScanRegionLocal(region, s, p); });
+    });
+}
+
+MoveScanStats MovedObjectScanner::ScanLocalGlobalCC(Heap *heap)
+{
+    return RunLocalAnchor("GlobalCC", heap, [](Heap *h, MoveScanStats &s, HeapProfiler *p) {
+        auto scanRegion = [&s, p](Region *region) { ScanRegionLocal(region, s, p); };
+        h->EnumerateLocalCCFromRegions(scanRegion);
+        // GlobalCC also evacuates the specialized local spaces.
+        h->GetModuleSpace()->EnumerateFromRegions(scanRegion);
+        if constexpr (!G_USE_CMS_GC) {
+            h->GetNativePointerSpace()->EnumerateFromRegions(scanRegion);
+        }
     });
 }
 

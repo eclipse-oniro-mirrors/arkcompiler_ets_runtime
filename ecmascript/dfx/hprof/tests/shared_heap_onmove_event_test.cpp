@@ -26,6 +26,7 @@
 #include "ecmascript/mem/heap.h"
 #include "ecmascript/mem/region.h"
 #include "ecmascript/mem/shared_heap/shared_gc.h"
+#include "ecmascript/module/js_module_source_text.h"
 #include "ecmascript/tests/test_helper.h"
 
 using namespace panda::ecmascript;
@@ -413,6 +414,51 @@ HWTEST_F_L0(SharedHeapOnMoveEventTest, LocalCCAnchorFiresWhenRecording)
     EXPECT_TRUE(idAlive);
     EXPECT_NE(newAddr, reinterpret_cast<JSTaggedType>(obj));
 }
+
+#if defined(PANDA_TARGET_64) && ENABLE_MODULE_SPACE && !USE_CMS_GC
+HWTEST_F_L0(SharedHeapOnMoveEventTest, GlobalCCPreservesMovedObjectIds)
+{
+    HeapProfiler *profiler = static_cast<HeapProfiler *>(HeapProfilerInterface::GetInstance(ecmaVm_));
+    TrackingTestStream stream;
+    ASSERT_TRUE(profiler->StartHeapTracking(50, true, &stream, false, false));
+
+    auto *factory = ecmaVm_->GetFactory();
+    JSHandle<TaggedArray> localObject = factory->NewTaggedArray(8);
+    JSHandle<TaggedArray> sharedObject = factory->NewSOldSpaceTaggedArray(8, JSTaggedValue::Undefined());
+    JSHandle<SourceTextModule> module = factory->NewSourceTextModule();
+    JSHandle<JSNativePointer> nativePointer = factory->NewJSNativePointer(nullptr);
+    EXPECT_TRUE(Region::ObjectAddressToRange(module.GetTaggedValue().GetTaggedObject())->InModuleSpace());
+    EXPECT_TRUE(Region::ObjectAddressToRange(nativePointer.GetTaggedValue().GetTaggedObject())->InNativePointerSpace());
+
+    std::vector<JSHandle<JSTaggedValue>> objects {
+        JSHandle<JSTaggedValue>::Cast(localObject), JSHandle<JSTaggedValue>::Cast(sharedObject),
+        JSHandle<JSTaggedValue>::Cast(module), JSHandle<JSTaggedValue>::Cast(nativePointer)
+    };
+    std::vector<JSTaggedType> oldAddresses;
+    std::vector<uint64_t> ids;
+    for (const auto &object : objects) {
+        JSTaggedType address = reinterpret_cast<JSTaggedType>(object.GetTaggedValue().GetTaggedObject());
+        oldAddresses.push_back(address);
+        ids.push_back(profiler->GetEntryIdMap()->FindOrInsertNodeId(address));
+    }
+
+    sHeap_->CollectGarbage<TriggerGCType::GLOBAL_CC, GCReason::OTHER>(thread_);
+    ecmaVm_->GetHeap()->WaitAllTasksFinished();
+    sHeap_->WaitAllTasksFinished(thread_);
+
+    for (size_t i = 0; i < objects.size(); i++) {
+        JSTaggedType address = reinterpret_cast<JSTaggedType>(objects[i].GetTaggedValue().GetTaggedObject());
+        EXPECT_NE(address, oldAddresses[i]);
+        const auto *idMap = profiler->GetEntryIdMap()->GetIdMap();
+        auto entry = idMap->find(address);
+        EXPECT_TRUE(entry != idMap->end());
+        if (entry != idMap->end()) {
+            EXPECT_EQ(entry->second, ids[i]);
+        }
+    }
+    EXPECT_TRUE(profiler->StopHeapTracking(&stream, nullptr, false));
+}
+#endif
 
 HWTEST_F_L0(SharedHeapOnMoveEventTest, RealProfilerNodeIdStableAcrossGC)
 {

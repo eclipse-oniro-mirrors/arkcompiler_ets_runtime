@@ -65,6 +65,8 @@ public:
                 return "local cc gc";
             case TRIGGER_IDLE_GC_TYPE::SHARED_CC:
                 return "shared cc";
+            case TRIGGER_IDLE_GC_TYPE::GLOBAL_CC:
+                return "global cc";
             case TRIGGER_IDLE_GC_TYPE::LOCAL_CONCURRENT_YOUNG_MARK:
                 return "local concurrent young mark";
             case TRIGGER_IDLE_GC_TYPE::LOCAL_CONCURRENT_FULL_MARK:
@@ -114,6 +116,7 @@ public:
     bool ReachIdleSharedGCThresholds();
     void TryPostHandleMarkFinished();
     void TryTriggerIdleGC(TRIGGER_IDLE_GC_TYPE gcType);
+    bool TryTriggerIdleGlobalCC();
     bool CheckIdleYoungGC(bool isLongIdle = false) const;
     bool CheckIdleLocalOldGC(const Heap *heap) const;
     bool CheckLocalBindingNativeTriggerOldGC() const;

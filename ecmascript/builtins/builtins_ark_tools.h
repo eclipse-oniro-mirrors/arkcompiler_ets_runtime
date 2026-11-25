@@ -91,6 +91,7 @@
     V("triggerSharedGC",                TriggerSharedGC,                0, INVALID)       \
     V("triggerLocalCCGC",               TriggerLocalCCGC,               0, INVALID)       \
     V("triggerSharedCC",                TriggerSharedCC,                0, INVALID)       \
+    V("triggerGlobalCC",                TriggerGlobalCC,                0, INVALID)       \
     V("enableProcDumpInSharedOOM",      EnableProcDumpInSharedOOM,      1, INVALID)       \
     V("GetBranchCount",                 GetBranchCount,                 0, INVALID)
 
@@ -511,6 +512,7 @@ public:
     static JSTaggedValue TriggerSharedGC(EcmaRuntimeCallInfo *info);
     static JSTaggedValue TriggerLocalCCGC(EcmaRuntimeCallInfo *info);
     static JSTaggedValue TriggerSharedCC(EcmaRuntimeCallInfo *info);
+    static JSTaggedValue TriggerGlobalCC(EcmaRuntimeCallInfo *info);
 
     static JSTaggedValue EnableProcDumpInSharedOOM(EcmaRuntimeCallInfo *info);
 

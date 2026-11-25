@@ -49,7 +49,7 @@ uintptr_t SpecializedSlotTlabAllocator::Allocate()
 void SpecializedSlotTlabAllocator::Reset(SpecializedSlotSpace *space)
 {
     ASSERT(space != nullptr);
-    Discard();
+    Finalize();
     space_ = space;
     slotSize_ = space->GetSlotSize();
 }
@@ -293,6 +293,7 @@ void CCTlabAllocator::Setup(Heap *heap)
     if constexpr (!G_USE_CMS_GC) {
         nativePointerAllocator_.Reset(heap->GetNativePointerSpace());
     }
+    moduleTlab_.Reset(heap->GetModuleSpace());
 }
 
 void CCTlabAllocator::Initialize()
@@ -301,6 +302,7 @@ void CCTlabAllocator::Initialize()
     if constexpr (!G_USE_CMS_GC) {
         nativePointerAllocator_.Reset(heap_->GetNativePointerSpace());
     }
+    moduleTlab_.Reset(heap_->GetModuleSpace());
 }
 
 void CCTlabAllocator::Finalize()
@@ -312,6 +314,7 @@ void CCTlabAllocator::Finalize()
     if constexpr (!G_USE_CMS_GC) {
         nativePointerAllocator_.Finalize();
     }
+    moduleTlab_.Finalize();
 }
 
 void CCTlabAllocator::ReleaseNativePointer(uintptr_t address)
@@ -326,8 +329,17 @@ uintptr_t CCTlabAllocator::AllocateNativePointer()
     return nativePointerAllocator_.Allocate();
 }
 
-uintptr_t CCTlabAllocator::Allocate(size_t size)
+void CCTlabAllocator::ReleaseModule(uintptr_t address)
 {
+    moduleTlab_.Release(address);
+}
+
+uintptr_t CCTlabAllocator::Allocate(size_t size, MemSpaceType space)
+{
+    if (space == MemSpaceType::MODULE_SPACE) {
+        return AllocateInModuleSpace(size);
+    }
+    ASSERT(space == MemSpaceType::OLD_SPACE);
     ASSERT(AlignUp(size, static_cast<size_t>(MemAlignment::MEM_ALIGN_OBJECT)) == size);
     size = AlignUp(size, static_cast<size_t>(MemAlignment::MEM_ALIGN_OBJECT));
     uintptr_t result = bpAllocator_.Allocate(size);
@@ -338,6 +350,12 @@ uintptr_t CCTlabAllocator::Allocate(size_t size)
     tlabRegion_->IncreaseAliveObject(size);
     ASSERT(result != 0);
     return result;
+}
+
+uintptr_t CCTlabAllocator::AllocateInModuleSpace(size_t size)
+{
+    ASSERT(size == heap_->GetModuleSpace()->GetSlotSize());
+    return moduleTlab_.Allocate();
 }
 
 void CCTlabAllocator::Expand()

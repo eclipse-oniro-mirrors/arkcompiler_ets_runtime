@@ -5392,9 +5392,7 @@ void JSNApi::IgnoreFinalizeCallback(EcmaVM *ecmaVm)
 {
     CROSS_THREAD_CHECK(ecmaVm);
     ecmascript::ThreadManagedScope scope(thread);
-    if (ecmascript::g_isEnableCMCGC) {
-        thread->IgnoreFinalizeCallback();
-    }
+    thread->IgnoreFinalizeCallback();
 }
 
 void JSNApi::RegisterUncatchableErrorHandler(EcmaVM *ecmaVm, const UncatchableErrorHandler &handler)
@@ -5458,6 +5456,10 @@ void JSNApi::TriggerGC(const EcmaVM *vm, ecmascript::GCReason reason, TRIGGER_GC
                     sHeap->CollectGarbage<ecmascript::TriggerGCType::SHARED_CC,
                         ecmascript::GCReason::EXTERNAL_TRIGGER>(thread);
                     break;
+                case TRIGGER_GC_TYPE::GLOBAL_CC:
+                    sHeap->CollectGarbage<ecmascript::TriggerGCType::GLOBAL_CC,
+                        ecmascript::GCReason::EXTERNAL_TRIGGER>(thread);
+                    break;
                 default:
                     break;
             }
@@ -5490,6 +5492,19 @@ void JSNApi::TriggerIdleGC(const EcmaVM *vm, TRIGGER_IDLE_GC_TYPE gcType)
         ecmascript::ThreadManagedScope managedScope(thread);
         vm->GetHeap()->GetIdleGCTrigger()->TryTriggerIdleGC(gcType);
     }
+}
+
+bool JSNApi::TryTriggerIdleGlobalCC(const EcmaVM *vm)
+{
+    if (vm == nullptr || !vm->IsInitialized()) {
+        return false;
+    }
+    CROSS_THREAD_CHECK(vm);
+    if (thread == nullptr) {
+        return false;
+    }
+    ecmascript::ThreadManagedScope managedScope(thread);
+    return vm->GetHeap()->GetIdleGCTrigger()->TryTriggerIdleGlobalCC();
 }
 
 size_t JSNApi::GetEcmaVMExpectedMemoryReclamationSize(const EcmaVM *vm)

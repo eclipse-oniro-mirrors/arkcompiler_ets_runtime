@@ -104,6 +104,7 @@ void SharedHeap::CreateUnifiedGC()
 
 void Heap::UnifiedGCPrepare()
 {
+    WaitGlobalCCFinished();
     WaitAndHandleCCFinished(false);
     WaitAllMarkTaskFinished();
     sweeper_->EnsureAllTaskFinished();

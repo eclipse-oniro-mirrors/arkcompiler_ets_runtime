@@ -1271,6 +1271,7 @@ ecma_source = [
   "ecmascript/mem/local_cmc/concurrent_copy_gc.cpp",
   "ecmascript/mem/global_cc/global_concurrent_marker.cpp",
   "ecmascript/mem/global_cc/global_mark_work_manager.cpp",
+  "ecmascript/mem/global_cc/global_cc.cpp",
   "ecmascript/mem/assert_scope.cpp",
   "ecmascript/mem/barriers.cpp",
   "ecmascript/mem/c_string.cpp",

@@ -30,6 +30,7 @@ enum class DaemonTaskType : uint32_t {
     TRIGGER_CONCURRENT_MARK,
     TRIGGER_COLLECT_GARBAGE,
     TRIGGER_SHARED_CC,
+    TRIGGER_GLOBAL_CC,
     TRIGGER_UNIFIED_GC_MARK,
     TERMINATE_DAEMON,
     MOCK_FOR_TEST,
@@ -110,6 +111,13 @@ class TriggerSharedCCTask : public DaemonTask {
 public:
     inline explicit TriggerSharedCCTask(JSThread *thread);
     ~TriggerSharedCCTask() override = default;
+};
+
+template<GCReason gcReason>
+class TriggerGlobalCCTask : public DaemonTask {
+public:
+    inline explicit TriggerGlobalCCTask(JSThread *thread);
+    ~TriggerGlobalCCTask() override = default;
 };
 
 template<TriggerGCType gcType, GCReason gcReason>

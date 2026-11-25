@@ -135,9 +135,7 @@ public:
         ASSERT(!thread->IsConcurrentCopying());
         if (!thread->TrySwitchSharedCCStub() && thread->HasPostTaskToThreadCallback() &&
             thread->TryMarkCCTaskPending()) {
-            thread->PostTaskToThread([thread]() {
-                thread->ExecuteSharedCCStubSwitch();
-            });
+            thread->PostRuntimeThreadTask();
         }
         MarkRoots(thread);
     }

@@ -17,9 +17,10 @@
 #define ECMASCRIPT_JS_THREAD_H
 
 #include <atomic>
+#include <cstdint>
+#include <memory>
 #include <sstream>
 #include <string>
-#include <cstdint>
 #include <unordered_map>
 
 #include "ecmascript/platform/ffrt.h"
@@ -93,6 +94,7 @@ enum class CCStatus : uint8_t {
     READY,
     COPYING,
     COPY_FINISHED,
+    GLOBAL_COPYING,
 };
 
 enum class SharedCCStatus : uint8_t {
@@ -105,6 +107,9 @@ enum class SharedCCStatus : uint8_t {
 enum class ReadBarrierOwner : uint8_t {
     LOCAL_CC = 1U,
     SHARED_PARTIAL_GC = 1U << 1U,
+    // GLOBAL_CC shares the SHARED_CC bit: both are daemon-driven and the single
+    // daemon thread serializes their whole cycles, so their barrier windows
+    // can never overlap.
     SHARED_CC = 1U << 2U,
 };
 
@@ -684,10 +689,8 @@ public:
         return status == CCStatus::COPY_FINISHED;
     }
 
-    // ---- Global CC mark state (independent of the local/shared mark bitfield) ----
     // Gates WB dispatch to Barriers::UpdateGlobalCC while a global concurrent mark/remark
     // round is in flight. Set on every participating JSThread by GlobalCCMarker.
-    // (The per-thread WB buffer itself lives on the local Heap, mirroring SharedGC.)
     bool IsGlobalConcurrentMarking() const
     {
         return globalConcurrentMarking_;
@@ -695,6 +698,12 @@ public:
     void SetGlobalConcurrentMarking(bool v)
     {
         globalConcurrentMarking_ = v;
+    }
+
+    bool IsGlobalConcurrentCopying() const
+    {
+        auto status = CCStatusBits::Decode(glueData_.gcStateBitField_);
+        return status == CCStatus::GLOBAL_COPYING;
     }
 
     SharedCCStatus GetSharedCCStatus() const
@@ -772,8 +781,14 @@ public:
         waitingSharedGCFinished_ = v;
     }
 
-    // Called on target thread (via PostTaskToThread callback) to complete stub switch
+    // Completes the SharedCC/GlobalCC stub switch on the owner thread.
     void ExecuteSharedCCStubSwitch();
+
+    // SharedCC/GlobalCC use one coalesced owner-thread notification. The NAPI
+    // bridge stores a single pending task, so every producer must post this
+    // common entry point rather than a request-specific closure.
+    void PostRuntimeThreadTask();
+    void HandleRuntimeThreadTask();
 
     using PostTaskToThreadCallback = std::function<void(std::function<void()> task)>;
 
@@ -793,6 +808,9 @@ public:
             postTaskToThreadCallback_(std::move(task));
         }
     }
+
+    void RequestGlobalCCCallback();
+    bool HandleGlobalCCCallbacks();
 
     SharedMarkStatus GetSharedMarkStatus() const
     {
@@ -1458,6 +1476,9 @@ public:
         glueData_.heapCurrentEnd_ = newEnd;
     }
 
+    // Installed once by the ConcurrentCopyGC constructor (at VM creation) and
+    // owned by the JSThread; both LocalCC and GlobalCC copy local FROM objects
+    // through it (read barrier routes by InSharedHeap).
     CCEvacuator *GetLocalCCEvacuator() const
     {
         return localEvacuator_;
@@ -2641,6 +2662,7 @@ private:
     bool ccTaskPending_ {false};
     mutable Mutex ccStatusMutex_;
     PostTaskToThreadCallback postTaskToThreadCallback_ {nullptr};
+    std::atomic_bool globalCCCallbackPending_ {false};
 
     // Global CC mark state (independent of the local/shared mark bitfield above).
     bool globalConcurrentMarking_ {false};

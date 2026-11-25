@@ -33,7 +33,12 @@ template <ReferenceType refType>
 template <typename Visitor>
 inline void RSetItem<refType>::Process(const Visitor &visitor)
 {
-    rSet_->IterateAllMarkedBits(ToUintPtr(region_), visitor);
+    // The collected set is processed by GC threads while the owner JS thread is still running
+    // and may trim slots (AtomicClearCollectedLocalToShareRSetInRange). Visitors like
+    // SharedGCMarkLocalToShareRSetVisitor prune non-shared bits during iteration; that clear
+    // must be atomic, otherwise the plain read-modify-write could resurrect bits the JS
+    // thread has just cleared.
+    rSet_->AtomicIterateAllMarkedBits(ToUintPtr(region_), visitor);
 }
 
 template <ReferenceType refType>

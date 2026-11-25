@@ -33,9 +33,11 @@ BaseHeap                       ← Local/Shared GC 协作（STW / 屏障 / RSet�
 | `SHARED_CC` | Shared | 并发复制（实验性） | 配置开启或冷启动后压缩 |
 | `APPSPAWN_FULL_GC` | Local | 压缩到 AppSpawn 空间 | Fork 前 |
 | `UNIFIED_GC` | 跨 VM | 统一多 VM GC | 跨 VM 引用清理 |
+| `GLOBAL_CC` | 跨堆（Local+Shared） | 并发拷贝（分阶段 STW + RB 协作，DaemonThread 驱动，全量拷贝可移动空间） | 主动 `EXTERNAL_TRIGGER`/idle 接口（NAPI 加压）；暂不开放水位自动触发 |
 
 GC 从轻到重逐级升级，`ALLOCATION_FAILED` 是 OOM 前最后一次尝试，**不要在此路径增加新的堆分配**。
 
+CMC GC（`g_isEnableCMCGC` 路径）计划废除中。
 ## 线程模型与并发控制
 
 ### 线程状态与 STW 原理
@@ -99,6 +101,8 @@ GC 从轻到重逐级升级，`ALLOCATION_FAILED` 是 OOM 前最后一次尝试�
 | `ecmascript/mem/shared_heap/shared_full_gc.cpp` | SharedFullGC（全程 STW） |
 | `ecmascript/mem/shared_heap/shared_partial_gc.cpp` | SharedPartialGC（并发标记/清扫） |
 | `ecmascript/mem/shared_heap/shared_cc.h/cpp` | SharedCC（实验性，分阶段并发复制 + RSet 协作） |
+| `ecmascript/mem/global_cc/global_cc.h/cpp` | GlobalCC（跨堆分阶段并发拷贝） |
+| `ecmascript/mem/global_cc/global_concurrent_marker.h/cpp` | GlobalCC 并发标记 |
 | `ecmascript/common_enum.h` | `TriggerGCType`, `GCReason`, `MarkType` 等枚举定义 |
 | `ecmascript/js_thread.h/cpp` | ThreadState 状态机、CheckSafepoint、SharedCCStatus |
 | `ecmascript/checkpoint/thread_state_transition.h` | `SuspendAllScope`/`SuspendAllAction`（STW 入口） |

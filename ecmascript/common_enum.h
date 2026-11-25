@@ -57,6 +57,7 @@ enum TriggerGCType {
     UNIFIED_GC,
     // fixme: support sticky
     CMS_GC,
+    GLOBAL_CC,
     GC_TYPE_LAST,
 };
 

@@ -49,6 +49,7 @@ void ConcurrentSweeper::PostTask(TriggerGCType gcType)
                 break;
             case TriggerGCType::LOCAL_CC:
             case TriggerGCType::FULL_GC:
+            case TriggerGCType::GLOBAL_CC:
                 break;
             default:
                 LOG_ECMA(FATAL) << "this branch is unreachable, " << static_cast<int>(gcType);
@@ -104,6 +105,7 @@ void ConcurrentSweeper::Sweep(TriggerGCType gcType)
                 heap_->GetModuleSpace()->PrepareSweeping();
                 break;
             case TriggerGCType::FULL_GC:
+            case TriggerGCType::GLOBAL_CC:
                 startSpaceType_ = MemSpaceType::NON_MOVABLE;
                 endSpaceType_ = MemSpaceType::MACHINE_CODE_SPACE;
                 break;
@@ -138,10 +140,13 @@ void ConcurrentSweeper::Sweep(TriggerGCType gcType)
             case TriggerGCType::CMS_GC:
                 heap_->GetSlotSpace()->Sweep();
                 break;
+            // LocalCC evacuates old and young spaces, then sweeps ModuleSpace
+            // here and the remaining non-movable spaces below.
             case TriggerGCType::LOCAL_CC:
                 heap_->GetModuleSpace()->Sweep();
                 break;
             case TriggerGCType::FULL_GC:
+            case TriggerGCType::GLOBAL_CC:
                 break;
             default:
                 LOG_ECMA(FATAL) << "this branch is unreachable, " << static_cast<int>(gcType);

@@ -1811,6 +1811,7 @@ protected:
     bool needSharedMemoryPressureCallback_ = false;
 
 private:
+    void DrainGCCallbacksForDestruction();
     void ClearBufferData();
     void ClearConstpoolBufferData();
     void CheckStartCpuProfiler();

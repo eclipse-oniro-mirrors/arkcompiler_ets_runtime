@@ -55,6 +55,17 @@ TriggerSharedCCTask<gcReason>::TriggerSharedCCTask(JSThread *thread)
     : DaemonTask(thread, DaemonTaskType::TRIGGER_SHARED_CC, DaemonTaskGroup::GC_GROUP,
                  &TriggerSharedCCTaskRunner<gcReason>, nullptr) {}
 
+template<GCReason gcReason>
+void TriggerGlobalCCTaskRunner()
+{
+    SharedHeap::GetInstance()->TriggerGlobalCC(gcReason);
+}
+
+template<GCReason gcReason>
+TriggerGlobalCCTask<gcReason>::TriggerGlobalCCTask(JSThread *thread)
+    : DaemonTask(thread, DaemonTaskType::TRIGGER_GLOBAL_CC, DaemonTaskGroup::GC_GROUP,
+                 &TriggerGlobalCCTaskRunner<gcReason>, nullptr) {}
+
 inline void TerminateDaemonTaskRunner()
 {
     DaemonThread *dThread = DaemonThread::GetInstance();

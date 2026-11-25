@@ -52,13 +52,14 @@
 #include "ecmascript/ic/properties_cache.h"
 #include "ecmascript/interpreter/interpreter.h"
 #include "ecmascript/mem/concurrent_marker.h"
+#include "ecmascript/mem/global_cc/global_cc.h"
+#include "ecmascript/mem/heap.h"
 #include "ecmascript/mem/shared_heap/shared_cc.h"
 #include "ecmascript/platform/file.h"
 #include "ecmascript/jit/jit.h"
 #include "common_interfaces/thread/thread_holder_manager.h"
 #include "ecmascript/checkpoint/thread_state_transition.h"
 #include "ecmascript/platform/asm_stack.h"
-#include "ecmascript/base/config.h"
 
 #undef ENABLE_LINXKIT
 #ifdef ENABLE_LINXKIT
@@ -862,8 +863,11 @@ void JSThread::SetReadyForGCIterating(bool flag)
     readyForGCIterating_ = flag;
     if (readyForGCIterating_ && SharedHeap::GetInstance()->NeedSwitchRBStub()) {
         SharedCC *cc = SharedHeap::GetInstance()->GetSharedCC();
+        GlobalCC *globalCC = SharedHeap::GetInstance()->GetGlobalCC();
         if (cc != nullptr && cc->IsRunning()) {
             cc->PrepareNewThread(this);
+        } else if (globalCC->IsRunning()) {
+            globalCC->PrepareNewThread(this);
         } else {
             AcquireReadBarrier(ReadBarrierOwner::SHARED_PARTIAL_GC);
         }
@@ -1163,10 +1167,30 @@ void JSThread::SwitchAllStub(bool isStwCopy)
     glueData_.switchToStwStub_ = isStwCopy;
 }
 
+void JSThread::RequestGlobalCCCallback()
+{
+    globalCCCallbackPending_.store(true, std::memory_order_release);
+    SetCheckSafePointStatus();
+}
+
+bool JSThread::HandleGlobalCCCallbacks()
+{
+    // Consume before invoking callbacks so reentrant GC can publish another batch.
+    if (!globalCCCallbackPending_.exchange(false, std::memory_order_acquire)) {
+        return false;
+    }
+    InvokeWeakNodeFreeGlobalCallBack();
+    vm_->GetHeap()->ProcessGCCallback();
+    return true;
+}
+
 void JSThread::ExecuteSharedCCStubSwitch()
 {
     {
         LockHolder lock(ccStatusMutex_);
+        if (!ccTaskPending_) {
+            return;
+        }
         ccTaskPending_ = false;
         if (ccStatus_ == SharedCCStatus::IDLE || ccStatus_ == SharedCCStatus::SUSPENDED) {
             return;
@@ -1181,6 +1205,26 @@ void JSThread::ExecuteSharedCCStubSwitch()
         }
     }
     SharedHeap::GetInstance()->GetSharedCC()->NotifyMainThreadReady();
+}
+
+void JSThread::PostRuntimeThreadTask()
+{
+    PostTaskToThread([this]() {
+        HandleRuntimeThreadTask();
+    });
+}
+
+void JSThread::HandleRuntimeThreadTask()
+{
+    ASSERT(JSThread::GetCurrent() == this);
+
+    // Preserve the SharedCC loop task's stub switch before managed entry.
+    // Both request types survive replacement of the pending loop task.
+    ExecuteSharedCCStubSwitch();
+    if (globalCCCallbackPending_.load(std::memory_order_acquire)) {
+        ThreadManagedScope managedScope(this);
+        CheckSafepoint();
+    }
 }
 
 void JSThread::WaitCCSuspend()
@@ -1288,7 +1332,7 @@ bool JSThread::CheckSafepoint()
         SetNeedProfiling(false);
     }
 #endif // ECMASCRIPT_SUPPORT_CPUPROFILER
-    bool gcTriggered = false;
+    bool gcMaybeTriggered = false;
 #ifndef NDEBUG
     if (vm_->GetJSOptions().EnableForceGC()) {
         if (g_isEnableCMCGC) {
@@ -1297,17 +1341,19 @@ bool JSThread::CheckSafepoint()
         } else {
             vm_->CollectGarbage(TriggerGCType::FULL_GC);
         }
-        gcTriggered = true;
+        gcMaybeTriggered = true;
     }
 #endif
     auto heap = const_cast<Heap *>(vm_->GetHeap());
     heap->HandleDeferredCleanCallback();
     // Handle exit app senstive scene
     heap->HandleExitHighSensitiveEvent();
+    // Callbacks may trigger GC, so report them to let the interpreter reload its accumulator.
+    gcMaybeTriggered = HandleGlobalCCCallbacks() || gcMaybeTriggered;
 
     // Do not trigger local gc during the shared gc processRset process.
     if UNLIKELY(IsProcessingLocalToSharedRset()) {
-        return false;
+        return gcMaybeTriggered;
     }
     // After concurrent mark finish, should trigger gc here to avoid create much floating garbage
     // except in serialize or high sensitive event
@@ -1316,12 +1362,12 @@ bool JSThread::CheckSafepoint()
             heap->SetCanThrowOOMError(false);
             heap->GetConcurrentMarker()->HandleMarkingFinished();
             heap->SetCanThrowOOMError(true);
-            gcTriggered = true;
+            gcMaybeTriggered = true;
         } else {
             heap->GetCCGC()->HandleUpdateFinished();
         }
     }
-    return gcTriggered;
+    return gcMaybeTriggered;
 }
 
 void JSThread::CheckJSTaggedType(JSTaggedType value) const
@@ -1552,7 +1598,9 @@ void JSThread::ResumeThread(bool internalSuspend)
         suspendCount_--;
         if (suspendCount_ == 0) {
             ClearFlag(ThreadFlag::SUSPEND_REQUEST);
-            ResetCheckSafePointStatus();
+            if (!globalCCCallbackPending_.load(std::memory_order_acquire)) {
+                ResetCheckSafePointStatus();
+            }
         }
     }
     suspendCondVar_.Signal();

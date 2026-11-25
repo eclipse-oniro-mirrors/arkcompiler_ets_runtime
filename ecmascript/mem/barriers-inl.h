@@ -75,14 +75,14 @@ static ARK_INLINE void WriteBarrier(const JSThread *thread, void *obj, size_t of
     ASSERT(!objectRegion->InSharedHeap() || valueRegion->InSharedHeap());
     if (!valueRegion->InSharedHeap() && thread->IsConcurrentMarkingOrFinished()) {
         Barriers::Update<refType>(thread, slotAddr, objectRegion, reinterpret_cast<TaggedObject *>(value),
-                                  valueRegion);
+                                  valueRegion, writeType);
         // NOTE: ConcurrentMarking and SharedConcurrentMarking can be enabled at the same time, but a specific value
         // can't be "not shared heap" and "in SharedSweepableSpace" at the same time. So using "if - else if" is safe.
     } else if (valueRegion->InSharedSweepableSpace() && thread->IsSharedConcurrentMarkingOrFinished()) {
         if constexpr (writeType == WriteBarrierType::NORMAL) {
             Barriers::UpdateShared<refType>(thread, slotAddr, objectRegion, reinterpret_cast<TaggedObject *>(value),
                                             valueRegion);
-        } else {
+        } else if (!thread->IsGlobalConcurrentMarking()) {
             // In deserialize, will never add references from old object(not allocated by deserialing) to
             // new object(allocated by deserializing), only two kinds of references(new->old, new->new) will
             // be added, the old object is considered as serialize_root, and be marked and pushed in

@@ -1830,7 +1830,8 @@ public:
         FULL_GC,
         SHARED_GC,
         SHARED_FULL_GC,
-        SHARED_CC
+        SHARED_CC,
+        GLOBAL_CC
     };
 
     enum class PUBLIC_API TRIGGER_IDLE_GC_TYPE : uint16_t {
@@ -1843,6 +1844,7 @@ public:
         SHARED_FULL_GC = 1 << 6,
         LOCAL_CC_GC = 1 << 7,
         SHARED_CC = 1 << 8,
+        GLOBAL_CC = 1 << 9,
     };
 
     enum class PUBLIC_API MemoryReduceDegree : uint8_t {
@@ -1967,6 +1969,8 @@ public:
     static void HintGC(const EcmaVM *vm, MemoryReduceDegree degree, ecmascript::GCReason reason);
     static void HintGC(const EcmaVM *vm, UrgencyLevel level);
     static void TriggerIdleGC(const EcmaVM *vm, TRIGGER_IDLE_GC_TYPE gcType);
+    // True means GlobalCC was requested or is already active; failure does not notify freeze completion.
+    static bool TryTriggerIdleGlobalCC(const EcmaVM *vm);
     static size_t GetEcmaVMExpectedMemoryReclamationSize(const EcmaVM *vm);
     // One-way enable of the proportional handle/primitive storage shrink.
     static void EnableHandleMemoryOptimization(EcmaVM *vm);

@@ -615,6 +615,9 @@ EcmaVM::~EcmaVM()
         UNREACHABLE();
     }
 #endif
+    thread_->SetAsyncCleanTaskCallback(nullptr);
+    DrainGCCallbacksForDestruction();
+    ASSERT(!thread_->IsConcurrentCopying());
     initialized_ = false;
 #if defined(ECMASCRIPT_SUPPORT_CPUPROFILER)
     if (profiler_ != nullptr) {
@@ -646,10 +649,6 @@ EcmaVM::~EcmaVM()
     }
     ClearBufferData();
     heap_->WaitAllTasksFinished();
-    while (heap_->HasPendingNativePointerCallbacks()) {
-        heap_->ClearNativePointerList();
-        heap_->WaitAllTasksFinished();
-    }
     ASSERT(!thread_->IsConcurrentCopying());
     common::Taskpool::GetCurrentTaskpool()->Destroy(thread_->GetThreadId());
 
@@ -1066,10 +1065,11 @@ void EcmaVM::ProcessReferences(const WeakRootVisitor& visitor)
 {
     heap_->ProcessReferences(visitor);
 #ifndef EXCLUDE_PGO
-    GetPGOProfiler()->ProcessReferences(visitor);
+    if (pgoProfiler_ != nullptr) {
+        pgoProfiler_->ProcessReferences(visitor);
+    }
 #endif
 }
-
 void EcmaVM::ProcessSnapShotEnv(const WeakRootVisitor& visitor)
 {
     GetSnapshotEnv()->ProcessSnapShotEnv(visitor);
@@ -1113,6 +1113,23 @@ void EcmaVM::RemoveFromDeregisterModuleList(CString module)
 bool EcmaVM::ContainInDeregisterModuleList(CString module)
 {
     return (deregisterModuleList_.find(module) != deregisterModuleList_.end());
+}
+
+void EcmaVM::DrainGCCallbacksForDestruction()
+{
+    for (;;) {
+        heap_->WaitAllTasksFinished();
+#if ENABLE_LOCALCC_OPTIMIZATION
+        heap_->WaitLocalCCNativePointerCallbacks();
+#endif  // ENABLE_LOCALCC_OPTIMIZATION
+
+        bool globalCallbackPending = thread_->globalCCCallbackPending_.exchange(false, std::memory_order_acquire);
+        if (!globalCallbackPending && thread_->weakNodeNativeFinalizeCallbacks_.empty() &&
+            !heap_->HasPendingNativePointerCallbacks()) {
+            return;
+        }
+        heap_->ProcessGCCallback();
+    }
 }
 
 void EcmaVM::ClearBufferData()
