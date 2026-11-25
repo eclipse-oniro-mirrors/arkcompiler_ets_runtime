@@ -632,7 +632,7 @@ bool AssemblerAarch64::TrySequenceOfOnes(const Register &rd, uint64_t imm)
                 secondMovkShift = shift;
             }
         } else if (shift > startIdx && shift < endIdx && himm != inside) {
-            orrImm = UpdateImm(orrImm, shift, outside == 0);
+            orrImm = UpdateImm(orrImm, shift, inside == 0);
             if (firstMovkShift == -1) {
                 firstMovkShift = shift;
             } else {
@@ -641,7 +641,7 @@ bool AssemblerAarch64::TrySequenceOfOnes(const Register &rd, uint64_t imm)
         }
     }
     ASSERT_PRINT(firstMovkShift != -1, "constant materializable with single orr!");
-    Orr(rd, rd, LogicalImmediate::Create(orrImm, X_REG_SIZE));
+    Orr(rd, xzr, LogicalImmediate::Create(orrImm, X_REG_SIZE));
     Movk(rd, (imm >> firstMovkShift) & HWORD_MASK, firstMovkShift);
     if (secondMovkShift != -1) {
         Movk(rd, (imm >> secondMovkShift) & HWORD_MASK, secondMovkShift);
@@ -666,11 +666,11 @@ bool AssemblerAarch64::TryReplicateHWords(const Register &rd, uint64_t imm)
         const int count = iter.second;
         uint64_t repeatImm = hImm | (hImm << 16) | (hImm << 32) | (hImm << 48);
         LogicalImmediate orrImm = LogicalImmediate::Create(repeatImm, 64);
-        // if orrImm not valid, repeat count can't be 2 or 3, it can't be simplified with orr.
-        if ((count != 2 && count != 3) || orrImm.IsValid()) {
+        // Seed the register with an encodable repeated halfword; MOVK replaces the other halfwords.
+        if ((count != 2 && count != 3) || !orrImm.IsValid()) {  // 2: two MOVKs. 3: one MOVK.
             continue;
         }
-        Orr(rd, rd, orrImm);
+        Orr(rd, xzr, orrImm);
         int shift = 0;
         uint64_t imm16 = 0;
         // Find the first chunk not materialized with the ORR instruction.

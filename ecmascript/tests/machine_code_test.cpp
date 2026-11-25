@@ -148,7 +148,8 @@ HWTEST_F_L0(MachineCodeTest, SetText001)
     MachineCodeDesc desc;
     desc.codeType = MachineCodeType::FAST_JIT_CODE;
     desc.instructionsSize = 100;
-    desc.instructionsAddr = 1000;
+    uint8_t textBuf[100] = {0};  // 100: byte count advertised by desc.instructionsSize.
+    desc.instructionsAddr = reinterpret_cast<uintptr_t>(textBuf);
     desc.stackMapSizeAlign = 100;
     desc.rodataSizeAfterTextAlign = 0;
     desc.rodataSizeBeforeTextAlign = 0;
@@ -160,6 +161,7 @@ HWTEST_F_L0(MachineCodeTest, SetText001)
     Jit::GetInstance()->SetEnableAsyncCopyToFort(true);
     TaggedObject *machineCode = factory->NewMachineCodeObject(100, desc);
     MachineCode *code = MachineCode::Cast(machineCode);
+    code->SetInstructionsAddr(desc.instructionsAddr);
     desc.rodataSizeAfterTextAlign = 0;
     desc.rodataSizeBeforeTextAlign = 1;
     desc.rodataAddrBeforeText = 0;
@@ -174,7 +176,8 @@ HWTEST_F_L0(MachineCodeTest, SetText002)
     MachineCodeDesc desc;
     desc.codeType = MachineCodeType::FAST_JIT_CODE;
     desc.instructionsSize = 100;
-    desc.instructionsAddr = 1000;
+    uint8_t textBuf[100] = {0};  // 100: byte count advertised by desc.instructionsSize.
+    desc.instructionsAddr = reinterpret_cast<uintptr_t>(textBuf);
     desc.stackMapSizeAlign = 100;
     desc.rodataSizeAfterTextAlign = 0;
     desc.rodataSizeBeforeTextAlign = 0;
@@ -186,6 +189,7 @@ HWTEST_F_L0(MachineCodeTest, SetText002)
     Jit::GetInstance()->SetEnableAsyncCopyToFort(true);
     TaggedObject *machineCode = factory->NewMachineCodeObject(100, desc);
     MachineCode *code = MachineCode::Cast(machineCode);
+    code->SetInstructionsAddr(desc.instructionsAddr);
     desc.rodataSizeAfterTextAlign = 1;
     desc.rodataAddrAfterText = 0;
     desc.rodataSizeBeforeTextAlign = 0;
@@ -200,7 +204,8 @@ HWTEST_F_L0(MachineCodeTest, SetText003)
     MachineCodeDesc desc;
     desc.codeType = MachineCodeType::FAST_JIT_CODE;
     desc.instructionsSize = 100;
-    desc.instructionsAddr = 1000;
+    uint8_t textBuf[100] = {0};  // 100: byte count advertised by desc.instructionsSize.
+    desc.instructionsAddr = reinterpret_cast<uintptr_t>(textBuf);
     desc.stackMapSizeAlign = 100;
     desc.rodataSizeAfterTextAlign = 0;
     desc.rodataSizeBeforeTextAlign = 0;
@@ -212,6 +217,7 @@ HWTEST_F_L0(MachineCodeTest, SetText003)
     Jit::GetInstance()->SetEnableAsyncCopyToFort(true);
     TaggedObject *machineCode = factory->NewMachineCodeObject(100, desc);
     MachineCode *code = MachineCode::Cast(machineCode);
+    code->SetInstructionsAddr(desc.instructionsAddr);
     desc.rodataSizeAfterTextAlign = 1;
     desc.rodataAddrAfterText = 0;
     desc.rodataSizeBeforeTextAlign = 0;
