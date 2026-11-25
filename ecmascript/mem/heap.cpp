@@ -840,7 +840,7 @@ bool SharedHeap::CheckOngoingConcurrentMarking()
 void SharedHeap::CheckProfilerEnabled()
 {
 #if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER)
-    profilerEnabled_ = Runtime::GetInstance()->IsHiProfilerEnabled();
+    profilerEnabled_ = Runtime::IsHiProfilerEnabled();
     Runtime::GetInstance()->GCIterateThreadList([this](JSThread *thread) {
         if (thread->GetEcmaVM()->GetHeapProfile() != nullptr) {
             profilerEnabled_ = true;
@@ -2504,7 +2504,7 @@ void BaseHeap::OnAllocateEvent([[maybe_unused]] EcmaVM *ecmaVm, [[maybe_unused]]
                                [[maybe_unused]] size_t size)
 {
 #if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER)
-    if (Runtime::GetInstance()->IsHiProfilerEnabled()) {
+    if (Runtime::IsHiProfilerEnabled()) {
         MEMORY_TRACE_ALLOCATE(address, size);
     }
     HeapProfilerInterface *profiler = ecmaVm->GetHeapProfile();

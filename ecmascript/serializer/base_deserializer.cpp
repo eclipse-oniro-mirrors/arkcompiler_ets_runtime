@@ -43,7 +43,7 @@ BaseDeserializer::BaseDeserializer(JSThread *thread, SerializeData *data, void *
         }
     }
 #if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER)
-    profilerEnabled_ = Runtime::GetInstance()->IsHiProfilerEnabled() ||
+    profilerEnabled_ = Runtime::IsHiProfilerEnabled() ||
         thread_->GetEcmaVM()->GetHeapProfile() != nullptr;
 #endif
 }

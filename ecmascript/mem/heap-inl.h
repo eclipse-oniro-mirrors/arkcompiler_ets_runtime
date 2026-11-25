@@ -519,7 +519,7 @@ void Heap::MergeToOldSpaceSync(LocalSpace *localSpace)
 bool Heap::IsProfilerEnabled()
 {
 #if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER)
-    return Runtime::GetInstance()->IsHiProfilerEnabled() ||
+    return Runtime::IsHiProfilerEnabled() ||
         GetEcmaVM()->GetHeapProfile() != nullptr;
 #else
     return false;
@@ -1024,7 +1024,7 @@ void Heap::OnMoveEvent([[maybe_unused]] uintptr_t address, [[maybe_unused]] Tagg
                        [[maybe_unused]] size_t size)
 {
 #if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER)
-    if (UNLIKELY(Runtime::GetInstance()->IsHiProfilerEnabled())) {
+    if (UNLIKELY(Runtime::IsHiProfilerEnabled())) {
         MEMORY_TRACE_MOVE(address, forwardAddress, size);
     }
 #endif
@@ -1034,7 +1034,7 @@ void SharedHeap::OnMoveEvent([[maybe_unused]] uintptr_t address, [[maybe_unused]
                              [[maybe_unused]] size_t size)
 {
 #if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER)
-    if (UNLIKELY(Runtime::GetInstance()->IsHiProfilerEnabled())) {
+    if (UNLIKELY(Runtime::IsHiProfilerEnabled())) {
         MEMORY_TRACE_MOVE(address, forwardAddress, size);
     }
 #endif

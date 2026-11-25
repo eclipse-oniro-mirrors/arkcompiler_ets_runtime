@@ -43,6 +43,7 @@ int32_t Runtime::vmCount_ = 0;
 int32_t Runtime::destroyCount_ = 0;
 bool Runtime::firstVmCreated_ = false;
 bool Runtime::isFork_ = false;
+std::atomic<bool> Runtime::hiProfilerEnabled_ {false};
 Mutex *Runtime::vmCreationLock_ = new Mutex();
 Runtime *Runtime::instance_ = nullptr;
 common::BaseRuntime *Runtime::baseInstance_ = nullptr;
@@ -686,7 +687,7 @@ void Runtime::IteratorNativeDeleteInSharedGC(WeakVisitor &visitor)
             }
             ++constpoolIter;
         }
-        if (constpools.size() == 0 && !Runtime::GetInstance()->IsHiProfilerEnabled()) {
+        if (constpools.size() == 0 && !Runtime::IsHiProfilerEnabled()) {
             LOG_ECMA(INFO) << "remove js pandafile by gc, file:" << iterator->first->GetJSPandaFileDesc();
             JSPandaFileManager::GetInstance()->RemoveJSPandaFile(iterator->first);
             iterator = globalSharedConstpools_.erase(iterator);
@@ -726,7 +727,7 @@ void Runtime::ProcessNativeDeleteInSharedGC(const WeakRootVisitor &visitor)
             }
             ++constpoolIter;
         }
-        if (constpools.size() == 0 && !Runtime::GetInstance()->IsHiProfilerEnabled()) {
+        if (constpools.size() == 0 && !Runtime::IsHiProfilerEnabled()) {
             LOG_ECMA(INFO) << "remove js pandafile by gc, file:" << iterator->first->GetJSPandaFileDesc();
             JSPandaFileManager::GetInstance()->RemoveJSPandaFile(iterator->first);
             iterator = globalSharedConstpools_.erase(iterator);

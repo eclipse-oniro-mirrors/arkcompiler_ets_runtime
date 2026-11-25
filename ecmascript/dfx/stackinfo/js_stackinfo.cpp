@@ -2228,28 +2228,30 @@ __attribute__((visibility("default"))) int ark_parse_js_frame_info_local(
 __attribute__((visibility("default"))) void EnableArkTsHook()
 {
 #if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER)
-    if (!panda::ecmascript::Runtime::HasInstance()) {
-        return;
+    panda::ecmascript::Runtime::SetHiProfilerEnabled(true);
+    if (panda::ecmascript::Runtime::HasInstance()) {
+        panda::ecmascript::Runtime::GetInstance()->IterateAllThreadList([](panda::ecmascript::JSThread *thread) {
+            thread->SetIsStartHeapSampling(true);
+        });
+    } else {
+        LOG_ECMA(INFO) << "EnableArkTsHook: Runtime instance not created yet, flag will take effect on new threads";
     }
-    panda::ecmascript::Runtime::GetInstance()->SetHiProfilerEnabled(true);
-    panda::ecmascript::Runtime::GetInstance()->IterateAllThreadList([](panda::ecmascript::JSThread *thread) {
-        thread->SetIsStartHeapSampling(true);
-    });
 #endif
 }
 
 __attribute__((visibility("default"))) void DisableArkTsHook()
 {
 #if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER)
-    if (!panda::ecmascript::Runtime::HasInstance()) {
-        return;
+    panda::ecmascript::Runtime::SetHiProfilerEnabled(false);
+    if (panda::ecmascript::Runtime::HasInstance()) {
+        panda::ecmascript::Runtime::GetInstance()->IterateAllThreadList([](panda::ecmascript::JSThread *thread) {
+            if (thread->IsJitThread() || thread->GetEcmaVM() == nullptr ||
+                thread->GetEcmaVM()->GetHeapProfile() == nullptr) {
+                thread->SetIsStartHeapSampling(false);
+            }
+        });
+    } else {
+        LOG_ECMA(INFO) << "DisableArkTsHook: Runtime instance not created yet, only flag is cleared";
     }
-    panda::ecmascript::Runtime::GetInstance()->SetHiProfilerEnabled(false);
-    panda::ecmascript::Runtime::GetInstance()->IterateAllThreadList([](panda::ecmascript::JSThread *thread) {
-        if (thread->IsJitThread() || thread->GetEcmaVM() == nullptr ||
-            thread->GetEcmaVM()->GetHeapProfile() == nullptr) {
-            thread->SetIsStartHeapSampling(false);
-        }
-    });
 #endif
 }

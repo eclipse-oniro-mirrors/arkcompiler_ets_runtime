@@ -71,6 +71,7 @@ public:
     {
         TestHelper::DestroyEcmaVMWithScope(instance_, scope_);
         JsStackInfo::nameMap.clear();
+        Runtime::SetHiProfilerEnabled(false);
     }
 
     EcmaVM *instance_ {nullptr};
@@ -3683,5 +3684,85 @@ HWTEST_F_L0(JsStackInfoTest, ParseJsFrameInfo_LongName_WithSingleton_OrthogonalT
     // trailing byte.
     EXPECT_EQ(strlen(jsFunction.url), 0U)
         << "url overflowed — SourceMap path corrupted buffer!";
+}
+
+// Test: EnableArkTsHook sets the hiProfilerEnabled flag to true. After the call,
+// Runtime::IsHiProfilerEnabled() must return true. Since the test fixture creates
+// a VM, Runtime::HasInstance() is true, so the iterate-thread-list path is also
+// exercised (thread->SetIsStartHeapSampling(true) is invoked). Cleanup uses
+// DisableArkTsHook() to symmetrically clear both the static flag and the
+// thread-level isStartHeapSampling state.
+HWTEST_F_L0(JsStackInfoTest, EnableArkTsHook_SetsHiProfilerEnabled)
+{
+#if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER)
+    EXPECT_FALSE(Runtime::IsHiProfilerEnabled());
+    EnableArkTsHook();
+    EXPECT_TRUE(Runtime::IsHiProfilerEnabled());
+    DisableArkTsHook();
+    EXPECT_FALSE(Runtime::IsHiProfilerEnabled());
+#else
+    ASSERT_TRUE(true);
+#endif
+}
+
+// Test: DisableArkTsHook clears the hiProfilerEnabled flag. After the call,
+// Runtime::IsHiProfilerEnabled() must return false.
+HWTEST_F_L0(JsStackInfoTest, DisableArkTsHook_ClearsHiProfilerEnabled)
+{
+#if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER)
+    Runtime::SetHiProfilerEnabled(true);
+    EXPECT_TRUE(Runtime::IsHiProfilerEnabled());
+    DisableArkTsHook();
+    EXPECT_FALSE(Runtime::IsHiProfilerEnabled());
+#else
+    ASSERT_TRUE(true);
+#endif
+}
+
+// Test: EnableArkTsHook and DisableArkTsHook can be toggled repeatedly and the
+// flag reflects the most recent operation each time.
+HWTEST_F_L0(JsStackInfoTest, EnableDisableArkTsHook_ToggleFlag)
+{
+#if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER)
+    EXPECT_FALSE(Runtime::IsHiProfilerEnabled());
+
+    EnableArkTsHook();
+    EXPECT_TRUE(Runtime::IsHiProfilerEnabled());
+
+    DisableArkTsHook();
+    EXPECT_FALSE(Runtime::IsHiProfilerEnabled());
+
+    EnableArkTsHook();
+    EXPECT_TRUE(Runtime::IsHiProfilerEnabled());
+
+    DisableArkTsHook();
+    EXPECT_FALSE(Runtime::IsHiProfilerEnabled());
+#else
+    ASSERT_TRUE(true);
+#endif
+}
+
+// Test: Runtime::SetHiProfilerEnabled and Runtime::IsHiProfilerEnabled are
+// static methods that operate on a process-level flag. They can be called
+// without going through GetInstance(), so the flag is accessible even before
+// a Runtime instance is fully constructed (as long as static initialization
+// has completed).
+HWTEST_F_L0(JsStackInfoTest, Runtime_HiProfilerEnabled_StaticAccess)
+{
+#if defined(ECMASCRIPT_SUPPORT_HEAPPROFILER)
+    Runtime::SetHiProfilerEnabled(true);
+    EXPECT_TRUE(Runtime::IsHiProfilerEnabled());
+
+    Runtime::SetHiProfilerEnabled(false);
+    EXPECT_FALSE(Runtime::IsHiProfilerEnabled());
+
+    Runtime::SetHiProfilerEnabled(true);
+    EXPECT_TRUE(Runtime::IsHiProfilerEnabled());
+
+    Runtime::SetHiProfilerEnabled(false);
+    EXPECT_FALSE(Runtime::IsHiProfilerEnabled());
+#else
+    ASSERT_TRUE(true);
+#endif
 }
 }  // namespace panda::test
