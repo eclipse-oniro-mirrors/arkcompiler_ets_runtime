@@ -40,7 +40,7 @@ static constexpr int32_t ANS_MAP_SIZE = 5;
 static constexpr int32_t DIGIT_NUM = 64;
 
 const std::string MEGER_SOURCE_MAP_PATH = "ets/sourceMaps.map";
-static constexpr std::string_view DOBULE_QUOTATION = "\"";
+static constexpr std::string_view DOUBLE_QUOTATION = "\"";
 static constexpr std::string_view FLAG_URL = ": {";
 static constexpr std::string_view FLAG_SOURCES = "    \"sources\":";
 static constexpr std::string_view FLAG_MAPPINGS = "    \"mappings\": \"";
@@ -479,7 +479,7 @@ std::string SourceMap::GetMappings(std::string_view sourcemap)
     if (start == std::string_view::npos) {
         return std::string();
     }
-    auto end = sourcemap.find(DOBULE_QUOTATION, start + FLAG_MAPPINGS_LEN);
+    auto end = sourcemap.find(DOUBLE_QUOTATION, start + FLAG_MAPPINGS_LEN);
     if (end == std::string_view::npos) {
         return std::string();
     }
@@ -493,12 +493,12 @@ std::string SourceMap::GetSources(std::string_view sourcemap)
         return std::string();
     }
 
-    start = sourcemap.find(DOBULE_QUOTATION, start + FLAG_SOURCES_LEN);
+    start = sourcemap.find(DOUBLE_QUOTATION, start + FLAG_SOURCES_LEN);
     if (start == std::string_view::npos) {
         return std::string();
     }
 
-    auto end = sourcemap.find(DOBULE_QUOTATION, start + 1);
+    auto end = sourcemap.find(DOUBLE_QUOTATION, start + 1);
     if (end == std::string_view::npos) {
         return std::string();
     }
@@ -512,7 +512,7 @@ std::string SourceMap::GetEntryPackageInfo(std::string_view sourcemap)
     if (start == std::string_view::npos) {
         return std::string();
     }
-    auto end = sourcemap.find(DOBULE_QUOTATION, start + FLAG_ENTRY_PACKAGE_INFO_SIZE);
+    auto end = sourcemap.find(DOUBLE_QUOTATION, start + FLAG_ENTRY_PACKAGE_INFO_SIZE);
     if (end == std::string_view::npos) {
         return std::string();
     }
@@ -527,7 +527,7 @@ std::string SourceMap::GetPackageInfo(std::string_view sourcemap)
     if (start == std::string_view::npos) {
         return std::string();
     }
-    auto end = sourcemap.find(DOBULE_QUOTATION, start + FLAG_PACKAGE_INFO_SIZE);
+    auto end = sourcemap.find(DOUBLE_QUOTATION, start + FLAG_PACKAGE_INFO_SIZE);
     if (end == std::string_view::npos) {
         return std::string();
     }
