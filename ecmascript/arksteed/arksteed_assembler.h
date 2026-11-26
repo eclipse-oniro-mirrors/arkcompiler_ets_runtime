@@ -45,6 +45,7 @@ class ArkSteedDisassembler;
 class Graph;
 class ArkSteedAssembler;
 class TemporaryRegisterScope;
+enum class IntBitwiseKind : uint8_t;
 
 #if defined(PANDA_TARGET_AMD64)
 constexpr x64::Register X64_SCRATCH_REGISTER = ARKSTEED_EAGER_DEOPT_ENTRY_TARGET_REGISTER;
@@ -109,6 +110,14 @@ public:
     // Get memory operand for C calling convention stack argument slot (SP-relative)
     inline MemoryOperand GetCallArgSlot(int32_t slotIndex);
     void LoadCallArgv(ArkSteedRegister dst);
+    // Reserves the aligned frame and writes its first two Word64 slots, or emits nothing.
+    bool TryReserveCallArgSlotsWithHeader(int32_t slotCount, int32_t first, int32_t second);
+    static bool CanStoreCallArgumentPair(int32_t firstCallSlot);
+    bool TryStoreCallArgumentPair(ArkSteedRegister first, ArkSteedRegister second, int32_t firstCallSlot);
+    bool TryCopyCallArgumentPair(const InstructionOperand &first, const InstructionOperand &second,
+                                 int32_t firstCallSlot);
+    // Initializes one pair of outgoing stack slots to Undefined, or emits nothing.
+    bool TryFillCallArgumentPairWithUndefined(int32_t firstSlot);
     void ReserveCallArgSlots(int32_t slotCount);
     void FreeCallArgSlots(int32_t slotCount);
     void ReserveCallArgSlots(ArkSteedRegister slotCount);
@@ -180,6 +189,7 @@ public:
 
     void LoadField(ArkSteedRegister dst, ArkSteedRegister base, int32_t offset);
     void LoadHClassFromObject(ArkSteedRegister dst, ArkSteedRegister object);
+    void LoadObjectType(ArkSteedRegister dst, ArkSteedRegister object);
     void LoadInt32Field(ArkSteedRegister dst, ArkSteedRegister base, int32_t offset);
     void LoadUint8Field(ArkSteedRegister dst, ArkSteedRegister base, int32_t offset);
     // Return the full TaggedArray byte offset only when one direct memory access can encode it.
@@ -191,6 +201,12 @@ public:
 #else
     void StoreTaggedElement(ArkSteedRegister elements, ArkSteedRegister index, int32_t value, ArkSteedRegister scratch);
 #endif
+    // Returns a direct byte offset for a non-negative constant index and a scaled memory operand.
+    static std::optional<int32_t> TryGetScaledElementOffset(std::optional<int32_t> index, uint32_t elementShift,
+                                                           int32_t headerOffset = 0);
+    // The write barrier consumes a register byte offset rather than a memory immediate.
+    static std::optional<int32_t> TryGetTaggedElementBarrierOffset(std::optional<int32_t> index);
+    void ComputeTaggedElementByteOffset(ArkSteedRegister dst, ArkSteedRegister index);
     void StoreTaggedElement(ArkSteedRegister elements, ArkSteedRegister index, ArkSteedRegister value,
                             ArkSteedRegister scratch);
     void LoadLineStringCharCode(ArkSteedRegister dst, ArkSteedRegister string, ArkSteedRegister index,
@@ -238,6 +254,11 @@ public:
     void Add(ArkSteedRegister dst, ArkSteedRegister src);
     void Add(ArkSteedRegister dst, int32_t immediate);
     void Add(ArkSteedRegister dst, int64_t immediate);
+    // Encodes a Float64 as a tagged value with a canonical NaN on tag overflow.
+    // Preserves the input and may clobber an assembler scratch register and flags.
+    void EncodeTaggedDouble(ArkSteedRegister dst, ArkSteedDoubleRegister input);
+    // Decodes tagged double bits. tagMarkScratch holds TAG_MARK on entry and may be overwritten.
+    void DecodeTaggedDouble(ArkSteedRegister dst, ArkSteedRegister value, ArkSteedRegister tagMarkScratch);
     void Sub(ArkSteedRegister dst, ArkSteedRegister src);
     void Sub(ArkSteedRegister dst, int32_t immediate);
     void SignExtendInt32ToInt64(ArkSteedRegister dst, ArkSteedRegister src);
@@ -255,10 +276,41 @@ public:
     void Int32Mul(ArkSteedRegister dst, ArkSteedRegister left, int32_t immediate);
     void Int32MulWide(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
     void Int32MulHigh(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
+    // Writes a signed Int32 product and branches on overflow or negative zero.
+    // The exit state must not depend on dst. May clobber flags and assembler scratch.
+    // ARM64 requires dst distinct from left and right; its slow path uses assembler scratch,
+    // not a node temporary.
+    // x64 requires dst == left and uses one node temporary.
+    void Int32MulWithOverflow(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right,
+                              Label *overflowExit, Label *negativeZeroExit);
+    // Returns divisor - 1 for a supported positive power of two greater than one.
+    static std::optional<int32_t> TryGetInt32PowerOfTwoMask(std::optional<int32_t> divisor);
+    // Writes the signed Int32 quotient or branches on negative zero or a fractional result.
+    // ARM64 requires dst distinct from dividend; its power-of-two path uses no node temporaries,
+    // and its general path uses one.
+    // x64 uses RAX (dst), RDX, RCX and R8. Only negative divisors have negativeZeroExit.
+    // Flags and temporary registers are clobbered.
+    void Int32DivByConstWithCheck(ArkSteedRegister dst, ArkSteedRegister dividend, int32_t divisor, int32_t magic,
+                                 uint32_t shift, Label *negativeZeroExit, Label *notIntExit);
     void Int32Div(ArkSteedRegister dst, ArkSteedRegister dividend, ArkSteedRegister divisor);
+    // Writes the signed quotient or branches for zero divisor, overflow, a fraction, or negative zero.
+    // ARM64 borrows an assembler scratch. x64 requires RAX (dst) and RDX. Flags are clobbered.
+    void CheckedInt32Div(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right,
+                         Label *divideZeroExit, Label *overflowExit, Label *notIntExit, Label *negativeZeroExit);
+    // Checks overflow and optionally rejects zero before a signed Int32 unary operation.
+    // The exit state must not depend on dst. May clobber flags and assembler scratch.
+    void Int32UnaryWithOverflow(ArkSteedRegister dst, ArkSteedRegister input,
+                                void (ArkSteedAssembler::*operation)(ArkSteedRegister, ArkSteedRegister),
+                                bool checkZero, Label *deoptExit);
     void Int32DivAndRemainder(ArkSteedRegister quotient, ArkSteedRegister remainder, ArkSteedRegister dividend,
                               ArkSteedRegister divisor);
     void PositiveInt32Mod(ArkSteedRegister dst, ArkSteedRegister dividend, ArkSteedRegister divisor);
+    // Writes the signed Int32 remainder or branches for zero divisor, INT_MIN % -1, or negative zero.
+    // A supported power-of-two mask replaces the right register and the two divisor checks.
+    // The general path uses assembler scratch on ARM64 and fixed RAX/RDX on x64. Flags are clobbered.
+    void CheckedInt32Mod(ArkSteedRegister dst, ArkSteedRegister left, std::optional<ArkSteedRegister> right,
+                         std::optional<int32_t> mask, Label *divideZeroExit, Label *overflowExit,
+                         Label *negativeZeroExit);
     void Int32ToFloat64(ArkSteedDoubleRegister dst, ArkSteedRegister src);
     void Uint32ToFloat64(ArkSteedDoubleRegister dst, ArkSteedRegister src);
     void Float64Add(ArkSteedDoubleRegister dst, ArkSteedDoubleRegister src);
@@ -296,6 +348,12 @@ public:
     void And(ArkSteedRegister dst, int32_t immediate);
     void And(ArkSteedRegister dst, int64_t immediate);
     void And(ArkSteedRegister dst, ArkSteedRegister src);
+    // Computes dst &= src and sets the zero condition for the resulting word.
+    // Other condition flags are unspecified; neither register is a temporary.
+    void AndSetZeroCondition(ArkSteedRegister dst, ArkSteedRegister src);
+    // Uses a signed 32-bit immediate mask at the destination register's operand width.
+    void AndSetZeroCondition(ArkSteedRegister dst, int32_t immediate);
+    void AndSetZeroCondition(ArkSteedRegister dst, int64_t immediate);
     void Lsr(ArkSteedRegister dst, uint32_t shift);
     void ShiftRightLogical(ArkSteedRegister dst, uint32_t shift);
     void ShiftLeft(ArkSteedRegister dst, uint32_t shift);
@@ -332,6 +390,8 @@ public:
     void Int32ShiftRightArithmeticByRegister(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister shift);
     void SetTaggedBoolean(ArkSteedRegister dst, Condition condition);
 #endif
+    void Int32BitwiseBinary(ArkSteedRegister dst, ArkSteedRegister left, int32_t right, IntBitwiseKind kind);
+    bool TryJumpOnZeroCompare(ArkSteedRegister value, Condition condition, Label *target, bool isInt32);
 
     // =========================================================================
     // Comparison Operations
@@ -346,6 +406,7 @@ public:
     void CompareInt32(ArkSteedRegister lhs, ArkSteedRegister rhs);
     void Compare(ArkSteedRegister lhs, int32_t immediate);
     void Compare(ArkSteedRegister lhs, int64_t immediate);
+    void CompareTaggedTrue(ArkSteedRegister value);
     void CompareInt32(ArkSteedRegister lhs, int32_t immediate);
     void CompareField(ArkSteedRegister base, int32_t offset, ArkSteedRegister rhs);
 
@@ -358,6 +419,20 @@ public:
     void Jump(ArkSteedRegister target);
 #endif
     void JumpIf(Condition condition, Label *target);
+    // Branches on a single set bit. The input is a disposable temporary and flags are unspecified.
+    void BranchOnBitSet(ArkSteedRegister value, uint32_t bit, Label *ifTrue, bool trueFallsThrough,
+                        Label *ifFalse, bool falseFallsThrough);
+    // Reads value, may clobber scratch and flags, and branches to target on failure.
+    // scratch is caller-owned and must not alias value.
+    void JumpIfNotTaggedInt(ArkSteedRegister value, ArkSteedRegister scratch, Label *target);
+    // Sets the zero condition according to the tagged-number mask.
+    void TestTaggedNumber(ArkSteedRegister value);
+    // Falls through on success and branches to deopt on failure.
+    void CheckTaggedNumber(ArkSteedRegister value, Label *deopt);
+    // Checks a tagged receiver's HClass. Uses two node temporaries.
+    void CheckHClass(ArkSteedRegister receiver, uint32_t expectedHandleIndex, Label *deopt);
+    // Checks the receiver's stable-elements bit. Uses one node temporary.
+    void CheckStableElements(ArkSteedRegister receiver, Label *deopt);
     void JumpIfNotTaggedHeapObject(ArkSteedRegister value, Label *target);
     void JumpIfNotStrongHeapObject(ArkSteedRegister value, Label *target);
     void JumpIfNotECMAObject(ArkSteedRegister value, Label *target);
@@ -390,6 +465,8 @@ public:
     // Zero branches preserve flags and participate in label and veneer management.
     void JumpIfZero(ArkSteedRegister value, Label *target);
     void JumpIfNotZero(ArkSteedRegister value, Label *target);
+    // Supports unbound or distant targets even across a long emission interval.
+    void JumpOnInt32Sign(ArkSteedRegister value, bool negative, Label *target);
     void TestAndBranchIfZero(ArkSteedRegister value, int32_t bit, Label *target);
     void TestAndBranchIfNotZero(ArkSteedRegister value, int32_t bit, Label *target);
     void CheckCodePools(bool precedingCodeCanFallThrough, size_t protectedCodeSize = 0U);
@@ -517,9 +594,16 @@ private:
         SUBS,
     };
 
+    void Add(ArkSteedRegister dst, ArkSteedRegister left, ArkSteedRegister right);
+    void ShiftLeft(ArkSteedRegister dst, ArkSteedRegister src, uint32_t shift);
+    void TestMask(ArkSteedRegister value, ArkSteedRegister mask);
+    void TestDoubleEncodeOverflow(ArkSteedRegister raw, ArkSteedRegister encodeOffset);
+    void TestInt32Mask(ArkSteedRegister value, uint32_t mask);
     aarch64::Condition ToPhysicalCondition(Condition condition) const;
     void EmitAddSubImmediate(ArkSteedRegister dst, ArkSteedRegister src, uint64_t immediate,
                              AddSubImmediateOp operation);
+    static bool FitsScaledImmediateOffset(int64_t byteOffset, int64_t scale);
+    static bool FitsScaledImmediateOffset(const aarch64::MemoryOperand &operand, bool is64Bit);
     aarch64::MemoryOperand MaterializeAddress(const aarch64::MemoryOperand &operand);
     void LoadRegisterWithOperand(const aarch64::Register &dst, const aarch64::MemoryOperand &src);
     void StoreRegisterWithOperand(const aarch64::Register &src, const aarch64::MemoryOperand &dst);
@@ -547,6 +631,7 @@ private:
     void UpdateEmbeddedLiteralPoolCheck(uint32_t loadOffset, size_t literalIndex);
     uint64_t GetEmbeddedLiteralPoolMaxSize() const;
     void EmitEmbeddedLiteralPool(bool precedingCodeCanFallThrough);
+    bool TryJumpOnBoundBit(ArkSteedRegister value, int32_t bit, bool whenSet, Label *target);
 #endif
 
     PlatformAssembler assembler_;
@@ -689,6 +774,11 @@ public:
             LOG_JIT(FATAL) << "Undeclared specific FPR temporary: " << static_cast<int32_t>(reg.Code());
         }
         return reg;
+    }
+
+    bool HasScratchRegisters(uint32_t count) const
+    {
+        return availableScratchGPRs_.Count() >= count;
     }
 
     ArkSteedRegister AcquireScratch()

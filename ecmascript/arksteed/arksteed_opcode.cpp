@@ -136,6 +136,29 @@ void UseLazyDeoptFrameSlots(LazyDeoptimizableMixin *deopt)
     }
 }
 
+uint32_t TypedArrayElementShift(JSType type)
+{
+    constexpr uint32_t elementShift32Bit = 2;
+    constexpr uint32_t elementShift64Bit = 3;
+    switch (type) {
+        case JSType::JS_INT8_ARRAY:
+        case JSType::JS_UINT8_ARRAY:
+        case JSType::JS_UINT8_CLAMPED_ARRAY:
+            return 0;
+        case JSType::JS_INT16_ARRAY:
+        case JSType::JS_UINT16_ARRAY:
+            return 1;
+        case JSType::JS_INT32_ARRAY:
+        case JSType::JS_UINT32_ARRAY:
+        case JSType::JS_FLOAT32_ARRAY:
+            return elementShift32Bit;
+        case JSType::JS_FLOAT64_ARRAY:
+            return elementShift64Bit;
+        default:
+            UNREACHABLE();
+    }
+}
+
 }  // namespace
 
 #define __ masm->
@@ -974,7 +997,12 @@ void StoreTaggedElementWithBarrierVertex::SetValueLocationConstraints()
     // Write-barrier stub ABI (glue-first, glue installed by the write-barrier
     // emitter): object lands on C parameter 1 and value on C parameter 3
     UseFixed(Arg(OBJECT_INDEX), static_cast<uint32_t>(ArkSteedAssembler::GetParameterRegister(1).Code()));
-    UseRegister(Arg(INDEX_INDEX));
+    const auto index = TryGetInt32Constant(GetInput(INDEX_INDEX));
+    if (ArkSteedAssembler::TryGetTaggedElementBarrierOffset(index)) {
+        UseAny(Arg(INDEX_INDEX));
+    } else {
+        UseRegister(Arg(INDEX_INDEX));
+    }
     // 3: value parameter slot of the write-barrier stub
     UseFixed(Arg(VALUE_INDEX), static_cast<uint32_t>(ArkSteedAssembler::GetParameterRegister(3).Code()));
     // 2: byteOffset parameter slot, doubles as the element-address scratch
@@ -985,7 +1013,12 @@ void StoreTaggedElementWithBarrierVertex::SetValueLocationConstraints()
 void StoreIntTypedArrayElementVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(RECEIVER_INDEX));
-    UseRegister(Arg(INDEX_INDEX));
+    const auto index = TryGetInt32Constant(GetInput(INDEX_INDEX));
+    if (ArkSteedAssembler::TryGetScaledElementOffset(index, TypedArrayElementShift(GetType()))) {
+        UseAny(Arg(INDEX_INDEX));
+    } else {
+        UseRegister(Arg(INDEX_INDEX));
+    }
     UseRegister(Arg(VALUE_INDEX));
     // 1: on-heap data-pointer scratch; 2: off-heap adds the backing-offset scratch
     SetTemporariesNeeded(OnHeap::IsOnHeap(onHeapMode_) ? 1 : 2);
@@ -994,7 +1027,12 @@ void StoreIntTypedArrayElementVertex::SetValueLocationConstraints()
 void StoreFloatTypedArrayElementVertex::SetValueLocationConstraints()
 {
     UseRegister(Arg(RECEIVER_INDEX));
-    UseRegister(Arg(INDEX_INDEX));
+    const auto index = TryGetInt32Constant(GetInput(INDEX_INDEX));
+    if (ArkSteedAssembler::TryGetScaledElementOffset(index, TypedArrayElementShift(GetType()))) {
+        UseAny(Arg(INDEX_INDEX));
+    } else {
+        UseRegister(Arg(INDEX_INDEX));
+    }
     UseRegister(Arg(VALUE_INDEX));
     // 2: base and byteOffset scratches; 3: off-heap adds the backing offset
     SetTemporariesNeeded(OnHeap::IsOnHeap(onHeapMode_) ? 2 : 3);
@@ -1257,10 +1295,10 @@ void I32MulWithOverflowVertex::SetValueLocationConstraints()
     UseRegister(Arg(RIGHT_INDEX));
 #if defined(PANDA_TARGET_AMD64)
     DefineSameAsFirst(this);
+    SetTemporariesNeeded(1);
 #else
     DefineAsRegister(this);
 #endif
-    SetTemporariesNeeded(1);
 }
 
 void I32DivWithOverflowVertex::SetValueLocationConstraints()
@@ -1290,7 +1328,9 @@ void I32DivByConstWithCheckVertex::SetValueLocationConstraints()
 #else
     DefineAsRegister(this);
     UseRegister(Arg(INPUT_INDEX));
-    SetTemporariesNeeded(2);  // 2: work and saved-original dividend scratches
+    if (!ArkSteedAssembler::TryGetInt32PowerOfTwoMask(GetDivisor())) {
+        SetTemporariesNeeded(1);  // 1: work scratch; dividend is preserved
+    }
 #endif
 }
 
@@ -1336,16 +1376,16 @@ void I32DivVertex::SetValueLocationConstraints()
 
 void CheckedI32ModVertex::SetValueLocationConstraints()
 {
-#if defined(PANDA_TARGET_AMD64)
     DefineAsRegister(this);
     UseRegister(Arg(LEFT_INDEX));
-    UseRegister(Arg(RIGHT_INDEX));
+    if (ArkSteedAssembler::TryGetInt32PowerOfTwoMask(TryGetInt32Constant(GetInput(RIGHT_INDEX)))) {
+        UseAny(Arg(RIGHT_INDEX));
+    } else {
+        UseRegister(Arg(RIGHT_INDEX));
+    }
+#if defined(PANDA_TARGET_AMD64)
     RequireSpecificTemporary(this, x64::rax);
     RequireSpecificTemporary(this, x64::rdx);
-#else
-    DefineAsRegister(this);
-    UseRegister(Arg(LEFT_INDEX));
-    UseRegister(Arg(RIGHT_INDEX));
 #endif
 }
 

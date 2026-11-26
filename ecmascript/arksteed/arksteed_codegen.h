@@ -129,6 +129,8 @@ private:
     template <typename CallVertexT>
     void PrepareArkSteedSpreadCall(CallVertexT *call, ArkSteedRegister target, ArkSteedRegister scratch,
                                    ArkSteedRegister elements, ArkSteedRegister elementsLength);
+
+    void StoreKnownCallArguments(const Vertex *call, uint32_t firstInput, uint32_t firstSlot, uint32_t count);
     void PrepareKnownArkSteedCall(CallKnownJSFunctionVertex *call, ArkSteedRegister target);
     void PrepareArkSteedSelfCall(CallSelfVertex *call);
     template <typename CallVertexT>

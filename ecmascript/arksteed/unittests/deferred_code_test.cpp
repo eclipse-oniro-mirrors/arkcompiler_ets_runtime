@@ -25,6 +25,7 @@
 #include "ecmascript/mem/chunk.h"
 #include "ecmascript/mem/native_area_allocator.h"
 #include "ecmascript/tests/test_helper.h"
+#include "securec.h"
 
 #include <cstddef>
 #include <initializer_list>
@@ -48,7 +49,7 @@ using panda::test::BaseTestWithScope;
  *
  * Observable (D4): the composition and the order of the code comments recorded by
  * `ArkSteedAssembler` when comments are enabled. Machine-code bytes and absolute
- * offsets are never compared; the only values read from the emission are the
+ * offsets are never compared by the deferred-layout fixtures; their only observations are the
  * comment texts, their `pcOffset` ordering and the emitted code size.
  *
  * Fixtures (H4):
@@ -513,5 +514,277 @@ HWTEST_F_L0(ArkSteedDeferredCodeTest, MutationControlRejectsLostBlockAndMidFlowB
     EXPECT_LT(midFlowLayout.firstMarkerIndex, midFlowLayout.mainFlowTailIndex);
     EXPECT_LE(midFlowLayout.firstMarkerPcOffset, midFlowLayout.mainFlowTailPcOffset);
 }
+
+#if defined(PANDA_TARGET_ARM64)
+namespace {
+constexpr uint32_t ARM64_INSTRUCTION_SIZE = sizeof(uint32_t);
+constexpr uint32_t TEST_BIT = 3;
+
+uint32_t ReadArm64Instruction(ArkSteedAssembler &assembler, uint32_t offset)
+{
+    uint32_t instruction = 0;
+    errno_t copyResult = memcpy_s(&instruction, sizeof(instruction), assembler.GetCodeBuffer() + offset,
+                                  sizeof(instruction));
+    EXPECT_EQ(copyResult, EOK);
+    return instruction;
+}
+
+uint32_t EncodeBranchImmediate(uint32_t pc, const Label &target, uint32_t mask, uint32_t shift)
+{
+    const int64_t distance = static_cast<int64_t>(target.GetPos()) - pc;
+    return (static_cast<uint32_t>(distance / ARM64_INSTRUCTION_SIZE) << shift) & mask;
+}
+}  // namespace
+
+HWTEST_F_L0(ArkSteedDeferredCodeTest, ConstantInt32BitwiseUsesIndependentResultRegister)
+{
+    NativeAreaAllocator nativeArea;
+    Chunk chunk(&nativeArea);
+    ArkSteedAssembler assembler(&chunk, nullptr);
+    constexpr uint32_t REGISTER_MASK = 31;
+    constexpr uint32_t SOURCE_REGISTER_SHIFT = 5;
+    constexpr int32_t SHIFT = 7;
+    for (auto kind : {IntBitwiseKind::SHIFT_LEFT, IntBitwiseKind::SHIFT_RIGHT_ARITHMETIC}) {
+        for (auto dst : {aarch64::x0, aarch64::x1}) {
+            auto start = assembler.GetPcOffset();
+            assembler.Int32BitwiseBinary(dst, aarch64::x0, SHIFT, kind);
+            ASSERT_EQ(assembler.GetPcOffset() - start, ARM64_INSTRUCTION_SIZE);
+            uint32_t instruction = ReadArm64Instruction(assembler, start);
+            EXPECT_EQ(instruction & REGISTER_MASK, static_cast<uint32_t>(dst.Code()));
+            EXPECT_EQ((instruction >> SOURCE_REGISTER_SHIFT) & REGISTER_MASK,
+                      static_cast<uint32_t>(aarch64::x0.Code()));
+        }
+    }
+}
+
+HWTEST_F_L0(ArkSteedDeferredCodeTest, BoundBitBranchChecksShortRangeAndFallthrough)
+{
+    constexpr uint32_t BACKWARD_REACH = 32 * 1024;
+    for (bool falseFallsThrough : {false, true}) {
+        for (uint32_t distance : {BACKWARD_REACH, BACKWARD_REACH + ARM64_INSTRUCTION_SIZE}) {
+            NativeAreaAllocator nativeArea;
+            Chunk chunk(&nativeArea);
+            ArkSteedAssembler assembler(&chunk, nullptr);
+            Label target;
+            Label fallthrough;
+            assembler.Bind(&target);
+            for (uint32_t i = 0; i < distance; i += ARM64_INSTRUCTION_SIZE) {
+                assembler.Move(aarch64::x1, aarch64::x0);
+            }
+            const uint32_t before = assembler.GetPcOffset();
+            auto *ifTrue = falseFallsThrough ? &target : &fallthrough;
+            auto *ifFalse = falseFallsThrough ? &fallthrough : &target;
+            assembler.BranchOnBitSet(aarch64::x0, TEST_BIT, ifTrue, !falseFallsThrough, ifFalse, falseFallsThrough);
+            const bool useShortBranch = distance == BACKWARD_REACH;
+            ASSERT_EQ(assembler.GetPcOffset() - before, (useShortBranch ? 1U : 2U) * ARM64_INSTRUCTION_SIZE);
+            assembler.Bind(&fallthrough);
+            assembler.FinalizeVeneers();
+
+            const auto branch = falseFallsThrough ? aarch64::TBNZ : aarch64::TBZ;
+            if (useShortBranch) {
+                const uint32_t expected = branch | (TEST_BIT << aarch64::BRANCH_B40_LOWBITS) |
+                    EncodeBranchImmediate(before, target, aarch64::BRANCH_Imm14_MASK, aarch64::BRANCH_Imm14_LOWBITS);
+                EXPECT_EQ(ReadArm64Instruction(assembler, before), expected);
+            } else {
+                const uint32_t branchPc = before + ARM64_INSTRUCTION_SIZE;
+                const auto condition = falseFallsThrough ? aarch64::NE : aarch64::EQ;
+                const uint32_t expected = aarch64::BranchCond | static_cast<uint32_t>(condition) |
+                    EncodeBranchImmediate(branchPc, target, aarch64::BRANCH_Imm19_MASK, aarch64::BRANCH_Imm19_LOWBITS);
+                EXPECT_EQ(ReadArm64Instruction(assembler, branchPc), expected);
+            }
+        }
+    }
+}
+
+HWTEST_F_L0(ArkSteedDeferredCodeTest, UnboundBitBranchUsesConditionalFallback)
+{
+    for (bool falseFallsThrough : {true, false}) {
+        NativeAreaAllocator nativeArea;
+        Chunk chunk(&nativeArea);
+        ArkSteedAssembler assembler(&chunk, nullptr);
+        Label ifTrue;
+        Label ifFalse;
+        assembler.BranchOnBitSet(aarch64::x0, TEST_BIT, &ifTrue, false, &ifFalse, falseFallsThrough);
+        ASSERT_EQ(assembler.GetPcOffset(), (falseFallsThrough ? 2U : 3U) * ARM64_INSTRUCTION_SIZE);
+        if (!falseFallsThrough) {
+            assembler.Move(aarch64::x1, aarch64::x0);
+        }
+        assembler.Bind(&ifFalse);
+        assembler.Move(aarch64::x1, aarch64::x0);
+        assembler.Bind(&ifTrue);
+        assembler.FinalizeVeneers();
+
+        const uint32_t conditionalPc = ARM64_INSTRUCTION_SIZE;
+        const auto condition = falseFallsThrough ? aarch64::NE : aarch64::EQ;
+        const auto &conditionalTarget = falseFallsThrough ? ifTrue : ifFalse;
+        const uint32_t expected = aarch64::BranchCond | static_cast<uint32_t>(condition) |
+            EncodeBranchImmediate(conditionalPc, conditionalTarget, aarch64::BRANCH_Imm19_MASK,
+                                  aarch64::BRANCH_Imm19_LOWBITS);
+        EXPECT_EQ(ReadArm64Instruction(assembler, conditionalPc), expected);
+        if (!falseFallsThrough) {
+            const uint32_t jumpPc = conditionalPc + ARM64_INSTRUCTION_SIZE;
+            EXPECT_EQ(ReadArm64Instruction(assembler, jumpPc), aarch64::Branch |
+                EncodeBranchImmediate(jumpPc, ifTrue, aarch64::BRANCH_Imm26_MASK, aarch64::BRANCH_Imm26_LOWBITS));
+        }
+    }
+}
+
+HWTEST_F_L0(ArkSteedDeferredCodeTest, CallHeaderPairRespectsFrameAlignmentAndEncoding)
+{
+    NativeAreaAllocator nativeArea;
+    Chunk chunk(&nativeArea);
+    ArkSteedAssembler assembler(&chunk, nullptr);
+    for (int32_t slots : {2, 4, 6, 64}) {
+        const uint32_t before = assembler.GetPcOffset();
+        EXPECT_TRUE(assembler.TryReserveCallArgSlotsWithHeader(slots, 1, 2));
+        EXPECT_EQ(assembler.GetPcOffset() - before, 3U * sizeof(uint32_t));
+    }
+    for (int32_t slots : {-2, 0, 1, 3, 65, 66}) {
+        const uint32_t before = assembler.GetPcOffset();
+        EXPECT_FALSE(assembler.TryReserveCallArgSlotsWithHeader(slots, 1, 2));
+        EXPECT_EQ(assembler.GetPcOffset(), before);
+    }
+}
+
+HWTEST_F_L0(ArkSteedDeferredCodeTest, ConstantElementOffsetsUseTheirOwnEncodingBounds)
+{
+    EXPECT_EQ(ArkSteedAssembler::TryGetScaledElementOffset(4095, 2), 4095 * 4);
+    EXPECT_FALSE(ArkSteedAssembler::TryGetScaledElementOffset(4096, 2));
+    EXPECT_FALSE(ArkSteedAssembler::TryGetScaledElementOffset(-1, 2));
+    EXPECT_FALSE(ArkSteedAssembler::TryGetScaledElementOffset(0, 2, 1));
+    constexpr int32_t INDEX = 5000;
+    EXPECT_FALSE(ArkSteedAssembler::TryGetScaledElementOffset(INDEX, TAGGED_TYPE_SIZE_LOG, TaggedArray::DATA_OFFSET));
+    EXPECT_EQ(ArkSteedAssembler::TryGetTaggedElementBarrierOffset(INDEX),
+              INDEX * JSTaggedValue::TaggedTypeSize() + TaggedArray::DATA_OFFSET);
+}
+
+HWTEST_F_L0(ArkSteedDeferredCodeTest, Int32SignBranchSpansLargeEmissionBetweenPoolChecks)
+{
+    constexpr size_t SIGN_BRANCH_REACH = 32 * 1024;
+    for (bool negative : {false, true}) {
+        NativeAreaAllocator nativeArea;
+        Chunk chunk(&nativeArea);
+        ArkSteedAssembler assembler(&chunk, nullptr);
+        Label deferredTarget;
+
+        assembler.JumpOnInt32Sign(aarch64::x0, negative, &deferredTarget);
+        // A compare followed by a wide conditional branch, with hot-path fallthrough.
+        ASSERT_EQ(assembler.GetPcOffset(), 2 * sizeof(uint32_t));
+
+        // Model a single visitor that emits more than a test branch can reach.
+        for (size_t bytes = 0; bytes <= SIGN_BRANCH_REACH; bytes += sizeof(uint32_t)) {
+            assembler.Move(aarch64::x1, aarch64::x0);
+        }
+        ASSERT_GT(assembler.GetPcOffset(), SIGN_BRANCH_REACH);
+        assembler.CheckCodePools(true);
+        assembler.Bind(&deferredTarget);
+        assembler.FinalizeVeneers();
+        const uint32_t branchPc = ARM64_INSTRUCTION_SIZE;
+        const auto condition = negative ? aarch64::LT : aarch64::GE;
+        const uint32_t expected = aarch64::BranchCond | static_cast<uint32_t>(condition) |
+            EncodeBranchImmediate(branchPc, deferredTarget, aarch64::BRANCH_Imm19_MASK,
+                                  aarch64::BRANCH_Imm19_LOWBITS);
+        EXPECT_EQ(ReadArm64Instruction(assembler, branchPc), expected);
+    }
+}
+
+HWTEST_F_L0(ArkSteedDeferredCodeTest, TaggedNumberCheckFallsThroughOnSuccess)
+{
+    NativeAreaAllocator nativeArea;
+    Chunk chunk(&nativeArea);
+    ArkSteedAssembler assembler(&chunk, nullptr);
+    Label deopt;
+
+    assembler.CheckTaggedNumber(aarch64::x0, &deopt);
+    constexpr uint32_t CHECK_INSTRUCTION_COUNT = 2;
+    ASSERT_EQ(assembler.GetPcOffset(), CHECK_INSTRUCTION_COUNT * ARM64_INSTRUCTION_SIZE);
+    assembler.Move(aarch64::x1, aarch64::x0);
+    assembler.Bind(&deopt);
+    assembler.FinalizeVeneers();
+
+    const uint32_t branchPc = ARM64_INSTRUCTION_SIZE;
+    const uint32_t expected = aarch64::BranchCond | static_cast<uint32_t>(aarch64::EQ) |
+        EncodeBranchImmediate(branchPc, deopt, aarch64::BRANCH_Imm19_MASK, aarch64::BRANCH_Imm19_LOWBITS);
+    EXPECT_EQ(ReadArm64Instruction(assembler, branchPc), expected);
+}
+
+HWTEST_F_L0(ArkSteedDeferredCodeTest, Int32MulWithOverflowNeedsNoNodeTemporary)
+{
+    NativeAreaAllocator nativeArea;
+    Chunk chunk(&nativeArea);
+    ArkSteedAssembler assembler(&chunk, nullptr);
+    Label overflow;
+    Label negativeZero;
+
+    assembler.Int32MulWithOverflow(aarch64::x2, aarch64::x0, aarch64::x1, &overflow, &negativeZero);
+    constexpr uint32_t INSTRUCTION_COUNT = 7;
+    ASSERT_EQ(assembler.GetPcOffset(), INSTRUCTION_COUNT * ARM64_INSTRUCTION_SIZE);
+    assembler.Bind(&overflow);
+    assembler.Move(aarch64::x1, aarch64::x0);
+    assembler.Bind(&negativeZero);
+    assembler.FinalizeVeneers();
+}
+
+HWTEST_F_L0(ArkSteedDeferredCodeTest, Int32DivByConstGeneralPathUsesSingleTemporary)
+{
+    NativeAreaAllocator nativeArea;
+    Chunk chunk(&nativeArea);
+    ArkSteedAssembler assembler(&chunk, nullptr);
+    Label negativeZero;
+    Label notInt;
+    TemporaryRegisterScope scope(&assembler);
+    ArkSteedRegList temps;
+    temps.Set(aarch64::x3);
+    scope.Include(temps);
+
+    constexpr int32_t DIVISOR = -3;
+    constexpr int32_t MAGIC = 0x55555555;
+    assembler.Int32DivByConstWithCheck(aarch64::x1, aarch64::x0, DIVISOR, MAGIC, 0U, &negativeZero, &notInt);
+    assembler.Bind(&negativeZero);
+    assembler.Move(aarch64::x2, aarch64::x0);
+    assembler.Bind(&notInt);
+    assembler.FinalizeVeneers();
+
+    constexpr uint32_t CBZ_W_MASK = 0xFF00001FU;
+    constexpr uint32_t CBZ_W0 = 0x34000000U;
+    EXPECT_EQ(ReadArm64Instruction(assembler, 0) & CBZ_W_MASK, CBZ_W0);
+}
+
+HWTEST_F_L0(ArkSteedDeferredCodeTest, CheckedInt32ModGeneralPathEmitsSingleSdiv)
+{
+    NativeAreaAllocator nativeArea;
+    Chunk chunk(&nativeArea);
+    ArkSteedAssembler assembler(&chunk, nullptr);
+    Label divideZero;
+    Label overflow;
+    Label negativeZero;
+
+    assembler.CheckedInt32Mod(aarch64::x2, aarch64::x0, aarch64::x1, std::nullopt, &divideZero, &overflow,
+                              &negativeZero);
+    const uint32_t bodyEnd = assembler.GetPcOffset();
+    assembler.Bind(&divideZero);
+    assembler.Bind(&overflow);
+    assembler.Bind(&negativeZero);
+    assembler.FinalizeVeneers();
+
+    constexpr uint32_t SDIV_W_MASK = 0xFFE0FC00U;
+    constexpr uint32_t SDIV_W_OP = 0x1AC00C00U;
+    constexpr uint32_t BRANCH_MASK = 0xFC000000U;
+    constexpr uint32_t BRANCH_OP = 0x14000000U;
+    uint32_t sdivCount = 0;
+    uint32_t branchCount = 0;
+    for (uint32_t pc = 0; pc < bodyEnd; pc += ARM64_INSTRUCTION_SIZE) {
+        const uint32_t inst = ReadArm64Instruction(assembler, pc);
+        if ((inst & SDIV_W_MASK) == SDIV_W_OP) {
+            ++sdivCount;
+        }
+        if ((inst & BRANCH_MASK) == BRANCH_OP) {
+            ++branchCount;
+        }
+    }
+    EXPECT_EQ(sdivCount, 1U);
+    EXPECT_EQ(branchCount, 0U);
+}
+#endif
 
 }  // namespace panda::ecmascript::arksteed

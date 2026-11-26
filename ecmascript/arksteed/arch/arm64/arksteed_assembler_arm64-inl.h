@@ -36,15 +36,16 @@ inline bool IsNegativeImmediateOffset(const aarch64::MemoryOperand &operand)
            operand.GetImmediate().Value() < 0;
 }
 
-inline bool FitsScaledImmediateOffset(const aarch64::MemoryOperand &operand, bool is64Bit)
+inline bool ArkSteedAssembler::FitsScaledImmediateOffset(int64_t byteOffset, int64_t scale)
 {
-    if (!operand.IsImmediateOffset() || operand.GetAddrMode() != aarch64::AddrMode::OFFSET) {
-        return false;
-    }
-    int64_t imm = operand.GetImmediate().Value();
-    int64_t scale = is64Bit ? static_cast<int64_t>(sizeof(int64_t)) : static_cast<int64_t>(sizeof(int32_t));
-    // 4095: max 12-bit unsigned immediate (0xFFF) for ARM64 load/store
-    return imm >= 0 && (imm % scale) == 0 && (imm / scale) <= 4095;
+    // 4095: maximum unsigned 12-bit load/store immediate.
+    return byteOffset >= 0 && byteOffset % scale == 0 && byteOffset / scale <= 4095;
+}
+
+inline bool ArkSteedAssembler::FitsScaledImmediateOffset(const aarch64::MemoryOperand &operand, bool is64Bit)
+{
+    return operand.IsImmediateOffset() && operand.GetAddrMode() == aarch64::AddrMode::OFFSET &&
+           FitsScaledImmediateOffset(operand.GetImmediate().Value(), is64Bit ? sizeof(int64_t) : sizeof(int32_t));
 }
 
 inline bool FitsAddSubImmediate(uint64_t imm)

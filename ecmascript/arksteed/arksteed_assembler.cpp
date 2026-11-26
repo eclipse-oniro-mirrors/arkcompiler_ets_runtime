@@ -42,9 +42,10 @@ void ArkSteedAssembler::JumpIfNotStrongHeapObject(ArkSteedRegister value, Label 
     TemporaryRegisterScope scope(this);
     ArkSteedRegister bits = scope.Acquire();
     Move(bits, static_cast<int64_t>(JSTaggedValue::TAG_WEAK_MASK));
-    And(bits, value);
 #if defined(PANDA_TARGET_ARM64)
-    Compare(bits, 0);
+    AndSetZeroCondition(bits, value);
+#else
+    And(bits, value);
 #endif
     JumpIf(Condition::NOT_EQUAL, target);
 }
