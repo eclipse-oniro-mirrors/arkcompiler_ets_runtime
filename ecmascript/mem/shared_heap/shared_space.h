@@ -53,7 +53,7 @@ public:
 
     // For sweeping
     void PrepareSweeping();
-    void AsyncSweep(bool isMain, bool releaseMemory = false);
+    void AsyncSweep(bool isMain);
     void Sweep();
 
     bool TryFillSweptRegion();

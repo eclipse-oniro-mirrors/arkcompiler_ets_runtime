@@ -41,7 +41,6 @@ enum class GCType : int {
     SHARED_CC,
     GLOBAL_GC,
     GLOBAL_CC,
-    // fixme: support sticky
     CMS_GC,
     OTHER,
     START,

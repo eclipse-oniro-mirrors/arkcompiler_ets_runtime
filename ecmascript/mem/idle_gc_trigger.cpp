@@ -350,7 +350,8 @@ void IdleGCTrigger::NotifyIsNeedFreeze(bool needFreeze)
 bool IdleGCTrigger::TryTriggerLocalCC() const
 {
     if (!heap_->LocalCCEnabled() || !thread_->IsMainThreadFast() ||
-        heap_->GetHeapObjectSize() < IDLE_LOCAL_CC_LIMIT || thread_->GetLastLeaveFrame() != nullptr) {
+        heap_->GetHeapObjectSize() < IDLE_LOCAL_CC_LIMIT || thread_->GetLastLeaveFrame() != nullptr
+        || CheckIdleOrHintFullGC<SharedHeap>(sHeap_)) {
         return false;
     }
     if (thread_->IsGlobalConcurrentMarking() || thread_->IsGlobalConcurrentCopying()) {

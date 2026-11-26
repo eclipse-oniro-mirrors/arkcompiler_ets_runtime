@@ -106,7 +106,6 @@ void SharedCC::ReMarkAndPrepare(GCReason gcReason)
         Runtime::GetInstance()->GCIterateThreadList([](JSThread *thread) {
             Heap *heap = thread->GetEcmaVM()->GetHeap();
             heap->WaitAndHandleCCFinished(false);
-            heap->WaitRunningMarkTaskFinished();
             heap->ResetTlab();
         });
         sHeap_->GetSweeper()->Sweep(true);
