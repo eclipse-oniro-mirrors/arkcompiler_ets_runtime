@@ -85,7 +85,8 @@ inline aarch64::MemoryOperand ArkSteedAssembler::MaterializeAddress(const aarch6
         EmitAddSubImmediate(scratch, base, magnitude, AddSubImmediateOp::SUB);
     } else {
         assembler_.Mov(scratch, aarch64::Immediate(imm));
-        assembler_.Add(scratch, base, aarch64::Operand(scratch));
+        // Extended-register ADD interprets register 31 as SP when used as the base.
+        assembler_.Add(scratch, base, aarch64::Operand(scratch, aarch64::UXTX, 0));
     }
     return aarch64::MemoryOperand(scratch, 0, aarch64::AddrMode::OFFSET);
 }
