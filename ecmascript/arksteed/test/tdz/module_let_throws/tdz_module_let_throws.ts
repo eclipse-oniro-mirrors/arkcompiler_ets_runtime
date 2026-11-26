@@ -17,7 +17,7 @@
 //! HAS StoreEnvSlot
 //! COMPILE_COUNT_GE *tdz_module_let_throws* 1
 //! EXEC_COUNT_GE *tdz_module_let_throws* 1
-//! DEOPT_COUNT *Deoptimize* 0
+//! DEOPT_COUNT_GE *Deoptimize* 1
 
 // Test: throw.undefinedifholewithname THROWS for module-level let accessed before initialization.
 // The function tdz_module_let_throws accesses module-scoped counter via lexical env.

@@ -17,7 +17,7 @@
 //! HAS StoreEnvSlot
 //! COMPILE_COUNT_GE *add* 1
 //! EXEC_COUNT_GE *add* 1
-//! DEOPT_COUNT *Deoptimize* 0
+//! DEOPT_COUNT_GE *Deoptimize* 1
 
 // Test: throw.undefinedifholewithname THROWS for closure-captured let accessed before initialization.
 // The inner function add() accesses sum via lexical env.

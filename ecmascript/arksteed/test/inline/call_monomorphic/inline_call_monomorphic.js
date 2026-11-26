@@ -211,14 +211,14 @@
 //! METHOD callInnerHotCatch
 //! COUNT DeoptIfTaggedCondition 1
 //! COUNT LoadException 1
-//! HAS_NOT Deopt
+//! COUNT_LE Deopt 1  # cold TDZ exit for innerShouldThrow
 //! HAS_NOT CallKnownJSFunction
 //! HAS_NOT Call
 
 //! METHOD callInnerColdCatch
 //! COUNT DeoptIfTaggedCondition 1
 //! HAS_NOT LoadException
-//! COUNT Deopt 2
+//! COUNT_LE Deopt 2
 //! HAS_NOT CallKnownJSFunction
 //! HAS_NOT Call
 

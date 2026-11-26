@@ -15,7 +15,8 @@
 
 //! METHOD      compute
 //! COUNT_LE    BranchIfReferenceEqual  2
-//! COUNT_LE    CallCommonStub   GetStringFromConstPool  2
+//! HAS_NOT     CallCommonStub   GetStringFromConstPool
+//! COUNT_LE    Deopt  2
 //! METHOD compute
 //! HAS LoadTaggedField
 //! COMPILE_COUNT_GE *compute* 1
@@ -24,7 +25,8 @@
 // Test: the frontend (ets_frontend f0bcbe524b) eliminates the redundant hole-checks
 // for the repeated loop-body reads of the same non-hole lexical var. The loop back-edge
 // keeps two guards (one per read in the body), asserted via COUNT_LE to tolerate further
-// elimination.
+// elimination. The never-fired hole leaves the name string unmaterialized, so each cold
+// throw block reaching the JIT lowers to an unfired-throw deopt, not a string fetch.
 
 declare function print(arg: number): string;
 

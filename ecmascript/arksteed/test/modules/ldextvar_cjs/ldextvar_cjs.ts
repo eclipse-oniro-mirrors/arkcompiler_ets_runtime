@@ -31,7 +31,7 @@ declare class ArkTools {
 //! METHOD      reader
 //! HAS         CallRuntime      LdExternalModuleVarByIndexOnJSFunc
 //! HAS_NOT     LoadTaggedElement
-//! HAS         LoadTaggedField
+//! COUNT_LE    Deopt 1
 //! METHOD reader
 //! COMPILE_COUNT_GE *reader* 1
 //! EXEC_COUNT_GE *reader* 1

@@ -15,8 +15,9 @@
 
 //! PARAMS --compiler-jit-hotness-threshold=60000
 //! METHOD      compute
-//! COUNT Throw 2
-//! COUNT CallCommonStub GetStringFromConstPool 2
+//! COUNT_LE Deopt 2
+//! HAS_NOT Throw
+//! HAS_NOT CallCommonStub GetStringFromConstPool
 //! HAS Phi
 //! HAS_NOT CallCommonStub Add
 //! HAS LoadTaggedField
@@ -25,7 +26,7 @@
 //! DEOPT_COUNT *Deoptimize* 0
 // Each arm checks the same lexical binding before the merge. The bytecode
 // optimizer removes the redundant check on the post-merge load, leaving
-// two throw paths for ArkSteed to lower.
+// two cold TDZ exits for ArkSteed to lower to eager deopts.
 // Warm the additions to avoid generic Add invalidating lexical-load facts.
 
 declare function print(arg: number): string;

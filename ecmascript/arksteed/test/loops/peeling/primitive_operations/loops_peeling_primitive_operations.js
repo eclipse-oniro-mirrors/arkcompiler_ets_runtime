@@ -50,7 +50,8 @@
 //! COMPILE_COUNT_GE *envFacts 1
 //! EXEC_COUNT_GE *envFacts 1
 //! HAS CallCommonStub TypeOf
-//! COUNT LoadTaggedField 5 # Captured slot, two TDZ-path loads, parent env, packing function and its env.
+//! COUNT LoadTaggedField 3 # Captured slot, parent env, packing function and its env.
+//! COUNT_LE Deopt 1 # Unfired TDZ throw on the module var name.
 //! COUNT CallKnownJSFunction 1
 //! COUNT BranchIfReferenceEqual 1 # One TDZ check.
 

@@ -32,7 +32,8 @@
 //! COUNT_GE LoadTaggedField 3
 //! METHOD charEnvFacts
 //! HAS CallCommonStub CreateStringBySingleCharCode
-//! COUNT LoadTaggedField 6 # GlobalEnv, captured slot, two TDZ-path loads and three packing-call loads.
+//! COUNT LoadTaggedField 4 # GlobalEnv, captured slot and three packing-call loads.
+//! COUNT_LE Deopt 1 # Unfired TDZ throw on the module var name.
 //! COUNT CallKnownJSFunction 1
 //! COUNT BranchIfReferenceEqual 1 # One TDZ check.
 

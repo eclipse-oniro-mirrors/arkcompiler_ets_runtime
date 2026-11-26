@@ -15,17 +15,22 @@
 
 //! METHOD      compute
 //! COUNT_LE    BranchIfReferenceEqual  1
-//! COUNT_LE    CallCommonStub   GetStringFromConstPool  1
+//! HAS_NOT     CallCommonStub   GetStringFromConstPool
+//! COUNT_LE    Deopt  1
 //! METHOD compute
 //! HAS LoadTaggedField
 //! COMPILE_COUNT_GE *compute* 1
 //! EXEC_COUNT_GE *compute* 1
-//! DEOPT_COUNT *Deoptimize* 0
+//! DEOPT_COUNT_GE *Deoptimize* 1
 // Test: throw.undefinedifholewithname on the SAME value, accessed BEFORE initialization.
 // The frontend (ets_frontend f0bcbe524b) deduplicates the repeated reads of the same
 // hole lexical var in one basic block, so at most one throw.undefinedifholewithname
 // reaches the JIT (COUNT_LE tolerates further elimination); it fires on the first read.
-// The call must throw a ReferenceError caught by the caller.
+// compute() is compiled while x is still the hole and while the name string is still
+// unmaterialized, so the cold throw block lowers to an unfired-throw deopt instead of
+// fetching the name: the eager deopt fires when the read executes, the interpreter
+// re-executes the bytecode, materializes the name and throws the ReferenceError
+// caught by the caller.
 
 declare function print(arg: string): void;
 

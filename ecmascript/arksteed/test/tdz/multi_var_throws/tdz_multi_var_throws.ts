@@ -16,7 +16,7 @@
 //! HAS LoadTaggedField
 //! COMPILE_COUNT_GE *compute* 1
 //! EXEC_COUNT_GE *compute* 1
-//! DEOPT_COUNT *Deoptimize* 0
+//! DEOPT_COUNT_GE *Deoptimize* 1
 
 // Test: throw.undefinedifholewithname THROWS for multiple let variables accessed via closure before initialization.
 // The inner function compute() accesses a, b, c via lexical env.

@@ -16,7 +16,7 @@
 //! HAS LoadTaggedField
 //! COMPILE_COUNT_GE *tdz_newobj_class_throws* 1
 //! EXEC_COUNT_GE *tdz_newobj_class_throws* 1
-//! DEOPT_COUNT *Deoptimize* 0
+//! DEOPT_COUNT_GE *Deoptimize* 1
 
 // Test: throw.undefinedifholewithname THROWS for class constructor accessed via ldlexvar before class definition.
 // The function tdz_newobj_class_throws loads Wallet via lexical env.

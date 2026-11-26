@@ -6969,6 +6969,20 @@ struct GraphBuilder::BytecodeVisitor {
         return true;
     }
 
+    bool TryBuildUnfiredThrowDeopt(const BytecodeInfo *bcInfo)
+    {
+        ASSERT(self->preproc_->GetEnv()->GetMethodLiteral() != nullptr);
+        uint16_t stringId = static_cast<uint16_t>(GetICSlotId<int>(bcInfo, 0));
+        ArkSteedNameRef name;
+        if (self->pgoContext_.GetBroker()->TryGetNameFromConstantPool(stringId, &name)) {
+            return false;
+        }
+        constexpr auto DEOPT_TYPE = kungfu::DeoptType::INSUFFICIENTPROFILE;
+        auto *deopt = self->FinishBlockWith<DeoptVertex>(currentBlock, {}, self->chunk_, DEOPT_TYPE, currentBcIndex);
+        deopt->SetEagerDeoptFrameState(BuildCurrentEagerDeoptFrameState(currentBcIndex));
+        return true;
+    }
+
     void LowerThrow()
     {
         currentBlock->SetDeferred(true);
@@ -7159,7 +7173,7 @@ struct GraphBuilder::BytecodeVisitor {
                 return LoweringResult::CONTINUE;
             case HoleCheckKind::ALWAYS_THROWS:
                 currentBlock->SetDeferred(true);
-                if (!TryBuildColdCatchDeopt()) {
+                if (!TryBuildColdCatchDeopt() && !TryBuildUnfiredThrowDeopt(bcInfo)) {
                     ValueVertex *strID = self->graph_->GetInt32Constant(GetICSlotId<int>(bcInfo, 0));
                     ValueVertex *str = StringFromConstPool(strID);
                     auto *throwVertex =
@@ -7180,7 +7194,7 @@ struct GraphBuilder::BytecodeVisitor {
 
         EnterInternalBlock(throwBlock);
         currentBlock->SetDeferred(true);
-        if (!TryBuildColdCatchDeopt()) {
+        if (!TryBuildColdCatchDeopt() && !TryBuildUnfiredThrowDeopt(bcInfo)) {
             ValueVertex *strID = self->graph_->GetInt32Constant(GetICSlotId<int>(bcInfo, 0));
             ValueVertex *str = StringFromConstPool(strID);
             auto *throwVertex =
