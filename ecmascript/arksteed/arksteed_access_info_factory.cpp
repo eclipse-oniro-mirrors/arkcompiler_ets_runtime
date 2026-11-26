@@ -354,6 +354,11 @@ bool ArkSteedAccessInfoFactory::TryMakeNamedStoreAccessInfo(const NamedAccessCas
     if (isField && !TrySetStoreFieldLocationFromHClass(broker_, caseFeedback, parsed, name, info)) {
         return false;
     }
+    if (caseFeedback.handler.IsInt() && info->IsDataField() && !isSharedStore &&
+        !broker_->CheckStableHClass(info->expectedHClass)) {
+        // An immediate field handler overwrites an own field. The store still guards the receiver HClass.
+        info->dependencies.hclassDependency = AccessDependencyKind::NONE;
+    }
     if (isAccessor) {
         SetFieldLocation(fieldHandlerInfo, info);
         info->fieldHClass = info->holderHClass;
@@ -431,6 +436,10 @@ bool ArkSteedAccessInfoFactory::TryMakeNamedLoadAccessInfo(const NamedAccessCase
     info->guards.hasNotFoundProtoCellGuard = info->hasNotFoundProtoCellGuard;
     FillNamedAccessInfo(caseFeedback, parsed.handlerInfo, parsed.protoCell, parsed.hasProtoCell, info);
     if (isTypedArrayLength) {
+        info->dependencies.hclassDependency = AccessDependencyKind::NONE;
+    } else if (info->IsDataField() && !broker_->CheckStableHClass(info->expectedHClass)) {
+        // Dictionary lookups do not produce field handlers. A non-leaf fast layout can still be
+        // checked at the load site; prototype-chain protection remains independent.
         info->dependencies.hclassDependency = AccessDependencyKind::NONE;
     }
     return true;

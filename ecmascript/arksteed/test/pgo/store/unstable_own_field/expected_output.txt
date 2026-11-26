@@ -1,0 +1,3 @@
+PASS own field and setter
+PASS mixed shapes and field storage
+PASS read-only assignment

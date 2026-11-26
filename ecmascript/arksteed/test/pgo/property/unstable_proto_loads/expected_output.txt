@@ -1,0 +1,3 @@
+PASS prototype-value/accessor/chain-change
+PASS unstable-prototype/shadow/delete
+PASS non-dictionary-unstable-holder
