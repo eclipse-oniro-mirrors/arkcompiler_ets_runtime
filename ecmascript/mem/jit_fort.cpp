@@ -16,7 +16,6 @@
 #include "ecmascript/mem/heap-inl.h"
 #include "ecmascript/mem/jit_fort.h"
 #include "ecmascript/jit/jit.h"
-#include "ecmascript/platform/backtrace.h"
 #include "ecmascript/platform/file.h"
 #include "ecmascript/platform/os.h"
 #if defined(JIT_ENABLE_CODE_SIGN) && !defined(JIT_FORT_DISABLE)

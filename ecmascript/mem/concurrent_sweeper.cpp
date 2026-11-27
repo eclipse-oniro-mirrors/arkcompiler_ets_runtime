@@ -56,9 +56,9 @@ void ConcurrentSweeper::PostTask(TriggerGCType gcType)
                 UNREACHABLE();
         }
         common::Taskpool::GetCurrentTaskpool()->PostTask(std::make_unique<SweeperTask>(
-            tid, this, MemSpaceType::NON_MOVABLE, startSpaceType_, endSpaceType_, isFullGC));
+            tid, this, NON_MOVABLE, startSpaceType_, endSpaceType_, isFullGC));
         common::Taskpool::GetCurrentTaskpool()->PostTask(std::make_unique<SweeperTask>(
-            tid, this, MemSpaceType::MACHINE_CODE_SPACE, startSpaceType_, endSpaceType_, isFullGC));
+            tid, this, MACHINE_CODE_SPACE, startSpaceType_, endSpaceType_, isFullGC));
         // Every task sweeps every type in the range exactly once, so the task
         // count must equal the range size or WaitAllTaskFinished hangs.
         if (startSpaceType_ <= MemSpaceType::MODULE_SPACE &&

@@ -28,7 +28,7 @@ class TaggedObject;
 class TaggedStateWord {
 public:
     static constexpr size_t ADDRESS_WIDTH = 48;
-    static constexpr uint64_t ADDRESS_MASK = (0x1ULL << ADDRESS_WIDTH) - 1;
+    static constexpr uint64_t ADDRESS_MASK = (uint64_t{1} << ADDRESS_WIDTH) - 1;
 
     // Little endian
     struct GCStateWord {
