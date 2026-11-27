@@ -16,7 +16,6 @@
 #include "ecmascript/dfx/cpu_profiler/cpu_profiler.h"
 #include "ecmascript/dfx/cpu_profiler/profiler_raw_reads.h"
 
-
 #include <algorithm>
 #include <csignal>
 #include <cstdint>
@@ -33,9 +32,6 @@
 #include "ecmascript/platform/ffrt.h"
 #include "libpandabase/os/thread.h"
 #include "ecmascript/platform/profiler_signal_guard.h"
-#ifdef PANDA_JS_ETS_HYBRID_MODE
-#include "ecmascript/checkpoint/thread_state_transition.h"
-#endif
 
 #if defined(ENABLE_FFRT_INTERFACES)
 #include "c/executor_task.h"
@@ -59,6 +55,7 @@ constexpr uint64_t HANDLER_DRAIN_ESCAPE_BUDGET_US = 5000000; // 5s: teardown dra
 } // namespace
 Mutex CpuProfiler::synchronizationMutex_;
 CMap<pthread_t, struct TaskInfo> CpuProfiler::profilerMap_ = CMap<pthread_t, struct TaskInfo>();
+
 CpuProfiler::CpuProfiler(const EcmaVM *vm, const int interval) : vm_(vm), interval_(interval)
 {
     enableVMTag_ = const_cast<EcmaVM *>(vm)->GetJSOptions().EnableCpuProfilerVMTag();
@@ -543,23 +540,30 @@ void CpuProfiler::ProcessStaticFrame(const void *frame)
         return;
     }
 
-    generator_->PostHybridStackFrame(frameInfo);
+    generator_->PushHybridStackFrame(frameInfo);
 }
 
-void CpuProfiler::ProcessDynamicFrame(const void *frame, JSThread *thread)
+void CpuProfiler::ProcessDynamicFrame(const void *frame)
 {
     if (frame == nullptr) {
         LOG_ECMA(ERROR) << "CpuProfiler::ProcessDynamicFrame, frame is nullptr";
         return;
     }
 
-    auto *frameHandler = static_cast<FrameHandler *>(const_cast<void *>(frame));
-    FrameIterator it(frameHandler->GetSp(), thread);
-    GetStack(it);
+    arkplatform::HybridFrameInfo frameInfo;
+
+    auto *crossVMOperator = vm_->GetCrossVMOperator();
+    if (crossVMOperator == nullptr || !crossVMOperator->GetDynamicFrameInfo(frame, frameInfo)) {
+        LOG_ECMA(ERROR) << "CpuProfiler::ProcessDynamicFrame, GetDynamicFrameInfo failed";
+        return;
+    }
+
+    generator_->PushHybridStackFrame(frameInfo);
 }
 
 void CpuProfiler::ProcessHybridStack(JSThread *thread)
 {
+    generator_->ResetFrameLength();
     if (thread == nullptr) {
         LOG_ECMA(ERROR) << "CpuProfiler::ProcessHybridStack, thread is nullptr";
         return;
@@ -571,25 +575,27 @@ void CpuProfiler::ProcessHybridStack(JSThread *thread)
 
     auto *crossVMOperator = vm_->GetCrossVMOperator();
     if (crossVMOperator != nullptr) {
+        struct HybridStackData {
+            CpuProfiler *profiler;
+            size_t &staticFrameCount;
+            size_t &dynamicFrameCount;
+        } data {this, staticFrameCount, dynamicFrameCount};
         crossVMOperator->ForEachFrameInUnionStack(
-            [this, thread, &staticFrameCount, &dynamicFrameCount](const void *frame, bool isStaticFrame) {
+            [](const void *frame, bool isStaticFrame, void *userData) {
+                auto *d = static_cast<HybridStackData *>(userData);
                 if (frame == nullptr) {
-                    LOG_ECMA(WARN) << "CpuProfiler::ProcessHybridStack, frame is nullptr, isStaticFrame="
-                                   << isStaticFrame;
                     return;
                 }
                 if (isStaticFrame) {
-                    ProcessStaticFrame(frame);
-                    staticFrameCount++;
+                    d->profiler->ProcessStaticFrame(frame);
+                    d->staticFrameCount++;
                 } else {
-                    ProcessDynamicFrame(frame, thread);
-                    dynamicFrameCount++;
+                    d->profiler->ProcessDynamicFrame(frame);
+                    d->dynamicFrameCount++;
                 }
-            });
+            }, &data);
+        generator_->PostFrame();
     }
-
-    LOG_ECMA(INFO) << "CpuProfiler::ProcessHybridStack, processed " << staticFrameCount
-                   << " static frames and " << dynamicFrameCount << " dynamic frames";
 }
 #endif // defined(PANDA_JS_ETS_HYBRID_MODE)
 
@@ -1351,6 +1357,7 @@ bool CpuProfiler::IsAddrAtStubOrAot(AnFileDataManager *manager, uint64_t pc) con
 #if defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
 bool CpuProfiler::IsAddrAtStubOrAot(uint64_t pc) const
 {
+    // Legacy form used by GetStackSignalHandler (blocking range query).
     AOTFileManager *loader = vm_->GetAOTFileManager();
     return loader->InsideStub(pc) || loader->InsideAOT(pc);
 }

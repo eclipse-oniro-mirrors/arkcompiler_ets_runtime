@@ -102,19 +102,30 @@ public:
 
     void FinishXGCBarrier() override {}
 
+    bool UnionStackIsEmpty(bool *isEmpty) override
+    {
+        return isEmpty;
+    }
+ 
+    bool ForEachFrameInUnionStack(void (*)(const void *frame, bool isStaticFrame, void *data),
+                                  void *) override
+    {
+        return true;
+    }
+ 
+    bool GetStaticFrameInfo(const void *frame, arkplatform::HybridFrameInfo &frameInfo) override
+    {
+        (void)frame;
+        (void)frameInfo;
+        return true;
+    }
+
     bool TriggerXGC() override
     {
         return true;
     }
 
     void NotifyWaiters() override {}
-
-    bool GetStaticFrameInfo(const void *frame, arkplatform::HybridFrameInfo &frameInfo) override
-    {
-        (void)frame;
-        (void)frameInfo;
-        return false;
-    }
 
     bool AttachCurrentThread() override
     {
@@ -210,17 +221,6 @@ public:
     bool IsCurrentThreadAttached() override
     {
         return isAttached_;
-    }
-
-    bool UnionStackIsEmpty(bool *isEmpty) override
-    {
-        return isEmpty;
-    }
-
-    bool ForEachFrameInUnionStack(const std::function<void(const void *frame, bool isStaticFrame)> &callback) override
-    {
-        (void)callback;
-        return true;
     }
 
     void AddStaticNode(uint64_t addr, const std::string &name,

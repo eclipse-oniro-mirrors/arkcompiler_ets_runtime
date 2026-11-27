@@ -101,10 +101,10 @@ public:
 #endif
     }
 
-    void ProcessDynamicFrameTest(const void *frame, JSThread *thread)
+    void ProcessDynamicFrameTest(const void *frame)
     {
 #if defined(PANDA_JS_ETS_HYBRID_MODE) && defined(ECMASCRIPT_SUPPORT_CPUPROFILER_LEGACY)
-        cpu_profiler.ProcessDynamicFrame(frame, thread);
+        cpu_profiler.ProcessDynamicFrame(frame);
 #else
         return;
 #endif
@@ -503,7 +503,7 @@ HWTEST_F_L0(CpuProfilerTest, CpuProfilerHybridStackTest_ProcessDynamicFrame_Null
 
     int frameCountBefore = cpuProfilerFriend.GetFrameStackLengthTest();
 
-    cpuProfilerFriend.ProcessDynamicFrameTest(nullptr, thread);
+    cpuProfilerFriend.ProcessDynamicFrameTest(nullptr);
 
     int frameCountAfter = cpuProfilerFriend.GetFrameStackLengthTest();
 

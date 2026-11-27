@@ -174,7 +174,8 @@ public:
     static void SetSymbolicBreakpoint(JSDebugger *debugger, const std::unordered_set<std::string> &functionNamesSet);
     static void RemoveSymbolicBreakpoint(JSDebugger *debugger, const std::string &functionName);
     static bool ForEachFrameInHybridStack(const EcmaVM *ecmaVm,
-                                         const std::function<void(const void *frame, bool isStaticFrame)> &callback);
+                                          void (*callback)(const void *frame, bool isStaticFrame, void *data),
+                                          void *data);
     static bool HybridStackIsEmpty(const EcmaVM *ecmaVm, bool *isEmpty);
 
     // HotReload

@@ -162,7 +162,7 @@ public:
     void ClearNapiStack();
     void PostFrame();
     void PostNapiFrame();
-    void PostHybridStackFrame(const arkplatform::HybridFrameInfo &frameInfo);
+    void PushHybridStackFrame(const arkplatform::HybridFrameInfo &frameInfo);
     void ResetFrameLength();
     uint64_t GetCallTimeStamp();
     void SetCallTimeStamp(uint64_t timeStamp);
