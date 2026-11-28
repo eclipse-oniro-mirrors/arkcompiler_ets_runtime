@@ -46,15 +46,27 @@ void JSPandaFileSnapshotInterfaces::Serialize(const EcmaVM *vm, const CString &p
 
 void JSPandaFileSnapshotInterfaces::ReadCrossBundleHspInfo(const EcmaVM *vm, const CString &path)
 {
+    // Snapshot not enabled: nothing to read or clean up.
+    if (ModulesSnapshotHelper::IsPandafileSnapshotDisabled(path)) {
+        LOG_ECMA(DEBUG) << "PandaFileSnapshotInterfaces::ReadCrossBundleHspInfo: snapshot not enabled";
+        return;
+    }
     if (!ecmascript::Runtime::GetInstance()->IsMainProcess()) {
         LOG_ECMA(DEBUG) << "PandaFileSnapshotInterfaces::ReadCrossBundleHspInfo skiped in child process";
         return;
     }
+    CString filename = base::ConcatToCString(path, JSPandaFileSnapshot::CROSS_BUNDLE_HSP_FILE_NAME);
+    if (!FileExist(filename.c_str())) {
+        LOG_ECMA(DEBUG) << "PandaFileSnapshotInterfaces::ReadCrossBundleHspInfo file not exist";
+        // Without the index the snapshot set is incomplete: remove the other snapshot
+        // files (nothing to remove on the first start).
+        ModulesSnapshotHelper::RemoveSnapshotFiles(path);
+        return;
+    }
     ModulesSnapshotHelper::MarkJSPandaFileSnapshotLoaded();
     CString version = OhosVersionInfoTools::GetRomVersion();
-    bool result = JSPandaFileSnapshot::ReadCrossBundleHspDataFromFile(vm->GetJSThread(), path, version);
-    if (!result) {
-        LOG_ECMA(ERROR) << "PandaFileSnapshotInterfaces::ReadCrossBundleHspInfo failed";
+    if (!JSPandaFileSnapshot::ReadCrossBundleHspDataFromFile(vm->GetJSThread(), path, version)) {
+        // Real failure only: remove the possibly corrupted snapshot files.
         ModulesSnapshotHelper::RemoveSnapshotFiles(path);
     }
 }

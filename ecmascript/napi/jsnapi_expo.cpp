@@ -6158,7 +6158,7 @@ bool JSNApi::ExecuteForAbsolutePath(const EcmaVM *vm, const std::string &fileNam
                                     bool needUpdate, const ecmascript::ExecuteTypes &executeType)
 {
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, false);
-    LOG_ECMA(DEBUG) << "start to execute absolute path ark file: " << fileName;
+    LOG_ECMA(DEBUG) << "ExecuteForAbsolutePath: " << fileName;
     ecmascript::ThreadManagedScope scope(thread);
     if (!ecmascript::JSPandaFileExecutor::ExecuteFromAbsolutePathAbcFile(
         thread, fileName.c_str(), entry, needUpdate, executeType)) {
@@ -6177,7 +6177,7 @@ bool JSNApi::Execute(const EcmaVM *vm, const std::string &fileName, const std::s
                      bool needUpdate, const ecmascript::ExecuteTypes &executeType)
 {
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, false);
-    LOG_ECMA(DEBUG) << "start to execute ark file: " << fileName;
+    LOG_ECMA(DEBUG) << "Execute(file): " << fileName;
     ecmascript::ThreadManagedScope scope(thread);
     if (!ecmascript::JSPandaFileExecutor::ExecuteFromAbcFile(
         thread, fileName.c_str(), entry, needUpdate, executeType)) {
@@ -6197,7 +6197,7 @@ bool JSNApi::Execute(EcmaVM *vm, const uint8_t *data, int32_t size, const std::s
                      const std::string &filename, bool needUpdate, [[maybe_unused]] void* fileMapper)
 {
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, false);
-    LOG_ECMA(DEBUG) << "start to execute ark buffer: " << filename;
+    LOG_ECMA(DEBUG) << "Execute(buffer): " << filename;
     ecmascript::ThreadManagedScope scope(thread);
     if (!ecmascript::JSPandaFileExecutor::ExecuteFromBuffer(thread, data, size, entry, filename.c_str(), needUpdate)) {
         if (thread->HasPendingException()) {
@@ -6257,7 +6257,7 @@ bool JSNApi::ExecuteModuleBuffer(EcmaVM *vm, const uint8_t *data, int32_t size, 
                                  bool needUpdate)
 {
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, false);
-    LOG_ECMA(DEBUG) << "start to execute module buffer: " << filename;
+    LOG_ECMA(DEBUG) << "ExecuteModuleBuffer: " << filename;
     ecmascript::ThreadManagedScope scope(thread);
     if (!ecmascript::JSPandaFileExecutor::ExecuteModuleBuffer(thread, data, size, filename.c_str(), needUpdate)) {
         if (thread->HasPendingException()) {
@@ -6281,7 +6281,7 @@ bool JSNApi::ExecuteSecureWithOhmUrl(EcmaVM *vm, uint8_t *data, int32_t size, co
                                      const std::string &ohmUrl)
 {
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, false);
-    LOG_ECMA(INFO) << "start to execute ark buffer with secure memory use file: " << srcFilename <<
+    LOG_ECMA(INFO) << "ExecuteSecureWithOhmUrl: " << srcFilename <<
                       ", entrypoint: " << ohmUrl;
     ecmascript::ThreadManagedScope scope(thread);
     ecmascript::CString filename = PathHelper::NormalizePath(srcFilename.c_str());
@@ -6315,7 +6315,7 @@ bool JSNApi::ExecuteSecure(EcmaVM *vm, uint8_t *data, int32_t size, const std::s
                            const std::string &filename, bool needUpdate, void *fileMapper)
 {
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, false);
-    LOG_ECMA(INFO) << "start to execute ark buffer with secure memory: " << filename;
+    LOG_ECMA(INFO) << "ExecuteSecure: " << filename;
     ecmascript::ThreadManagedScope scope(thread);
     if (!ecmascript::JSPandaFileExecutor::ExecuteFromBufferSecure(
         thread, data, size, entry, filename.c_str(), needUpdate, fileMapper)) {
@@ -6334,7 +6334,7 @@ bool JSNApi::ExecuteModuleBufferSecure(EcmaVM *vm, uint8_t* data, int32_t size, 
                                        bool needUpdate, void *fileMapper)
 {
     CROSS_THREAD_AND_EXCEPTION_CHECK_WITH_RETURN(vm, false);
-    LOG_ECMA(INFO) << "start to execute module buffer with secure memory: " << filename;
+    LOG_ECMA(INFO) << "ExecuteModuleBufferSecure: " << filename;
     ecmascript::ThreadManagedScope scope(thread);
     if (!ecmascript::JSPandaFileExecutor::ExecuteModuleBufferSecure(thread, data, size, filename.c_str(),
                                                                     needUpdate, fileMapper)) {
